@@ -310,8 +310,9 @@ blobRoutes.post(
           415,
         );
       }
+      const ext = fileExt(relPath);
       console.warn(
-        `[blobs] BLOB_MIME_ENFORCE=warn: storing ${relPath} with unlisted mime ${mime}`,
+        `[blobs] BLOB_MIME_ENFORCE=warn: storing a .${ext} file with unlisted mime ${mime}`,
       );
     }
 
@@ -830,7 +831,10 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
         415,
       );
     }
-    console.warn(`[blobs] BLOB_MIME_ENFORCE=warn: intent for ${relPath} with unlisted mime ${mime}`);
+    const ext = fileExt(relPath);
+    console.warn(
+      `[blobs] BLOB_MIME_ENFORCE=warn: intent for a .${ext} file with unlisted mime ${mime}`,
+    );
   }
 
   const store = await createBlobStore();
@@ -1891,4 +1895,16 @@ function storeError(c: Context, e: unknown) {
     );
   }
   throw e;
+}
+
+/**
+ * A file's extension for a log line, never its path (#267): a vault-relative
+ * path carries client names, people and document titles, and log retention and
+ * access are much broader than the data's. Lower-cased, capped, `none` if absent.
+ */
+function fileExt(relPath: string): string {
+  const base = relPath.slice(relPath.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) return "none";
+  return base.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 10) || "none";
 }

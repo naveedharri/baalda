@@ -232,7 +232,7 @@ export async function revertVaultToCheckpoint(
             await db.query("RELEASE SAVEPOINT revert_note");
             if ((err as { code?: string })?.code !== "23505") throw err;
             console.warn(
-              `[revert] skipping ${note.id}: another live note already occupies ${note.rel_path}`,
+              `[revert] skipping ${note.id}: another live note already occupies its path`,
             );
             continue;
           }

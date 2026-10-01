@@ -1092,6 +1092,7 @@ export async function deleteRegisteredFile(
     // device turns up still holding the id. Re-registering the id stays allowed.
     await tombstoneFile(pool, id);
     await pool.query("DELETE FROM files WHERE id = $1", [id]);
-    console.info(`[registry] deleted file ${row.path} (${id}) and ${blobs} blob(s)`);
+    // Ids and counts only — never the path (#267).
+    console.info(`[registry] deleted file ${id} in vault ${row.vault_id} and ${blobs} blob(s)`);
     return { status: "deleted", vaultId: row.vault_id, path: row.path };
 }

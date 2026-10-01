@@ -254,7 +254,9 @@ export async function sendMail(msg: MailMessage): Promise<void> {
  */
 export function dispatchMail(what: string, msg: MailMessage): void {
   void sendMail(msg).catch((err: unknown) => {
-    console.error(`[email] ${what} to ${msg.to} failed:`, err);
+    // No recipient address in the log: it is personal data, and `what` plus the
+    // error is enough to chase a transport failure.
+    console.error(`[email] ${what} failed:`, err);
   });
 }
 
