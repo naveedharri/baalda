@@ -217,6 +217,75 @@ describe("empty-ingest truncation guard", () => {
     }
   });
 
+  // #256: the shapes agents and scripts actually leave behind when they
+  // "empty" a note are not 0 bytes. Each is refused over a populated doc.
+  const LONG =
+    "---\ntitle: Plan\ntags: [a, b]\n---\n# Plan\n\n" +
+    "A paragraph of real notes that a teammate wrote and that must survive. ".repeat(5);
+  it.each([
+    ["a lone newline", "\n"],
+    ["whitespace only", "  \n\t\n   \n"],
+    ["bare frontmatter", "---\ntitle: Plan\ntags: [a, b]\n---\n"],
+    ["frontmatter and blank lines", "---\ntitle: Plan\n---\n\n\n"],
+  ])("refuses to clear a populated doc from %s", async (_label, blank) => {
+    vi.useFakeTimers();
+    try {
+      const { io, fs } = makeHarness({ [PATH]: LONG });
+      const errors: Array<{ err: unknown; context: string }> = [];
+      const bridge = await NoteBridge.open(
+        { ...io, onError: (err, context) => errors.push({ err, context }) },
+        { docId: "doc-1", path: PATH },
+      );
+      expect(bridge.serialize()).toBe(LONG);
+
+      fs.externalWrite(PATH, blank);
+      expect(await bridge.ingestNow()).toBe(false);
+      expect(bridge.serialize()).toBe(LONG);
+      expect(errors.map((e) => e.context)).toContain("ingest:truncate");
+      // Refusing never rewrites the file either way: it is left as found.
+      expect(fs.get(PATH)).toBe(blank);
+
+      bridge.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still applies a partial edit that keeps any body text, however much it cuts", async () => {
+    vi.useFakeTimers();
+    try {
+      const { io, fs } = makeHarness({ [PATH]: LONG });
+      const bridge = await NoteBridge.open(io, { docId: "doc-1", path: PATH });
+
+      const cut = "---\ntitle: Plan\ntags: [a, b]\n---\n# Plan\n";
+      fs.externalWrite(PATH, cut);
+      expect(await bridge.ingestNow()).toBe(true);
+      expect(bridge.serialize()).toBe(cut);
+
+      bridge.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still lets a short note be cleared to a blank line from another editor", async () => {
+    vi.useFakeTimers();
+    try {
+      // Under the 200-character floor, a blank file is plausibly a person
+      // clearing a scratch note — the same floor the server's shrink guard uses.
+      const { io, fs } = makeHarness({ [PATH]: CONTENT });
+      const bridge = await NoteBridge.open(io, { docId: "doc-1", path: PATH });
+
+      fs.externalWrite(PATH, "\n");
+      expect(await bridge.ingestNow()).toBe(true);
+      expect(bridge.serialize()).toBe("\n");
+
+      bridge.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("honours a 0-byte file when the note is configured to allow it", async () => {
     vi.useFakeTimers();
     try {
