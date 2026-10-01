@@ -7,6 +7,7 @@
  */
 import type { ReconcileItem, ReconcileKind } from "./sync/reconcileReport";
 import { READ_ONLY_DETAIL } from "./sync/readOnlyRejections";
+import { isNoteExt } from "./formats";
 
 export const RECONCILE_KIND_ORDER: readonly ReconcileKind[] = [
   "deletedByTeammate",
@@ -61,8 +62,13 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
   switch (kind) {
     case "deletedByTeammate":
       return `${notes(n)} you edited offline ${one ? "was" : "were"} deleted by a teammate. Your ${one ? "version is" : "versions are"} in Trash.`;
-    case "restoredFromServer":
-      return `${notes(n)} you removed while offline ${one ? "was" : "were"} restored. Delete ${one ? "it" : "them"} again to remove ${one ? "it" : "them"} for everyone.`;
+    case "restoredFromServer": {
+      // Binaries are restored too (#215); call them files when any are.
+      const what = group.every((it) => isNoteExt(it.path))
+        ? notes(n)
+        : `${n.toLocaleString()} ${one ? "file" : "files"}`;
+      return `${what} you removed while offline ${one ? "was" : "were"} restored. Delete ${one ? "it" : "them"} again to remove ${one ? "it" : "them"} for everyone.`;
+    }
     case "renamedConflict": {
       if (one) {
         const it = group[0];
