@@ -73,6 +73,17 @@ export function planResolveAll(
   return { copiesToDelete, next };
 }
 
+/**
+ * Activity → Clear: mark every pending item `skipped`. Nothing is deleted —
+ * every file and recovery copy stays exactly where it is; the items just stop
+ * asking (and, being resolved, are not seeded again on the next launch).
+ */
+export function planSkipAll(items: readonly ReviewItem[], resolved: ResolvedMap): Map<string, Resolution> {
+  const next = new Map(resolved);
+  for (const it of pendingItems(items, resolved)) next.set(it.key, "skipped");
+  return next;
+}
+
 /** The first pending item after `key` (wrapping), else any pending, else null. */
 export function nextPendingKey(
   items: readonly ReviewItem[],

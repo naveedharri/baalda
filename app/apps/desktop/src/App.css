@@ -8005,6 +8005,13 @@ button.secondary:active:not(:disabled),
   margin-left: auto;
   font-size: var(--fs-xs);
 }
+/* Clear sits at the right edge; after "Updating…" it just follows it. */
+.activity-clear {
+  margin-left: auto;
+}
+.activity-updating + .activity-clear {
+  margin-left: 0;
+}
 .activity-note {
   margin: 0;
   font-size: var(--fs-sm);

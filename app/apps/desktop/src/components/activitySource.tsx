@@ -15,13 +15,17 @@ import * as ipc from "../lib/ipc";
 import { buildActivity, failureEntries, type ActivityRow, type FailedEntry } from "./activityRows";
 import { ACTIVITY_LOG_MAX_PATHS, appendLog, loadLog, removeFromLog, saveLog, type ActivityLogEntry } from "./activityLog";
 import {
+  afterClear,
   badgeText,
+  loadClearedAt,
   loadReadState,
   markAllRead,
+  saveClearedAt,
   saveReadState,
   unreadCount,
   type ReadState,
 } from "./activityUnread";
+import { planSkipAll, reviewItems, reviewState } from "./reviewModel";
 
 /** Last Trash listing per server vault id, this app session. Never authorises. */
 const lastTrash = new Map<string, { listing: TrashListing; at: number }>();
@@ -241,6 +245,8 @@ export interface ActivitySnapshot {
   error: string | null;
   updating: boolean;
   schedule: () => void;
+  /** Activity → Clear: hide every row so far and stop pending reviews asking. */
+  clear: () => void;
 }
 
 const EMPTY: ActivitySnapshot = {
@@ -253,6 +259,7 @@ const EMPTY: ActivitySnapshot = {
   error: null,
   updating: false,
   schedule: () => {},
+  clear: () => {},
 };
 
 let snapshot: ActivitySnapshot = EMPTY;
@@ -446,7 +453,7 @@ export function ActivityHost(): null {
 
   // ── Rows ──
   const activeFailures = useMemo(() => new Set(failures.map((f) => f.key)), [failures]);
-  const rows = useMemo(() => {
+  const allRows = useMemo(() => {
     const byId = new Map(log.map((e) => [e.id, e]));
     const seededReconcile = log.filter((e) => LOGGED_RECONCILE.has(e.kind as ReconcileKind)).map(reconcileFromLog);
     const access = log
@@ -476,6 +483,27 @@ export function ActivityHost(): null {
       failures: failed,
     });
   }, [log, reconcile, trash.listing, copies, pendingDelete, shrinks.items, failures, vaultId]);
+
+  // ── Clear ──
+  const [clearedAt, setClearedAt] = useState(() => (root ? loadClearedAt(root) : 0));
+  useEffect(() => {
+    setClearedAt(root ? loadClearedAt(root) : 0);
+  }, [root]);
+  const rows = useMemo(() => afterClear(allRows, clearedAt), [allRows, clearedAt]);
+  const allRowsRef = useRef(allRows);
+  allRowsRef.current = allRows;
+  const clear = useCallback(() => {
+    if (!root) return;
+    // Past the newest row too, in case a clock put one slightly ahead of now.
+    let at = Date.now();
+    for (const r of allRowsRef.current) if (r.at > at) at = r.at;
+    saveClearedAt(root, at);
+    setClearedAt(at);
+    // Pending reviews stop asking (skipped, never deleted), so the toolbar's
+    // "Review changes" and the banner's count go too, and the next launch does
+    // not seed them again.
+    reviewState.set(planSkipAll(reviewItems(reconcileReport.items()), reviewState.get()));
+  }, [root]);
 
   // ── Unread ──
   const [readState, setReadState] = useState<ReadState | null>(() => (root ? loadReadState(root) : null));
@@ -508,8 +536,9 @@ export function ActivityHost(): null {
       error: trash.error ?? copiesError,
       updating,
       schedule,
+      clear,
     });
-  }, [rows, unread, activeFailures, trash.online, trash.listing, trash.error, copiesError, updating, schedule]);
+  }, [rows, unread, activeFailures, trash.online, trash.listing, trash.error, copiesError, updating, schedule, clear]);
   useEffect(() => () => publish(EMPTY), []);
   return null;
 }

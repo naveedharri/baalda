@@ -37,11 +37,20 @@ describe("activity unread", () => {
     expect(unreadCount([row("t:d1", T + 9)], s)).toBe(1);
   });
 
-  it("caps the read list, newest kept", () => {
-    const rows = Array.from({ length: READ_STATE_MAX + 5 }, (_, i) => row(`r${i}`, T + 1 + i));
+  it("reads a burst bigger than the old id cap completely (no stuck 99+)", () => {
+    const rows = Array.from({ length: READ_STATE_MAX + 853 }, (_, i) => row(`r${i}`, T + 1 + i));
     const s = markAllRead(freshReadState(T), rows);
-    expect(s.read).toHaveLength(READ_STATE_MAX);
-    expect(s.read[0]).toBe(`r${READ_STATE_MAX + 4}@${T + READ_STATE_MAX + 5}`);
+    expect(unreadCount(rows, s)).toBe(0);
+    expect(s.read).toEqual([]);
+    // Something newer still counts.
+    expect(unreadCount([...rows, row("new", T + READ_STATE_MAX + 900)], s)).toBe(1);
+  });
+
+  it("keeps a legacy id-read row read when the watermark moves", () => {
+    const legacy = { since: T, read: [`late@${T + 50}`] };
+    const rows = [row("a", T + 10), row("late", T + 50)];
+    const s = markAllRead(legacy, rows);
+    expect(unreadCount(rows, s)).toBe(0);
   });
 
   it("formats the badge", () => {
