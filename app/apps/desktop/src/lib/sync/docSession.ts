@@ -14,7 +14,12 @@ import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
 import { bridgeManager, createTauriBridgeIO, sha256Hex } from "../bridge/adapter";
-import { isServerTooOld, type NoteLastEdited, type SessionInfo } from "../api";
+import {
+  ACCESS_CHECK_MAX,
+  isServerTooOld,
+  type NoteLastEdited,
+  type SessionInfo,
+} from "../api";
 import * as ipc from "../ipc";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
@@ -46,6 +51,7 @@ import { DocSync, type SyncStatus } from "./syncManager";
 import { VaultRegistry, type InboundHost, type RegistryFailure } from "./registry";
 import { VaultDocStore, createIpcManifestStore } from "./vaultDocStore";
 import {
+  isBulkPhase,
   vaultScopes,
   type DocSyncState,
   type SyncProgress,
@@ -3715,6 +3721,7 @@ export class SyncManager implements InboundHost {
       toProbe.push({ docId, relPath });
     }
     if (toProbe.length === 0) return keep;
+    const settledNow: string[] = [];
     return runPool(
       toProbe,
       async ({ docId, relPath }) => {
@@ -3744,13 +3751,43 @@ export class SyncManager implements InboundHost {
         this.emptyEverywhere.add(docId);
         this.registry.markPushed(docId);
         this.progress?.doc(docId, "synced");
+        settledNow.push(docId);
       },
       { concurrency: IPC_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
     ).then(() => {
       if (!scope.isCurrent()) return;
       this.serverEmpty = keep;
       this.progress?.flush();
+      this.reportConfirmedEmpty(settledNow, scope);
     });
+  }
+
+  /**
+   * Tell the server which notes were just settled as empty everywhere (#257),
+   * so it can tell a genuinely empty note from an upload that never arrived.
+   *
+   * Fire-and-forget and purely informational: the server only stamps a marker
+   * (`notes.confirmed_empty_at`, and only on notes it holds no content for) and
+   * changes no content; nothing on either side reads the marker to clear or
+   * skip a note, and `ready.empty` still names these docs. A failure (offline,
+   * an older server without the route) costs only the count, and the doc is
+   * reported again on a later connect because `ready.empty` names it again.
+   * Once per doc per session — `emptyEverywhere` already keeps a settled doc
+   * from being probed twice, so this cannot loop.
+   */
+  private reportConfirmedEmpty(docIds: string[], scope: VaultScope): void {
+    const vaultId = this.registry.vaultId;
+    if (!vaultId || docIds.length === 0) return;
+    void (async () => {
+      for (let i = 0; i < docIds.length; i += ACCESS_CHECK_MAX) {
+        if (!scope.isCurrent()) return;
+        try {
+          await api.confirmEmptyNotes(vaultId, docIds.slice(i, i + ACCESS_CHECK_MAX));
+        } catch {
+          return; // informational: never retried in a loop, never surfaced
+        }
+      }
+    })();
   }
 
   /**
@@ -3899,7 +3936,7 @@ export class SyncManager implements InboundHost {
       onProgress: (p) => {
         if (cleanupActive) return;
         this.logRunPhase(p);
-        this.onSyncProgress?.(p);
+        this.onSyncProgress?.(this.withUploadBacklog(p));
       },
       onDocState: (patch) => this.onDocState?.(patch),
     });
@@ -4913,6 +4950,35 @@ export class SyncManager implements InboundHost {
       permanentFailure: this.permanentFailures.get(docId)?.reason ?? null,
       emptyEverywhere: this.emptyEverywhere.has(docId),
     };
+  }
+
+  /**
+   * How many notes this device holds whose content the server has never
+   * confirmed (#258): not checkpointed as pushed, or named on `ready.empty`,
+   * and not settled as empty everywhere.
+   *
+   * The checkpoint behind it (`registry.pushed`) is persisted in
+   * `config.json`, so this survives a quit or crash mid first-upload — which is
+   * what lets the next launch say "Finishing upload" instead of resuming in
+   * silence while teammates open empty notes. Purely a READ: the resume itself
+   * is the ordinary content run, which pulls the server's state before pushing
+   * anything (`decideSeed`), so nothing here can send stale local state over
+   * content the server already has.
+   */
+  notUploadedCount(): number {
+    let n = 0;
+    for (const docId of this.registry.allDocIds()) {
+      if (this.emptyEverywhere.has(docId)) continue;
+      if (!this.registry.isPushed(docId) || this.serverEmpty.has(docId)) n++;
+    }
+    return n;
+  }
+
+  /** Stamp {@link SyncProgress.notUploaded} on a running phase's emission. */
+  private withUploadBacklog(p: SyncProgress | null): SyncProgress | null {
+    if (!p || !isBulkPhase(p.phase)) return p;
+    const notUploaded = this.notUploadedCount();
+    return notUploaded > 0 ? { ...p, notUploaded } : p;
   }
 
   /** Everything the current run could not sync — registry rows and note content. */

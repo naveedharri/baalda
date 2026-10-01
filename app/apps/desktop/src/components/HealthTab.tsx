@@ -42,6 +42,7 @@ import { HealthInspector } from "./HealthInspector";
 import { HealthTimeline } from "./HealthTimeline";
 import { HealthActivity, HealthLargest } from "./HealthStats";
 import { AttachmentSyncNotice } from "./AttachmentSyncNotice";
+import { StalledUploadsNotice } from "./StalledUploadsNotice";
 import {
   Glyph,
   Section,
@@ -100,6 +101,7 @@ export function HealthTab({
         surface="health"
         detected={snapshot.inventory.local.files > 0 || snapshot.inventory.serverOnlyFiles.length > 0}
       />
+      {!demo && <StalledUploadsNotice />}
       <HealthView
         key={vaultPath}
         mode="overview"

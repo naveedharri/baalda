@@ -97,6 +97,15 @@ export function syncBadgeLabel(args: {
   // Synced/Syncing strobe this state used to produce.
   if (status === "deleted") return "Deleted";
   if (progress && isSyncRunActive(progress)) {
+    // The one exception to "one verb": notes whose content the server has
+    // never had (#258) — an interrupted first upload resuming, or a fresh one.
+    // That is the user's situation, not the mechanism, and the count is what
+    // tells them not to quit yet. `notUploaded` is only stamped when non-zero,
+    // so an already-synced vault never reads "Uploading".
+    const left = progress.notUploaded ?? 0;
+    if (progress.phase === "uploading" && left > 0) {
+      return `Uploading · ${left.toLocaleString()} ${left === 1 ? "note" : "notes"} left`;
+    }
     if (progress.total <= 0) return "Syncing…";
     // One verb for every phase. The old per-phase labels ("Uploading",
     // "Downloading") described the mechanism, not the user's situation — the
