@@ -197,8 +197,11 @@ export function createDocWriter(
 
     // Detached path: hydrate, mutate, persist the incremental update. Shared
     // with the bulk push route — see `sync/doc-batch.ts applyDetached`, which
-    // carries the register-observer-after-hydration subtlety.
-    await applyDetached(vaultId, docId, (doc) => doc.transact(() => fn(doc.getText(CONTENT_FIELD)), MCP_ORIGIN), actor, {
+    // carries the register-observer-after-hydration subtlety. Tagged `mcp` like
+    // the live path's origin above, so the shrink burst brake treats a detached
+    // tool write the same as a live one (never counted).
+    const detachedActor: DocActor = { ...actor, source: actor?.source ?? MCP_ORIGIN };
+    await applyDetached(vaultId, docId, (doc) => doc.transact(() => fn(doc.getText(CONTENT_FIELD)), MCP_ORIGIN), detachedActor, {
       hooks: { publishUpdate, onDocWritten },
     });
   }

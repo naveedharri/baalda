@@ -6,7 +6,8 @@ import type { Server } from "@hocuspocus/server";
 import { createSyncServer, disconnectUserInVault, type SyncContext } from "../src/sync/hocuspocus.js";
 import { formatDocName } from "../src/sync/doc-name.js";
 import { mintSyncToken } from "../src/tokens/sync-token.js";
-import { applyDocPush, SHRINK_HELD_CODE } from "../src/sync/doc-batch.js";
+import { applyDocPush, setDocBatchRuntime, SHRINK_HELD_CODE } from "../src/sync/doc-batch.js";
+import { createDocWriter } from "../src/mcp/doc-writer.js";
 import { loadDocState } from "../src/yjs/persistence.js";
 import {
   isShrinkHeld,
@@ -171,6 +172,20 @@ describe("shrink brake on the write paths", () => {
     for (const d of locals) d.destroy();
   });
 
+  it("detached doc-writer (MCP) shrinks are versioned but never engage the brake", async () => {
+    const { user, vaultId, docs } = await seed();
+    const writer = createDocWriter(server);
+    try {
+      for (const docId of docs) await writer.setContent(vaultId, docId, BODY, { userId: user.userId });
+      // No live socket on these docs, so every write takes the detached path.
+      for (const docId of docs) await writer.setContent(vaultId, docId, "", { userId: user.userId });
+      expect(isShrinkHeld(user.userId, vaultId)).toBe(false);
+      for (const docId of docs) expect(await serverText(docId)).toBe("");
+    } finally {
+      setDocBatchRuntime(null);
+    }
+  });
+
   it("live path: the burst kicks the user's sockets and re-admits them read-only", async () => {
     const { user, vaultId, docs } = await seed();
     const providers: HocuspocusProvider[] = [];
@@ -185,6 +200,23 @@ describe("shrink brake on the write paths", () => {
           token,
           document: doc,
           WebSocketPolyfill: WebSocket as unknown as typeof globalThis.WebSocket,
+        });
+        // Hocuspocus v4 kicks a doc IN-BAND (a Close message; the socket stays
+        // open) and the provider does not re-attach by itself. Reconnect the
+        // way the desktop's DocSync does (`reconnectWithFreshToken`): take the
+        // socket down, then connect once the disconnect has landed.
+        let reconnecting = false;
+        provider.on("close", () => {
+          const wsp = provider.configuration.websocketProvider;
+          if (reconnecting || wsp.webSocket?.readyState !== WebSocket.OPEN) return;
+          reconnecting = true;
+          const again = () => {
+            wsp.off("disconnect", again);
+            reconnecting = false;
+            void wsp.connect();
+          };
+          wsp.on("disconnect", again);
+          wsp.disconnect();
         });
         providers.push(provider);
         ydocs.push(doc);
