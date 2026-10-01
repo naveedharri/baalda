@@ -47,13 +47,16 @@ export function useReviewPersistence(): void {
         if (cancelled) return;
         const seed = prunePersisted(saved, existing);
         for (const it of seed) {
-          reconcileReport.record({
-            kind: it.kind,
-            path: it.path,
-            ...(it.docId ? { docId: it.docId } : {}),
-            ...(it.newPath ? { newPath: it.newPath } : {}),
-            ...(it.detail ? { detail: it.detail } : {}),
-          });
+          reconcileReport.record(
+            {
+              kind: it.kind,
+              path: it.path,
+              ...(it.docId ? { docId: it.docId } : {}),
+              ...(it.newPath ? { newPath: it.newPath } : {}),
+              ...(it.detail ? { detail: it.detail } : {}),
+            },
+            { at: it.at, seeded: true },
+          );
         }
       }
       if (cancelled) return;
