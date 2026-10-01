@@ -46,8 +46,11 @@ import {
   installUpdate,
   isUpdateBlocking,
   justUpdatedTo,
+  RELEASES_PAGE_URL,
+  serverRequiresUpdate,
   useUpdateState,
 } from "./lib/updater";
+import { onClientOutdated } from "./lib/api";
 import { isSilentRelease, notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { viewerFor } from "./lib/formats";
@@ -567,12 +570,16 @@ function VaultFolderPrompt() {
  */
 function UpdateGate() {
   const update = useUpdateState();
+  // The version the wall is for. `""` is a wall too: the server refused this
+  // build (#251) and no newer release could be found to name.
   const [required, setRequired] = useState<string | null>(null);
   useEffect(() => {
     if (isUpdateBlocking(update) && "version" in update) setRequired(update.version);
   }, [update]);
+  // A server `426 client_outdated` refusal: try to update now, wall if not.
+  useEffect(() => onClientOutdated(() => void serverRequiresUpdate()), []);
 
-  if (!required) return null;
+  if (required === null) return null;
 
   const pct =
     update.phase === "downloading" && update.total > 0
@@ -651,16 +658,32 @@ function UpdateGate() {
         )}
         {!working && (
           <>
-            <p>
-              {BRAND_NAME} couldn&rsquo;t install the update to <strong>v{required}</strong>
-              {"message" in update && update.message ? ` — ${update.message}` : ""}. It tried
-              twice on its own. Check your connection and try again — your notes stay right
-              where they are, on your disk.
-            </p>
+            {required ? (
+              <p>
+                {BRAND_NAME} couldn&rsquo;t install the update to <strong>v{required}</strong>
+                {"message" in update && update.message ? ` — ${update.message}` : ""}. It tried
+                twice on its own. Check your connection and try again — your notes stay right
+                where they are, on your disk.
+              </p>
+            ) : (
+              <p>
+                Your server needs a newer version of {BRAND_NAME} before this one can sync.
+                Your notes and edits stay right where they are, on your disk, and sync as
+                soon as the update is in.
+              </p>
+            )}
             <div className="update-gate-actions">
               <AsyncButton className="primary update-gate-cta" onClick={retry}>
                 Try again
               </AsyncButton>
+              {/* For when the updater itself cannot install (#251): the same
+                  release, fetched by hand. */}
+              <button
+                className="ghost-pill lg"
+                onClick={() => void ipc.openExternal(RELEASES_PAGE_URL).catch(() => {})}
+              >
+                Download manually
+              </button>
               <button className="ghost-pill lg" onClick={() => void reload()}>
                 Reload
               </button>
