@@ -46,9 +46,46 @@ pub const ALLOWED_EXTS: &[&str] = &[
 /// `src/lib/sync/registry.ts` and `src/lib/sync/inbound.ts` (same lockstep test).
 pub const NOTE_EXTS: &[&str] = &["md", "markdown", "mdx", "txt", "html", "htm", "canvas"];
 
+/// Name prefixes of the lock and owner files other apps leave NEXT TO a file
+/// they hold open (#265). They are not the user's files: Word, Excel and
+/// PowerPoint write `~$Report.docx` beside an open `Report.docx` (with an
+/// extension the vault surfaces, so the allowlist alone lets it through) and
+/// remove it on close; LibreOffice writes `.~lock.Report.docx#`, which the dot
+/// rule already covers but is listed so the contract names it. Synced, each one
+/// was a server row, an upload attempt, a delete and a tombstone, and a ghost
+/// file appearing and vanishing in every teammate's sidebar.
+///
+/// ONE CONTRACT with `TRANSIENT_PREFIXES` in `src/lib/formats.ts` (pinned by
+/// `formatsLockstep.test.ts`) and the server's `registry/transient.ts`.
+pub const TRANSIENT_PREFIXES: &[&str] = &["~$", ".~lock."];
+
+/// True for an app's transient lock/temp file (see [`TRANSIENT_PREFIXES`]),
+/// plus the `~*.tmp` family Office writes while saving (`~WRL0001.tmp`,
+/// `~WRD0003.tmp`). `tmp` is not in `ALLOWED_EXTS`, so that half is
+/// belt-and-braces: it keeps the rule true if the allowlist ever grows one.
+///
+/// Deliberately narrow, because an ignored name drops out of the tree, the
+/// index and every sync pass: a prefix only counts on a surfaced NON-NOTE file
+/// (the only thing an owner file ever shadows), so a note or a folder somebody
+/// happened to name `~$…` keeps syncing exactly as before, and a user's own
+/// `~notes.md` is theirs. Nothing is ever deleted because of this rule — an
+/// already-registered lock file simply stops being re-uploaded.
+pub fn is_transient_name(name: &str) -> bool {
+    if TRANSIENT_PREFIXES.iter().any(|p| name.starts_with(p))
+        && is_allowed_file(name)
+        && !is_note_file(name)
+    {
+        return true;
+    }
+    name.starts_with('~') && name.len() > 5 && name.to_ascii_lowercase().ends_with(".tmp")
+}
+
 /// True if a directory/file name should be skipped by the tree walk & watcher.
 pub fn is_ignored_name(name: &str) -> bool {
-    name.starts_with('.') || IGNORED_DIRS.contains(&name) || DENIED_DIRS.contains(&name)
+    name.starts_with('.')
+        || IGNORED_DIRS.contains(&name)
+        || DENIED_DIRS.contains(&name)
+        || is_transient_name(name)
 }
 
 /// True if a file (by name) is an allowed, surfaceable type per `ALLOWED_EXTS`.
@@ -310,6 +347,30 @@ mod tests {
     fn accepts_nested_relative_paths() {
         let p = resolve_in_vault(&vault(), "sub/dir/note.md").unwrap();
         assert_eq!(p, PathBuf::from("/tmp/vault/sub/dir/note.md"));
+    }
+
+    #[test]
+    fn ignores_office_and_editor_lock_files() {
+        // Office owner files carry a surfaced extension: the allowlist alone
+        // would sync them (#265).
+        assert!(is_ignored_name("~$Report.docx"));
+        assert!(is_ignored_name("~$dget.xlsx"));
+        assert!(is_ignored_name("~$eck.pptx"));
+        assert!(is_ignored_name("~WRL0001.tmp"));
+        assert!(is_ignored_name("~WRD0003.TMP"));
+        assert!(is_ignored_name(".~lock.Report.docx#"));
+        assert!(rel_path_is_ignored("Team/Docs/~$Report.docx"));
+        assert!(!is_indexable_file("Team/~$Report.docx"));
+        // Narrow on purpose: a note or folder named like one keeps syncing.
+        assert!(!is_ignored_name("~$draft.md"));
+        assert!(!is_ignored_name("~$Archive"));
+        assert!(!rel_path_is_ignored("~$Archive/notes.md"));
+        // A user's own tilde-named files are theirs.
+        assert!(!is_ignored_name("~notes.md"));
+        assert!(!is_ignored_name("~.tmp"));
+        assert!(!is_ignored_name("Report~$.docx"));
+        assert!(!is_ignored_name("~é.md"));
+        assert!(!rel_path_is_ignored("Team/Report.docx"));
     }
 
     #[test]

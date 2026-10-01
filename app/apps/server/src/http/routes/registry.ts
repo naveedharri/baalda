@@ -991,6 +991,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (out.status === "error") {
       if (out.code === "note_limit_reached") return c.json({ error: out.message, code: out.code, limit: 20000 }, 402);
       if (out.code === "path_folder_mismatch") return c.json({ error: out.message, code: out.code }, 400);
+      if (out.code === "transient_file") return c.json({ error: out.message, code: out.code }, 400);
       if (out.code === "root_frozen") return c.json(ROOT_FROZEN_ERROR, 403);
       if (out.code === "not_readable") return c.json({ error: out.message, code: out.code }, 409);
       return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);

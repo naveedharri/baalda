@@ -66,6 +66,7 @@
 // upload pays for the probe.
 
 import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
+import { isTransientPath } from "../pathIdentity";
 import { BATCH_MAX_FILES, runPool, useBulkPath } from "./pool";
 import type { DocSyncState } from "./vaultScope";
 import type {
@@ -152,6 +153,10 @@ export function isSafeTreeBinaryRelPath(relPath: string): boolean {
   if (!parts.every((seg) => seg !== "" && seg !== "." && seg !== ".." && !seg.startsWith(".")))
     return false;
   if (isNoteExt(relPath)) return false;
+  // Another device's Office lock file (`~$Report.docx`, #265), registered by a
+  // client that predates the ignore rule: never pulled onto this disk. Its row
+  // is left alone — this only declines the download.
+  if (isTransientPath(relPath)) return false;
   const format = formatFor(relPath);
   return !!format && format.surface && format.syncAs === "attachment";
 }
@@ -1229,7 +1234,9 @@ export class AttachmentSync {
     // forever — an empty `__init__.py` held a `files` row with no bytes behind
     // it. The same reading `settleServerEmpty` gives an empty note: nothing to
     // push, so it is settled, never registered and never queued.
-    const toUpload = plan.toUpload.filter((a) => a.size !== 0);
+    // An Office lock file never uploads (#265). Rust's listing already leaves
+    // them out; this is the same rule held on the side that talks to the server.
+    const toUpload = plan.toUpload.filter((a) => a.size !== 0 && !isTransientPath(a.relPath));
     // Replacements grow during the upload phase: a 409 `stale_base` is one more.
     const replacements: BinaryReplace[] = [...plan.toReplace];
     for (const g of plan.agreed) {

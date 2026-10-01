@@ -16,6 +16,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { FORMATS, NOTE_EXTS, SURFACED_EXTS } from "../formats";
+import { TRANSIENT_PREFIXES, isTransientFileName } from "../pathIdentity";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(here, "../../..");
@@ -96,5 +97,21 @@ describe("format lockstep", () => {
       if (!want) continue;
       for (const ext of format.exts) expect(arms.get(ext), ext).toBe(want);
     }
+  });
+
+  // #265: what Rust's walk and watcher hide as an app's lock file, the sync
+  // layer refuses to pull down and the server refuses to register.
+  it("agrees with Rust and the server on transient lock-file prefixes", () => {
+    const rust = literals(vaultRs, rustArray("TRANSIENT_PREFIXES"));
+    expect(rust.length).toBeGreaterThan(0);
+    expect(new Set(rust)).toEqual(new Set(TRANSIENT_PREFIXES));
+    const serverTs = read("../server/src/registry/transient.ts");
+    expect(new Set(literals(serverTs, /export const TRANSIENT_PREFIXES\s*=\s*\[([\s\S]*?)\];/))).toEqual(
+      new Set(TRANSIENT_PREFIXES),
+    );
+    expect(isTransientFileName("~$Report.docx")).toBe(true);
+    expect(isTransientFileName("~WRL0001.tmp")).toBe(true);
+    expect(isTransientFileName("~notes.md")).toBe(false);
+    expect(isTransientFileName("Report.docx")).toBe(false);
   });
 });
