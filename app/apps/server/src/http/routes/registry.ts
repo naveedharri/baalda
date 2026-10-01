@@ -36,6 +36,7 @@ import {
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
 import { softDeleteSet } from "../../trash/retention.js";
+import { trashChanged } from "../../trash/activity.js";
 import { gainsConflictSuffix, takeForeignRename } from "../../registry/rename-guard.js";
 
 /** Most doc ids one `POST /vaults/:id/access-check` may ask about — the same
@@ -675,6 +676,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // Their derived index rows go with them (see the single-note delete below)…
     await purgeNoteIndex(deletedNoteIds);
     changed(c, row.vault_id);
+    if (deletedNoteIds.length > 0) trashChanged(row.vault_id);
     // …and anyone with one of them open is kicked off the now-gone doc. Without
     // this a folder delete left live editors happily typing into notes that no
     // longer exist anywhere in the tree — the single-note delete has always done
@@ -952,6 +954,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // it on its next store (indexer.scheduleIndex / backfillIndex).
     await purgeNoteIndex([id]);
     changed(c, row.vault_id);
+    trashChanged(row.vault_id);
     // Kick live editors so their provider re-authenticates and learns the doc
     // is in Trash (pushes into it stay accepted until purge_after). Same as
     // MCP's delete_note; `evictDoc` so the next connect reloads from Postgres.

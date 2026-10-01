@@ -145,7 +145,11 @@ export type ServerControl =
    *  dropped them (throttled server-side, ~5 s per connection). */
   | { t: "rejected"; docId: string; reason: "read_only" }
   | { t: "reauth" }
-  | { t: "registry" }
+  /** `meta`: the window carried only "last edited by" stamps, nothing
+   *  structural (#262) — the session folds it into a throttled pull. */
+  | { t: "registry"; meta?: true }
+  /** The vault's Trash or shrink-event listings changed (#260). */
+  | { t: "activity" }
   | { t: "member"; name: string }
   | ({ t: "presence" } & PresenceState)
   | { t: "err"; message: string };
@@ -210,7 +214,10 @@ export function parseServerControl(text: string): ServerControl | null {
     return { t: "revoked", docIds };
   }
   if (t === "reauth") return { t: "reauth" };
-  if (t === "registry") return { t: "registry" };
+  if (t === "registry") {
+    return (v as { meta?: unknown }).meta === true ? { t: "registry", meta: true } : { t: "registry" };
+  }
+  if (t === "activity") return { t: "activity" };
   if (t === "member" && typeof (v as { name?: unknown }).name === "string") {
     return { t: "member", name: (v as { name: string }).name };
   }

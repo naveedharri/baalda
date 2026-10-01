@@ -204,6 +204,18 @@ const EMPTY_PROBE_MAX_BYTES = 1024;
 const REGISTRY_PULL_MAX_WAIT_MS = 1_000;
 
 /**
+ * Minimum gap between the last registry pull and one asked for by a META-only
+ * frame (#262) — the server's "last edited by" stamp, which moves no row and
+ * grants nothing. Each note connection that pushes ops stamps its note, so a
+ * returning device catching up, or a user opening notes in a row, used to make
+ * every app in the vault re-pull the whole tree once per note. The stamp is
+ * already up to 60 s behind server-side, so 30 s here costs nothing a person
+ * can see. Structural frames (create/rename/move/delete) never wait on this:
+ * they keep the immediate, debounced path.
+ */
+export const REGISTRY_META_PULL_MIN_MS = 30_000;
+
+/**
  * How long the server's `acl-changed` frame keeps a pull authorised to remove
  * files wholesale (see {@link SyncManager.revocationAuthority}).
  *
@@ -258,7 +270,9 @@ export type RegistryPullReason =
   | "revert"
   // #221: the user answered a held bulk delete.
   | "delete-restore"
-  | "delete-confirmed";
+  | "delete-confirmed"
+  // #262: a `meta` frame (last-edited stamps only), after its throttle.
+  | "meta-frame";
 
 export interface OpenedDoc {
   awareness: Awareness;
@@ -417,6 +431,14 @@ export class SyncManager implements InboundHost {
   /** When the currently-armed pull's burst started (see
    *  {@link REGISTRY_PULL_MAX_WAIT_MS}); 0 when no pull is armed. */
   private registryPullBurstAt = 0;
+  /** When the last registry pull was started (any reason). A meta-only frame
+   *  inside {@link REGISTRY_META_PULL_MIN_MS} of it is deferred, not dropped. */
+  private lastRegistryPullAt = 0;
+  /** The deferred meta-only pull, if one is waiting. At most one. */
+  private metaPullTimer: ReturnType<typeof setTimeout> | null = null;
+  /** UI subscribes here to refetch the Activity feed when the server says the
+   *  vault's Trash / shrink listings may have moved (#260). */
+  private onActivityChanged?: () => void;
   private attachments: AttachmentSync | null = null;
   /** Disk deletes for BINARIES — the blob mirror's own `drainDiskDeletes`
    *  (`binaryDeletes.ts`). Built and torn down beside the mirror it guards. */
@@ -1366,6 +1388,12 @@ export class SyncManager implements InboundHost {
         this.pullAfterDiskDeletes = true;
         return;
       }
+      this.lastRegistryPullAt = Date.now();
+      // This pull carries whatever a deferred meta-only one was waiting for.
+      if (this.metaPullTimer) {
+        clearTimeout(this.metaPullTimer);
+        this.metaPullTimer = null;
+      }
       void this.registry
         .pull()
         .then((changed) => {
@@ -1397,9 +1425,56 @@ export class SyncManager implements InboundHost {
     }, 250);
   }
 
+  /**
+   * A `registry` frame flagged `meta`: only "last edited by" stamps moved
+   * (#262). Nothing structural changed and nothing was granted or revoked, so
+   * there is no delete or rename this pull could be the first to hear about —
+   * those always arrive as ordinary frames and take {@link handleRegistryChanged}
+   * at once. All this pull refreshes is the sidebar's "edited by" line, so it
+   * rides an armed pull when there is one, and otherwise waits until
+   * {@link REGISTRY_META_PULL_MIN_MS} has passed since the last pull started.
+   * Deferred, never dropped: one timer, shared by every frame that lands while
+   * it waits.
+   */
+  handleRegistryMetaChanged(): void {
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) return;
+    if (this.registryPullTimer || this.metaPullTimer) return;
+    const wait = this.lastRegistryPullAt + REGISTRY_META_PULL_MIN_MS - Date.now();
+    if (wait <= 0) {
+      this.handleRegistryChanged("meta-frame");
+      return;
+    }
+    this.metaPullTimer = setTimeout(() => {
+      this.metaPullTimer = null;
+      if (scope.isCurrent()) this.handleRegistryChanged("meta-frame");
+    }, wait);
+  }
+
+  /** UI hook for the Activity feed's push refetch (#260). */
+  setActivityChangedListener(cb: (() => void) | undefined): void {
+    this.onActivityChanged = cb;
+  }
+
+  /** The server said Trash / shrink listings may have moved: an `activity`
+   *  frame, or a structural `registry` frame (every soft delete is one). */
+  private notifyActivityChanged(scope: VaultScope): void {
+    if (!scope.isCurrent()) return;
+    try {
+      this.onActivityChanged?.();
+    } catch (e) {
+      console.warn("[sync] activity listener threw", e);
+    }
+  }
+
   /** True while a debounced registry pull is still armed (teardown assertions). */
   hasPendingRegistryPull(): boolean {
     return this.registryPullTimer != null;
+  }
+
+  /** True while a meta-only pull is deferred (tests / teardown assertions). */
+  hasPendingMetaPull(): boolean {
+    return this.metaPullTimer != null;
   }
 
   /** True while the blob mirror has a debounced pass armed — the binary half of
@@ -2665,6 +2740,10 @@ export class SyncManager implements InboundHost {
     if (this.registryPullTimer) {
       clearTimeout(this.registryPullTimer);
       this.registryPullTimer = null;
+    }
+    if (this.metaPullTimer) {
+      clearTimeout(this.metaPullTimer);
+      this.metaPullTimer = null;
     }
     this.pendingDiskDeletes.clear();
     this.pendingDeleteByPath.clear();
@@ -4958,6 +5037,11 @@ export class SyncManager implements InboundHost {
       this.registryPullTimer = null;
     }
     this.registryPullBurstAt = 0;
+    if (this.metaPullTimer) {
+      clearTimeout(this.metaPullTimer);
+      this.metaPullTimer = null;
+    }
+    this.lastRegistryPullAt = 0;
     if (this.localChangeTimer) {
       clearTimeout(this.localChangeTimer);
       this.localChangeTimer = null;
@@ -5388,7 +5472,19 @@ export class SyncManager implements InboundHost {
       // read-only/editable live — no reopen (spec 04 §4).
       onAclChanged: () => this.handleServerReauth(scope),
       // A teammate changed the folder/note structure — re-pull + refresh tree.
-      onRegistryChanged: () => this.handleRegistryChanged("registry-frame"),
+      // A `meta` frame is only "last edited by" stamps (#262) and takes the
+      // throttled path; anything structural pulls now, and may have moved the
+      // Trash too (every soft delete is a structural change).
+      onRegistryChanged: (meta) => {
+        if (meta) {
+          this.handleRegistryMetaChanged();
+          return;
+        }
+        this.handleRegistryChanged("registry-frame");
+        this.notifyActivityChanged(scope);
+      },
+      // Trash / shrink listings moved (#260): refetch instead of polling.
+      onActivityChanged: () => this.notifyActivityChanged(scope),
       // A new teammate joined the vault — refresh roster + celebrate.
       onMemberJoined: (name) => this.onMemberJoined?.(name),
       // A teammate's viewing state changed — update the sidebar presence roster.

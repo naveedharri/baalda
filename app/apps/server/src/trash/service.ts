@@ -12,6 +12,7 @@ import { listDeletedReadableDocsInVault } from "../permissions/vault-docs.js";
 import { basename, dirname, findFolderByPath, joinPath } from "../registry/tree-ops.js";
 import { extractDocText, purgeNoteIndex } from "../index/indexer.js";
 import { trashedNotePermission } from "./access.js";
+import { trashChanged } from "./activity.js";
 
 type Queryable = Pick<typeof defaultPool, "query">;
 
@@ -283,7 +284,7 @@ export async function purgeExpiredTrash(
 ): Promise<string[]> {
   // Stamp FIRST, re-checking the window in the same statement: a restore that
   // ran concurrently cleared purge_after and must win with its CRDT intact.
-  const { rows } = await db.query<{ id: string }>(
+  const { rows } = await db.query<{ id: string; vault_id: string }>(
     `WITH due AS (
        SELECT id FROM notes
         WHERE deleted_at IS NOT NULL AND purged_at IS NULL
@@ -295,11 +296,13 @@ export async function purgeExpiredTrash(
        FROM due
       WHERE n.id = due.id AND n.deleted_at IS NOT NULL AND n.purged_at IS NULL
         AND n.purge_after IS NOT NULL AND n.purge_after <= $1
-     RETURNING n.id`,
+     RETURNING n.id, n.vault_id`,
     [now],
   );
   const ids = rows.map((r) => r.id);
   if (ids.length === 0) return [];
+  // Open Activity feeds in these vaults drop the purged rows (#260).
+  for (const vaultId of new Set(rows.map((r) => r.vault_id))) trashChanged(vaultId);
   await purgeNoteIndex(ids, db);
   await db.query("DELETE FROM doc_updates WHERE doc_id = ANY($1::text[])", [ids]);
   await db.query("DELETE FROM doc_snapshots WHERE doc_id = ANY($1::text[])", [ids]);
