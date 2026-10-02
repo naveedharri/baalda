@@ -227,6 +227,13 @@ vi.mock("../vaultSyncEngine", () => ({
 vi.mock("../vaultDocStore", () => ({
   createIpcManifestStore: () => ({ load: async () => [], save: async () => {} }),
   VaultDocStore: class {
+    parkMark() {
+      return 0;
+    }
+    async settleParked() {}
+    takeOverflowed() {
+      return [];
+    }
     async promote() {
       return null;
     }

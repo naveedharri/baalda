@@ -135,6 +135,13 @@ const storeHooks = vi.hoisted(() => ({
 vi.mock("../vaultDocStore", () => ({
   createIpcManifestStore: () => ({ load: async () => [], save: async () => {} }),
   VaultDocStore: class {
+    parkMark() {
+      return 0;
+    }
+    async settleParked() {}
+    takeOverflowed() {
+      return [];
+    }
     constructor(opts: VaultDocStoreOptions) {
       storeHooks.created++;
       storeHooks.opts = opts;

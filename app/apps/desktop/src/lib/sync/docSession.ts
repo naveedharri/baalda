@@ -1267,7 +1267,7 @@ export class SyncManager implements InboundHost {
     if (!scope.isCurrent()) return;
     this.registry.forgetFileId(path);
     this.attachments?.forgetFile(path);
-    await this.registry.pull();
+    await this.pullRegistry(scope);
     if (scope.isCurrent()) this.onRegistryChanged?.();
   }
 
@@ -1431,12 +1431,9 @@ export class SyncManager implements InboundHost {
         clearTimeout(this.metaPullTimer);
         this.metaPullTimer = null;
       }
-      const parkMark = this.docStore?.parkMark();
-      void this.registry
-        .pull()
+      void this.pullRegistry(scope)
         .then((changed) => {
           if (!scope.isCurrent()) return;
-          this.settleParkedDocs(scope, parkMark);
           // A completed structure pull is half of "this session is live" (the
           // other half is the channel reaching `synced`). Until both hold, a
           // missing file is a disk that isn't ready, not a delete.
@@ -3501,6 +3498,54 @@ export class SyncManager implements InboundHost {
   }
 
   /**
+   * Every registry pull goes through here, so the vault channel's parked updates
+   * settle wherever a pull completes — a registry frame, the catch-up pull on
+   * every (re)connect, a manual retry, a server-file removal. The mark is taken
+   * BEFORE the pull starts: only docs parked before then can be judged by it.
+   */
+  private async pullRegistry(scope: VaultScope): Promise<boolean> {
+    const store = this.docStore;
+    const mark = store?.parkMark() ?? 0;
+    let changed: boolean;
+    try {
+      changed = await this.registry.pull();
+    } catch (e) {
+      // A failed pull judged nothing: place what already maps, discard nothing.
+      if (scope.isCurrent()) this.settleParkedDocs(scope, store, 0);
+      throw e;
+    }
+    if (scope.isCurrent()) this.settleParkedDocs(scope, store, mark);
+    return changed;
+  }
+
+  /**
+   * A registry pull has completed: hand the vault channel's parked updates —
+   * backfills for docs that arrived before this device could map them, which is
+   * the normal order for a note created on the server — to the doc store, which
+   * writes the ones the pull placed and discards the rest. Docs the store had to
+   * evict from its bounded buffer lost their base; a reconnect re-requests them
+   * (its manifest has no entry for them, so the server sends full state). In a
+   * live-only session the bulk engine owns downloads and is left to fetch them.
+   *
+   * `markedOn` is the store the mark was read from: a channel restarted during
+   * the pull has its own sequence, so the mark judges nothing there.
+   */
+  private settleParkedDocs(scope: VaultScope, markedOn: VaultDocStore | null, mark: number): void {
+    const store = this.docStore;
+    if (!store) return;
+    void store
+      .settleParked(store === markedOn ? mark : 0)
+      .then(() => {
+        if (!scope.isCurrent() || store !== this.docStore) return;
+        const lost = store.takeOverflowed();
+        if (lost.length === 0 || this.vaultEngineLiveOnly) return;
+        console.info(`[sync] re-requesting ${lost.length} doc(s) whose early backfill overflowed the buffer`);
+        this.vaultEngine?.reconnect({ liveOnly: false });
+      })
+      .catch((e) => console.warn("[sync] applying parked updates failed", e));
+  }
+
+  /**
    * Land the vault on a coherent state after a registry pull.
    *
    * A pull re-enters the `registering` phase (it may create rows for a teammate's
@@ -3516,30 +3561,6 @@ export class SyncManager implements InboundHost {
    * the terminal phase — `startContentRunIfNeeded` decides which, and defers to
    * the vault channel's backfill if one is still arriving.
    */
-  /**
-   * A registry pull has completed: hand the vault channel's parked updates —
-   * backfills for docs that arrived before this device could map them, which is
-   * the normal order for a note created on the server — to the doc store, which
-   * writes the ones the pull placed and discards the rest. Docs the store had to
-   * evict from its bounded buffer lost their base; a reconnect re-requests them
-   * (its manifest has no entry for them, so the server sends full state). In a
-   * live-only session the bulk engine owns downloads and is left to fetch them.
-   */
-  private settleParkedDocs(scope: VaultScope, mark: number | undefined): void {
-    const store = this.docStore;
-    if (!store || mark === undefined) return;
-    void store
-      .settleParked(mark)
-      .then(() => {
-        if (!scope.isCurrent() || store !== this.docStore) return;
-        const lost = store.takeOverflowed();
-        if (lost.length === 0 || this.vaultEngineLiveOnly) return;
-        console.info(`[sync] re-requesting ${lost.length} doc(s) whose early backfill overflowed the buffer`);
-        this.vaultEngine?.reconnect({ liveOnly: false });
-      })
-      .catch((e) => console.warn("[sync] applying parked updates failed", e));
-  }
-
   private settleAfterPull(scope: VaultScope): void {
     // Checked BEFORE this pass may start a content run: the sweep waits for an
     // idle session, and a run started below re-checks at fire time anyway.
@@ -4171,6 +4192,8 @@ export class SyncManager implements InboundHost {
       // The registry reads the vault tree itself (the FULL recursive walk); it
       // deliberately does not take one from here, because the tree this layer
       // has access to is the sidebar's lazy one. See `reconcile`.
+      const primedStore = this.docStore;
+      const parkMark = primedStore?.parkMark() ?? 0;
       const { seeded } = await this.registry.reconcile({
         organizationId: session.activeOrganizationId,
         vaultName: vault.name,
@@ -4189,6 +4212,11 @@ export class SyncManager implements InboundHost {
       // is news (see `markLive` for the other half of the condition).
       this.pulledOnce = true;
       this.markLive();
+      // The primed channel backfilled while the reconcile ran, and a note created
+      // on the server since the last launch is unmapped until the reconcile maps
+      // it — its backfill was parked. The channel's own `synced` pull was ignored
+      // while disabled, so settle here or it waits for the next registry frame.
+      this.settleParkedDocs(scope, primedStore, parkMark);
       // Renames, moves and deletes made while the app was closed were not
       // applied by that pass; say so once (#221).
       this.maybeNoticeClosedChanges();
@@ -4394,14 +4422,12 @@ export class SyncManager implements InboundHost {
     this.progress?.phase("registering", 0);
     this.progress?.flush();
     let changed = false;
-    const parkMark = this.docStore?.parkMark();
     try {
-      changed = await this.registry.pull();
+      changed = await this.pullRegistry(scope);
     } catch (e) {
       console.warn("[sync] manual retry pull failed", e);
     }
     if (!scope.isCurrent()) return;
-    this.settleParkedDocs(scope, parkMark);
     if (changed) this.onRegistryChanged?.();
     this.settleAfterPull(scope);
   }

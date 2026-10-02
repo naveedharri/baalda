@@ -248,11 +248,26 @@ const storeHooks = vi.hoisted(() => ({
   residentIngests: [] as string[],
   /** Per-doc text a promoted bridge serializes to ("content" when unset). */
   texts: new Map<string, string>(),
+  /** Docs whose backfill the channel delivered before the registry mapped them. */
+  parked: new Set<string>(),
+  /** Every `settleParked(mark)` the session made, and the docs each one placed. */
+  settles: [] as Array<{ mark: number; placed: string[] }>,
 }));
 
 vi.mock("../vaultDocStore", () => ({
   createIpcManifestStore: () => ({ load: async () => [], save: async () => {} }),
   VaultDocStore: class {
+    parkMark() {
+      return storeHooks.parked.size;
+    }
+    async settleParked(mark: number) {
+      const placed = [...storeHooks.parked].filter((id) => fakeRegistry.pathForDocId(id) !== null);
+      for (const id of placed) storeHooks.parked.delete(id);
+      storeHooks.settles.push({ mark, placed });
+    }
+    takeOverflowed() {
+      return [];
+    }
     constructor(opts: VaultDocStoreOptions) {
       storeHooks.opts = opts;
     }
@@ -347,6 +362,9 @@ const flush = async () => {
 beforeEach(() => {
   vi.useRealTimers();
   vaultScopes.end();
+  storeHooks.parked.clear();
+  storeHooks.settles = [];
+  fakeRegistry.primeLocal.mockReset().mockResolvedValue(false);
   fakeRegistry.pushed = new Set();
   fakeRegistry.reconcile.mockClear();
   fakeRegistry.pull.mockClear();
@@ -2154,5 +2172,74 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     await live(sm);
     expect(sm.structureNotice().closedAppChanges).toBe(false);
     vi.useRealTimers();
+  });
+});
+
+describe("SyncManager — parked backfills settle wherever a registry pull completes", () => {
+  // A note created on the server (MCP `create_note`, a teammate) is backfilled
+  // over the vault channel before the pull that maps its doc_id. The store parks
+  // that backfill; the session must hand it back after EVERY pull, or the note
+  // the pull materializes stays a 0-byte placeholder until some later frame.
+  const created = "doc-created-on-server";
+
+  it("places a parked backfill after a registry frame's pull, without a reconnect", async () => {
+    vi.useFakeTimers();
+    const sm = new SyncManager();
+    await enable(sm);
+    await vi.advanceTimersByTimeAsync(1_000);
+    storeHooks.settles = [];
+    const reconnectsBefore = engineHooks.refreshes;
+
+    storeHooks.parked.add(created); // the backfill beat the pull
+    fakeRegistry.pull.mockImplementationOnce(async () => {
+      fakeRegistry.pathForDocId.mockImplementation((id: string) => (id === created ? "New.md" : null));
+      return true;
+    });
+    engineHooks.opts!.onRegistryChanged?.();
+    await vi.advanceTimersByTimeAsync(300);
+    await flush();
+
+    expect(storeHooks.settles).toEqual([{ mark: 1, placed: [created] }]);
+    expect(engineHooks.refreshes).toBe(reconnectsBefore);
+    vi.useRealTimers();
+  });
+
+  it("places a backfill parked in the prime window once the startup reconcile maps it", async () => {
+    // A note created while the app was closed: the primed channel backfills it
+    // during the reconcile, whose `synced` pull is ignored while disabled.
+    fakeRegistry.primeLocal.mockResolvedValue(true);
+    fakeRegistry.reconcile.mockImplementationOnce(async () => {
+      storeHooks.parked.add(created);
+      fakeRegistry.pathForDocId.mockImplementation((id: string) => (id === created ? "New.md" : null));
+      return { seeded: false };
+    });
+    const sm = new SyncManager();
+    await enable(sm);
+    await flush();
+
+    expect(storeHooks.settles[0]).toEqual({ mark: 0, placed: [created] });
+  });
+
+  it("a manual retry settles too, and a failed pull judges nothing", async () => {
+    const sm = new SyncManager();
+    await enable(sm);
+    await flush();
+    storeHooks.settles = [];
+
+    storeHooks.parked.add(created);
+    fakeRegistry.pull.mockRejectedValueOnce(new Error("offline"));
+    await sm.retrySync();
+    await flush();
+    // Mark 0 discards nothing: the doc stays parked for the next pull.
+    expect(storeHooks.settles).toEqual([{ mark: 0, placed: [] }]);
+    expect(storeHooks.parked.has(created)).toBe(true);
+
+    fakeRegistry.pull.mockImplementationOnce(async () => {
+      fakeRegistry.pathForDocId.mockImplementation((id: string) => (id === created ? "New.md" : null));
+      return true;
+    });
+    await sm.retrySync();
+    await flush();
+    expect(storeHooks.settles[1]).toEqual({ mark: 1, placed: [created] });
   });
 });
