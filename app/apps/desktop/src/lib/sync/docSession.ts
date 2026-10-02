@@ -1720,6 +1720,17 @@ export class SyncManager implements InboundHost {
    * took away arrive as `drop` frames just ahead of this one, and those name
    * themselves ({@link handleServerDrop}).
    */
+  /**
+   * This user just changed access in this vault (the Access panel saved). The
+   * server's `reauth` frame does the same thing when it arrives; this covers
+   * the window before it, and a server that does not echo it to the author.
+   */
+  retryHeldRegistrations(): void {
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) return;
+    if (this.registry.retryHeldRefusals()) this.handleRegistryChanged("reauth");
+  }
+
   handleServerReauth(scope: VaultScope): void {
     if (!scope.isCurrent()) return;
     this.aclChangedAt = Date.now();
@@ -1731,7 +1742,10 @@ export class SyncManager implements InboundHost {
     // changed too. That pull is what removes a note this user just lost access to
     // from their disk, and without it the removal would wait for the next
     // structural change or an app restart - long enough to look like the
-    // revocation hadn't worked.
+    // revocation hadn't worked. It is also the pass that re-asks every create
+    // the server refused for access: a grant that lifts the refusal lets those
+    // new notes register by themselves.
+    this.registry.retryHeldRefusals();
     this.handleRegistryChanged("reauth");
     // ...and the BINARIES are re-diffed against the server. This is the file
     // half of that same pull, and it has to be asked for separately: the pull
@@ -4415,6 +4429,8 @@ export class SyncManager implements InboundHost {
       this.registry.unmarkPushed(docId);
       this.divergedDocs.add(docId);
     }
+    // Creates refused for access are re-asked too, for the same reason.
+    this.registry.retryHeldRefusals();
     // The old uploader's failure list belongs to the run being retried; keeping
     // it would let `completeRun` re-report failures the retry just fixed.
     this.uploader = null;

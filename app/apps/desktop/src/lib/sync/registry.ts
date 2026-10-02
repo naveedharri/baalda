@@ -87,6 +87,7 @@ import {
 import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { isSymlinkRefusal, SYMLINK_REFUSAL_REASON } from "./linkRefusals";
 import { toast } from "../toast";
+import { isHeldCreateCode } from "./createRefusals";
 import { vaultScopes, type VaultScope, type VaultScopeSource } from "./vaultScope";
 
 export interface DocMapping {
@@ -492,6 +493,14 @@ export interface RegistryFailure {
 const frozenRootNotified = new Set<string>();
 
 /**
+ * How long a held create refusal ({@link VaultRegistry.heldRefusals}) is trusted
+ * before the registry asks the server again on its own. An access change
+ * re-asks at once ({@link VaultRegistry.retryHeldRefusals}); this is the slow
+ * backstop for a grant whose announcement never reached this device.
+ */
+export const HELD_REFUSAL_RETRY_MS = 10 * 60_000;
+
+/**
  * How many inbound REMOVALS run at once.
  *
  * A unit here includes local disk checks and a `deleteFile` call, so it takes the shared local width
@@ -816,6 +825,22 @@ export class VaultRegistry {
   private deletedPaths = new Set<string>();
   private deletedDocIds = new Set<string>();
   /**
+   * Lower-cased paths whose create the server refused for ACCESS
+   * (`no_write_access`, `root_frozen` — see `createRefusals.ts`), with the
+   * failure and when it was last asked.
+   *
+   * Edits to existing notes keep syncing in exactly those cases, so before this
+   * a script writing new files into a view-only folder stranded every one of
+   * them for days with nothing louder than a Health row. Held refusals outlive
+   * the per-pass `failed` reset (they are still true until access changes), so
+   * the vault never reads "Synced" while they stand; and they are NOT re-sent on
+   * every pull — the answer cannot change until access does. They are asked
+   * again after {@link HELD_REFUSAL_RETRY_MS}, or at once when access changes
+   * ({@link retryHeldRefusals}). An entry leaves when its path registers or
+   * leaves the disk; wholesale on `reset`.
+   */
+  private heldRefused = new Map<string, { failure: RegistryFailure; at: number }>();
+  /**
    * Paths THIS device just created as materialized placeholders, awaiting their
    * own watcher echo (see {@link consumeMaterialized}).
    *
@@ -1087,6 +1112,7 @@ export class VaultRegistry {
     this.hiddenPaths.clear();
     this.deletedPaths.clear();
     this.deletedDocIds.clear();
+    this.heldRefused.clear();
     this.folderByPath.clear();
     // Server ids for vault A's binaries name nothing in vault B.
     this.fileByPath.clear();
@@ -1630,11 +1656,39 @@ export class VaultRegistry {
 
   /** Everything that could not be registered in the last reconcile/pull. */
   failures(): RegistryFailure[] {
-    return [...this.failed];
+    if (this.heldRefused.size === 0) return [...this.failed];
+    // Held refusals were not asked again this pass, but they are still true.
+    const listed = new Set(this.failed.map((f) => pathKey(f.path)));
+    const out = [...this.failed];
+    for (const [key, { failure }] of this.heldRefused) {
+      if (!listed.has(key)) out.push(failure);
+    }
+    return out;
   }
 
   hasFailures(): boolean {
-    return this.failed.length > 0;
+    return this.failed.length > 0 || this.heldRefused.size > 0;
+  }
+
+  /** Creates the server refused for access, still standing (see {@link heldRefused}). */
+  heldRefusals(): RegistryFailure[] {
+    return [...this.heldRefused.values()].map((e) => e.failure);
+  }
+
+  /**
+   * Access may have changed: ask about every held refusal again on the next
+   * pass. Entries stay listed (they are still unsynced) until that pass answers.
+   * Returns whether there was anything to re-ask.
+   */
+  retryHeldRefusals(): boolean {
+    for (const e of this.heldRefused.values()) e.at = 0;
+    return this.heldRefused.size > 0;
+  }
+
+  /** Held and not yet due for another ask — skipped by this pass. */
+  private isHeldRefusal(path: string): boolean {
+    const e = this.heldRefused.get(pathKey(path));
+    return e != null && Date.now() - e.at < HELD_REFUSAL_RETRY_MS;
   }
 
   /** The plan-limit code that stopped the run, if one did. */
@@ -1671,6 +1725,15 @@ export class VaultRegistry {
         ...f,
         reason: "deleted on the server by another member — kept on this device, no longer synced",
       };
+    }
+    if (isHeldCreateCode(f.code) && (f.kind === "note" || f.kind === "folder")) {
+      const firstTime = !this.heldRefused.has(pathKey(f.path));
+      this.heldRefused.set(pathKey(f.path), { failure: f, at: Date.now() });
+      // A re-ask that got the same answer is not news.
+      if (!firstTime) {
+        if (f.docId) this.sink.doc(f.docId, "error");
+        return "failed";
+      }
     }
     this.failed.push(f);
     if (f.code === "vault_limit_reached" || f.code === "member_limit_reached") {
@@ -2885,6 +2948,8 @@ export class VaultRegistry {
     if (previous !== undefined && previous !== relPath) this.byPath.delete(previous);
     this.byPath.set(relPath, { vaultId, docId });
     this.byDocId.set(docId, relPath);
+    // Registered: a held refusal for this path is answered.
+    if (this.heldRefused.size > 0) this.heldRefused.delete(pathKey(relPath));
     this.notifyMapChanged();
   }
 
@@ -3468,7 +3533,10 @@ export class VaultRegistry {
       }
     }
     const missingFolders = folders.filter(
-      (f) => !this.folderByPath.has(f.path) && !this.hiddenPaths.has(pathKey(f.path)),
+      (f) =>
+        !this.folderByPath.has(f.path) &&
+        !this.hiddenPaths.has(pathKey(f.path)) &&
+        !this.isHeldRefusal(f.path),
     );
 
     // 3. Notes: adopt by relPath, create missing. Any first-run seeding happened
@@ -3536,6 +3604,17 @@ export class VaultRegistry {
     for (const key of [...this.deletedPaths]) {
       if (resolvedNotePathsCi.has(key) || !localNotePathCi.has(key)) this.deletedPaths.delete(key);
     }
+    // Registered after all (another device, or access came back), or gone from
+    // this disk: no longer held (see `heldRefused`).
+    if (this.heldRefused.size > 0) {
+      const onDiskCi = new Set(folders.map((f) => pathKey(f.path)));
+      for (const key of [...this.heldRefused.keys()]) {
+        const isNote = localNotePathCi.has(key);
+        if (isNote ? resolvedNotePathsCi.has(key) : !onDiskCi.has(key) || serverFolderByPathCi.has(key)) {
+          this.heldRefused.delete(key);
+        }
+      }
+    }
     if (this.deletedDocIds.size > 0) {
       const listed = new Set(serverNotes.map((n) => noteDocId(n)));
       for (const id of [...this.deletedDocIds]) if (listed.has(id)) this.deletedDocIds.delete(id);
@@ -3546,7 +3625,8 @@ export class VaultRegistry {
         !this.inboundSuppressed.has(n.path) &&
         !this.aliasPaths.has(n.path) &&
         !this.hiddenPaths.has(pathKey(n.path)) &&
-        !this.deletedPaths.has(pathKey(n.path)),
+        !this.deletedPaths.has(pathKey(n.path)) &&
+        !this.isHeldRefusal(n.path),
     );
 
     // 3b. A rename made while the app was closed (offline reconciliation, row
@@ -3767,6 +3847,12 @@ export class VaultRegistry {
     // After the mappings, so a handler can resolve every id it is given.
     this.announceCreated(createdNow);
     if (this.stale()) return mutated;
+
+    // A held folder that a re-ask just registered is answered too (notes leave
+    // through `setMapping`).
+    if (this.heldRefused.size > 0) {
+      for (const rp of this.folderByPath.keys()) this.heldRefused.delete(pathKey(rp));
+    }
 
     // 4. Prune mappings for notes that no longer exist anywhere (deleted on the
     //    server AND absent locally), then checkpoint the map.

@@ -526,6 +526,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
         buildBulkAccessInput({ resources: compactAccessResources(selectedResources, entries), audienceType, userIds: selectedUserIds, mode }),
       );
       if (scope !== scopeGen.current) return;
+      // New notes the server refused for access may be allowed now.
+      syncManager.retryHeldRegistrations();
       // Permission writes do not change the structure. Refresh the two access
       // views together instead of re-downloading and re-sorting the whole vault.
       await Promise.all([useStore.getState().refreshLocks(), reloadVault(false)]);
