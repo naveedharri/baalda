@@ -35,12 +35,14 @@ export function syncRunPercent(progress: SyncProgress | null | undefined): numbe
  * `syncManager.syncFailures()`, which this leaves untouched.
  *
  * An `error` run with NO failed note is kept as it is: that is the channel
- * never connecting (the download watchdog), a genuine connectivity state.
+ * never connecting (the download watchdog), a genuine connectivity state. So
+ * is one with new notes the server refused for access (`refused`): those stay
+ * local until someone changes access, and only the pill and its banner say so.
  */
 export function pillProgress(
   progress: SyncProgress | null | undefined,
 ): SyncProgress | null | undefined {
-  if (progress?.phase === "error" && progress.failed > 0) {
+  if (progress?.phase === "error" && progress.failed > 0 && !progress.refused) {
     return { ...progress, phase: "done" };
   }
   return progress;
@@ -223,13 +225,15 @@ export function syncBadgeAction(args: {
   running: boolean;
   phase?: string | null;
   failed?: number;
+  /** {@link SyncProgress.refused}: keeps the run actionable despite `failed`. */
+  refused?: number;
   hasRetry: boolean;
   hasHealth: boolean;
 }): { kind: "none" | "retry" | "explain"; cta: string; title?: string } {
-  const { running, phase, failed = 0, hasRetry, hasHealth } = args;
+  const { running, phase, failed = 0, refused = 0, hasRetry, hasHealth } = args;
   // A run that ended with failed notes reads "Synced" (see `pillProgress`) and
   // offers nothing: the failures live on the Health page, not on the pill.
-  if (running || phase !== "error" || failed > 0 || (!hasRetry && !hasHealth)) {
+  if (running || phase !== "error" || (failed > 0 && refused === 0) || (!hasRetry && !hasHealth)) {
     return { kind: "none", cta: "" };
   }
   if (hasHealth) {
@@ -321,6 +325,7 @@ export function SyncBadge({
     running,
     phase: progress?.phase,
     failed: progress?.failed,
+    refused: progress?.refused,
     hasRetry: onRetry != null,
     hasHealth: onOpenHealth != null,
   });

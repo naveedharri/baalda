@@ -387,3 +387,28 @@ describe("syncBadgeHold", () => {
     expect(syncBadgeHold({ enabled: false, pause: { until: null }, now })).toBeNull();
   });
 });
+
+// New notes the server refused for access stay local until access changes, and
+// a refused create may or may not have been re-asked (and so counted as
+// `failed`) in the run that just ended. Either way the pill must not read
+// "Synced" over them.
+describe("a run with held create refusals", () => {
+  const now = 1_000_000_000_000;
+  const asked: SyncProgress = { phase: "error", done: 3, total: 3, failed: 2, refused: 2 };
+  const skipped: SyncProgress = { phase: "error", done: 0, total: 0, failed: 0, refused: 2 };
+
+  it("reads the same whether or not the refusals were re-asked this run", () => {
+    for (const progress of [asked, skipped]) {
+      expect(syncBadgeLabel({ status: "synced", now, progress })).toBe("Sync incomplete");
+      expect(syncBadgeTone({ status: "synced", progress })).toBe("error");
+      expect(
+        syncBadgeAction({ running: false, phase: "error", failed: progress.failed, refused: 2, hasRetry: true, hasHealth: true }).kind,
+      ).toBe("explain");
+    }
+  });
+
+  it("still reads Synced for ordinary failed notes", () => {
+    const progress: SyncProgress = { phase: "error", done: 3, total: 3, failed: 2 };
+    expect(syncBadgeLabel({ status: "synced", now, progress, lastSyncedAt: now })).toBe("Synced · just now");
+  });
+});

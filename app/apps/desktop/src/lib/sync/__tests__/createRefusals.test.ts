@@ -59,7 +59,14 @@ function fakeApi() {
     createVault: vi.fn(),
     listFolders: vi.fn(async () => folders),
     listFolderRegistry: vi.fn(async () => ({ folders, tombstones: [] })),
-    createFolder: vi.fn(async (input: { path: string }) => ({ id: `folder-${input.path}` })),
+    createFolder: vi.fn(async (input: { path: string }) => {
+      if (!writable && input.path.startsWith("Reports/")) {
+        throw new ApiError(403, "Forbidden", { code: "no_write_access" });
+      }
+      const row = { id: `folder-${input.path}`, path: input.path };
+      folders.push(row);
+      return row;
+    }),
     listNotes: vi.fn(async () => notes),
     listNoteRegistry: vi.fn(async () => ({ notes, tombstones: [] })),
     listNoteRegistryPaged: vi.fn(async () => ({ notes, tombstones: [] })),
@@ -156,6 +163,44 @@ describe("VaultRegistry — creates refused for access", () => {
     vi.mocked(ipc.listTree).mockResolvedValue(fullTree(tree([])));
     await reg.pull();
     expect(reg.heldRefusals()).toEqual([]);
+  });
+
+  it("registers a held note once it is moved to a folder this user can edit", async () => {
+    const { api, reg } = await setup(["Reports/a.md", "Reports/pic.png"]);
+    vi.mocked(ipc.listTree).mockResolvedValue(fullTree(tree(["Mine/a.md", "Reports/pic.png"])));
+    await reg.pull();
+    expect(reg.getMapping("Mine/a.md")).not.toBeNull();
+    expect(reg.heldRefusals()).toEqual([]);
+    expect(reg.hasFailures()).toBe(false);
+    expect(reportsCreates(api)).toBe(1);
+  });
+
+  it("holds a refused folder's notes with it instead of sending each one", async () => {
+    const { api, reg } = await setup(["Reports/New/a.md", "Reports/New/b.md", "Reports/New/Deep/c.md"]);
+    expect(reg.heldRefusals().map((f) => f.path).sort()).toEqual(["Reports/New"]);
+    // Nothing inside it was sent: without the folder's id each would be refused.
+    expect(api.createNote).not.toHaveBeenCalled();
+    for (let i = 0; i < 3; i++) await reg.pull();
+    expect(api.createFolder.mock.calls.filter((c) => c[0].path.startsWith("Reports/New"))).toHaveLength(1);
+    expect(api.createNote).not.toHaveBeenCalled();
+
+    api.grant();
+    reg.retryHeldRefusals();
+    await reg.pull();
+    // The folder registers on the re-ask; its notes follow on the next pass.
+    await reg.pull();
+    expect(reg.getMapping("Reports/New/a.md")).not.toBeNull();
+    expect(reg.getMapping("Reports/New/Deep/c.md")).not.toBeNull();
+    expect(reg.heldRefusals()).toEqual([]);
+  });
+
+  it("forgets a held note or folder the moment it leaves the disk", async () => {
+    const { reg } = await setup(["Reports/a.md", "Reports/New/b.md"]);
+    expect(reg.heldRefusals()).toHaveLength(2);
+    expect(reg.forgetHeldRefusal("reports/A.md")).toBe(true);
+    expect(reg.forgetHeldRefusal("Reports/New")).toBe(true);
+    expect(reg.heldRefusals()).toEqual([]);
+    expect(reg.forgetHeldRefusal("Reports/a.md")).toBe(false);
   });
 
   it("retryHeldRefusals reports nothing to re-ask when nothing is held", async () => {

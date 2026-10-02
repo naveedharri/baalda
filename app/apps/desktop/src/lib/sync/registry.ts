@@ -1685,10 +1685,39 @@ export class VaultRegistry {
     return this.heldRefused.size > 0;
   }
 
-  /** Held and not yet due for another ask — skipped by this pass. */
+  /**
+   * `path` (a note, or a folder and everything in it) left the disk: stop
+   * holding it. Returns whether anything was held there.
+   */
+  forgetHeldRefusal(path: string): boolean {
+    if (this.heldRefused.size === 0) return false;
+    const key = pathKey(path);
+    let forgot = false;
+    for (const k of [...this.heldRefused.keys()]) {
+      if (k === key || k.startsWith(`${key}/`)) {
+        this.heldRefused.delete(k);
+        forgot = true;
+      }
+    }
+    return forgot;
+  }
+
+  /**
+   * Held and not yet due for another ask — skipped by this pass. So is anything
+   * inside a held FOLDER: the server would refuse each child ("no folder at …")
+   * on every pull, one row per file. They are asked once the folder registers.
+   */
   private isHeldRefusal(path: string): boolean {
-    const e = this.heldRefused.get(pathKey(path));
-    return e != null && Date.now() - e.at < HELD_REFUSAL_RETRY_MS;
+    if (this.heldRefused.size === 0) return false;
+    const now = Date.now();
+    let key = pathKey(path);
+    for (;;) {
+      const e = this.heldRefused.get(key);
+      if (e != null && now - e.at < HELD_REFUSAL_RETRY_MS) return true;
+      const i = key.lastIndexOf("/");
+      if (i === -1) return false;
+      key = key.slice(0, i);
+    }
   }
 
   /** The plan-limit code that stopped the run, if one did. */
@@ -3703,8 +3732,11 @@ export class VaultRegistry {
     } else
     for (const depth of [...byDepth.keys()].sort((a, b) => a - b)) {
       if (this.stopRun()) break;
+      // Inside a folder refused at a shallower depth: held with it.
+      const level = byDepth.get(depth)!.filter((f) => !this.isHeldRefusal(f.path));
+      for (let i = level.length; i < byDepth.get(depth)!.length; i++) this.sink.item("failed");
       await runPool(
-        byDepth.get(depth)!,
+        level,
         async (f) => {
           const parentPath = parentDir(f.path);
           const parentId = parentPath ? (this.folderByPath.get(parentPath) ?? null) : null;
@@ -3732,6 +3764,13 @@ export class VaultRegistry {
       );
     }
     if (this.stale()) return mutated;
+    // A folder refused just now holds its notes too (see `isHeldRefusal`):
+    // without its id each would be refused on its own.
+    if (this.heldRefused.size > 0) {
+      const before = missingNotes.length;
+      missingNotes = missingNotes.filter((n) => !this.isHeldRefusal(n.path));
+      for (let i = missingNotes.length; i < before; i++) this.sink.item("failed");
+    }
 
     // ---- notes ----
     // Above the threshold: the same work, batched. Identical accounting —
