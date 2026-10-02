@@ -69,7 +69,8 @@ describe("Access panel during sync and permission changes", () => {
   async function settle() {
     for (let i = 0; i < 3; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 200)); });
   }
-  const button = (label: string) => [...host.querySelectorAll("button")]
+  // The body, not `host`: confirm dialogs portal to `document.body` (#272).
+  const button = (label: string) => [...document.body.querySelectorAll("button")]
     .find((node) => node.textContent === label) ?? null;
 
   it("keeps a person's current mode stable through unrelated download batches", async () => {
