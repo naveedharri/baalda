@@ -7,7 +7,7 @@ import { useMemo } from "react";
 import { createAvatar } from "@dicebear/core";
 import { icons } from "@dicebear/collection";
 import { ITEM_COLORS } from "../lib/appearance";
-import type { VaultIconName } from "../lib/vaultIcon";
+import { NO_COLOR, type VaultIconName } from "../lib/vaultIcon";
 
 /**
  * The SVG for one preset. DiceBear draws a white glyph on a mid-tone square;
@@ -16,6 +16,18 @@ import type { VaultIconName } from "../lib/vaultIcon";
  * folders in the tree.
  */
 export function vaultIconSvg(icon: VaultIconName, colorId: string): string {
+  // "None": no square behind it, and the glyph in the surrounding text colour
+  // (`currentColor`), so it reads in both themes.
+  if (colorId === NO_COLOR) {
+    return createAvatar(icons, {
+      seed: icon,
+      icon: [icon],
+      backgroundColor: ["transparent"],
+      scale: 80,
+    })
+      .toString()
+      .replace(/fill="#fff"/g, 'fill="currentColor"');
+  }
   const color = ITEM_COLORS.find((c) => c.id === colorId) ?? ITEM_COLORS[0];
   return createAvatar(icons, {
     seed: icon,
