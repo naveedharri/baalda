@@ -128,24 +128,24 @@ describe("clampEditorMeasure", () => {
 });
 
 describe("automatic item colours", () => {
-  it("defaults off and stores an explicit choice per account", () => {
+  it("defaults on and stores an explicit choice per account", () => {
     const store = stubStorage();
 
-    expect(readAutomaticItemColors("alice")).toBe(false);
-    expect(readAutomaticItemColors("bob")).toBe(false);
+    expect(readAutomaticItemColors("alice")).toBe(true);
+    expect(readAutomaticItemColors("bob")).toBe(true);
 
     writeAutomaticItemColors("alice", false);
     expect(store.get("context.automaticItemColors:alice")).toBe("off");
     expect(readAutomaticItemColors("alice")).toBe(false);
-    expect(readAutomaticItemColors("bob")).toBe(false);
+    expect(readAutomaticItemColors("bob")).toBe(true);
 
     writeAutomaticItemColors("alice", true);
     expect(readAutomaticItemColors("alice")).toBe(true);
   });
 
-  it("falls back to off when storage is unavailable", () => {
+  it("falls back to on when storage is unavailable", () => {
     stubThrowingStorage();
-    expect(readAutomaticItemColors("alice")).toBe(false);
+    expect(readAutomaticItemColors("alice")).toBe(true);
     expect(() => writeAutomaticItemColors("alice", false)).not.toThrow();
   });
 });

@@ -23,6 +23,7 @@ import * as ipc from "../lib/ipc";
 import {
   automaticItemColorAssignments,
   ITEM_COLORS,
+  itemColorFill,
   itemColorValue,
 } from "../lib/appearance";
 import { readAutomaticItemColors } from "../lib/prefs";
@@ -247,6 +248,41 @@ export function FileTree() {
   }, [session?.user.id]);
   const treeRef = useRef<TreeApi<TreeNode> | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  // The ⋯ menu's "Sort by" and "Color" rows are one line each; their options
+  // open in a fly-out to the right. The fly-out is its OWN fixed layer (the
+  // menu scrolls, so anything positioned inside it would be clipped), opened on
+  // hover or click and kept open while the pointer crosses the gap into it.
+  const [sub, setSub] = useState<{ kind: "sort" | "color"; rect: DOMRect } | null>(null);
+  const [subPos, setSubPos] = useState<{ left: number; top: number } | null>(null);
+  const subRef = useRef<HTMLUListElement | null>(null);
+  const subTimer = useRef<number | undefined>(undefined);
+  useEffect(() => setSub(null), [menu]);
+  const openSub = (kind: "sort" | "color", row: HTMLElement) => {
+    window.clearTimeout(subTimer.current);
+    setSub({ kind, rect: row.getBoundingClientRect() });
+  };
+  const keepSub = () => window.clearTimeout(subTimer.current);
+  const closeSubSoon = () => {
+    window.clearTimeout(subTimer.current);
+    subTimer.current = window.setTimeout(() => setSub(null), 180);
+  };
+  useEffect(() => () => window.clearTimeout(subTimer.current), []);
+  // Right of its row; flips left when the window edge is in the way, and is
+  // kept inside the window vertically. Layout effect: placed before paint.
+  useLayoutEffect(() => {
+    if (!sub) {
+      setSubPos(null);
+      return;
+    }
+    const el = subRef.current;
+    if (!el) return;
+    const box = el.getBoundingClientRect();
+    const gap = 6;
+    let left = sub.rect.right + gap;
+    if (left + box.width > window.innerWidth - 8) left = Math.max(8, sub.rect.left - box.width - gap);
+    const top = Math.max(8, Math.min(sub.rect.top - 4, window.innerHeight - 8 - box.height));
+    setSubPos({ left, top });
+  }, [sub]);
   // Resolved once the menu has been measured; null means "not placed yet", which
   // is also what keeps it invisible for that one frame.
   const menuRef = useRef<HTMLUListElement | null>(null);
@@ -481,7 +517,9 @@ export function FileTree() {
   // Assign each sibling group as a unit. Identity hashing keeps colours stable,
   // while the group pass prevents adjacent rows from landing on the same small
   // patch of colour. Nested folders restart the adjacency window because their
-  // children are a separate visual list.
+  // children are a separate visual list. FOLDERS ONLY: files stay neutral
+  // unless someone gives one a colour by hand, so the colour marks the
+  // structure instead of turning every row into confetti.
   const automaticColors = useMemo(() => {
     if (!automaticItemColors) return {};
     const owner = session?.user.id ?? "local";
@@ -493,11 +531,13 @@ export function FileTree() {
         automaticItemColorAssignments(
           owner,
           vaultIdentity,
-          siblings.map((node) => ({
-            key: node.path,
-            identity: docIdByPath[node.path] ?? node.path,
-            explicitColorId: itemColors[node.path],
-          })),
+          siblings
+            .filter((node) => node.isDir)
+            .map((node) => ({
+              key: node.path,
+              identity: docIdByPath[node.path] ?? node.path,
+              explicitColorId: itemColors[node.path],
+            })),
         ),
       );
       for (const node of siblings) {
@@ -1962,57 +2002,30 @@ export function FileTree() {
               it (until a deeper folder sets its own) — the same base layer,
               scoped, never a third one: a hand-made arrangement still sits on
               top of it. "Vault default" drops the override. */}
-          {menuDir === "" ? (
-            <>
-              <li className="menu-heading menu-sep-item">Sort notes by</li>
-              {TREE_SORTS.map((s) => (
-                <li
-                  key={s.id}
-                  role="menuitemradio"
-                  aria-checked={treeSort === s.id}
-                  className={treeSort === s.id ? "is-on" : undefined}
-                  title={s.hint}
-                  onClick={() => useStore.getState().setTreeSort(s.id)}
-                >
-                  <span className="menu-tick" aria-hidden="true">
-                    {treeSort === s.id ? "✓" : ""}
-                  </span>
-                  {s.label}
-                </li>
-              ))}
-            </>
-          ) : (
-            <>
-              <li className="menu-heading menu-sep-item">Sort this folder by</li>
-              <li
-                role="menuitemradio"
-                aria-checked={!folderSorts[menuDir]}
-                className={!folderSorts[menuDir] ? "is-on" : undefined}
-                title="Follow the vault-wide sort (header button)"
-                onClick={() => useStore.getState().setFolderSort(menuDir, null)}
-              >
-                <span className="menu-tick" aria-hidden="true">
-                  {!folderSorts[menuDir] ? "✓" : ""}
-                </span>
-                Vault default
-              </li>
-              {TREE_SORTS.map((s) => (
-                <li
-                  key={s.id}
-                  role="menuitemradio"
-                  aria-checked={folderSorts[menuDir] === s.id}
-                  className={folderSorts[menuDir] === s.id ? "is-on" : undefined}
-                  title={s.hint}
-                  onClick={() => useStore.getState().setFolderSort(menuDir, s.id)}
-                >
-                  <span className="menu-tick" aria-hidden="true">
-                    {folderSorts[menuDir] === s.id ? "✓" : ""}
-                  </span>
-                  {s.label}
-                </li>
-              ))}
-            </>
-          )}
+          <li
+            className={`menu-sub-row menu-sep-item${sub?.kind === "sort" ? " open" : ""}`}
+            aria-haspopup="menu"
+            aria-expanded={sub?.kind === "sort"}
+            title={menuDir === "" ? "How the whole vault is sorted" : "How this folder is sorted"}
+            onMouseEnter={(e) => openSub("sort", e.currentTarget)}
+            onMouseLeave={closeSubSoon}
+            onClick={(e) => {
+              e.stopPropagation();
+              openSub("sort", e.currentTarget);
+            }}
+          >
+            <span className="menu-sub-label">Sort by</span>
+            <span className="menu-sub-value">
+              {menuDir === ""
+                ? TREE_SORTS.find((t) => t.id === treeSort)?.label
+                : folderSorts[menuDir]
+                  ? TREE_SORTS.find((t) => t.id === folderSorts[menuDir])?.label
+                  : "Vault default"}
+            </span>
+            <span className="menu-sub-chevron" aria-hidden="true">
+              ›
+            </span>
+          </li>
           {/* Only offered where there IS an arrangement to drop — this clears
               the hand-made order for one folder so its contents fall back to
               the sort above, and leaves every other folder's alone. */}
@@ -2062,39 +2075,135 @@ export function FileTree() {
                 Lock for everyone
               </li>
             ))}
-          {menu.node && (
-            <li className="menu-heading menu-sep-item">Color</li>
-          )}
-          {menu.node && (
-            <li className="menu-swatches" onClick={(e) => e.stopPropagation()}>
-              <span
-                className={`swatch clear${itemColors[menu.node.data.path] == null ? " on" : ""}`}
-                title="Clear color"
-                onClick={() => {
-                  useStore.getState().setItemColor(menu.node!.data.path, null);
-                  setMenu(null);
+          {menu.node && (() => {
+            // What the row actually shows: a hand-picked colour, else the
+            // automatic one — so the menu and the sidebar never disagree.
+            const path = menu.node!.data.path;
+            const auto = !itemColors[path] && !!automaticColors[path];
+            const currentColor = ITEM_COLORS.find((c) => c.id === (itemColors[path] ?? automaticColors[path]));
+            return (
+              <li
+                className={`menu-sub-row menu-sep-item${sub?.kind === "color" ? " open" : ""}`}
+                aria-haspopup="menu"
+                aria-expanded={sub?.kind === "color"}
+                onMouseEnter={(e) => openSub("color", e.currentTarget)}
+                onMouseLeave={closeSubSoon}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openSub("color", e.currentTarget);
                 }}
-              />
-              {ITEM_COLORS.map((c) => (
-                <span
-                  key={c.id}
-                  className={`swatch${itemColors[menu.node!.data.path] === c.id ? " on" : ""}`}
-                  style={{ backgroundColor: c.value }}
-                  title={c.label}
-                  onClick={() => {
-                    useStore
-                      .getState()
-                      .setItemColor(menu.node!.data.path, c.id);
-                    setMenu(null);
-                  }}
-                />
-              ))}
-            </li>
-          )}
+              >
+                <span className="menu-sub-label">Color</span>
+                <span className="menu-sub-value">
+                  {currentColor ? (
+                    <>
+                      {auto && <span className="menu-sub-auto">Auto</span>}
+                      <span
+                        className="swatch"
+                        style={{ backgroundColor: currentColor.fill, boxShadow: `inset 0 0 0 1.5px ${currentColor.value}` }}
+                      />
+                    </>
+                  ) : (
+                    "None"
+                  )}
+                </span>
+                <span className="menu-sub-chevron" aria-hidden="true">
+                  ›
+                </span>
+              </li>
+            );
+          })()}
           {menu.node && (
             <li className="danger" onClick={() => handleDelete(menu.node!)}>
               Delete
             </li>
+          )}
+        </ul>
+      )}
+
+      {menu && sub && (
+        <ul
+          className="context-menu context-submenu"
+          ref={subRef}
+          role="menu"
+          style={subPos ? { left: subPos.left, top: subPos.top } : { visibility: "hidden", left: 0, top: 0 }}
+          onMouseEnter={keepSub}
+          onMouseLeave={closeSubSoon}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {sub.kind === "sort" ? (
+            <>
+              {menuDir !== "" && (
+                <li
+                  role="menuitemradio"
+                  aria-checked={!folderSorts[menuDir]}
+                  className={!folderSorts[menuDir] ? "is-on" : undefined}
+                  title="Follow the vault-wide sort (header button)"
+                  onClick={() => {
+                    useStore.getState().setFolderSort(menuDir, null);
+                    setMenu(null);
+                  }}
+                >
+                  <span className="menu-tick" aria-hidden="true">
+                    {!folderSorts[menuDir] ? "✓" : ""}
+                  </span>
+                  Vault default
+                </li>
+              )}
+              {TREE_SORTS.map((t) => {
+                const on = menuDir === "" ? treeSort === t.id : folderSorts[menuDir] === t.id;
+                return (
+                  <li
+                    key={t.id}
+                    role="menuitemradio"
+                    aria-checked={on}
+                    className={on ? "is-on" : undefined}
+                    title={t.hint}
+                    onClick={() => {
+                      if (menuDir === "") useStore.getState().setTreeSort(t.id);
+                      else useStore.getState().setFolderSort(menuDir, t.id);
+                      setMenu(null);
+                    }}
+                  >
+                    <span className="menu-tick" aria-hidden="true">
+                      {on ? "✓" : ""}
+                    </span>
+                    {t.label}
+                  </li>
+                );
+              })}
+            </>
+          ) : (
+            menu.node &&
+            (() => {
+              const path = menu.node!.data.path;
+              const hasAuto = !!automaticColors[path];
+              const effective = itemColors[path] ?? automaticColors[path];
+              return (
+              <li className="menu-swatches">
+                <span
+                  className={`swatch clear${effective == null ? " on" : ""}`}
+                  title={hasAuto ? "Reset to automatic" : "No colour"}
+                  onClick={() => {
+                    useStore.getState().setItemColor(path, null);
+                    setMenu(null);
+                  }}
+                />
+                {ITEM_COLORS.map((c) => (
+                  <span
+                    key={c.id}
+                    className={`swatch${effective === c.id ? " on" : ""}`}
+                    style={{ backgroundColor: c.fill, boxShadow: `inset 0 0 0 1.5px ${c.value}` }}
+                    title={c.label}
+                    onClick={() => {
+                      useStore.getState().setItemColor(path, c.id);
+                      setMenu(null);
+                    }}
+                  />
+                ))}
+              </li>
+              );
+            })()
           )}
         </ul>
       )}
@@ -2604,7 +2713,11 @@ function Node({
       )}
       <span
         className={`tree-glyph${isEmpty ? " is-empty" : ""}${colorValue ? " colored" : ""}`}
-        style={colorValue ? { color: colorValue } : undefined}
+        style={
+          colorValue
+            ? ({ color: colorValue, "--glyph-fill": itemColorFill(color) } as CSSProperties)
+            : undefined
+        }
         aria-hidden="true"
       >
         {/* Opening must not replace this glyph: the unmount/remount was visible

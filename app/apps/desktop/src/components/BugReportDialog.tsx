@@ -113,13 +113,6 @@ export function BugReportDialog({ onClose }: { onClose: () => void }) {
     ["Sync status", details.syncStatus ?? ""],
   ];
 
-  let host = serverUrl;
-  try {
-    host = new URL(serverUrl).host;
-  } catch {
-    /* keep the raw value */
-  }
-
   const addFiles = (incoming: File[]) => {
     setError(null);
     const next = [...files];
@@ -352,10 +345,6 @@ export function BugReportDialog({ onClose }: { onClose: () => void }) {
               </p>
             )}
 
-            <p className="bug-report-note">
-              Sent to the team running {host}
-              {email ? <>. Replies go to {email}</> : null}.
-            </p>
             <div className="bug-report-actions bug-report-buttons">
               <button type="button" className="ghost-pill" onClick={onClose}>
                 Cancel

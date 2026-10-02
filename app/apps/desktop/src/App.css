@@ -914,6 +914,9 @@ body:has(.sidebar-resizer.dragging) {
   width: 20px;
   height: 20px;
   margin-left: auto;
+  /* Centred on the tree rows' sync-dot column (49px in from the sidebar's
+     right edge; this button already sits 26px in): see `.filetree-head`. */
+  margin-right: 23px;
   color: var(--text-tertiary);
   transition:
     color var(--t-fast) var(--ease),
@@ -1202,15 +1205,14 @@ body:has(.sidebar-resizer.dragging) {
 .filetree-head {
   display: flex;
   align-items: center;
-  /* Left-anchored, NOT space-between: the buttons sit just after the label so
-     widening the sidebar doesn't drag them across the screen. Their position is
-     fixed relative to the sidebar's left edge, which is the edge that never
-     moves. */
   justify-content: flex-start;
-  gap: var(--sp-2);
+  gap: var(--sp-1);
   /* Left pad lines the label roughly under the row glyphs (the tree is nudged
-     left by sp-2); right pad matches the row's own right inset. */
-  padding: 0 var(--sp-2) var(--sp-1) calc(var(--sp-3) + var(--sp-2));
+     left by sp-2). Right pad 36px centres the last button (26px wide) on the
+     rows' sync-dot column at ANY sidebar width, 49px in from the tree's right
+     edge: row pad 12 + the 22px ⋯ button + 8px gap + half the 14px dot slot.
+     The Reveal-in-Finder button above sits on the same column (`.vault-reveal`). */
+  padding: 0 36px var(--sp-1) calc(var(--sp-3) + var(--sp-2));
   min-height: 24px;
 }
 .filetree-head .section-label {
@@ -1226,6 +1228,8 @@ body:has(.sidebar-resizer.dragging) {
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
+  /* Right end of the row, on the sync-dot column. */
+  margin-left: auto;
 }
 .filetree-actions .tree-tool {
   flex: 0 0 auto;
@@ -1295,7 +1299,9 @@ body:has(.sidebar-resizer.dragging) {
 .filetree-actions .tool-divider {
   width: 1px;
   height: 15px;
-  margin: 0 var(--sp-1);
+  /* 2px, not 4: with the right-hand inset, "NOTES" still fits whole beside
+     the full-size toolbar at the default sidebar width. */
+  margin: 0 2px;
   background: var(--border);
   flex: 0 0 auto;
 }
@@ -1631,12 +1637,9 @@ body:has(.sidebar-resizer.dragging) {
 }
 /* Colored items are filled, not just outlined — folders read like Finder
    tags (near-solid), notes get a soft wash so their detail lines stay legible. */
+/* baalda.com's pairing: the pastel inside, the deeper tone as the outline. */
 .tree-glyph.colored svg {
-  fill: currentColor;
-  fill-opacity: 0.22;
-}
-.tree-row.is-dir .tree-glyph.colored svg {
-  fill-opacity: 0.85;
+  fill: var(--glyph-fill, currentColor);
 }
 
 /* The label takes whatever width the badges leave, so its right edge always
@@ -1927,6 +1930,9 @@ body:has(.sidebar-resizer.dragging) {
   font-size: var(--fs-md);
   color: var(--text-primary);
   cursor: pointer;
+  /* One line per row: the menu widens to its longest label instead of
+     wrapping one ("Recently modified") over two. */
+  white-space: nowrap;
   transition:
     background var(--t-fast) var(--ease),
     color var(--t-fast) var(--ease);
@@ -1947,9 +1953,20 @@ body:has(.sidebar-resizer.dragging) {
 /* A thin rule above an item groups it apart from the ones above (Import/Export
    sit below the create actions). */
 .context-menu li.menu-sep-item {
-  margin-top: var(--sp-1);
-  padding-top: calc(var(--sp-2) + 1px);
-  border-top: 1px solid var(--border);
+  position: relative;
+  margin-top: 9px;
+}
+/* The rule is its own straight line above the row, not the row's top border:
+   a border on a rounded row bent up at both ends into a faint box. */
+.context-menu li.menu-sep-item::before {
+  content: "";
+  position: absolute;
+  left: var(--sp-2);
+  right: var(--sp-2);
+  top: -5px;
+  height: 1px;
+  background: var(--border);
+  pointer-events: none;
 }
 .context-menu li.danger {
   color: var(--danger);
@@ -1970,6 +1987,9 @@ body:has(.sidebar-resizer.dragging) {
   text-transform: uppercase;
   color: var(--text-tertiary);
   cursor: default;
+  /* One line: the menu widens to fit "Sort this folder by" instead of
+     breaking it over two. */
+  white-space: nowrap;
 }
 .context-menu li.menu-heading:hover {
   background: none;
@@ -1977,9 +1997,7 @@ body:has(.sidebar-resizer.dragging) {
 /* As a group start inside the ⋯ menu it keeps the rule but not the sep's own
    padding, which would double up with the heading's tighter one. */
 .context-menu li.menu-heading.menu-sep-item {
-  margin-top: var(--sp-1);
   padding-top: var(--sp-2);
-  border-top: 1px solid var(--border);
 }
 /* Fixed-width tick gutter, so the two options' labels line up whether or not
    they carry the check — and so the heading above can align to the same text. */
@@ -2186,6 +2204,41 @@ body:has(.sidebar-resizer.dragging) {
 .context-menu li.menu-swatches:hover {
   background: none;
 }
+/* ⋯ menu rows that open a fly-out (Sort by, Color): label · current value · ›. */
+.context-menu li.menu-sub-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.menu-sub-label {
+  flex: 1;
+}
+.menu-sub-value {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-tertiary);
+  font-size: var(--fs-sm);
+}
+.menu-sub-chevron {
+  color: var(--text-tertiary);
+  line-height: 1;
+}
+.menu-sub-auto {
+  margin-right: var(--sp-2);
+  font-size: var(--fs-xs);
+}
+.context-menu li.menu-sub-row.open {
+  background: var(--accent-soft);
+}
+/* The fly-out itself: the same card, its own layer beside the menu. */
+.context-menu.context-submenu {
+  z-index: 101;
+  min-width: 0;
+  animation: fade-in var(--t-fast) var(--ease) both;
+}
+.context-submenu li.menu-swatches {
+  padding: var(--sp-2);
+}
 .swatch {
   width: 14px;
   height: 14px;
@@ -2255,6 +2308,10 @@ body:has(.sidebar-resizer.dragging) {
   width: 100%;
   height: 100%;
   display: block;
+}
+/* Same pastel-inside / deeper-outline look as the sidebar glyph. */
+.appearance-glyph[style*="--glyph-fill"] svg {
+  fill: var(--glyph-fill);
 }
 .appearance-name {
   flex: 1;
@@ -8471,14 +8528,9 @@ button.secondary:active:not(:disabled),
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.bug-report-note {
-  margin: var(--sp-5) 0 0;
-  font-size: var(--fs-xs);
-  color: var(--text-tertiary);
-}
 .bug-report-buttons {
   justify-content: flex-end;
-  margin-top: var(--sp-3);
+  margin-top: var(--sp-5);
 }
 .bug-report-actions {
   display: flex;

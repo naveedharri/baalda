@@ -2,7 +2,7 @@
    the app, split out of `AccountMenu.tsx` so it can load on demand. Nothing
    here is on the first screen: the sidebar footer (identity bar + popovers)
    stays eager, and this chunk lands when someone actually opens settings. */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
   type McpToolInfo,
   type McpTokenRow,
@@ -14,7 +14,7 @@ import {
 } from "../lib/api";
 import { toast } from "../lib/toast";
 import { agoFromIso, checkpointTitle, noteCountLabel } from "./versionFormat";
-import { ITEM_COLORS, itemColorValue } from "../lib/appearance";
+import { ITEM_COLORS, itemColorFill, itemColorValue } from "../lib/appearance";
 import { authManager } from "../lib/auth/authManager";
 import {
   classifyLimitError,
@@ -3342,7 +3342,9 @@ function AppearanceTab() {
                 >
                   <span
                     className="appearance-glyph"
-                    style={{ color: itemColorValue(active) }}
+                    style={
+                      { color: itemColorValue(active), "--glyph-fill": itemColorFill(active) } as CSSProperties
+                    }
                     aria-hidden="true"
                   >
                     {item.isDir ? APPEARANCE_ICON.folder : APPEARANCE_ICON.note}
@@ -3363,7 +3365,7 @@ function AppearanceTab() {
                         key={c.id}
                         type="button"
                         className={`swatch${active === c.id ? " on" : ""}`}
-                        style={{ backgroundColor: c.value }}
+                        style={{ backgroundColor: c.fill, boxShadow: `inset 0 0 0 1.5px ${c.value}` }}
                         title={c.label}
                         aria-label={c.label}
                         onClick={() => useStore.getState().setItemColor(item.path, c.id)}
