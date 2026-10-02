@@ -61,7 +61,7 @@ export interface HealthContentFailure {
  *  `RegistryFailure`. Kept structural so the model needs no value import from
  *  the sync layer. */
 export interface HealthRegistryFailure {
-  kind: "folder" | "note" | "materialize" | "inbound" | "inbound-blocked" | "orphan";
+  kind: "folder" | "note" | "materialize" | "inbound" | "inbound-blocked" | "orphan" | "pull";
   path: string;
   docId: string | null;
   reason: string;
@@ -607,9 +607,44 @@ function limitIssue(f: HealthRegistryFailure): HealthIssue {
   };
 }
 
+/** Key of the vault-wide "registry pull keeps failing" issue. */
+export const PULL_FAILED_ISSUE_KEY = "registry-pull-failed";
+
 function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue {
   const key = f.docId ?? f.path;
   if (isLimitCode(f.code)) return limitIssue(f);
+  if (f.kind === "pull") {
+    return {
+      key: PULL_FAILED_ISSUE_KEY,
+      docId: null,
+      path: null,
+      kind: "register-failed",
+      severity: "error",
+      title: "New notes and folder changes aren't syncing",
+      why:
+        `The app can't load the vault's file list (last error: ${f.reason}). ` +
+        "Edits to existing notes still sync.",
+      remedies: ["copy-details"],
+      code: f.code,
+      explanation: {
+        meaning:
+          "New notes, new folders, renames and deletes sync through the vault's file list. " +
+          "Loading that list from the Remote Vault keeps failing, so these changes are waiting " +
+          "on this computer. Nothing was lost.",
+        next: "Baalda tries again on the next change, reconnect or retry, and this clears once it works.",
+        fixes: [
+          "Check your internet connection and the server address in Settings → Connection.",
+          "If it keeps happening, send the details below to support.",
+        ],
+        safety: "only-here",
+      },
+      facts: [
+        ...(f.code ? [{ label: "Remote Vault code", value: f.code, copyable: true }] : []),
+        { label: "Last error", value: f.reason, copyable: true },
+      ],
+      autoRetries: true,
+    };
+  }
   if (f.kind === "inbound-blocked" && f.code === "symlink") {
     return {
       key,
