@@ -58,6 +58,7 @@ interface Internals {
   pullRegistry(scope: VaultScope): Promise<boolean>;
   withRefusals(p: SyncProgress | null): SyncProgress | null;
   progress: unknown;
+  vaultStatus: string;
 }
 
 const scope = { isCurrent: () => true, vaultEpoch: 1 } as unknown as VaultScope;
@@ -75,11 +76,13 @@ function manager() {
     flush: vi.fn(),
   };
   inner.progress = progress;
+  // The vault channel is live: a failure while it is not is the offline state.
+  inner.vaultStatus = "synced";
   return { sm, inner, progress };
 }
 
-async function failPull(inner: Internals, message = "HTTP 502") {
-  fakeRegistry.pull.mockRejectedValueOnce(new Error(message));
+async function failPull(inner: Internals, message = "HTTP 502", status?: number) {
+  fakeRegistry.pull.mockRejectedValueOnce(Object.assign(new Error(message), { status }));
   await expect(inner.pullRegistry(scope)).rejects.toThrow(message);
 }
 
@@ -146,5 +149,49 @@ describe("failed registry pulls", () => {
     const { inner, progress } = manager();
     await failPull(inner);
     expect(progress.phase).not.toHaveBeenCalled();
+  });
+
+  it("are not counted while the vault channel is offline, and offline hides a raised one", async () => {
+    const { sm, inner } = manager();
+    inner.vaultStatus = "error";
+    for (let i = 0; i < PULL_FAILURE_THRESHOLD; i++) await failPull(inner, "Failed to fetch");
+    inner.vaultStatus = "synced";
+    expect(sm.pullFailure(Number.MAX_SAFE_INTEGER)).toBeNull();
+
+    for (let i = 0; i < PULL_FAILURE_THRESHOLD; i++) await failPull(inner);
+    expect(sm.pullFailure()).not.toBeNull();
+    inner.vaultStatus = "connecting";
+    expect(sm.pullFailure()).toBeNull();
+    expect(sm.syncFailures().registry).toEqual([]);
+  });
+
+  it("are not counted when the session or the app version was refused", async () => {
+    const { sm, inner } = manager();
+    for (let i = 0; i < PULL_FAILURE_THRESHOLD; i++) {
+      await failPull(inner, "Unauthorized", 401);
+      await failPull(inner, "Update required", 426);
+    }
+    expect(sm.pullFailure(Number.MAX_SAFE_INTEGER)).toBeNull();
+  });
+
+  it("re-stamp a raised streak on the next failure after a reconnect", async () => {
+    const { inner, progress } = manager();
+    for (let i = 0; i < PULL_FAILURE_THRESHOLD; i++) await failPull(inner);
+    progress.phase.mockClear();
+    inner.vaultStatus = "connecting";
+    inner.vaultStatus = "synced";
+    await failPull(inner);
+    expect(progress.phase).toHaveBeenLastCalledWith("error");
+  });
+
+  it("say a timed-out listing in plain words", async () => {
+    const { sm, inner } = manager();
+    for (let i = 0; i < PULL_FAILURE_THRESHOLD; i++) {
+      fakeRegistry.pull.mockRejectedValueOnce(
+        Object.assign(new Error("signal is aborted without reason"), { name: "AbortError" }),
+      );
+      await expect(inner.pullRegistry(scope)).rejects.toThrow();
+    }
+    expect(sm.pullFailure()?.reason).toBe("the server took too long to answer");
   });
 });

@@ -3573,21 +3573,39 @@ export class SyncManager implements InboundHost {
    * null otherwise.
    */
   pullFailure(now = Date.now()): { count: number; since: number; reason: string } | null {
+    // Offline, reconnecting or refused already says why nothing new arrives;
+    // the vault status wins over this issue.
+    if (this.vaultStatus !== "synced") return null;
+    return this.pullStreakRaised(now) ? this.pullFailures : null;
+  }
+
+  private pullStreakRaised(now = Date.now()): boolean {
     const f = this.pullFailures;
-    if (!f) return null;
-    return f.count >= PULL_FAILURE_THRESHOLD || now - f.since >= PULL_FAILURE_PERSIST_MS ? f : null;
+    if (!f) return false;
+    return f.count >= PULL_FAILURE_THRESHOLD || now - f.since >= PULL_FAILURE_PERSIST_MS;
   }
 
   private recordPullFailure(scope: VaultScope, e: unknown): void {
-    const before = this.pullFailure() != null;
-    const reason = e instanceof Error ? e.message : String(e);
+    // A pull that failed because we are offline, or because the session or the
+    // app version was refused, is not this problem: each has its own state.
+    if (this.vaultStatus !== "synced") return;
+    const status = (e as { status?: unknown } | null)?.status;
+    if (status === 401 || status === 426) return;
+    // A listing that hit REGISTRY_LISTING_TIMEOUT_MS aborts with a message
+    // ("signal is aborted without reason") that says nothing to a person.
+    const reason =
+      (e as { name?: unknown } | null)?.name === "AbortError"
+        ? "the server took too long to answer"
+        : e instanceof Error
+          ? e.message
+          : String(e);
     const prev = this.pullFailures;
     this.pullFailures = { count: (prev?.count ?? 0) + 1, since: prev?.since ?? Date.now(), reason };
-    if (!before && this.pullFailure() != null) this.rejudgeFinishedRun(scope);
+    if (this.pullFailure() != null) this.rejudgeFinishedRun(scope);
   }
 
   private clearPullFailures(scope: VaultScope): void {
-    const was = this.pullFailure() != null;
+    const was = this.pullStreakRaised();
     this.pullFailures = null;
     if (was) this.rejudgeFinishedRun(scope);
   }
@@ -3595,6 +3613,9 @@ export class SyncManager implements InboundHost {
   /** No run follows a pull's verdict, so re-stamp a finished run's phase here. */
   private rejudgeFinishedRun(scope: VaultScope): void {
     if (this.contentRunInFlight()) return;
+    // An unsettled backfill would make `completeRun` start a download phase;
+    // that run stamps its own verdict when it ends.
+    if (!this.bulkPhase && this.vaultEngine && !this.vaultEngine.backfillSettled()) return;
     const phase = this.progress?.snapshot().phase;
     if (phase === "done" || phase === "error") this.completeRun(scope);
   }
