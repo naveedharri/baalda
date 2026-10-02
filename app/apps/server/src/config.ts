@@ -175,6 +175,10 @@ export const config = {
   /** Force a transport (`smtp` | `resend` | `log` | `memory`). Normally inferred
    *  from which credential is set; `log`/`memory` are dev/test only. */
   emailTransport: optional("EMAIL_TRANSPORT"),
+  /** Where the desktop's "Report a bug" dialog delivers (needs email on, above).
+   *  Unset ⇒ bug reports are off and the app hides the button — the default
+   *  for a self-host, whose users' reports belong to its own operator. */
+  bugReportEmail: optional("BUG_REPORT_EMAIL"),
   // ---- Subscription billing (Polar) ----
   /** Polar organization access token. Its presence is the ON switch for the
    *  whole billing feature (see `billingEnabled` below): unset ⇒ billing is

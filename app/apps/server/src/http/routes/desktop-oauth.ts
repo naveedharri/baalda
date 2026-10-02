@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { auth, googleEnabled } from "../../auth/auth.js";
 import { emailEnabled } from "../../email/mailer.js";
 import { mintDesktopCode, redeemDesktopCode } from "../../tokens/desktop-code.js";
+import { bugReportsEnabled } from "./bug-reports.js";
 
 /**
  * Desktop Google sign-in handoff (spec 04 §7).
@@ -36,6 +37,9 @@ desktopOauthRoutes.get("/auth-methods", (c) => {
     google: googleEnabled,
     passwordReset: email,
     invitationEmail: email,
+    // Email on AND an operator inbox (BUG_REPORT_EMAIL) — the desktop shows
+    // its "Report a bug" button only when this is true.
+    bugReport: bugReportsEnabled(),
   });
 });
 

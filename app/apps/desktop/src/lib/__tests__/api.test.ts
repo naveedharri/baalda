@@ -232,6 +232,7 @@ describe("ApiClient against a mocked fetch", () => {
       google: false,
       passwordReset: false,
       invitationEmail: false,
+      bugReport: false,
     });
   });
 
@@ -245,6 +246,7 @@ describe("ApiClient against a mocked fetch", () => {
       google: true,
       passwordReset: false,
       invitationEmail: false,
+      bugReport: false,
     });
   });
 
@@ -255,6 +257,7 @@ describe("ApiClient against a mocked fetch", () => {
         google: false,
         passwordReset: true,
         invitationEmail: true,
+        bugReport: true,
       },
     }));
     const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
@@ -263,6 +266,7 @@ describe("ApiClient against a mocked fetch", () => {
       google: false,
       passwordReset: true,
       invitationEmail: true,
+      bugReport: true,
     });
   });
 

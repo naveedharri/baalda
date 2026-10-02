@@ -35,7 +35,6 @@ import {
 } from "../lib/updater";
 import { readOrgVaults, useStore, type InviteResult } from "../store";
 import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
-import { SyncBadge } from "./Identity";
 import { AccessPanel } from "./AccessPanel";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -400,13 +399,6 @@ function GeneralTab({
   onRequestSignIn?: () => void;
 }) {
   const vault = useStore((s) => s.vault);
-  const syncStatus = useStore((s) => s.syncStatus);
-  const syncEnabledState = useStore((s) => s.syncEnabled);
-  const lastSyncedAt = useStore((s) => s.lastSyncedAt);
-  const syncPending = useStore((s) => s.syncPending);
-  // The vault's bulk-run counter ("Syncing 128/500"), so this row reports the
-  // whole vault's state and not just whether a socket is up.
-  const syncProgress = useStore((s) => s.syncProgress);
   const serverUrl = useStore((s) => s.serverUrl);
   const authStatus = useStore((s) => s.authStatus);
   // The sidebar paints before the session restore finishes, so this page can be
@@ -456,16 +448,6 @@ function GeneralTab({
           <div className="muted">
             This vault syncs to your team. Its notes stay as plain files on
             disk and live-sync to everyone with access.
-          </div>
-          <div className="menu-row">
-            <span className="menu-row-label">Sync</span>
-            <SyncBadge
-              status={syncStatus}
-              enabled={syncEnabledState}
-              lastSyncedAt={lastSyncedAt}
-              pending={syncPending}
-              progress={syncProgress}
-            />
           </div>
           <div className="menu-row">
             <span className="menu-row-label">Server</span>
@@ -859,7 +841,6 @@ function FreezeRootRow({ canManage }: { canManage: boolean }) {
   return (
     <>
       <div className="menu-sep" />
-      <div className="subhead">Vault structure</div>
       <label className="menu-row toggle-row">
         <span className="menu-row-label">
           Freeze vault root

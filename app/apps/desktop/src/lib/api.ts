@@ -152,6 +152,18 @@ export interface AuthMethods {
   passwordReset: boolean;
   /** Server delivers invitations by email (otherwise the admin shares a link). */
   invitationEmail: boolean;
+  /** Server takes "Report a bug" reports (its operator set BUG_REPORT_EMAIL). */
+  bugReport: boolean;
+}
+
+/** Optional app details attached to a bug report; the server keeps only these keys. */
+export interface BugReportDetails {
+  appVersion?: string;
+  platform?: string;
+  os?: string;
+  serverUrl?: string;
+  vault?: string;
+  syncStatus?: string;
 }
 
 export interface Vault {
@@ -1405,6 +1417,7 @@ export class ApiClient {
         google: !!data.google,
         passwordReset: !!data.passwordReset,
         invitationEmail: !!data.invitationEmail,
+        bugReport: !!data.bugReport,
       };
     } catch {
       // Fails CLOSED, and deliberately so: an older/self-hosted server without
@@ -1418,6 +1431,7 @@ export class ApiClient {
         google: false,
         passwordReset: false,
         invitationEmail: false,
+        bugReport: false,
       };
     }
   }
@@ -1834,6 +1848,18 @@ export class ApiClient {
    * Repeated calls return the SAME url until it's revoked; gated server-side
    * like share management (owner/admin or the note's creator).
    */
+  /** Email a bug report to this server's operator (`POST /api/bug-reports`). */
+  async sendBugReport(input: {
+    message: string;
+    details?: BugReportDetails;
+    /** A Loom (or any http/https) recording link. */
+    videoUrl?: string;
+    /** Files as base64; the server decides each type from its extension. */
+    attachments?: Array<{ name: string; data: string }>;
+  }): Promise<void> {
+    await this.request<unknown>("POST", "/api/bug-reports", { body: input });
+  }
+
   async createPublicLink(docId: string): Promise<PublicLink> {
     const { data } = await this.request<PublicLink>(
       "POST",

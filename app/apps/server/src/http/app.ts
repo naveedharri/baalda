@@ -23,6 +23,7 @@ import { bootstrapRoutes } from "./routes/bootstrap.js";
 import { syncTokenRoutes } from "./routes/sync-token.js";
 import { vaultTokenRoutes } from "./routes/vault-token.js";
 import { desktopOauthRoutes } from "./routes/desktop-oauth.js";
+import { bugReportRoutes } from "./routes/bug-reports.js";
 import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
 import { createHousekeeperRoutes } from "./routes/housekeeper.js";
@@ -228,6 +229,7 @@ export function createApp(deps: AppDeps): Hono {
   // Desktop Google sign-in handoff — deliberately NOT under /api/auth (the
   // catch-all above would shadow it). See desktop-oauth.ts.
   app.route("/api", desktopOauthRoutes);
+  app.route("/api", bugReportRoutes);
   // Invitation preview (public, by unguessable id) + the signed-in inbox that
   // sidesteps Better Auth's verified-email gate on list-user-invitations.
   app.route("/api", invitationRoutes);

@@ -163,39 +163,6 @@ button.primary.hero:hover:not(:disabled) {
   width: 18px;
   height: 18px;
 }
-/* Copy-link button. Goes green on success rather than only toasting: the toast
-   is at the other end of the window, and the confirmation belongs where the
-   click happened. */
-/* ---- Share popover: the header share button's private/public choice.
-   Reuses the account-popover shell + dense menu scale; only the anchoring
-   differs — it hangs down-right from a fixed header button instead of rising
-   from the sidebar's identity bar. ---- */
-.share-menu {
-  position: relative;
-  display: inline-flex;
-}
-.account-popover.share-popover {
-  top: calc(100% + var(--sp-1));
-  bottom: auto;
-  right: 0;
-  left: auto;
-  width: 340px;
-}
-/* The minted url as a click-to-copy row (shown only when the automatic
-   clipboard write failed). The label carries the FULL url — the click copies
-   that, never the ellipsized text. */
-.share-fallback-url .menu-item-label {
-  font-size: var(--fs-xs);
-  color: var(--text-secondary);
-}
-.share-btn.copied {
-  color: var(--success);
-}
-.share-btn .checkmark {
-  width: 18px;
-  height: 18px;
-}
-
 /* Graph view toggle in the main header — nudge toward accent so it reads as a
    navigable affordance rather than a passive status glyph. */
 .graph-btn {
@@ -810,7 +777,8 @@ button.primary.hero:hover:not(:disabled) {
    empty chrome around it still moves the window. */
 .titlebar-tools {
   position: absolute;
-  top: 8px;
+  /* Centred on the chrome row (the tools are 28px tall). */
+  top: calc(var(--chrome-row-h) / 2 - 14px);
   left: calc(var(--sidebar-layout-w) + 8px);
   z-index: 60;
   display: flex;
@@ -846,8 +814,6 @@ button.primary.hero:hover:not(:disabled) {
 }
 html[data-platform="macos"] .titlebar-tools {
   left: 84px;
-  /* Native traffic-light centres sit 16px below the webview's top edge. */
-  top: 2px;
 }
 
 /* ---- Sidebar resize handle ----
@@ -1517,8 +1483,10 @@ body:has(.sidebar-resizer.dragging) {
 }
 /* Flat, edge-to-edge fills — no pills, no shadows, no rounding. The glyph is
    the first thing in every row, so all rows on a level share one left edge. */
+/* Hover is a lighter step of the selected row's violet, so the two states read
+   as one family instead of a grey hover beside a violet selection. */
 .tree-row:hover {
-  background: var(--bg-active);
+  background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
   color: var(--text-primary);
 }
 /* A one-shot "here it is" pulse on a row the app just revealed (store
@@ -2630,18 +2598,18 @@ body:has(.sidebar-resizer.dragging) {
   }
 }
 /* The tab strip is the header's title row (see App.tsx): tabs on the left, the
-   sync badge and the icon buttons on the right. The row is chrome (a subtle
-   well) and its bottom rule is the seam with the note sheet; the active tab is
-   a piece of that sheet lifted into the row, so the rule bends up and around
-   it (Obsidian's tab shape). */
+   sync badge and the icon buttons on the right. The row has no chrome of its
+   own — no fill, no bottom rule — so it is part of the white note sheet; the
+   tabs are pills and the controls float as one pill (`.header-actions`). */
 .main-header {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   gap: var(--sp-3);
-  min-height: 44px;
-  padding: 0 var(--sp-6) 0 calc(var(--sp-3) + 68px);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-subtle);
+  /* Same centre line as the traffic lights and the sidebar/search tools; the
+     row is taller than the pill, so the pill also clears the window's top. */
+  min-height: var(--chrome-row-h);
+  padding: 0 var(--sp-4) 0 calc(var(--sp-3) + 68px);
+  background: transparent;
 }
 html[data-platform="macos"] .main-header {
   padding-left: var(--sp-3);
@@ -2665,20 +2633,22 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   align-self: center;
   white-space: nowrap;
 }
+/* The floating pill around the sync badge and the icon buttons. */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  /* More air on the left so the badge's tint never kisses the pill's edge. */
+  padding: 4px var(--sp-2) 4px var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+}
 /* ---- Open-file tabs (TabBar) ---- */
 .tab-strip {
   display: flex;
-  /* Tabs fill the strip's height (not content-sized and bottom-hung): the label
-     is centred in the tab's content box, which `--tab-inset` pulls up from the
-     bottom by the same amount the strip pads the top, so the text centre lands
-     on the header's centre — level with the sync badge and the icon buttons —
-     while the card itself still reaches the bottom rule. Content-sized tabs put
-     the text ~6px lower than everything else in the row. */
-  align-items: stretch;
-  --tab-inset: 6px;
-  /* The card's top corners. Larger than `--radius-sm` on purpose: at 6px the
-     outline read as a near-right angle; a browser tab wants a soft shoulder. */
-  --tab-radius: 14px;
+  align-items: center;
   gap: var(--sp-1);
   overflow-x: auto;
   overflow-y: hidden;
@@ -2690,16 +2660,11 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   display: none;
 }
 /* Inside the header: take the row and shrink rather than push the controls off.
-   `margin-bottom: -1px` lets the strip reach 1px INTO the header's bottom rule,
-   so the active card (which sits at the strip's bottom edge) paints over the
-   rule and joins the sheet below. The mask fades the last tabs out before they
-   reach the badge, so overflow reads as "more to the right". The first tab
-   starts at the sidebar seam; its left fillet is removed below. */
+   The mask fades the last tabs out before they reach the badge, so overflow
+   reads as "more to the right". */
 .main-header > .tab-strip {
   flex: 1 1 auto;
   min-width: 0;
-  padding: var(--tab-inset) 0 0;
-  margin-bottom: -1px;
   mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
   -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
 }
@@ -2708,75 +2673,22 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   display: flex;
   align-items: center;
   flex: none;
-  /* Mirrors the strip's top padding, see `--tab-inset` above. */
-  padding-bottom: var(--tab-inset);
   max-width: 220px;
-  border-radius: var(--tab-radius) var(--tab-radius) 0 0;
+  border-radius: var(--radius-pill);
   color: var(--text-secondary);
 }
 /* No hover fill on an inactive tab: the only thing that changes under the
    pointer is the × appearing (see `.tab:hover .tab-close`). A grey card
    behind the label read as a second, half-selected tab. */
 /* The active tab's card SLIDES between tabs (one shared-layout motion element,
-   see TabBar.tsx) — the tabs themselves never move. The card is the note sheet
-   itself (`--bg-surface`) outlined by the same rule as the header's seam, open
-   at the bottom so it merges with the sheet. */
+   see TabBar.tsx) — the tabs themselves never move. The card is a pill in the
+   sidebar's grey (`--bg-app`) on the white row. */
 .tab-active-bg {
   position: absolute;
   inset: 0;
   z-index: 0;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-bottom: 0;
-  border-radius: var(--tab-radius) var(--tab-radius) 0 0;
-}
-/* Fillets: an r×r square just outside each bottom corner of the card, painted
-   with a radial gradient centred on the square's outer-top corner — transparent
-   (the header shows through) inside the arc, a 1px ring of `--border` AS the
-   arc, and the sheet colour outside it. The sheet part covers the header's
-   rule for the fillet's width and the ring meets the rule at the far end, so
-   the seam climbs up into the card's side and the card blends back into the
-   sheet. `--tab-radius` (12px) rather than the old 8px: at 8px the arc was so
-   tight it read as a vertical tick under each corner. The half-pixel stops
-   anti-alias both edges of the ring. Children of the card, so they travel. */
-.tab-active-bg::before,
-.tab-active-bg::after {
-  content: "";
-  position: absolute;
-  bottom: 0;
-  width: var(--tab-radius);
-  height: var(--tab-radius);
-  pointer-events: none;
-}
-/* The strip begins at the sidebar seam. Its first tab therefore has no left
-   bottom fillet: the sheet meets that edge cleanly while the right shoulder
-   keeps the browser-tab shape used everywhere else. */
-.tab.first-tab .tab-active-bg::before {
-  display: none;
-}
-/* The square starts ON the card's border column, not one pixel outside it: the
-   sheet-coloured part of the gradient then paints over the card's straight side
-   for the bottom r px, so the side turns into the arc instead of continuing
-   past it — which is the "straight line sticking out" under each corner. */
-.tab-active-bg::before {
-  left: calc(var(--tab-radius) * -1);
-  background: radial-gradient(
-    circle at 0 0,
-    transparent calc(var(--tab-radius) - 1.5px),
-    var(--border) calc(var(--tab-radius) - 1px),
-    var(--border) var(--tab-radius),
-    var(--bg-surface) calc(var(--tab-radius) + 0.5px)
-  );
-}
-.tab-active-bg::after {
-  right: calc(var(--tab-radius) * -1);
-  background: radial-gradient(
-    circle at 100% 0,
-    transparent calc(var(--tab-radius) - 1.5px),
-    var(--border) calc(var(--tab-radius) - 1px),
-    var(--border) var(--tab-radius),
-    var(--bg-surface) calc(var(--tab-radius) + 0.5px)
-  );
+  background: var(--bg-app);
+  border-radius: var(--radius-pill);
 }
 .tab > .tab-label,
 .tab > .tab-close {
@@ -2797,9 +2709,8 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   flex: none;
   width: 26px;
   height: 26px;
-  /* Centred in the same band as the tab labels (the strip stretches tabs). */
   align-self: center;
-  margin: 0 var(--sp-1) var(--tab-inset);
+  margin: 0 var(--sp-1);
   border: 0;
   border-radius: var(--radius-sm);
   background: none;
@@ -2840,7 +2751,9 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   margin: 0 var(--sp-2);
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  /* Round, to sit inside the round tab pill (a rounded square read as a
+     second, mismatched shape). */
+  border-radius: 50%;
   background: none;
   color: var(--text-tertiary);
   cursor: pointer;
@@ -3431,56 +3344,74 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
 /* ============================================================
    Backlinks
    ============================================================ */
-.backlinks-panel {
-  border-top: 1px solid var(--border);
-  max-height: 32%;
-  overflow: auto;
-  padding: var(--sp-4) var(--sp-6) var(--sp-5);
+.backlinks-float {
+  /* Bottom-right of the note, inside .main (position: relative). Below the
+     slide-over right panel (120), above the editor. */
+  position: absolute;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  z-index: 20;
 }
-.backlinks-panel.collapsed {
-  max-height: none;
-  overflow: visible;
-  padding-top: var(--sp-3);
-  padding-bottom: var(--sp-3);
+/* Same shape as the header's floating controls pill. */
+.backlinks-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 5px var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    color var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
 }
-.panel-header {
-  margin-bottom: var(--sp-3);
+.backlinks-pill:hover,
+.backlinks-pill.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.backlinks-pill:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.backlinks-pill svg {
+  width: 13px;
+  height: 13px;
+}
+/* The shared popover card, opening upward from the pill, right-aligned. */
+.account-popover.backlinks-popover {
+  top: auto;
+  bottom: calc(100% + var(--sp-2));
+  left: auto;
+  right: 0;
+  width: 300px;
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+}
+/* Heading and rows share one left edge: the row's padding. */
+.backlinks-popover-head {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  width: 100%;
-  background: none;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  color: inherit;
-  font: inherit;
-  text-align: left;
+  padding: var(--sp-1) var(--sp-2) var(--sp-2);
 }
-.backlinks-panel.collapsed .panel-header {
-  margin-bottom: 0;
+.backlinks-popover-head .subhead {
+  margin: 0;
 }
-.panel-chevron {
-  display: inline-block;
-  transition: transform var(--t-fast) var(--ease);
-  color: var(--text-tertiary);
-  font-size: var(--fs-md);
-  line-height: 1;
-}
-.panel-chevron.open {
-  transform: rotate(90deg);
-}
-.panel-header .count {
-  color: var(--accent);
-  background: var(--accent-soft);
+.backlinks-popover-count {
+  padding: 0 6px;
   border-radius: var(--radius-pill);
-  padding: 0 var(--sp-2);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
   font-size: var(--fs-xs);
+  font-weight: 600;
   line-height: 18px;
-}
-.backlinks-empty {
-  font-size: var(--fs-sm);
-  color: var(--text-tertiary);
 }
 .backlinks-list {
   list-style: none;
@@ -3491,7 +3422,10 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   gap: 2px;
 }
 .backlink {
-  padding: var(--sp-2) var(--sp-3);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: background var(--t-fast) var(--ease);
@@ -3499,16 +3433,45 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
 .backlink:hover {
   background: var(--bg-hover);
 }
+.backlink-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--text-tertiary);
+}
+.backlink-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.backlink-title,
+.backlink-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .backlink-title {
-  font-size: var(--fs-md);
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text-primary);
 }
-.backlink-text {
-  font-size: var(--fs-sm);
-  color: var(--text-secondary);
-  margin-top: 2px;
-  line-height: var(--lh-body);
+.backlink-meta {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+/* The row opens the note; the chevron says so on hover. */
+.backlink-go {
+  flex: none;
+  color: var(--text-tertiary);
+  font-size: var(--fs-md);
+  line-height: 1;
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.backlink:hover .backlink-go {
+  opacity: 1;
 }
 
 /* ============================================================
@@ -3519,7 +3482,9 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
 .sidebar-footer {
   margin-top: auto;
   border-top: 1px solid var(--border);
-  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-1);
+  /* No side padding: the identity bar's hover box spans exactly the divider
+     above it, instead of floating as a smaller box inside the section. */
+  padding: var(--sp-1) 0 var(--sp-2);
 }
 .account-menu {
   position: relative;
@@ -3533,21 +3498,34 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   background: transparent;
   border: none;
   border-radius: var(--radius-md);
-  padding: var(--sp-2);
+  padding: 6px var(--sp-2);
   text-align: left;
   color: var(--text-primary);
   transition: background var(--t-fast) var(--ease);
 }
-.identity-bar:hover {
-  background: var(--bg-hover);
+/* The account bar plus, when this server takes reports, the bug icon beside
+   it — a sibling, since a button cannot hold another button. */
+.identity-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
 }
-.identity-bar.open {
-  background: var(--bg-surface);
-  box-shadow: var(--shadow-sm);
+.identity-row > .identity-bar {
+  flex: 1;
+  min-width: 0;
+}
+.identity-bug {
+  flex: none;
+  /* Off the sidebar's right edge, not hugging it. */
+  margin-right: var(--sp-2);
+  color: var(--text-tertiary);
+}
+.identity-bug:hover {
+  color: var(--text-primary);
 }
 .identity-avatar.signed-out {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
@@ -3589,6 +3567,10 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   height: 32px;
   font-size: var(--fs-sm);
   transition: transform var(--t-med) var(--ease-spring);
+}
+.identity-avatar-wrap .avatar {
+  width: 28px;
+  height: 28px;
 }
 .identity-bar:hover .identity-avatar-wrap .avatar {
   transform: scale(1.12);
@@ -3641,7 +3623,7 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   gap: 3px;
 }
 .identity-line1 {
-  font-size: var(--fs-md);
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text-primary);
   line-height: var(--lh-tight);
@@ -4408,7 +4390,7 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-5);
-  background: var(--bg-subtle);
+  background: var(--bg-card);
   scroll-margin-top: var(--sp-5);
 }
 .access-default-copy {
@@ -4486,7 +4468,7 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
    its content and the page carries it; folders start collapsed, so what's on
    screen by default is the vault's top level, not everything in it. */
 .access-master {
-  background: var(--bg-subtle);
+  background: var(--bg-card);
   border: 1px solid var(--border-subtle, var(--border));
   border-radius: var(--radius-lg);
   padding: var(--sp-3);
@@ -4669,7 +4651,7 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
-  background: var(--bg-subtle);
+  background: var(--bg-card);
   scroll-margin-top: var(--sp-5);
 }
 .access-bulk-heading {
@@ -4960,7 +4942,7 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   display: flex;
   gap: var(--sp-2);
   align-items: flex-start;
-  background: var(--bg-subtle);
+  background: var(--bg-card);
   border-radius: var(--radius-md);
   padding: var(--sp-3);
   font-size: var(--fs-sm);
@@ -6068,24 +6050,32 @@ button.sync-badge-retry:hover {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
-  padding: var(--sp-3);
-  margin-bottom: var(--sp-3);
-  background: var(--accent-soft);
-  border-radius: var(--radius-md);
+  padding: var(--sp-4);
+  margin-bottom: var(--sp-4);
+  background: var(--brand-violet-tint);
+  border-radius: var(--radius-lg);
 }
 .join-code-meta {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--sp-1);
+}
+/* `.subhead` carries a top margin for use between sections; inside the card
+   it pushed the copy off-centre from the code and Copy beside it. */
+.join-code-meta .subhead {
+  margin: 0;
+}
+.join-code-row .link-btn {
+  color: var(--brand-violet);
 }
 .join-code {
   font-family: var(--font-mono);
   font-size: var(--fs-lg);
   font-weight: 700;
   letter-spacing: 0.12em;
-  color: var(--accent);
+  color: var(--brand-violet);
   background: var(--bg-surface);
   border-radius: var(--radius-sm);
   padding: var(--sp-1) var(--sp-2);
@@ -6860,7 +6850,7 @@ button.secondary:disabled {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
-  background: var(--bg-subtle);
+  background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--sp-5);
@@ -7407,12 +7397,142 @@ button.is-done:disabled {
   gap: 0;
 }
 
-/* Share menu: the row just copied says so inline (the menu stays open). */
-.share-popover .share-copied {
+/* ---- Share dialog: the header Share button's team / public links ---- */
+.modal.share-dialog {
+  width: 500px;
+}
+.share-dialog-title {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+/* The note being shared, on its own line under the heading. */
+.share-dialog-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--font-body, inherit);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.share-dialog-note svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--text-tertiary);
+}
+.share-dialog-note > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* One card, one row per kind of link (icon · copy · control), a divider
+   between them; the published url row spans the copy + control columns. */
+.share-options {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+}
+.share-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--sp-3);
+  padding: var(--sp-4);
+}
+.share-option + .share-option {
+  border-top: 1px solid var(--border);
+}
+.share-option-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.share-option.is-on .share-option-icon {
+  color: var(--brand-violet);
+  background: var(--brand-violet-tint);
+  border-color: transparent;
+}
+.share-option-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.share-option-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.share-option-copy > strong {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.share-option-copy > span {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.share-copy-btn {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
-  color: var(--success);
+  white-space: nowrap;
+}
+/* Slides open/closed: a grid row animating 0fr → 1fr is the one way to
+   transition to an element's natural height without measuring it. */
+.share-url-reveal {
+  grid-column: 2 / -1;
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 220ms var(--ease),
+    opacity 180ms var(--ease);
+}
+.share-url-reveal.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.share-url-reveal > .share-url-row {
+  min-height: 0;
+  overflow: hidden;
+}
+@media (prefers-reduced-motion: reduce) {
+  .share-url-reveal {
+    transition: none;
+  }
+}
+.share-url-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-top: var(--sp-3);
+}
+.modal input.share-url {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+  padding: var(--sp-1) var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+}
+.share-url-hint {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
 }
 
 /* ---- Confirm dialog (destructive access changes, etc.) ---- */
@@ -8005,9 +8125,30 @@ button.secondary:active:not(:disabled),
   margin-left: auto;
   font-size: var(--fs-xs);
 }
-/* Clear sits at the right edge; after "Updating…" it just follows it. */
+/* Clear sits at the right edge; after "Updating…" it just follows it. A quiet
+   text button: it only empties this list, so it shouldn't shout. */
 .activity-clear {
   margin-left: auto;
+  padding: 3px var(--sp-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    color var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.activity-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.activity-clear:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 .activity-updating + .activity-clear {
   margin-left: 0;
@@ -8019,7 +8160,7 @@ button.secondary:active:not(:disabled),
 /* Rows share one grid, so every chip, path and action column lines up. */
 .activity-list {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr) auto;
+  grid-template-columns: max-content minmax(0, 1fr);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -8042,8 +8183,19 @@ button.secondary:active:not(:disabled),
   justify-self: start;
   margin-top: 1px;
 }
+/* Text + actions on one line that WRAPS: the text grows to fill the line but
+   never shrinks below its basis, so when the actions don't fit beside it they
+   move under it (left-aligned) instead of crushing it to one word per line. */
+.activity-row-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--sp-2) var(--sp-3);
+  min-width: 0;
+}
 .activity-row-main {
   display: flex;
+  flex: 1 1 12rem;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
@@ -8070,25 +8222,19 @@ button.secondary:active:not(:disabled),
 }
 .activity-row-actions {
   display: flex;
+  flex: 0 1 auto;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: var(--sp-1);
   min-width: 0;
+  max-width: 100%;
+}
+.activity-row-actions:empty {
+  display: none;
 }
 .activity-row-actions .health-missing-actions {
   flex-wrap: wrap;
-  justify-content: flex-end;
   gap: var(--sp-1) var(--sp-2);
-}
-/* Narrow panel: actions drop under the path, still on the path's left edge. */
-@container (max-width: 360px) {
-  .activity-row-actions {
-    grid-column: 2 / -1;
-    align-items: flex-start;
-  }
-  .activity-row-actions .health-missing-actions {
-    justify-content: flex-start;
-  }
 }
 .activity-more {
   align-self: flex-start;
@@ -8164,4 +8310,203 @@ button.secondary:active:not(:disabled),
   user-select: none;
   transform-origin: center center;
   will-change: transform;
+}
+
+/* ---- Report a bug dialog (sidebar account bar → bug icon) ---- */
+.modal.bug-report-dialog {
+  width: 480px;
+  /* Never taller than the window: past that the dialog scrolls inside. */
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+.bug-report-label {
+  display: block;
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.modal textarea.bug-report-message {
+  width: 100%;
+  min-height: 132px;
+  /* Drag-resizable, but only so far: the rest of the form stays on screen. */
+  max-height: min(320px, 40vh);
+  resize: vertical;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--fs-md);
+  line-height: var(--lh-body);
+}
+/* Second and later field labels sit off the field above them. */
+.bug-report-message + .bug-report-label {
+  margin-top: var(--sp-4);
+}
+.bug-report-optional {
+  margin-left: var(--sp-1);
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+.modal input.bug-report-video {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+.modal input.bug-report-video.is-invalid {
+  border-color: var(--danger);
+}
+.bug-report-field-error {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--danger);
+}
+/* Picked files as chips (thumbnail for images), then the Attach button. */
+.bug-report-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.bug-report-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 4px 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  font-size: var(--fs-xs);
+}
+.bug-report-file img,
+.bug-report-file > svg {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  object-fit: cover;
+  color: var(--text-tertiary);
+}
+.bug-report-file-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.bug-report-file-size {
+  color: var(--text-tertiary);
+}
+.bug-report-file-remove {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  cursor: pointer;
+}
+.bug-report-file-remove:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.bug-report-attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.bug-report-attach svg {
+  width: 14px;
+  height: 14px;
+}
+.modal textarea.bug-report-message:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+.bug-report-include {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.bug-report-include input {
+  width: auto;
+  margin: 0;
+}
+/* Exactly what will be attached, shown before it is sent. */
+.bug-report-details {
+  display: grid;
+  gap: 2px;
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-3);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  font-size: var(--fs-xs);
+}
+.bug-report-details > div {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: var(--sp-2);
+}
+.bug-report-details dt {
+  color: var(--text-tertiary);
+}
+.bug-report-details dd {
+  margin: 0;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bug-report-note {
+  margin: var(--sp-5) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.bug-report-buttons {
+  justify-content: flex-end;
+  margin-top: var(--sp-3);
+}
+.bug-report-actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+.bug-report-sent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-4) 0 0;
+  text-align: center;
+}
+.bug-report-sent-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--success-soft);
+  color: var(--success);
+}
+.bug-report-sent-icon svg {
+  width: 22px;
+  height: 22px;
+}
+.bug-report-sent p {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
 }

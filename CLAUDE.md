@@ -535,7 +535,8 @@ plaintext token per note; revoke = DELETE).
 change in prod) · `BETTER_AUTH_URL` · `PORT` (3010) · `HOCUSPOCUS_PORT` (3011) · `SYNC_TOKEN_TTL_SECONDS`
 (600) · `COMPACTION_THRESHOLD` (50) · `TRASH_RETENTION_DAYS` (30) · `CORS_ORIGINS` (optional) · `OPENAI_API_KEY` (optional) ·
 `EMAIL_FROM` + `SMTP_URL` | `RESEND_API_KEY` (optional; turns on password reset, sign-up verification
-and invitation emails — `src/email/mailer.ts`; unset ⇒ none offered, like Google OAuth).
+and invitation emails — `src/email/mailer.ts`; unset ⇒ none offered, like Google OAuth) · `BUG_REPORT_EMAIL` (optional; with email on, the desktop's sidebar bug icon emails reports
+there, Reply-To = reporter — `http/routes/bug-reports.ts`; unset ⇒ the icon is hidden).
 
 ## Conventions & gotchas
 

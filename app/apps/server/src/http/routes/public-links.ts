@@ -219,63 +219,84 @@ function esc(s: string): string {
 }
 
 const PAGE_CSS = `
+  /* baalda.com's palette: warm beige page, white sheet, near-black ink, the
+     brand violet for links and the tinted wikilink chip. */
   :root {
-    --bg-app: #ececf0; --bg-surface: #ffffff;
-    --text-primary: #1a1a1e; --text-secondary: #6b6b76;
-    --border: rgba(20, 20, 40, 0.09); --code-bg: #f1f1f4;
-    --accent: #6d5ae6;
+    --bg-page: #fcf9f7; --bg-sheet: #ffffff; --bg-soft: #f6f2ee;
+    --ink: #1c1c1a; --ink-soft: #57564f; --ink-faint: #8a8984;
+    --border: rgba(3, 3, 2, 0.08); --violet: #7c5cff; --violet-tint: rgba(124, 92, 255, 0.09);
+    --button-bg: #030302; --button-ink: #ffffff;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg-app: #101014; --bg-surface: #1d1d24;
-      --text-primary: #f2f2f5; --text-secondary: #a6a6b2;
-      --border: rgba(255, 255, 255, 0.09); --code-bg: #26262e;
-      --accent: #8d7cf0;
+      --bg-page: #141413; --bg-sheet: #1c1c1a; --bg-soft: #252522;
+      --ink: #eceae6; --ink-soft: #b3b1aa; --ink-faint: #85837d;
+      --border: rgba(255, 255, 255, 0.08); --violet: #a28dff; --violet-tint: rgba(162, 141, 255, 0.14);
+      --button-bg: #eceae6; --button-ink: #141413;
     }
   }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         margin: 0; background: var(--bg-app); color: var(--text-primary);
-         line-height: 1.65; -webkit-font-smoothing: antialiased; }
-  /* The app's editor sheet: a centred column at the same measure. */
-  main { max-width: min(120ch, calc(100vw - 32px)); margin: 24px auto 48px;
-         background: var(--bg-surface); border: 1px solid var(--border);
-         border-radius: 14px; padding: 48px 64px 56px; }
-  @media (max-width: 760px) { main { padding: 28px 20px 36px; margin: 0 auto 24px;
-         border-radius: 0; border-left: none; border-right: none; } }
-  .page-top { display: flex; align-items: center; gap: 12px; justify-content: space-between;
-              margin-bottom: 20px; }
-  a.open-app { display: inline-block; padding: 7px 16px; border-radius: 999px;
-               background: var(--text-primary); color: var(--bg-surface);
-               text-decoration: none; font-weight: 600; font-size: 0.9rem;
-               white-space: nowrap; }
-  article h1, article h2, article h3 { line-height: 1.3; }
-  article img { max-width: 100%; height: auto; border-radius: 6px; }
-  article pre { background: var(--code-bg); padding: 0.8rem 1rem; border-radius: 8px;
-                overflow-x: auto; }
-  article code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px;
-                 font-size: 0.92em; font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg-page); color: var(--ink);
+         font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+         font-size: 17px; line-height: 1.7; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 20px 24px 40px; }
+  .site-top { display: flex; align-items: center; justify-content: space-between;
+              gap: 12px; padding: 8px 4px 20px; }
+  a.brand { color: var(--ink); text-decoration: none; font-weight: 700;
+            letter-spacing: 0.2em; font-size: 0.92rem; }
+  a.open-app { display: inline-block; padding: 9px 18px; border-radius: 999px;
+               background: var(--button-bg); color: var(--button-ink);
+               text-decoration: none; font-weight: 600; font-size: 0.88rem; white-space: nowrap; }
+  a.open-app:hover { opacity: 0.88; }
+  main { background: var(--bg-sheet); border: 1px solid var(--border); border-radius: 22px;
+         padding: 64px 88px 72px; box-shadow: 0 1px 2px rgba(3, 3, 2, 0.03), 0 12px 32px rgba(3, 3, 2, 0.04); }
+  @media (max-width: 640px) { main { padding: 32px 22px 36px; border-radius: 16px; } }
+  h1.doc-title { font-size: 2.1rem; line-height: 1.2; letter-spacing: -0.02em;
+                 margin: 0 0 28px; font-weight: 700; }
+  article > :first-child { margin-top: 0; }
+  article h1, article h2, article h3, article h4 { line-height: 1.3; letter-spacing: -0.01em;
+                                                  margin: 1.8em 0 0.5em; }
+  article h1 { font-size: 1.6rem; } article h2 { font-size: 1.3rem; } article h3 { font-size: 1.1rem; }
+  article p, article ul, article ol { margin: 0 0 1em; }
+  article li { margin: 0.2em 0; }
+  article li::marker { color: var(--ink-faint); }
+  article img { max-width: 100%; height: auto; border-radius: 12px; }
+  article hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
+  article a { color: var(--violet); text-decoration: underline; text-decoration-thickness: 1px;
+              text-underline-offset: 3px; text-decoration-color: color-mix(in srgb, var(--violet) 40%, transparent); }
+  article a:hover { text-decoration-color: var(--violet); }
+  /* A [[wikilink]] points at a note this page does not carry: the site's
+     violet chip, not a link. */
+  .wikilink { color: var(--violet); background: var(--violet-tint); padding: 0.05em 0.35em;
+              border-radius: 6px; }
+  article pre { background: var(--bg-soft); padding: 14px 16px; border-radius: 12px;
+                overflow-x: auto; font-size: 0.88em; line-height: 1.55; }
+  article code { background: var(--bg-soft); padding: 0.12em 0.4em; border-radius: 6px; font-size: 0.88em;
+                 font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace; }
   article pre code { background: none; padding: 0; }
-  article blockquote { margin: 0; padding-left: 1rem; border-left: 3px solid var(--border);
-                       color: var(--text-secondary); }
-  article a { color: var(--accent); }
-  .wikilink { color: var(--text-secondary); border-bottom: 1px dotted var(--border); }
+  article blockquote { margin: 0 0 1em; padding: 10px 18px; border-left: 3px solid var(--violet);
+                       background: var(--violet-tint); border-radius: 0 10px 10px 0; color: var(--ink-soft); }
+  article blockquote > :last-child { margin-bottom: 0; }
   /* Tables — the editor's exact treatment: natural column widths, cells wrap
      at a readable measure, a wide table scrolls in its wrapper. */
-  .md-table { margin: 12px 0; overflow-x: auto; contain: inline-size; }
-  .md-table table { border-collapse: collapse; width: max-content; font-size: 0.95em; }
-  .md-table th, .md-table td { border: 1px solid var(--border); padding: 4px 12px;
+  .md-table { margin: 12px 0 1em; overflow-x: auto; contain: inline-size; }
+  .md-table table { border-collapse: collapse; width: max-content; font-size: 0.92em; }
+  .md-table th, .md-table td { border: 1px solid var(--border); padding: 6px 12px;
                                text-align: left; vertical-align: top; max-width: 42ch; }
-  .md-table th { font-weight: 600; }
+  .md-table th { font-weight: 600; background: var(--bg-soft); }
   .md-table::-webkit-scrollbar { height: 8px; }
   .md-table::-webkit-scrollbar-thumb { background-color: var(--border); border-radius: 4px; }
   .md-table::-webkit-scrollbar-track { background: transparent; }
-  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border);
-           font-size: 0.85rem; color: var(--text-secondary); }
-  footer a { color: inherit; }
-  h1.doc-title { font-size: 1.7rem; margin: 0; }
+  footer { text-align: center; margin-top: 22px; font-size: 0.82rem; color: var(--ink-faint); }
+  footer a { color: var(--ink-soft); }
 `;
 
-function pageShell(title: string, inner: string): string {
+/** The page frame: brand bar (with "Open in Baalda" when there is a note to
+ *  open), the white sheet, and a quiet footer under it. */
+function pageShell(title: string, inner: string, openHref?: string): string {
+  const open = openHref
+    ? `<a class="open-app" href="${esc(openHref)}">Open in ${esc(BRAND_NAME)}</a>`
+    : "";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -286,10 +307,13 @@ function pageShell(title: string, inner: string): string {
 <style>${PAGE_CSS}</style>
 </head>
 <body>
+<div class="wrap">
+<header class="site-top"><a class="brand" href="https://baalda.com" rel="noopener noreferrer">${esc(BRAND_NAME.toUpperCase())}</a>${open}</header>
 <main>
 ${inner}
-<footer>Shared via ${esc(BRAND_NAME)} · <a href="https://baalda.com" rel="noopener noreferrer">Get ${esc(BRAND_NAME)}</a></footer>
 </main>
+<footer>Shared with ${esc(BRAND_NAME)} · <a href="https://baalda.com" rel="noopener noreferrer">Get ${esc(BRAND_NAME)}</a></footer>
+</div>
 </body>
 </html>`;
 }
@@ -396,7 +420,8 @@ export function createPublicPageRoutes(deps: PublicPageDeps): Hono {
     return c.html(
       pageShell(
         title,
-        `<div class="page-top"><h1 class="doc-title">${esc(title)}</h1><a class="open-app" href="${esc(openHref)}">Open in ${esc(BRAND_NAME)}</a></div>\n<article>${bodyHtml}</article>`,
+        `<h1 class="doc-title">${esc(title)}</h1>\n<article>${bodyHtml}</article>`,
+        openHref,
       ),
       200,
       PAGE_HEADERS,
