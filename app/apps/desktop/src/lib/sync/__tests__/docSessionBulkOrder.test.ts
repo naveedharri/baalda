@@ -64,6 +64,8 @@ const fakeRegistry = vi.hoisted(() => {
     flushCheckpoint: vi.fn(async () => {}),
     failures: vi.fn((): unknown[] => []),
     hasFailures: vi.fn(() => false),
+    heldRefusals: vi.fn((): unknown[] => []),
+    retryHeldRefusals: vi.fn(() => false),
     limitCode: vi.fn((): string | null => null),
     // ---- disk-delete propagation (#93) ----
     /** Paths the registry's own materialize step created; one echo each. */

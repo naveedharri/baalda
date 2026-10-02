@@ -863,7 +863,7 @@ export function createRefusalIssue(g: CreateRefusalGroup, ctx: IssueContext): He
             g.folder === "" ? "this vault" : "this folder"
           } but not add to it, so the Remote Vault turned these down. Nothing was lost — ` +
           "the files are safe on this computer."
-        : "The vault's owner locked its top level, so new notes can only be added inside a folder. " +
+        : "This vault's top level is locked, so new notes can only be added inside a folder. " +
           "Nothing was lost — the files are safe on this computer.",
       next: access
         ? "They sync by themselves as soon as your access changes. Baalda also checks again every 10 minutes."

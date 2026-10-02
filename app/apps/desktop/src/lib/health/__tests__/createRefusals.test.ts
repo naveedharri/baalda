@@ -41,7 +41,7 @@ const refused = (path: string, code: string | null, kind: HealthRegistryFailure[
 });
 
 describe("groupCreateRefusals", () => {
-  it("groups by code and folder, largest first", () => {
+  it("groups by code and folder, largest first, then by folder", () => {
     const groups = groupCreateRefusals([
       refused("Reports/a.md", "no_write_access"),
       refused("Reports/b.md", "no_write_access"),
@@ -53,8 +53,8 @@ describe("groupCreateRefusals", () => {
     ]);
     expect(groups).toEqual([
       { code: "no_write_access", folder: "Reports", paths: ["Reports/a.md", "Reports/b.md"], notes: 2 },
-      { code: "no_write_access", folder: "Daily", paths: ["Daily/x.md"], notes: 1 },
       { code: "root_frozen", folder: "", paths: ["top.md"], notes: 1 },
+      { code: "no_write_access", folder: "Daily", paths: ["Daily/x.md"], notes: 1 },
     ]);
   });
 
