@@ -42,7 +42,7 @@ export function syncRunPercent(progress: SyncProgress | null | undefined): numbe
 export function pillProgress(
   progress: SyncProgress | null | undefined,
 ): SyncProgress | null | undefined {
-  if (progress?.phase === "error" && progress.failed > 0 && !progress.refused) {
+  if (progress?.phase === "error" && progress.failed > 0 && !progress.refused && !progress.pullFailing) {
     return { ...progress, phase: "done" };
   }
   return progress;
@@ -227,13 +227,15 @@ export function syncBadgeAction(args: {
   failed?: number;
   /** {@link SyncProgress.refused}: keeps the run actionable despite `failed`. */
   refused?: number;
+  /** {@link SyncProgress.pullFailing}: likewise. */
+  pullFailing?: boolean;
   hasRetry: boolean;
   hasHealth: boolean;
 }): { kind: "none" | "retry" | "explain"; cta: string; title?: string } {
-  const { running, phase, failed = 0, refused = 0, hasRetry, hasHealth } = args;
+  const { running, phase, failed = 0, refused = 0, pullFailing = false, hasRetry, hasHealth } = args;
   // A run that ended with failed notes reads "Synced" (see `pillProgress`) and
   // offers nothing: the failures live on the Health page, not on the pill.
-  if (running || phase !== "error" || (failed > 0 && refused === 0) || (!hasRetry && !hasHealth)) {
+  if (running || phase !== "error" || (failed > 0 && refused === 0 && !pullFailing) || (!hasRetry && !hasHealth)) {
     return { kind: "none", cta: "" };
   }
   if (hasHealth) {
@@ -326,6 +328,7 @@ export function SyncBadge({
     phase: progress?.phase,
     failed: progress?.failed,
     refused: progress?.refused,
+    pullFailing: progress?.pullFailing,
     hasRetry: onRetry != null,
     hasHealth: onOpenHealth != null,
   });

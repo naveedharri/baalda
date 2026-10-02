@@ -224,6 +224,18 @@ const REGISTRY_PULL_MAX_WAIT_MS = 1_000;
 export const REGISTRY_META_PULL_MIN_MS = 30_000;
 
 /**
+ * Consecutive failed registry pulls before Health and the pill say so. The pull
+ * is the only path that registers a NEW note or folder; content edits ride
+ * their own sockets, so a pull that keeps failing used to look like "edits sync,
+ * new notes never appear" with nothing on screen but a console line.
+ */
+export const PULL_FAILURE_THRESHOLD = 3;
+/** …or a failing streak this old, whatever its count (pulls can be rare). */
+export const PULL_FAILURE_PERSIST_MS = 5 * 60_000;
+/** The code on the Health row for a failing registry pull. */
+export const PULL_FAILED_CODE = "registry_pull_failed";
+
+/**
  * How long the server's `acl-changed` frame keeps a pull authorised to remove
  * files wholesale (see {@link SyncManager.revocationAuthority}).
  *
@@ -436,6 +448,9 @@ export class SyncManager implements InboundHost {
   private onColors?: (colors: Record<string, string>) => void;
   private mapPublishTimer: ReturnType<typeof setTimeout> | null = null;
   private registryPullTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The current streak of failed registry pulls (see
+   *  {@link PULL_FAILURE_THRESHOLD}); reset by the next pull that succeeds. */
+  private pullFailures: { count: number; since: number; reason: string } | null = null;
   /** When the currently-armed pull's burst started (see
    *  {@link REGISTRY_PULL_MAX_WAIT_MS}); 0 when no pull is armed. */
   private registryPullBurstAt = 0;
@@ -3539,11 +3554,70 @@ export class SyncManager implements InboundHost {
       changed = await this.registry.pull();
     } catch (e) {
       // A failed pull judged nothing: place what already maps, discard nothing.
-      if (scope.isCurrent()) this.settleParkedDocs(scope, store, 0);
+      if (scope.isCurrent()) {
+        this.settleParkedDocs(scope, store, 0);
+        this.recordPullFailure(scope, e);
+      }
       throw e;
     }
-    if (scope.isCurrent()) this.settleParkedDocs(scope, store, mark);
+    if (scope.isCurrent()) {
+      this.settleParkedDocs(scope, store, mark);
+      this.clearPullFailures(scope);
+    }
     return changed;
+  }
+
+  /**
+   * The failing registry pull Health and the pill report, once the streak is
+   * {@link PULL_FAILURE_THRESHOLD} long or {@link PULL_FAILURE_PERSIST_MS} old;
+   * null otherwise.
+   */
+  pullFailure(now = Date.now()): { count: number; since: number; reason: string } | null {
+    // Offline, reconnecting or refused already says why nothing new arrives;
+    // the vault status wins over this issue.
+    if (this.vaultStatus !== "synced") return null;
+    return this.pullStreakRaised(now) ? this.pullFailures : null;
+  }
+
+  private pullStreakRaised(now = Date.now()): boolean {
+    const f = this.pullFailures;
+    if (!f) return false;
+    return f.count >= PULL_FAILURE_THRESHOLD || now - f.since >= PULL_FAILURE_PERSIST_MS;
+  }
+
+  private recordPullFailure(scope: VaultScope, e: unknown): void {
+    // A pull that failed because we are offline, or because the session or the
+    // app version was refused, is not this problem: each has its own state.
+    if (this.vaultStatus !== "synced") return;
+    const status = (e as { status?: unknown } | null)?.status;
+    if (status === 401 || status === 426) return;
+    // A listing that hit REGISTRY_LISTING_TIMEOUT_MS aborts with a message
+    // ("signal is aborted without reason") that says nothing to a person.
+    const reason =
+      (e as { name?: unknown } | null)?.name === "AbortError"
+        ? "the server took too long to answer"
+        : e instanceof Error
+          ? e.message
+          : String(e);
+    const prev = this.pullFailures;
+    this.pullFailures = { count: (prev?.count ?? 0) + 1, since: prev?.since ?? Date.now(), reason };
+    if (this.pullFailure() != null) this.rejudgeFinishedRun(scope);
+  }
+
+  private clearPullFailures(scope: VaultScope): void {
+    const was = this.pullStreakRaised();
+    this.pullFailures = null;
+    if (was) this.rejudgeFinishedRun(scope);
+  }
+
+  /** No run follows a pull's verdict, so re-stamp a finished run's phase here. */
+  private rejudgeFinishedRun(scope: VaultScope): void {
+    if (this.contentRunInFlight()) return;
+    // An unsettled backfill would make `completeRun` start a download phase;
+    // that run stamps its own verdict when it ends.
+    if (!this.bulkPhase && this.vaultEngine && !this.vaultEngine.backfillSettled()) return;
+    const phase = this.progress?.snapshot().phase;
+    if (phase === "done" || phase === "error") this.completeRun(scope);
   }
 
   /**
@@ -5124,6 +5198,7 @@ export class SyncManager implements InboundHost {
       // push was denied, leaves the vault partly unsynced either way.
       this.bulkFailures.size === 0 &&
       !this.serverTooOld &&
+      this.pullFailure() == null &&
       this.permanentFailures.size === 0 &&
       !this.registry.hasFailures() &&
       this.registry.limitCode() == null;
@@ -5191,11 +5266,14 @@ export class SyncManager implements InboundHost {
     return n;
   }
 
-  /** Stamp {@link SyncProgress.refused} on a failed run's emission. */
+  /** Stamp {@link SyncProgress.refused} and {@link SyncProgress.pullFailing}
+   *  on a failed run's emission. */
   private withRefusals(p: SyncProgress | null): SyncProgress | null {
     if (p?.phase !== "error") return p;
     const refused = this.registry.heldRefusals().length;
-    return refused > 0 ? { ...p, refused } : p;
+    const pullFailing = this.pullFailure() != null;
+    if (refused === 0 && !pullFailing) return p;
+    return { ...p, ...(refused > 0 ? { refused } : {}), ...(pullFailing ? { pullFailing } : {}) };
   }
 
   /** Stamp {@link SyncProgress.notUploaded} on a running phase's emission. */
@@ -5270,6 +5348,12 @@ export class SyncManager implements InboundHost {
         reason: DELETE_DECISION_REASON,
         code: "delete_decision",
       });
+    }
+    // A registry pull that keeps failing: every new note and folder is stuck
+    // behind it, so it is said once, for the whole vault.
+    const pull = this.pullFailure();
+    if (pull) {
+      registry.push({ kind: "pull", path: "", docId: null, reason: pull.reason, code: PULL_FAILED_CODE });
     }
     return {
       registry,
@@ -5363,6 +5447,8 @@ export class SyncManager implements InboundHost {
     this.goneFolders.clear();
     this.folderCandidates.clear();
     this.rootMissing = false;
+    // A failing pull describes the vault we are leaving.
+    this.pullFailures = null;
     this.deleteDecision = null;
     this.deleteDecisionIds = new Set();
     this.closedChangesChecked = false;

@@ -70,6 +70,8 @@ export function failureEntries(f: HealthFailures | null | undefined): FailedEntr
   }
   for (const r of f.registry) {
     if (r.kind === "inbound-blocked" && r.code === "delete_decision") continue;
+    // Vault-wide, with no path to name: the Health issue says it.
+    if (r.kind === "pull") continue;
     out.push({
       key: `fr:${r.kind}:${r.docId ?? r.path}`,
       docId: r.docId,

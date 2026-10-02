@@ -478,7 +478,8 @@ export interface ReconcileInput {
 /** A folder/note that could NOT be registered, after retries. Surfaced so the
  *  vault is never reported fully synced while an arbitrary subset is local-only. */
 export interface RegistryFailure {
-  kind: "folder" | "note" | "materialize" | "inbound" | "inbound-blocked" | "orphan";
+  /** `pull`: the whole registry pull failed (recorded by `SyncManager`, not here). */
+  kind: "folder" | "note" | "materialize" | "inbound" | "inbound-blocked" | "orphan" | "pull";
   /** Vault-relative path. */
   path: string;
   /** Intended docId, when known (notes) — phase 3 keys its badge by this. */

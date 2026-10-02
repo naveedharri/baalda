@@ -412,3 +412,34 @@ describe("a run with held create refusals", () => {
     expect(syncBadgeLabel({ status: "synced", now, progress, lastSyncedAt: now })).toBe("Synced · just now");
   });
 });
+
+// A registry pull that keeps failing strands every new note and folder, so the
+// pill must not read "Synced" over it — even when the run also had ordinary
+// failed notes, which on their own read "Synced".
+describe("a run whose registry pull keeps failing", () => {
+  const now = 1_000_000_000_000;
+  const withFailed: SyncProgress = { phase: "error", done: 3, total: 3, failed: 2, pullFailing: true };
+  const alone: SyncProgress = { phase: "error", done: 0, total: 0, failed: 0, pullFailing: true };
+
+  it("reads Sync incomplete and offers the Health explanation", () => {
+    for (const progress of [withFailed, alone]) {
+      expect(syncBadgeLabel({ status: "synced", now, progress })).toBe("Sync incomplete");
+      expect(syncBadgeTone({ status: "synced", progress })).toBe("error");
+      expect(
+        syncBadgeAction({
+          running: false,
+          phase: "error",
+          failed: progress.failed,
+          pullFailing: true,
+          hasRetry: true,
+          hasHealth: true,
+        }).kind,
+      ).toBe("explain");
+    }
+  });
+
+  it("reads Synced again once the stamp is gone", () => {
+    const progress: SyncProgress = { phase: "error", done: 3, total: 3, failed: 2 };
+    expect(syncBadgeLabel({ status: "synced", now, progress, lastSyncedAt: now })).toBe("Synced · just now");
+  });
+});

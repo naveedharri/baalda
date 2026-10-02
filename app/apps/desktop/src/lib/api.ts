@@ -1061,6 +1061,16 @@ export const ACCESS_CHECK_MAX = 2000;
  */
 export const ACCESS_CHECK_TIMEOUT_MS = 30_000;
 
+/**
+ * Per request (one page) for the folder + note registry listings. Every
+ * registry pull is serialized behind the one before it (`registry.pull`'s
+ * chain), so a listing that never answers parks EVERY later pull behind it —
+ * new local notes then never register while content edits, which ride their
+ * own sockets, keep syncing. A timeout turns that into a failed pull the next
+ * trigger retries.
+ */
+export const REGISTRY_LISTING_TIMEOUT_MS = 120_000;
+
 // The two things a person can actually act on. Kept as constants so the dialog
 // and Settings → Connection say the same words for the same failure.
 const UNREACHABLE_MESSAGE =
@@ -1246,6 +1256,9 @@ export class ApiClient {
       timer = setTimeout(() => controller?.abort(), opts.timeoutMs);
     }
     let res: Response;
+    let text: string;
+    // The timer covers the BODY too: a server that sends headers and then
+    // stalls mid-body otherwise hangs the caller exactly as if it never answered.
     try {
       res = await this.fetchImpl(url.toString(), {
         method,
@@ -1253,6 +1266,7 @@ export class ApiClient {
         body: bodyInit,
         ...(controller ? { signal: controller.signal } : {}),
       });
+      text = await res.text();
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -1260,7 +1274,6 @@ export class ApiClient {
     // Better Auth returns the opaque session token in this header on sign-in/up.
     const authToken = opts.captureAuthToken ? res.headers.get("set-auth-token") : null;
 
-    const text = await res.text();
     let parsed: unknown = undefined;
     if (text) {
       try {
@@ -2048,7 +2061,7 @@ export class ApiClient {
     const { data } = await this.request<{
       folders: RegisteredFolder[];
       tombstones?: string[];
-    }>("GET", "/api/folders", { query: { vaultId } });
+    }>("GET", "/api/folders", { query: { vaultId }, timeoutMs: REGISTRY_LISTING_TIMEOUT_MS });
     return {
       folders: data.folders ?? [],
       tombstones: Array.isArray(data.tombstones) ? data.tombstones : null,
@@ -2515,6 +2528,7 @@ export class ApiClient {
         nextAfter?: string | null;
       }>("GET", "/api/notes", {
         query: { vaultId, limit: String(limit), after },
+        timeoutMs: REGISTRY_LISTING_TIMEOUT_MS,
       });
       notes.push(...(data.notes ?? []));
       tombstones = Array.isArray(data.tombstones) ? data.tombstones : null;

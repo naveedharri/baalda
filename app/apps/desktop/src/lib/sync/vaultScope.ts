@@ -252,6 +252,12 @@ export interface SyncProgress {
    * reading "Synced" (see `pillProgress`): nothing else would tell the user.
    */
   refused?: number;
+  /**
+   * The registry pull keeps failing (`SyncManager.pullFailure`), so no new note
+   * or folder can register. Stamped on an `error` emission only; like
+   * `refused`, it keeps the pill off "Synced".
+   */
+  pullFailing?: boolean;
 }
 
 /**
