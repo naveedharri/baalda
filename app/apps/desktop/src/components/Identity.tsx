@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { CheckMark } from "./Spinner";
 import { isBulkPhase, type SyncProgress } from "../lib/sync/vaultScope";
+import { syncPauseRemaining, type SyncPause } from "../lib/sync/syncPause";
 
 /** "just now" / "1m ago" / "2h ago" — coarse on purpose; it ticks every 30s. */
 export function relativeAgo(ts: number, now: number): string {
@@ -163,6 +164,45 @@ export function syncBadgeTone(args: {
 }
 
 /**
+ * A vault-wide hold that outranks every per-note and per-run state: while it
+ * lasts nothing syncs, so no call site may claim "Synced" (#273 — a second
+ * badge that skipped these read "Synced · 9m ago" under a paused vault).
+ *
+ * - The vault folder is gone (#228): neutral, not an error — the banner has
+ *   the fix.
+ * - The server's shrink burst brake holds our writes (#252): amber, not red —
+ *   nothing is lost, and it ends on its own or when an owner releases it.
+ */
+export function syncBadgeHold(args: {
+  rootMissing?: boolean;
+  /** Sync turned on for this vault; the brake only means something then. */
+  enabled?: boolean;
+  pause?: Pick<SyncPause, "until"> | null;
+  now: number;
+}): { tone: "offline" | "connecting"; label: string; title: string } | null {
+  const { rootMissing, enabled, pause, now } = args;
+  if (rootMissing) {
+    return {
+      tone: "offline",
+      label: "Paused",
+      title: "Sync is paused until the vault folder is back",
+    };
+  }
+  if (enabled && pause) {
+    const remaining = syncPauseRemaining(pause, now);
+    return {
+      tone: "connecting",
+      label: "Sync paused",
+      title:
+        "Many notes were emptied at once, so the server paused your sync. Your edits are safe " +
+        `on this device and sync when the pause ends${remaining ? ` (in ${remaining})` : ""} ` +
+        "or a vault owner or admin releases it.",
+    };
+  }
+  return null;
+}
+
+/**
  * What the pill offers once a run has stopped, and what it says about it.
  *
  * Pure so the precedence is pinned by a test rather than by a rendered DOM —
@@ -221,6 +261,8 @@ export function SyncBadge({
   noteOpen,
   onRetry,
   onOpenHealth,
+  rootMissing,
+  pause,
 }: {
   status: string;
   enabled?: boolean;
@@ -243,6 +285,10 @@ export function SyncBadge({
    * to {@link onRetry} when absent.
    */
   onOpenHealth?: () => void;
+  /** The vault folder is gone — see {@link syncBadgeHold}. */
+  rootMissing?: boolean;
+  /** The server's shrink brake (`store.syncPause`) — see {@link syncBadgeHold}. */
+  pause?: SyncPause | null;
 }) {
   const running = isSyncRunActive(progress);
   // Only tick the relative clock once we're settled (synced, nothing pending, no
@@ -317,6 +363,15 @@ export function SyncBadge({
       {label}
     </>
   );
+  const hold = syncBadgeHold({ rootMissing, enabled, pause, now: Date.now() });
+  if (hold) {
+    return (
+      <span className={`sync-badge ${hold.tone}`} title={hold.title}>
+        <span className="sync-dot" aria-hidden="true" />
+        {hold.label}
+      </span>
+    );
+  }
   if (retryable) {
     return (
       <button
