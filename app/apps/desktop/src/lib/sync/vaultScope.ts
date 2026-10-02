@@ -245,6 +245,13 @@ export interface SyncProgress {
    * running phase.
    */
   notUploaded?: number;
+  /**
+   * New notes/folders the server refused for access and that stay refused until
+   * access changes (`VaultRegistry.heldRefusals`). Stamped on an `error`
+   * emission only. Unlike an ordinary failed note, these keep the pill from
+   * reading "Synced" (see `pillProgress`): nothing else would tell the user.
+   */
+  refused?: number;
 }
 
 /**

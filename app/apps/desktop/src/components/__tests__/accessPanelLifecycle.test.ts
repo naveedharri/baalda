@@ -15,7 +15,7 @@ vi.mock("../../lib/auth/authManager", () => ({
   authManager: { api, getServerUrl: () => "http://test.invalid" },
 }));
 vi.mock("../../lib/sync/docSession", () => ({
-  syncManager: { registry: { vaultId: "v1" } },
+  syncManager: { registry: { vaultId: "v1" }, retryHeldRegistrations: vi.fn() },
 }));
 vi.mock("../FileTree", () => ({ iconForPath: () => null }));
 vi.mock("../../lib/toast", () => ({ toast: vi.fn() }));

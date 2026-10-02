@@ -8,6 +8,7 @@ import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingB
 import { SyncPausedBannerView } from "./components/SyncPausedBanner";
 import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
 import { NoteLimitBannerView, noteLimitBanner } from "./components/NoteLimitBanner";
+import { CreateRefusalBannerView, createRefusalBanner } from "./components/CreateRefusalBanner";
 import {
   LOCATE_FOLDER,
   RESTORE_HERE,
@@ -293,6 +294,31 @@ function NoteLimitBanner() {
     <NoteLimitBannerView
       show={show}
       onUpgrade={() => useStore.getState().requestSettings("billing")}
+      onDismiss={() => setDismissedRunToken(runToken)}
+    />
+  );
+}
+
+/**
+ * New notes the server refused to create for access (`no_write_access`,
+ * `root_frozen`). Read on the same re-render triggers as `NoteLimitBanner`
+ * (every run's progress), since the refusals are recorded by those runs.
+ */
+function CreateRefusalBanner() {
+  const syncEnabled = useStore((s) => s.syncEnabled);
+  useStore((s) => s.syncProgress);
+  const runToken = useStore((s) => s.failedRunToken);
+  const [dismissedRunToken, setDismissedRunToken] = useState<number | null>(null);
+  const text = createRefusalBanner({
+    syncEnabled,
+    refusals: syncManager.registry.heldRefusals(),
+    runToken,
+    dismissedRunToken,
+  });
+  return (
+    <CreateRefusalBannerView
+      text={text}
+      onShow={() => useStore.getState().requestSettings("health")}
       onDismiss={() => setDismissedRunToken(runToken)}
     />
   );
@@ -1571,6 +1597,7 @@ export default function App() {
           <NotSyncingBanner />
           <SyncPausedBanner />
           <NoteLimitBanner />
+          <CreateRefusalBanner />
           <RemovedBanner />
           <DeletedByTeammateBanner />
           {attachmentLocalOnly && <AttachmentSyncNotice />}

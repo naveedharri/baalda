@@ -20,6 +20,12 @@ import { buildTreeSyncIndex } from "../syncRollup";
 // dependency-free.
 import { formatBytes, relativeTime } from "./format";
 import { BRAND_NAME } from "../brand";
+import {
+  groupCreateRefusals,
+  isHeldCreateCode,
+  wherePhrase,
+  type CreateRefusalGroup,
+} from "../sync/createRefusals";
 import { isBulkPhase, type DocSyncState, type SyncProgress } from "../sync/vaultScope";
 import type { SyncStatus } from "../sync/syncManager";
 import type { AuthStatus } from "../../store";
@@ -821,6 +827,66 @@ function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue
   };
 }
 
+/** File paths listed on one grouped create-refusal issue; the count says the rest. */
+export const MAX_REFUSAL_PATHS_SHOWN = 50;
+
+/** Key of the grouped issue for one (code, folder) — what the banner's Show opens. */
+export function createRefusalIssueKey(code: string, folder: string): string {
+  return `create-refused:${code}:${folder.toLowerCase()}`;
+}
+
+/** Every create refused for the same access reason in one folder, as ONE issue. */
+export function createRefusalIssue(g: CreateRefusalGroup, ctx: IssueContext): HealthIssue {
+  const n = g.paths.length;
+  const what = g.notes === n ? plural(n, "new note") : plural(n, "new item");
+  const where = wherePhrase(g.folder);
+  const access = g.code === "no_write_access";
+  const shown = g.paths.slice(0, MAX_REFUSAL_PATHS_SHOWN);
+  return {
+    key: createRefusalIssueKey(g.code, g.folder),
+    docId: null,
+    path: g.folder === "" ? null : g.folder,
+    kind: "register-failed",
+    severity: "error",
+    title: access
+      ? `${what} not syncing: no permission to add notes ${where}`
+      : `${what} not syncing: notes can't be added at the top of this vault`,
+    why: access
+      ? `You don't have permission to add notes ${where}, so these stay on this computer. ` +
+        "Edits to notes that already exist still sync."
+      : "This vault's top level is locked, so these stay on this computer until they are in a folder.",
+    remedies: access ? ["contact-owner", "copy-details"] : ["copy-details"],
+    code: g.code,
+    explanation: {
+      meaning: access
+        ? `Before a new note can sync, the Remote Vault has to accept it. You can read ${
+            g.folder === "" ? "this vault" : "this folder"
+          } but not add to it, so the Remote Vault turned these down. Nothing was lost — ` +
+          "the files are safe on this computer."
+        : "This vault's top level is locked, so new notes can only be added inside a folder. " +
+          "Nothing was lost — the files are safe on this computer.",
+      next: access
+        ? "They sync by themselves as soon as your access changes. Baalda also checks again every 10 minutes."
+        : "They sync by themselves once they are inside a folder.",
+      fixes: access
+        ? [
+            `Ask ${ownerPhrase(ctx.owner)} to give you edit access ${where}.`,
+            "Or move these notes to a folder you can edit.",
+          ]
+        : ["Move these notes into a folder."],
+      safety: "only-here",
+    },
+    facts: [
+      { label: "Folder", value: g.folder === "" ? "Top of the vault" : g.folder },
+      { label: "Not syncing", value: num(n) },
+      ...shown.map((p) => ({ label: "Path", value: p })),
+      ...(n > shown.length ? [{ label: "More", value: `${num(n - shown.length)} more` }] : []),
+      { label: "Remote Vault code", value: g.code, copyable: true },
+    ],
+    autoRetries: access,
+  };
+}
+
 /** Cap on the `unregistered` warnings emitted. A vault mid-registration can have
  *  thousands; 50 rows say everything 5,000 would, and the total lands in the
  *  report's `detail` instead of in 4,950 DOM nodes. */
@@ -1011,7 +1077,13 @@ function buildIssues(
   for (const f of input.failures.content) {
     if (f.kind !== "shrink-held") push(contentIssue(f, issueCtx));
   }
-  for (const f of input.failures.registry) push(registryIssue(f, issueCtx));
+  // Creates refused for access: one issue per (reason, folder) with the file
+  // list, not one row per file — a script can strand hundreds in one folder.
+  for (const g of groupCreateRefusals(input.failures.registry)) push(createRefusalIssue(g, issueCtx));
+  for (const f of input.failures.registry) {
+    if ((f.kind === "note" || f.kind === "folder") && isHeldCreateCode(f.code)) continue;
+    push(registryIssue(f, issueCtx));
+  }
 
   // A limit that stopped the run but was recorded against nothing the user can
   // see still has to be said once.

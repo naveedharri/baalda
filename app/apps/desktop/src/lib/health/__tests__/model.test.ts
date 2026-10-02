@@ -1110,9 +1110,10 @@ describe("naming the owner", () => {
       }),
     );
     const byPath = new Map(r.issues.map((i) => [i.path, i]));
-    expect(byPath.get("Team/N.md")?.remedies).toContain("contact-owner");
-    expect(byPath.get("Team/N.md")?.explanation.meaning).toContain("view-only");
-    expect(byPath.get("Team/N.md")?.explanation.fixes[0]).toContain("Sam");
+    // Grouped by folder (see `createRefusalIssue`).
+    expect(byPath.get("Team")?.remedies).toContain("contact-owner");
+    expect(byPath.get("Team")?.explanation.meaning).toContain("but not add to it");
+    expect(byPath.get("Team")?.explanation.fixes[0]).toContain("Sam");
     expect(byPath.get("Other/N.md")?.remedies).not.toContain("contact-owner");
   });
 

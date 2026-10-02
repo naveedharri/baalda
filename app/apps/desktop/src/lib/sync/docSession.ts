@@ -1720,6 +1720,17 @@ export class SyncManager implements InboundHost {
    * took away arrive as `drop` frames just ahead of this one, and those name
    * themselves ({@link handleServerDrop}).
    */
+  /**
+   * This user just changed access in this vault (the Access panel saved). The
+   * server's `reauth` frame does the same thing when it arrives; this covers
+   * the window before it, and a server that does not echo it to the author.
+   */
+  retryHeldRegistrations(): void {
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) return;
+    if (this.registry.retryHeldRefusals()) this.handleRegistryChanged("reauth");
+  }
+
   handleServerReauth(scope: VaultScope): void {
     if (!scope.isCurrent()) return;
     this.aclChangedAt = Date.now();
@@ -1731,7 +1742,10 @@ export class SyncManager implements InboundHost {
     // changed too. That pull is what removes a note this user just lost access to
     // from their disk, and without it the removal would wait for the next
     // structural change or an app restart - long enough to look like the
-    // revocation hadn't worked.
+    // revocation hadn't worked. It is also the pass that re-asks every create
+    // the server refused for access: a grant that lifts the refusal lets those
+    // new notes register by themselves.
+    this.registry.retryHeldRefusals();
     this.handleRegistryChanged("reauth");
     // ...and the BINARIES are re-diffed against the server. This is the file
     // half of that same pull, and it has to be asked for separately: the pull
@@ -1891,7 +1905,16 @@ export class SyncManager implements InboundHost {
     // pass below decides what a `modified` means by asking whether a delete is
     // pending. Deciding that against half a batch is how an external rename
     // would randomly propagate as a delete plus a brand-new note.
+    let forgotHeld = false;
     for (const { path: relPath, kind, gone } of changes) {
+      // A new note or folder the server refused for access left the disk:
+      // nothing is stranded there any more (see `VaultRegistry.heldRefused`).
+      if (
+        (kind === "removed" || (kind === "tree" && gone === true)) &&
+        this.registry.forgetHeldRefusal?.(relPath)
+      ) {
+        forgotHeld = true;
+      }
       // A registered folder that is no longer on disk: the old half of a folder
       // moved outside the app, or a folder removed as ONE event (Finder's Move
       // to Trash is a rename). Held for the drain, which pairs it with a folder
@@ -1908,6 +1931,11 @@ export class SyncManager implements InboundHost {
       }
       if (kind !== "removed") continue;
       if (this.queueDiskDelete(scope, relPath)) queuedDelete = true;
+    }
+    // No pull follows an unregistered file's removal, so re-judge the finished
+    // run here or the pill and banner keep counting a file that is gone.
+    if (forgotHeld && !this.contentRunInFlight() && this.progress?.snapshot().phase === "error") {
+      this.completeRun(scope);
     }
     for (const { path: relPath, kind, unchanged, gone } of changes) {
       if (kind === "removed") continue; // handled above
@@ -4106,7 +4134,7 @@ export class SyncManager implements InboundHost {
       onProgress: (p) => {
         if (cleanupActive) return;
         this.logRunPhase(p);
-        this.onSyncProgress?.(this.withUploadBacklog(p));
+        this.onSyncProgress?.(this.withRefusals(this.withUploadBacklog(p)));
       },
       onDocState: (patch) => this.onDocState?.(patch),
     });
@@ -4415,6 +4443,8 @@ export class SyncManager implements InboundHost {
       this.registry.unmarkPushed(docId);
       this.divergedDocs.add(docId);
     }
+    // Creates refused for access are re-asked too, for the same reason.
+    this.registry.retryHeldRefusals();
     // The old uploader's failure list belongs to the run being retried; keeping
     // it would let `completeRun` re-report failures the retry just fixed.
     this.uploader = null;
@@ -5159,6 +5189,13 @@ export class SyncManager implements InboundHost {
       if (!this.registry.isPushed(docId) || this.serverEmpty.has(docId)) n++;
     }
     return n;
+  }
+
+  /** Stamp {@link SyncProgress.refused} on a failed run's emission. */
+  private withRefusals(p: SyncProgress | null): SyncProgress | null {
+    if (p?.phase !== "error") return p;
+    const refused = this.registry.heldRefusals().length;
+    return refused > 0 ? { ...p, refused } : p;
   }
 
   /** Stamp {@link SyncProgress.notUploaded} on a running phase's emission. */
