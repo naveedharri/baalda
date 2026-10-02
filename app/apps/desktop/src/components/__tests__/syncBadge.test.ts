@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isSyncRunActive,
   syncBadgeAction,
+  syncBadgeHold,
   syncBadgeLabel,
   syncBadgeTone,
   syncRunPercent,
@@ -351,5 +352,38 @@ describe("syncBadgeAction", () => {
       syncBadgeAction({ running: false, phase: "error", hasRetry: false, hasHealth: false })
         .kind,
     ).toBe("none");
+  });
+});
+
+// #273: a vault-wide hold outranks every per-note/per-run state, in every badge
+// that renders through SyncBadge — Vault Settings once read "Synced · 9m ago"
+// while the tab-bar pill said "Sync paused".
+describe("syncBadgeHold", () => {
+  const now = 1_000_000_000_000;
+
+  it("is null when nothing holds sync", () => {
+    expect(syncBadgeHold({ now })).toBeNull();
+    expect(syncBadgeHold({ enabled: true, pause: null, now })).toBeNull();
+  });
+
+  it("reads a neutral Paused while the vault folder is missing (#228)", () => {
+    const hold = syncBadgeHold({ rootMissing: true, enabled: true, pause: { until: null }, now });
+    expect(hold).toEqual({
+      tone: "offline",
+      label: "Paused",
+      title: "Sync is paused until the vault folder is back",
+    });
+  });
+
+  it("reads an amber Sync paused while the shrink brake holds writes (#252)", () => {
+    const hold = syncBadgeHold({ enabled: true, pause: { until: now + 10 * 60_000 }, now });
+    expect(hold?.tone).toBe("connecting");
+    expect(hold?.label).toBe("Sync paused");
+    expect(hold?.title).toContain("(in about 10 min)");
+    expect(syncBadgeHold({ enabled: true, pause: { until: null }, now })?.title).not.toContain("(in ");
+  });
+
+  it("ignores a brake on a vault whose sync is off", () => {
+    expect(syncBadgeHold({ enabled: false, pause: { until: null }, now })).toBeNull();
   });
 });

@@ -6,7 +6,6 @@ import { Banner } from "./components/Banner";
 import { ReconcileBanner } from "./components/ReconcileBanner";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
 import { SyncPausedBannerView } from "./components/SyncPausedBanner";
-import { syncPauseRemaining } from "./lib/sync/syncPause";
 import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
 import { NoteLimitBannerView, noteLimitBanner } from "./components/NoteLimitBanner";
 import {
@@ -22,7 +21,7 @@ import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FileTree } from "./components/FileTree";
-import { SyncBadge } from "./components/Identity";
+import { SyncBadge, syncBadgeHold } from "./components/Identity";
 import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
 import { Spinner } from "./components/Spinner";
@@ -886,39 +885,16 @@ function SyncIndicator({
   const progress = useStore((s) => s.syncProgress);
   const rootMissing = useStore((s) => s.structureNotice.rootMissing);
   const syncPause = useStore((s) => s.syncPause);
-  // The folder is gone (#228): nothing syncs until it is back, so the pill
-  // must not claim "Synced". Neutral, not an error — the banner has the fix.
-  if (rootMissing) {
-    return (
-      <span className="sync-badge offline" title="Sync is paused until the vault folder is back">
-        <span className="sync-dot" aria-hidden="true" />
-        Paused
-      </span>
-    );
-  }
-  // The server's shrink burst brake holds our writes (#252). Amber, not red:
-  // nothing is lost, and it ends on its own or when an owner releases it.
-  if (syncEnabled && syncPause) {
-    const remaining = syncPauseRemaining(syncPause, Date.now());
-    return (
-      <span
-        className="sync-badge connecting"
-        title={
-          "Many notes were emptied at once, so the server paused your sync. Your edits are safe " +
-          `on this device and sync when the pause ends${remaining ? ` (in ${remaining})` : ""} ` +
-          "or a vault owner or admin releases it."
-        }
-      >
-        <span className="sync-dot" aria-hidden="true" />
-        Sync paused
-      </span>
-    );
-  }
-  if (attachmentLocalOnly) {
+  // The folder is gone (#228) or the shrink brake holds our writes (#252):
+  // SyncBadge renders both itself (`syncBadgeHold`), and they outrank the
+  // attachment notice and the idle-vault hide below.
+  const held =
+    syncBadgeHold({ rootMissing, enabled: syncEnabled, pause: syncPause, now: Date.now() }) != null;
+  if (!held && attachmentLocalOnly) {
     return <SyncBadge status="offline" enabled={false} noteOpen />;
   }
   // "idle" is the reporter's pre-start value — nothing to report yet.
-  if (!noteOpen && (progress == null || progress.phase === "idle")) return null;
+  if (!held && !noteOpen && (progress == null || progress.phase === "idle")) return null;
   return (
     <SyncBadge
       status={status}
@@ -927,6 +903,8 @@ function SyncIndicator({
       pending={pending}
       progress={progress}
       noteOpen={noteOpen}
+      rootMissing={rootMissing}
+      pause={syncPause}
       // A run that could not proceed carries its own remedy: one click re-pulls
       // the registry and re-runs the content pass for everything unconfirmed.
       onRetry={syncEnabled ? () => void syncManager.retrySync() : undefined}

@@ -151,6 +151,12 @@ export function crdtBytes(doc: Y.Doc): number {
 
 const utf8 = new TextEncoder();
 
+/** What a note held by the server's shrink burst brake (#252) says. Shared by
+ *  both push paths: `docBatchPush.ts` gets it per item as `shrink_held`, this
+ *  engine infers it from a missing ack during a live pause. */
+export const SHRINK_HELD_REASON =
+  "Sync paused: many notes were emptied at once. This edit is safe on this device and syncs when the pause ends.";
+
 /** A doc whose content could not be pushed, after retries. */
 export interface UploadFailure {
   docId: string;
@@ -257,6 +263,18 @@ export interface ContentUploaderOptions {
   lazyPhase?: boolean;
   /** Abandon the run (vault switch). Checked before every doc. */
   shouldStop?: () => boolean;
+  /**
+   * True while the server's shrink burst brake holds this account's writes in
+   * this vault (#252; `SyncPauseTracker.current() != null`).
+   *
+   * A held socket is admitted read-only WITHOUT a `rejected` frame, so the
+   * server silently drops our update and the ack never comes: on its own that
+   * reads as "server did not acknowledge the content", with a Retry that cannot
+   * succeed until the hold lapses. Consulted only when an ack is missing, so a
+   * missing ack during a pause is reported as `shrink-held` — the same verdict
+   * the batch push gets per item — and requeued when the pause lifts.
+   */
+  syncPaused?: () => boolean;
   concurrency?: number;
   /** How long to wait for the initial server sync per doc. Default 10s. */
   syncTimeoutMs?: number;
@@ -620,7 +638,14 @@ export class ContentUploader {
       // the local-change path recognizes its own bytes and stays quiet.)
       await bridge.flushEgest();
       if (!flushed) {
-        this.fail(docId, relPath, "server did not acknowledge the content");
+        // Asked AFTER the wait, not before it: the pause may have been
+        // announced while we were waiting, and it is the pause, not a sick
+        // server, that swallowed the ack.
+        if (this.opts.syncPaused?.() ?? false) {
+          this.fail(docId, relPath, SHRINK_HELD_REASON, { kind: "shrink-held" });
+        } else {
+          this.fail(docId, relPath, "server did not acknowledge the content");
+        }
         return false;
       }
       this.streak = 0;

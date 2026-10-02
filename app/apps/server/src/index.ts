@@ -23,13 +23,15 @@ import { invalidateReadableCache } from "./permissions/readable-cache.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
 import {
+  BrakeGrowthCoalescer,
   isShrinkHeld,
+  setShrinkBrakeGrowHook,
   setShrinkBrakeHook,
   setShrinkBrakeReleaseHook,
   setShrinkHook,
   shrinkBrake,
 } from "./versions/shrink-guard.js";
-import { recordBrakeEngaged } from "./versions/brake-events.js";
+import { recordBrakeEngaged, updateBrakeCount } from "./versions/brake-events.js";
 import { createReleaseWatch, releaseWatchConfig } from "./sync/release-watch.js";
 import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
 
@@ -178,20 +180,47 @@ async function main() {
       console.info(`[versions] shrink brake lifted: reconnecting ${closed} connection(s) in vault ${vaultId}`);
     }
   };
+  // The recorded event of each live hold, so its count can be corrected as
+  // in-flight shrinks keep arriving after it engaged (#275).
+  const brakeEventIds = new Map<string, Promise<string | null>>();
+  const brakeGrowth = new BrakeGrowthCoalescer(1_000, (vaultId, userId) => {
+    const hold = shrinkBrake.holdOf(userId, vaultId);
+    const eventId = brakeEventIds.get(brakeKey(vaultId, userId));
+    if (!hold || !eventId) return; // lapsed or released meanwhile
+    const count = hold.count;
+    void vaultChannel
+      .publishBrake(vaultId, userId, { held: true, until: hold.until, count })
+      .catch(broadcastFailed("brake"));
+    void eventId
+      .then((id) => (id ? updateBrakeCount(id, count) : false))
+      .then((changed) => (changed ? vaultChannel.publishActivityChanged(vaultId) : undefined))
+      .catch((err) => console.error("[versions] shrink brake count update failed:", err));
+  });
+  setShrinkBrakeGrowHook((vaultId, userId) => brakeGrowth.grew(vaultId, userId));
   setShrinkBrakeHook((vaultId, userId, hold) => {
     const closed = disconnectUserInVault(sync, vaultId, userId);
     console.warn(`[versions] shrink brake: closed ${closed} live connection(s) in vault ${vaultId}`);
     void vaultChannel
       .publishBrake(vaultId, userId, { held: true, until: hold.until, count: hold.count })
       .catch(broadcastFailed("brake"));
-    void recordBrakeEngaged(vaultId, userId, hold.count, new Date(hold.until))
-      .then(() => vaultChannel.publishActivityChanged(vaultId))
-      .catch((err) => console.error("[versions] shrink brake record failed:", err));
     const key = brakeKey(vaultId, userId);
+    const recorded = recordBrakeEngaged(vaultId, userId, hold.count, new Date(hold.until)).then(
+      (id) => {
+        void vaultChannel.publishActivityChanged(vaultId).catch(broadcastFailed("activity-changed"));
+        return id;
+      },
+      (err) => {
+        console.error("[versions] shrink brake record failed:", err);
+        return null;
+      },
+    );
+    brakeEventIds.set(key, recorded);
     clearTimeout(lapseTimers.get(key));
     const timer = setTimeout(() => {
       lapseTimers.delete(key);
       if (isShrinkHeld(userId, vaultId)) return; // re-engaged meanwhile: its own timer
+      brakeEventIds.delete(key);
+      brakeGrowth.cancel(vaultId, userId);
       brakeLifted(vaultId, userId);
       void vaultChannel.publishBrake(vaultId, userId, { held: false }).catch(broadcastFailed("brake"));
       void vaultChannel.publishActivityChanged(vaultId).catch(broadcastFailed("activity-changed"));
@@ -215,6 +244,8 @@ async function main() {
       const key = brakeKey(vaultId, userId);
       clearTimeout(lapseTimers.get(key));
       lapseTimers.delete(key);
+      brakeEventIds.delete(key);
+      brakeGrowth.cancel(vaultId, userId);
       brakeLifted(vaultId, userId);
     } catch (err) {
       console.error("[versions] shrink brake release message failed:", err);

@@ -61,7 +61,7 @@
 import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
 import type { DocPushItem, DocPushResult } from "./bulkTypes";
-import { MAX_NOTE_BYTES, crdtBytes, type UploadFailure } from "./contentUpload";
+import { MAX_NOTE_BYTES, SHRINK_HELD_REASON, crdtBytes, type UploadFailure } from "./contentUpload";
 import {
   BATCH_MAX_DECODED_BYTES,
   BATCH_MAX_DOCS,
@@ -201,8 +201,7 @@ interface Prepared {
 
 /** The server's per-item code while the shrink burst brake holds us (#252). */
 export const SHRINK_HELD_CODE = "shrink_held";
-export const SHRINK_HELD_REASON =
-  "Sync paused: many notes were emptied at once. This edit is safe on this device and syncs when the pause ends.";
+export { SHRINK_HELD_REASON };
 
 export class DocBatchPusher {
   private readonly opts: DocBatchPusherOptions;

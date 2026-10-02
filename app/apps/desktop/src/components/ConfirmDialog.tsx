@@ -1,10 +1,18 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { AsyncButton } from "./AsyncButton";
 
 /**
  * A confirm for actions that are hard to take back. Rides the shared
  * `.modal-backdrop` / `.modal` shell so it stacks above Settings and the
  * access panel wherever it is raised from.
+ *
+ * PORTALLED to `document.body` (#272): rendered inline, any ancestor that is a
+ * containing block for `position: fixed` — the Activity feed's
+ * `container-type: inline-size`, the right panel's slide-in transform — laid
+ * the backdrop out inside that narrow column and clipped the buttons, so the
+ * confirm could not be pressed. Without a DOM (the static-markup tests) it
+ * renders inline.
  *
  * `onConfirm` may be async: the confirm button reports on it and the dialog
  * is closed by the caller once it lands (or stays open on failure, so the
@@ -30,6 +38,8 @@ export function ConfirmDialog({
   onConfirm: () => Promise<unknown> | unknown;
   onCancel: () => void;
 }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCancel();
@@ -38,9 +48,34 @@ export function ConfirmDialog({
     return () => window.removeEventListener("keydown", onKey);
   }, [onCancel]);
 
-  return (
-    <div className="modal-backdrop" onClick={onCancel}>
+  // Take focus so keys land in the dialog rather than on the button that
+  // raised it, and hand it back when the confirm closes.
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    ref.current?.focus({ preventScroll: true });
+    return () => {
+      if (previous?.isConnected) previous.focus({ preventScroll: true });
+    };
+  }, []);
+
+  const dialog = (
+    <div
+      className="modal-backdrop"
+      onClick={(e) => {
+        // A portal still bubbles React events up the component tree, so keep
+        // this confirm's clicks from reaching the row or panel that raised it.
+        e.stopPropagation();
+        onCancel();
+      }}
+      // Esc is ours (the window listener above): mark it handled so a host
+      // that closes on Esc (the right panel) does not close underneath us.
+      onKeyDown={(e) => {
+        if (e.key === "Escape") e.preventDefault();
+      }}
+    >
       <div
+        ref={ref}
+        tabIndex={-1}
         className={`modal confirm-dialog tone-${tone}`}
         role="alertdialog"
         aria-modal="true"
@@ -77,4 +112,5 @@ export function ConfirmDialog({
       </div>
     </div>
   );
+  return typeof document === "undefined" ? dialog : createPortal(dialog, document.body);
 }

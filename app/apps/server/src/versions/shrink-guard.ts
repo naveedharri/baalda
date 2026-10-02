@@ -65,7 +65,22 @@ export function reportShrink(
       console.error(`[versions] shrink hook failed for ${docId}:`, err);
     }
   }
-  if (userId && source !== "mcp" && shrinkBrake.record(userId, vaultId, docId)) {
+  const outcome = userId && source !== "mcp" ? shrinkBrake.recordShrink(userId, vaultId, docId) : null;
+  if (userId && outcome === "grew") {
+    // A held user's update that was already in flight when the brake engaged
+    // (a batch item past its hold check, a socket not yet kicked) still
+    // applied: the hold's count follows it, so every surface says how many
+    // notes were really emptied, not the threshold (#275).
+    const hold = shrinkBrake.holdOf(userId, vaultId);
+    if (hold && brakeGrowHook) {
+      try {
+        brakeGrowHook(vaultId, userId, hold);
+      } catch (err) {
+        console.error(`[versions] shrink brake grow hook failed for vault ${vaultId}:`, err);
+      }
+    }
+  }
+  if (userId && outcome === "engaged") {
     console.warn(
       `[versions] shrink brake engaged for user ${userId} in vault ${vaultId}: ` +
         `${shrinkBrake.threshold} populated notes sharply shrunk within ${shrinkBrake.windowMs / 1000}s; ` +
@@ -119,8 +134,10 @@ export interface BrakeHold {
  * op can be refused forever.
  *
  * The updates that tripped the brake were applied, each with its `pre-shrink`
- * version, so the damage is bounded at {@link ShrinkBrake.threshold} notes and
- * each is restorable from Version History.
+ * version, so the damage is bounded at {@link ShrinkBrake.threshold} notes plus
+ * any already in flight when it engaged (which the hold's `count` includes, so
+ * every surface names the real number, #275), and each is restorable from
+ * Version History.
  *
  * In-memory and per process. A restart forgets a hold (failing back to today's
  * behaviour, never to something less safe), and with several instances each
@@ -129,6 +146,10 @@ export interface BrakeHold {
 export class ShrinkBrake {
   private readonly hits = new Map<string, Array<{ docId: string; at: number }>>();
   private readonly held = new Map<string, BrakeHold>();
+  /** The distinct notes counted into each live hold: the burst that engaged
+   *  it plus every one that shrank while held, so `count` never double counts
+   *  a note that shrinks again. */
+  private readonly heldDocs = new Map<string, Set<string>>();
 
   constructor(
     public threshold: number,
@@ -144,6 +165,7 @@ export class ShrinkBrake {
     if (opts.holdMs !== undefined) this.holdMs = opts.holdMs;
     this.hits.clear();
     this.held.clear();
+    this.heldDocs.clear();
   }
 
   private key(userId: string, vaultId: string): string {
@@ -155,19 +177,37 @@ export class ShrinkBrake {
    * brake (distinct docs only — the same note shrinking twice is one note).
    */
   record(userId: string, vaultId: string, docId: string): boolean {
-    if (this.threshold <= 0) return false;
+    return this.recordShrink(userId, vaultId, docId) === "engaged";
+  }
+
+  /**
+   * Count one sharp shrink and say what it did: `engaged` the brake, `grew` a
+   * live hold's count (a note not yet counted in it — the hold's lapse never
+   * moves), or nothing (`null`).
+   */
+  recordShrink(userId: string, vaultId: string, docId: string): "engaged" | "grew" | null {
+    if (this.threshold <= 0) return null;
     const key = this.key(userId, vaultId);
     const t = this.now();
+    const hold = this.holdOf(userId, vaultId);
+    if (hold) {
+      const docs = this.heldDocs.get(key);
+      if (!docs || docs.has(docId)) return null;
+      docs.add(docId);
+      hold.count = docs.size;
+      return "grew";
+    }
     const recent = (this.hits.get(key) ?? []).filter(
       (h) => t - h.at <= this.windowMs && h.docId !== docId,
     );
     recent.push({ docId, at: t });
     this.hits.set(key, recent);
     this.prune(t);
-    if (recent.length < this.threshold || this.isHeld(userId, vaultId)) return false;
+    if (recent.length < this.threshold) return null;
     this.held.set(key, { until: t + this.holdMs, count: recent.length });
+    this.heldDocs.set(key, new Set(recent.map((h) => h.docId)));
     this.hits.delete(key);
-    return true;
+    return "engaged";
   }
 
   /** Are this user's content writes in this vault being held right now? */
@@ -184,6 +224,7 @@ export class ShrinkBrake {
     if (hold === undefined) return null;
     if (this.now() >= hold.until) {
       this.held.delete(key);
+      this.heldDocs.delete(key);
       return null;
     }
     return hold;
@@ -198,6 +239,7 @@ export class ShrinkBrake {
   release(userId: string, vaultId: string): boolean {
     const was = this.isHeld(userId, vaultId);
     this.held.delete(this.key(userId, vaultId));
+    this.heldDocs.delete(this.key(userId, vaultId));
     this.hits.delete(this.key(userId, vaultId));
     return was;
   }
@@ -243,6 +285,74 @@ let brakeHook: ShrinkBrakeHook | null = null;
 
 export function setShrinkBrakeHook(next: ShrinkBrakeHook | null): void {
   brakeHook = next;
+}
+
+/** Notified each time a live hold counts one more distinct note (#275), with
+ *  the hold as it now stands, so the process can correct the recorded event and
+ *  the held user's notice. Called once per note: coalesce before writing. */
+export type ShrinkBrakeGrowHook = (vaultId: string, userId: string, hold: BrakeHold) => void;
+
+let brakeGrowHook: ShrinkBrakeGrowHook | null = null;
+
+export function setShrinkBrakeGrowHook(next: ShrinkBrakeGrowHook | null): void {
+  brakeGrowHook = next;
+}
+
+/**
+ * Coalesces a hold's growth per (vault, user): the first grow schedules ONE
+ * flush `delayMs` later and every grow until then rides on it, so a 500-note
+ * script costs a DB write and a frame per window, not per note — and, being a
+ * throttle rather than a debounce, a steady stream still updates every window.
+ * Pure apart from the injected timer.
+ */
+export class BrakeGrowthCoalescer {
+  private readonly pending = new Map<string, unknown>();
+  private readonly setTimer: (fn: () => void, ms: number) => unknown;
+  private readonly clearTimer: (handle: unknown) => void;
+
+  constructor(
+    private readonly delayMs: number,
+    private readonly flush: (vaultId: string, userId: string) => void,
+    timers: {
+      setTimer?: (fn: () => void, ms: number) => unknown;
+      clearTimer?: (handle: unknown) => void;
+    } = {},
+  ) {
+    this.setTimer =
+      timers.setTimer ??
+      ((fn, ms) => {
+        const h = setTimeout(fn, ms);
+        h.unref?.();
+        return h;
+      });
+    this.clearTimer = timers.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+  }
+
+  /** One more note counted into this user's hold. */
+  grew(vaultId: string, userId: string): void {
+    const key = `${vaultId}\u0000${userId}`;
+    if (this.pending.has(key)) return;
+    this.pending.set(
+      key,
+      this.setTimer(() => {
+        this.pending.delete(key);
+        try {
+          this.flush(vaultId, userId);
+        } catch (err) {
+          console.error(`[versions] shrink brake count flush failed for vault ${vaultId}:`, err);
+        }
+      }, this.delayMs),
+    );
+  }
+
+  /** The hold ended (lapse or release): a pending flush has nothing to say. */
+  cancel(vaultId: string, userId: string): void {
+    const key = `${vaultId}\u0000${userId}`;
+    const h = this.pending.get(key);
+    if (h === undefined) return;
+    this.clearTimer(h);
+    this.pending.delete(key);
+  }
 }
 
 /** Notified when a hold is lifted early on this process, so it can tell every
