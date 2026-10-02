@@ -5,3 +5,5 @@
 // `memoryOutbox` (src/email/mailer.ts) — no SMTP, no network.
 process.env.EMAIL_FROM ||= "Baalda Test <test@baalda.local>";
 process.env.EMAIL_TRANSPORT ||= "memory";
+// And an operator inbox, so the "Report a bug" route is on (tests/bug-reports.test.ts).
+process.env.BUG_REPORT_EMAIL ||= "bugs@baalda.local";

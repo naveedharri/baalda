@@ -5,7 +5,7 @@ import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { canCreateIn, canEditDoc, canEditFolder, canWriteBlob } from "../../permissions/http-gates.js";
 import { deleteDocBlobs } from "./blobs.js";
-import { effectivePermission } from "../../permissions/resolver.js";
+import { createResolverCache, effectivePermission } from "../../permissions/resolver.js";
 import {
   listDeletedReadableDocsInVault,
   listReadableDocsInVault,
@@ -36,7 +36,14 @@ import {
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
 import { softDeleteSet } from "../../trash/retention.js";
+import { trashChanged } from "../../trash/activity.js";
 import { gainsConflictSuffix, takeForeignRename } from "../../registry/rename-guard.js";
+import {
+  CONFIRM_EMPTY_MAX,
+  STALLED_UPLOAD_MIN_AGE_MINUTES,
+  confirmEmptyNotes,
+  uploadHealth,
+} from "../../registry/upload-health.js";
 
 /** Most doc ids one `POST /vaults/:id/access-check` may ask about — the same
  *  bound the vault channel's `ready.revoked` uses for the list it corroborates,
@@ -430,11 +437,80 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // seconds on a managed database, and any proxy timeout in front of it turns
     // this into the client's "no answer, remove nothing" branch on every pass.
     // The same width the vault channel backfills at.
+    //
+    // One request-scoped `ResolverCache` for the whole batch (#263): the role,
+    // vault posture, join snapshot and each folder's ancestry are the same for
+    // every id, so 2,000 ids used to re-walk the same folders and re-read the
+    // same vault rows 2,000 times. The cache memoises those INPUTS only, never a
+    // verdict, and dies with this request — every answer is bit-for-bit the
+    // uncached one (`resolveManyEqualsPerDoc`), which is what this route's
+    // "do not remove on doubt" contract needs.
+    //
+    // `prefetch` then loads every id's location, folder chain and share rows in
+    // three reads, so the pool below runs almost entirely in memory. An id it
+    // cannot vouch for is resolved live, exactly as before.
     const none: string[] = [];
+    const resolverCache = createResolverCache();
+    await resolverCache.prefetch(pool, inVault);
     await runPool(inVault, config.backfillConcurrency, async (id) => {
-      if ((await effectivePermission(session.userId, id)) === "none") none.push(id);
+      if ((await effectivePermission(session.userId, id, pool, resolverCache)) === "none") none.push(id);
     });
     return c.json({ none });
+  });
+
+  // ── confirmed-empty notes / stalled uploads (#257) ───────────────────────
+  // The desktop settles a `ready.empty` doc whose file AND local CRDT are
+  // empty as "nothing anywhere"; this records that answer so a contentless
+  // note without the marker can be counted as an upload that never arrived.
+  // Informational only — see `registry/upload-health.ts`: nothing here or
+  // downstream clears, skips or overwrites content because of the marker.
+  registryRoutes.post("/vaults/:vaultId/notes/confirm-empty", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const org = await vaultOrg(vaultId);
+    if (!org) return c.json({ error: "Unknown vault" }, 404);
+    if (!(await orgRole(org, session.userId))) {
+      return c.json({ error: "Not a member of this vault" }, 403);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    const docIds: unknown = (body as { docIds?: unknown }).docIds;
+    if (!Array.isArray(docIds)) return c.json({ error: "docIds array required" }, 400);
+    const ids = [...new Set(docIds.filter((d): d is string => typeof d === "string" && d !== ""))];
+    if (ids.length > CONFIRM_EMPTY_MAX) {
+      return c.json({ error: `at most ${CONFIRM_EMPTY_MAX} docIds per request` }, 400);
+    }
+    // Only someone who could have written the content may vouch that there is
+    // none: the same per-doc resolver every write path uses, with its inputs
+    // memoised and prefetched for this request only (#263).
+    const editable: string[] = [];
+    const resolverCache = createResolverCache();
+    await resolverCache.prefetch(pool, ids);
+    await runPool(ids, config.backfillConcurrency, async (id) => {
+      if ((await effectivePermission(session.userId, id, pool, resolverCache)) === "edit") editable.push(id);
+    });
+    const confirmed = await confirmEmptyNotes(vaultId, editable);
+    return c.json({ confirmed });
+  });
+
+  registryRoutes.get("/vaults/:vaultId/upload-health", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const org = await vaultOrg(vaultId);
+    if (!org) return c.json({ error: "Unknown vault" }, 404);
+    const role = await orgRole(org, session.userId);
+    if (!role) return c.json({ error: "Not a member of this vault" }, 403);
+    // A vault-wide census (it counts notes the caller may not read), so it is
+    // for the people who manage the vault, like the access tree.
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "Owner or admin only", code: "not_manager" }, 403);
+    }
+    const raw = Number(c.req.query("minAgeMinutes"));
+    const minAge = Number.isFinite(raw)
+      ? Math.min(60 * 24 * 30, Math.max(0, Math.floor(raw)))
+      : STALLED_UPLOAD_MIN_AGE_MINUTES;
+    return c.json(await uploadHealth(vaultId, minAge));
   });
 
   // ── folders ──────────────────────────────────────────────────────────────
@@ -675,6 +751,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // Their derived index rows go with them (see the single-note delete below)…
     await purgeNoteIndex(deletedNoteIds);
     changed(c, row.vault_id);
+    if (deletedNoteIds.length > 0) trashChanged(row.vault_id);
     // …and anyone with one of them open is kicked off the now-gone doc. Without
     // this a folder delete left live editors happily typing into notes that no
     // longer exist anywhere in the tree — the single-note delete has always done
@@ -952,6 +1029,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // it on its next store (indexer.scheduleIndex / backfillIndex).
     await purgeNoteIndex([id]);
     changed(c, row.vault_id);
+    trashChanged(row.vault_id);
     // Kick live editors so their provider re-authenticates and learns the doc
     // is in Trash (pushes into it stay accepted until purge_after). Same as
     // MCP's delete_note; `evictDoc` so the next connect reloads from Postgres.
@@ -991,6 +1069,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (out.status === "error") {
       if (out.code === "note_limit_reached") return c.json({ error: out.message, code: out.code, limit: 20000 }, 402);
       if (out.code === "path_folder_mismatch") return c.json({ error: out.message, code: out.code }, 400);
+      if (out.code === "transient_file") return c.json({ error: out.message, code: out.code }, 400);
       if (out.code === "root_frozen") return c.json(ROOT_FROZEN_ERROR, 403);
       if (out.code === "not_readable") return c.json({ error: out.message, code: out.code }, 409);
       return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
@@ -1092,6 +1171,7 @@ export async function deleteRegisteredFile(
     // device turns up still holding the id. Re-registering the id stays allowed.
     await tombstoneFile(pool, id);
     await pool.query("DELETE FROM files WHERE id = $1", [id]);
-    console.info(`[registry] deleted file ${row.path} (${id}) and ${blobs} blob(s)`);
+    // Ids and counts only — never the path (#267).
+    console.info(`[registry] deleted file ${id} in vault ${row.vault_id} and ${blobs} blob(s)`);
     return { status: "deleted", vaultId: row.vault_id, path: row.path };
 }

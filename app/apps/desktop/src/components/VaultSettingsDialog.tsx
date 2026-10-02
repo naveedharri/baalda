@@ -2,7 +2,7 @@
    the app, split out of `AccountMenu.tsx` so it can load on demand. Nothing
    here is on the first screen: the sidebar footer (identity bar + popovers)
    stays eager, and this chunk lands when someone actually opens settings. */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
   type McpToolInfo,
   type McpTokenRow,
@@ -14,7 +14,7 @@ import {
 } from "../lib/api";
 import { toast } from "../lib/toast";
 import { agoFromIso, checkpointTitle, noteCountLabel } from "./versionFormat";
-import { ITEM_COLORS, itemColorValue } from "../lib/appearance";
+import { ITEM_COLORS, itemColorFill, itemColorValue } from "../lib/appearance";
 import { authManager } from "../lib/auth/authManager";
 import {
   classifyLimitError,
@@ -34,8 +34,7 @@ import {
   useUpdateState,
 } from "../lib/updater";
 import { readOrgVaults, useStore, type InviteResult } from "../store";
-import { buildInviteLink } from "../lib/inviteLink";
-import { SyncBadge } from "./Identity";
+import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
 import { AccessPanel } from "./AccessPanel";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -400,13 +399,6 @@ function GeneralTab({
   onRequestSignIn?: () => void;
 }) {
   const vault = useStore((s) => s.vault);
-  const syncStatus = useStore((s) => s.syncStatus);
-  const syncEnabledState = useStore((s) => s.syncEnabled);
-  const lastSyncedAt = useStore((s) => s.lastSyncedAt);
-  const syncPending = useStore((s) => s.syncPending);
-  // The vault's bulk-run counter ("Syncing 128/500"), so this row reports the
-  // whole vault's state and not just whether a socket is up.
-  const syncProgress = useStore((s) => s.syncProgress);
   const serverUrl = useStore((s) => s.serverUrl);
   const authStatus = useStore((s) => s.authStatus);
   // The sidebar paints before the session restore finishes, so this page can be
@@ -456,16 +448,6 @@ function GeneralTab({
           <div className="muted">
             This vault syncs to your team. Its notes stay as plain files on
             disk and live-sync to everyone with access.
-          </div>
-          <div className="menu-row">
-            <span className="menu-row-label">Sync</span>
-            <SyncBadge
-              status={syncStatus}
-              enabled={syncEnabledState}
-              lastSyncedAt={lastSyncedAt}
-              pending={syncPending}
-              progress={syncProgress}
-            />
           </div>
           <div className="menu-row">
             <span className="menu-row-label">Server</span>
@@ -859,7 +841,6 @@ function FreezeRootRow({ canManage }: { canManage: boolean }) {
   return (
     <>
       <div className="menu-sep" />
-      <div className="subhead">Vault structure</div>
       <label className="menu-row toggle-row">
         <span className="menu-row-label">
           Freeze vault root
@@ -1833,6 +1814,28 @@ function MembersTab({ canManage }: { canManage: boolean }) {
     }
   };
 
+  /**
+   * Re-send an invitation: invite the same address with the same role again.
+   * The server replaces the pending row with a fresh one (new link, new expiry)
+   * and emails it — which is what an expired invitation needs (#268).
+   */
+  const [resendBusyId, setResendBusyId] = useState<string | null>(null);
+  const resend = async (inv: { id: string; email: string; role: string }) => {
+    setResendBusyId(inv.id);
+    setInviteError(null);
+    setLimitNudge(null);
+    try {
+      const role = inv.role === "admin" ? "admin" : "member";
+      setCreated(await useStore.getState().inviteMember(inv.email, role));
+    } catch (e) {
+      const kind = classifyLimitError(e);
+      if (kind) setLimitNudge({ kind, limit: limitFromError(e) });
+      else setInviteError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setResendBusyId(null);
+    }
+  };
+
   const invite = async () => {
     if (!inviteEmail.trim()) return;
     setBusy(true);
@@ -1993,13 +1996,33 @@ function MembersTab({ canManage }: { canManage: boolean }) {
         <>
           <div className="subhead">Invited — awaiting response</div>
           <ul className="member-list">
-            {pendingInvitations.map((inv) => (
+            {pendingInvitations.map((inv) => {
+              // Better Auth keeps an expired row at status "pending"; only the
+              // date says its link is dead.
+              const expired = isInvitationExpired(inv.expiresAt);
+              return (
               <li key={inv.id}>
                 <Avatar label={inv.email} />
                 <span className="member-name">{inv.email}</span>
-                <span className="member-role pending">{inv.role} · pending</span>
+                <span
+                  className="member-role pending"
+                  title={
+                    inv.expiresAt
+                      ? `${expired ? "Expired" : "Expires"} ${new Date(inv.expiresAt).toLocaleString()}`
+                      : undefined
+                  }
+                >
+                  {inv.role} · {expired ? "expired" : "pending"}
+                </span>
                 {canManage && (
                   <>
+                    <button
+                      className="link-btn"
+                      disabled={resendBusyId !== null}
+                      onClick={() => void resend(inv)}
+                    >
+                      {resendBusyId === inv.id ? "Sending…" : "Resend"}
+                    </button>
                     {/* The link is useful long after the invite was sent: the
                         email may have bounced, or this server may not send any. */}
                     <button
@@ -2037,7 +2060,8 @@ function MembersTab({ canManage }: { canManage: boolean }) {
                   </>
                 )}
               </li>
-            ))}
+              );
+            })}
           </ul>
         </>
       )}
@@ -3318,7 +3342,9 @@ function AppearanceTab() {
                 >
                   <span
                     className="appearance-glyph"
-                    style={{ color: itemColorValue(active) }}
+                    style={
+                      { color: itemColorValue(active), "--glyph-fill": itemColorFill(active) } as CSSProperties
+                    }
                     aria-hidden="true"
                   >
                     {item.isDir ? APPEARANCE_ICON.folder : APPEARANCE_ICON.note}
@@ -3339,7 +3365,7 @@ function AppearanceTab() {
                         key={c.id}
                         type="button"
                         className={`swatch${active === c.id ? " on" : ""}`}
-                        style={{ backgroundColor: c.value }}
+                        style={{ backgroundColor: c.fill, boxShadow: `inset 0 0 0 1.5px ${c.value}` }}
                         title={c.label}
                         aria-label={c.label}
                         onClick={() => useStore.getState().setItemColor(item.path, c.id)}

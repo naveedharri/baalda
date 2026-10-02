@@ -3,14 +3,12 @@ import { pool } from "../../db/pool.js";
 import { canEditDoc } from "../../permissions/http-gates.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { effectivePermission } from "../../permissions/resolver.js";
-import {
-  listDeletedReadableDocsInVault,
-  listReadableDocsInVault,
-  vaultAccess,
-} from "../../permissions/vault-docs.js";
+import { vaultAccess } from "../../permissions/vault-docs.js";
+import { deletedReadableDocsForActivity, readableDocsForActivity } from "../../permissions/readable-cache.js";
 import { extractDocText } from "../../index/indexer.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
 import { recordVersion, sha256Hex, stampLastEdited, type VersionCause } from "../../versions/capture.js";
+import { VERSION_CONTENT, VERSION_TEXT_JOIN } from "../../versions/texts.js";
 import {
   captureCheckpoint,
   getCheckpointSummary,
@@ -151,8 +149,9 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
 
     const { rows } = await pool.query<VersionRow>(
       `SELECT v.id, v.doc_id, v.created_at, v.cause, v.author_id,
-              u.name AS author_name, v.sha256, octet_length(v.content) AS size
+              u.name AS author_name, v.sha256, octet_length(${VERSION_CONTENT}) AS size
          FROM note_versions v
+         ${VERSION_TEXT_JOIN}
          LEFT JOIN "user" u ON u.id = v.author_id
         WHERE v.doc_id = $1
         ORDER BY v.id DESC`,
@@ -175,8 +174,10 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     if (!Number.isFinite(versionId)) return c.json({ error: "Unknown version" }, 404);
     const { rows } = await pool.query<VersionRow & { content: string }>(
       `SELECT v.id, v.doc_id, v.created_at, v.cause, v.author_id,
-              u.name AS author_name, v.sha256, octet_length(v.content) AS size, v.content
+              u.name AS author_name, v.sha256, octet_length(${VERSION_CONTENT}) AS size,
+              ${VERSION_CONTENT} AS content
          FROM note_versions v
+         ${VERSION_TEXT_JOIN}
          LEFT JOIN "user" u ON u.id = v.author_id
         WHERE v.id = $1`,
       [versionId],
@@ -207,11 +208,15 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     const versionId = Number.parseInt(c.req.param("versionId"), 10);
     if (!Number.isFinite(versionId)) return c.json({ error: "Unknown version" }, 404);
     const { rows } = await pool.query<{ doc_id: string; content: string }>(
-      "SELECT doc_id, content FROM note_versions WHERE id = $1",
+      `SELECT v.doc_id, ${VERSION_CONTENT} AS content
+         FROM note_versions v ${VERSION_TEXT_JOIN} WHERE v.id = $1`,
       [versionId],
     );
     const version = rows[0];
     if (!version || version.doc_id !== docId) return c.json({ error: "Unknown version" }, 404);
+    // Fail safe: a version whose text cannot be resolved is never "restored"
+    // as an empty note.
+    if (version.content == null) return c.json({ error: "Version content unavailable" }, 409);
 
     // Capture where we are BEFORE overwriting it, so a revert is itself
     // undoable. `recordVersion` dedupes against the newest stored version, so
@@ -325,11 +330,24 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     const limitRaw = Number.parseInt(c.req.query("limit") ?? "", 10);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, SHRINK_EVENTS_MAX) : SHRINK_EVENTS_MAX;
 
+    // Candidates FIRST (#261): the docs with any `pre-shrink` version in the
+    // window, through `note_versions_pre_shrink_idx` (migration 041). Shrinks
+    // are rare, so this is usually empty and no readable set is built at all;
+    // otherwise readability is checked for these few ids only, against the
+    // display-only cached sets (`permissions/readable-cache.ts` — this listing
+    // drives nothing on a client's disk). It used to build both full sets on
+    // every call and send every readable id back as `= ANY($3)`.
+    const { rows: candidateRows } = await pool.query<{ doc_id: string }>(
+      `SELECT DISTINCT doc_id FROM note_versions
+        WHERE vault_id = $1 AND cause = 'pre-shrink' AND created_at >= $2`,
+      [vaultId, since],
+    );
+    if (candidateRows.length === 0) return c.json({ items: [], truncated: false, afterIsCurrent: true });
     const [live, deleted] = await Promise.all([
-      listReadableDocsInVault(session.userId, vaultId),
-      listDeletedReadableDocsInVault(session.userId, vaultId),
+      readableDocsForActivity(session.userId, vaultId),
+      deletedReadableDocsForActivity(session.userId, vaultId),
     ]);
-    const readable = [...live, ...deleted];
+    const readable = candidateRows.map((r) => r.doc_id).filter((d) => live.has(d) || deleted.has(d));
     if (readable.length === 0) return c.json({ items: [], truncated: false, afterIsCurrent: true });
 
     const { rows } = await pool.query<{
@@ -341,9 +359,10 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
       deleted: boolean;
     }>(
       `SELECT v.id, v.doc_id, n.rel_path, v.created_at,
-              char_length(v.content)::int AS before_chars,
+              char_length(${VERSION_CONTENT})::int AS before_chars,
               n.deleted_at IS NOT NULL AS deleted
          FROM note_versions v
+         ${VERSION_TEXT_JOIN}
          JOIN notes n ON n.id = v.doc_id AND n.vault_id = $1
         WHERE v.vault_id = $1 AND v.cause = 'pre-shrink' AND v.created_at >= $2
           AND v.doc_id = ANY($3::text[])

@@ -21,18 +21,19 @@ beforeEach(() => {
   host = document.createElement("div"); root = createRoot(host);
 });
 afterEach(() => act(() => root.unmount()));
+// The repair renders as a ConfirmDialog, which portals to document.body (#272).
 async function render() { await act(async () => root.render(createElement(AssistantLocalRepair, { id: finding.id, snapshot, onClose: vi.fn() }))); }
-async function apply() { await act(async () => [...host.querySelectorAll("button")].find(b => b.textContent?.includes("Save copies"))!.click()); }
+async function apply() { await act(async () => [...document.body.querySelectorAll("button")].find(b => b.textContent?.includes("Save copies"))!.click()); }
 it("previews exact files and only copies after approval with the original epoch", async () => {
-  await render(); expect(host.textContent).toContain("Big.md"); expect(env.copy).not.toHaveBeenCalled();
+  await render(); expect(document.body.textContent).toContain("Big.md"); expect(env.copy).not.toHaveBeenCalled();
   await apply();
   expect(env.checks).toHaveBeenCalledWith({ doc: "Big.md" }, 1);
   expect(env.copy).toHaveBeenCalledWith("Big.md", "/backup/Big.md", 1);
-  expect(host.textContent).toContain("Saved 1 of 1");
+  expect(document.body.textContent).toContain("Saved 1 of 1");
 });
 it("refuses a changed finding before opening a destination picker", async () => {
   await render(); env.checks.mockResolvedValue({ results: [{ ...finding, count: 0, items: [] }] });
-  await apply(); expect(env.pick).not.toHaveBeenCalled(); expect(host.textContent).toContain("finding changed");
+  await apply(); expect(env.pick).not.toHaveBeenCalled(); expect(document.body.textContent).toContain("finding changed");
 });
 it("never exports another vault if the user switches while the picker is open", async () => {
   await render(); env.pick.mockImplementation(async () => { env.state.vault = { path: "/other", epoch: 2 }; return "/backup"; });

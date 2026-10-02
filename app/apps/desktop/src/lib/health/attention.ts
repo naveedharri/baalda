@@ -126,6 +126,8 @@ export function issueGroupTitle(kind: HealthIssueKind, n: number): string {
       return "Linked paths ignored by sync";
     case "shared-file":
       return `${plural(n, "file", "files")} shared by more than one note`;
+    case "sync-paused":
+      return "Sync paused";
   }
 }
 
@@ -138,6 +140,8 @@ export function issueRowSentence(issue: Pick<HealthIssue, "kind" | "title">): st
       return "Your plan's limit stopped new notes from syncing";
     case "orphan-history":
       return "History kept for notes this vault no longer has";
+    case "sync-paused":
+      return "Many notes were emptied at once, so sync is paused for a while";
     default:
       return issue.title;
   }

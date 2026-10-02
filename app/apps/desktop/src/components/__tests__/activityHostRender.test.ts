@@ -12,6 +12,8 @@ const h = vi.hoisted(() => ({
   api: {
     listTrash: vi.fn(),
     listShrinkEvents: vi.fn(),
+    listInvitationExpiries: vi.fn(),
+    listShrinkBrakes: vi.fn(),
   },
 }));
 
@@ -28,6 +30,7 @@ vi.mock("../../lib/sync/docSession", () => ({
       content: [{ docId: "d1", relPath: "x.md", reason: "network" }],
       limitCode: null,
     }),
+    setActivityChangedListener: () => {},
   },
 }));
 vi.mock("../../lib/ipc", () => ({ listTrashCopies: vi.fn(async () => []) }));
@@ -87,6 +90,8 @@ beforeEach(() => {
   h.vaultId = null;
   h.api.listTrash.mockResolvedValue({ items: [], truncated: false });
   h.api.listShrinkEvents.mockResolvedValue({ items: [], truncated: false, afterIsCurrent: true });
+  h.api.listInvitationExpiries.mockResolvedValue([]);
+  h.api.listShrinkBrakes.mockResolvedValue({ items: [], canRelease: false });
   try {
     localStorage.clear();
   } catch {
@@ -136,7 +141,7 @@ it("settles for a synced vault with rows, and stays still on unrelated store chu
   setStore(
     {
       syncEnabled: true,
-      session: { token: "x" },
+      session: { token: "x", user: { id: "u1" } },
       vaultSyncStatus: "synced",
       vault: { path: "/v2", epoch: 1 },
       rightPanel: null,

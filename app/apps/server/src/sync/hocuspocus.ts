@@ -1,13 +1,15 @@
 import { Server } from "@hocuspocus/server";
 import * as Y from "yjs";
 import { config } from "../config.js";
+import { pool } from "../db/pool.js";
+import { createResolverCache } from "../permissions/resolver.js";
 import { verifySyncToken } from "../tokens/sync-token.js";
 import { syncPermission } from "../trash/access.js";
 import { appendUpdate, loadDocState } from "../yjs/persistence.js";
 import { scheduleIndex } from "../index/indexer.js";
 import { formatDocName, parseDocName } from "./doc-name.js";
 import { redisExtensions } from "./redis-extension.js";
-import { reportShrink } from "../versions/shrink-guard.js";
+import { isShrinkHeld, reportShrink } from "../versions/shrink-guard.js";
 
 /**
  * Hocuspocus sync server (spec 03 §3, 04 §4).
@@ -72,6 +74,14 @@ export interface SyncContext {
   /** Throttle for {@link RejectedHook}: last time this connection reported a
    *  dropped read-only edit (ms epoch). */
   lastRejectedAt?: number;
+  /**
+   * Read-only only because the shrink burst brake holds this user's content
+   * writes in this vault (`versions/shrink-guard.ts ShrinkBrake`), not because
+   * of a grant. Such a connection never reports `rejected`: that frame sends
+   * the desktop down its view-grant rebase, and a hold must leave the device's
+   * copy untouched.
+   */
+  shrinkHeld?: boolean;
 }
 
 /** Minimum gap between two `rejected` reports for one connection. */
@@ -196,7 +206,7 @@ export function createSyncServer(
     async beforeSync(data) {
       if (!onRejected) return;
       const ctx = data.context as SyncContext | undefined;
-      if (!ctx?.readOnly || !ctx.userId) return;
+      if (!ctx?.readOnly || !ctx.userId || ctx.shrinkHeld) return;
       if (data.type !== 1 && data.type !== 2) return;
       const now = Date.now();
       if (ctx.lastRejectedAt && now - ctx.lastRejectedAt < REJECTED_THROTTLE_MS) return;
@@ -264,7 +274,9 @@ export function createSyncServer(
       if (claims.userId) {
         let permission;
         try {
-          permission = await syncPermission(claims.userId, parsed.docId);
+          // Per-connect cache: fewer round trips, never a reused answer — it
+          // is created here and dropped with this call (#263).
+          permission = await syncPermission(claims.userId, parsed.docId, pool, createResolverCache());
         } catch (err) {
           // Fail CLOSED. A resolver that cannot answer must not be read as
           // "carry on with whatever the token claimed" — that is the hole this
@@ -286,16 +298,23 @@ export function createSyncServer(
       // covers only tokens already in flight at deploy time, and it dies with
       // them. It is reachable only by someone who can sign with `JWT_SECRET`.
 
+      // The shrink burst brake (#252): this user just emptied several populated
+      // notes in this vault, so their content writes are held for a while. The
+      // connection is admitted read-only (updates dropped unapplied, the client
+      // keeps them) and flagged so it never reports `rejected`.
+      const shrinkHeld = !readOnly && isShrinkHeld(claims.userId, parsed.vaultId);
+
       // View grants: server silently rejects updates from this connection.
-      if (readOnly) {
+      if (readOnly || shrinkHeld) {
         data.connectionConfig.readOnly = true;
       }
 
       const context: SyncContext = {
         docId: parsed.docId,
         vaultId: parsed.vaultId,
-        readOnly,
+        readOnly: readOnly || shrinkHeld,
         userId: claims.userId ?? null,
+        ...(shrinkHeld ? { shrinkHeld: true } : {}),
       };
       return context;
     },
@@ -349,8 +368,15 @@ export function createSyncServer(
       const parsed = parseDocName(data.documentName);
       if (!parsed) return;
       if (before !== undefined) {
-        const ctx = data.context as Partial<SyncContext> | undefined;
-        reportShrink(parsed.vaultId, parsed.docId, before, text, ctx?.userId ?? null);
+        const ctx = data.context as (Partial<SyncContext> & { source?: string }) | undefined;
+        reportShrink(
+          parsed.vaultId,
+          parsed.docId,
+          before,
+          text,
+          ctx?.userId ?? null,
+          ctx?.source ?? null,
+        );
       }
       // NEVER let this reject. Hocuspocus calls `onChange` unawaited AND
       // uncaught (`handleDocumentUpdate` → `this.hooks("onChange", …)`), so a
@@ -415,6 +441,31 @@ export function disconnectDoc(
   docId: string,
 ): void {
   server.hocuspocus.closeConnections(formatDocName(vaultId, docId));
+}
+
+/**
+ * Close every live socket ONE user holds on any doc in a vault. Used when the
+ * shrink burst brake engages (#252): the client reconnects, and
+ * `onAuthenticate` re-admits it read-only for as long as the hold lasts.
+ * Returns how many connections were closed.
+ */
+export function disconnectUserInVault(
+  server: Server<SyncContext>,
+  vaultId: string,
+  userId: string,
+): number {
+  const prefix = formatDocName(vaultId, "");
+  let closed = 0;
+  for (const [name, doc] of server.hocuspocus.documents) {
+    if (!name.startsWith(prefix)) continue;
+    for (const conn of doc.getConnections()) {
+      const ctx = conn.context as Partial<SyncContext> | undefined;
+      if (ctx?.userId !== userId) continue;
+      conn.close();
+      closed++;
+    }
+  }
+  return closed;
 }
 
 /**

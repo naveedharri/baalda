@@ -169,7 +169,10 @@ export interface BridgeConfig {
    * the note, on every device.
    *
    * A PARTIAL truncation still applies — this is only the all-or-nothing case.
-   * Set true where clearing a note from disk must be honoured verbatim.
+   * "Empty" also covers a file with no body (whitespace, a lone newline or bare
+   * frontmatter) over a doc with at least 200 characters of body (#256,
+   * `blankFile.ts`). Set true where clearing a note from disk must be honoured
+   * verbatim.
    */
   allowTruncateFromDisk: boolean;
   /** First retry delay after a failed egest write; doubles per consecutive

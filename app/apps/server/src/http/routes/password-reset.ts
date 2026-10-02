@@ -99,7 +99,7 @@ passwordResetRoutes.post("/password-reset/request", async (c) => {
       resetPasswordEmail({ to: user.email, url, validMinutes: RESET_TOKEN_TTL_SECONDS / 60 }),
     );
   } catch (err) {
-    console.error(`[email] password reset to ${user.email} failed:`, err);
+    console.error(`[email] password reset for user ${user.id} failed:`, err);
     return c.json(
       {
         error: "send_failed",

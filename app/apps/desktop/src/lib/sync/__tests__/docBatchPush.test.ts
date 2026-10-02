@@ -593,3 +593,37 @@ describe("failures", () => {
     expect(out.failures[0]).toMatchObject({ docId: "big", permanent: true });
   });
 });
+
+describe("the shrink burst brake (#252)", () => {
+  it("maps a shrink_held item to a retryable shrink-held failure and keeps the local doc", async () => {
+    const { io } = harness();
+    const bridge = await NoteBridge.open(io, { docId: "h", path: "h.md", seedFromFile: false });
+    bridge.edit((t) => t.insert(0, "typed while paused"));
+    await bridge.whenPersisted();
+
+    const discarded: string[] = [];
+    const h = pusher(io, [{ docId: "h", relPath: "h.md", serverEmpty: false }], {
+      discard: async (docId) => {
+        discarded.push(docId);
+      },
+      answer: (items) =>
+        items.map((i) => ({
+          docId: i.docId,
+          status: "error" as const,
+          code: "shrink_held",
+          error: "content writes are paused",
+        })),
+    });
+    const out = await h.p.run();
+
+    expect(out.failures).toHaveLength(1);
+    expect(out.failures[0]).toMatchObject({ docId: "h", kind: "shrink-held" });
+    expect(out.failures[0].permanent).toBeUndefined();
+    expect(out.failures[0].reason).toMatch(/Sync paused/);
+    // Nothing confirmed, nothing thrown away, nothing sent down the view-only rebase.
+    expect(h.pushed).toEqual([]);
+    expect(discarded).toEqual([]);
+    expect(out.denied).toEqual([]);
+    expect(text(h.bridges.get("h")!)).toBe("typed while paused");
+  });
+});

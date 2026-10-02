@@ -42,6 +42,7 @@ import type { SyncStatus } from "./lib/sync/syncManager";
 import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
 import type { StructureNotice, VoiceSpeaker } from "./lib/sync/docSession";
+import type { SyncPause } from "./lib/sync/syncPause";
 import { MicPermissionError } from "./lib/voice/capture";
 import * as perf from "./lib/perf";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
@@ -357,6 +358,13 @@ interface AppStore {
   /** True while the open note has local edits not yet acked by the server
    *  (drives the "Saving…" badge state). */
   syncPending: boolean;
+  /** The server's shrink burst brake is pausing OUR writes in this vault
+   *  (#252): "Sync paused" on the pill, Health and a banner. Null otherwise. */
+  syncPause: SyncPause | null;
+  /** The `since` of the pause whose banner was dismissed (the pill and Health
+   *  keep saying it until it lifts). */
+  syncPauseDismissed: number | null;
+  dismissSyncPause: () => void;
   /**
    * Counted progress of the current vault's sync run; null when none is running.
    * Belongs to ONE vault — dropped on every vault switch (see
@@ -710,7 +718,9 @@ interface AppStore {
    *  RETURNS the invitation AND whether the email actually went out: a server
    *  that can't send, or a provider that refused, leaves the link as the only
    *  way the invitation ever reaches the person — so the UI must know. */
-  inviteMember: (email: string, role: "member" | "admin") => Promise<InviteResult>;
+  /** Invite into the active vault, or into `organizationId` when given (the
+   *  Activity feed's Resend names the vault the notice belongs to). */
+  inviteMember: (email: string, role: "member" | "admin", organizationId?: string) => Promise<InviteResult>;
   /** Re-send the sign-up confirmation email to the signed-in address. */
   resendVerificationEmail: () => Promise<void>;
   /**
@@ -1632,6 +1642,7 @@ function vaultScopedSyncReset() {
     syncStatus: "offline" as SyncStatus,
     vaultSyncStatus: "offline" as SyncStatus,
     syncPending: false,
+    syncPause: null,
     syncProgress: null,
     failedRunToken: 0,
     vaultReadySeen: false,
@@ -1816,6 +1827,7 @@ export const useStore = create<AppStore>((set, get) => ({
   userInvitations: [],
   ...vaultScopedSyncReset(),
   lastSyncedAt: null,
+  syncPauseDismissed: null,
   vaultPresence: [],
   voiceSpeakers: [],
   broadcasting: false,
@@ -2618,6 +2630,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
   initAuth: async () => {
     syncManager.setStatusListener((status) => get().setSyncStatus(status));
+    syncManager.setSyncPauseListener((pause) => set({ syncPause: pause }));
     syncManager.setVaultStatusListener((status) =>
       set(
         status === "synced"
@@ -3510,12 +3523,12 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  inviteMember: async (email, role) => {
-    const activeOrgId = get().session?.activeOrganizationId ?? undefined;
+  inviteMember: async (email, role, organizationId) => {
+    const orgId = organizationId ?? get().session?.activeOrganizationId ?? undefined;
     const invitation = await authManager.api.inviteMember({
       email,
       role,
-      organizationId: activeOrgId,
+      organizationId: orgId,
     });
     // Creating the row sends nothing by itself — the explicit send is what
     // lets us say "emailed" only when the provider actually took the message,
@@ -4346,6 +4359,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
   // A server ack of all pending changes: this is the real "synced just now".
   markSynced: () => set({ lastSyncedAt: Date.now(), syncPending: false }),
+  dismissSyncPause: () => set((s) => ({ syncPauseDismissed: s.syncPause?.since ?? null })),
 
   setSyncProgress: (progress) => {
     const prev = get().syncProgress;

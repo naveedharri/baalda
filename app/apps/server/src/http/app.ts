@@ -5,6 +5,11 @@ import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from "better-a
 import { config } from "../config.js";
 import { auth } from "../auth/auth.js";
 import { throttledSignIn } from "../auth/signin-throttle.js";
+import {
+  CLIENT_VERSION_HEADER,
+  clientVersionPolicy,
+  requireSupportedClient,
+} from "./client-version.js";
 import { oauthConnectRoutes } from "./routes/oauth-connect.js";
 import { accountPageRoutes } from "./routes/account-pages.js";
 import { invitationRoutes } from "./routes/invitations.js";
@@ -18,6 +23,7 @@ import { bootstrapRoutes } from "./routes/bootstrap.js";
 import { syncTokenRoutes } from "./routes/sync-token.js";
 import { vaultTokenRoutes } from "./routes/vault-token.js";
 import { desktopOauthRoutes } from "./routes/desktop-oauth.js";
+import { bugReportRoutes } from "./routes/bug-reports.js";
 import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
 import { createHousekeeperRoutes } from "./routes/housekeeper.js";
@@ -26,6 +32,7 @@ import { createMcpRoutes } from "./routes/mcp.js";
 import { createRepairRoutes } from "./routes/repair.js";
 import { createVersionRoutes } from "./routes/versions.js";
 import { createTrashRoutes } from "./routes/trash.js";
+import { createShrinkBrakeRoutes } from "./routes/shrink-brake.js";
 import { createBillingRoutes } from "./routes/billing.js";
 import { PolarBillingProvider } from "../billing/polar.js";
 import type { BillingProvider } from "../billing/provider.js";
@@ -143,6 +150,9 @@ export function createApp(deps: AppDeps): Hono {
         // Opaque per-client instance id on registry writes, so the vault channel
         // doesn't tell a client to re-pull its own structural change.
         ORIGIN_HEADER,
+        // The desktop's app version on every call, so the content-write routes
+        // can refuse a build too old to push safely (`client-version.ts`, #251).
+        CLIENT_VERSION_HEADER,
       ],
       // set-auth-token carries the session token the desktop client reads after
       // sign-in/up; without exposing it the browser hides it even on success.
@@ -219,12 +229,25 @@ export function createApp(deps: AppDeps): Hono {
   // Desktop Google sign-in handoff — deliberately NOT under /api/auth (the
   // catch-all above would shadow it). See desktop-oauth.ts.
   app.route("/api", desktopOauthRoutes);
+  app.route("/api", bugReportRoutes);
   // Invitation preview (public, by unguessable id) + the signed-in inbox that
   // sidesteps Better Auth's verified-email gate on list-user-invitations.
   app.route("/api", invitationRoutes);
   // Password reset request that reports sent / no account / failed (Better
   // Auth's own endpoint is neutral and swallows send errors).
   app.route("/api", passwordResetRoutes);
+  // Outdated-client gate (#251) on every route that hands out the ability to
+  // push CRDT state: the per-doc token (the only key to a writable Hocuspocus
+  // socket), the vault-channel token and the batch push. Mounted here, ahead
+  // of the routers, so the policy lives in one place. Reads stay open, so an
+  // old build can still sign in and list its vault while its updater runs.
+  // The policy is evaluated once now so a malformed MIN_CLIENT_VERSION fails
+  // at startup rather than on the first push.
+  clientVersionPolicy();
+  const clientGate = requireSupportedClient();
+  app.use("/api/sync-token", clientGate);
+  app.use("/api/vault-sync-token", clientGate);
+  app.use("/api/vaults/:vaultId/docs/batch", clientGate);
   app.route("/api", syncTokenRoutes);
   app.route("/api", vaultTokenRoutes);
   app.route(
@@ -259,6 +282,7 @@ export function createApp(deps: AppDeps): Hono {
     }),
   );
   app.route("/api", createTrashRoutes({ onRegistryChanged: deps.onRegistryChanged }));
+  app.route("/api", createShrinkBrakeRoutes());
   app.route("/api", createRepairRoutes({ evictDoc: deps.evictDoc }));
   app.route("/api", createShareRoutes(deps));
   app.route("/api", publicLinkApiRoutes);

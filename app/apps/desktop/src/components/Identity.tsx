@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { CheckMark } from "./Spinner";
 import { isBulkPhase, type SyncProgress } from "../lib/sync/vaultScope";
+import { syncPauseRemaining, type SyncPause } from "../lib/sync/syncPause";
 
 /** "just now" / "1m ago" / "2h ago" — coarse on purpose; it ticks every 30s. */
 export function relativeAgo(ts: number, now: number): string {
@@ -34,12 +35,14 @@ export function syncRunPercent(progress: SyncProgress | null | undefined): numbe
  * `syncManager.syncFailures()`, which this leaves untouched.
  *
  * An `error` run with NO failed note is kept as it is: that is the channel
- * never connecting (the download watchdog), a genuine connectivity state.
+ * never connecting (the download watchdog), a genuine connectivity state. So
+ * is one with new notes the server refused for access (`refused`): those stay
+ * local until someone changes access, and only the pill and its banner say so.
  */
 export function pillProgress(
   progress: SyncProgress | null | undefined,
 ): SyncProgress | null | undefined {
-  if (progress?.phase === "error" && progress.failed > 0) {
+  if (progress?.phase === "error" && progress.failed > 0 && !progress.refused && !progress.pullFailing) {
     return { ...progress, phase: "done" };
   }
   return progress;
@@ -97,6 +100,15 @@ export function syncBadgeLabel(args: {
   // Synced/Syncing strobe this state used to produce.
   if (status === "deleted") return "Deleted";
   if (progress && isSyncRunActive(progress)) {
+    // The one exception to "one verb": notes whose content the server has
+    // never had (#258) — an interrupted first upload resuming, or a fresh one.
+    // That is the user's situation, not the mechanism, and the count is what
+    // tells them not to quit yet. `notUploaded` is only stamped when non-zero,
+    // so an already-synced vault never reads "Uploading".
+    const left = progress.notUploaded ?? 0;
+    if (progress.phase === "uploading" && left > 0) {
+      return `Uploading · ${left.toLocaleString()} ${left === 1 ? "note" : "notes"} left`;
+    }
     if (progress.total <= 0) return "Syncing…";
     // One verb for every phase. The old per-phase labels ("Uploading",
     // "Downloading") described the mechanism, not the user's situation — the
@@ -154,6 +166,45 @@ export function syncBadgeTone(args: {
 }
 
 /**
+ * A vault-wide hold that outranks every per-note and per-run state: while it
+ * lasts nothing syncs, so no call site may claim "Synced" (#273 — a second
+ * badge that skipped these read "Synced · 9m ago" under a paused vault).
+ *
+ * - The vault folder is gone (#228): neutral, not an error — the banner has
+ *   the fix.
+ * - The server's shrink burst brake holds our writes (#252): amber, not red —
+ *   nothing is lost, and it ends on its own or when an owner releases it.
+ */
+export function syncBadgeHold(args: {
+  rootMissing?: boolean;
+  /** Sync turned on for this vault; the brake only means something then. */
+  enabled?: boolean;
+  pause?: Pick<SyncPause, "until"> | null;
+  now: number;
+}): { tone: "offline" | "connecting"; label: string; title: string } | null {
+  const { rootMissing, enabled, pause, now } = args;
+  if (rootMissing) {
+    return {
+      tone: "offline",
+      label: "Paused",
+      title: "Sync is paused until the vault folder is back",
+    };
+  }
+  if (enabled && pause) {
+    const remaining = syncPauseRemaining(pause, now);
+    return {
+      tone: "connecting",
+      label: "Sync paused",
+      title:
+        "Many notes were emptied at once, so the server paused your sync. Your edits are safe " +
+        `on this device and sync when the pause ends${remaining ? ` (in ${remaining})` : ""} ` +
+        "or a vault owner or admin releases it.",
+    };
+  }
+  return null;
+}
+
+/**
  * What the pill offers once a run has stopped, and what it says about it.
  *
  * Pure so the precedence is pinned by a test rather than by a rendered DOM —
@@ -174,13 +225,17 @@ export function syncBadgeAction(args: {
   running: boolean;
   phase?: string | null;
   failed?: number;
+  /** {@link SyncProgress.refused}: keeps the run actionable despite `failed`. */
+  refused?: number;
+  /** {@link SyncProgress.pullFailing}: likewise. */
+  pullFailing?: boolean;
   hasRetry: boolean;
   hasHealth: boolean;
 }): { kind: "none" | "retry" | "explain"; cta: string; title?: string } {
-  const { running, phase, failed = 0, hasRetry, hasHealth } = args;
+  const { running, phase, failed = 0, refused = 0, pullFailing = false, hasRetry, hasHealth } = args;
   // A run that ended with failed notes reads "Synced" (see `pillProgress`) and
   // offers nothing: the failures live on the Health page, not on the pill.
-  if (running || phase !== "error" || failed > 0 || (!hasRetry && !hasHealth)) {
+  if (running || phase !== "error" || (failed > 0 && refused === 0 && !pullFailing) || (!hasRetry && !hasHealth)) {
     return { kind: "none", cta: "" };
   }
   if (hasHealth) {
@@ -212,6 +267,8 @@ export function SyncBadge({
   noteOpen,
   onRetry,
   onOpenHealth,
+  rootMissing,
+  pause,
 }: {
   status: string;
   enabled?: boolean;
@@ -234,6 +291,10 @@ export function SyncBadge({
    * to {@link onRetry} when absent.
    */
   onOpenHealth?: () => void;
+  /** The vault folder is gone — see {@link syncBadgeHold}. */
+  rootMissing?: boolean;
+  /** The server's shrink brake (`store.syncPause`) — see {@link syncBadgeHold}. */
+  pause?: SyncPause | null;
 }) {
   const running = isSyncRunActive(progress);
   // Only tick the relative clock once we're settled (synced, nothing pending, no
@@ -266,6 +327,8 @@ export function SyncBadge({
     running,
     phase: progress?.phase,
     failed: progress?.failed,
+    refused: progress?.refused,
+    pullFailing: progress?.pullFailing,
     hasRetry: onRetry != null,
     hasHealth: onOpenHealth != null,
   });
@@ -308,6 +371,15 @@ export function SyncBadge({
       {label}
     </>
   );
+  const hold = syncBadgeHold({ rootMissing, enabled, pause, now: Date.now() });
+  if (hold) {
+    return (
+      <span className={`sync-badge ${hold.tone}`} title={hold.title}>
+        <span className="sync-dot" aria-hidden="true" />
+        {hold.label}
+      </span>
+    );
+  }
   if (retryable) {
     return (
       <button

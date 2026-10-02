@@ -38,6 +38,10 @@ import {
 import * as ipc from "../ipc";
 import type { TreeNode } from "../ipc";
 import * as perf from "../perf";
+// Every case-insensitive path key below goes through `pathKey` (NFC, then
+// lowercase, #259): a Mac's decomposed `Café.md` and a Windows box's composed
+// one are the same note. Compare-time only — paths are never rewritten.
+import { pathKey } from "../pathIdentity";
 import { seedWelcomeContent } from "../vault/seed";
 import { Checkpointer, checkpointBatchFor } from "./checkpoint";
 import { sha256Hex } from "../bridge/adapter";
@@ -65,7 +69,7 @@ export function conflictPath(relPath: string, taken: ReadonlySet<string>, now = 
   const day = now.toISOString().slice(0, 10);
   for (let i = 1; ; i++) {
     const candidate = `${dir}${stem} (conflict ${day}${i > 1 ? ` ${i}` : ""})${ext}`;
-    if (!taken.has(candidate.toLowerCase())) return candidate;
+    if (!taken.has(pathKey(candidate))) return candidate;
   }
 }
 import { planInbound, samePath, type InboundPlan, type InboundTrash } from "./inbound";
@@ -83,6 +87,7 @@ import {
 import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { isSymlinkRefusal, SYMLINK_REFUSAL_REASON } from "./linkRefusals";
 import { toast } from "../toast";
+import { isHeldCreateCode } from "./createRefusals";
 import { vaultScopes, type VaultScope, type VaultScopeSource } from "./vaultScope";
 
 export interface DocMapping {
@@ -473,7 +478,8 @@ export interface ReconcileInput {
 /** A folder/note that could NOT be registered, after retries. Surfaced so the
  *  vault is never reported fully synced while an arbitrary subset is local-only. */
 export interface RegistryFailure {
-  kind: "folder" | "note" | "materialize" | "inbound" | "inbound-blocked" | "orphan";
+  /** `pull`: the whole registry pull failed (recorded by `SyncManager`, not here). */
+  kind: "folder" | "note" | "materialize" | "inbound" | "inbound-blocked" | "orphan" | "pull";
   /** Vault-relative path. */
   path: string;
   /** Intended docId, when known (notes) — phase 3 keys its badge by this. */
@@ -486,6 +492,14 @@ export interface RegistryFailure {
 /** Paths already toasted about a frozen-root refusal — reconcile re-runs and
  *  retry clicks re-hit the same 403, and one sticky explanation is enough. */
 const frozenRootNotified = new Set<string>();
+
+/**
+ * How long a held create refusal ({@link VaultRegistry.heldRefusals}) is trusted
+ * before the registry asks the server again on its own. An access change
+ * re-asks at once ({@link VaultRegistry.retryHeldRefusals}); this is the slow
+ * backstop for a grant whose announcement never reached this device.
+ */
+export const HELD_REFUSAL_RETRY_MS = 10 * 60_000;
 
 /**
  * How many inbound REMOVALS run at once.
@@ -512,6 +526,14 @@ const INBOUND_REMOVE_CONCURRENCY = IPC_CONCURRENCY;
  * tracks the cap rather than exceeding it).
  */
 const PULL_PAGE_LIMIT = 5000;
+
+/**
+ * The share of a closed-app-moved folder's notes and agreed binaries that must
+ * reappear, byte-identical, at the same sub-path under ONE new folder before
+ * the pair is applied as a folder move (#276). The same value as the live
+ * pairing's `FOLDER_MOVE_MIN_RATIO` in `docSession.ts`.
+ */
+const FOLDER_MOVE_MIN_RATIO = 0.8;
 
 /** How long a registry-made move stays "ours" (see `RegistrySync.isOwnMove`):
  *  comfortably past the watcher debounce and the 2.5 s disk-delete grace. */
@@ -727,7 +749,7 @@ export class VaultRegistry {
 
   /** A materialize just re-created `rp`: report it if it was a mapped note (D5). */
   private noteRestored(rp: string): void {
-    if (!this.restoreCandidatesCi.delete(rp.toLowerCase())) return;
+    if (!this.restoreCandidatesCi.delete(pathKey(rp))) return;
     reconcileReport.record({
       kind: "restoredFromServer",
       docId: this.byPath.get(rp)?.docId,
@@ -803,6 +825,22 @@ export class VaultRegistry {
    */
   private deletedPaths = new Set<string>();
   private deletedDocIds = new Set<string>();
+  /**
+   * Lower-cased paths whose create the server refused for ACCESS
+   * (`no_write_access`, `root_frozen` — see `createRefusals.ts`), with the
+   * failure and when it was last asked.
+   *
+   * Edits to existing notes keep syncing in exactly those cases, so before this
+   * a script writing new files into a view-only folder stranded every one of
+   * them for days with nothing louder than a Health row. Held refusals outlive
+   * the per-pass `failed` reset (they are still true until access changes), so
+   * the vault never reads "Synced" while they stand; and they are NOT re-sent on
+   * every pull — the answer cannot change until access does. They are asked
+   * again after {@link HELD_REFUSAL_RETRY_MS}, or at once when access changes
+   * ({@link retryHeldRefusals}). An entry leaves when its path registers or
+   * leaves the disk; wholesale on `reset`.
+   */
+  private heldRefused = new Map<string, { failure: RegistryFailure; at: number }>();
   /**
    * Paths THIS device just created as materialized placeholders, awaiting their
    * own watcher echo (see {@link consumeMaterialized}).
@@ -995,11 +1033,11 @@ export class VaultRegistry {
       // pre-migration-023 twins resolves to one of them consistently rather
       // than alternating between passes.
       for (const rp of this.byPath.keys()) {
-        const k = rp.toLowerCase();
+        const k = pathKey(rp);
         if (!this.byPathCi.has(k)) this.byPathCi.set(k, rp);
       }
     }
-    return this.byPathCi.get(relPath.toLowerCase()) ?? null;
+    return this.byPathCi.get(pathKey(relPath)) ?? null;
   }
 
   /** Folder twin of {@link canonicalNotePath}. Scanned rather than indexed:
@@ -1007,9 +1045,9 @@ export class VaultRegistry {
    *  is genuinely missing from the map. */
   private canonicalFolderPath(relPath: string): string | null {
     if (this.folderByPath.has(relPath)) return relPath;
-    const want = relPath.toLowerCase();
+    const want = pathKey(relPath);
     for (const rp of this.folderByPath.keys()) {
-      if (rp.toLowerCase() === want) return rp;
+      if (pathKey(rp) === want) return rp;
     }
     return null;
   }
@@ -1075,6 +1113,7 @@ export class VaultRegistry {
     this.hiddenPaths.clear();
     this.deletedPaths.clear();
     this.deletedDocIds.clear();
+    this.heldRefused.clear();
     this.folderByPath.clear();
     // Server ids for vault A's binaries name nothing in vault B.
     this.fileByPath.clear();
@@ -1213,10 +1252,10 @@ export class VaultRegistry {
    * so entries simply age out.
    */
   isOwnMove(relPath: string): boolean {
-    const at = this.ownMoves.get(relPath.toLowerCase());
+    const at = this.ownMoves.get(pathKey(relPath));
     if (at === undefined) return false;
     if (Date.now() - at > OWN_MOVE_TTL_MS) {
-      this.ownMoves.delete(relPath.toLowerCase());
+      this.ownMoves.delete(pathKey(relPath));
       return false;
     }
     return true;
@@ -1225,8 +1264,8 @@ export class VaultRegistry {
   private noteOwnMove(from: string, to: string): void {
     if (this.ownMoves.size > 20_000) this.ownMoves.clear();
     const now = Date.now();
-    this.ownMoves.set(from.toLowerCase(), now);
-    this.ownMoves.set(to.toLowerCase(), now);
+    this.ownMoves.set(pathKey(from), now);
+    this.ownMoves.set(pathKey(to), now);
   }
 
   markUnhydratedPlaceholder(docId: string): void {
@@ -1254,6 +1293,13 @@ export class VaultRegistry {
   /** The server `files` id this device registered for a tree binary, if any. */
   getFileId(relPath: string): string | null {
     return this.fileByPath.get(relPath) ?? null;
+  }
+
+  /** Every tree binary this device has a `files` id for — the binary half of
+   *  the evidence a folder moved outside the app is paired by
+   *  (`docSession.drainFolderMoves`). */
+  mappedFiles(): Array<{ fileId: string; relPath: string }> {
+    return [...this.fileByPath].map(([relPath, fileId]) => ({ fileId, relPath }));
   }
 
   /**
@@ -1611,11 +1657,68 @@ export class VaultRegistry {
 
   /** Everything that could not be registered in the last reconcile/pull. */
   failures(): RegistryFailure[] {
-    return [...this.failed];
+    if (this.heldRefused.size === 0) return [...this.failed];
+    // Held refusals were not asked again this pass, but they are still true.
+    const listed = new Set(this.failed.map((f) => pathKey(f.path)));
+    const out = [...this.failed];
+    for (const [key, { failure }] of this.heldRefused) {
+      if (!listed.has(key)) out.push(failure);
+    }
+    return out;
   }
 
   hasFailures(): boolean {
-    return this.failed.length > 0;
+    return this.failed.length > 0 || this.heldRefused.size > 0;
+  }
+
+  /** Creates the server refused for access, still standing (see {@link heldRefused}). */
+  heldRefusals(): RegistryFailure[] {
+    return [...this.heldRefused.values()].map((e) => e.failure);
+  }
+
+  /**
+   * Access may have changed: ask about every held refusal again on the next
+   * pass. Entries stay listed (they are still unsynced) until that pass answers.
+   * Returns whether there was anything to re-ask.
+   */
+  retryHeldRefusals(): boolean {
+    for (const e of this.heldRefused.values()) e.at = 0;
+    return this.heldRefused.size > 0;
+  }
+
+  /**
+   * `path` (a note, or a folder and everything in it) left the disk: stop
+   * holding it. Returns whether anything was held there.
+   */
+  forgetHeldRefusal(path: string): boolean {
+    if (this.heldRefused.size === 0) return false;
+    const key = pathKey(path);
+    let forgot = false;
+    for (const k of [...this.heldRefused.keys()]) {
+      if (k === key || k.startsWith(`${key}/`)) {
+        this.heldRefused.delete(k);
+        forgot = true;
+      }
+    }
+    return forgot;
+  }
+
+  /**
+   * Held and not yet due for another ask — skipped by this pass. So is anything
+   * inside a held FOLDER: the server would refuse each child ("no folder at …")
+   * on every pull, one row per file. They are asked once the folder registers.
+   */
+  private isHeldRefusal(path: string): boolean {
+    if (this.heldRefused.size === 0) return false;
+    const now = Date.now();
+    let key = pathKey(path);
+    for (;;) {
+      const e = this.heldRefused.get(key);
+      if (e != null && now - e.at < HELD_REFUSAL_RETRY_MS) return true;
+      const i = key.lastIndexOf("/");
+      if (i === -1) return false;
+      key = key.slice(0, i);
+    }
   }
 
   /** The plan-limit code that stopped the run, if one did. */
@@ -1637,21 +1740,30 @@ export class VaultRegistry {
     // fix: the file stays exactly where it is, local-only, and the path is left
     // out of every later pass until the server lists it again — see `hiddenPaths`.
     if (f.code === "not_readable" && (f.kind === "folder" || f.kind === "note")) {
-      this.hiddenPaths.add(f.path.toLowerCase());
+      this.hiddenPaths.add(pathKey(f.path));
       return "ok";
     }
     // The id names a note deleted on the server. Reported ONCE (the path is
     // skipped from now on — see `deletedPaths`), with a reason that says the
     // file is safe and why it no longer syncs.
     if (f.code === "note_deleted" && f.kind === "note") {
-      const firstTime = !this.deletedPaths.has(f.path.toLowerCase());
-      this.deletedPaths.add(f.path.toLowerCase());
+      const firstTime = !this.deletedPaths.has(pathKey(f.path));
+      this.deletedPaths.add(pathKey(f.path));
       if (f.docId) this.deletedDocIds.add(f.docId);
       if (!firstTime) return "failed";
       f = {
         ...f,
         reason: "deleted on the server by another member — kept on this device, no longer synced",
       };
+    }
+    if (isHeldCreateCode(f.code) && (f.kind === "note" || f.kind === "folder")) {
+      const firstTime = !this.heldRefused.has(pathKey(f.path));
+      this.heldRefused.set(pathKey(f.path), { failure: f, at: Date.now() });
+      // A re-ask that got the same answer is not news.
+      if (!firstTime) {
+        if (f.docId) this.sink.doc(f.docId, "error");
+        return "failed";
+      }
     }
     this.failed.push(f);
     if (f.code === "vault_limit_reached" || f.code === "member_limit_reached") {
@@ -2459,6 +2571,177 @@ export class VaultRegistry {
   }
 
   /**
+   * Pair each registered folder whose directory is gone with an unregistered
+   * folder that appeared, while the app was closed (#276), and turn the pair
+   * into ONE server folder move (`renamePath` → `PATCH /folders/:id`), exactly
+   * what the live `docSession.drainFolderMoves` (#221/#266) does when it SEES
+   * the move. The folder id, and every note and `files` id under it, is kept;
+   * the old path stops existing on the server, so no device re-materializes it.
+   *
+   * Positive evidence only — absence alone never moves or deletes anything,
+   * which is what keeps an unmounted volume or a half-copied folder safe:
+   *  - G = a folder this device recorded an id for, missing on disk, which the
+   *    server still lists under that id at the SAME path and has not
+   *    tombstoned (a server-side move or delete is the inbound step's job);
+   *  - C = a folder on disk the server does not list and this device has no id
+   *    for, whose parent is the root or a registered folder (the move needs a
+   *    parent id);
+   *  - evidence = mapped notes under G whose file at `C/<sub-path>` hashes to
+   *    this device's local CRDT text, plus registered binaries under G whose
+   *    file at `C/<sub-path>` hashes to the agreed base (`fileBases`). A
+   *    binary with no base, or a note with no local text, counts on neither
+   *    side. At least {@link FOLDER_MOVE_MIN_RATIO} of what G held must match,
+   *    and each C is used once.
+   * Below the ratio nothing happens here and the pass behaves as before. A
+   * move the server refuses changes nothing. The listing rows are rewritten in
+   * place so the rest of the pass agrees. Returns from → to per landed move.
+   */
+  private async pairClosedAppFolderMoves(
+    localFolders: readonly string[],
+    localNotes: readonly string[],
+    serverFolders: RegisteredFolder[],
+    serverNotes: RegisteredNote[],
+    folderTombstones: readonly string[] | null,
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (this.folderByPath.size === 0 || localFolders.length === 0) return out;
+    const under = (p: string, root: string) => p === root || p.startsWith(root + "/");
+    const topmost = (paths: readonly string[]) =>
+      paths.filter((p) => !paths.some((q) => q !== p && under(p, q)));
+    const localCi = new Set(localFolders.map((p) => pathKey(p)));
+    const serverPathById = new Map(serverFolders.map((f) => [f.id, f.path] as const));
+    const serverCi = new Set(serverFolders.map((f) => pathKey(f.path)));
+    const mappedCi = new Set([...this.folderByPath.keys()].map((p) => pathKey(p)));
+    const dead = new Set(folderTombstones ?? []);
+    const gone = topmost(
+      [...this.folderByPath]
+        .filter(([p, id]) => {
+          if (localCi.has(pathKey(p)) || dead.has(id)) return false;
+          const now = serverPathById.get(id);
+          return now !== undefined && samePath(now, p);
+        })
+        .map(([p]) => p),
+    );
+    if (gone.length === 0) return out;
+    const cands = localFolders.filter((c) => {
+      if (serverCi.has(pathKey(c)) || mappedCi.has(pathKey(c))) return false;
+      const parent = parentDir(c);
+      return parent === "" || this.folderByPath.has(parent);
+    });
+    if (cands.length === 0) return out;
+
+    const notesOnDisk = new Set(localNotes);
+    const mappedNotes = [...this.byPath].map(([relPath, m]) => ({ relPath, docId: m.docId }));
+    const mappedFiles = [...this.fileByPath].flatMap(([relPath, fileId]) => {
+      const base = this.fileBases.get(fileId);
+      return base ? [{ relPath, base }] : [];
+    });
+    let binaryShas: Map<string, string> | null | undefined;
+    const localBinaryShas = async (): Promise<Map<string, string> | null> => {
+      if (binaryShas !== undefined) return binaryShas;
+      try {
+        const list = await ipc.listBinaries(this.epoch());
+        binaryShas = new Map(list.map((b) => [b.relPath, b.sha256]));
+      } catch (e) {
+        if (!ipc.isVaultMismatch(e)) console.warn("[registry] folder move: couldn't list binaries", e);
+        binaryShas = null;
+      }
+      return binaryShas;
+    };
+    const docShas = new Map<string, string | null>();
+    const docSha = async (docId: string): Promise<string | null> => {
+      if (docShas.has(docId)) return docShas.get(docId) ?? null;
+      let text: string | null = null;
+      try {
+        text = (await this.host?.localText?.(docId)) ?? null;
+      } catch {
+        text = null;
+      }
+      const sha = text == null ? null : await sha256Hex(text);
+      docShas.set(docId, sha);
+      return sha;
+    };
+    const fileSha = async (path: string): Promise<string | null> => {
+      try {
+        return await sha256Hex(await ipc.readNote(path, this.epoch()));
+      } catch {
+        return null;
+      }
+    };
+    const usedCands = new Set<string>();
+
+    for (const g of gone) {
+      if (this.stopRun()) break;
+      const notesUnder = mappedNotes.filter((n) => under(n.relPath, g));
+      const filesUnder = mappedFiles.filter((f) => under(f.relPath, g));
+      const total = notesUnder.length + filesUnder.length;
+      if (total === 0) continue; // no evidence either way — as before
+      const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+      const shas = filesUnder.length > 0 ? await localBinaryShas() : null;
+      if (this.stale()) return out;
+      let best: { to: string; matched: string[]; score: number } | null = null;
+      for (const c of cands) {
+        if (usedCands.has(c)) continue;
+        const at = (p: string) => c + p.slice(g.length);
+        const present = notesUnder.filter((n) => notesOnDisk.has(at(n.relPath)));
+        const filesPresent = shas ? filesUnder.filter((f) => shas.has(at(f.relPath))) : [];
+        if (present.length + filesPresent.length < need) continue; // no hashing at all
+        const matched: string[] = [];
+        for (const n of present) {
+          const a = await docSha(n.docId);
+          if (this.stale()) return out;
+          if (a == null) continue;
+          const b = await fileSha(at(n.relPath));
+          if (this.stale()) return out;
+          if (a === b) matched.push(n.docId);
+        }
+        const files = filesPresent.filter((f) => shas!.get(at(f.relPath)) === f.base).length;
+        const score = matched.length + files;
+        if (score >= need && (!best || score > best.score)) best = { to: c, matched, score };
+      }
+      if (!best) continue;
+      usedCands.add(best.to);
+      const to = best.to;
+      // Nothing may still write to the OLD paths once they move: a bridge that
+      // egests after the move re-creates the file (and forks the note).
+      for (const n of notesUnder) await this.host?.releaseDoc(n.docId);
+      if (this.stale()) return out;
+      if (!(await this.renamePath(g, to))) continue;
+      if (this.stale()) return out;
+      // The index row at each new note path was minted a fresh id on launch;
+      // give it the kept doc id back (same local half `pairClosedAppRenames` does).
+      for (const n of notesUnder) {
+        const np = to + n.relPath.slice(g.length);
+        if (!notesOnDisk.has(np)) continue;
+        try {
+          await ipc.rebindNoteId(np, n.docId, this.epoch());
+        } catch (e) {
+          if (ipc.isVaultMismatch(e)) return out;
+          console.warn(`[registry] couldn't rebind ${np} to ${n.docId}`, e);
+        }
+        this.host?.notePathChanged(n.docId, n.relPath, np);
+      }
+      const remap = (p: string) => (under(p, g) ? to + p.slice(g.length) : p);
+      for (const f of serverFolders) {
+        if (!under(f.path, g)) continue;
+        if (f.path === g) f.name = baseName(to);
+        f.path = remap(f.path);
+      }
+      for (const n of serverNotes) {
+        const rp = noteRelPath(n);
+        if (!rp || !under(rp, g)) continue;
+        if (n.relPath !== undefined) n.relPath = remap(rp);
+        if (n.rel_path !== undefined || n.relPath === undefined) n.rel_path = remap(rp);
+      }
+      console.info(
+        `[registry] ${g} → ${to} (folder moved while the app was closed; ${best.score}/${total} items matched, keeping folder and file ids)`,
+      );
+      out.set(g, to);
+    }
+    return out;
+  }
+
+  /**
    * Same-path create (offline reconciliation D4): this device made a note at a
    * path where, meanwhile, a teammate's note appeared on the server.
    *
@@ -2490,20 +2773,20 @@ export class VaultRegistry {
       const rp = noteRelPath(n);
       const docId = noteDocId(n);
       if (!rp || this.baselineDocs.has(docId) || this.byDocId.has(docId)) continue;
-      const localPath = localNotePathCi.get(rp.toLowerCase());
+      const localPath = localNotePathCi.get(pathKey(rp));
       if (localPath === undefined || this.byPath.has(localPath)) continue;
       candidates.push({ n, localPath, docId });
     }
     if (candidates.length === 0) return held;
-    const localIds = new Map((await titles()).map((t) => [t.path.toLowerCase(), t.id] as const));
+    const localIds = new Map((await titles()).map((t) => [pathKey(t.path), t.id] as const));
     const taken = new Set<string>([
       ...localNotePathCi.keys(),
-      ...serverNotes.map((x) => (noteRelPath(x) ?? "").toLowerCase()),
+      ...serverNotes.map((x) => pathKey(noteRelPath(x) ?? "")),
     ]);
     const conflicts: typeof candidates = [];
     for (const c of candidates) {
       if (this.stopRun()) return held;
-      if (localIds.get(c.localPath.toLowerCase()) === c.docId) continue; // the same note
+      if (localIds.get(pathKey(c.localPath)) === c.docId) continue; // the same note
       // This device already holds the server note's own CRDT, so it has seen
       // that note — the file at its path is that note, written here by the
       // materialize step or the bulk download, not a create of ours made while
@@ -2527,8 +2810,8 @@ export class VaultRegistry {
         `[registry] ${conflicts.length} same-path conflicts in one pass (cap ${samePathConflictCap(serverNotes.length)}) — renaming none`,
       );
       for (const { localPath } of conflicts) {
-        held.add(localPath.toLowerCase());
-        localNotePathCi.delete(localPath.toLowerCase());
+        held.add(pathKey(localPath));
+        localNotePathCi.delete(pathKey(localPath));
         this.aliasPaths.add(localPath);
         this.recordFailure({
           kind: "note", path: localPath, docId: null, code: null,
@@ -2548,7 +2831,7 @@ export class VaultRegistry {
         if (ipc.isVaultMismatch(e)) return held;
       }
       const target = conflictPath(localPath, taken);
-      taken.add(target.toLowerCase());
+      taken.add(pathKey(target));
       const serverIsLater = Number.isFinite(serverAt) && serverAt > localAt;
       if (serverIsLater) {
         try {
@@ -2570,7 +2853,7 @@ export class VaultRegistry {
         // the renamed note registered as the NEW note it is, promptly.
         await ipc.renamePath(localPath, target, this.epoch());
         this.noteOwnMove(localPath, target);
-        localNotePathCi.delete(localPath.toLowerCase());
+        localNotePathCi.delete(pathKey(localPath));
         reconcileReport.record({
           kind: "renamedConflict", path: localPath, newPath: target,
           detail: serverIsLater
@@ -2581,8 +2864,8 @@ export class VaultRegistry {
         if (ipc.isVaultMismatch(e)) return held;
         // Could not move ours: never bind it to their id. Hold the path out of
         // this pass entirely, so the file is left exactly as it is.
-        held.add(localPath.toLowerCase());
-        localNotePathCi.delete(localPath.toLowerCase());
+        held.add(pathKey(localPath));
+        localNotePathCi.delete(pathKey(localPath));
         this.aliasPaths.add(localPath);
         this.recordFailure({
           kind: "note", path: localPath, docId: null, code: null,
@@ -2695,6 +2978,8 @@ export class VaultRegistry {
     if (previous !== undefined && previous !== relPath) this.byPath.delete(previous);
     this.byPath.set(relPath, { vaultId, docId });
     this.byDocId.set(docId, relPath);
+    // Registered: a held refusal for this path is answered.
+    if (this.heldRefused.size > 0) this.heldRefused.delete(pathKey(relPath));
     this.notifyMapChanged();
   }
 
@@ -3103,7 +3388,7 @@ export class VaultRegistry {
     let serverNotes = noteRegistry.notes;
     let { folders, notes } = flattenTree(workingTree);
     // The paths this device already knew BEFORE this pass (#221 drift report).
-    const priorMappedCi = new Set([...this.byPath.keys()].map((p) => p.toLowerCase()));
+    const priorMappedCi = new Set([...this.byPath.keys()].map((p) => pathKey(p)));
     const checkpoint = this.checkpoint ?? this.newCheckpointer();
     // A pull can be the first thing to touch a big vault's map (a reconnect
     // catch-up), so retune here too rather than trusting the construction-time
@@ -3136,6 +3421,20 @@ export class VaultRegistry {
         }
         return rows;
       })());
+
+    // 0. A folder renamed or moved while the app was closed (#276), BEFORE the
+    //    inbound step: left alone, inbound read the stale server row at the old
+    //    path as "missing locally" and re-created it on disk as an empty ghost
+    //    (for every member), while the new path registered as a second folder.
+    const movedFolders = await this.pairClosedAppFolderMoves(
+      folders.map((f) => f.path),
+      notes.map((n) => n.path),
+      serverFolders,
+      serverNotes,
+      folderRegistry.tombstones,
+    );
+    if (this.stale()) return false;
+    if (movedFolders.size > 0) mutated = true;
 
     // Learn who wrote what, BEFORE any of the steps below and outside the inbound
     // guard: the very first pass of a fresh vault has no baseline and so runs no
@@ -3232,24 +3531,24 @@ export class VaultRegistry {
     // mapping under that, and the local paths were still unmatched next pass.
     // A 235-item wave that could never empty — "Syncing 225/235", restart, loop.
     const serverFolderByPathCi = new Map(
-      serverFolders.map((f) => [f.path.toLowerCase(), f.id] as const),
+      serverFolders.map((f) => [pathKey(f.path), f.id] as const),
     );
     for (const [rp, id] of [...this.folderByPath]) {
-      if (serverFolderByPathCi.get(rp.toLowerCase()) !== id) this.folderByPath.delete(rp);
+      if (serverFolderByPathCi.get(pathKey(rp)) !== id) this.folderByPath.delete(rp);
     }
     // The path we keep is the one on DISK: every other lookup in this class is
     // made with a local path, so mapping the server's spelling instead would
     // leave those lookups missing. The id is the identity; the spelling is ours.
-    const localFolderPathCi = new Map(folders.map((f) => [f.path.toLowerCase(), f.path] as const));
+    const localFolderPathCi = new Map(folders.map((f) => [pathKey(f.path), f.path] as const));
     for (const f of serverFolders) {
-      this.folderByPath.set(localFolderPathCi.get(f.path.toLowerCase()) ?? f.path, f.id);
+      this.folderByPath.set(localFolderPathCi.get(pathKey(f.path)) ?? f.path, f.id);
     }
     // …and drop the twin the merge left behind. Both spellings are in the
     // persisted map for a vault that had case-duplicated rows, and neither is
     // wrong enough for the prune above to remove (they carry the same id), so
     // without this they stay in `config.json` for good.
     for (const rp of [...this.folderByPath.keys()]) {
-      const onDisk = localFolderPathCi.get(rp.toLowerCase());
+      const onDisk = localFolderPathCi.get(pathKey(rp));
       if (onDisk !== undefined && onDisk !== rp) {
         this.folderByPath.delete(rp);
         mutated = true;
@@ -3258,29 +3557,32 @@ export class VaultRegistry {
     // A hidden path the server now lists (access came back), or that left the
     // disk, is an ordinary path again.
     if (this.hiddenPaths.size > 0) {
-      const onDiskCi = new Set([...folders, ...notes].map((x) => x.path.toLowerCase()));
+      const onDiskCi = new Set([...folders, ...notes].map((x) => pathKey(x.path)));
       for (const key of [...this.hiddenPaths]) {
         if (serverFolderByPathCi.has(key) || !onDiskCi.has(key)) this.hiddenPaths.delete(key);
       }
     }
     const missingFolders = folders.filter(
-      (f) => !this.folderByPath.has(f.path) && !this.hiddenPaths.has(f.path.toLowerCase()),
+      (f) =>
+        !this.folderByPath.has(f.path) &&
+        !this.hiddenPaths.has(pathKey(f.path)) &&
+        !this.isHeldRefusal(f.path),
     );
 
     // 3. Notes: adopt by relPath, create missing. Any first-run seeding happened
     //    in reconcile before this runs; the seeded files register here as docs.
     // Case-insensitive for the same reason as the folders above, and again the
     // local spelling is the one mapped.
-    const localNotePathCi = new Map(notes.map((n) => [n.path.toLowerCase(), n.path] as const));
+    const localNotePathCi = new Map(notes.map((n) => [pathKey(n.path), n.path] as const));
     /** Every path the server accounted for, in the spelling we MAPPED it under. */
     const resolvedNotePaths = new Set<string>();
     /** The same set, lower-cased — what every membership test below compares on. */
     const resolvedNotePathsCi = new Set<string>();
     const resolveNote = (serverPath: string, docId: string) => {
-      const mapped = localNotePathCi.get(serverPath.toLowerCase()) ?? serverPath;
+      const mapped = localNotePathCi.get(pathKey(serverPath)) ?? serverPath;
       this.setMapping(mapped, docId, vaultId);
       resolvedNotePaths.add(mapped);
-      resolvedNotePathsCi.add(mapped.toLowerCase());
+      resolvedNotePathsCi.add(pathKey(mapped));
     };
     // D4: two people created a note at the same path while apart. Resolve it
     // BEFORE anything binds the local file to the server's id, which would
@@ -3289,7 +3591,7 @@ export class VaultRegistry {
     if (this.stale()) return mutated;
     for (const n of serverNotes) {
       const rp = noteRelPath(n);
-      if (rp && !heldConflicts.has(rp.toLowerCase())) resolveNote(rp, noteDocId(n));
+      if (rp && !heldConflicts.has(pathKey(rp))) resolveNote(rp, noteDocId(n));
     }
     // The note twin of the folder collapse above: a mapping under a spelling this
     // pass did not resolve, whose case-variant it DID, is the leftover of a
@@ -3297,7 +3599,7 @@ export class VaultRegistry {
     // path index needs the removal.
     for (const [rp, m] of [...this.byPath]) {
       if (resolvedNotePaths.has(rp)) continue;
-      if (!resolvedNotePathsCi.has(rp.toLowerCase())) continue;
+      if (!resolvedNotePathsCi.has(pathKey(rp))) continue;
       if (m.vaultId !== vaultId) continue;
       this.byPath.delete(rp);
       this.notifyMapChanged();
@@ -3318,8 +3620,8 @@ export class VaultRegistry {
     // vault re-registers normally.
     for (const rp of [...this.aliasPaths]) {
       if (
-        resolvedNotePathsCi.has(rp.toLowerCase()) ||
-        !localNotePathCi.has(rp.toLowerCase())
+        resolvedNotePathsCi.has(pathKey(rp)) ||
+        !localNotePathCi.has(pathKey(rp))
       ) {
         this.aliasPaths.delete(rp);
       }
@@ -3332,17 +3634,29 @@ export class VaultRegistry {
     for (const key of [...this.deletedPaths]) {
       if (resolvedNotePathsCi.has(key) || !localNotePathCi.has(key)) this.deletedPaths.delete(key);
     }
+    // Registered after all (another device, or access came back), or gone from
+    // this disk: no longer held (see `heldRefused`).
+    if (this.heldRefused.size > 0) {
+      const onDiskCi = new Set(folders.map((f) => pathKey(f.path)));
+      for (const key of [...this.heldRefused.keys()]) {
+        const isNote = localNotePathCi.has(key);
+        if (isNote ? resolvedNotePathsCi.has(key) : !onDiskCi.has(key) || serverFolderByPathCi.has(key)) {
+          this.heldRefused.delete(key);
+        }
+      }
+    }
     if (this.deletedDocIds.size > 0) {
       const listed = new Set(serverNotes.map((n) => noteDocId(n)));
       for (const id of [...this.deletedDocIds]) if (listed.has(id)) this.deletedDocIds.delete(id);
     }
     let missingNotes = notes.filter(
       (n) =>
-        !resolvedNotePathsCi.has(n.path.toLowerCase()) &&
+        !resolvedNotePathsCi.has(pathKey(n.path)) &&
         !this.inboundSuppressed.has(n.path) &&
         !this.aliasPaths.has(n.path) &&
-        !this.hiddenPaths.has(n.path.toLowerCase()) &&
-        !this.deletedPaths.has(n.path.toLowerCase()),
+        !this.hiddenPaths.has(pathKey(n.path)) &&
+        !this.deletedPaths.has(pathKey(n.path)) &&
+        !this.isHeldRefusal(n.path),
     );
 
     // 3b. A rename made while the app was closed (offline reconciliation, row
@@ -3353,7 +3667,7 @@ export class VaultRegistry {
     if (missingNotes.length > 0) {
       const paired = await this.pairClosedAppRenames(
         [...resolvedNotePaths].filter(
-          (rp) => !localNotePathCi.has(rp.toLowerCase()) && priorMappedCi.has(rp.toLowerCase()),
+          (rp) => !localNotePathCi.has(pathKey(rp)) && priorMappedCi.has(pathKey(rp)),
         ),
         missingNotes.map((n) => n.path),
         serverNotes,
@@ -3363,12 +3677,12 @@ export class VaultRegistry {
         mutated = true;
         for (const [from, to] of paired) {
           resolvedNotePaths.delete(from);
-          resolvedNotePathsCi.delete(from.toLowerCase());
+          resolvedNotePathsCi.delete(pathKey(from));
           resolvedNotePaths.add(to);
-          resolvedNotePathsCi.add(to.toLowerCase());
+          resolvedNotePathsCi.add(pathKey(to));
         }
-        const taken = new Set([...paired.values()].map((p) => p.toLowerCase()));
-        missingNotes = missingNotes.filter((n) => !taken.has(n.path.toLowerCase()));
+        const taken = new Set([...paired.values()].map((p) => pathKey(p)));
+        missingNotes = missingNotes.filter((n) => !taken.has(pathKey(n.path)));
       }
     }
 
@@ -3419,8 +3733,11 @@ export class VaultRegistry {
     } else
     for (const depth of [...byDepth.keys()].sort((a, b) => a - b)) {
       if (this.stopRun()) break;
+      // Inside a folder refused at a shallower depth: held with it.
+      const level = byDepth.get(depth)!.filter((f) => !this.isHeldRefusal(f.path));
+      for (let i = level.length; i < byDepth.get(depth)!.length; i++) this.sink.item("failed");
       await runPool(
-        byDepth.get(depth)!,
+        level,
         async (f) => {
           const parentPath = parentDir(f.path);
           const parentId = parentPath ? (this.folderByPath.get(parentPath) ?? null) : null;
@@ -3448,6 +3765,13 @@ export class VaultRegistry {
       );
     }
     if (this.stale()) return mutated;
+    // A folder refused just now holds its notes too (see `isHeldRefusal`):
+    // without its id each would be refused on its own.
+    if (this.heldRefused.size > 0) {
+      const before = missingNotes.length;
+      missingNotes = missingNotes.filter((n) => !this.isHeldRefusal(n.path));
+      for (let i = missingNotes.length; i < before; i++) this.sink.item("failed");
+    }
 
     // ---- notes ----
     // Above the threshold: the same work, batched. Identical accounting —
@@ -3529,7 +3853,7 @@ export class VaultRegistry {
           const noteId = noteDocId(out.value);
           this.setMapping(rp, noteId, vaultId);
           resolvedNotePaths.add(rp);
-          resolvedNotePathsCi.add(rp.toLowerCase());
+          resolvedNotePathsCi.add(pathKey(rp));
           // 201, not 200: a row the server MADE (see `api.createNote`). An
           // adopted one may already hold content and must never be announced.
           if (out.value.created && noteId) createdNow.push(noteId);
@@ -3564,10 +3888,16 @@ export class VaultRegistry {
     this.announceCreated(createdNow);
     if (this.stale()) return mutated;
 
+    // A held folder that a re-ask just registered is answered too (notes leave
+    // through `setMapping`).
+    if (this.heldRefused.size > 0) {
+      for (const rp of this.folderByPath.keys()) this.heldRefused.delete(pathKey(rp));
+    }
+
     // 4. Prune mappings for notes that no longer exist anywhere (deleted on the
     //    server AND absent locally), then checkpoint the map.
     for (const [rp, m] of [...this.byPath]) {
-      if (!resolvedNotePathsCi.has(rp.toLowerCase())) {
+      if (!resolvedNotePathsCi.has(pathKey(rp))) {
         this.byPath.delete(rp);
         // Reverse entry only if it still names this path — see the same guard in
         // the cross-collection prune above (#129).
@@ -3623,12 +3953,12 @@ export class VaultRegistry {
     // Case-insensitive, or a note whose server spelling differs from the one on
     // disk would be "server-only" here and get an empty file written at the other
     // spelling — which on a case-insensitive filesystem is the SAME file.
-    const localNotePaths = new Set(notes.map((n) => n.path.toLowerCase()));
+    const localNotePaths = new Set(notes.map((n) => pathKey(n.path)));
     // Removed from disk in a live bulk delete the user has not answered yet
     // (#221): neither restored nor deleted until they do.
     const held = this.host?.heldDocIds?.() ?? null;
     const toMaterialize = [...resolvedNotePaths].filter((rp) => {
-      if (localNotePaths.has(rp.toLowerCase())) return false;
+      if (localNotePaths.has(pathKey(rp))) return false;
       if (held && held.size > 0) {
         const docId = this.byPath.get(rp)?.docId;
         if (docId && held.has(docId)) return false;
@@ -3636,14 +3966,14 @@ export class VaultRegistry {
       return true;
     });
     this.passDrift = {
-      missingMapped: toMaterialize.filter((rp) => priorMappedCi.has(rp.toLowerCase())).length,
+      missingMapped: toMaterialize.filter((rp) => priorMappedCi.has(pathKey(rp))).length,
       unmappedLocal: missingNotes.length,
     };
     // D5: a path this device had MAPPED before the pass and no longer has on
     // disk was removed here without the delete reaching the team (app closed,
     // or a refused propagation). Re-creating it undoes that; say so.
     this.restoreCandidatesCi = new Set(
-      toMaterialize.filter((rp) => priorMappedCi.has(rp.toLowerCase())).map((rp) => rp.toLowerCase()),
+      toMaterialize.filter((rp) => priorMappedCi.has(pathKey(rp))).map((rp) => pathKey(rp)),
     );
     this.sink.addTotal(toMaterialize.length);
     // Materializing is the other half a pull can be bulk for — a fresh device
@@ -3964,7 +4294,7 @@ export class VaultRegistry {
             // case-variant and answered with its own — see `resolveNote`.
             this.setMapping(rp, res.docId, vaultId);
             ctx.resolvedNotePaths.add(rp);
-            ctx.resolvedNotePathsCi.add(rp.toLowerCase());
+            ctx.resolvedNotePathsCi.add(pathKey(rp));
             // `created` only — an ADOPTED row may already hold content, and
             // seeding one is the split-brain pull-before-seed exists to prevent.
             if (res.status === "created") createdInChunk.push(res.docId);
@@ -4094,7 +4424,7 @@ export class VaultRegistry {
     if (mappedAs) return this.byPath.get(mappedAs) ?? null;
     // Deleted on the server (see `deletedPaths`): opening the local copy must
     // not ask again — the answer is known, and it stays a local-only note.
-    if ((docId && this.deletedDocIds.has(docId)) || this.deletedPaths.has(relPath.toLowerCase())) {
+    if ((docId && this.deletedDocIds.has(docId)) || this.deletedPaths.has(pathKey(relPath))) {
       return null;
     }
     try {
@@ -4274,8 +4604,8 @@ export class VaultRegistry {
           // stale/adopted server identity must not prevent deleting that local
           // remainder, but a readable, read-only folder still stays protected.
           const beneath = (candidate: string) => {
-            const root = path.toLowerCase();
-            const value = candidate.toLowerCase();
+            const root = pathKey(path);
+            const value = pathKey(candidate);
             return value === root || value.startsWith(root + "/");
           };
           const hasMappedContent = () =>

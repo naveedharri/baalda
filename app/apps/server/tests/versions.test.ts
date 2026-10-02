@@ -89,7 +89,7 @@ describe("per-note versions", () => {
     capture.stop();
 
     const { rows } = await pool.query(
-      "SELECT doc_id, vault_id, content, sha256, cause, author_id FROM note_versions",
+      `SELECT v.doc_id, v.vault_id, COALESCE(v.content, t.content) AS content, v.sha256, v.cause, v.author_id FROM note_versions v LEFT JOIN note_texts t ON t.doc_id = v.doc_id AND t.sha256 = v.sha256`,
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].doc_id).toBe(docId);
@@ -148,7 +148,7 @@ describe("per-note versions", () => {
       await recordVersion({ vaultId: vault, docId, content: `v${i}`, cause: "idle", authorId: null });
     }
     const { rows } = await pool.query<{ content: string }>(
-      "SELECT content FROM note_versions WHERE doc_id = $1 ORDER BY id ASC",
+      `SELECT COALESCE(v.content, t.content) AS content FROM note_versions v LEFT JOIN note_texts t ON t.doc_id = v.doc_id AND t.sha256 = v.sha256 WHERE v.doc_id = $1 ORDER BY v.id ASC`,
       [docId],
     );
     expect(rows).toHaveLength(MAX_VERSIONS_PER_NOTE);
@@ -407,7 +407,7 @@ describe("per-note versions", () => {
 
     // One per doc — exactly what 30 single writes down the live path produce.
     const { rows } = await pool.query<{ doc_id: string; content: string }>(
-      "SELECT doc_id, content FROM note_versions",
+      `SELECT v.doc_id, COALESCE(v.content, t.content) AS content FROM note_versions v LEFT JOIN note_texts t ON t.doc_id = v.doc_id AND t.sha256 = v.sha256`,
     );
     expect(rows).toHaveLength(30);
     expect(new Set(rows.map((r) => r.doc_id))).toEqual(new Set(merged));
@@ -620,7 +620,7 @@ describe("per-note versions", () => {
     expect(body.preRevertVersionId).toBeTypeOf("number");
 
     const pre = await pool.query<{ content: string; cause: string; author_id: string }>(
-      "SELECT content, cause, author_id FROM note_versions WHERE id = $1",
+      `SELECT COALESCE(v.content, t.content) AS content, v.cause, v.author_id FROM note_versions v LEFT JOIN note_texts t ON t.doc_id = v.doc_id AND t.sha256 = v.sha256 WHERE v.id = $1`,
       [body.preRevertVersionId],
     );
     expect(pre.rows[0]).toMatchObject({

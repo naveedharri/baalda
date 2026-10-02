@@ -14,9 +14,11 @@ import {
   dirname,
   resolveFolderParent,
   resolveParentFolder,
+  pathKey as treePathKey,
   samePath,
   type FolderByPath,
 } from "./tree-ops.js";
+import { isTransientPath } from "./transient.js";
 
 /**
  * Registration of ONE structural row — the shared body of `POST /api/folders`,
@@ -77,6 +79,7 @@ export function normalizeColor(value: unknown): string | null | undefined {
 /** Why a registration was refused. Mirrors `BulkErrorCode`'s registration half. */
 export type RegisterCode =
   | "path_folder_mismatch"
+  | "transient_file"
   | "no_write_access"
   | "note_limit_reached"
   | "root_frozen"
@@ -197,7 +200,7 @@ const NOT_READABLE = {
  * A registration batch asks the same three questions per item — "is there
  * already a note/file/folder at this path?" — and a 200-note batch asked
  * Postgres 200 times, serially, on ONE checked-out connection. The batch routes
- * PREFILL these with a single `lower(path) = ANY($1)` read per kind; every
+ * PREFILL these with a single `vault_path_key(path) = ANY($1)` read per kind; every
  * lookup below then consults the map first and falls back to the single-row
  * query on a miss, so a single-item route behaves exactly as it always did with
  * a cache of size one.
@@ -219,11 +222,10 @@ export function createRegisterCache(): RegisterCache {
   return { folders: new Map(), notes: new Map(), files: new Map() };
 }
 
-/** Cache key: paths are matched case-insensitively everywhere (m023's
- *  `lower(path)` unique indexes), so the key has to be too. */
-function pathKey(path: string): string {
-  return path.toLowerCase();
-}
+/** Cache key: paths are matched case-insensitively and NFC-normalized
+ *  everywhere (the `vault_path_key(path)` unique indexes, m043), so the key
+ *  has to be too. The same function as `tree-ops`' so the two cannot drift. */
+const pathKey = treePathKey;
 
 export function registerCtx(
   vaultId: string,
@@ -330,7 +332,7 @@ async function folderByPath(
     color: string | null;
   }>(
     `SELECT ${FOLDER_COLS} FROM folders
-      WHERE vault_id = $1 AND lower(path) = lower($2)
+      WHERE vault_id = $1 AND vault_path_key(path) = vault_path_key($2)
       ORDER BY created_at ASC, id ASC LIMIT 1`,
     [ctx.vaultId, path],
   );
@@ -341,7 +343,7 @@ async function folderByPath(
 
 /**
  * Prefill the folder cache for every path in `paths` (and, for a note/file
- * batch, every parent DIRECTORY it names) with ONE `lower(path) = ANY($1)`
+ * batch, every parent DIRECTORY it names) with ONE `vault_path_key(path) = ANY($1)`
  * read.
  *
  * A miss is cached as `null` too — that is the whole saving, since "no folder at
@@ -360,9 +362,9 @@ export async function prefetchFolders(ctx: RegisterCtx, paths: string[]): Promis
     path: string;
     color: string | null;
   }>(
-    `SELECT DISTINCT ON (lower(path)) ${FOLDER_COLS} FROM folders
-      WHERE vault_id = $1 AND lower(path) = ANY($2::text[])
-      ORDER BY lower(path), created_at ASC, id ASC`,
+    `SELECT DISTINCT ON (vault_path_key(path)) ${FOLDER_COLS} FROM folders
+      WHERE vault_id = $1 AND vault_path_key(path) = ANY(ARRAY(SELECT vault_path_key(k) FROM unnest($2::text[]) k))
+      ORDER BY vault_path_key(path), created_at ASC, id ASC`,
     [ctx.vaultId, wanted],
   );
   for (const k of wanted) ctx.cache.folders.set(k, null);
@@ -505,7 +507,7 @@ async function liveNoteByPath(
     rel_path: string;
   }>(
     `SELECT id, folder_id, title, rel_path FROM notes
-      WHERE vault_id = $1 AND lower(rel_path) = lower($2) AND deleted_at IS NULL
+      WHERE vault_id = $1 AND vault_path_key(rel_path) = vault_path_key($2) AND deleted_at IS NULL
       ORDER BY created_at ASC, id ASC LIMIT 1`,
     [ctx.vaultId, relPath],
   );
@@ -514,7 +516,7 @@ async function liveNoteByPath(
   return row;
 }
 
-/** One `lower(rel_path) = ANY($1)` read for a whole note batch's adopt probes,
+/** One `vault_path_key(rel_path) = ANY($1)` read for a whole note batch's adopt probes,
  *  plus one for the parent folders their paths name. See {@link RegisterCache}. */
 export async function prefetchNotes(ctx: RegisterCtx, relPaths: string[]): Promise<void> {
   const wanted = [...new Set(relPaths.filter((p) => p !== "").map(pathKey))].filter(
@@ -527,9 +529,9 @@ export async function prefetchNotes(ctx: RegisterCtx, relPaths: string[]): Promi
       title: string | null;
       rel_path: string;
     }>(
-      `SELECT DISTINCT ON (lower(rel_path)) id, folder_id, title, rel_path FROM notes
-        WHERE vault_id = $1 AND lower(rel_path) = ANY($2::text[]) AND deleted_at IS NULL
-        ORDER BY lower(rel_path), created_at ASC, id ASC`,
+      `SELECT DISTINCT ON (vault_path_key(rel_path)) id, folder_id, title, rel_path FROM notes
+        WHERE vault_id = $1 AND vault_path_key(rel_path) = ANY(ARRAY(SELECT vault_path_key(k) FROM unnest($2::text[]) k)) AND deleted_at IS NULL
+        ORDER BY vault_path_key(rel_path), created_at ASC, id ASC`,
       [ctx.vaultId, wanted],
     );
     for (const k of wanted) ctx.cache.notes.set(k, null);
@@ -570,7 +572,7 @@ interface NoteInsertPlan {
  * insert**. What moved is only WHERE the questions are asked:
  *
  *  · the adopt probe and the parent lookup are answered from the request cache,
- *    prefilled by ONE `lower(path) = ANY($1)` read each (`prefetchNotes`);
+ *    prefilled by ONE `vault_path_key(path) = ANY($1)` read each (`prefetchNotes`);
  *  · the inserts are ONE `INSERT … SELECT FROM unnest(…) ON CONFLICT (id) DO
  *    NOTHING RETURNING id` (measured 2.1× faster than a multi-row VALUES at
  *    1,000 rows, and unlike COPY it keeps `ON CONFLICT`, which is what makes a
@@ -926,12 +928,19 @@ export async function registerNote(
 
 // ── files (tree binaries) ──────────────────────────────────────────────────
 
-async function fileByPath(ctx: RegisterCtx, path: string): Promise<FileRow | null> {
+async function fileByPath(
+  ctx: RegisterCtx,
+  path: string,
+  /** Read past the cache — the 23505 race fallback, like {@link folderByPath}. */
+  fresh = false,
+): Promise<FileRow | null> {
   const key = pathKey(path);
-  const hit = ctx.cache.files.get(key);
-  if (hit !== undefined) return hit;
+  if (!fresh) {
+    const hit = ctx.cache.files.get(key);
+    if (hit !== undefined) return hit;
+  }
   const { rows } = await ctx.db.query<{ id: string; folder_id: string | null; path: string }>(
-    "SELECT id, folder_id, path FROM files WHERE vault_id = $1 AND lower(path) = lower($2) LIMIT 1",
+    "SELECT id, folder_id, path FROM files WHERE vault_id = $1 AND vault_path_key(path) = vault_path_key($2) ORDER BY id ASC LIMIT 1",
     [ctx.vaultId, path],
   );
   const r = rows[0];
@@ -940,7 +949,7 @@ async function fileByPath(ctx: RegisterCtx, path: string): Promise<FileRow | nul
   return row;
 }
 
-/** One `lower(path) = ANY($1)` read for a whole file batch's adopt probes, plus
+/** One `vault_path_key(path) = ANY($1)` read for a whole file batch's adopt probes, plus
  *  one for the parent folders their paths name. See {@link RegisterCache}. */
 export async function prefetchFiles(ctx: RegisterCtx, paths: string[]): Promise<void> {
   const wanted = [...new Set(paths.filter((p) => p !== "").map(pathKey))].filter(
@@ -948,9 +957,9 @@ export async function prefetchFiles(ctx: RegisterCtx, paths: string[]): Promise<
   );
   if (wanted.length > 0) {
     const { rows } = await ctx.db.query<{ id: string; folder_id: string | null; path: string }>(
-      `SELECT DISTINCT ON (lower(path)) id, folder_id, path FROM files
-        WHERE vault_id = $1 AND lower(path) = ANY($2::text[])
-        ORDER BY lower(path), id ASC`,
+      `SELECT DISTINCT ON (vault_path_key(path)) id, folder_id, path FROM files
+        WHERE vault_id = $1 AND vault_path_key(path) = ANY(ARRAY(SELECT vault_path_key(k) FROM unnest($2::text[]) k))
+        ORDER BY vault_path_key(path), id ASC`,
       [ctx.vaultId, wanted],
     );
     for (const k of wanted) ctx.cache.files.set(k, null);
@@ -965,6 +974,24 @@ export interface FileInput {
   path: string;
   docId?: string;
   folderId?: string | null;
+}
+
+/**
+ * A `files` write lost a same-path race (23505 on `files_vault_path_ci_uq`):
+ * answer with the winner, the way the folder insert does. `null` when the error
+ * is anything else, or the winner is already gone again (the caller rethrows).
+ */
+async function adoptPathRace(
+  ctx: RegisterCtx,
+  err: unknown,
+  path: string,
+): Promise<StructResult<FileRow> | null> {
+  if ((err as { code?: string })?.code !== "23505") return null;
+  const winner = await fileByPath(ctx, path, true);
+  if (!winner) return null;
+  ctx.cache.files.set(pathKey(winner.path), winner);
+  if (!(await ctx.canAdoptDoc(winner.id))) return NOT_READABLE;
+  return { status: "adopted", row: winner, wrote: false };
 }
 
 export async function registerFile(
@@ -984,6 +1011,17 @@ export async function registerFile(
   if (byPath) {
     if (!(await ctx.canAdoptDoc(byPath.id))) return NOT_READABLE;
     return { status: "adopted", row: byPath, wrote: false };
+  }
+
+  // An app's lock file (`~$Report.docx`, #265) is not the user's file. Refused
+  // only HERE, after the adoption above, so a row an older client already
+  // registered keeps answering exactly as it did — nothing existing is touched.
+  if (isTransientPath(input.path)) {
+    return {
+      status: "error",
+      code: "transient_file",
+      message: `"${input.path}" is a temporary lock file and is not synced.`,
+    };
   }
 
   let resolvedFolder: string | null;
@@ -1041,11 +1079,22 @@ export async function registerFile(
         message: "You do not have permission to create a file here.",
       };
     }
-    await ctx.db.query("UPDATE files SET folder_id = $2, path = $3 WHERE id = $1", [
-      id,
-      resolvedFolder,
-      storedPath,
-    ]);
+    try {
+      await ctx.db.query("UPDATE files SET folder_id = $2, path = $3 WHERE id = $1", [
+        id,
+        resolvedFolder,
+        storedPath,
+      ]);
+    } catch (err) {
+      // 23505 on `files_vault_path_ci_uq` (m023): another file reached the
+      // destination between the adopt probe above and this move (#266). The
+      // same answer the probe would have given had it run a moment later —
+      // the occupant IS the file at that path — so adopt it, and leave this id
+      // where it was. Never a bare 500: the client retried that forever.
+      const won = await adoptPathRace(ctx, err, storedPath);
+      if (won) return won;
+      throw err;
+    }
     // A MOVE: the row changed, so this adopt does owe a broadcast.
     const moved = { id, folderId: resolvedFolder, path: storedPath };
     // The row left `byId[0].path` and landed here — forget the old key (the
@@ -1066,10 +1115,20 @@ export async function registerFile(
     };
   }
 
-  await ctx.db.query(
-    "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
-    [id, ctx.vaultId, resolvedFolder, storedPath],
-  );
+  try {
+    await ctx.db.query(
+      "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
+      [id, ctx.vaultId, resolvedFolder, storedPath],
+    );
+  } catch (err) {
+    // 23505 on the PATH index: a concurrent registration of the same path
+    // (case-insensitively) won the insert (#266) — a second device, a batch and
+    // a single-item call racing, or a rename landing on it. Adopt the winner
+    // exactly as the probe at the top would have, rather than surface a 500.
+    const won = await adoptPathRace(ctx, err, storedPath);
+    if (won) return won;
+    throw err;
+  }
   const created = { id, folderId: resolvedFolder, path: storedPath };
   ctx.noteCreated(id);
   ctx.cache.files.set(pathKey(storedPath), created);

@@ -19,6 +19,13 @@ import { buildTreeSyncIndex } from "../syncRollup";
 // under it. That module imports a type and nothing else, so this keeps the model
 // dependency-free.
 import { formatBytes, relativeTime } from "./format";
+import { BRAND_NAME } from "../brand";
+import {
+  groupCreateRefusals,
+  isHeldCreateCode,
+  wherePhrase,
+  type CreateRefusalGroup,
+} from "../sync/createRefusals";
 import { isBulkPhase, type DocSyncState, type SyncProgress } from "../sync/vaultScope";
 import type { SyncStatus } from "../sync/syncManager";
 import type { AuthStatus } from "../../store";
@@ -47,14 +54,14 @@ export interface HealthContentFailure {
   /** Retrying cannot help without changing the note or its access. */
   permanent?: boolean;
   /** User-facing diagnosis. `permanent` is scheduling metadata, not a cause. */
-  kind?: "too-large" | "no-write-access";
+  kind?: "too-large" | "no-write-access" | "shrink-held";
 }
 
 /** One row the registry could not create/move. Mirrors `registry.ts`
  *  `RegistryFailure`. Kept structural so the model needs no value import from
  *  the sync layer. */
 export interface HealthRegistryFailure {
-  kind: "folder" | "note" | "materialize" | "inbound" | "inbound-blocked" | "orphan";
+  kind: "folder" | "note" | "materialize" | "inbound" | "inbound-blocked" | "orphan" | "pull";
   path: string;
   docId: string | null;
   reason: string;
@@ -108,6 +115,9 @@ export interface HealthInput {
    *  needs no value import from `lib/api.ts`; absent ⇒ the explanations fall
    *  back to "the vault's owner". */
   members?: HealthMember[];
+  /** `store.syncPause` — the server's shrink burst brake holding this
+   *  account's writes in the vault (#252). Absent ⇒ none. */
+  syncPause?: { until: number | null; count: number | null } | null;
 }
 
 /** The one shape the model needs out of `api.Member`. */
@@ -597,9 +607,44 @@ function limitIssue(f: HealthRegistryFailure): HealthIssue {
   };
 }
 
+/** Key of the vault-wide "registry pull keeps failing" issue. */
+export const PULL_FAILED_ISSUE_KEY = "registry-pull-failed";
+
 function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue {
   const key = f.docId ?? f.path;
   if (isLimitCode(f.code)) return limitIssue(f);
+  if (f.kind === "pull") {
+    return {
+      key: PULL_FAILED_ISSUE_KEY,
+      docId: null,
+      path: null,
+      kind: "register-failed",
+      severity: "error",
+      title: "New notes and folder changes aren't syncing",
+      why:
+        `The app can't load the vault's file list (last error: ${f.reason}). ` +
+        "Edits to existing notes still sync.",
+      remedies: ["copy-details"],
+      code: f.code,
+      explanation: {
+        meaning:
+          "New notes, new folders, renames and deletes sync through the vault's file list. " +
+          "Loading that list from the Remote Vault keeps failing, so these changes are waiting " +
+          "on this computer. Nothing was lost.",
+        next: "Baalda tries again on the next change, reconnect or retry, and this clears once it works.",
+        fixes: [
+          "Check your internet connection and the server address in Settings → Connection.",
+          "If it keeps happening, send the details below to support.",
+        ],
+        safety: "only-here",
+      },
+      facts: [
+        ...(f.code ? [{ label: "Remote Vault code", value: f.code, copyable: true }] : []),
+        { label: "Last error", value: f.reason, copyable: true },
+      ],
+      autoRetries: true,
+    };
+  }
   if (f.kind === "inbound-blocked" && f.code === "symlink") {
     return {
       key,
@@ -817,6 +862,66 @@ function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue
   };
 }
 
+/** File paths listed on one grouped create-refusal issue; the count says the rest. */
+export const MAX_REFUSAL_PATHS_SHOWN = 50;
+
+/** Key of the grouped issue for one (code, folder) — what the banner's Show opens. */
+export function createRefusalIssueKey(code: string, folder: string): string {
+  return `create-refused:${code}:${folder.toLowerCase()}`;
+}
+
+/** Every create refused for the same access reason in one folder, as ONE issue. */
+export function createRefusalIssue(g: CreateRefusalGroup, ctx: IssueContext): HealthIssue {
+  const n = g.paths.length;
+  const what = g.notes === n ? plural(n, "new note") : plural(n, "new item");
+  const where = wherePhrase(g.folder);
+  const access = g.code === "no_write_access";
+  const shown = g.paths.slice(0, MAX_REFUSAL_PATHS_SHOWN);
+  return {
+    key: createRefusalIssueKey(g.code, g.folder),
+    docId: null,
+    path: g.folder === "" ? null : g.folder,
+    kind: "register-failed",
+    severity: "error",
+    title: access
+      ? `${what} not syncing: no permission to add notes ${where}`
+      : `${what} not syncing: notes can't be added at the top of this vault`,
+    why: access
+      ? `You don't have permission to add notes ${where}, so these stay on this computer. ` +
+        "Edits to notes that already exist still sync."
+      : "This vault's top level is locked, so these stay on this computer until they are in a folder.",
+    remedies: access ? ["contact-owner", "copy-details"] : ["copy-details"],
+    code: g.code,
+    explanation: {
+      meaning: access
+        ? `Before a new note can sync, the Remote Vault has to accept it. You can read ${
+            g.folder === "" ? "this vault" : "this folder"
+          } but not add to it, so the Remote Vault turned these down. Nothing was lost — ` +
+          "the files are safe on this computer."
+        : "This vault's top level is locked, so new notes can only be added inside a folder. " +
+          "Nothing was lost — the files are safe on this computer.",
+      next: access
+        ? "They sync by themselves as soon as your access changes. Baalda also checks again every 10 minutes."
+        : "They sync by themselves once they are inside a folder.",
+      fixes: access
+        ? [
+            `Ask ${ownerPhrase(ctx.owner)} to give you edit access ${where}.`,
+            "Or move these notes to a folder you can edit.",
+          ]
+        : ["Move these notes into a folder."],
+      safety: "only-here",
+    },
+    facts: [
+      { label: "Folder", value: g.folder === "" ? "Top of the vault" : g.folder },
+      { label: "Not syncing", value: num(n) },
+      ...shown.map((p) => ({ label: "Path", value: p })),
+      ...(n > shown.length ? [{ label: "More", value: `${num(n - shown.length)} more` }] : []),
+      { label: "Remote Vault code", value: g.code, copyable: true },
+    ],
+    autoRetries: access,
+  };
+}
+
 /** Cap on the `unregistered` warnings emitted. A vault mid-registration can have
  *  thousands; 50 rows say everything 5,000 would, and the total lands in the
  *  report's `detail` instead of in 4,950 DOM nodes. */
@@ -897,6 +1002,56 @@ export function buildHealthReport(input: HealthInput): HealthReport {
   };
 }
 
+/** The vault-level "Sync paused" issue (#252). Exported for tests. */
+export function syncPausedIssue(
+  pause: { until: number | null; count: number | null } | null,
+  heldNotes: number,
+  now: number,
+): HealthIssue {
+  const minutes =
+    pause?.until != null && pause.until > now ? Math.max(1, Math.round((pause.until - now) / 60_000)) : null;
+  const count = pause?.count ?? null;
+  return {
+    key: "vault:sync-paused",
+    docId: null,
+    path: null,
+    kind: "sync-paused",
+    severity: "warn",
+    title: "Sync paused",
+    why:
+      (count != null && count > 0
+        ? `${num(count)} notes were emptied at once from this account, so the Remote Vault paused your sync. `
+        : "Many notes were emptied at once from this account, so the Remote Vault paused your sync. ") +
+      "Your edits are safe on this device.",
+    remedies: ["copy-details"],
+    code: "shrink_held",
+    explanation: {
+      meaning:
+        "When one person's notes lose most of their text all at once, the Remote Vault stops " +
+        "accepting their edits for a while, in case something went wrong (a script, a bad " +
+        "sync, a folder emptied by mistake). Every note that lost its text was saved as a " +
+        "version first, so nothing on the server is lost.",
+      next:
+        (minutes != null
+          ? `The pause ends on its own in about ${minutes} min`
+          : "The pause ends on its own shortly") +
+        ", or sooner if a vault owner or admin releases it from Activity. Then your edits sync like any other edit.",
+      fixes: [
+        "Keep working. Everything you change stays on this device until the pause ends.",
+        "If the emptied notes were a mistake, restore them from version history before the pause ends.",
+        "Ask a vault owner or admin to release the pause if the change was intended.",
+      ],
+      safety: "only-here",
+    },
+    facts: [
+      ...(count != null ? [{ label: "Notes emptied", value: num(count) }] : []),
+      ...(heldNotes > 0 ? [{ label: "Notes waiting to sync", value: num(heldNotes) }] : []),
+      ...(minutes != null ? [{ label: "Ends in", value: `about ${minutes} min` }] : []),
+    ],
+    autoRetries: true,
+  };
+}
+
 // ── Verdict ───────────────────────────────────────────────────────────────────
 
 function decideVerdict(
@@ -945,10 +1100,25 @@ function buildIssues(
   const owner = ownerOf(input.members);
   const issueCtx: IssueContext = { stats: input.stats, owner };
 
+  // A shrink-brake pause first, as ONE issue: the notes it held are not each
+  // broken, they are waiting for the same thing (#252).
+  const held = input.failures.content.filter((f) => f.kind === "shrink-held");
+  if (input.syncEnabled && (input.syncPause || held.length > 0)) {
+    push(syncPausedIssue(input.syncPause ?? null, held.length, input.now));
+  }
+
   // Content first: these are the failures that name a specific note whose only
   // copy is here.
-  for (const f of input.failures.content) push(contentIssue(f, issueCtx));
-  for (const f of input.failures.registry) push(registryIssue(f, issueCtx));
+  for (const f of input.failures.content) {
+    if (f.kind !== "shrink-held") push(contentIssue(f, issueCtx));
+  }
+  // Creates refused for access: one issue per (reason, folder) with the file
+  // list, not one row per file — a script can strand hundreds in one folder.
+  for (const g of groupCreateRefusals(input.failures.registry)) push(createRefusalIssue(g, issueCtx));
+  for (const f of input.failures.registry) {
+    if ((f.kind === "note" || f.kind === "folder") && isHeldCreateCode(f.code)) continue;
+    push(registryIssue(f, issueCtx));
+  }
 
   // A limit that stopped the run but was recorded against nothing the user can
   // see still has to be said once.
@@ -1351,6 +1521,16 @@ function describe(
       if (p?.phase === "removing") return {
         headline: `Updating access — ${num(Math.max(0, p.total - p.done))} remaining`,
         detail: "Removing local copies you can no longer access.",
+      };
+      // #258: content the server has never had (an interrupted first upload
+      // resuming, or a fresh one) is named as such, because "keep the app open
+      // until this reaches zero" is the one thing the reader needs to know.
+      const notUploaded = p?.notUploaded ?? 0;
+      if (notUploaded > 0) return {
+        headline: `Uploading — ${plural(notUploaded, "note")} not uploaded yet`,
+        detail:
+          `Teammates see these notes as empty until their content arrives. Keep ` +
+          `${BRAND_NAME} open until this reaches zero${where}.${overflow}`,
       };
       const of = p && p.total > 0 ? `${num(p.done)} of ${num(p.total)}` : num(behind);
       return {

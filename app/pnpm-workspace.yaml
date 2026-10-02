@@ -29,3 +29,8 @@ strictDepBuilds: true
 # SDK postinstall only checks remote model-type freshness; published JS is ready.
 ignoredBuiltDependencies:
   - "@openrouter/sdk"
+
+# Security floors for transitive deps (Dependabot). dompurify arrives through
+# mermaid; drop the entry once mermaid's own range requires the fixed version.
+overrides:
+  dompurify: ">=3.4.16"

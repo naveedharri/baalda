@@ -5,8 +5,10 @@ import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
 import { ReconcileBanner } from "./components/ReconcileBanner";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
+import { SyncPausedBannerView } from "./components/SyncPausedBanner";
 import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
 import { NoteLimitBannerView, noteLimitBanner } from "./components/NoteLimitBanner";
+import { CreateRefusalBannerView, createRefusalBanner } from "./components/CreateRefusalBanner";
 import {
   LOCATE_FOLDER,
   RESTORE_HERE,
@@ -20,7 +22,7 @@ import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FileTree } from "./components/FileTree";
-import { SyncBadge } from "./components/Identity";
+import { SyncBadge, syncBadgeHold } from "./components/Identity";
 import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
 import { Spinner } from "./components/Spinner";
@@ -46,8 +48,14 @@ import {
   installUpdate,
   isUpdateBlocking,
   justUpdatedTo,
+  launchUpdateGate,
+  RELEASES_PAGE_URL,
+  scheduleHintedUpdateCheck,
+  serverRequiresUpdate,
   useUpdateState,
 } from "./lib/updater";
+import { onClientOutdated } from "./lib/api";
+import { setUpdateHintHandler } from "./lib/updateHint";
 import { isSilentRelease, notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { viewerFor } from "./lib/formats";
@@ -197,6 +205,31 @@ function NotSyncingBanner() {
 }
 
 /**
+ * "Sync paused" while the server's shrink burst brake holds our writes (#252).
+ * The minute tick only refreshes the "in about N min" countdown.
+ */
+function SyncPausedBanner() {
+  const pause = useStore((s) => s.syncPause);
+  const dismissed = useStore((s) => s.syncPauseDismissed);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!pause) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, [pause]);
+  return (
+    <SyncPausedBannerView
+      pause={pause}
+      dismissed={dismissed}
+      now={now}
+      onDismiss={() => useStore.getState().dismissSyncPause()}
+      onOpenHealth={() => useStore.getState().requestSettings("health")}
+    />
+  );
+}
+
+/**
  * The strip for a vault whose owner made it **local only** from somewhere else.
  *
  * The probe is here rather than in the launch chain because its two inputs land
@@ -261,6 +294,31 @@ function NoteLimitBanner() {
     <NoteLimitBannerView
       show={show}
       onUpgrade={() => useStore.getState().requestSettings("billing")}
+      onDismiss={() => setDismissedRunToken(runToken)}
+    />
+  );
+}
+
+/**
+ * New notes the server refused to create for access (`no_write_access`,
+ * `root_frozen`). Read on the same re-render triggers as `NoteLimitBanner`
+ * (every run's progress), since the refusals are recorded by those runs.
+ */
+function CreateRefusalBanner() {
+  const syncEnabled = useStore((s) => s.syncEnabled);
+  useStore((s) => s.syncProgress);
+  const runToken = useStore((s) => s.failedRunToken);
+  const [dismissedRunToken, setDismissedRunToken] = useState<number | null>(null);
+  const text = createRefusalBanner({
+    syncEnabled,
+    refusals: syncManager.registry.heldRefusals(),
+    runToken,
+    dismissedRunToken,
+  });
+  return (
+    <CreateRefusalBannerView
+      text={text}
+      onShow={() => useStore.getState().requestSettings("health")}
       onDismiss={() => setDismissedRunToken(runToken)}
     />
   );
@@ -564,22 +622,35 @@ function VaultFolderPrompt() {
  * build without the updater) never reaches `failed`, so it still walls nothing
  * off. Local edits stay safe throughout — notes are on disk, and
  * `installUpdate` flushes the open note before it touches anything.
+ *
+ * `launchVersion` is the other way in: the launch gate found an update before
+ * sync started (`launchUpdateGate`, #255) and is installing it now, with sync
+ * held until the restart. The same card shows the download as "Updating
+ * Baalda" — it is not a failure, so there are no retry actions — and goes away
+ * if the gate gives up and lets this build open.
  */
-function UpdateGate() {
+function UpdateGate({ launchVersion = null }: { launchVersion?: string | null }) {
   const update = useUpdateState();
+  // The version the wall is for. `""` is a wall too: the server refused this
+  // build (#251) and no newer release could be found to name.
   const [required, setRequired] = useState<string | null>(null);
   useEffect(() => {
     if (isUpdateBlocking(update) && "version" in update) setRequired(update.version);
   }, [update]);
+  // A server `426 client_outdated` refusal: try to update now, wall if not.
+  useEffect(() => onClientOutdated(() => void serverRequiresUpdate()), []);
 
-  if (!required) return null;
+  // `required === ""` is still a wall (server refusal, version unknown).
+  if (required === null && launchVersion == null) return null;
+  const launching = required === null;
 
   const pct =
     update.phase === "downloading" && update.total > 0
       ? Math.round((update.downloaded / update.total) * 100)
       : null;
 
-  const version = ("version" in update ? update.version : null) ?? required;
+  const version =
+    ("version" in update ? update.version : null) ?? required ?? (launchVersion || null);
 
   // Once the wall is up the only thing left in the window is this card, so a
   // manual retry restarts the moment it can — the quiet-moment wait exists to
@@ -591,6 +662,7 @@ function UpdateGate() {
   };
 
   const working =
+    launching ||
     update.phase === "checking" ||
     update.phase === "downloading" ||
     update.phase === "installing" ||
@@ -609,7 +681,12 @@ function UpdateGate() {
   };
 
   return (
-    <div className="update-gate" role="alertdialog" aria-modal="true" aria-label="Update required">
+    <div
+      className="update-gate"
+      role="alertdialog"
+      aria-modal="true"
+      aria-label={launching ? `Updating ${BRAND_NAME}` : "Update required"}
+    >
       <div className="update-gate-card">
         <div className="update-gate-badge" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -619,7 +696,7 @@ function UpdateGate() {
           </svg>
         </div>
         <div className="update-gate-heading">
-          <h1>Update required</h1>
+          <h1>{launching ? `Updating ${BRAND_NAME}` : "Update required"}</h1>
           {version && <span className="update-gate-version">v{version}</span>}
         </div>
         {working && (
@@ -627,7 +704,9 @@ function UpdateGate() {
             <p role="status">
               {update.phase === "checking"
                 ? "Checking for the update…"
-                : update.phase === "downloading"
+                : update.phase === "available"
+                  ? "Starting the download…"
+                  : update.phase === "downloading"
                   ? `Downloading v${update.version}${pct != null ? ` — ${pct}%` : "…"}`
                   : "Installing — the app will restart itself…"}
             </p>
@@ -651,16 +730,32 @@ function UpdateGate() {
         )}
         {!working && (
           <>
-            <p>
-              {BRAND_NAME} couldn&rsquo;t install the update to <strong>v{required}</strong>
-              {"message" in update && update.message ? ` — ${update.message}` : ""}. It tried
-              twice on its own. Check your connection and try again — your notes stay right
-              where they are, on your disk.
-            </p>
+            {required ? (
+              <p>
+                {BRAND_NAME} couldn&rsquo;t install the update to <strong>v{required}</strong>
+                {"message" in update && update.message ? ` — ${update.message}` : ""}. It tried
+                twice on its own. Check your connection and try again — your notes stay right
+                where they are, on your disk.
+              </p>
+            ) : (
+              <p>
+                Your server needs a newer version of {BRAND_NAME} before this one can sync.
+                Your notes and edits stay right where they are, on your disk, and sync as
+                soon as the update is in.
+              </p>
+            )}
             <div className="update-gate-actions">
               <AsyncButton className="primary update-gate-cta" onClick={retry}>
                 Try again
               </AsyncButton>
+              {/* For when the updater itself cannot install (#251): the same
+                  release, fetched by hand. */}
+              <button
+                className="ghost-pill lg"
+                onClick={() => void ipc.openExternal(RELEASES_PAGE_URL).catch(() => {})}
+              >
+                Download manually
+              </button>
               <button className="ghost-pill lg" onClick={() => void reload()}>
                 Reload
               </button>
@@ -815,21 +910,17 @@ function SyncIndicator({
   const pending = useStore((s) => s.syncPending);
   const progress = useStore((s) => s.syncProgress);
   const rootMissing = useStore((s) => s.structureNotice.rootMissing);
-  // The folder is gone (#228): nothing syncs until it is back, so the pill
-  // must not claim "Synced". Neutral, not an error — the banner has the fix.
-  if (rootMissing) {
-    return (
-      <span className="sync-badge offline" title="Sync is paused until the vault folder is back">
-        <span className="sync-dot" aria-hidden="true" />
-        Paused
-      </span>
-    );
-  }
-  if (attachmentLocalOnly) {
+  const syncPause = useStore((s) => s.syncPause);
+  // The folder is gone (#228) or the shrink brake holds our writes (#252):
+  // SyncBadge renders both itself (`syncBadgeHold`), and they outrank the
+  // attachment notice and the idle-vault hide below.
+  const held =
+    syncBadgeHold({ rootMissing, enabled: syncEnabled, pause: syncPause, now: Date.now() }) != null;
+  if (!held && attachmentLocalOnly) {
     return <SyncBadge status="offline" enabled={false} noteOpen />;
   }
   // "idle" is the reporter's pre-start value — nothing to report yet.
-  if (!noteOpen && (progress == null || progress.phase === "idle")) return null;
+  if (!held && !noteOpen && (progress == null || progress.phase === "idle")) return null;
   return (
     <SyncBadge
       status={status}
@@ -838,6 +929,8 @@ function SyncIndicator({
       pending={pending}
       progress={progress}
       noteOpen={noteOpen}
+      rootMissing={rootMissing}
+      pause={syncPause}
       // A run that could not proceed carries its own remedy: one click re-pulls
       // the registry and re-runs the content pass for everything unconfirmed.
       onRetry={syncEnabled ? () => void syncManager.retrySync() : undefined}
@@ -932,6 +1025,8 @@ export default function App() {
   // session restore + sync reconcile too, which is why launch showed "Loading…"
   // for seconds on a big vault: the sidebar was ready long before auth was.
   const [openingLastVault, setOpeningLastVault] = useState(true);
+  /** Version the launch gate is installing before sync starts, else null. */
+  const [launchUpdating, setLaunchUpdating] = useState<string | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
@@ -1023,6 +1118,18 @@ export default function App() {
         // The frame AFTER the state flush is the one the user sees.
         requestAnimationFrame(() => perf.mark("tree-painted"));
       }
+      // The update decision comes BEFORE the session restore (#255): with an
+      // update pending, the old build must not start the sync reconcile at
+      // all — that is where the bugs the new build fixed still live. The tree
+      // is already painted above; this only holds the network side. A found
+      // update installs and restarts right here (the card says "Updating
+      // Baalda"); no update, an offline launch or a check slower than
+      // LAUNCH_CHECK_TIMEOUT_MS falls straight through. Not in a dev build —
+      // see the note on the poll below.
+      if (!import.meta.env.DEV) {
+        await launchUpdateGate({ onUpdating: (v) => setLaunchUpdating(v) });
+        setLaunchUpdating(null);
+      }
       // Detached, deliberately: the session restore is 3+ HTTP round trips and
       // it ends in the sync reconcile, which on a large vault is minutes of
       // work. Every `set()` inside it is generation-guarded (`authInitGen`), so
@@ -1031,13 +1138,13 @@ export default function App() {
         .getState()
         .initAuth()
         .catch((e) => console.error("auth init failed", e));
-      // Check for updates at launch AND on a background poll, and install what
-      // we find WITHOUT asking: a found release is downloaded and installed
-      // silently, then the app restarts itself at the next pause in typing (see
-      // lib/quietMoment.ts). Nothing is shown on the way through — the user
-      // meets the new version in the What's New modal after the restart. The
-      // required-update wall (UpdateGate) is the fallback for when that silent
-      // path has failed twice.
+      // Check for updates on a background poll too (the launch check ran
+      // above), and install what we find WITHOUT asking: a found release is
+      // downloaded and installed silently, then the app restarts itself at the
+      // next pause in typing (see lib/quietMoment.ts). Nothing is shown on the
+      // way through — the user meets the new version in the What's New modal
+      // after the restart. The required-update wall (UpdateGate) is the
+      // fallback for when that silent path has failed twice.
       //
       // Failures (offline, non-bundled dev build) are swallowed by the updater
       // store — surfaced only in Settings → Updates. App-lifetime interval —
@@ -1049,8 +1156,10 @@ export default function App() {
       // dev session would silently download a release bundle and then ask Tauri
       // to relaunch a `cargo run` binary, which quits the app outright.
       if (!import.meta.env.DEV) {
-        void backgroundUpdateCheck();
         setInterval(() => void backgroundUpdateCheck(), UPDATE_POLL_MS);
+        // The server's release hint (#269) runs the same check early; the
+        // poll above stays as the fallback for servers that never send it.
+        setUpdateHintHandler(() => scheduleHintedUpdateCheck());
       }
     })();
   }, []);
@@ -1339,7 +1448,7 @@ export default function App() {
     // the user to choose/create one before its folder opens.
     return (
       <div className="app-shell">
-        <UpdateGate />
+        <UpdateGate launchVersion={launchUpdating} />
         {/* Reusing `.booting` means the loading→welcome hand-off reads as one
             continuous boot rather than a flash of a second loader. */}
         <Suspense fallback={<div className="booting">Loading…</div>}>
@@ -1355,7 +1464,7 @@ export default function App() {
     <div className="app-shell">
       {/* Window-global, above the sidebar+main split: a new release must be
           visible the moment the poll finds it, whatever is on screen. */}
-      <UpdateGate />
+      <UpdateGate launchVersion={launchUpdating} />
       <VaultSwitchOverlay />
       <PromptedAuthDialog />
       <div
@@ -1414,66 +1523,69 @@ export default function App() {
                 title, which for a legacy note whose H1 and filename disagree said
                 something different from its own tab. */}
             <TabBar />
-            <SyncIndicator
-              noteOpen={openNote != null && !isPreview}
-              attachmentLocalOnly={attachmentLocalOnly}
-            />
-            {/* Vault-wide, so it sits in the header regardless of the open note. */}
-            <TalkButton />
-            {/* Same gate as history: a link is a doc_id, so it only exists for a
-                note the server knows about. */}
-            {versionDocId && !isPreview && <ShareNoteButton docId={versionDocId} />}
-            <button
-              className="icon-btn graph-btn"
-              title="Graph view (⌘G)"
-              aria-label="Open graph view"
-              onClick={() => setGraphOpen(true)}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
+            {/* The right-hand controls float as one pill over the white row. */}
+            <div className="header-actions">
+              <SyncIndicator
+                noteOpen={openNote != null && !isPreview}
+                attachmentLocalOnly={attachmentLocalOnly}
+              />
+              {/* Vault-wide, so it sits in the header regardless of the open note. */}
+              <TalkButton />
+              {/* Same gate as history: a link is a doc_id, so it only exists for a
+                  note the server knows about. */}
+              {versionDocId && !isPreview && <ShareNoteButton docId={versionDocId} />}
+              <button
+                className="icon-btn graph-btn"
+                title="Graph view (⌘G)"
+                aria-label="Open graph view"
+                onClick={() => setGraphOpen(true)}
               >
-                <circle cx="5.5" cy="6" r="2.5" />
-                <circle cx="18" cy="4.5" r="2" />
-                <circle cx="12.5" cy="13" r="2.5" />
-                <circle cx="6" cy="19" r="2" />
-                <circle cx="19.5" cy="18.5" r="2.5" />
-                <path d="M7.8 7.2 10.6 11M14.4 11.3 16.6 6M11 15 7.3 17.6M14.8 14.6l3 2.6" />
-              </svg>
-            </button>
-            {/* Far right: the Activity / Versions panel (push-to-talk lives in
-                its header now). */}
-            <button
-              className={`icon-btn panel-btn${rightPanelOpen ? " active" : ""}`}
-              title={pendingReview > 0 ? `Panel (${pendingReview} to review)` : "Panel"}
-              aria-label={pendingReview > 0 ? `Panel, ${pendingReview} changes to review` : "Panel"}
-              aria-pressed={rightPanelOpen}
-              onClick={() => {
-                if (rightPanelOpen) useStore.getState().closeRightPanel();
-                else useStore.getState().openRightPanel();
-              }}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <circle cx="5.5" cy="6" r="2.5" />
+                  <circle cx="18" cy="4.5" r="2" />
+                  <circle cx="12.5" cy="13" r="2.5" />
+                  <circle cx="6" cy="19" r="2" />
+                  <circle cx="19.5" cy="18.5" r="2.5" />
+                  <path d="M7.8 7.2 10.6 11M14.4 11.3 16.6 6M11 15 7.3 17.6M14.8 14.6l3 2.6" />
+                </svg>
+              </button>
+              {/* Far right: the Activity / Versions panel (push-to-talk lives in
+                  its header now). */}
+              <button
+                className={`icon-btn panel-btn${rightPanelOpen ? " active" : ""}`}
+                title={pendingReview > 0 ? `Panel (${pendingReview} to review)` : "Panel"}
+                aria-label={pendingReview > 0 ? `Panel, ${pendingReview} changes to review` : "Panel"}
+                aria-pressed={rightPanelOpen}
+                onClick={() => {
+                  if (rightPanelOpen) useStore.getState().closeRightPanel();
+                  else useStore.getState().openRightPanel();
+                }}
               >
-                <rect x="3" y="4" width="18" height="16" rx="3" />
-                <path d="M15 4v16" />
-              </svg>
-              <SilentBoundary label="Activity badge">
-                <ActivityBadge />
-              </SilentBoundary>
-            </button>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="3" y="4" width="18" height="16" rx="3" />
+                  <path d="M15 4v16" />
+                </svg>
+                <SilentBoundary label="Activity badge">
+                  <ActivityBadge />
+                </SilentBoundary>
+              </button>
+            </div>
           </header>
           <VaultUnsyncedBanner />
           <VaultRootMissingBanner />
@@ -1483,7 +1595,9 @@ export default function App() {
             <ReconcileBanner />
           </SilentBoundary>
           <NotSyncingBanner />
+          <SyncPausedBanner />
           <NoteLimitBanner />
+          <CreateRefusalBanner />
           <RemovedBanner />
           <DeletedByTeammateBanner />
           {attachmentLocalOnly && <AttachmentSyncNotice />}

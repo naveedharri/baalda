@@ -1,139 +1,154 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { ApiError, type PublicLink } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import { copyText } from "../lib/clipboard";
+import { noteLabel } from "../lib/notePath";
 import { buildNoteLink } from "../lib/shareLink";
 import { toast } from "../lib/toast";
 import { useStore } from "../store";
-import { CheckMark, Spinner } from "./Spinner";
+import { CheckMark } from "./Spinner";
+import { Switch } from "./Switch";
 
 /**
- * "Copy link to this note" — the header's share affordance.
+ * The header's Share button: opens a dialog that hands out the two kinds of
+ * link to this note. Still deliberately not a permissions surface — Access
+ * owns who can do what.
  *
- * One click opens a two-row choice (private / public); the second click copies.
- * Still deliberately not a permissions surface — Access owns who can do what;
- * this popover only hands out the two kinds of link (and kills the public one).
- *
- * Private: the existing https://<server>/open/note/… link. It carries a vault
+ * Team link: the existing https://<server>/open/note/… link. It carries a vault
  * id and a doc_id and nothing else — opening it resolves both against whoever
  * clicks, so sending it to someone without a grant hands them nothing.
  *
- * Public: a server-minted https://<server>/p/<token> page anyone can read in a
- * browser. The token IS the capability, so it is minted only when the row is
- * clicked — never as a side effect of opening the menu — and its existence is
- * re-fetched on every open (a stale "no public link" on a security affordance
- * is worse than the extra request).
+ * Public link: a server-minted https://<server>/p/<token> page anyone can read
+ * in a browser. The token IS the capability, so it is minted only when the
+ * switch is turned on — never as a side effect of opening the dialog — and its
+ * existence is re-fetched on every open (a stale "not published" on a security
+ * affordance is worse than the extra request). Turning the switch off revokes
+ * it; the old URL stops working.
  */
 export function ShareNoteButton({ docId }: { docId: string }) {
   const orgId = useStore((s) => s.session?.activeOrganizationId ?? null);
   const [open, setOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
-  // Which row was just copied, for an inline tick. The menu stays OPEN after a
-  // copy — closing it read as the click having failed, and left no way to grab
-  // the other link without reopening — so the row itself has to confirm.
-  const [copiedKind, setCopiedKind] = useState<"private" | "public" | null>(null);
-  const [existing, setExisting] = useState<PublicLink | null | "loading">(null);
+
+  // A different note is a different link: never carry an open dialog over.
+  useEffect(() => setOpen(false), [docId]);
+
+  if (!orgId) return null;
+
+  return (
+    <>
+      <button
+        className={`icon-btn share-btn${open ? " active" : ""}`}
+        title="Share this note"
+        aria-label="Share this note"
+        aria-haspopup="dialog"
+        onClick={() => setOpen(true)}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          {/* Share glyph: an open tray with an arrow rising out of its
+              centre through the open top. */}
+          <path d="M4 12v7a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 20 19v-7" />
+          <path d="M12 15V3" />
+          <path d="M8 7l4-4 4 4" />
+        </svg>
+      </button>
+      {open && <ShareNoteDialog docId={docId} orgId={orgId} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+function ShareNoteDialog({
+  docId,
+  orgId,
+  onClose,
+}: {
+  docId: string;
+  orgId: string;
+  onClose: () => void;
+}) {
+  const notePath = useStore((s) => s.openNote?.path ?? null);
+  // `undefined` while the first fetch is in flight; null = not published.
+  const [publicLink, setPublicLink] = useState<PublicLink | null | undefined>(undefined);
   const [publicBusy, setPublicBusy] = useState(false);
-  // Clipboard write failed after the link was minted: show the url as a
-  // click-to-copy row instead of losing it behind an error toast.
-  const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
-  const [fallbackCopied, setFallbackCopied] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
+  const [copied, setCopied] = useState<"team" | "public" | null>(null);
 
-  // The tick is a state, so it has to be cleared — otherwise switching notes
-  // leaves a stale "copied" on a link nobody copied.
   useEffect(() => {
-    if (!copied) return;
-    const id = window.setTimeout(() => {
-      setCopied(false);
-      setCopiedKind(null);
-    }, 1600);
-    return () => window.clearTimeout(id);
-  }, [copied]);
-  useEffect(() => {
-    setCopied(false);
-    setCopiedKind(null);
-    setOpen(false);
-    setFallbackUrl(null);
-    setFallbackCopied(false);
-  }, [docId]);
-  useEffect(() => {
-    if (!fallbackCopied) return;
-    const id = window.setTimeout(() => setFallbackCopied(false), 1600);
-    return () => window.clearTimeout(id);
-  }, [fallbackCopied]);
-
-  // Close on outside click or Escape (the AccountMenu popover pattern).
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (e: PointerEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") onClose();
     };
-    window.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
-  // Re-fetched on every open, kept component-local: the popover is the only
-  // reader, and it must never show stale "no public link exists".
   useEffect(() => {
-    if (!open) return;
     let alive = true;
-    setExisting("loading");
     authManager.api
       .getPublicLink(docId)
       .then((link) => {
-        if (alive) setExisting(link);
+        if (alive) setPublicLink(link);
       })
       .catch(() => {
-        if (alive) setExisting(null);
+        if (alive) setPublicLink(null);
       });
     return () => {
       alive = false;
     };
-  }, [open, docId]);
+  }, [docId]);
 
-  if (!orgId) return null;
+  // The "Copied" tick is a state, so it has to clear itself.
+  useEffect(() => {
+    if (!copied) return;
+    const id = window.setTimeout(() => setCopied(null), 1600);
+    return () => window.clearTimeout(id);
+  }, [copied]);
 
-  const copyPrivate = async () => {
+  const copy = useCallback(async (kind: "team" | "public", url: string) => {
+    if (await copyText(url)) {
+      setCopied(kind);
+      return true;
+    }
+    toast("Couldn't copy the link", "error");
+    return false;
+  }, []);
+
+  const copyTeam = () =>
     // Built on the server URL so it's an https link — chat apps make those
     // clickable, where a bare baalda:// scheme had to be copy-pasted. The
     // server's /open/note page bounces the click into the app.
-    const link = buildNoteLink({ orgId, docId }, useStore.getState().serverUrl);
-    if (await copyText(link)) {
-      setCopied(true);
-      setCopiedKind("private");
-      toast("Link copied — anyone on your team with access can open it");
-    } else {
-      toast("Couldn't copy the link", "error");
-    }
-  };
+    void copy("team", buildNoteLink({ orgId, docId }, useStore.getState().serverUrl));
 
-  const copyPublic = async () => {
+  const setPublished = async (next: boolean) => {
     setPublicBusy(true);
-    setFallbackUrl(null);
     try {
-      const link = await authManager.api.createPublicLink(docId);
-      setExisting(link);
-      if (!(await copyText(link.url))) {
-        // The link exists now even though both clipboard paths failed —
-        // surface it as a click-to-copy row rather than stranding it behind
-        // an error (the fresh click carries its own user activation).
-        setFallbackUrl(link.url);
-        return;
+      if (next) {
+        const link = await authManager.api.createPublicLink(docId);
+        setPublicLink(link);
+        // Publishing is almost always followed by pasting it somewhere. If the
+        // clipboard refuses, the url is on screen with its own Copy button.
+        if (await copyText(link.url)) {
+          setCopied("public");
+          toast("Public link created and copied");
+        }
+      } else {
+        await authManager.api.revokePublicLink(docId);
+        setPublicLink(null);
+        toast("Public link turned off — the old link no longer works");
       }
-      setCopied(true);
-      setCopiedKind("public");
-      toast("Public link copied — anyone with this link can view this note");
     } catch (e) {
       toast(
-        e instanceof ApiError ? e.message : "Couldn't create the public link",
+        e instanceof ApiError
+          ? e.message
+          : next
+            ? "Couldn't create the public link"
+            : "Couldn't turn off the public link",
         "error",
       );
     } finally {
@@ -141,114 +156,119 @@ export function ShareNoteButton({ docId }: { docId: string }) {
     }
   };
 
-  const disablePublic = async () => {
-    setPublicBusy(true);
-    try {
-      await authManager.api.revokePublicLink(docId);
-      setExisting(null);
-      setFallbackUrl(null);
-      toast("Public link disabled — the old link no longer works");
-    } catch (e) {
-      toast(
-        e instanceof ApiError ? e.message : "Couldn't disable the public link",
-        "error",
-      );
-    } finally {
-      setPublicBusy(false);
-    }
-  };
+  const published = publicLink != null;
+  // Kept after unpublishing so the row collapses with its text still in it.
+  const [lastUrl, setLastUrl] = useState("");
+  useEffect(() => {
+    if (publicLink) setLastUrl(publicLink.url);
+  }, [publicLink]);
+  const shownUrl = publicLink?.url ?? lastUrl;
+  const title = notePath ? noteLabel(notePath) : "this note";
 
-  return (
-    <div className="share-menu" ref={rootRef}>
-      <button
-        className={`icon-btn share-btn${copied ? " copied" : ""}${open ? " active" : ""}`}
-        title="Copy a link to this note"
-        aria-label="Copy a link to this note"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+  // Portalled to <body>, like UpgradeDialog: the header row's floating pill is
+  // a containing block for anything positioned inside it.
+  return createPortal(
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal share-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Share ${title}`}
+        onClick={(e) => e.stopPropagation()}
       >
-        {copied ? (
-          <CheckMark size="sm" />
-        ) : (
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            {/* Share glyph: an open tray with an arrow rising out of its
-                centre through the open top. */}
-            <path d="M4 12v7a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 20 19v-7" />
-            <path d="M12 15V3" />
-            <path d="M8 7l4-4 4 4" />
-          </svg>
-        )}
-      </button>
-      {open && (
-        <div className="account-popover share-popover" role="menu">
-          <button className="menu-item" onClick={() => void copyPrivate()}>
-            <span className="menu-item-label">Copy private link</span>
-            {copiedKind === "private" ? (
-              <span className="menu-hint share-copied">
-                <CheckMark size="xs" /> Copied
-              </span>
-            ) : (
-              <span className="menu-hint">Team members with access</span>
-            )}
+        <div className="modal-header">
+          <span className="share-dialog-title">
+            Share this note
+            <span className="share-dialog-note">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+                <path d="M14 3v5h5" />
+              </svg>
+              <span>{title}</span>
+            </span>
+          </span>
+          <button className="icon-btn" onClick={onClose} aria-label="Close">
+            ✕
           </button>
-          <button
-            className="menu-item"
-            disabled={publicBusy}
-            onClick={() => void copyPublic()}
-          >
-            <span className="menu-item-label">Copy public link</span>
-            {publicBusy ? (
-              <Spinner size="xs" />
-            ) : copiedKind === "public" ? (
-              <span className="menu-hint share-copied">
-                <CheckMark size="xs" /> Copied
-              </span>
-            ) : (
-              <span className="menu-hint">Anyone with the link can view</span>
-            )}
-          </button>
-          {fallbackUrl && (
-            <button
-              className="menu-item share-fallback-url"
-              title="Copy the public link"
-              onClick={() => {
-                void copyText(fallbackUrl).then((ok) => {
-                  if (ok) {
-                    setFallbackCopied(true);
-                    toast("Public link copied — anyone with this link can view this note");
-                  } else {
-                    toast("Couldn't copy the link", "error");
-                  }
-                });
-              }}
-            >
-              <span className="menu-item-label">{fallbackUrl}</span>
-              {fallbackCopied ? <CheckMark size="xs" /> : <span className="menu-hint">Copy</span>}
-            </button>
-          )}
-          {existing !== null && existing !== "loading" && (
-            <>
-              <div className="menu-sep" />
-              <button
-                className="menu-item danger"
-                disabled={publicBusy}
-                onClick={() => void disablePublic()}
-              >
-                <span className="menu-item-label">Disable public link</span>
-                <span className="menu-hint">The link stops working</span>
-              </button>
-            </>
-          )}
         </div>
-      )}
-    </div>
+
+        <div className="share-options">
+          <section className="share-option">
+            <span className="share-option-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="9" cy="8" r="3.2" />
+                <path d="M3.5 19a5.5 5.5 0 0 1 11 0" />
+                <path d="M16 5.2a3 3 0 0 1 0 5.6M18 19a5.4 5.4 0 0 0-2.6-4.6" />
+              </svg>
+            </span>
+            <span className="share-option-copy">
+              <strong>Team link</strong>
+              <span>Opens for people in this vault who have access.</span>
+            </span>
+            <button type="button" className="ghost-pill sm share-copy-btn" onClick={copyTeam}>
+              {copied === "team" ? (
+                <>
+                  <CheckMark size="xs" /> Copied
+                </>
+              ) : (
+                "Copy link"
+              )}
+            </button>
+          </section>
+
+          <section className={`share-option${published ? " is-on" : ""}`}>
+            <span className="share-option-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+              </svg>
+            </span>
+            <span className="share-option-copy">
+              <strong>Publish to the web</strong>
+              <span>Anyone with the link can read it in a browser.</span>
+            </span>
+            {/* The switch stays put while it works (disabled, not swapped for a
+                spinner) so the row never changes width mid-click. */}
+            <Switch
+              checked={published}
+              disabled={publicLink === undefined || publicBusy}
+              onChange={(next) => void setPublished(next)}
+              ariaLabel="Publish to the web"
+            />
+            {/* Always mounted and animated open/closed (grid 0fr → 1fr), with
+                the last url kept while it collapses — so publishing slides the
+                row in instead of making the dialog jump. */}
+            <div className={`share-url-reveal${published ? " open" : ""}`} aria-hidden={!published}>
+              <div className="share-url-row">
+                <input
+                  className="share-url"
+                  readOnly
+                  tabIndex={published ? 0 : -1}
+                  value={shownUrl}
+                  aria-label="Public link"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+                <button
+                  type="button"
+                  className="ghost-pill sm share-copy-btn"
+                  tabIndex={published ? 0 : -1}
+                  onClick={() => publicLink && void copy("public", publicLink.url)}
+                >
+                  {copied === "public" ? (
+                    <>
+                      <CheckMark size="xs" /> Copied
+                    </>
+                  ) : (
+                    "Copy"
+                  )}
+                </button>
+                <p className="share-url-hint">Turn this off to make the link stop working.</p>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }

@@ -14,8 +14,14 @@ import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
 import { bridgeManager, createTauriBridgeIO, sha256Hex } from "../bridge/adapter";
-import { isServerTooOld, type NoteLastEdited, type SessionInfo } from "../api";
+import {
+  ACCESS_CHECK_MAX,
+  isServerTooOld,
+  type NoteLastEdited,
+  type SessionInfo,
+} from "../api";
 import * as ipc from "../ipc";
+import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
@@ -46,6 +52,7 @@ import { DocSync, type SyncStatus } from "./syncManager";
 import { VaultRegistry, type InboundHost, type RegistryFailure } from "./registry";
 import { VaultDocStore, createIpcManifestStore } from "./vaultDocStore";
 import {
+  isBulkPhase,
   vaultScopes,
   type DocSyncState,
   type SyncProgress,
@@ -63,6 +70,7 @@ import {
 import { bytesToBase64, type VoiceFrame } from "./vaultProtocol";
 import { svFromBase64 } from "./ackedSv";
 import { ReadOnlyRejections } from "./readOnlyRejections";
+import { SyncPauseTracker, type SyncPause } from "./syncPause";
 import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
 import { VoicePlayer } from "../voice/playback";
 import { VoiceRoster, type VoiceSpeaker } from "../voice/roster";
@@ -143,9 +151,9 @@ function diskDeleteCap(mappedCount: number): number {
   return Math.max(5, Math.ceil(mappedCount * 0.2));
 }
 /**
- * The share of a vanished folder's notes that must reappear, byte-identical, at
- * the same sub-path under ONE new folder before the pair is treated as a folder
- * move (#221). High enough that an unrelated folder never qualifies; low enough
+ * The share of a vanished folder's notes (and tree binaries, #266) that must
+ * reappear, byte-identical, at the same sub-path under ONE new folder before
+ * the pair is treated as a folder move (#221). High enough that an unrelated folder never qualifies; low enough
  * that editing a handful of notes in the same breath as the move keeps it one.
  */
 const FOLDER_MOVE_MIN_RATIO = 0.8;
@@ -204,6 +212,30 @@ const EMPTY_PROBE_MAX_BYTES = 1024;
 const REGISTRY_PULL_MAX_WAIT_MS = 1_000;
 
 /**
+ * Minimum gap between the last registry pull and one asked for by a META-only
+ * frame (#262) — the server's "last edited by" stamp, which moves no row and
+ * grants nothing. Each note connection that pushes ops stamps its note, so a
+ * returning device catching up, or a user opening notes in a row, used to make
+ * every app in the vault re-pull the whole tree once per note. The stamp is
+ * already up to 60 s behind server-side, so 30 s here costs nothing a person
+ * can see. Structural frames (create/rename/move/delete) never wait on this:
+ * they keep the immediate, debounced path.
+ */
+export const REGISTRY_META_PULL_MIN_MS = 30_000;
+
+/**
+ * Consecutive failed registry pulls before Health and the pill say so. The pull
+ * is the only path that registers a NEW note or folder; content edits ride
+ * their own sockets, so a pull that keeps failing used to look like "edits sync,
+ * new notes never appear" with nothing on screen but a console line.
+ */
+export const PULL_FAILURE_THRESHOLD = 3;
+/** …or a failing streak this old, whatever its count (pulls can be rare). */
+export const PULL_FAILURE_PERSIST_MS = 5 * 60_000;
+/** The code on the Health row for a failing registry pull. */
+export const PULL_FAILED_CODE = "registry_pull_failed";
+
+/**
  * How long the server's `acl-changed` frame keeps a pull authorised to remove
  * files wholesale (see {@link SyncManager.revocationAuthority}).
  *
@@ -258,7 +290,9 @@ export type RegistryPullReason =
   | "revert"
   // #221: the user answered a held bulk delete.
   | "delete-restore"
-  | "delete-confirmed";
+  | "delete-confirmed"
+  // #262: a `meta` frame (last-edited stamps only), after its throttle.
+  | "meta-frame";
 
 export interface OpenedDoc {
   awareness: Awareness;
@@ -414,9 +448,44 @@ export class SyncManager implements InboundHost {
   private onColors?: (colors: Record<string, string>) => void;
   private mapPublishTimer: ReturnType<typeof setTimeout> | null = null;
   private registryPullTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The current streak of failed registry pulls (see
+   *  {@link PULL_FAILURE_THRESHOLD}); reset by the next pull that succeeds. */
+  private pullFailures: { count: number; since: number; reason: string } | null = null;
   /** When the currently-armed pull's burst started (see
    *  {@link REGISTRY_PULL_MAX_WAIT_MS}); 0 when no pull is armed. */
   private registryPullBurstAt = 0;
+  /** When the last registry pull was started (any reason). A meta-only frame
+   *  inside {@link REGISTRY_META_PULL_MIN_MS} of it is deferred, not dropped. */
+  private lastRegistryPullAt = 0;
+  /** The deferred meta-only pull, if one is waiting. At most one. */
+  private metaPullTimer: ReturnType<typeof setTimeout> | null = null;
+  /** UI subscribes here to refetch the Activity feed when the server says the
+   *  vault's Trash / shrink listings may have moved (#260). */
+  private onActivityChanged?: () => void;
+  /** UI subscribes here for "Sync paused" (the server's shrink burst brake,
+   *  #252). */
+  private onSyncPause?: (pause: SyncPause | null) => void;
+  /**
+   * This device's view of a shrink-brake hold on our own writes in this vault.
+   * A notice only: while it lasts, local edits stay exactly where they are, and
+   * when it lifts the notes it held are queued again like any other edit.
+   */
+  private readonly syncPause = new SyncPauseTracker({
+    onChange: (next, prev, reason) => {
+      try {
+        this.onSyncPause?.(next);
+      } catch (e) {
+        console.warn("[sync] pause listener threw", e);
+      }
+      if (next) {
+        if (!prev) this.note("warn", "sync-paused", "Sync paused: many notes were emptied at once");
+      } else if (prev && reason === "lifted") {
+        this.note("info", "sync-resumed", "Sync resumed");
+        const scope = this.scope;
+        if (scope?.isCurrent()) this.requeueShrinkHeld(scope);
+      }
+    },
+  });
   private attachments: AttachmentSync | null = null;
   /** Disk deletes for BINARIES — the blob mirror's own `drainDiskDeletes`
    *  (`binaryDeletes.ts`). Built and torn down beside the mirror it guards. */
@@ -586,6 +655,8 @@ export class SyncManager implements InboundHost {
   /** Unregistered paths that appeared as `tree` changes — possibly the new half
    *  of a folder move (path → seenAt). Pruned by age; verified at drain time. */
   private folderCandidates = new Map<string, number>();
+  /** {@link drainFolderMoves} is deciding: `goneFolders` was already taken. */
+  private pairingFolders = false;
   /**
    * The vault root folder is gone while the app is open (#221): renamed, moved
    * or unmounted. Latched until the vault is reopened (teardown clears it);
@@ -948,14 +1019,17 @@ export class SyncManager implements InboundHost {
   private logUploadFailure(f: UploadFailure): void {
     this.invalidatedFailures.delete(f.docId);
     this.note(
-      "error",
+      // A note the shrink brake holds is waiting, not broken (#274).
+      f.kind === "shrink-held" ? "warn" : "error",
       // A permanent refusal is a different fact from a failed attempt: nothing
       // retries it, so the page offers a different remedy.
       f.kind === "too-large"
         ? "too-large"
         : f.kind === "no-write-access"
           ? "no-write-access"
-          : "push-failed",
+          : f.kind === "shrink-held"
+            ? "shrink-held"
+            : "push-failed",
       `${f.relPath} — ${f.reason}`,
       { docId: f.docId, path: f.relPath },
     );
@@ -1208,7 +1282,7 @@ export class SyncManager implements InboundHost {
     if (!scope.isCurrent()) return;
     this.registry.forgetFileId(path);
     this.attachments?.forgetFile(path);
-    await this.registry.pull();
+    await this.pullRegistry(scope);
     if (scope.isCurrent()) this.onRegistryChanged?.();
   }
 
@@ -1366,8 +1440,13 @@ export class SyncManager implements InboundHost {
         this.pullAfterDiskDeletes = true;
         return;
       }
-      void this.registry
-        .pull()
+      this.lastRegistryPullAt = Date.now();
+      // This pull carries whatever a deferred meta-only one was waiting for.
+      if (this.metaPullTimer) {
+        clearTimeout(this.metaPullTimer);
+        this.metaPullTimer = null;
+      }
+      void this.pullRegistry(scope)
         .then((changed) => {
           if (!scope.isCurrent()) return;
           // A completed structure pull is half of "this session is live" (the
@@ -1397,9 +1476,98 @@ export class SyncManager implements InboundHost {
     }, 250);
   }
 
+  /**
+   * A `registry` frame flagged `meta`: only "last edited by" stamps moved
+   * (#262). Nothing structural changed and nothing was granted or revoked, so
+   * there is no delete or rename this pull could be the first to hear about —
+   * those always arrive as ordinary frames and take {@link handleRegistryChanged}
+   * at once. All this pull refreshes is the sidebar's "edited by" line, so it
+   * rides an armed pull when there is one, and otherwise waits until
+   * {@link REGISTRY_META_PULL_MIN_MS} has passed since the last pull started.
+   * Deferred, never dropped: one timer, shared by every frame that lands while
+   * it waits.
+   */
+  handleRegistryMetaChanged(): void {
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) return;
+    if (this.registryPullTimer || this.metaPullTimer) return;
+    const wait = this.lastRegistryPullAt + REGISTRY_META_PULL_MIN_MS - Date.now();
+    if (wait <= 0) {
+      this.handleRegistryChanged("meta-frame");
+      return;
+    }
+    this.metaPullTimer = setTimeout(() => {
+      this.metaPullTimer = null;
+      if (scope.isCurrent()) this.handleRegistryChanged("meta-frame");
+    }, wait);
+  }
+
+  /** UI hook for the Activity feed's push refetch (#260). */
+  setActivityChangedListener(cb: (() => void) | undefined): void {
+    this.onActivityChanged = cb;
+  }
+
+  /** UI hook for the "Sync paused" notice (#252). Fires with the current
+   *  state at once, so a late subscriber is never stale. */
+  setSyncPauseListener(cb: ((pause: SyncPause | null) => void) | undefined): void {
+    this.onSyncPause = cb;
+    cb?.(this.syncPause.current());
+  }
+
+  /** The current shrink-brake pause on our writes in this vault, if any. */
+  syncPauseState(): SyncPause | null {
+    return this.syncPause.current();
+  }
+
+  /**
+   * The pause lifted: queue every note a batch push left `shrink-held` so its
+   * ops go up now, through the ordinary per-note drain — like {@link retryDoc}
+   * without the "user asked" note. Nothing local is touched: these docs were
+   * never pushed, so the drain pulls the server state first and merges.
+   */
+  private requeueShrinkHeld(scope: VaultScope): void {
+    let queued = 0;
+    const requeue = (docId: string, failure: UploadFailure): void => {
+      const relPath = this.registry.pathForDocId(docId) ?? failure.relPath;
+      this.invalidatedFailures.add(docId);
+      this.divergedDocs.add(docId);
+      this.localChanges.set(docId, relPath);
+      queued++;
+    };
+    for (const [docId, failure] of [...this.bulkFailures]) {
+      if (failure.kind !== "shrink-held") continue;
+      this.bulkFailures.delete(docId);
+      requeue(docId, failure);
+    }
+    // …and the ones the per-note uploader held: its missing acks during the
+    // pause are reported the same way (#274). The failure stays in that run's
+    // list, so `invalidatedFailures` + the queue entry are what retire it.
+    for (const failure of this.uploader?.failedDocs() ?? []) {
+      if (failure.kind !== "shrink-held" || this.localChanges.has(failure.docId)) continue;
+      requeue(failure.docId, failure);
+    }
+    if (queued > 0) this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+  }
+
+  /** The server said Trash / shrink listings may have moved: an `activity`
+   *  frame, or a structural `registry` frame (every soft delete is one). */
+  private notifyActivityChanged(scope: VaultScope): void {
+    if (!scope.isCurrent()) return;
+    try {
+      this.onActivityChanged?.();
+    } catch (e) {
+      console.warn("[sync] activity listener threw", e);
+    }
+  }
+
   /** True while a debounced registry pull is still armed (teardown assertions). */
   hasPendingRegistryPull(): boolean {
     return this.registryPullTimer != null;
+  }
+
+  /** True while a meta-only pull is deferred (tests / teardown assertions). */
+  hasPendingMetaPull(): boolean {
+    return this.metaPullTimer != null;
   }
 
   /** True while the blob mirror has a debounced pass armed — the binary half of
@@ -1567,6 +1735,17 @@ export class SyncManager implements InboundHost {
    * took away arrive as `drop` frames just ahead of this one, and those name
    * themselves ({@link handleServerDrop}).
    */
+  /**
+   * This user just changed access in this vault (the Access panel saved). The
+   * server's `reauth` frame does the same thing when it arrives; this covers
+   * the window before it, and a server that does not echo it to the author.
+   */
+  retryHeldRegistrations(): void {
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) return;
+    if (this.registry.retryHeldRefusals()) this.handleRegistryChanged("reauth");
+  }
+
   handleServerReauth(scope: VaultScope): void {
     if (!scope.isCurrent()) return;
     this.aclChangedAt = Date.now();
@@ -1578,7 +1757,10 @@ export class SyncManager implements InboundHost {
     // changed too. That pull is what removes a note this user just lost access to
     // from their disk, and without it the removal would wait for the next
     // structural change or an app restart - long enough to look like the
-    // revocation hadn't worked.
+    // revocation hadn't worked. It is also the pass that re-asks every create
+    // the server refused for access: a grant that lifts the refusal lets those
+    // new notes register by themselves.
+    this.registry.retryHeldRefusals();
     this.handleRegistryChanged("reauth");
     // ...and the BINARIES are re-diffed against the server. This is the file
     // half of that same pull, and it has to be asked for separately: the pull
@@ -1738,7 +1920,16 @@ export class SyncManager implements InboundHost {
     // pass below decides what a `modified` means by asking whether a delete is
     // pending. Deciding that against half a batch is how an external rename
     // would randomly propagate as a delete plus a brand-new note.
+    let forgotHeld = false;
     for (const { path: relPath, kind, gone } of changes) {
+      // A new note or folder the server refused for access left the disk:
+      // nothing is stranded there any more (see `VaultRegistry.heldRefused`).
+      if (
+        (kind === "removed" || (kind === "tree" && gone === true)) &&
+        this.registry.forgetHeldRefusal?.(relPath)
+      ) {
+        forgotHeld = true;
+      }
       // A registered folder that is no longer on disk: the old half of a folder
       // moved outside the app, or a folder removed as ONE event (Finder's Move
       // to Trash is a rename). Held for the drain, which pairs it with a folder
@@ -1755,6 +1946,11 @@ export class SyncManager implements InboundHost {
       }
       if (kind !== "removed") continue;
       if (this.queueDiskDelete(scope, relPath)) queuedDelete = true;
+    }
+    // No pull follows an unregistered file's removal, so re-judge the finished
+    // run here or the pill and banner keep counting a file that is gone.
+    if (forgotHeld && !this.contentRunInFlight() && this.progress?.snapshot().phase === "error") {
+      this.completeRun(scope);
     }
     for (const { path: relPath, kind, unchanged, gone } of changes) {
       if (kind === "removed") continue; // handled above
@@ -1981,7 +2177,13 @@ export class SyncManager implements InboundHost {
       // 0b. Folder moves (#221), BEFORE anything per-note: a registered folder
       //     that vanished paired with an unregistered one that appeared.
       if (goneFolders.length > 0 && folderCandidates.length > 0) {
-        const out = await this.drainFolderMoves(goneFolders, folderCandidates, scope);
+        this.pairingFolders = true;
+        let out: Awaited<ReturnType<SyncManager["drainFolderMoves"]>>;
+        try {
+          out = await this.drainFolderMoves(goneFolders, folderCandidates, scope);
+        } finally {
+          this.pairingFolders = false;
+        }
         if (!scope.isCurrent() || this.rootMissing) return;
         pending = pending.filter((p) => !out.movedFrom.some((f) => isUnder(p.relPath, f)));
         candidates = candidates.filter((c) => !out.movedTo.some((t) => isUnder(c, t)));
@@ -2429,12 +2631,17 @@ export class SyncManager implements InboundHost {
    *
    * The rule, per topmost gone folder G (a nested gone folder travels with its
    * parent) against each topmost appeared folder C:
-   *  - N = the mapped notes under G. With N = 0 there is no evidence, and G is
-   *    left to the pull exactly as before.
+   *  - N = the mapped notes under G, plus the registered tree binaries under it
+   *    whose bytes this device last agreed with the server on (`fileBases`,
+   *    #266). With N = 0 there is no evidence, and G is left to the pull
+   *    exactly as before.
    *  - a note PAIRS when `C/<its sub-path under G>` is a note on disk whose
    *    text hashes (sha256, the same `sha256Hex` the per-note `matchRename`
-   *    compares) equal to the doc's current text.
-   *  - pairs >= {@link FOLDER_MOVE_MIN_RATIO} x N => G moved to C: one
+   *    compares) equal to the doc's current text; a binary pairs when the file
+   *    at its sub-path hashes to that agreed base. A binary with no base is no
+   *    evidence either way and counts on neither side.
+   *  - pairs >= {@link FOLDER_MOVE_MIN_RATIO} x N — or, as before, the notes
+   *    alone reach the ratio of the notes — => G moved to C: one
    *    `registry.renamePath(G, C)` (`PATCH /folders/:id`, which keeps every doc
    *    id under it, exactly like a sidebar drag), then every mapped note that
    *    has a file at its sub-path is re-indexed under its KEPT doc id — the
@@ -2498,6 +2705,26 @@ export class SyncManager implements InboundHost {
     if (gone.length === 0 || cands.length === 0) return out;
 
     const mapped = this.registry.mappedNotes();
+    // Binaries with an agreed base only: that sha is the proof this device had
+    // these very bytes, the same proof the mirror's offline rename asks for.
+    const mappedFiles = (this.registry.mappedFiles?.() ?? []).flatMap((f) => {
+      const base = this.registry.getFileBase?.(f.fileId) ?? null;
+      return base ? [{ ...f, base }] : [];
+    });
+    /** Local binary sha by path, read once and only when a gone folder holds
+     *  binaries; `null` = the disk could not be listed (no binary evidence). */
+    let binaryShas: Map<string, string> | null | undefined;
+    const localBinaryShas = async (): Promise<Map<string, string> | null> => {
+      if (binaryShas !== undefined) return binaryShas;
+      try {
+        const list = await ipc.listBinaries(scope.vaultEpoch);
+        binaryShas = new Map(list.map((b) => [b.relPath, b.sha256]));
+      } catch (e) {
+        if (!ipc.isVaultMismatch(e)) console.warn("[sync] folder move: couldn't list binaries", e);
+        binaryShas = null;
+      }
+      return binaryShas;
+    };
     const docShas = new Map<string, string | null>();
     const docSha = async (docId: string, relPath: string): Promise<string | null> => {
       if (docShas.has(docId)) return docShas.get(docId) ?? null;
@@ -2520,13 +2747,25 @@ export class SyncManager implements InboundHost {
 
     for (const g of gone) {
       const under = mapped.filter((n) => isUnder(n.relPath, g));
-      if (under.length === 0) continue; // no evidence either way — the pull decides, as before
-      const need = Math.ceil(under.length * FOLDER_MOVE_MIN_RATIO);
-      let best: { to: string; matched: Set<string> } | null = null;
+      const filesUnder = mappedFiles.filter((f) => isUnder(f.relPath, g));
+      // no evidence either way — the pull decides, as before
+      if (under.length === 0 && filesUnder.length === 0) continue;
+      const shas = filesUnder.length > 0 ? await localBinaryShas() : null;
+      if (!scope.isCurrent()) return out;
+      const total = under.length + filesUnder.length;
+      const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+      // The notes-only rule this replaced still qualifies on its own, so adding
+      // binaries to the evidence can only ever turn a fallback into a move.
+      const needNotes = under.length > 0 ? Math.ceil(under.length * FOLDER_MOVE_MIN_RATIO) : Infinity;
+      let best: { to: string; matched: Set<string>; files: number; score: number } | null = null;
       for (const c of cands) {
         if (usedCands.has(c)) continue;
         const present = under.filter((n) => notesOnDisk.has(c + n.relPath.slice(g.length)));
-        if (present.length < need) continue; // cannot reach the ratio: no hashing at all
+        const filesPresent = shas
+          ? filesUnder.filter((f) => shas.has(c + f.relPath.slice(g.length)))
+          : [];
+        // cannot reach the ratio: no hashing at all
+        if (present.length < needNotes && present.length + filesPresent.length < need) continue;
         const matched = new Set<string>();
         for (const n of present) {
           const a = await docSha(n.docId, n.relPath);
@@ -2535,8 +2774,10 @@ export class SyncManager implements InboundHost {
           if (!scope.isCurrent()) return out;
           if (a != null && a === b) matched.add(n.docId);
         }
-        if (matched.size >= need && (!best || matched.size > best.matched.size)) {
-          best = { to: c, matched };
+        const files = filesPresent.filter((f) => shas!.get(c + f.relPath.slice(g.length)) === f.base).length;
+        const score = matched.size + files;
+        if ((matched.size >= needNotes || score >= need) && (!best || score > best.score)) {
+          best = { to: c, matched, files, score };
         }
       }
       if (!best) {
@@ -2550,6 +2791,9 @@ export class SyncManager implements InboundHost {
         continue;
       }
       usedCands.add(best.to);
+      console.info(
+        `[sync] ${g} → ${best.to}: ${best.files}/${filesUnder.length} binaries matched their agreed bytes`,
+      );
       if (await this.applyFolderMove(g, best.to, under, best.matched, notesOnDisk, scope)) {
         out.movedFrom.push(g);
         out.movedTo.push(best.to);
@@ -2665,6 +2909,10 @@ export class SyncManager implements InboundHost {
     if (this.registryPullTimer) {
       clearTimeout(this.registryPullTimer);
       this.registryPullTimer = null;
+    }
+    if (this.metaPullTimer) {
+      clearTimeout(this.metaPullTimer);
+      this.metaPullTimer = null;
     }
     this.pendingDiskDeletes.clear();
     this.pendingDeleteByPath.clear();
@@ -3043,6 +3291,8 @@ export class SyncManager implements InboundHost {
       lazyPhase: true,
       onFailure: (f) => this.logUploadFailure(f),
       shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
+      // A missing ack during a shrink-brake hold is the hold, not a failure (#274).
+      syncPaused: () => this.syncPause.current() != null,
     });
     this.uploader = uploader;
 
@@ -3288,6 +3538,113 @@ export class SyncManager implements InboundHost {
   /** Registry host hook: forward a pass's access grants to the UI listener. */
   accessGranted(info: { count: number; paths: string[] }): void {
     this.onAccessGranted?.(info);
+  }
+
+  /**
+   * Every registry pull goes through here, so the vault channel's parked updates
+   * settle wherever a pull completes — a registry frame, the catch-up pull on
+   * every (re)connect, a manual retry, a server-file removal. The mark is taken
+   * BEFORE the pull starts: only docs parked before then can be judged by it.
+   */
+  private async pullRegistry(scope: VaultScope): Promise<boolean> {
+    const store = this.docStore;
+    const mark = store?.parkMark() ?? 0;
+    let changed: boolean;
+    try {
+      changed = await this.registry.pull();
+    } catch (e) {
+      // A failed pull judged nothing: place what already maps, discard nothing.
+      if (scope.isCurrent()) {
+        this.settleParkedDocs(scope, store, 0);
+        this.recordPullFailure(scope, e);
+      }
+      throw e;
+    }
+    if (scope.isCurrent()) {
+      this.settleParkedDocs(scope, store, mark);
+      this.clearPullFailures(scope);
+    }
+    return changed;
+  }
+
+  /**
+   * The failing registry pull Health and the pill report, once the streak is
+   * {@link PULL_FAILURE_THRESHOLD} long or {@link PULL_FAILURE_PERSIST_MS} old;
+   * null otherwise.
+   */
+  pullFailure(now = Date.now()): { count: number; since: number; reason: string } | null {
+    // Offline, reconnecting or refused already says why nothing new arrives;
+    // the vault status wins over this issue.
+    if (this.vaultStatus !== "synced") return null;
+    return this.pullStreakRaised(now) ? this.pullFailures : null;
+  }
+
+  private pullStreakRaised(now = Date.now()): boolean {
+    const f = this.pullFailures;
+    if (!f) return false;
+    return f.count >= PULL_FAILURE_THRESHOLD || now - f.since >= PULL_FAILURE_PERSIST_MS;
+  }
+
+  private recordPullFailure(scope: VaultScope, e: unknown): void {
+    // A pull that failed because we are offline, or because the session or the
+    // app version was refused, is not this problem: each has its own state.
+    if (this.vaultStatus !== "synced") return;
+    const status = (e as { status?: unknown } | null)?.status;
+    if (status === 401 || status === 426) return;
+    // A listing that hit REGISTRY_LISTING_TIMEOUT_MS aborts with a message
+    // ("signal is aborted without reason") that says nothing to a person.
+    const reason =
+      (e as { name?: unknown } | null)?.name === "AbortError"
+        ? "the server took too long to answer"
+        : e instanceof Error
+          ? e.message
+          : String(e);
+    const prev = this.pullFailures;
+    this.pullFailures = { count: (prev?.count ?? 0) + 1, since: prev?.since ?? Date.now(), reason };
+    if (this.pullFailure() != null) this.rejudgeFinishedRun(scope);
+  }
+
+  private clearPullFailures(scope: VaultScope): void {
+    const was = this.pullStreakRaised();
+    this.pullFailures = null;
+    if (was) this.rejudgeFinishedRun(scope);
+  }
+
+  /** No run follows a pull's verdict, so re-stamp a finished run's phase here. */
+  private rejudgeFinishedRun(scope: VaultScope): void {
+    if (this.contentRunInFlight()) return;
+    // An unsettled backfill would make `completeRun` start a download phase;
+    // that run stamps its own verdict when it ends.
+    if (!this.bulkPhase && this.vaultEngine && !this.vaultEngine.backfillSettled()) return;
+    const phase = this.progress?.snapshot().phase;
+    if (phase === "done" || phase === "error") this.completeRun(scope);
+  }
+
+  /**
+   * A registry pull has completed: hand the vault channel's parked updates —
+   * backfills for docs that arrived before this device could map them, which is
+   * the normal order for a note created on the server — to the doc store, which
+   * writes the ones the pull placed and discards the rest. Docs the store had to
+   * evict from its bounded buffer lost their base; a reconnect re-requests them
+   * (its manifest has no entry for them, so the server sends full state). In a
+   * live-only session the bulk engine owns downloads and is left to fetch them.
+   *
+   * `markedOn` is the store the mark was read from: a channel restarted during
+   * the pull has its own sequence, so the mark judges nothing there.
+   */
+  private settleParkedDocs(scope: VaultScope, markedOn: VaultDocStore | null, mark: number): void {
+    const store = this.docStore;
+    if (!store) return;
+    void store
+      .settleParked(store === markedOn ? mark : 0)
+      .then(() => {
+        if (!scope.isCurrent() || store !== this.docStore) return;
+        const lost = store.takeOverflowed();
+        if (lost.length === 0 || this.vaultEngineLiveOnly) return;
+        console.info(`[sync] re-requesting ${lost.length} doc(s) whose early backfill overflowed the buffer`);
+        this.vaultEngine?.reconnect({ liveOnly: false });
+      })
+      .catch((e) => console.warn("[sync] applying parked updates failed", e));
   }
 
   /**
@@ -3636,6 +3993,7 @@ export class SyncManager implements InboundHost {
       toProbe.push({ docId, relPath });
     }
     if (toProbe.length === 0) return keep;
+    const settledNow: string[] = [];
     return runPool(
       toProbe,
       async ({ docId, relPath }) => {
@@ -3665,13 +4023,43 @@ export class SyncManager implements InboundHost {
         this.emptyEverywhere.add(docId);
         this.registry.markPushed(docId);
         this.progress?.doc(docId, "synced");
+        settledNow.push(docId);
       },
       { concurrency: IPC_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
     ).then(() => {
       if (!scope.isCurrent()) return;
       this.serverEmpty = keep;
       this.progress?.flush();
+      this.reportConfirmedEmpty(settledNow, scope);
     });
+  }
+
+  /**
+   * Tell the server which notes were just settled as empty everywhere (#257),
+   * so it can tell a genuinely empty note from an upload that never arrived.
+   *
+   * Fire-and-forget and purely informational: the server only stamps a marker
+   * (`notes.confirmed_empty_at`, and only on notes it holds no content for) and
+   * changes no content; nothing on either side reads the marker to clear or
+   * skip a note, and `ready.empty` still names these docs. A failure (offline,
+   * an older server without the route) costs only the count, and the doc is
+   * reported again on a later connect because `ready.empty` names it again.
+   * Once per doc per session — `emptyEverywhere` already keeps a settled doc
+   * from being probed twice, so this cannot loop.
+   */
+  private reportConfirmedEmpty(docIds: string[], scope: VaultScope): void {
+    const vaultId = this.registry.vaultId;
+    if (!vaultId || docIds.length === 0) return;
+    void (async () => {
+      for (let i = 0; i < docIds.length; i += ACCESS_CHECK_MAX) {
+        if (!scope.isCurrent()) return;
+        try {
+          await api.confirmEmptyNotes(vaultId, docIds.slice(i, i + ACCESS_CHECK_MAX));
+        } catch {
+          return; // informational: never retried in a loop, never surfaced
+        }
+      }
+    })();
   }
 
   /**
@@ -3820,7 +4208,7 @@ export class SyncManager implements InboundHost {
       onProgress: (p) => {
         if (cleanupActive) return;
         this.logRunPhase(p);
-        this.onSyncProgress?.(p);
+        this.onSyncProgress?.(this.withRefusals(this.withUploadBacklog(p)));
       },
       onDocState: (patch) => this.onDocState?.(patch),
     });
@@ -3906,6 +4294,8 @@ export class SyncManager implements InboundHost {
       // The registry reads the vault tree itself (the FULL recursive walk); it
       // deliberately does not take one from here, because the tree this layer
       // has access to is the sidebar's lazy one. See `reconcile`.
+      const primedStore = this.docStore;
+      const parkMark = primedStore?.parkMark() ?? 0;
       const { seeded } = await this.registry.reconcile({
         organizationId: session.activeOrganizationId,
         vaultName: vault.name,
@@ -3924,6 +4314,11 @@ export class SyncManager implements InboundHost {
       // is news (see `markLive` for the other half of the condition).
       this.pulledOnce = true;
       this.markLive();
+      // The primed channel backfilled while the reconcile ran, and a note created
+      // on the server since the last launch is unmapped until the reconcile maps
+      // it — its backfill was parked. The channel's own `synced` pull was ignored
+      // while disabled, so settle here or it waits for the next registry frame.
+      this.settleParkedDocs(scope, primedStore, parkMark);
       // Renames, moves and deletes made while the app was closed were not
       // applied by that pass; say so once (#221).
       this.maybeNoticeClosedChanges();
@@ -4122,6 +4517,8 @@ export class SyncManager implements InboundHost {
       this.registry.unmarkPushed(docId);
       this.divergedDocs.add(docId);
     }
+    // Creates refused for access are re-asked too, for the same reason.
+    this.registry.retryHeldRefusals();
     // The old uploader's failure list belongs to the run being retried; keeping
     // it would let `completeRun` re-report failures the retry just fixed.
     this.uploader = null;
@@ -4130,7 +4527,7 @@ export class SyncManager implements InboundHost {
     this.progress?.flush();
     let changed = false;
     try {
-      changed = await this.registry.pull();
+      changed = await this.pullRegistry(scope);
     } catch (e) {
       console.warn("[sync] manual retry pull failed", e);
     }
@@ -4336,6 +4733,9 @@ export class SyncManager implements InboundHost {
         this.divergedDocs.delete(docId); // a confirmed push carries any merged ops
         this.serverEmpty.delete(docId);
         this.serverBehind.delete(docId);
+        // The server took a content write from us: a pause only a batch
+        // refusal announced is over.
+        this.syncPause.writeAccepted();
       },
       markAcked: (docId, sv) => this.registry.recordAck?.(docId, sv),
       // Never touch the open note: its editor session owns that doc's provider.
@@ -4469,6 +4869,8 @@ export class SyncManager implements InboundHost {
       progress,
       onFailure: (f) => this.logUploadFailure(f),
       shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
+      // A missing ack during a shrink-brake hold is the hold, not a failure (#274).
+      syncPaused: () => this.syncPause.current() != null,
     });
     this.uploader = uploader;
     await uploader.run();
@@ -4479,6 +4881,9 @@ export class SyncManager implements InboundHost {
 
   /** One note the bulk engine could not get through. */
   private recordBulkFailure(f: UploadFailure): void {
+    // Held by the shrink burst brake (#252): say "Sync paused" once rather
+    // than letting the note read as a mystery failure.
+    if (f.kind === "shrink-held") this.syncPause.batchHeld();
     this.invalidatedFailures.delete(f.docId);
     this.bulkFailures.set(f.docId, f);
     if (f.permanent) this.permanentFailures.set(f.docId, f);
@@ -4637,6 +5042,8 @@ export class SyncManager implements InboundHost {
       progress,
       onFailure: (f) => this.logUploadFailure(f),
       shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
+      // A missing ack during a shrink-brake hold is the hold, not a failure (#274).
+      syncPaused: () => this.syncPause.current() != null,
     });
     this.uploader = uploader;
 
@@ -4791,6 +5198,7 @@ export class SyncManager implements InboundHost {
       // push was denied, leaves the vault partly unsynced either way.
       this.bulkFailures.size === 0 &&
       !this.serverTooOld &&
+      this.pullFailure() == null &&
       this.permanentFailures.size === 0 &&
       !this.registry.hasFailures() &&
       this.registry.limitCode() == null;
@@ -4834,6 +5242,45 @@ export class SyncManager implements InboundHost {
       permanentFailure: this.permanentFailures.get(docId)?.reason ?? null,
       emptyEverywhere: this.emptyEverywhere.has(docId),
     };
+  }
+
+  /**
+   * How many notes this device holds whose content the server has never
+   * confirmed (#258): not checkpointed as pushed, or named on `ready.empty`,
+   * and not settled as empty everywhere.
+   *
+   * The checkpoint behind it (`registry.pushed`) is persisted in
+   * `config.json`, so this survives a quit or crash mid first-upload — which is
+   * what lets the next launch say "Finishing upload" instead of resuming in
+   * silence while teammates open empty notes. Purely a READ: the resume itself
+   * is the ordinary content run, which pulls the server's state before pushing
+   * anything (`decideSeed`), so nothing here can send stale local state over
+   * content the server already has.
+   */
+  notUploadedCount(): number {
+    let n = 0;
+    for (const docId of this.registry.allDocIds()) {
+      if (this.emptyEverywhere.has(docId)) continue;
+      if (!this.registry.isPushed(docId) || this.serverEmpty.has(docId)) n++;
+    }
+    return n;
+  }
+
+  /** Stamp {@link SyncProgress.refused} and {@link SyncProgress.pullFailing}
+   *  on a failed run's emission. */
+  private withRefusals(p: SyncProgress | null): SyncProgress | null {
+    if (p?.phase !== "error") return p;
+    const refused = this.registry.heldRefusals().length;
+    const pullFailing = this.pullFailure() != null;
+    if (refused === 0 && !pullFailing) return p;
+    return { ...p, ...(refused > 0 ? { refused } : {}), ...(pullFailing ? { pullFailing } : {}) };
+  }
+
+  /** Stamp {@link SyncProgress.notUploaded} on a running phase's emission. */
+  private withUploadBacklog(p: SyncProgress | null): SyncProgress | null {
+    if (!p || !isBulkPhase(p.phase)) return p;
+    const notUploaded = this.notUploadedCount();
+    return notUploaded > 0 ? { ...p, notUploaded } : p;
   }
 
   /** Everything the current run could not sync — registry rows and note content. */
@@ -4902,6 +5349,12 @@ export class SyncManager implements InboundHost {
         code: "delete_decision",
       });
     }
+    // A registry pull that keeps failing: every new note and folder is stuck
+    // behind it, so it is said once, for the whole vault.
+    const pull = this.pullFailure();
+    if (pull) {
+      registry.push({ kind: "pull", path: "", docId: null, reason: pull.reason, code: PULL_FAILED_CODE });
+    }
     return {
       registry,
       content,
@@ -4946,6 +5399,8 @@ export class SyncManager implements InboundHost {
     }
     this.vaultStatus = "idle";
     this.onVaultStatus?.("idle");
+    // A pause is about our writes in the vault we are leaving.
+    this.syncPause.reset();
     // The timeline describes the vault we are leaving; keeping it would explain
     // the next vault's state with the previous one's history. The SyncLog object
     // itself survives, so a subscriber's unsubscribe stays valid (see the field).
@@ -4958,6 +5413,11 @@ export class SyncManager implements InboundHost {
       this.registryPullTimer = null;
     }
     this.registryPullBurstAt = 0;
+    if (this.metaPullTimer) {
+      clearTimeout(this.metaPullTimer);
+      this.metaPullTimer = null;
+    }
+    this.lastRegistryPullAt = 0;
     if (this.localChangeTimer) {
       clearTimeout(this.localChangeTimer);
       this.localChangeTimer = null;
@@ -4987,6 +5447,8 @@ export class SyncManager implements InboundHost {
     this.goneFolders.clear();
     this.folderCandidates.clear();
     this.rootMissing = false;
+    // A failing pull describes the vault we are leaving.
+    this.pullFailures = null;
     this.deleteDecision = null;
     this.deleteDecisionIds = new Set();
     this.closedChangesChecked = false;
@@ -5388,7 +5850,19 @@ export class SyncManager implements InboundHost {
       // read-only/editable live — no reopen (spec 04 §4).
       onAclChanged: () => this.handleServerReauth(scope),
       // A teammate changed the folder/note structure — re-pull + refresh tree.
-      onRegistryChanged: () => this.handleRegistryChanged("registry-frame"),
+      // A `meta` frame is only "last edited by" stamps (#262) and takes the
+      // throttled path; anything structural pulls now, and may have moved the
+      // Trash too (every soft delete is a structural change).
+      onRegistryChanged: (meta) => {
+        if (meta) {
+          this.handleRegistryMetaChanged();
+          return;
+        }
+        this.handleRegistryChanged("registry-frame");
+        this.notifyActivityChanged(scope);
+      },
+      // Trash / shrink listings moved (#260): refetch instead of polling.
+      onActivityChanged: () => this.notifyActivityChanged(scope),
       // A new teammate joined the vault — refresh roster + celebrate.
       onMemberJoined: (name) => this.onMemberJoined?.(name),
       // A teammate's viewing state changed — update the sidebar presence roster.
@@ -5417,6 +5891,12 @@ export class SyncManager implements InboundHost {
       onServerTombstones: (docIds) => this.handleServerTombstones(docIds, scope),
       onServerRejected: (docId) => {
         if (scope.isCurrent()) void readOnlyRejections.handle(docId);
+      },
+      // A new release exists (#269): run the normal update check soon.
+      onVersionAvailable: (version) => hintUpdateAvailable(version),
+      // The shrink burst brake paused or resumed OUR writes here (#252).
+      onBrake: (state) => {
+        if (scope.isCurrent()) this.syncPause.channel(state);
       },
       // The server fully covers these hello vectors: record them as acks.
       onServerCovered: (acks) => {
@@ -5725,7 +6205,14 @@ export class SyncManager implements InboundHost {
       // A rename the delete queue could not settle (the server was unreachable
       // when its window closed) must not be registered as a new file meanwhile:
       // that is precisely how one file ends up with two `files` rows.
-      isRenamePending: () => this.binaryDeletes?.hasUnsettled() ?? false,
+      // A folder moved outside the app is the same hazard for every binary in
+      // it (#266): until the drain has paired it as ONE folder move, the files
+      // at the new path are not new files, and minting rows for them (or moving
+      // them one by one) is what re-created them under new ids.
+      isRenamePending: () =>
+        (this.binaryDeletes?.hasUnsettled() ?? false) ||
+        this.goneFolders.size > 0 ||
+        this.pairingFolders,
       // Extracted text: Rust already pulled the words out for local search, so
       // the server gets a copy as ranking fuel rather than re-parsing the file.
       fileText: (relPath) => ipc.getFileText(relPath),

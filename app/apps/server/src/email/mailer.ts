@@ -32,6 +32,16 @@ export interface MailMessage {
   /** Plain-text body — always sent alongside the HTML. */
   text: string;
   html: string;
+  /** Where a reply goes (a bug report: the reporter), if not the sender. */
+  replyTo?: string;
+  /** Files sent with the message (a bug report's screenshots and logs). */
+  attachments?: MailAttachment[];
+}
+
+export interface MailAttachment {
+  filename: string;
+  contentType: string;
+  content: Buffer;
 }
 
 export type MailTransportKind = "smtp" | "resend" | "log" | "memory";
@@ -134,7 +144,13 @@ function logMailer(from: string): Mailer {
     kind: "log",
     async send(msg) {
       console.log(
-        `[email] (log transport — not delivered)\nFrom: ${from}\nTo: ${msg.to}\nSubject: ${msg.subject}\n\n${msg.text}\n`,
+        `[email] (log transport — not delivered)\nFrom: ${from}\nTo: ${msg.to}\n${
+          msg.replyTo ? `Reply-To: ${msg.replyTo}\n` : ""
+        }Subject: ${msg.subject}\n\n${msg.text}\n${
+          msg.attachments?.length
+            ? `Attachments: ${msg.attachments.map((a) => `${a.filename} (${a.contentType}, ${a.content.length} bytes)`).join(", ")}\n`
+            : ""
+        }`,
       );
     },
   };
@@ -154,6 +170,16 @@ function smtpMailer(from: string, smtpUrl: string): Mailer {
         subject: msg.subject,
         text: msg.text,
         html: msg.html,
+        ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
+        ...(msg.attachments?.length
+          ? {
+              attachments: msg.attachments.map((a) => ({
+                filename: a.filename,
+                contentType: a.contentType,
+                content: a.content,
+              })),
+            }
+          : {}),
       });
     },
   };
@@ -181,6 +207,16 @@ export function resendMailer(
           subject: msg.subject,
           text: msg.text,
           html: msg.html,
+          ...(msg.replyTo ? { reply_to: msg.replyTo } : {}),
+          ...(msg.attachments?.length
+            ? {
+                attachments: msg.attachments.map((a) => ({
+                  filename: a.filename,
+                  content: a.content.toString("base64"),
+                  content_type: a.contentType,
+                })),
+              }
+            : {}),
         }),
       });
       if (!res.ok) {
@@ -254,7 +290,9 @@ export async function sendMail(msg: MailMessage): Promise<void> {
  */
 export function dispatchMail(what: string, msg: MailMessage): void {
   void sendMail(msg).catch((err: unknown) => {
-    console.error(`[email] ${what} to ${msg.to} failed:`, err);
+    // No recipient address in the log: it is personal data, and `what` plus the
+    // error is enough to chase a transport failure.
+    console.error(`[email] ${what} failed:`, err);
   });
 }
 

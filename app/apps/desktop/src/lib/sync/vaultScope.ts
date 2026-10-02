@@ -235,6 +235,29 @@ export interface SyncProgress {
    */
   bytesDone?: number;
   bytesTotal?: number;
+  /**
+   * Notes this device holds whose content the server has never confirmed —
+   * not checkpointed as pushed (or named on `ready.empty`), and not settled as
+   * empty everywhere. Stamped by the sync manager on every bulk-phase emission
+   * (#258). Non-zero at the start of a session is an upload a previous session
+   * never finished: an app quit, crash or network loss mid first-sync, which
+   * used to resume silently while teammates saw empty notes. Absent outside a
+   * running phase.
+   */
+  notUploaded?: number;
+  /**
+   * New notes/folders the server refused for access and that stay refused until
+   * access changes (`VaultRegistry.heldRefusals`). Stamped on an `error`
+   * emission only. Unlike an ordinary failed note, these keep the pill from
+   * reading "Synced" (see `pillProgress`): nothing else would tell the user.
+   */
+  refused?: number;
+  /**
+   * The registry pull keeps failing (`SyncManager.pullFailure`), so no new note
+   * or folder can register. Stamped on an `error` emission only; like
+   * `refused`, it keeps the pill off "Synced".
+   */
+  pullFailing?: boolean;
 }
 
 /**

@@ -56,6 +56,8 @@ const fakeRegistry = vi.hoisted(() => {
     flushCheckpoint: vi.fn(async () => {}),
     failures: vi.fn((): unknown[] => []),
     hasFailures: vi.fn(() => false),
+    heldRefusals: vi.fn((): unknown[] => []),
+    retryHeldRefusals: vi.fn(() => false),
     limitCode: vi.fn((): string | null => null),
     materialized: new Set<string>(),
     consumeMaterialized: vi.fn((relPath: string) => reg.materialized.delete(relPath)),
@@ -152,6 +154,13 @@ const storeHooks = vi.hoisted(() => ({
 vi.mock("../vaultDocStore", () => ({
   createIpcManifestStore: () => ({ load: async () => [], save: async () => {} }),
   VaultDocStore: class {
+    parkMark() {
+      return 0;
+    }
+    async settleParked() {}
+    takeOverflowed() {
+      return [];
+    }
     constructor(opts: VaultDocStoreOptions) {
       storeHooks.opts = opts;
     }

@@ -13,6 +13,7 @@ import { useLocalVaults, useRecentVaults } from "./useVaultLists";
 import { AsyncButton } from "./AsyncButton";
 import { LazyAvatar } from "./Face";
 import { MenuIcon } from "./MenuIcon";
+import { BugReportDialog } from "./BugReportDialog";
 
 /* The settings surface is a whole second app (nine tabs, billing, MCP tokens,
    access) and nothing in it is on the first screen, so all three dialogs load
@@ -72,6 +73,33 @@ export function AccountMenu() {
   // caches may be gone while the folder still knows whose it is.
   const [openFolderSynced, setOpenFolderSynced] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const [bugOpen, setBugOpen] = useState(false);
+  // The bug icon shows only when THIS server takes reports (its operator set
+  // BUG_REPORT_EMAIL). Re-asked per account + server, so switching either never
+  // leaves a button pointing at an inbox that is not there.
+  const [bugReport, setBugReport] = useState(false);
+  const serverUrl = useStore((s) => s.serverUrl);
+  const userId = session?.user.id ?? null;
+  useEffect(() => {
+    if (!userId) {
+      setBugReport(false);
+      return;
+    }
+    let alive = true;
+    // getAuthMethods fails CLOSED, so one answer taken while the server was
+    // down (or before it gained the setting) would hide the icon for the whole
+    // session. Ask again whenever the window comes back and the menu opens.
+    const check = () =>
+      void authManager.api.getAuthMethods().then((m) => {
+        if (alive) setBugReport(m.bugReport);
+      });
+    check();
+    window.addEventListener("focus", check);
+    return () => {
+      alive = false;
+      window.removeEventListener("focus", check);
+    };
+  }, [userId, serverUrl, open]);
 
   // "unknown" is a state the user can now SEE: the sidebar paints before the
   // session restore finishes, so for its first moments we do not yet know
@@ -202,9 +230,6 @@ export function AccountMenu() {
                   : "Sync & collaborate"}
             </span>
           </span>
-          <span className="identity-chevron" aria-hidden="true">
-            ›
-          </span>
         </button>
         {open && (
           <SignedOutPopover
@@ -278,35 +303,62 @@ export function AccountMenu() {
 
   return (
     <div className="account-menu" ref={rootRef}>
-      <button
-        className={`identity-bar ${open ? "open" : ""}`}
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        title={`${userLabel} · ${presenceLabel}${
-          syncEnabled && activeOrg ? ` · ${activeOrg.name}` : vault ? ` · ${vault.name}` : ""
-        }`}
-      >
-        <span className="identity-avatar-wrap">
-          <LazyAvatar label={userLabel} image={session.user.image} />
-          <span className={`presence-light ${presence}`} aria-label={presenceLabel} />
-        </span>
-        <span className="identity-meta">
-          {/* This bar is the profile control — it names its person. The vault's
-              name is the sidebar header's job, so repeating it here would just
-              say the same thing twice down one column. When the account has no
-              display name, line 1 is already the email, so line 2 falls back to
-              presence rather than repeating it. */}
-          <span className="identity-line1">{userLabel}</span>
-          <span className="identity-line2">
-            {session.user.name ? session.user.email : presenceLabel}
+      <div className="identity-row">
+        <button
+          className={`identity-bar ${open ? "open" : ""}`}
+          onClick={() => setOpen((v) => !v)}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          title={`${userLabel} · ${presenceLabel}${
+            syncEnabled && activeOrg ? ` · ${activeOrg.name}` : vault ? ` · ${vault.name}` : ""
+          }`}
+        >
+          <span className="identity-avatar-wrap">
+            <LazyAvatar label={userLabel} image={session.user.image} />
+            <span className={`presence-light ${presence}`} aria-label={presenceLabel} />
           </span>
-        </span>
-        {hasInvites && <span className="identity-alert" aria-label="Pending invitation" />}
-        <span className="identity-chevron" aria-hidden="true">
-          ›
-        </span>
-      </button>
+          <span className="identity-meta">
+            {/* This bar is the profile control — it names its person. The vault's
+                name is the sidebar header's job, so repeating it here would just
+                say the same thing twice down one column. When the account has no
+                display name, line 1 is already the email, so line 2 falls back to
+                presence rather than repeating it. */}
+            <span className="identity-line1">{userLabel}</span>
+            <span className="identity-line2">
+              {session.user.name ? session.user.email : presenceLabel}
+            </span>
+          </span>
+          {hasInvites && <span className="identity-alert" aria-label="Pending invitation" />}
+        </button>
+        {bugReport && (
+          <button
+            type="button"
+            className="icon-btn identity-bug"
+            title="Report a bug"
+            aria-label="Report a bug"
+            aria-haspopup="dialog"
+            onClick={() => {
+              setOpen(false);
+              setBugOpen(true);
+            }}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M9 7.5V6a3 3 0 0 1 6 0v1.5" />
+              <rect x="7" y="7.5" width="10" height="12" rx="5" />
+              <path d="M12 11v8.5M7 13H3.5M20.5 13H17M7.6 9.2 5 7M16.4 9.2 19 7M7.4 17.5 5 19.5M16.6 17.5 19 19.5" />
+            </svg>
+          </button>
+        )}
+      </div>
+      {bugOpen && <BugReportDialog onClose={() => setBugOpen(false)} />}
 
       {open && (
         <AccountPopover

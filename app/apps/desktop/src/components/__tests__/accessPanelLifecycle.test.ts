@@ -15,7 +15,7 @@ vi.mock("../../lib/auth/authManager", () => ({
   authManager: { api, getServerUrl: () => "http://test.invalid" },
 }));
 vi.mock("../../lib/sync/docSession", () => ({
-  syncManager: { registry: { vaultId: "v1" } },
+  syncManager: { registry: { vaultId: "v1" }, retryHeldRegistrations: vi.fn() },
 }));
 vi.mock("../FileTree", () => ({ iconForPath: () => null }));
 vi.mock("../../lib/toast", () => ({ toast: vi.fn() }));
@@ -69,7 +69,8 @@ describe("Access panel during sync and permission changes", () => {
   async function settle() {
     for (let i = 0; i < 3; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 200)); });
   }
-  const button = (label: string) => [...host.querySelectorAll("button")]
+  // The body, not `host`: confirm dialogs portal to `document.body` (#272).
+  const button = (label: string) => [...document.body.querySelectorAll("button")]
     .find((node) => node.textContent === label) ?? null;
 
   it("keeps a person's current mode stable through unrelated download batches", async () => {

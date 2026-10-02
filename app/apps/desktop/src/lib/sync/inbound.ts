@@ -18,6 +18,8 @@
  * codebase — this is the code that decides to delete someone's notes.
  */
 
+import { pathKey, samePathKey } from "../pathIdentity";
+
 /** docId → vault-relative path, on one side of the comparison. */
 export type PathsByDocId = Map<string, string>;
 
@@ -269,9 +271,13 @@ export interface InboundPlan {
  * `Projects/community/a.md` and `Projects/Community/a.md` are the same file, not
  * two. The server agrees since migration 023 (case-insensitive unique paths), so
  * treating them as distinct here only ever produced work that could not land.
+ *
+ * And Unicode-normalized (NFC, #259): macOS stores `Café` decomposed, Windows
+ * and Linux composed, and the two must not read as two notes. Compare-time
+ * only — see `lib/pathIdentity.ts pathKey`; no path is ever rewritten.
  */
 export function samePath(a: string, b: string): boolean {
-  return a.toLowerCase() === b.toLowerCase();
+  return samePathKey(a, b);
 }
 
 const IGNORED_DIRS = [".context", ".git"];
@@ -420,10 +426,10 @@ export function planInbound(input: InboundInput): InboundPlan {
   // server's spelling and removed the empty directory again; the watcher
   // requested pull N+2… One idle client pulled the whole registry (450 KB)
   // every 1.5 s for days, with the sync badge blinking Syncing/Synced (#98).
-  const localFoldersCi = new Set([...input.localFolders].map((p) => p.toLowerCase()));
-  const serverFoldersCi = new Set([...input.serverFolders].map((p) => p.toLowerCase()));
+  const localFoldersCi = new Set([...input.localFolders].map((p) => pathKey(p)));
+  const serverFoldersCi = new Set([...input.serverFolders].map((p) => pathKey(p)));
   for (const path of input.serverFolders) {
-    if (localFoldersCi.has(path.toLowerCase())) continue;
+    if (localFoldersCi.has(pathKey(path))) continue;
     if (!isSafeFolderPath(path)) {
       plan.rejected.push({
         kind: "folder",
@@ -448,8 +454,8 @@ export function planInbound(input: InboundInput): InboundPlan {
       const now = input.serverFolderIds.get(id);
       // A spelling disagreement is not a move: same directory on disk.
       if (now === undefined || samePath(now, path)) continue;
-      if (!localFoldersCi.has(path.toLowerCase())) continue; // already gone locally
-      if (serverFoldersCi.has(path.toLowerCase())) continue; // re-created server-side
+      if (!localFoldersCi.has(pathKey(path))) continue; // already gone locally
+      if (serverFoldersCi.has(pathKey(path))) continue; // re-created server-side
       if (!isSafeFolderPath(path)) continue;
       plan.removeFolders.push(path);
     }
@@ -461,8 +467,8 @@ export function planInbound(input: InboundInput): InboundPlan {
   if (input.folderTombstones && input.localFolderIds) {
     for (const [path, id] of input.localFolderIds) {
       if (!input.folderTombstones.has(id)) continue;
-      if (!localFoldersCi.has(path.toLowerCase())) continue; // already gone locally
-      if (serverFoldersCi.has(path.toLowerCase())) continue; // re-created server-side
+      if (!localFoldersCi.has(pathKey(path))) continue; // already gone locally
+      if (serverFoldersCi.has(pathKey(path))) continue; // re-created server-side
       if (!isSafeFolderPath(path)) {
         plan.rejected.push({
           kind: "folder",
@@ -496,8 +502,8 @@ export function planInbound(input: InboundInput): InboundPlan {
     for (const [path, id] of input.localFolderIds) {
       if (input.serverFolderIds.has(id)) continue; // listed (or moved) — handled above
       if (input.folderTombstones.has(id)) continue; // deleted — handled above
-      if (!localFoldersCi.has(path.toLowerCase())) continue; // already gone locally
-      if (serverFoldersCi.has(path.toLowerCase())) continue; // re-created server-side
+      if (!localFoldersCi.has(pathKey(path))) continue; // already gone locally
+      if (serverFoldersCi.has(pathKey(path))) continue; // re-created server-side
       if (!isSafeFolderPath(path)) {
         plan.rejected.push({
           kind: "folder",
@@ -535,7 +541,7 @@ export function planInbound(input: InboundInput): InboundPlan {
   // ---- notes --------------------------------------------------------------
   // Every note path on disk, for the "we lost this doc's local identity" case
   // below. `input.local` is docId → path, so its values are exactly that set.
-  const localPaths = new Set([...input.local.values()].map((p) => p.toLowerCase()));
+  const localPaths = new Set([...input.local.values()].map((p) => pathKey(p)));
   const docIds = new Set<string>([...input.baseline.keys(), ...input.server.keys()]);
   // A tombstoned id this disk still holds a note under, with NO baseline claim.
   // Without it the loop below never visits the id at all (or leaves at "never
@@ -617,7 +623,7 @@ export function planInbound(input: InboundInput): InboundPlan {
         // match we can't prove the file at that path is still this note, and a
         // wrong guess here deletes someone's work. It stays on disk as a purely
         // local note the user can remove themselves.
-        if (prev !== undefined && localPaths.has(prev.toLowerCase())) {
+        if (prev !== undefined && localPaths.has(pathKey(prev))) {
           plan.suppress.add(prev);
           plan.stubs.push(prev);
         }
@@ -724,7 +730,7 @@ function pushRename(
   // every pass, so a destination freed by another rename (two notes swapping
   // places, the far half of a chain) is planned on the next one — exactly as it
   // is today, where such a rename fails at the IPC boundary and is retried.
-  if (localPaths.has(to.toLowerCase())) {
+  if (localPaths.has(pathKey(to))) {
     plan.rejected.push({
       kind: "rename",
       path: to,

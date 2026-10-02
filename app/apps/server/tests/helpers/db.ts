@@ -11,6 +11,7 @@ export async function ensureMigrated(): Promise<void> {
 
 const TABLES = [
   "note_versions",
+  "note_texts",
   "vault_checkpoint_docs",
   "vault_checkpoints",
   "billing_events",

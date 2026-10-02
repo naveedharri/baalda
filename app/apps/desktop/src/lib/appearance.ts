@@ -9,39 +9,51 @@
 export interface ItemColor {
   id: string;
   label: string;
-  /** Glyph tint — reads on both themes against the sidebar surfaces. */
+  /** The deeper tone: the glyph's outline, and the swatch in the picker. */
   value: string;
+  /** The pastel the glyph is filled with (baalda.com's `*-2` swatches). */
+  fill: string;
   /** Nearby hues that should not form an adjacent automatic-colour batch. */
   family: string;
 }
 
+// baalda.com's pairing: a bright pastel fill (its blue-2 #9ed4ef, green-2
+// #9bd8a9, purple-2 #b8caf5, yellow-2 #fde99b, peach #f7d9be, violet #cbbcf6)
+// under a deeper outline of the same hue (green-4 #3f8850, yellow-4 #987e1b,
+// violet #7c5cff); the other hues are built the same way. The ids are what is
+// persisted, so values can be retuned freely; never rename or reorder an id —
+// the automatic assignment hashes into this list.
 export const ITEM_COLORS: ItemColor[] = [
-  { id: "violet", label: "Violet", value: "#7c5cff", family: "purple" },
-  { id: "purple", label: "Purple", value: "#9b51d0", family: "purple" },
-  { id: "plum", label: "Plum", value: "#b44aa1", family: "purple" },
-  { id: "magenta", label: "Magenta", value: "#d13b8f", family: "pink" },
-  { id: "pink", label: "Pink", value: "#e35f9b", family: "pink" },
-  { id: "rose", label: "Rose", value: "#d94f77", family: "pink" },
-  { id: "red", label: "Red", value: "#d84a4a", family: "red" },
-  { id: "coral", label: "Coral", value: "#e26755", family: "red" },
-  { id: "orange", label: "Orange", value: "#e0702f", family: "warm" },
-  { id: "amber", label: "Amber", value: "#d99114", family: "warm" },
-  { id: "gold", label: "Gold", value: "#bfa01d", family: "warm" },
-  { id: "lime", label: "Lime", value: "#79a83b", family: "green" },
-  { id: "green", label: "Green", value: "#3f9d54", family: "green" },
-  { id: "mint", label: "Mint", value: "#2eaa78", family: "green" },
-  { id: "teal", label: "Teal", value: "#0d9488", family: "teal" },
-  { id: "cyan", label: "Cyan", value: "#1599b8", family: "teal" },
-  { id: "sky", label: "Sky", value: "#398fcf", family: "blue" },
-  { id: "blue", label: "Blue", value: "#2f7de1", family: "blue" },
-  { id: "indigo", label: "Indigo", value: "#5868d9", family: "indigo" },
-  { id: "periwinkle", label: "Periwinkle", value: "#747bd8", family: "indigo" },
-  { id: "brown", label: "Brown", value: "#9a6b4f", family: "brown" },
-  { id: "slate", label: "Slate", value: "#64748b", family: "slate" },
+  { id: "violet", label: "Violet", value: "#7c5cff", fill: "#cbbcf6", family: "purple" },
+  { id: "purple", label: "Purple", value: "#9a5fd6", fill: "#dcc2f2", family: "purple" },
+  { id: "plum", label: "Plum", value: "#b0529f", fill: "#ecc0e4", family: "purple" },
+  { id: "magenta", label: "Magenta", value: "#cf3f8e", fill: "#f6bcdb", family: "pink" },
+  { id: "pink", label: "Pink", value: "#dc5f97", fill: "#fac6dc", family: "pink" },
+  { id: "rose", label: "Rose", value: "#d4567a", fill: "#f7c2cd", family: "pink" },
+  { id: "red", label: "Red", value: "#d24d43", fill: "#f7c4bd", family: "red" },
+  { id: "coral", label: "Coral", value: "#dc6e52", fill: "#f9cdbf", family: "red" },
+  { id: "orange", label: "Orange", value: "#d9773a", fill: "#f7d9be", family: "warm" },
+  { id: "amber", label: "Amber", value: "#c98a12", fill: "#fbe1a6", family: "warm" },
+  { id: "gold", label: "Gold", value: "#987e1b", fill: "#fde99b", family: "warm" },
+  { id: "lime", label: "Lime", value: "#6f9a2c", fill: "#d6eba9", family: "green" },
+  { id: "green", label: "Green", value: "#3f8850", fill: "#9bd8a9", family: "green" },
+  { id: "mint", label: "Mint", value: "#2f9a6e", fill: "#b4e6cf", family: "green" },
+  { id: "teal", label: "Teal", value: "#23877e", fill: "#a8e0d8", family: "teal" },
+  { id: "cyan", label: "Cyan", value: "#1f8aa6", fill: "#a8e2ee", family: "teal" },
+  { id: "sky", label: "Sky", value: "#2f86bf", fill: "#9ed4ef", family: "blue" },
+  { id: "blue", label: "Blue", value: "#3b74d1", fill: "#b8d2f8", family: "blue" },
+  { id: "indigo", label: "Indigo", value: "#5262d0", fill: "#b8caf5", family: "indigo" },
+  { id: "periwinkle", label: "Periwinkle", value: "#6c74d4", fill: "#c9cdf6", family: "indigo" },
+  { id: "brown", label: "Brown", value: "#8e6347", fill: "#e6cdb9", family: "brown" },
+  { id: "slate", label: "Slate", value: "#5f6b7a", fill: "#cfd6df", family: "slate" },
 ];
 
 export function itemColorValue(id: string | undefined): string | undefined {
   return ITEM_COLORS.find((c) => c.id === id)?.value;
+}
+
+export function itemColorFill(id: string | undefined): string | undefined {
+  return ITEM_COLORS.find((c) => c.id === id)?.fill;
 }
 
 /** Stable FNV-1a hash: random-looking palette choices without persisted rows. */

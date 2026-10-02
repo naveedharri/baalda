@@ -87,7 +87,14 @@ export const config = {
   /** Quiet time after a note's last edit before a version is captured.
    *  Lower it locally to test the history panel without the 10-minute wait. */
   versionIdleMs: int("VERSION_IDLE_MS", 10 * 60_000),
-  invitationExpiresInSeconds: 48 * 60 * 60, // 48h per spec 04 §2
+  /**
+   * How long a vault invitation stays acceptable. Was a fixed 48 h (spec 04
+   * §2), and most invitations expired unaccepted: people open the email days
+   * later (#268). `INVITATION_EXPIRES_HOURS`, default 7 days. Applies to
+   * invitations created from now on; an existing row keeps the expiry it was
+   * created with, and an owner/admin can Resend an expired one.
+   */
+  invitationExpiresInSeconds: int("INVITATION_EXPIRES_HOURS", 7 * 24) * 60 * 60,
   // ---- Vault sync engine (spec 05) ----
   /** Redis connection string. Unset ⇒ in-memory pub/sub, single instance.
    *  Set ⇒ Redis fanout so N server instances share the vault feed (HA). */
@@ -168,6 +175,10 @@ export const config = {
   /** Force a transport (`smtp` | `resend` | `log` | `memory`). Normally inferred
    *  from which credential is set; `log`/`memory` are dev/test only. */
   emailTransport: optional("EMAIL_TRANSPORT"),
+  /** Where the desktop's "Report a bug" dialog delivers (needs email on, above).
+   *  Unset ⇒ bug reports are off and the app hides the button — the default
+   *  for a self-host, whose users' reports belong to its own operator. */
+  bugReportEmail: optional("BUG_REPORT_EMAIL"),
   // ---- Subscription billing (Polar) ----
   /** Polar organization access token. Its presence is the ON switch for the
    *  whole billing feature (see `billingEnabled` below): unset ⇒ billing is

@@ -9,7 +9,8 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
-import type { ShrinkEvent, TrashItem } from "../lib/api";
+import type { InvitationExpiry, ShrinkBrakeEvent, ShrinkEvent, TrashItem } from "../lib/api";
+import { buildInviteLink } from "../lib/inviteLink";
 import { toast } from "../lib/toast";
 import { syncManager } from "../lib/sync/docSession";
 import type { ReconcileItem } from "../lib/sync/reconcileReport";
@@ -202,6 +203,63 @@ function ShrunkRowActions({
   );
 }
 
+/**
+ * Release a member's sync pause early (owner/admin, #252). Their held edits
+ * then arrive like any edit — each sharp shrink is still saved as a version
+ * first, and a renewed burst pauses them again.
+ */
+function PausedRowActions({
+  event,
+  online,
+  onDone,
+}: {
+  event: ShrinkBrakeEvent;
+  online: boolean;
+  onDone: () => void;
+}) {
+  const [confirm, setConfirm] = useState(false);
+  const who = event.userName?.trim() || "this member";
+  const release = async () => {
+    setConfirm(false);
+    const vaultId = syncManager.registry.vaultId;
+    if (!vaultId) return;
+    try {
+      await authManager.api.releaseShrinkBrake(vaultId, event.userId);
+      toast(`Sync resumed for ${who}.`, "success");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+    onDone();
+  };
+  return (
+    <>
+      <span className="health-missing-actions">
+        <button
+          type="button"
+          className="ghost-pill sm"
+          disabled={!online}
+          title={online ? "Let their held edits sync now." : "Reconnect to release."}
+          onClick={() => setConfirm(true)}
+        >
+          Release
+        </button>
+      </span>
+      {confirm && (
+        <ConfirmDialog
+          title={`Resume sync for ${who}?`}
+          confirmLabel="Release"
+          onConfirm={release}
+          onCancel={() => setConfirm(false)}
+        >
+          Their edits that were waiting on their device sync now, including any notes they emptied.
+          Every emptied note was saved as a version first, so it can still be restored from Version
+          history. Check the Shrunk rows here first if the change might have been a mistake.
+        </ConfirmDialog>
+      )}
+    </>
+  );
+}
+
 function OpenNoteButton({ path }: { path: string }) {
   return (
     <button
@@ -247,6 +305,63 @@ function FailedRowActions({ failure, onDone }: { failure: FailedEntry; onDone: (
   );
 }
 
+/**
+ * Resend an expired invitation: the Members tab's Resend (VaultSettingsDialog),
+ * aimed at the notice's own vault. Better Auth gives the address a fresh row
+ * (new link, new expiry), which is also what drops this notice server-side.
+ * Without email the new link goes to the clipboard instead.
+ */
+function InvitationRowActions({
+  invitation,
+  online,
+  onDone,
+}: {
+  invitation: InvitationExpiry;
+  online: boolean;
+  onDone: () => void;
+}) {
+  const resend = async () => {
+    try {
+      const role = invitation.role === "admin" ? "admin" : "member";
+      const r = await useStore.getState().inviteMember(invitation.email, role, invitation.organizationId);
+      if (r.emailed) {
+        toast(`Sent a new invitation to ${invitation.email}.`, "success");
+      } else {
+        const link = buildInviteLink(useStore.getState().serverUrl, r.invitation.id);
+        let copied = false;
+        if (link) {
+          try {
+            await navigator.clipboard.writeText(link);
+            copied = true;
+          } catch {
+            /* clipboard unavailable */
+          }
+        }
+        const how = copied ? "Its link is copied; share it with them." : "Share its link from Vault Settings → Members.";
+        toast(
+          r.emailError ? `New invitation created, but the email failed: ${r.emailError} ${how}` : `New invitation created. ${how}`,
+          r.emailError ? "error" : "success",
+        );
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+    onDone();
+  };
+  return (
+    <span className="health-missing-actions">
+      <AsyncButton
+        className="ghost-pill sm"
+        disabled={!online}
+        title={online ? "Send a new invitation with a fresh link." : "Reconnect to resend."}
+        onClick={resend}
+      >
+        Resend
+      </AsyncButton>
+    </span>
+  );
+}
+
 function rowMeta(row: ActivityRow, now: number): string {
   const when = relativeTime(row.at, now);
   if (row.type === "trash") {
@@ -255,6 +370,15 @@ function rowMeta(row: ActivityRow, now: number): string {
   }
   if (row.type === "copy") return `${when} · ${formatBytes(row.copy.bytes)}`;
   if (row.type === "held") return "Waiting for your answer";
+  if (row.type === "invitation") {
+    const by = row.invitation.inviterName ? `sent by ${row.invitation.inviterName} · ` : "";
+    return `${by}${when}`;
+  }
+
+  if (row.type === "paused") {
+    if (row.event.held) return `${when} · until ${clockTime(Date.parse(row.event.heldUntil))}`;
+    return row.event.releasedAt ? `${when} · released early` : `${when} · ended`;
+  }
   if (row.type === "shrunk" || row.type === "access" || row.type === "failed") {
     return row.path ? `${row.text} · ${when}` : when;
   }
@@ -265,6 +389,7 @@ function rowTitle(row: ActivityRow): string {
   if (row.type === "reconcile") return `${ACTIVITY_HINT.reconcile}\n${row.item.detail ?? row.path}`;
   if (row.type === "trash") return `${ACTIVITY_HINT.trash}\n${row.path}`;
   if (row.type === "held") return ACTIVITY_HINT.held;
+  if (row.type === "paused") return `${ACTIVITY_HINT.paused}\n${row.text}`;
   if (row.type === "shrunk") {
     return `${ACTIVITY_HINT.shrunk}${row.event.deleted ? "\nThe note is deleted now." : ""}\n${row.path}`;
   }
@@ -277,6 +402,7 @@ function rowTitle(row: ActivityRow): string {
     return `${ACTIVITY_HINT.access}\n${row.path}`;
   }
   if (row.type === "failed") return `${ACTIVITY_HINT.failed}\n${row.text}`;
+  if (row.type === "invitation") return `${ACTIVITY_HINT.invitation}\n${row.invitation.email}`;
   return `${ACTIVITY_HINT.copy}\n.context/trash/${row.copy.stamp}/${row.copy.relPath}`;
 }
 
@@ -335,7 +461,7 @@ export function ActivityFeed() {
           {rows.length > 0 && (
             <button
               type="button"
-              className="secondary sm activity-clear"
+              className="activity-clear"
               onClick={() => setConfirmClear(true)}
             >
               Clear
@@ -386,59 +512,72 @@ export function ActivityFeed() {
                   data-tone={
                     (row.type === "trash" && row.item.hasUnsyncedContributions) ||
                     row.type === "held" ||
+                    (row.type === "paused" && row.event.held) ||
                     row.type === "shrunk" ||
-                    row.type === "failed"
+                    row.type === "failed" ||
+                    row.type === "invitation"
                       ? "warn"
                       : undefined
                   }
                 >
                   {row.label}
                 </span>
-                <span className="activity-row-main" title={rowTitle(row)}>
-                  <span className="activity-row-path">
-                    {row.path ? <PathText path={row.path} /> : "text" in row ? <span>{row.text}</span> : null}
-                    {row.type === "reconcile" && row.item.newPath && (
-                      <>
-                        <span className="muted" aria-label="renamed to">
-                          →
+                {/* Text and actions share one wrapping line: the text keeps a
+                    readable minimum and the actions drop beneath it when the
+                    panel is too narrow for both, never squeezing the text. */}
+                <div className="activity-row-body">
+                  <span className="activity-row-main" title={rowTitle(row)}>
+                    <span className="activity-row-path">
+                      {row.path ? <PathText path={row.path} /> : "text" in row ? <span>{row.text}</span> : null}
+                      {row.type === "reconcile" && row.item.newPath && (
+                        <>
+                          <span className="muted" aria-label="renamed to">
+                            →
+                          </span>
+                          <PathText path={row.item.newPath} />
+                        </>
+                      )}
+                    </span>
+                    <span className="activity-row-meta muted" title={clockTime(row.at)}>
+                      {rowMeta(row, now)}
+                      {row.type === "trash" && row.item.hasUnsyncedContributions && (
+                        <span
+                          className="health-pill"
+                          data-tone="warn"
+                          title="Someone's edits arrived after it was deleted. Review before it is purged."
+                        >
+                          Has unseen edits
                         </span>
-                        <PathText path={row.item.newPath} />
-                      </>
-                    )}
+                      )}
+                    </span>
                   </span>
-                  <span className="activity-row-meta muted" title={clockTime(row.at)}>
-                    {rowMeta(row, now)}
-                    {row.type === "trash" && row.item.hasUnsyncedContributions && (
-                      <span
-                        className="health-pill"
-                        data-tone="warn"
-                        title="Someone's edits arrived after it was deleted. Review before it is purged."
-                      >
-                        Has unseen edits
-                      </span>
+                  <div className="activity-row-actions">
+                    {row.type === "reconcile" ? (
+                      <ReconcileRowActions item={row.item} onChanged={schedule} />
+                    ) : row.type === "held" ? (
+                      <HeldRowActions onDone={schedule} />
+                    ) : row.type === "paused" ? (
+                      row.canRelease ? (
+                        <PausedRowActions event={row.event} online={trash.online} onDone={schedule} />
+                      ) : null
+                    ) : row.type === "shrunk" ? (
+                      <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
+                    ) : row.type === "failed" ? (
+                      activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} /> : null
+                    ) : row.type === "access" ? (
+                      row.event.kind === "granted" ? <GrantRowActions paths={row.event.paths ?? []} /> : null
+                    ) : row.type === "invitation" ? (
+                      <InvitationRowActions invitation={row.invitation} online={trash.online} onDone={schedule} />
+                    ) : row.type === "trash" ? (
+                      <TrashRowActions item={row.item} online={trash.online} onRestored={schedule} />
+                    ) : (
+                      <RecoveryCopyActions
+                        copy={{ stamp: row.copy.stamp, relPath: row.copy.relPath }}
+                        modified={row.copy.modified}
+                        onChanged={schedule}
+                      />
                     )}
-                  </span>
-                </span>
-                <div className="activity-row-actions">
-                  {row.type === "reconcile" ? (
-                    <ReconcileRowActions item={row.item} onChanged={schedule} />
-                  ) : row.type === "held" ? (
-                    <HeldRowActions onDone={schedule} />
-                  ) : row.type === "shrunk" ? (
-                    <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
-                  ) : row.type === "failed" ? (
-                    activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} /> : null
-                  ) : row.type === "access" ? (
-                    row.event.kind === "granted" ? <GrantRowActions paths={row.event.paths ?? []} /> : null
-                  ) : row.type === "trash" ? (
-                    <TrashRowActions item={row.item} online={trash.online} onRestored={schedule} />
-                  ) : (
-                    <RecoveryCopyActions
-                      copy={{ stamp: row.copy.stamp, relPath: row.copy.relPath }}
-                      modified={row.copy.modified}
-                      onChanged={schedule}
-                    />
-                  )}
+                  </div>
                 </div>
               </li>
             ))}

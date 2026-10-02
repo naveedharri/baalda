@@ -14,8 +14,11 @@ import {
   encodePubsubUpdate,
   encodePubsubAclChanged,
   encodePubsubRegistryChanged,
+  encodePubsubMetaChanged,
+  encodePubsubActivityChanged,
   encodePubsubMemberJoined,
   encodePubsubRejected,
+  encodePubsubBrake,
   encodePubsubPresence,
   encodePubsubPresenceQuery,
   encodePubsubVoice,
@@ -77,6 +80,13 @@ export interface VaultChannelDeps {
   heartbeatMs?: number;
   /** Coalescing window for `registry` broadcasts (ms; 0 disables). */
   registryCoalesceMs?: number;
+  /**
+   * Is this user's content in this vault held by the shrink burst brake right
+   * now (on THIS process)? Asked once per connection after `ready`, so a client
+   * that (re)connects during a hold is told why its writes are not landing.
+   * Unbound: never held.
+   */
+  brakeState?: (userId: string, vaultId: string) => { until: number; count: number } | null;
 }
 
 /** Default coalescing window for structural-change broadcasts (ms). A reconcile
@@ -132,6 +142,7 @@ export class VaultChannel {
   private readonly sendStallMs: number;
   private readonly sendPollMs: number;
   private readonly heartbeatMs: number;
+  private readonly brakeState: VaultChannelDeps["brakeState"];
   /** Live connections, so the shared heartbeat has something to sweep. Entries
    *  remove themselves from `cleanup()`, i.e. on close/terminate/failure. */
   private readonly connections = new Set<VaultConnection>();
@@ -143,6 +154,11 @@ export class VaultChannel {
     string,
     { timer: ReturnType<typeof setTimeout>; origins: Set<string>; anonymous: boolean }
   >();
+  /** Pending last-edited-stamp and Activity broadcasts, per vault. Same
+   *  coalescing window as the registry: a returning device pushing 40 notes
+   *  stamps 40 rows inside a second, and that is one announcement. */
+  private readonly pendingMeta = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly pendingActivity = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(deps: VaultChannelDeps) {
     this.pubsub = deps.pubsub;
@@ -157,6 +173,7 @@ export class VaultChannel {
     this.sendPollMs = deps.sendPollMs ?? config.vaultSendPollMs;
     this.heartbeatMs = deps.heartbeatMs ?? config.vaultHeartbeatMs;
     this.registryCoalesceMs = deps.registryCoalesceMs ?? REGISTRY_COALESCE_MS;
+    this.brakeState = deps.brakeState;
   }
 
   /** Fan an incremental doc update out to the vault's subscribers (any instance). */
@@ -217,6 +234,53 @@ export class VaultChannel {
   }
 
   /**
+   * Signal that only "last edited by" stamps changed in a vault (#262).
+   *
+   * This used to ride `publishRegistryChanged` with a null origin, which made
+   * every subscriber — the editor's own app included — recompute its readable
+   * set AND re-pull the whole registry for a change that moves no row and grants
+   * nothing. A returning device pushing its notes one connection at a time
+   * stamped each one, so every doc connect was followed by a full
+   * `/api/folders` + `/api/notes` pull on every open app in the vault. Now the
+   * readable set is left alone and the client is told it may fold the stamp into
+   * a throttled pull.
+   */
+  async publishMetaChanged(vaultId: string): Promise<void> {
+    this.publishCoalesced(this.pendingMeta, vaultId, encodePubsubMetaChanged);
+  }
+
+  /**
+   * Signal that the vault's trash or shrink-event listings changed (#260): a
+   * soft delete, restore or purge, or a `pre-shrink` version. Subscribers
+   * refetch the Activity feed on this instead of polling it every minute.
+   */
+  async publishActivityChanged(vaultId: string): Promise<void> {
+    this.publishCoalesced(this.pendingActivity, vaultId, encodePubsubActivityChanged);
+  }
+
+  private publishCoalesced(
+    pending: Map<string, ReturnType<typeof setTimeout>>,
+    vaultId: string,
+    encode: () => Uint8Array,
+  ): void {
+    const send = () =>
+      void this.pubsub
+        .publish(vaultTopic(vaultId), encode())
+        .catch((err) => console.error("Vault channel publish failed:", err));
+    if (this.registryCoalesceMs <= 0) {
+      send();
+      return;
+    }
+    if (pending.has(vaultId)) return; // folds into the window already open
+    const timer = setTimeout(() => {
+      pending.delete(vaultId);
+      send();
+    }, this.registryCoalesceMs);
+    timer.unref?.();
+    pending.set(vaultId, timer);
+  }
+
+  /**
    * Publish every still-open coalescing window immediately instead of waiting out
    * its timer. Called when this instance's WebSocketServer closes: the publish
    * goes to the shared pubsub, so subscribers on OTHER instances still learn about
@@ -228,6 +292,18 @@ export class VaultChannel {
       const entry = this.pendingRegistry.get(vaultId);
       if (entry) clearTimeout(entry.timer);
       this.flushRegistry(vaultId);
+    }
+    for (const [pending, encode] of [
+      [this.pendingMeta, encodePubsubMetaChanged],
+      [this.pendingActivity, encodePubsubActivityChanged],
+    ] as const) {
+      for (const [vaultId, timer] of [...pending]) {
+        clearTimeout(timer);
+        pending.delete(vaultId);
+        void this.pubsub
+          .publish(vaultTopic(vaultId), encode())
+          .catch((err) => console.error("Vault channel publish failed:", err));
+      }
     }
   }
 
@@ -242,6 +318,21 @@ export class VaultChannel {
    *  `rejected` frame). Every instance forwards it to that user's sockets. */
   async publishRejected(vaultId: string, userId: string, docId: string): Promise<void> {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubRejected(userId, docId, "read_only"));
+  }
+
+  /** The shrink burst brake engaged (`held`) or lifted for `userId` in this
+   *  vault. Every instance forwards it to that user's sockets only. */
+  async publishBrake(
+    vaultId: string,
+    userId: string,
+    state: { held: true; until: number; count: number } | { held: false },
+  ): Promise<void> {
+    await this.pubsub.publish(
+      vaultTopic(vaultId),
+      state.held
+        ? encodePubsubBrake(userId, true, state.until, state.count)
+        : encodePubsubBrake(userId, false),
+    );
   }
 
   /** Wire the channel onto the HTTP server's upgrade at `config.vaultSyncPath`. */
@@ -295,6 +386,18 @@ export class VaultChannel {
     this.heartbeat = null;
   }
 
+  /**
+   * Tell every authenticated connection on THIS instance that a new desktop
+   * release exists (#269). Per instance on purpose: each instance runs its own
+   * release watcher, so no pub/sub fan-out is needed. Returns how many
+   * connections were told.
+   */
+  broadcastVersionAvailable(version: string): number {
+    let told = 0;
+    for (const conn of [...this.connections]) if (conn.hintVersionAvailable(version)) told++;
+    return told;
+  }
+
   /** Live connection count — the number that grew without bound while ghosts
    *  accumulated (one `VaultConnection` + subscription each). */
   connectionCount(): number {
@@ -313,6 +416,7 @@ export class VaultChannel {
       sendCapBytes: this.sendCapBytes,
       sendStallMs: this.sendStallMs,
       sendPollMs: this.sendPollMs,
+      brakeState: this.brakeState,
       onGone: (c) => this.connections.delete(c),
     });
     this.connections.add(conn);
@@ -329,6 +433,7 @@ interface ConnDeps {
   sendCapBytes: number;
   sendStallMs: number;
   sendPollMs: number;
+  brakeState?: VaultChannelDeps["brakeState"];
   onGone: (conn: VaultConnection) => void;
 }
 
@@ -592,6 +697,23 @@ class VaultConnection {
       ...(covered.length > 0 ? { covered } : {}),
       ...(coveredTruncated ? { coveredTruncated: true as const } : {}),
     });
+    // After `ready`, so it never delays the frame that turns the client live.
+    // A hold this process does not know about (another instance's, or one a
+    // restart forgot) is simply not announced — the batch push's `shrink_held`
+    // still tells the client on its next attempt.
+    this.announceBrake();
+  }
+
+  private announceBrake(): void {
+    if (!this.deps.brakeState || !this.userId || !this.vaultId) return;
+    let hold: { until: number; count: number } | null = null;
+    try {
+      hold = this.deps.brakeState(this.userId, this.vaultId);
+    } catch (err) {
+      console.error("Vault channel brake lookup failed:", err);
+      return;
+    }
+    if (hold) this.send({ t: "brake", held: true, until: hold.until, count: hold.count });
   }
 
   /**
@@ -875,6 +997,37 @@ class VaultConnection {
       // wasted round trip (listFolders + listNotes + a full client syncStructure).
       if (selfOnly) return;
       this.send({ t: "registry" });
+      return;
+    }
+    if (msg.type === "meta-changed") {
+      // A stamp moves no row and grants nothing, so the readable set is NOT
+      // recomputed — that recompute, times every subscriber, times every
+      // stamped doc, was the bulk of what one returning device cost the vault.
+      // Every subscriber hears it (the stamp has no origin to skip), and a
+      // current client folds it into a throttled pull (#262).
+      this.send({ t: "registry", meta: true });
+      return;
+    }
+    if (msg.type === "activity-changed") {
+      // Trash / shrink listings are filtered per reader on fetch, so this frame
+      // names nothing and needs no ACL gate.
+      this.send({ t: "activity" });
+      return;
+    }
+    if (msg.type === "brake") {
+      // Only the held user's own sockets; nobody else's app changes behaviour.
+      if (msg.userId === this.userId) {
+        this.send(
+          msg.held
+            ? {
+                t: "brake",
+                held: true,
+                ...(msg.until !== undefined ? { until: msg.until } : {}),
+                ...(msg.count !== undefined ? { count: msg.count } : {}),
+              }
+            : { t: "brake", held: false },
+        );
+      }
       return;
     }
     if (msg.type === "rejected") {
@@ -1194,6 +1347,13 @@ class VaultConnection {
       /* already gone */
     }
     this.cleanup();
+  }
+
+  /** Forward a release hint once this connection has authenticated. */
+  hintVersionAvailable(version: string): boolean {
+    if (!this.helloSeen || !this.userId) return false;
+    this.send({ t: "version-available", version });
+    return true;
   }
 
   private send(control: ServerControl): void {

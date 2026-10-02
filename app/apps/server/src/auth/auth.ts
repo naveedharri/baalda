@@ -10,6 +10,8 @@ import { announceMemberJoined } from "../sync/member-events.js";
 import { dispatchMail, emailEnabled } from "../email/mailer.js";
 import { verifyEmailEmail } from "../email/templates.js";
 import { clearThrottle } from "./signin-throttle.js";
+import { hasExpiryNotice } from "../invitations/expiries.js";
+import { invitationActivityChanged } from "../invitations/sweep.js";
 
 /**
  * Better Auth (spec 04 §1/§2).
@@ -20,7 +22,7 @@ import { clearThrottle } from "./signin-throttle.js";
  *   `Authorization: Bearer <session-token>` header (token stored in the OS keychain),
  *   in addition to cookies.
  * - `organization` plugin = vaults/teams: owner/admin/member roles + invitations
- *   (48h expiry per spec).
+ *   (expiry: `INVITATION_EXPIRES_HOURS`, default 7 days — #268).
  * - outbound email (issue #99) is opt-in via env (`email/mailer.ts`). The
  *   sign-up verification email is wired below; password reset and invitation
  *   emails are sent by our own routes (routes/password-reset.ts,
@@ -199,7 +201,7 @@ export const auth = betterAuth({
     bearer(),
     organization({
       creatorRole: "owner",
-      invitationExpiresIn: config.invitationExpiresInSeconds, // 48h
+      invitationExpiresIn: config.invitationExpiresInSeconds, // INVITATION_EXPIRES_HOURS, default 7 days
       // Better Auth's own delete-organization endpoint is closed off entirely,
       // the same way `beforeUpdateMemberRole` closes off role changes below.
       // DELETE /api/orgs/:orgId (routes/orgs.ts) is the ONLY path: it cancels
@@ -211,7 +213,7 @@ export const auth = betterAuth({
       disableOrganizationDeletion: true,
       // Inviting an address that is already pending re-sends instead of
       // failing with "already invited": the old row is canceled and a fresh
-      // one (new id, new 48h) goes out. That is what an admin clicking Invite
+      // one (new id, fresh expiry) goes out. That is what an admin clicking Invite
       // a second time means.
       cancelPendingInvitationsOnReInvite: true,
       // No `sendInvitationEmail` here. Better Auth would call it after creating
@@ -249,6 +251,18 @@ export const auth = betterAuth({
               error: "member_limit_reached",
               limit,
             });
+          }
+        },
+        // A re-invite (Resend) answers an "expired unaccepted" Activity notice
+        // for that address (#268): tell open feeds so it drops without a poll.
+        // Best-effort; the invitation already exists, so never fail the call.
+        afterCreateInvitation: async (data) => {
+          try {
+            if (await hasExpiryNotice(data.organization.id, data.invitation.email)) {
+              invitationActivityChanged(data.organization.id);
+            }
+          } catch (err) {
+            console.error("[invitations] expiry notice check failed:", err);
           }
         },
         // A teammate accepted an invitation → announce to everyone live in the

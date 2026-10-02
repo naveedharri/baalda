@@ -526,6 +526,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
         buildBulkAccessInput({ resources: compactAccessResources(selectedResources, entries), audienceType, userIds: selectedUserIds, mode }),
       );
       if (scope !== scopeGen.current) return;
+      // New notes the server refused for access may be allowed now.
+      syncManager.retryHeldRegistrations();
       // Permission writes do not change the structure. Refresh the two access
       // views together instead of re-downloading and re-sorting the whole vault.
       await Promise.all([useStore.getState().refreshLocks(), reloadVault(false)]);
@@ -569,7 +571,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
         <>
           <p><strong>{people}</strong> will receive {MODE_LABEL[mode]} access to {scope}. Selected folders include everything currently inside them.</p>
           {audienceType === "org" ? (
-            <p>This replaces every team and per-person exception in the selected scope. Access for people who join later is still controlled by <strong>Access by default</strong>.</p>
+            <p>This replaces every team and per-person exception in the selected scope. Access for people who join later is still set by <strong>What new members see when they join</strong>.</p>
           ) : (
             <p>Only the selected people's custom settings are replaced inside this scope. Everyone else's access stays unchanged.</p>
           )}
@@ -611,8 +613,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       {canManage && orgId ? (
         <section className="access-default-card">
           <div className="access-default-copy">
-            <strong>Access by default</strong>
-            <span>What new members see when they join. This applies only to future members; existing access stays unchanged, and the vault creator keeps management access.</span>
+            <strong>What new members see when they join</strong>
+            <span>This applies only to future members; existing access stays unchanged, and the vault creator keeps management access.</span>
           </div>
           {accessDefault ? (
             <MenuSelect

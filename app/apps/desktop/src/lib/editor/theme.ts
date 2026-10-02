@@ -220,6 +220,35 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     borderRadius: "var(--radius-sm)",
     verticalAlign: "bottom",
   },
+  // Editable notes wrap the image so a corner handle can resize it (#244). An
+  // explicit `|width` sets the img's own width; `max-width: 100%` still caps it.
+  ".cm-md-img-wrap": {
+    position: "relative",
+    display: "inline-block",
+    maxWidth: "100%",
+    verticalAlign: "bottom",
+    lineHeight: "0",
+  },
+  ".cm-md-img-handle": {
+    position: "absolute",
+    right: "2px",
+    bottom: "2px",
+    width: "12px",
+    height: "12px",
+    borderRight: "2px solid var(--accent)",
+    borderBottom: "2px solid var(--accent)",
+    borderBottomRightRadius: "var(--radius-sm)",
+    cursor: "nwse-resize",
+    opacity: "0",
+    transition: "opacity 120ms ease",
+    touchAction: "none",
+  },
+  ".cm-md-img-wrap:hover .cm-md-img-handle, .cm-md-img-resizing .cm-md-img-handle": {
+    opacity: "1",
+  },
+  ".cm-md-img-resizing .cm-md-img": {
+    outline: "1px solid var(--accent)",
+  },
   // Markdown `![alt](src.pdf)` embeds rendered as an inline preview block.
   ".cm-md-pdf": {
     display: "block",
@@ -734,9 +763,14 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // Mirrors the selection wash onto the title while a selection reaches the
   // start of the document (see `titleSelectionMirror` in noteHeader.ts). Same
   // colour as `.cm-selectionBackground` above.
+  // Square bottom + a shadow strip the height of the first line's leading
+  // (`--title-sel-extend`, measured by the plugin) so the title's wash and the
+  // body's read as ONE selection. An outer box-shadow is never painted under
+  // its own box, so the translucent wash does not double up anywhere.
   ".cm-note-title.is-selected": {
     backgroundColor: "var(--editor-selection-bg)",
-    borderRadius: "var(--radius-sm)",
+    borderRadius: "var(--radius-sm) var(--radius-sm) 0 0",
+    boxShadow: "0 var(--title-sel-extend, 0px) 0 var(--editor-selection-bg)",
   },
   ".inline-title-wrap": {
     display: "flex",

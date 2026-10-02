@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isSyncRunActive,
   syncBadgeAction,
+  syncBadgeHold,
   syncBadgeLabel,
   syncBadgeTone,
   syncRunPercent,
@@ -20,6 +21,29 @@ describe("syncBadgeLabel", () => {
     expect(syncBadgeLabel({ status: "no-access", now, progress: { ...progress, done: 128 } })).toBe("Updating access · 2 remaining");
     expect(syncBadgeTone({ status: "no-access", progress })).toBe("connecting");
     expect(isSyncRunActive(progress)).toBe(true);
+  });
+
+  // #258: an interrupted first upload resumes visibly, counting what is left.
+  it("names the notes still to upload while their content is missing on the server", () => {
+    const progress: SyncProgress = {
+      phase: "uploading",
+      done: 10,
+      total: 500,
+      failed: 0,
+      notUploaded: 412,
+    };
+    expect(syncBadgeLabel({ status: "synced", now, progress })).toBe("Uploading · 412 notes left");
+    expect(syncBadgeLabel({ status: "synced", now, progress: { ...progress, notUploaded: 1 } })).toBe(
+      "Uploading · 1 note left",
+    );
+    // Nothing missing: the ordinary counter, so a synced vault never reads "Uploading".
+    expect(syncBadgeLabel({ status: "synced", now, progress: { ...progress, notUploaded: undefined } })).toBe(
+      "Syncing 10/500 updates",
+    );
+    // Only while uploading: the download half of the run keeps its own counter.
+    expect(syncBadgeLabel({ status: "synced", now, progress: { ...progress, phase: "downloading" } })).toBe(
+      "Syncing 10/500 updates",
+    );
   });
 
   it("reads 'Retrying…' when the run errored only because the channel never connected", () => {
@@ -328,5 +352,94 @@ describe("syncBadgeAction", () => {
       syncBadgeAction({ running: false, phase: "error", hasRetry: false, hasHealth: false })
         .kind,
     ).toBe("none");
+  });
+});
+
+// #273: a vault-wide hold outranks every per-note/per-run state, in every badge
+// that renders through SyncBadge — Vault Settings once read "Synced · 9m ago"
+// while the tab-bar pill said "Sync paused".
+describe("syncBadgeHold", () => {
+  const now = 1_000_000_000_000;
+
+  it("is null when nothing holds sync", () => {
+    expect(syncBadgeHold({ now })).toBeNull();
+    expect(syncBadgeHold({ enabled: true, pause: null, now })).toBeNull();
+  });
+
+  it("reads a neutral Paused while the vault folder is missing (#228)", () => {
+    const hold = syncBadgeHold({ rootMissing: true, enabled: true, pause: { until: null }, now });
+    expect(hold).toEqual({
+      tone: "offline",
+      label: "Paused",
+      title: "Sync is paused until the vault folder is back",
+    });
+  });
+
+  it("reads an amber Sync paused while the shrink brake holds writes (#252)", () => {
+    const hold = syncBadgeHold({ enabled: true, pause: { until: now + 10 * 60_000 }, now });
+    expect(hold?.tone).toBe("connecting");
+    expect(hold?.label).toBe("Sync paused");
+    expect(hold?.title).toContain("(in about 10 min)");
+    expect(syncBadgeHold({ enabled: true, pause: { until: null }, now })?.title).not.toContain("(in ");
+  });
+
+  it("ignores a brake on a vault whose sync is off", () => {
+    expect(syncBadgeHold({ enabled: false, pause: { until: null }, now })).toBeNull();
+  });
+});
+
+// New notes the server refused for access stay local until access changes, and
+// a refused create may or may not have been re-asked (and so counted as
+// `failed`) in the run that just ended. Either way the pill must not read
+// "Synced" over them.
+describe("a run with held create refusals", () => {
+  const now = 1_000_000_000_000;
+  const asked: SyncProgress = { phase: "error", done: 3, total: 3, failed: 2, refused: 2 };
+  const skipped: SyncProgress = { phase: "error", done: 0, total: 0, failed: 0, refused: 2 };
+
+  it("reads the same whether or not the refusals were re-asked this run", () => {
+    for (const progress of [asked, skipped]) {
+      expect(syncBadgeLabel({ status: "synced", now, progress })).toBe("Sync incomplete");
+      expect(syncBadgeTone({ status: "synced", progress })).toBe("error");
+      expect(
+        syncBadgeAction({ running: false, phase: "error", failed: progress.failed, refused: 2, hasRetry: true, hasHealth: true }).kind,
+      ).toBe("explain");
+    }
+  });
+
+  it("still reads Synced for ordinary failed notes", () => {
+    const progress: SyncProgress = { phase: "error", done: 3, total: 3, failed: 2 };
+    expect(syncBadgeLabel({ status: "synced", now, progress, lastSyncedAt: now })).toBe("Synced · just now");
+  });
+});
+
+// A registry pull that keeps failing strands every new note and folder, so the
+// pill must not read "Synced" over it — even when the run also had ordinary
+// failed notes, which on their own read "Synced".
+describe("a run whose registry pull keeps failing", () => {
+  const now = 1_000_000_000_000;
+  const withFailed: SyncProgress = { phase: "error", done: 3, total: 3, failed: 2, pullFailing: true };
+  const alone: SyncProgress = { phase: "error", done: 0, total: 0, failed: 0, pullFailing: true };
+
+  it("reads Sync incomplete and offers the Health explanation", () => {
+    for (const progress of [withFailed, alone]) {
+      expect(syncBadgeLabel({ status: "synced", now, progress })).toBe("Sync incomplete");
+      expect(syncBadgeTone({ status: "synced", progress })).toBe("error");
+      expect(
+        syncBadgeAction({
+          running: false,
+          phase: "error",
+          failed: progress.failed,
+          pullFailing: true,
+          hasRetry: true,
+          hasHealth: true,
+        }).kind,
+      ).toBe("explain");
+    }
+  });
+
+  it("reads Synced again once the stamp is gone", () => {
+    const progress: SyncProgress = { phase: "error", done: 3, total: 3, failed: 2 };
+    expect(syncBadgeLabel({ status: "synced", now, progress, lastSyncedAt: now })).toBe("Synced · just now");
   });
 });

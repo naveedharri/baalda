@@ -39,7 +39,7 @@
     "ioredis": "^5.11.1",
     "jose": "^6.2.3",
     "kysely": "^0.29.3",
-    "nodemailer": "^9.1.1",
+    "nodemailer": "^10.0.13",
     "pg": "^8.22.0",
     "standardwebhooks": "^1.0.0",
     "ws": "^8.21.0",

@@ -184,9 +184,39 @@ export type ServerControl =
    */
   | { t: "rejected"; docId: string; reason: "read_only" }
   | { t: "reauth" } // ACL changed in this vault -> client re-mints its open doc's token
-  | { t: "registry" } // folders/notes structure changed -> client re-pulls the registry
+  /**
+   * Folders/notes structure changed -> client re-pulls the registry. `meta`
+   * marks a window that carried ONLY "last edited by" stamps (no create, move,
+   * rename or delete): the tree and the readable set are unchanged, so a client
+   * may fold it into a throttled pull instead of pulling at once (#262). An
+   * older client ignores the field and pulls, which is what it always did.
+   */
+  | { t: "registry"; meta?: true }
+  /**
+   * Something the Activity feed lists changed in this vault: a note was
+   * soft-deleted, restored or purged, or a `pre-shrink` version was kept. The
+   * client refetches its trash / shrink listings on this instead of polling
+   * them (#260). Old clients ignore an unknown `t`.
+   */
+  | { t: "activity" }
   | { t: "member"; name: string } // a new teammate joined the vault -> refresh + celebrate
   | ({ t: "presence" } & PresenceState) // a teammate's live viewing state changed
+  /**
+   * A new desktop release exists (`sync/release-watch.ts`, #269). A HINT to run
+   * the client's own update check now — the updater still fetches and verifies
+   * the release itself, so this can never deliver or force anything. Sent to
+   * every authenticated connection; older clients ignore an unknown `t`.
+   */
+  | { t: "version-available"; version: string }
+  /**
+   * The shrink burst brake (#252) holds — or stopped holding — THIS user's
+   * content writes in this vault. Addressed to that user only. `held: true`
+   * carries when the hold lapses (`until`, ms epoch) and how many notes engaged
+   * it; `held: false` means it lifted (lapsed or released by an owner/admin).
+   * Deliberately NOT `rejected`/`readOnly`: the client keeps every local edit
+   * and only shows that sync is paused. Older clients ignore an unknown `t`.
+   */
+  | { t: "brake"; held: boolean; until?: number; count?: number }
   | { t: "err"; message: string };
 
 /** Client's post-hello presence frame: declares what note it's currently on.
@@ -395,6 +425,12 @@ export const PS_PRESENCE = 0x05;
 export const PS_PRESENCE_QUERY = 0x06;
 export const PS_VOICE = 0x07;
 export const PS_REJECTED = 0x08;
+/** "Last edited by" stamps only — see the `meta` flag on the `registry` frame. */
+export const PS_META_CHANGED = 0x09;
+/** Trash or shrink-event listings changed — see the `activity` frame. */
+export const PS_ACTIVITY_CHANGED = 0x0a;
+/** A user's shrink-brake hold engaged or lifted — see the `brake` frame. */
+export const PS_BRAKE = 0x0b;
 
 export function encodePubsubUpdate(docId: string, update: Uint8Array): Uint8Array {
   const body = frameDocPayload(docId, update);
@@ -422,6 +458,19 @@ export function encodePubsubRegistryChanged(origins: string[] = []): Uint8Array 
   out[0] = PS_REGISTRY_CHANGED;
   out.set(body, 1);
   return out;
+}
+
+/** Last-edited stamps changed in a vault, and nothing structural. Carries no
+ *  origin: the stamp is written by the sync server, which has none. An older
+ *  instance decodes the unknown type as null and drops it (a stale "edited by"
+ *  for the length of a rolling deploy, nothing worse). */
+export function encodePubsubMetaChanged(): Uint8Array {
+  return new Uint8Array([PS_META_CHANGED]);
+}
+
+/** The vault's trash or shrink-event listings changed. */
+export function encodePubsubActivityChanged(): Uint8Array {
+  return new Uint8Array([PS_ACTIVITY_CHANGED]);
 }
 
 export function encodePubsubMemberJoined(name: string): Uint8Array {
@@ -463,6 +512,28 @@ export function encodePubsubRejected(userId: string, docId: string, reason: "rea
   return out;
 }
 
+/** A user's shrink-brake hold engaged (`held`, with `until` + `count`) or
+ *  lifted; addressed to `userId` only. */
+export function encodePubsubBrake(
+  userId: string,
+  held: boolean,
+  until?: number,
+  count?: number,
+): Uint8Array {
+  const body = enc.encode(
+    JSON.stringify({
+      userId,
+      held,
+      ...(held && until !== undefined ? { until } : {}),
+      ...(held && count !== undefined ? { count } : {}),
+    }),
+  );
+  const out = new Uint8Array(1 + body.length);
+  out[0] = PS_BRAKE;
+  out.set(body, 1);
+  return out;
+}
+
 /** Ask every connection in the vault to re-announce its presence — sent when a
  *  client joins so it learns who's already viewing what (stateless: no instance
  *  holds the whole roster, so newcomers pull it via a re-announce round). */
@@ -474,11 +545,14 @@ export type PubsubMessage =
   | { type: "update"; docId: string; update: Uint8Array }
   | { type: "acl-changed" }
   | { type: "registry-changed"; origins: string[] }
+  | { type: "meta-changed" }
+  | { type: "activity-changed" }
   | { type: "member-joined"; name: string }
   | { type: "presence"; presence: PresenceState }
   | { type: "presence-query" }
   | { type: "voice"; frame: Uint8Array; speakerId: string }
-  | { type: "rejected"; userId: string; docId: string; reason: "read_only" };
+  | { type: "rejected"; userId: string; docId: string; reason: "read_only" }
+  | { type: "brake"; userId: string; held: boolean; until?: number; count?: number };
 
 export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
   if (bytes.length < 1) return null;
@@ -502,6 +576,10 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
         return { type: "registry-changed", origins: [] };
       }
     }
+    case PS_META_CHANGED:
+      return { type: "meta-changed" };
+    case PS_ACTIVITY_CHANGED:
+      return { type: "activity-changed" };
     case PS_MEMBER_JOINED:
       return { type: "member-joined", name: dec.decode(bytes.subarray(1)) };
     case PS_PRESENCE: {
@@ -536,6 +614,26 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
           return null;
         }
         return { type: "rejected", userId: p.userId, docId: p.docId, reason: "read_only" };
+      } catch {
+        return null;
+      }
+    }
+    case PS_BRAKE: {
+      try {
+        const p = JSON.parse(dec.decode(bytes.subarray(1))) as {
+          userId?: unknown;
+          held?: unknown;
+          until?: unknown;
+          count?: unknown;
+        };
+        if (typeof p.userId !== "string" || typeof p.held !== "boolean") return null;
+        return {
+          type: "brake",
+          userId: p.userId,
+          held: p.held,
+          ...(p.held && typeof p.until === "number" ? { until: p.until } : {}),
+          ...(p.held && typeof p.count === "number" ? { count: p.count } : {}),
+        };
       } catch {
         return null;
       }
