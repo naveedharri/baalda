@@ -115,18 +115,42 @@ describe("VaultDocStore — parked updates for unmapped docs", () => {
 
   it("evicts the oldest parked doc past the cap and reports it for a re-request", async () => {
     const { io } = makeHarness({});
-    const store = new VaultDocStore({ io, resolvePath: () => null });
+    const reg = registry();
+    const store = new VaultDocStore({ io, resolvePath: reg.resolvePath });
 
-    for (let i = 0; i <= PARKED_DOC_CAP; i++) {
+    for (let i = 0; i <= PARKED_DOC_CAP + 1; i++) {
       await store.applyUpdate(`d${i}`, serverDoc(`note ${i}`).full());
     }
 
     const parked = store.parkedDocs();
     expect(parked).toHaveLength(PARKED_DOC_CAP);
     expect(parked).not.toContain("d0");
-    expect(parked).toContain(`d${PARKED_DOC_CAP}`);
+    expect(parked).not.toContain("d1");
+    expect(parked).toContain(`d${PARKED_DOC_CAP + 1}`);
+    // Only an evicted doc the pull placed is worth a reconnect: re-requesting
+    // one that still does not map would just overflow again, every pull.
+    reg.map("d0", "d0.md");
     expect(store.takeOverflowed()).toEqual(["d0"]);
     expect(store.takeOverflowed()).toEqual([]); // cleared on read
+  });
+
+  it("discards a doc parked before the pull's mark that the pull did not map", async () => {
+    // The customer path end to end: one note the pull maps, one it never lists.
+    const { io, fs } = makeHarness({ "new.md": "" });
+    const reg = registry();
+    const store = new VaultDocStore({ io, resolvePath: reg.resolvePath });
+    const created = serverDoc("# Agenda");
+
+    await store.applyUpdate("created", created.full());
+    await store.applyUpdate("unlisted", serverDoc("never listed").full());
+    const mark = store.parkMark(); // the pull starts AFTER both parked
+    reg.map("created", "new.md");
+    await store.settleParked(mark);
+
+    expect(fs.get("new.md")).toBe("# Agenda");
+    expect(store.parkedDocs()).toEqual([]);
+    await store.applyUpdate("created", created.append("\n- item"));
+    expect(fs.get("new.md")).toBe("# Agenda\n- item");
   });
 
   it("forgets parked updates for a dropped doc", async () => {

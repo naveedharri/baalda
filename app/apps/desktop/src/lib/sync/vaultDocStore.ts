@@ -534,19 +534,22 @@ export class VaultDocStore implements DocUpdateSink {
           docId,
           entry.updates.length === 1 ? entry.updates[0] : Y.mergeUpdates(entry.updates),
         ]);
-      } else if (entry.seq < mark || now - entry.at > PARKED_TTL_MS) {
+      } else if (entry.seq <= mark || now - entry.at > PARKED_TTL_MS) {
         this.unpark(docId);
       }
     }
     await Promise.all(ready.map(([docId, update]) => this.applyUpdate(docId, update)));
   }
 
-  /** Docs whose parked updates the caps evicted, cleared on read. The session
-   *  reconnects the channel for these: the manifest has no entry for them, so
-   *  the server re-sends their full state. */
+  /** Docs whose parked updates the caps evicted and that the registry now
+   *  places, cleared on read. The session reconnects the channel for these: the
+   *  manifest has no entry for them, so the server re-sends their full state.
+   *  One that still does not map is not re-requested — a reconnect would only
+   *  park (and overflow) the same backfill again, on every pull — and the next
+   *  ordinary reconnect brings it once it maps. */
   takeOverflowed(): string[] {
     // A doc that reached the manifest some other way already has its base.
-    const ids = [...this.overflowed].filter((id) => !this.svCache.has(id));
+    const ids = [...this.overflowed].filter((id) => !this.svCache.has(id) && this.resolvePath(id));
     this.overflowed.clear();
     return ids;
   }
