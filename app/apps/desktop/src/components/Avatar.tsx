@@ -18,6 +18,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { createAvatar } from "@dicebear/core";
 import { notionists } from "@dicebear/collection";
 import { PRESENCE_PALETTE } from "../lib/presence/color";
+import { characterSeed } from "../lib/profileAvatar";
 
 // Palette hex values without the leading "#", as DiceBear expects. DiceBear
 // deterministically picks one per seed, so each character gets its own colour.
@@ -56,17 +57,21 @@ export function FaceSvg({ seed, className, style, title, ariaHidden }: FaceProps
 }
 
 export function Avatar({ label, image }: { label: string; image?: string | null }) {
-  const svg = useMemo(() => characterSvg(label || "?"), [label]);
+  // A picked character (`character:<seed>`) is still a generated face, just
+  // from a chosen seed instead of the person's name.
+  const picked = characterSeed(image);
+  const svg = useMemo(() => characterSvg(picked ?? (label || "?")), [picked, label]);
+  const photo = picked ? null : image;
   // Prefer a real profile photo (e.g. from Google) when present; fall back to
   // the generated character if there's no image or it fails to load.
   const [imgFailed, setImgFailed] = useState(false);
-  useEffect(() => setImgFailed(false), [image]);
+  useEffect(() => setImgFailed(false), [photo]);
 
-  if (image && !imgFailed) {
+  if (photo && !imgFailed) {
     return (
       <span className="avatar" aria-hidden="true">
         <img
-          src={image}
+          src={photo}
           alt=""
           // Google's lh3.googleusercontent.com can 403 when a referrer is sent.
           referrerPolicy="no-referrer"

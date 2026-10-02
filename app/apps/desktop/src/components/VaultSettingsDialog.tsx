@@ -55,6 +55,7 @@ import { Switch } from "./Switch";
 import { ThemeToggle } from "./ThemeToggle";
 import { formatPrice, perLabel, UpgradeDialog } from "./UpgradeDialog";
 import { useKnownOrgIds, useLocalVaults } from "./useVaultLists";
+import { VaultIconSettings } from "./VaultIconSettings";
 
 // Defined in `lib/settingsTabs.ts` so the store can name a tab without importing
 // this component; re-exported here so every existing importer is unchanged.
@@ -404,6 +405,10 @@ function GeneralTab({
   // The sidebar paints before the session restore finishes, so this page can be
   // open while we still don't know whether anyone is signed in.
   const authPending = authStatus === "unknown";
+  const activeOrgId = useStore((s) => s.session?.activeOrganizationId ?? null);
+  // Same identity the sidebar switcher keys its icons on.
+  const iconIdentity =
+    isSynced && activeOrgId ? `org:${activeOrgId}` : vault ? `local:${vault.path}` : null;
 
   const [name, setName] = useState(vault?.name ?? "");
   const [busy, setBusy] = useState(false);
@@ -443,6 +448,16 @@ function GeneralTab({
 
   return (
     <>
+      {iconIdentity && (
+        <>
+          <VaultIconSettings
+            identity={iconIdentity}
+            name={(isSynced ? activeOrgName : null) ?? vault?.name ?? ""}
+            canEdit={!isSynced || canManage}
+          />
+          <div className="menu-sep" />
+        </>
+      )}
       {isSynced ? (
         <>
           <div className="muted">
