@@ -1548,7 +1548,12 @@ export class ApiClient {
 
   // ---- Organizations (org plugin) -----------------------------------------
 
-  async createOrganization(input: { name: string; slug: string }): Promise<Organization> {
+  async createOrganization(input: {
+    name: string;
+    slug: string;
+    /** The vault icon to start with (`lib/vaultIcon.ts` wire format). */
+    logo?: string;
+  }): Promise<Organization> {
     const { data } = await this.request<Organization>("POST", "/api/auth/organization/create", {
       body: input,
     });

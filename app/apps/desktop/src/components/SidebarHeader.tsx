@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import * as ipc from "../lib/ipc";
 import { copyText } from "../lib/clipboard";
 import { toast } from "../lib/toast";
 import { useStore } from "../store";
@@ -51,19 +50,19 @@ export function SidebarHeader() {
     };
   }, [menuOpen]);
 
+  // The chevron shows only while the whole name fits beside it; a long name
+  // drops it and takes that room instead. Judged against the width WITH the
+  // chevron, so hiding it can never make the name fit and flip it back.
+  const mainRef = useRef<HTMLDivElement>(null);
+  const nameRef = useRef<HTMLSpanElement>(null);
+  const [longName, setLongName] = useState(false);
+
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
   useEffect(() => {
     if (!copiedPath) return;
     const timer = setTimeout(() => setCopiedPath(null), 1800);
     return () => clearTimeout(timer);
   }, [copiedPath]);
-
-  if (!vault) return null;
-  const copyPath = async () => {
-    if (switching) return;
-    if (await copyText(vault.path)) setCopiedPath(vault.path);
-    else toast("Couldn't copy the vault path", "error");
-  };
 
   const activeOrg =
     organizations.find((o) => o.id === session?.activeOrganizationId) ?? null;
@@ -72,7 +71,34 @@ export function SidebarHeader() {
   // showing the vault being left until the very last one is what made switching
   // feel like it hadn't registered. If the switch fails the store clears the
   // flag and this snaps back to the truth.
-  const name = switching?.name ?? (syncEnabled && activeOrg ? activeOrg.name : vault.name);
+  const name = vault
+    ? (switching?.name ?? (syncEnabled && activeOrg ? activeOrg.name : vault.name))
+    : "";
+  const measureName = () => {
+    const main = mainRef.current;
+    const nameEl = nameRef.current;
+    if (!main || !nameEl) return;
+    // The button may use the row minus 19px (see `.vault-switch-btn` in
+    // App.css); inside it: 4px padding each side, an 8px gap, a 20px chevron.
+    setLongName(nameEl.scrollWidth > main.clientWidth - 19 - 8 - 8 - 20);
+  };
+  useLayoutEffect(() => {
+    const main = mainRef.current;
+    if (!main) return;
+    measureName();
+    const ro = new ResizeObserver(() => measureName());
+    ro.observe(main);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, !!vault]);
+
+  if (!vault) return null;
+  const copyPath = async () => {
+    if (switching) return;
+    if (await copyText(vault.path)) setCopiedPath(vault.path);
+    else toast("Couldn't copy the vault path", "error");
+  };
+
   // The tile matches the vault's card in the switcher: the target while a switch
   // is in flight, else the open one.
   const tileIdentity = switching
@@ -86,7 +112,7 @@ export function SidebarHeader() {
     // `titleBarStyle: "Overlay"` in tauri.conf.json), and this row occupies the
     // strip the macOS traffic lights float over. "deep" makes the whole subtree
     // draggable — padding, name and path alike — while Tauri still lets real
-    // controls through, so the reveal-folder button below keeps working.
+    // controls through, so the switcher button keeps working.
     <div
       ref={rootRef}
       className={`sidebar-header${switching ? " is-switching" : ""}`}
@@ -105,7 +131,7 @@ export function SidebarHeader() {
           <VaultTile identity={tileIdentity} name={name} />
         </button>
         <div className="sidebar-header-text">
-          <div className="sidebar-header-main">
+          <div className="sidebar-header-main" ref={mainRef}>
             <button
               type="button"
               className={`vault-switch-btn${menuOpen ? " open" : ""}`}
@@ -119,6 +145,12 @@ export function SidebarHeader() {
               <AnimatePresence mode="wait" initial={false}>
                 <motion.span
                   key={name}
+                  // Measured as it mounts too: on a switch the new name's span
+                  // arrives after the old one's exit animation.
+                  ref={(el: HTMLSpanElement | null) => {
+                    nameRef.current = el;
+                    if (el) measureName();
+                  }}
                   className="vault-name"
                   title={name}
                   initial={reduceMotion ? false : { opacity: 0, y: -4 }}
@@ -129,18 +161,20 @@ export function SidebarHeader() {
                   {name}
                 </motion.span>
               </AnimatePresence>
-              <svg
-                className="vault-switch-chevron"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <path d="m6 9 6 6 6-6" />
-              </svg>
+              {!longName && (
+                <svg
+                  className="vault-switch-chevron"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              )}
             </button>
             {switching && <Spinner size="xs" tone="accent" className="vault-switch-spinner" />}
           </div>
@@ -174,32 +208,6 @@ export function SidebarHeader() {
                 </svg>
               )}
             </span>
-            {/* Reveal-in-file-manager sits on the path row — it acts on the path,
-                so it belongs beside it — and stays visible: an affordance that only
-                appears on hover is one nobody finds. */}
-            <button
-              className="icon-btn vault-reveal"
-              title={`Open ${vault.path} in your file manager`}
-              aria-label="Open vault folder"
-              onClick={() =>
-                void ipc.openInFileManager(vault.path).catch((e) => {
-                  console.error("open vault folder failed", e);
-                })
-              }
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M4 20a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2" />
-                <path d="M2 18l2.5-6h17L19 18a2 2 0 0 1-1.9 1.4H4" />
-              </svg>
-            </button>
           </div>
         </div>
         {/* Anchored to the tile + name block, so it opens right under it. */}

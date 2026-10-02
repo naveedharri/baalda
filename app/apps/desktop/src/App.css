@@ -1321,15 +1321,18 @@ body:has(.sidebar-resizer.dragging) {
   align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-1) var(--sp-2);
-  padding: var(--sp-1) var(--sp-2) var(--sp-1) calc(var(--sp-3) + var(--sp-2));
+  /* Same 17px inset as the tree rows (`TreeRowView`'s paddingLeft), so the
+     select-all box sits in the rows' checkbox column. */
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) 17px;
   min-height: 30px;
   border-bottom: 1px solid var(--border);
   margin-bottom: var(--sp-1);
 }
 .selbar-check {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
+  /* Same size as the rows' `.tree-check`, so the column lines up exactly. */
+  width: 16px;
+  height: 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1351,8 +1354,8 @@ body:has(.sidebar-resizer.dragging) {
   border-color: var(--accent);
 }
 .selbar-check svg {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
 }
 .selbar-count {
   flex: 1;
@@ -3814,9 +3817,23 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   cursor: pointer;
   transition: background var(--t-fast) var(--ease);
 }
+/* The chevron follows a short name; a long name hides it (SidebarHeader
+   measures). The button is capped so the name stops on the tree rows' sync-dot
+   column: a 20px box centred 33px in from the right edge, i.e. 23px clear of
+   it — 19px here plus this button's own 4px right padding. The chevron's 3px
+   side padding makes its box those 20px. */
+.sidebar-header-main .vault-switch-btn {
+  max-width: calc(100% - 19px);
+}
+.vault-switch-btn .vault-name {
+  min-width: 0;
+  text-align: left;
+}
 .vault-switch-chevron {
+  box-sizing: content-box;
   width: 14px;
   height: 14px;
+  padding: 0 3px;
   flex-shrink: 0;
   color: var(--text-tertiary);
   transition: transform var(--t-fast) var(--ease);
