@@ -14,7 +14,13 @@
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { makeHarness } from "../../bridge/__tests__/helpers";
-import { ContentUploader, MAX_NOTE_BYTES, TerminalSyncError, type DocPush } from "../contentUpload";
+import {
+  ContentUploader,
+  MAX_NOTE_BYTES,
+  SHRINK_HELD_REASON,
+  TerminalSyncError,
+  type DocPush,
+} from "../contentUpload";
 import { UPLOAD_CONCURRENCY } from "../pool";
 import type { SyncProgressSink } from "../progress";
 import { VaultDocStore } from "../vaultDocStore";
@@ -147,6 +153,7 @@ interface RigOptions {
   readFile?: boolean;
   lazyPhase?: boolean;
   failTrash?: boolean;
+  syncPaused?: () => boolean;
 }
 
 function rig(opts: RigOptions) {
@@ -197,6 +204,7 @@ function rig(opts: RigOptions) {
     isUnhydratedPlaceholder: opts.isUnhydratedPlaceholder,
     shouldStop: opts.shouldStop,
     lazyPhase: opts.lazyPhase,
+    syncPaused: opts.syncPaused,
     progress: sink.sink,
     concurrency: opts.concurrency,
     failureStreakLimit: opts.failureStreakLimit,
@@ -647,6 +655,54 @@ describe("ContentUploader — resume and honest failures", () => {
     ]);
     expect(r.sink.stateOf("bad")).toContain("error");
     expect(r.sink.counts().failed).toBe(1);
+  });
+
+  it("reports a missing ack during a shrink-brake pause as shrink-held, not a mystery failure (#274)", async () => {
+    // A held socket is admitted read-only-ish with no `rejected` frame, so the
+    // server drops the update and the ack never comes. With the pause live the
+    // verdict is the batch push's: shrink-held, retryable, and no Retry row.
+    const r = rig({
+      files: { "Held.md": "emptied" },
+      notes: [{ docId: "h", relPath: "Held.md" }],
+      behaviour: { neverFlushed: new Set(["h"]) },
+      syncPaused: () => true,
+    });
+    const result = await r.uploader.run();
+
+    expect(result).toMatchObject({ total: 1, pushed: 0, failed: 1 });
+    expect(r.marked).toEqual([]);
+    expect(r.uploader.failedDocs()).toEqual([
+      { docId: "h", relPath: "Held.md", reason: SHRINK_HELD_REASON, kind: "shrink-held" },
+    ]);
+    // Never permanent: the pause lifting is exactly what makes it go through.
+    expect(r.uploader.failedDocs()[0]?.permanent).toBeUndefined();
+    // Local text is untouched.
+    expect(r.harness.fs.get("Held.md")).toBe("emptied");
+  });
+
+  it("keeps the generic verdict for a missing ack when no pause is live", async () => {
+    const r = rig({
+      files: { "Bad.md": "lost" },
+      notes: [{ docId: "bad", relPath: "Bad.md" }],
+      behaviour: { neverFlushed: new Set(["bad"]) },
+      syncPaused: () => false,
+    });
+    await r.uploader.run();
+    expect(r.uploader.failedDocs()).toEqual([
+      { docId: "bad", relPath: "Bad.md", reason: "server did not acknowledge the content" },
+    ]);
+  });
+
+  it("never consults the pause for a doc the server acknowledged", async () => {
+    const syncPaused = vi.fn(() => true);
+    const r = rig({
+      files: { "Ok.md": "fine" },
+      notes: [{ docId: "ok", relPath: "Ok.md" }],
+      syncPaused,
+    });
+    const result = await r.uploader.run();
+    expect(result).toMatchObject({ pushed: 1, failed: 0 });
+    expect(syncPaused).not.toHaveBeenCalled();
   });
 
   it("aborts the whole run after a streak of failures (a dead server)", async () => {

@@ -1004,14 +1004,17 @@ export class SyncManager implements InboundHost {
   private logUploadFailure(f: UploadFailure): void {
     this.invalidatedFailures.delete(f.docId);
     this.note(
-      "error",
+      // A note the shrink brake holds is waiting, not broken (#274).
+      f.kind === "shrink-held" ? "warn" : "error",
       // A permanent refusal is a different fact from a failed attempt: nothing
       // retries it, so the page offers a different remedy.
       f.kind === "too-large"
         ? "too-large"
         : f.kind === "no-write-access"
           ? "no-write-access"
-          : "push-failed",
+          : f.kind === "shrink-held"
+            ? "shrink-held"
+            : "push-failed",
       `${f.relPath} — ${f.reason}`,
       { docId: f.docId, path: f.relPath },
     );
@@ -1510,14 +1513,24 @@ export class SyncManager implements InboundHost {
    */
   private requeueShrinkHeld(scope: VaultScope): void {
     let queued = 0;
-    for (const [docId, failure] of [...this.bulkFailures]) {
-      if (failure.kind !== "shrink-held") continue;
+    const requeue = (docId: string, failure: UploadFailure): void => {
       const relPath = this.registry.pathForDocId(docId) ?? failure.relPath;
-      this.bulkFailures.delete(docId);
       this.invalidatedFailures.add(docId);
       this.divergedDocs.add(docId);
       this.localChanges.set(docId, relPath);
       queued++;
+    };
+    for (const [docId, failure] of [...this.bulkFailures]) {
+      if (failure.kind !== "shrink-held") continue;
+      this.bulkFailures.delete(docId);
+      requeue(docId, failure);
+    }
+    // …and the ones the per-note uploader held: its missing acks during the
+    // pause are reported the same way (#274). The failure stays in that run's
+    // list, so `invalidatedFailures` + the queue entry are what retire it.
+    for (const failure of this.uploader?.failedDocs() ?? []) {
+      if (failure.kind !== "shrink-held" || this.localChanges.has(failure.docId)) continue;
+      requeue(failure.docId, failure);
     }
     if (queued > 0) this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
   }
@@ -3236,6 +3249,8 @@ export class SyncManager implements InboundHost {
       lazyPhase: true,
       onFailure: (f) => this.logUploadFailure(f),
       shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
+      // A missing ack during a shrink-brake hold is the hold, not a failure (#274).
+      syncPaused: () => this.syncPause.current() != null,
     });
     this.uploader = uploader;
 
@@ -4696,6 +4711,8 @@ export class SyncManager implements InboundHost {
       progress,
       onFailure: (f) => this.logUploadFailure(f),
       shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
+      // A missing ack during a shrink-brake hold is the hold, not a failure (#274).
+      syncPaused: () => this.syncPause.current() != null,
     });
     this.uploader = uploader;
     await uploader.run();
@@ -4867,6 +4884,8 @@ export class SyncManager implements InboundHost {
       progress,
       onFailure: (f) => this.logUploadFailure(f),
       shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
+      // A missing ack during a shrink-brake hold is the hold, not a failure (#274).
+      syncPaused: () => this.syncPause.current() != null,
     });
     this.uploader = uploader;
 
