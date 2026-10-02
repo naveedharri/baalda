@@ -540,6 +540,13 @@ const FOLDER_MOVE_MIN_RATIO = 0.8;
 const OWN_MOVE_TTL_MS = 120_000;
 
 /**
+ * The longest a sidebar delete of a not-yet-registered path waits for the
+ * registrations in flight (see `settleRegistrations`). Past it the delete goes
+ * ahead as before — a hung request must not freeze the sidebar.
+ */
+export const REGISTRATION_SETTLE_MS = 15_000;
+
+/**
  * The most same-path conflicts one pass may resolve by renaming. A real one is
  * two people creating the same note while apart — a handful at most. Hundreds
  * in one pass means the premise is wrong (the files are the server's own notes,
@@ -746,6 +753,44 @@ export class VaultRegistry {
 
   /** Paths (lower-cased) this pass may re-create that were mapped before it. */
   private restoreCandidatesCi = new Set<string>();
+
+  /**
+   * Registrations in flight: sync passes (`reconcile`, `pull`) and the eager
+   * single-item calls (`registerNote` when a note opens, `registerFolder` when
+   * one is created). A sidebar delete of a path none of them has mapped YET
+   * waits for them — before this it skipped the server (nothing to delete
+   * there yet), the registration landed a moment later, and the next pull
+   * wrote the "deleted" note back from the server (the restored-note banner).
+   */
+  private readonly registrations = new Set<Promise<unknown>>();
+
+  private trackRegistration<T>(p: Promise<T>): Promise<T> {
+    this.registrations.add(p);
+    const done = () => {
+      this.registrations.delete(p);
+    };
+    p.then(done, done);
+    return p;
+  }
+
+  /** Wait, bounded, for the registrations in flight. True when there were any. */
+  private async settleRegistrations(): Promise<boolean> {
+    if (this.registrations.size === 0) return false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.allSettled([...this.registrations]),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, REGISTRATION_SETTLE_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    return true;
+  }
+
+  /** Is `path` known to the server as a note or a folder (exact spelling)? */
+  private isMappedPath(path: string): boolean {
+    return this.folderByPath.has(path) || this.byPath.has(path);
+  }
 
   /** Notes already announced as restored this session (like attachments.ts). */
   private readonly restoreNoticed = new Set<string>();
@@ -3088,7 +3133,11 @@ export class VaultRegistry {
     return true;
   }
 
-  async reconcile(input: ReconcileInput): Promise<{ seeded: boolean }> {
+  reconcile(input: ReconcileInput): Promise<{ seeded: boolean }> {
+    return this.trackRegistration(this.reconcileNow(input));
+  }
+
+  private async reconcileNow(input: ReconcileInput): Promise<{ seeded: boolean }> {
     // Bind this registry to the vault the reconcile is FOR — this is the one
     // operation allowed to (re)claim it. Every await below is a chance for the
     // user to switch vaults; each `stale()` checkpoint drops the rest of the work
@@ -3303,7 +3352,7 @@ export class VaultRegistry {
       () => this.pullOnce(),
     );
     this.pullChain = run.catch(() => false);
-    return run;
+    return this.trackRegistration(run);
   }
 
   /**
@@ -4418,7 +4467,15 @@ export class VaultRegistry {
    * checkpointer. It used to read config.json, merge one key and rewrite the
    * whole file per note — O(N) bytes each, O(N²) for a vault being filled in.
    */
-  async registerNote(
+  registerNote(
+    relPath: string,
+    title: string | null,
+    docId?: string,
+  ): Promise<DocMapping | null> {
+    return this.trackRegistration(this.registerNoteNow(relPath, title, docId));
+  }
+
+  private async registerNoteNow(
     relPath: string,
     title: string | null,
     docId?: string,
@@ -4473,7 +4530,11 @@ export class VaultRegistry {
    * it can be shared. Idempotent (the server adopts an existing path). No-op if
    * the vault isn't reconciled yet.
    */
-  async registerFolder(relPath: string, name: string): Promise<string | null> {
+  registerFolder(relPath: string, name: string): Promise<string | null> {
+    return this.trackRegistration(this.registerFolderNow(relPath, name));
+  }
+
+  private async registerFolderNow(relPath: string, name: string): Promise<string | null> {
     if (this.stale()) return null;
     const vaultId = this.serverVaultId;
     if (!vaultId) return null;
@@ -4600,6 +4661,11 @@ export class VaultRegistry {
    */
   async deletePath(path: string): Promise<void> {
     if (this.stale()) return;
+    if (!this.serverVaultId) return;
+    // Not on the server yet — but maybe only because its registration is still
+    // in flight (a note created a moment ago). Let that land first, then delete
+    // it there too; see `registrations`.
+    if (!this.isMappedPath(path) && (await this.settleRegistrations()) && this.stale()) return;
     const vaultId = this.serverVaultId;
     if (!vaultId) return;
     const folderId = this.folderByPath.get(path);
@@ -4702,6 +4768,11 @@ export class VaultRegistry {
       out.set(path, { path, status: "failed", reason: reasonOf(e), code: errorCode(e) });
 
     if (this.stale()) return answer();
+    if (!this.serverVaultId) return answer();
+    // As in `deletePath`: a path not registered YET may be mid-registration.
+    if (unique.some((p) => !this.isMappedPath(p)) && (await this.settleRegistrations())) {
+      if (this.stale()) return answer();
+    }
     const vaultId = this.serverVaultId;
     if (!vaultId) return answer();
 
