@@ -517,6 +517,14 @@ const INBOUND_REMOVE_CONCURRENCY = IPC_CONCURRENCY;
  */
 const PULL_PAGE_LIMIT = 5000;
 
+/**
+ * The share of a closed-app-moved folder's notes and agreed binaries that must
+ * reappear, byte-identical, at the same sub-path under ONE new folder before
+ * the pair is applied as a folder move (#276). The same value as the live
+ * pairing's `FOLDER_MOVE_MIN_RATIO` in `docSession.ts`.
+ */
+const FOLDER_MOVE_MIN_RATIO = 0.8;
+
 /** How long a registry-made move stays "ours" (see `RegistrySync.isOwnMove`):
  *  comfortably past the watcher debounce and the 2.5 s disk-delete grace. */
 const OWN_MOVE_TTL_MS = 120_000;
@@ -2470,6 +2478,177 @@ export class VaultRegistry {
   }
 
   /**
+   * Pair each registered folder whose directory is gone with an unregistered
+   * folder that appeared, while the app was closed (#276), and turn the pair
+   * into ONE server folder move (`renamePath` → `PATCH /folders/:id`), exactly
+   * what the live `docSession.drainFolderMoves` (#221/#266) does when it SEES
+   * the move. The folder id, and every note and `files` id under it, is kept;
+   * the old path stops existing on the server, so no device re-materializes it.
+   *
+   * Positive evidence only — absence alone never moves or deletes anything,
+   * which is what keeps an unmounted volume or a half-copied folder safe:
+   *  - G = a folder this device recorded an id for, missing on disk, which the
+   *    server still lists under that id at the SAME path and has not
+   *    tombstoned (a server-side move or delete is the inbound step's job);
+   *  - C = a folder on disk the server does not list and this device has no id
+   *    for, whose parent is the root or a registered folder (the move needs a
+   *    parent id);
+   *  - evidence = mapped notes under G whose file at `C/<sub-path>` hashes to
+   *    this device's local CRDT text, plus registered binaries under G whose
+   *    file at `C/<sub-path>` hashes to the agreed base (`fileBases`). A
+   *    binary with no base, or a note with no local text, counts on neither
+   *    side. At least {@link FOLDER_MOVE_MIN_RATIO} of what G held must match,
+   *    and each C is used once.
+   * Below the ratio nothing happens here and the pass behaves as before. A
+   * move the server refuses changes nothing. The listing rows are rewritten in
+   * place so the rest of the pass agrees. Returns from → to per landed move.
+   */
+  private async pairClosedAppFolderMoves(
+    localFolders: readonly string[],
+    localNotes: readonly string[],
+    serverFolders: RegisteredFolder[],
+    serverNotes: RegisteredNote[],
+    folderTombstones: readonly string[] | null,
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (this.folderByPath.size === 0 || localFolders.length === 0) return out;
+    const under = (p: string, root: string) => p === root || p.startsWith(root + "/");
+    const topmost = (paths: readonly string[]) =>
+      paths.filter((p) => !paths.some((q) => q !== p && under(p, q)));
+    const localCi = new Set(localFolders.map((p) => pathKey(p)));
+    const serverPathById = new Map(serverFolders.map((f) => [f.id, f.path] as const));
+    const serverCi = new Set(serverFolders.map((f) => pathKey(f.path)));
+    const mappedCi = new Set([...this.folderByPath.keys()].map((p) => pathKey(p)));
+    const dead = new Set(folderTombstones ?? []);
+    const gone = topmost(
+      [...this.folderByPath]
+        .filter(([p, id]) => {
+          if (localCi.has(pathKey(p)) || dead.has(id)) return false;
+          const now = serverPathById.get(id);
+          return now !== undefined && samePath(now, p);
+        })
+        .map(([p]) => p),
+    );
+    if (gone.length === 0) return out;
+    const cands = localFolders.filter((c) => {
+      if (serverCi.has(pathKey(c)) || mappedCi.has(pathKey(c))) return false;
+      const parent = parentDir(c);
+      return parent === "" || this.folderByPath.has(parent);
+    });
+    if (cands.length === 0) return out;
+
+    const notesOnDisk = new Set(localNotes);
+    const mappedNotes = [...this.byPath].map(([relPath, m]) => ({ relPath, docId: m.docId }));
+    const mappedFiles = [...this.fileByPath].flatMap(([relPath, fileId]) => {
+      const base = this.fileBases.get(fileId);
+      return base ? [{ relPath, base }] : [];
+    });
+    let binaryShas: Map<string, string> | null | undefined;
+    const localBinaryShas = async (): Promise<Map<string, string> | null> => {
+      if (binaryShas !== undefined) return binaryShas;
+      try {
+        const list = await ipc.listBinaries(this.epoch());
+        binaryShas = new Map(list.map((b) => [b.relPath, b.sha256]));
+      } catch (e) {
+        if (!ipc.isVaultMismatch(e)) console.warn("[registry] folder move: couldn't list binaries", e);
+        binaryShas = null;
+      }
+      return binaryShas;
+    };
+    const docShas = new Map<string, string | null>();
+    const docSha = async (docId: string): Promise<string | null> => {
+      if (docShas.has(docId)) return docShas.get(docId) ?? null;
+      let text: string | null = null;
+      try {
+        text = (await this.host?.localText?.(docId)) ?? null;
+      } catch {
+        text = null;
+      }
+      const sha = text == null ? null : await sha256Hex(text);
+      docShas.set(docId, sha);
+      return sha;
+    };
+    const fileSha = async (path: string): Promise<string | null> => {
+      try {
+        return await sha256Hex(await ipc.readNote(path, this.epoch()));
+      } catch {
+        return null;
+      }
+    };
+    const usedCands = new Set<string>();
+
+    for (const g of gone) {
+      if (this.stopRun()) break;
+      const notesUnder = mappedNotes.filter((n) => under(n.relPath, g));
+      const filesUnder = mappedFiles.filter((f) => under(f.relPath, g));
+      const total = notesUnder.length + filesUnder.length;
+      if (total === 0) continue; // no evidence either way — as before
+      const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+      const shas = filesUnder.length > 0 ? await localBinaryShas() : null;
+      if (this.stale()) return out;
+      let best: { to: string; matched: string[]; score: number } | null = null;
+      for (const c of cands) {
+        if (usedCands.has(c)) continue;
+        const at = (p: string) => c + p.slice(g.length);
+        const present = notesUnder.filter((n) => notesOnDisk.has(at(n.relPath)));
+        const filesPresent = shas ? filesUnder.filter((f) => shas.has(at(f.relPath))) : [];
+        if (present.length + filesPresent.length < need) continue; // no hashing at all
+        const matched: string[] = [];
+        for (const n of present) {
+          const a = await docSha(n.docId);
+          if (this.stale()) return out;
+          if (a == null) continue;
+          const b = await fileSha(at(n.relPath));
+          if (this.stale()) return out;
+          if (a === b) matched.push(n.docId);
+        }
+        const files = filesPresent.filter((f) => shas!.get(at(f.relPath)) === f.base).length;
+        const score = matched.length + files;
+        if (score >= need && (!best || score > best.score)) best = { to: c, matched, score };
+      }
+      if (!best) continue;
+      usedCands.add(best.to);
+      const to = best.to;
+      // Nothing may still write to the OLD paths once they move: a bridge that
+      // egests after the move re-creates the file (and forks the note).
+      for (const n of notesUnder) await this.host?.releaseDoc(n.docId);
+      if (this.stale()) return out;
+      if (!(await this.renamePath(g, to))) continue;
+      if (this.stale()) return out;
+      // The index row at each new note path was minted a fresh id on launch;
+      // give it the kept doc id back (same local half `pairClosedAppRenames` does).
+      for (const n of notesUnder) {
+        const np = to + n.relPath.slice(g.length);
+        if (!notesOnDisk.has(np)) continue;
+        try {
+          await ipc.rebindNoteId(np, n.docId, this.epoch());
+        } catch (e) {
+          if (ipc.isVaultMismatch(e)) return out;
+          console.warn(`[registry] couldn't rebind ${np} to ${n.docId}`, e);
+        }
+        this.host?.notePathChanged(n.docId, n.relPath, np);
+      }
+      const remap = (p: string) => (under(p, g) ? to + p.slice(g.length) : p);
+      for (const f of serverFolders) {
+        if (!under(f.path, g)) continue;
+        if (f.path === g) f.name = baseName(to);
+        f.path = remap(f.path);
+      }
+      for (const n of serverNotes) {
+        const rp = noteRelPath(n);
+        if (!rp || !under(rp, g)) continue;
+        if (n.relPath !== undefined) n.relPath = remap(rp);
+        if (n.rel_path !== undefined || n.relPath === undefined) n.rel_path = remap(rp);
+      }
+      console.info(
+        `[registry] ${g} → ${to} (folder moved while the app was closed; ${best.score}/${total} items matched, keeping folder and file ids)`,
+      );
+      out.set(g, to);
+    }
+    return out;
+  }
+
+  /**
    * Same-path create (offline reconciliation D4): this device made a note at a
    * path where, meanwhile, a teammate's note appeared on the server.
    *
@@ -3153,6 +3332,20 @@ export class VaultRegistry {
     // inbound, yet it is the one pass that sees every row. Authorship has to be
     // captured while the row is still LISTED — once access to it is taken away
     // the listing omits it, which is precisely the moment the answer is needed.
+    // 0. A folder renamed or moved while the app was closed (#276), BEFORE the
+    //    inbound step: left alone, inbound read the stale server row at the old
+    //    path as "missing locally" and re-created it on disk as an empty ghost
+    //    (for every member), while the new path registered as a second folder.
+    const movedFolders = await this.pairClosedAppFolderMoves(
+      folders.map((f) => f.path),
+      notes.map((n) => n.path),
+      serverFolders,
+      serverNotes,
+      folderRegistry.tombstones,
+    );
+    if (this.stale()) return false;
+    if (movedFolders.size > 0) mutated = true;
+
     this.learnAuthorship(serverNotes);
     // Access GRANTS: notes readable now that were not in the previous pass's
     // listing. Measured against the listing, before anything below maps them.
