@@ -7598,6 +7598,10 @@ button.is-done:disabled {
   padding: var(--sp-8) var(--sp-8) var(--sp-6);
   text-align: center;
 }
+/* The card takes focus on open (so Esc lands in it), not as a control. */
+.confirm-dialog:focus-visible {
+  outline: none;
+}
 .confirm-badge {
   display: grid;
   place-items: center;
