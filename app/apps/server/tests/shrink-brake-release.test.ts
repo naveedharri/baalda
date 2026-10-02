@@ -1,15 +1,17 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
 import {
+  BrakeGrowthCoalescer,
   isShrinkHeld,
   reportShrink,
+  setShrinkBrakeGrowHook,
   setShrinkBrakeHook,
   setShrinkBrakeReleaseHook,
   ShrinkBrake,
   shrinkBrake,
   type BrakeHold,
 } from "../src/versions/shrink-guard.js";
-import { listBrakeEvents, recordBrakeEngaged } from "../src/versions/brake-events.js";
+import { listBrakeEvents, recordBrakeEngaged, updateBrakeCount } from "../src/versions/brake-events.js";
 import { decodePubsub, encodePubsubBrake } from "../src/sync/vault-protocol.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
@@ -75,6 +77,124 @@ describe("ShrinkBrake hold details (pure)", () => {
       setShrinkBrakeHook(null);
       shrinkBrake.configure({ threshold: 0 });
     }
+  });
+});
+
+describe("ShrinkBrake live count (#275)", () => {
+  it("keeps counting DISTINCT notes after it engages, without moving the lapse", () => {
+    let t = 1_000;
+    const b = new ShrinkBrake(3, 60_000, 600_000, () => t);
+    expect(b.recordShrink("u", "v", "a")).toBeNull();
+    expect(b.recordShrink("u", "v", "b")).toBeNull();
+    expect(b.recordShrink("u", "v", "c")).toBe("engaged");
+    t += 500;
+    // A note of the engaging burst shrinking again is the same note.
+    expect(b.recordShrink("u", "v", "a")).toBeNull();
+    for (const d of ["d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q"]) {
+      expect(b.recordShrink("u", "v", d)).toBe("grew");
+    }
+    // ...and so is a note counted while held.
+    expect(b.recordShrink("u", "v", "q")).toBeNull();
+    expect(b.holdOf("u", "v")).toEqual({ until: 601_000, count: 17 });
+    // Never re-engages while held; `record` still answers only engagement.
+    expect(b.record("u", "v", "r")).toBe(false);
+    expect(b.holdOf("u", "v")?.count).toBe(18);
+    // Other (user, vault) pairs are untouched.
+    expect(b.recordShrink("u", "other", "a")).toBeNull();
+  });
+
+  it("starts from zero after a lapse or a release", () => {
+    let t = 0;
+    const b = new ShrinkBrake(2, 60_000, 600_000, () => t);
+    b.record("u", "v", "a");
+    b.record("u", "v", "b");
+    b.recordShrink("u", "v", "c");
+    expect(b.holdOf("u", "v")?.count).toBe(3);
+    t = 600_000;
+    expect(b.holdOf("u", "v")).toBeNull();
+    // The lapsed hold's notes are forgotten: a re-run of the same notes is new.
+    expect(b.recordShrink("u", "v", "a")).toBeNull();
+    expect(b.recordShrink("u", "v", "b")).toBe("engaged");
+    expect(b.holdOf("u", "v")?.count).toBe(2);
+    b.release("u", "v");
+    expect(b.recordShrink("u", "v", "c")).toBeNull();
+    expect(b.recordShrink("u", "v", "d")).toBe("engaged");
+    expect(b.holdOf("u", "v")?.count).toBe(2);
+  });
+
+  it("reports each newly counted note to the grow hook, never the engaging ones or MCP", () => {
+    shrinkBrake.configure({ threshold: 2, windowMs: 60_000, holdMs: 120_000 });
+    const engaged: number[] = [];
+    const grew: number[] = [];
+    setShrinkBrakeHook((_v, _u, hold) => engaged.push(hold.count));
+    setShrinkBrakeGrowHook((_v, _u, hold) => grew.push(hold.count));
+    try {
+      reportShrink("v-grow", "a", BODY, "", "u-grow");
+      reportShrink("v-grow", "b", BODY, "", "u-grow");
+      reportShrink("v-grow", "c", BODY, "", "u-grow");
+      reportShrink("v-grow", "c", BODY, "", "u-grow"); // same note again
+      reportShrink("v-grow", "d", BODY, "", "u-grow", "mcp"); // not counted
+      reportShrink("v-grow", "e", BODY, "", "u-grow");
+      expect(engaged).toEqual([2]);
+      expect(grew).toEqual([3, 4]);
+      expect(shrinkBrake.holdOf("u-grow", "v-grow")?.count).toBe(4);
+    } finally {
+      setShrinkBrakeHook(null);
+      setShrinkBrakeGrowHook(null);
+      shrinkBrake.configure({ threshold: 0 });
+    }
+  });
+});
+
+describe("BrakeGrowthCoalescer", () => {
+  function fakeTimers() {
+    const timers = new Map<number, () => void>();
+    let next = 1;
+    return {
+      timers,
+      setTimer: (fn: () => void) => {
+        const h = next++;
+        timers.set(h, fn);
+        return h;
+      },
+      clearTimer: (h: unknown) => {
+        timers.delete(h as number);
+      },
+      fire: () => {
+        const fns = [...timers.values()];
+        timers.clear();
+        for (const fn of fns) fn();
+      },
+    };
+  }
+
+  it("flushes once per window per (vault, user), however many notes grew", () => {
+    const ft = fakeTimers();
+    const flushed: Array<[string, string]> = [];
+    const c = new BrakeGrowthCoalescer(1_000, (v, u) => flushed.push([v, u]), ft);
+    for (let i = 0; i < 500; i++) c.grew("v", "u");
+    c.grew("v", "someone-else");
+    expect(ft.timers.size).toBe(2);
+    ft.fire();
+    expect(flushed).toEqual([
+      ["v", "u"],
+      ["v", "someone-else"],
+    ]);
+    // A steady stream keeps updating: the next growth opens a new window.
+    c.grew("v", "u");
+    ft.fire();
+    expect(flushed).toHaveLength(3);
+  });
+
+  it("cancel drops a pending flush", () => {
+    const ft = fakeTimers();
+    const flushed: string[] = [];
+    const c = new BrakeGrowthCoalescer(1_000, (v) => flushed.push(v), ft);
+    c.grew("v", "u");
+    c.cancel("v", "u");
+    ft.fire();
+    expect(flushed).toEqual([]);
+    c.cancel("v", "u"); // nothing pending: a no-op
   });
 });
 
@@ -151,6 +271,22 @@ describe("shrink brake routes", () => {
     expect(memberBody.items.map((i) => i.userId)).toEqual([member.userId]);
 
     expect((await req(outsider, "GET", `/api/vaults/${vault}/shrink-brakes`)).status).toBe(403);
+  });
+
+  it("an engagement's note count is corrected upward on the same event (#275)", async () => {
+    reportShrink(vault, "doc-a", BODY, "", member.userId);
+    reportShrink(vault, "doc-b", BODY, "", member.userId);
+    const hold = shrinkBrake.holdOf(member.userId, vault)!;
+    const id = await recordBrakeEngaged(vault, member.userId, hold.count, new Date(hold.until));
+    for (const d of ["doc-c", "doc-d", "doc-e"]) reportShrink(vault, d, BODY, "", member.userId);
+    expect(shrinkBrake.holdOf(member.userId, vault)?.count).toBe(5);
+    expect(await updateBrakeCount(id, 5)).toBe(true);
+    // Never lowered by a late or reordered write, and an equal count is a no-op.
+    expect(await updateBrakeCount(id, 3)).toBe(false);
+    expect(await updateBrakeCount(id, 5)).toBe(false);
+    const items = await listBrakeEvents(vault, new Date(0), member.userId);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id, noteCount: 5, held: true });
   });
 
   it("only an owner/admin can release, and releasing lifts the hold", async () => {

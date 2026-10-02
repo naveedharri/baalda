@@ -24,18 +24,35 @@ export interface BrakeEvent {
   held: boolean;
 }
 
-/** Record one engagement. Best-effort for the caller: it logs and moves on. */
+/** Record one engagement; resolves to the new row's id. Best-effort for the
+ *  caller: it logs and moves on. */
 export async function recordBrakeEngaged(
   vaultId: string,
   userId: string,
   noteCount: number,
   heldUntil: Date,
-): Promise<void> {
+): Promise<string> {
+  const id = randomUUID();
   await pool.query(
     `INSERT INTO shrink_brake_events (id, vault_id, user_id, note_count, held_until)
      VALUES ($1, $2, $3, $4, $5)`,
-    [randomUUID(), vaultId, userId, noteCount, heldUntil],
+    [id, vaultId, userId, noteCount, heldUntil],
   );
+  return id;
+}
+
+/**
+ * Correct an engagement's note count as its hold keeps counting (#275). Only
+ * ever raises it, so a late or reordered write cannot shrink what an earlier
+ * one said. Returns whether the row changed.
+ */
+export async function updateBrakeCount(eventId: string, noteCount: number): Promise<boolean> {
+  const res = await pool.query(
+    `UPDATE shrink_brake_events SET note_count = $2
+      WHERE id = $1 AND note_count < $2`,
+    [eventId, noteCount],
+  );
+  return (res.rowCount ?? 0) > 0;
 }
 
 /** Stamp every still-live row for (vault, user) released. Returns how many. */
