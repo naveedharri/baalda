@@ -67,13 +67,14 @@ export function writeMentionSound(enabled: boolean): void {
  * Give otherwise-uncoloured sidebar items a stable personal colour. The key is
  * account-scoped: two people sharing one computer can keep different choices,
  * just as two people looking at the same synced vault can see different auto
- * colours. Automatic colours are off unless that account explicitly opts in.
+ * colours. Automatic colours are ON unless that account explicitly turned them
+ * off — every new vault opens with the colour palette applied.
  */
 export function readAutomaticItemColors(userId: string | null | undefined): boolean {
   try {
-    return localStorage.getItem(AUTOMATIC_ITEM_COLORS_KEY + (userId ?? "local")) === "on";
+    return localStorage.getItem(AUTOMATIC_ITEM_COLORS_KEY + (userId ?? "local")) !== "off";
   } catch {
-    return false;
+    return true;
   }
 }
 

@@ -664,6 +664,12 @@ things switch on together:
   Inviting an address that is already pending re-sends. A teammate who was
   invited by email but joins with the vault's **join code** ends up in the same
   state — the invited role, invitation marked accepted.
+- **Bug reports** — set `BUG_REPORT_EMAIL` to the inbox that should receive
+  them, and the desktop shows a bug icon beside the account name in the sidebar.
+  Signed-in people describe the problem and, optionally, attach app details
+  (version, OS, server, vault, sync status); the email's Reply-To is the
+  reporter. Limited to 5 reports per account per hour. Unset, the icon is
+  hidden — reports from your users never go anywhere you did not choose.
 
 Links are built from `BETTER_AUTH_URL`, so it must be the address people can
 reach from outside. A half-configured setup (a transport without `EMAIL_FROM`,

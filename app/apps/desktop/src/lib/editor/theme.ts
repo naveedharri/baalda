@@ -763,9 +763,14 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // Mirrors the selection wash onto the title while a selection reaches the
   // start of the document (see `titleSelectionMirror` in noteHeader.ts). Same
   // colour as `.cm-selectionBackground` above.
+  // Square bottom + a shadow strip the height of the first line's leading
+  // (`--title-sel-extend`, measured by the plugin) so the title's wash and the
+  // body's read as ONE selection. An outer box-shadow is never painted under
+  // its own box, so the translucent wash does not double up anywhere.
   ".cm-note-title.is-selected": {
     backgroundColor: "var(--editor-selection-bg)",
-    borderRadius: "var(--radius-sm)",
+    borderRadius: "var(--radius-sm) var(--radius-sm) 0 0",
+    boxShadow: "0 var(--title-sel-extend, 0px) 0 var(--editor-selection-bg)",
   },
   ".inline-title-wrap": {
     display: "flex",

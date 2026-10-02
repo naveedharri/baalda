@@ -461,7 +461,7 @@ export function ActivityFeed() {
           {rows.length > 0 && (
             <button
               type="button"
-              className="secondary sm activity-clear"
+              className="activity-clear"
               onClick={() => setConfirmClear(true)}
             >
               Clear
@@ -522,57 +522,62 @@ export function ActivityFeed() {
                 >
                   {row.label}
                 </span>
-                <span className="activity-row-main" title={rowTitle(row)}>
-                  <span className="activity-row-path">
-                    {row.path ? <PathText path={row.path} /> : "text" in row ? <span>{row.text}</span> : null}
-                    {row.type === "reconcile" && row.item.newPath && (
-                      <>
-                        <span className="muted" aria-label="renamed to">
-                          →
+                {/* Text and actions share one wrapping line: the text keeps a
+                    readable minimum and the actions drop beneath it when the
+                    panel is too narrow for both, never squeezing the text. */}
+                <div className="activity-row-body">
+                  <span className="activity-row-main" title={rowTitle(row)}>
+                    <span className="activity-row-path">
+                      {row.path ? <PathText path={row.path} /> : "text" in row ? <span>{row.text}</span> : null}
+                      {row.type === "reconcile" && row.item.newPath && (
+                        <>
+                          <span className="muted" aria-label="renamed to">
+                            →
+                          </span>
+                          <PathText path={row.item.newPath} />
+                        </>
+                      )}
+                    </span>
+                    <span className="activity-row-meta muted" title={clockTime(row.at)}>
+                      {rowMeta(row, now)}
+                      {row.type === "trash" && row.item.hasUnsyncedContributions && (
+                        <span
+                          className="health-pill"
+                          data-tone="warn"
+                          title="Someone's edits arrived after it was deleted. Review before it is purged."
+                        >
+                          Has unseen edits
                         </span>
-                        <PathText path={row.item.newPath} />
-                      </>
-                    )}
+                      )}
+                    </span>
                   </span>
-                  <span className="activity-row-meta muted" title={clockTime(row.at)}>
-                    {rowMeta(row, now)}
-                    {row.type === "trash" && row.item.hasUnsyncedContributions && (
-                      <span
-                        className="health-pill"
-                        data-tone="warn"
-                        title="Someone's edits arrived after it was deleted. Review before it is purged."
-                      >
-                        Has unseen edits
-                      </span>
+                  <div className="activity-row-actions">
+                    {row.type === "reconcile" ? (
+                      <ReconcileRowActions item={row.item} onChanged={schedule} />
+                    ) : row.type === "held" ? (
+                      <HeldRowActions onDone={schedule} />
+                    ) : row.type === "paused" ? (
+                      row.canRelease ? (
+                        <PausedRowActions event={row.event} online={trash.online} onDone={schedule} />
+                      ) : null
+                    ) : row.type === "shrunk" ? (
+                      <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
+                    ) : row.type === "failed" ? (
+                      activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} /> : null
+                    ) : row.type === "access" ? (
+                      row.event.kind === "granted" ? <GrantRowActions paths={row.event.paths ?? []} /> : null
+                    ) : row.type === "invitation" ? (
+                      <InvitationRowActions invitation={row.invitation} online={trash.online} onDone={schedule} />
+                    ) : row.type === "trash" ? (
+                      <TrashRowActions item={row.item} online={trash.online} onRestored={schedule} />
+                    ) : (
+                      <RecoveryCopyActions
+                        copy={{ stamp: row.copy.stamp, relPath: row.copy.relPath }}
+                        modified={row.copy.modified}
+                        onChanged={schedule}
+                      />
                     )}
-                  </span>
-                </span>
-                <div className="activity-row-actions">
-                  {row.type === "reconcile" ? (
-                    <ReconcileRowActions item={row.item} onChanged={schedule} />
-                  ) : row.type === "held" ? (
-                    <HeldRowActions onDone={schedule} />
-                  ) : row.type === "paused" ? (
-                    row.canRelease ? (
-                      <PausedRowActions event={row.event} online={trash.online} onDone={schedule} />
-                    ) : null
-                  ) : row.type === "shrunk" ? (
-                    <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
-                  ) : row.type === "failed" ? (
-                    activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} /> : null
-                  ) : row.type === "access" ? (
-                    row.event.kind === "granted" ? <GrantRowActions paths={row.event.paths ?? []} /> : null
-                  ) : row.type === "invitation" ? (
-                    <InvitationRowActions invitation={row.invitation} online={trash.online} onDone={schedule} />
-                  ) : row.type === "trash" ? (
-                    <TrashRowActions item={row.item} online={trash.online} onRestored={schedule} />
-                  ) : (
-                    <RecoveryCopyActions
-                      copy={{ stamp: row.copy.stamp, relPath: row.copy.relPath }}
-                      modified={row.copy.modified}
-                      onChanged={schedule}
-                    />
-                  )}
+                  </div>
                 </div>
               </li>
             ))}

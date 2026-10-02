@@ -498,7 +498,7 @@
   padding: var(--sp-4);
   margin: 0 0 var(--sp-3) var(--sp-5);
   border-radius: var(--radius-lg);
-  background: var(--bg-subtle);
+  background: var(--bg-card);
   animation: health-open var(--t-med) var(--ease);
 }
 @keyframes health-open {
@@ -889,7 +889,7 @@
   margin-top: var(--sp-4);
   padding: var(--sp-4);
   border-radius: var(--radius-lg);
-  background: var(--bg-subtle);
+  background: var(--bg-card);
   border-left: 3px solid var(--tone);
 }
 .health-inspection-verdict {
@@ -1621,7 +1621,7 @@ button.health-metric-flag:hover {
   padding: var(--sp-5);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
-  background: var(--bg-subtle);
+  background: var(--bg-card);
 }
 .health-inventory-head {
   display: flex;
@@ -1945,7 +1945,7 @@ button.health-metric-flag:hover {
   margin-top: var(--sp-5);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
-  background: var(--bg-subtle);
+  background: var(--bg-card);
   overflow: hidden;
 }
 .health-advanced > summary {
@@ -2184,7 +2184,7 @@ button.health-metric-flag:hover {
 /* ── Left-on-disk group head ──────────────────────────────────────────────── */
 
 .health-group-head {
-  background: var(--bg-subtle);
+  background: var(--bg-card);
   border: 1px solid var(--border);
 }
 .health-group-status {

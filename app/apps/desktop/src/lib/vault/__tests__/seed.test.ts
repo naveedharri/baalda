@@ -45,7 +45,7 @@ describe("seedWelcomeContent", () => {
     // Every note in the starter set is written, in declared order.
     expect(written).toEqual(STARTER_NOTES.map((n) => n.path));
     expect(written[0]).toBe(WELCOME_NOTE_PATH);
-    expect(written.length).toBe(18);
+    expect(written.length).toBe(21);
     // No starter note begins with a `# Title`: the file name IS the title (the
     // editor's inline title shows it), so a heading would duplicate it.
     expect(writeNote.mock.calls[0][1]).toMatch(/^Baalda is your/);
@@ -66,6 +66,35 @@ describe("seedWelcomeContent", () => {
         if (/^wikilinks?$/i.test(target)) continue;
         expect(basenames, `${note.path} → [[${target}]]`).toContain(target);
       }
+    }
+  });
+
+  it("gives the root and every starter folder an AGENTS.md", () => {
+    const paths = new Set(STARTER_NOTES.map((n) => n.path));
+    const folders = new Set(
+      STARTER_NOTES.filter((n) => n.path.includes("/")).map((n) => n.path.split("/")[0]),
+    );
+    expect(paths).toContain("AGENTS.md");
+    for (const folder of folders) expect(paths, folder).toContain(`${folder}/AGENTS.md`);
+
+    // The root routing table names each folder and sends readers to its index.
+    const root = STARTER_NOTES.find((n) => n.path === "AGENTS.md")!.body;
+    for (const folder of folders) {
+      expect(root, folder).toContain(`\`${folder}/\``);
+      expect(root, folder).toContain(`\`${folder}/AGENTS.md\``);
+    }
+  });
+
+  it("indexes exactly the notes in each folder (no stale or missing rows)", () => {
+    for (const index of STARTER_NOTES.filter((n) => n.path.endsWith("/AGENTS.md"))) {
+      const folder = index.path.slice(0, -"/AGENTS.md".length);
+      const expected = STARTER_NOTES.filter(
+        (n) => n.path.startsWith(`${folder}/`) && n.path !== index.path,
+      )
+        .map((n) => n.path.slice(folder.length + 1))
+        .sort();
+      const listed = [...index.body.matchAll(/^\| `([^`]+\.md)` \|/gm)].map((m) => m[1]).sort();
+      expect(listed, index.path).toEqual(expected);
     }
   });
 

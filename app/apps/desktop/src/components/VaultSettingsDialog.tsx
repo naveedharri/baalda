@@ -2,7 +2,7 @@
    the app, split out of `AccountMenu.tsx` so it can load on demand. Nothing
    here is on the first screen: the sidebar footer (identity bar + popovers)
    stays eager, and this chunk lands when someone actually opens settings. */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
   type McpToolInfo,
   type McpTokenRow,
@@ -14,7 +14,7 @@ import {
 } from "../lib/api";
 import { toast } from "../lib/toast";
 import { agoFromIso, checkpointTitle, noteCountLabel } from "./versionFormat";
-import { ITEM_COLORS, itemColorValue } from "../lib/appearance";
+import { ITEM_COLORS, itemColorFill, itemColorValue } from "../lib/appearance";
 import { authManager } from "../lib/auth/authManager";
 import {
   classifyLimitError,
@@ -35,7 +35,6 @@ import {
 } from "../lib/updater";
 import { readOrgVaults, useStore, type InviteResult } from "../store";
 import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
-import { SyncBadge } from "./Identity";
 import { AccessPanel } from "./AccessPanel";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -400,13 +399,6 @@ function GeneralTab({
   onRequestSignIn?: () => void;
 }) {
   const vault = useStore((s) => s.vault);
-  const syncStatus = useStore((s) => s.syncStatus);
-  const syncEnabledState = useStore((s) => s.syncEnabled);
-  const lastSyncedAt = useStore((s) => s.lastSyncedAt);
-  const syncPending = useStore((s) => s.syncPending);
-  // The vault's bulk-run counter ("Syncing 128/500"), so this row reports the
-  // whole vault's state and not just whether a socket is up.
-  const syncProgress = useStore((s) => s.syncProgress);
   const serverUrl = useStore((s) => s.serverUrl);
   const authStatus = useStore((s) => s.authStatus);
   // The sidebar paints before the session restore finishes, so this page can be
@@ -456,16 +448,6 @@ function GeneralTab({
           <div className="muted">
             This vault syncs to your team. Its notes stay as plain files on
             disk and live-sync to everyone with access.
-          </div>
-          <div className="menu-row">
-            <span className="menu-row-label">Sync</span>
-            <SyncBadge
-              status={syncStatus}
-              enabled={syncEnabledState}
-              lastSyncedAt={lastSyncedAt}
-              pending={syncPending}
-              progress={syncProgress}
-            />
           </div>
           <div className="menu-row">
             <span className="menu-row-label">Server</span>
@@ -859,7 +841,6 @@ function FreezeRootRow({ canManage }: { canManage: boolean }) {
   return (
     <>
       <div className="menu-sep" />
-      <div className="subhead">Vault structure</div>
       <label className="menu-row toggle-row">
         <span className="menu-row-label">
           Freeze vault root
@@ -3361,7 +3342,9 @@ function AppearanceTab() {
                 >
                   <span
                     className="appearance-glyph"
-                    style={{ color: itemColorValue(active) }}
+                    style={
+                      { color: itemColorValue(active), "--glyph-fill": itemColorFill(active) } as CSSProperties
+                    }
                     aria-hidden="true"
                   >
                     {item.isDir ? APPEARANCE_ICON.folder : APPEARANCE_ICON.note}
@@ -3382,7 +3365,7 @@ function AppearanceTab() {
                         key={c.id}
                         type="button"
                         className={`swatch${active === c.id ? " on" : ""}`}
-                        style={{ backgroundColor: c.value }}
+                        style={{ backgroundColor: c.fill, boxShadow: `inset 0 0 0 1.5px ${c.value}` }}
                         title={c.label}
                         aria-label={c.label}
                         onClick={() => useStore.getState().setItemColor(item.path, c.id)}

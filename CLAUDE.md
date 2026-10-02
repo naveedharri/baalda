@@ -325,11 +325,12 @@ Entire vault row is mutually exclusive with item selections. **Everyone** replac
 per-member overrides in the selected subtrees, while a named audience replaces only those members.
 `readonly` is the item-level combined grant+cap (the vault posture still stores `view`).
 
-Automatic sidebar colours are a deterministic, account-personal fallback for files/folders without
-an explicit manual colour. A broad palette hashes stable item identities, then resolves collisions
+Automatic sidebar colours are a deterministic, account-personal fallback for FOLDERS without an
+explicit manual colour (files stay neutral unless coloured by hand). A broad palette hashes stable item identities, then resolves collisions
 within each ordered sibling group so the two preceding rows do not repeat; explicit synced colours
 always win and participate in that neighbour check. Automatic colours are stable across restarts and
-can be enabled in Account Settings → Appearance; they are off by default.
+can be turned off in Account Settings → Appearance; they are ON by default (an explicit off is
+kept). The palette pairs baalda.com's pastel fills with a deeper outline of the same hue.
 
 Vault Health reads `vaultSyncStatus` from the vault channel independently of the open note's
 `syncStatus`, which still controls editor permissions. A note-level refusal is not lost vault
@@ -535,7 +536,8 @@ plaintext token per note; revoke = DELETE).
 change in prod) · `BETTER_AUTH_URL` · `PORT` (3010) · `HOCUSPOCUS_PORT` (3011) · `SYNC_TOKEN_TTL_SECONDS`
 (600) · `COMPACTION_THRESHOLD` (50) · `TRASH_RETENTION_DAYS` (30) · `CORS_ORIGINS` (optional) · `OPENAI_API_KEY` (optional) ·
 `EMAIL_FROM` + `SMTP_URL` | `RESEND_API_KEY` (optional; turns on password reset, sign-up verification
-and invitation emails — `src/email/mailer.ts`; unset ⇒ none offered, like Google OAuth).
+and invitation emails — `src/email/mailer.ts`; unset ⇒ none offered, like Google OAuth) · `BUG_REPORT_EMAIL` (optional; with email on, the desktop's sidebar bug icon emails reports
+there, Reply-To = reporter — `http/routes/bug-reports.ts`; unset ⇒ the icon is hidden).
 
 ## Conventions & gotchas
 

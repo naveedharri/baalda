@@ -217,3 +217,68 @@ export function youLeftVaultEmail(input: { to: string; organizationName: string 
   });
   return { to: input.to, subject, text, html };
 }
+
+/**
+ * A bug report from the desktop's "Report a bug" dialog, to the operator's
+ * `BUG_REPORT_EMAIL`. Reply-To is the reporter, so answering is one click.
+ * Everything in it is user-supplied and escaped; the body keeps its own line
+ * breaks.
+ */
+export function bugReportEmail(input: {
+  to: string;
+  reporter: { email: string; name?: string | null };
+  message: string;
+  details: ReadonlyArray<[string, string]>;
+  /** A Loom / screen-recording link, already validated as http(s). */
+  videoUrl?: string;
+  attachments?: MailMessage["attachments"];
+}): MailMessage {
+  const who = input.reporter.name ? `${input.reporter.name} <${input.reporter.email}>` : input.reporter.email;
+  const firstLine = input.message.split("\n")[0]!.trim();
+  const summary = firstLine.length > 60 ? `${firstLine.slice(0, 57)}…` : firstLine;
+  const detailText = input.details.map(([k, v]) => `${k}: ${v}`).join("\n");
+  const detailHtml = input.details
+    .map(
+      ([k, v]) =>
+        `<tr><td style="padding:2px 12px 2px 0;color:#8a8a84;white-space:nowrap;vertical-align:top;">${esc(k)}</td><td style="padding:2px 0;color:#3a3a37;word-break:break-all;">${esc(v)}</td></tr>`,
+    )
+    .join("");
+  const files = input.attachments ?? [];
+  const filesLine = files.length ? `${files.length} attached: ${files.map((f) => f.filename).join(", ")}` : "";
+  return {
+    to: input.to,
+    replyTo: input.reporter.email,
+    subject: `Bug report: ${summary}`,
+    ...(files.length ? { attachments: files } : {}),
+    text: `Bug report from ${who}\n\n${input.message}\n${input.videoUrl ? `\nVideo: ${input.videoUrl}\n` : ""}${
+      filesLine ? `\n${filesLine}\n` : ""
+    }${detailText ? `\n---\n${detailText}\n` : ""}`,
+    html: `<!doctype html>
+<html lang="en">
+<body style="margin:0;padding:0;background:#f4f4f1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1c1c1a;">
+  <div style="max-width:560px;margin:0 auto;padding:32px 20px;">
+    <div style="font-weight:700;letter-spacing:0.18em;font-size:13px;color:#6b6b66;margin-bottom:18px;">${esc(BRAND_NAME.toUpperCase())} · BUG REPORT</div>
+    <div style="background:#ffffff;border:1px solid #e6e5df;border-radius:14px;padding:26px 24px;">
+      <p style="font-size:13px;margin:0 0 14px;color:#6b6b66;">From ${esc(who)} — reply to this email to answer them.</p>
+      <div style="font-size:15px;line-height:1.55;color:#1c1c1a;white-space:pre-wrap;">${esc(input.message)}</div>${
+        input.videoUrl
+          ? `
+      <p style="margin:16px 0 0;font-size:14px;"><a href="${esc(input.videoUrl)}" style="color:#7c5cff;">Watch the recording</a> <span style="color:#8a8a84;word-break:break-all;">${esc(input.videoUrl)}</span></p>`
+          : ""
+      }${
+        filesLine
+          ? `
+      <p style="margin:12px 0 0;font-size:13px;color:#6b6b66;">📎 ${esc(filesLine)}</p>`
+          : ""
+      }${
+        detailHtml
+          ? `
+      <table style="margin-top:20px;padding-top:14px;border-top:1px solid #eeede8;font-size:12px;line-height:1.5;width:100%;border-collapse:collapse;">${detailHtml}</table>`
+          : ""
+      }
+    </div>
+  </div>
+</body>
+</html>`,
+  };
+}

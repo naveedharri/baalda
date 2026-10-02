@@ -269,12 +269,35 @@ const titleSelectionMirror = ViewPlugin.fromClass(
         this.sync(u.view);
       }
     }
+    private frame = 0;
     private sync(view: EditorView) {
-      const host = view.contentDOM.querySelector(".cm-note-title");
+      const host = view.contentDOM.querySelector<HTMLElement>(".cm-note-title");
       if (!host) return;
       const sel = view.state.selection.main;
       const on = !sel.empty && sel.from === 0;
       host.classList.toggle("is-selected", on);
+      if (!on) {
+        host.style.removeProperty("--title-sel-extend");
+        return;
+      }
+      // drawSelection starts its wash at the first line's TEXT top, not the
+      // line box's top, so a strip of line leading stayed unpainted between
+      // the title's wash and the body's — two boxes instead of one. Measure
+      // that strip once the layer has drawn (next frame) and let the title's
+      // wash reach down over it. Capped: anything taller than a leading (a
+      // properties block in between) is not this gap.
+      cancelAnimationFrame(this.frame);
+      this.frame = requestAnimationFrame(() => {
+        let top = Infinity;
+        for (const r of view.dom.querySelectorAll(".cm-selectionLayer .cm-selectionBackground")) {
+          top = Math.min(top, r.getBoundingClientRect().top);
+        }
+        const gap = top - host.getBoundingClientRect().bottom;
+        host.style.setProperty("--title-sel-extend", `${gap > 0 && gap <= 40 ? Math.ceil(gap) : 0}px`);
+      });
+    }
+    destroy() {
+      cancelAnimationFrame(this.frame);
     }
   },
 );
