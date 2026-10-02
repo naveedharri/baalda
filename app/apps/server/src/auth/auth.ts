@@ -10,6 +10,8 @@ import { announceMemberJoined } from "../sync/member-events.js";
 import { dispatchMail, emailEnabled } from "../email/mailer.js";
 import { verifyEmailEmail } from "../email/templates.js";
 import { clearThrottle } from "./signin-throttle.js";
+import { isValidVaultIcon } from "./vault-icon.js";
+import { isValidProfileImage } from "./profile-image.js";
 import { hasExpiryNotice } from "../invitations/expiries.js";
 import { invitationActivityChanged } from "../invitations/sweep.js";
 
@@ -197,6 +199,22 @@ export const auth = betterAuth({
     // oauth-proxy plugin does for cross-origin flows.
     skipStateCookieCheck: true,
   },
+  // The profile picture (`image`) is validated on every update — see
+  // auth/profile-image.ts. Provider sign-ups write a photo URL, which passes.
+  databaseHooks: {
+    user: {
+      update: {
+        before: async (user) => {
+          if ("image" in user && !isValidProfileImage(user.image)) {
+            throw new APIError("BAD_REQUEST", {
+              message: "invalid_profile_image",
+              error: "invalid_profile_image",
+            });
+          }
+        },
+      },
+    },
+  },
   plugins: [
     bearer(),
     organization({
@@ -229,7 +247,23 @@ export const auth = betterAuth({
       // The desktop keys off HTTP 402 + the token; a no-op when billing is off
       // (the entitlement helpers short-circuit to "allowed").
       organizationHooks: {
+        // The vault icon (`logo`) is the only org field the desktop updates;
+        // validate it on both writes (see auth/vault-icon.ts).
+        beforeUpdateOrganization: async ({ organization }) => {
+          if ("logo" in organization && !isValidVaultIcon(organization.logo)) {
+            throw new APIError("BAD_REQUEST", {
+              message: "invalid_vault_icon",
+              error: "invalid_vault_icon",
+            });
+          }
+        },
         beforeCreateOrganization: async (data) => {
+          if (!isValidVaultIcon(data.organization.logo)) {
+            throw new APIError("BAD_REQUEST", {
+              message: "invalid_vault_icon",
+              error: "invalid_vault_icon",
+            });
+          }
           const { allowed, limit } = await canCreateOrganization(data.user.id);
           if (!allowed) {
             throw new APIError("PAYMENT_REQUIRED", {

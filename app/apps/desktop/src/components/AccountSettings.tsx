@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DEFAULT_SERVER_URL } from "../lib/api";
 import type { AccountSettingsTab } from "../lib/settingsTabs";
 import { authManager } from "../lib/auth/authManager";
@@ -29,6 +29,13 @@ import {
   useUpdateState,
 } from "../lib/updater";
 import { useStore } from "../store";
+import {
+  CHARACTER_PREFIX,
+  PROFILE_CHARACTER_SEEDS,
+  PROFILE_IMAGE_MAX_CHARS,
+  PROFILE_IMAGE_PX,
+} from "../lib/profileAvatar";
+import { imageFileToSquareDataUrl } from "../lib/squareImage";
 import { Avatar } from "./Avatar";
 import { ContentWidthPreview } from "./ContentWidthPreview";
 import { MenuSelect } from "./MenuSelect";
@@ -180,21 +187,68 @@ function ProfileTab() {
   const session = useStore((s) => s.session);
   const [name, setName] = useState(session?.user.name ?? "");
   const [image, setImage] = useState(session?.user.image ?? "");
-  const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  // While the name field has focus, a session refresh (our own save landing)
+  // must not overwrite what is still being typed.
+  const nameFocused = useRef(false);
 
   useEffect(() => {
-    setName(session?.user.name ?? "");
+    if (!nameFocused.current) setName(session?.user.name ?? "");
+  }, [session?.user.name]);
+  useEffect(() => {
     setImage(session?.user.image ?? "");
-  }, [session?.user.name, session?.user.image]);
+  }, [session?.user.image]);
+
+  // Everything saves as you go — no Save button. Only the changed field is
+  // sent; Better Auth's update-user takes a partial.
+  // The last name sent, so the blur save and the pause save never both go out.
+  const lastSentName = useRef<string | null>(null);
+  const persist = async (patch: { name?: string; image?: string | null }) => {
+    if (patch.name !== undefined) {
+      if (patch.name === lastSentName.current) return;
+      lastSentName.current = patch.name;
+    }
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      await useStore.getState().updateProfile(patch);
+      setSaved(true);
+      window.setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      // A failed name save may be retried with the same text.
+      if (patch.name !== undefined) lastSentName.current = null;
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // The name saves a moment after typing stops (or on blur, below).
+  const savedName = session?.user.name ?? "";
+  const nameDraft = name.trim();
+  useEffect(() => {
+    if (nameDraft === savedName) return;
+    if (!nameDraft) {
+      setError("Name can't be empty.");
+      return;
+    }
+    const timer = window.setTimeout(() => void persist({ name: nameDraft }), 700);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nameDraft, savedName]);
+
+  // A picture pick or upload saves at once.
+  const changeImage = (next: string) => {
+    setImage(next);
+    void persist({ image: next.trim() || null });
+  };
 
   if (!session) return null;
   const trimmedName = name.trim();
   const trimmedImage = image.trim();
-  const dirty =
-    trimmedName !== (session.user.name ?? "") ||
-    trimmedImage !== (session.user.image ?? "");
 
   // Re-sending the confirmation email: its own tiny state so a failure (this
   // server has no email; the provider refused) is said next to the button.
@@ -213,60 +267,42 @@ function ProfileTab() {
     }
   };
 
-  const save = async () => {
-    if (!trimmedName) {
-      setError("Name can't be empty.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    setSaved(false);
-    try {
-      await useStore.getState().updateProfile({
-        name: trimmedName,
-        image: trimmedImage || null,
-      });
-      setSaved(true);
-      window.setTimeout(() => setSaved(false), 2500);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="account-profile">
+      {/* The picture is chosen right where it's shown: upload / reset beside
+          the big avatar, the character gallery just under it. */}
       <div className="profile-hero">
         <Avatar label={trimmedName || session.user.email} image={trimmedImage || null} />
         <div className="profile-hero-meta">
           <strong>{trimmedName || "—"}</strong>
           <span className="muted">{session.user.email}</span>
         </div>
+        <ProfilePictureActions image={trimmedImage} onChange={changeImage} onError={setError} />
       </div>
+      <ProfileCharacterGrid
+        label={trimmedName || session.user.email}
+        image={trimmedImage}
+        onChange={changeImage}
+      />
 
       <label className="field">
         <span className="field-label">Display name</span>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
+          onFocus={() => {
+            nameFocused.current = true;
+          }}
+          onBlur={() => {
+            nameFocused.current = false;
+            // Leaving the field saves now rather than after the pause.
+            if (nameDraft && nameDraft !== savedName) void persist({ name: nameDraft });
+          }}
           placeholder="Your name"
           autoComplete="name"
         />
       </label>
 
-      <label className="field">
-        <span className="field-label">Avatar image URL</span>
-        <input
-          value={image}
-          onChange={(e) => setImage(e.target.value)}
-          placeholder="https://…/photo.jpg"
-          spellCheck={false}
-        />
-        <span className="field-hint">
-          Paste a link to a photo. Leave blank to use your generated character avatar.
-        </span>
-      </label>
 
       <label className="field">
         <span className="field-label">Email</span>
@@ -298,16 +334,100 @@ function ProfileTab() {
 
       {error && <div className="auth-error">{error}</div>}
 
-      <div className="update-actions">
-        <button className="primary sm" disabled={busy || !dirty} onClick={() => void save()}>
-          {busy && <span className="btn-spinner" aria-hidden="true" />}
-          <span>Save changes</span>
+      <span className="update-status profile-save-status" role="status" aria-live="polite">
+        {saving ? "Saving…" : saved ? "Saved" : ""}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Profile → picture, in the same style as a vault's icon picker: your default
+ * character (seeded by your name), one of the preset characters, or an
+ * uploaded photo. A pick saves straight away.
+ */
+function ProfilePictureActions({
+  image,
+  onChange,
+  onError,
+}: {
+  /** The form's image value: "" = default character. */
+  image: string;
+  onChange: (image: string) => void;
+  onError: (message: string | null) => void;
+}) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const upload = async (file: File) => {
+    try {
+      onError(null);
+      onChange(await imageFileToSquareDataUrl(file, PROFILE_IMAGE_PX, PROFILE_IMAGE_MAX_CHARS));
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <div className="profile-hero-actions">
+      {image && (
+        <button type="button" className="link-btn" onClick={() => onChange("")}>
+          Reset
         </button>
-        {saved && (
-          <span className="update-status" role="status">
-            Saved.
-          </span>
-        )}
+      )}
+      <button type="button" className="secondary sm" onClick={() => fileRef.current?.click()}>
+        Upload image
+      </button>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif"
+        hidden
+        onChange={(e) => {
+          const file = e.currentTarget.files?.[0];
+          e.currentTarget.value = "";
+          if (file) void upload(file);
+        }}
+      />
+    </div>
+  );
+}
+
+function ProfileCharacterGrid({
+  label,
+  image,
+  onChange,
+}: {
+  label: string;
+  image: string;
+  onChange: (image: string) => void;
+}) {
+  return (
+    <div className="profile-characters">
+      <span className="field-label">Or pick a character</span>
+      <div className="profile-character-grid" role="radiogroup" aria-label="Character">
+        <button
+          type="button"
+          className={`profile-character-option${image === "" ? " active" : ""}`}
+          role="radio"
+          aria-checked={image === ""}
+          title="Your default character"
+          onClick={() => onChange("")}
+        >
+          <Avatar label={label} />
+        </button>
+        {PROFILE_CHARACTER_SEEDS.map((seed) => {
+          const value = CHARACTER_PREFIX + seed;
+          return (
+            <button
+              key={seed}
+              type="button"
+              className={`profile-character-option${image === value ? " active" : ""}`}
+              role="radio"
+              aria-checked={image === value}
+              onClick={() => onChange(value)}
+            >
+              <Avatar label={label} image={value} />
+            </button>
+          );
+        })}
       </div>
     </div>
   );

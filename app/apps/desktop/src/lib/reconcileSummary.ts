@@ -67,7 +67,9 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
       const what = group.every((it) => isNoteExt(it.path))
         ? notes(n)
         : `${n.toLocaleString()} ${one ? "file" : "files"}`;
-      return `${what} you removed while offline ${one ? "was" : "were"} restored. Delete ${one ? "it" : "them"} again to remove ${one ? "it" : "them"} for everyone.`;
+      // Not "while offline": a delete made online that never reached the server
+      // (refused, or raced the note's registration) lands here too.
+      return `${what} you deleted didn't reach the server, so ${one ? "it was" : "they were"} put back. Delete ${one ? "it" : "them"} again to remove ${one ? "it" : "them"} for everyone.`;
     }
     case "renamedConflict": {
       if (one) {

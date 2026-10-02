@@ -95,6 +95,8 @@ export interface Organization {
   id: string;
   name: string;
   slug: string;
+  /** The vault's icon (`lib/vaultIcon.ts` wire format); null = the default. */
+  logo?: string | null;
   createdAt?: string;
 }
 
@@ -1546,11 +1548,23 @@ export class ApiClient {
 
   // ---- Organizations (org plugin) -----------------------------------------
 
-  async createOrganization(input: { name: string; slug: string }): Promise<Organization> {
+  async createOrganization(input: {
+    name: string;
+    slug: string;
+    /** The vault icon to start with (`lib/vaultIcon.ts` wire format). */
+    logo?: string;
+  }): Promise<Organization> {
     const { data } = await this.request<Organization>("POST", "/api/auth/organization/create", {
       body: input,
     });
     return data;
+  }
+
+  /** Set (or with null, clear) a vault's icon. Owner/admin only (Better Auth). */
+  async updateOrganizationLogo(organizationId: string, logo: string | null): Promise<void> {
+    await this.request("POST", "/api/auth/organization/update", {
+      body: { organizationId, data: { logo } },
+    });
   }
 
   async listOrganizations(): Promise<Organization[]> {

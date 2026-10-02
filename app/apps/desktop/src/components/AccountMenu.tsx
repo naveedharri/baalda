@@ -1,15 +1,8 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import * as ipc from "../lib/ipc";
-import type { RecentVault } from "../lib/ipc";
-import { readOrgVaults, useStore } from "../store";
-import {
-  POPOVER_VAULT_ROWS,
-  recentVaultRows,
-  type VaultRow,
-} from "../lib/vaultRows";
+import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
 import { statusTone } from "../lib/presence/color";
-import { useLocalVaults, useRecentVaults } from "./useVaultLists";
 import { AsyncButton } from "./AsyncButton";
 import { LazyAvatar } from "./Face";
 import { MenuIcon } from "./MenuIcon";
@@ -33,8 +26,9 @@ const AuthDialogLazy = lazy(() =>
 /**
  * Account & vault menu (spec 04 §2/§6/§7), redesigned as the standard
  * desktop-app identity flow: the sidebar footer is a single compact identity
- * bar (avatar + vault + sync dot). Clicking it opens a popover menu with
- * the vault switcher, sync state, theme, server settings and sign-out.
+ * bar (avatar + name + presence). Clicking it opens a popover menu with
+ * invitations, account settings and sign-out. Vaults — switching, creating,
+ * joining, their settings — live in the switcher on the sidebar header.
  * Heavy flows (sign-in, members & invites) live in focused modals so the
  * sidebar itself stays a file tree, not a settings page.
  */
@@ -180,11 +174,14 @@ export function AccountMenu() {
     // state: the name only, until the restore says who is signed in.
     return (
       <div className="account-menu" ref={rootRef}>
+        {/* Vault switching moved to the sidebar header, leaving signing in as
+            the only thing a signed-out account menu could offer — so the bar
+            does it directly instead of opening a one-item menu. */}
         <button
-          className={`identity-bar ${open ? "open" : ""}`}
-          onClick={() => setOpen((v) => !v)}
-          aria-haspopup="menu"
-          aria-expanded={open}
+          className="identity-bar"
+          onClick={() => {
+            if (!authPending) setAuthOpen(true);
+          }}
           title={
             vault
               ? authPending
@@ -231,20 +228,6 @@ export function AccountMenu() {
             </span>
           </span>
         </button>
-        {open && (
-          <SignedOutPopover
-            onClose={() => setOpen(false)}
-            onSignIn={() => {
-              setOpen(false);
-              setAuthOpen(true);
-            }}
-            onOpenSettings={() => {
-              setOpen(false);
-              setSettingsTab(undefined);
-              setMembersOpen(true);
-            }}
-          />
-        )}
         {/* Same rule as VaultPicker: a link-driven prompt mounts its own
             AuthDialog from App.tsx, and two stacked sign-in cards is a bug.
             The prompted one wins while it is up; this one comes back after. */}
@@ -363,11 +346,6 @@ export function AccountMenu() {
       {open && (
         <AccountPopover
           onClose={() => setOpen(false)}
-          onOpenMembers={() => {
-            setOpen(false);
-            setSettingsTab(undefined);
-            setMembersOpen(true);
-          }}
           onOpenAccount={() => {
             setOpen(false);
             setAccountSettingsTab(undefined);
@@ -397,279 +375,35 @@ export function AccountMenu() {
   );
 }
 
-/** Native-pick a folder and open it as a local vault, then close the menu. */
-/**
- * "New vault": name it, and it's created under the vaults root.
- *
- * Name-only, matching the welcome screen. Asking which folder was a question
- * with one sensible answer — every vault we create lives under the same root,
- * and a vault's folder is just `slugify(its name)`. Adopting a folder you
- * already have is "Open existing" on the welcome screen, which keeps that
- * folder exactly where it is.
- *
- * Inline rather than a dialog: it's one field, and the menu is already open.
- */
-function NewVaultItem({ onDone }: { onDone: () => void }) {
-  const [naming, setNaming] = useState(false);
-  const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const create = async () => {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const root = await ipc.getVaultsRoot();
-      const v = await ipc.createVault(root, trimmed);
-      // `seed`: a just-created vault gets first-run starter content (adopting
-      // an existing folder never does).
-      await useStore.getState().adoptOpenedVault(v, { seed: true });
-      setName("");
-      setNaming(false);
-      onDone();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (!naming) {
-    return (
-      <button className="menu-item subtle" onClick={() => setNaming(true)}>
-        <span className="menu-swatch plus" aria-hidden="true">
-          +
-        </span>
-        <span className="menu-item-label">New vault</span>
-      </button>
-    );
-  }
-
-  return (
-    <>
-      <div className="menu-create-org">
-        <input
-          autoFocus
-          placeholder="Vault name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void create();
-            if (e.key === "Escape") {
-              setNaming(false);
-              setName("");
-            }
-          }}
-        />
-        <button className="primary sm" disabled={busy || !name.trim()} onClick={() => void create()}>
-          Create
-        </button>
-      </div>
-      {error && <div className="auth-error">{error}</div>}
-    </>
-  );
-}
-
-/**
- * The vault switcher's rows: every vault you can switch to with one click,
- * newest-opened first, capped at four (`recentVaultRows` explains why they're
- * one list rather than two). The rest are on the Vaults settings page, reached
- * through the Vault settings row just below — so there's no "All vaults (N)"
- * link here spending a row to say what the item under it already does.
- */
-function VaultRows({
-  onClose,
-  organizations,
-  recents,
-  locals,
-  budget = POPOVER_VAULT_ROWS,
-}: {
-  onClose: () => void;
-  organizations: readonly { id: string; name: string }[];
-  /** The full recents list — where a synced vault's last-opened time comes from. */
-  recents: readonly RecentVault[];
-  /** Passed in rather than fetched here: the caller already has the list, and
-   *  a second `useLocalVaults()` would mean a second IPC round-trip for it. */
-  locals: readonly RecentVault[];
-  budget?: number;
-}) {
-  const openPath = useStore((s) => s.vault?.path) ?? null;
-  const rows = useMemo(
-    () =>
-      recentVaultRows({
-        organizations,
-        locals,
-        orgVaults: readOrgVaults(),
-        openedAt: Object.fromEntries(recents.map((r) => [r.path, r.openedAt])),
-        openPath,
-        budget,
-      }),
-    [organizations, locals, recents, openPath, budget],
-  );
-  if (rows.length === 0) return null;
-
-  const open = (row: VaultRow) => {
-    if (!row.current) {
-      if (row.kind === "synced") {
-        // Fire-and-forget on purpose: the switch is long and the menu should
-        // not sit open through it. The feedback lives in the sidebar header,
-        // which renames itself to this vault immediately (`switchingVault`)
-        // and spins until the folder has swapped.
-        void useStore.getState().setActiveOrganization(row.orgId);
-      } else {
-        void useStore.getState().openLocalVault(row.path);
-      }
-    }
-    onClose();
-  };
-
-  return (
-    <>
-      <div className="menu-label">Baalda Vaults</div>
-      {rows.map((row) => (
-        <button
-          key={row.key}
-          className={`menu-item${row.current ? " active" : ""}`}
-          role="menuitemradio"
-          aria-checked={row.current}
-          title={row.kind === "local" ? row.path : undefined}
-          onClick={() => open(row)}
-        >
-          <span className="menu-swatch" aria-hidden="true">
-            {row.name[0]?.toUpperCase() ?? "?"}
-          </span>
-          <span className="menu-item-label">{row.name}</span>
-          {row.current ? (
-            <>
-              <span className="menu-current">Current</span>
-              <svg
-                className="menu-check"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M20 6 9 17l-5-5" />
-              </svg>
-            </>
-          ) : row.kind === "synced" ? (
-            <span className="ws-badge synced">Remote</span>
-          ) : (
-            <span className="ws-badge local">Local</span>
-          )}
-        </button>
-      ))}
-    </>
-  );
-}
-
-/**
- * Signed-out switcher. Local-first: you can hop between local vaults and
- * open/create folders without an account; signing in is one item in the menu,
- * not the only thing you can do.
- */
-function SignedOutPopover({
-  onClose,
-  onSignIn,
-  onOpenSettings,
-}: {
-  onClose: () => void;
-  onSignIn: () => void;
-  onOpenSettings: () => void;
-}) {
-  const vault = useStore((s) => s.vault);
-  const recents = useRecentVaults();
-  const locals = useLocalVaults();
-  return (
-    <div className="account-popover" role="menu">
-      {vault && <HomeButton onClose={onClose} />}
-      {/* Signed out there are no vaults in an account, so local folders get
-          the whole budget. */}
-      <VaultRows onClose={onClose} organizations={[]} recents={recents} locals={locals} />
-
-      <NewVaultItem onDone={onClose} />
-
-      {vault && (
-        <button className="menu-item" onClick={onOpenSettings}>
-          <MenuIcon>
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </MenuIcon>
-          <span className="menu-item-label">Vault settings</span>
-          <span className="menu-hint">Turn on sync</span>
-        </button>
-      )}
-
-      <div className="menu-sep" />
-      <button className="menu-item" onClick={onSignIn}>
-        <MenuIcon>
-          <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-          <path d="M10 17l5-5-5-5M15 12H3" />
-        </MenuIcon>
-        <span className="menu-item-label">Sign in</span>
-        <span className="menu-hint">Sync &amp; collaborate</span>
-      </button>
-    </div>
-  );
-}
-
 function AccountPopover({
   onClose,
-  onOpenMembers,
   onOpenAccount,
 }: {
   onClose: () => void;
-  onOpenMembers: () => void;
   onOpenAccount: () => void;
 }) {
   const session = useStore((s) => s.session);
-  const organizations = useStore((s) => s.organizations);
-  const members = useStore((s) => s.members);
-  const pendingInvitations = useStore((s) => s.pendingInvitations);
   const userInvitations = useStore((s) => s.userInvitations);
-  const vault = useStore((s) => s.vault);
-  const recents = useRecentVaults();
-  const locals = useLocalVaults();
-
-  const [joining, setJoining] = useState(false);
-  const [joinCode, setJoinCode] = useState("");
-  const [joinError, setJoinError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
   if (!session) return null;
-  const activeOrgId = session.activeOrganizationId;
-
-  const joinByCode = async () => {
-    if (!joinCode.trim()) return;
-    setBusy(true);
-    setJoinError(null);
-    try {
-      await useStore.getState().joinVault(joinCode);
-      setJoinCode("");
-      setJoining(false);
-      onClose();
-    } catch (e) {
-      setJoinError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
 
   return (
     // No identity card at the top. The trigger this popover opens from IS the
     // identity card — name, email and avatar, permanently on screen in the
-    // sidebar footer — so repeating it here spent the most valuable row in the
-    // menu saying something the user was already looking at. Home takes that
-    // row instead: it's the one destination, and it was previously buried
-    // below the fold on an account with several vaults.
+    // sidebar footer — so repeating it here would say what the user is already
+    // looking at.
     <div className="account-popover" role="menu">
-      {vault && <HomeButton onClose={onClose} />}
-
+      {/* Vault items used to live here; point people at their new home. */}
+      <div className="menu-moved-note" role="note">
+        <MenuIcon>
+          <path d="M12 19V5M5 12l7-7 7 7" />
+        </MenuIcon>
+        <span>
+          Vault settings and switching have moved up. Click the vault icon at the
+          top of the sidebar.
+        </span>
+      </div>
+      <div className="menu-sep" />
       {userInvitations.length > 0 && (
         <div className="invite-inbox">
           <div className="subhead">You're invited</div>
@@ -719,64 +453,7 @@ function AccountPopover({
         </div>
       )}
 
-      <div className="menu-sep" />
-      <VaultRows
-        onClose={onClose}
-        organizations={organizations}
-        recents={recents}
-        locals={locals}
-      />
-
-      <NewVaultItem onDone={onClose} />
-
-      {/* Teammates join with the code shared from Vault settings. */}
-      {joining ? (
-        <div className="menu-create-org">
-          <input
-            autoFocus
-            placeholder="Join code, e.g. K7MPX2RA"
-            value={joinCode}
-            spellCheck={false}
-            onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void joinByCode();
-              if (e.key === "Escape") setJoining(false);
-            }}
-          />
-          <button className="primary sm" disabled={busy} onClick={() => void joinByCode()}>
-            Join
-          </button>
-        </div>
-      ) : (
-        <button className="menu-item subtle" onClick={() => setJoining(true)}>
-          <span className="menu-swatch plus" aria-hidden="true">
-            #
-          </span>
-          <span className="menu-item-label">Join with code</span>
-        </button>
-      )}
-      {joinError && <div className="auth-error">{joinError}</div>}
-
-      {vault && (
-        <button className="menu-item" onClick={onOpenMembers}>
-          <MenuIcon>
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </MenuIcon>
-          <span className="menu-item-label">Vault settings</span>
-          {activeOrgId ? (
-            <span className="menu-hint">
-              {members.length} member{members.length === 1 ? "" : "s"}
-              {pendingInvitations.length > 0 ? ` +${pendingInvitations.length}` : ""}
-            </span>
-          ) : (
-            <span className="ws-badge local">Local</span>
-          )}
-        </button>
-      )}
-
-      <div className="menu-sep" />
-
+      {userInvitations.length > 0 && <div className="menu-sep" />}
       <button className="menu-item" onClick={onOpenAccount}>
         <MenuIcon>
           <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
@@ -803,28 +480,3 @@ function AccountPopover({
     </div>
   );
 }
-
-/**
- * Close the open vault and return to the welcome (home) screen. A full menu
- * row like its siblings (a corner icon on the section label read as cramped) —
- * before this, the welcome screen was unreachable once any vault was open.
- */
-function HomeButton({ onClose }: { onClose: () => void }) {
-  return (
-    <button
-      className="menu-item"
-      onClick={() => {
-        useStore.getState().closeLocalVault();
-        onClose();
-      }}
-    >
-      <MenuIcon>
-        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-        <path d="M9 22V12h6v10" />
-      </MenuIcon>
-      <span className="menu-item-label">Home</span>
-      <span className="menu-hint">Close vault</span>
-    </button>
-  );
-}
-

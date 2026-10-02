@@ -66,6 +66,11 @@ function colorHash(seed: string): number {
   return hash >>> 0;
 }
 
+/** A vault's tile in the switcher: stable per vault, nothing persisted. */
+export function vaultTileColor(identity: string): ItemColor {
+  return ITEM_COLORS[colorHash(identity) % ITEM_COLORS.length];
+}
+
 /**
  * The personal automatic colour for an item. Existing explicit colours stay
  * authoritative; callers use this only as the fallback for an uncoloured row.

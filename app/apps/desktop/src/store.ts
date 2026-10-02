@@ -46,6 +46,7 @@ import type { SyncPause } from "./lib/sync/syncPause";
 import { MicPermissionError } from "./lib/voice/capture";
 import * as perf from "./lib/perf";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
+import { readLocalVaultIcon, resolveVaultIcon, serializeVaultIcon } from "./lib/vaultIcon";
 import {
   type ActivityStatus,
   type EditorMeasure,
@@ -3262,8 +3263,16 @@ export const useStore = create<AppStore>((set, get) => ({
     // the folder you're already in and syncs its existing files up. Create the
     // org directly, bind THIS folder, then let enableSyncForVault reconcile the
     // current tree into the new server vault.
+    // The icon this folder showed as a LOCAL vault becomes the synced vault's
+    // icon — its chosen one, or else its DEFAULT, written out explicitly. A
+    // default is derived from the vault's identity, which changes here
+    // (`local:<path>` → `org:<id>`), so leaving it implicit swapped the glyph
+    // and colour the moment sync turned on.
+    const logo = serializeVaultIcon(
+      resolveVaultIcon(`local:${vault.path}`, readLocalVaultIcon(vault.path)),
+    );
     const org = await createWithUniqueSlug(name?.trim() || vault.name, (input) =>
-      authManager.api.createOrganization(input),
+      authManager.api.createOrganization({ ...input, logo }),
     );
     // Bind the folder the moment the org exists — before the awaits below, each
     // of which can throw or go stale. This used to sit after all four, so a

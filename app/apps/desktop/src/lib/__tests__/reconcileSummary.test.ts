@@ -25,7 +25,7 @@ describe("summarizeReconcile", () => {
     expect(lines.map((l) => l.text)).toEqual([
       "2 notes you edited offline were deleted by a teammate. Your versions are in Trash.",
       "1 note is kept on this device only: you no longer have access.",
-      "1 note you removed while offline was restored. Delete it again to remove it for everyone.",
+      "1 note you deleted didn't reach the server, so it was put back. Delete it again to remove it for everyone.",
       "1 note was renamed to avoid a clash: plan.md → plan (2).md.",
       "Folder Q3 was kept because you added notes to it.",
     ]);
@@ -46,7 +46,7 @@ describe("summarizeReconcile", () => {
       item({ kind: "folderKept", path: "B" }),
     ]);
     expect(many.map((l) => l.text)).toEqual([
-      "2 notes you removed while offline were restored. Delete them again to remove them for everyone.",
+      "2 notes you deleted didn't reach the server, so they were put back. Delete them again to remove them for everyone.",
       "2 notes were renamed to avoid a clash with a teammate's note.",
       "2 folders were kept because you added notes to them.",
     ]);
