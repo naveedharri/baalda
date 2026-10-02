@@ -3327,11 +3327,6 @@ export class VaultRegistry {
         return rows;
       })());
 
-    // Learn who wrote what, BEFORE any of the steps below and outside the inbound
-    // guard: the very first pass of a fresh vault has no baseline and so runs no
-    // inbound, yet it is the one pass that sees every row. Authorship has to be
-    // captured while the row is still LISTED — once access to it is taken away
-    // the listing omits it, which is precisely the moment the answer is needed.
     // 0. A folder renamed or moved while the app was closed (#276), BEFORE the
     //    inbound step: left alone, inbound read the stale server row at the old
     //    path as "missing locally" and re-created it on disk as an empty ghost
@@ -3346,6 +3341,11 @@ export class VaultRegistry {
     if (this.stale()) return false;
     if (movedFolders.size > 0) mutated = true;
 
+    // Learn who wrote what, BEFORE any of the steps below and outside the inbound
+    // guard: the very first pass of a fresh vault has no baseline and so runs no
+    // inbound, yet it is the one pass that sees every row. Authorship has to be
+    // captured while the row is still LISTED — once access to it is taken away
+    // the listing omits it, which is precisely the moment the answer is needed.
     this.learnAuthorship(serverNotes);
     // Access GRANTS: notes readable now that were not in the previous pass's
     // listing. Measured against the listing, before anything below maps them.
