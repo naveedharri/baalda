@@ -71,6 +71,9 @@ export type VaultIconName = (typeof VAULT_ICON_NAMES)[number];
 export type PresetVaultIcon = { kind: "preset"; icon: VaultIconName; color: string };
 export type VaultIcon = PresetVaultIcon | { kind: "image"; src: string };
 
+/** The colour id for "no background": the glyph alone, in the text colour. */
+export const NO_COLOR = "none";
+
 /** Uploaded images are resized to this square before they are stored. */
 export const VAULT_ICON_IMAGE_PX = 128;
 /** Ceiling on a stored image data URL; mirrored by the server's validator. */
@@ -92,7 +95,7 @@ export function parseVaultIcon(raw: string | null | undefined): VaultIcon | null
   if (preset) {
     const [, icon, color] = preset;
     if (!(VAULT_ICON_NAMES as readonly string[]).includes(icon)) return null;
-    if (!ITEM_COLORS.some((c) => c.id === color)) return null;
+    if (color !== NO_COLOR && !ITEM_COLORS.some((c) => c.id === color)) return null;
     return { kind: "preset", icon: icon as VaultIconName, color };
   }
   if (raw.length <= VAULT_ICON_MAX_CHARS && IMAGE_RE.test(raw)) return { kind: "image", src: raw };
@@ -150,6 +153,36 @@ export function writeLocalVaultIcon(path: string, raw: string | null): void {
     else localStorage.setItem(LOCAL_PREFIX + path, raw);
   } catch {
     // Storage unavailable: the icon just doesn't persist on this device.
+  }
+  window.dispatchEvent(new Event(CHANGE_EVENT));
+}
+
+// ---- Recent uploads: device-local, offered again in the picker ----
+
+const RECENT_KEY = "context.vaultIcon.recentUploads";
+/** How many uploaded images the picker remembers. */
+export const RECENT_UPLOADS_MAX = 8;
+
+/** Uploaded icons this device used, newest first. */
+export function readRecentUploads(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
+    return Array.isArray(raw)
+      ? raw.filter((v): v is string => typeof v === "string" && parseVaultIcon(v)?.kind === "image")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Put `src` at the front of the recent uploads (deduped, capped). */
+export function rememberRecentUpload(src: string): void {
+  if (parseVaultIcon(src)?.kind !== "image") return;
+  const next = [src, ...readRecentUploads().filter((v) => v !== src)].slice(0, RECENT_UPLOADS_MAX);
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  } catch {
+    // Storage full or unavailable: the list just isn't remembered.
   }
   window.dispatchEvent(new Event(CHANGE_EVENT));
 }

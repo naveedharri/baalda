@@ -12,6 +12,7 @@ import { readOrgVaults, useStore } from "../store";
 import { POPOVER_VAULT_ROWS, recentVaultRows, type VaultRow } from "../lib/vaultRows";
 import { ITEM_COLORS, vaultTileColor } from "../lib/appearance";
 import {
+  NO_COLOR,
   onLocalVaultIconChange,
   readLocalVaultIcon,
   resolveVaultIcon,
@@ -120,6 +121,15 @@ export function VaultTile({ identity, name }: { identity: string; name: string }
     return (
       <span className="vault-tile image" aria-hidden="true">
         <img src={icon.src} alt="" draggable={false} />
+      </span>
+    );
+  }
+  if (icon.color === NO_COLOR) {
+    return (
+      <span className="vault-tile none" aria-hidden="true">
+        <Suspense fallback={Array.from(name.trim())[0]?.toUpperCase() ?? "?"}>
+          <VaultIconSvg icon={icon.icon} color={icon.color} />
+        </Suspense>
       </span>
     );
   }

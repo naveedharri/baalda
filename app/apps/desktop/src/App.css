@@ -3940,6 +3940,16 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
 .vault-tile.image img {
   object-fit: cover;
 }
+/* An uploaded image is shown as-is — no coloured square behind it, which
+   used to show through a logo's transparent corners. */
+.vault-tile.image {
+  background: none;
+}
+/* "None" colour: just the glyph, in the surrounding text colour. */
+.vault-tile.none {
+  background: none;
+  color: var(--text-secondary);
+}
 /* The open vault gets Slack's ring: a gap, then an outline. */
 .vault-card.current .vault-tile {
   box-shadow:
@@ -8882,5 +8892,23 @@ button.secondary:active:not(:disabled),
 /* Autosave feedback under the profile form; reserves its line so nothing jumps. */
 .profile-save-status {
   min-height: 1.4em;
+}
+
+/* The "None" colour swatch: an empty ring crossed by a slash. */
+.vault-icon-colors .swatch-none {
+  background: var(--bg-surface);
+  border: 1.5px solid var(--border-strong, var(--border));
+  background-image: linear-gradient(
+    135deg,
+    transparent calc(50% - 0.75px),
+    var(--text-tertiary) calc(50% - 0.75px),
+    var(--text-tertiary) calc(50% + 0.75px),
+    transparent calc(50% + 0.75px)
+  );
+}
+.vault-icon-recent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
 }
 

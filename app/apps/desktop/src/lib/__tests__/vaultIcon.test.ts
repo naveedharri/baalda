@@ -24,6 +24,10 @@ describe("vault icons", () => {
     expect(parseVaultIcon(src)).toEqual({ kind: "image", src });
   });
 
+  it("accepts the None colour", () => {
+    expect(parseVaultIcon("preset:book:none")).toEqual({ kind: "preset", icon: "book", color: "none" });
+  });
+
   it("falls back to the default for unknown or unsafe values", () => {
     for (const raw of [
       "preset:notAnIcon:violet",

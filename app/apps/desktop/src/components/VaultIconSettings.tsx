@@ -1,11 +1,15 @@
-import { useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { ITEM_COLORS } from "../lib/appearance";
 import { authManager } from "../lib/auth/authManager";
 import { imageFileToSquareDataUrl } from "../lib/squareImage";
 import { toast } from "../lib/toast";
 import {
   defaultVaultIcon,
+  NO_COLOR,
+  onLocalVaultIconChange,
   parseVaultIcon,
+  readRecentUploads,
+  rememberRecentUpload,
   resolveVaultIcon,
   serializeVaultIcon,
   VAULT_ICON_IMAGE_PX,
@@ -44,6 +48,9 @@ export function VaultIconSettings({
     pickedColor ?? (current.kind === "preset" ? current.color : defaultVaultIcon(identity).color);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Images uploaded on this device, offered again (newest first).
+  const [recent, setRecent] = useState(readRecentUploads);
+  useEffect(() => onLocalVaultIconChange(() => setRecent(readRecentUploads())), []);
 
   const save = async (value: string | null) => {
     setBusy(true);
@@ -78,6 +85,7 @@ export function VaultIconSettings({
   const upload = async (file: File) => {
     try {
       const src = await imageFileToSquareDataUrl(file, VAULT_ICON_IMAGE_PX, VAULT_ICON_MAX_CHARS);
+      rememberRecentUpload(src);
       await save(serializeVaultIcon({ kind: "image", src }));
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
@@ -127,7 +135,45 @@ export function VaultIconSettings({
         />
       </div>
 
+      {recent.length > 0 && (
+        <div className="vault-icon-recent">
+          <span className="field-label">Recent uploads</span>
+          <div className="vault-icon-grid" role="radiogroup" aria-label="Recent uploads">
+            {recent.map((src) => {
+              const selected = current.kind === "image" && current.src === src;
+              return (
+                <button
+                  key={src}
+                  className={`vault-icon-option${selected ? " active" : ""}`}
+                  role="radio"
+                  aria-checked={selected}
+                  title="Use this image"
+                  disabled={!canEdit || busy}
+                  onClick={() => {
+                    rememberRecentUpload(src);
+                    void save(serializeVaultIcon({ kind: "image", src }));
+                  }}
+                >
+                  <span className="vault-tile image">
+                    <img src={src} alt="" draggable={false} />
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="vault-icon-colors" role="radiogroup" aria-label="Icon colour">
+        {/* No background: the glyph alone, in the text colour. */}
+        <button
+          className={`swatch swatch-none${color === NO_COLOR ? " active" : ""}`}
+          role="radio"
+          aria-checked={color === NO_COLOR}
+          title="None"
+          disabled={!canEdit || busy}
+          onClick={() => pickColor(NO_COLOR)}
+        />
         {ITEM_COLORS.map((c) => (
           <button
             key={c.id}
@@ -155,7 +201,7 @@ export function VaultIconSettings({
               disabled={!canEdit || busy}
               onClick={() => pickPreset(icon)}
             >
-              <span className="vault-tile">
+              <span className={`vault-tile${color === NO_COLOR ? " none" : ""}`}>
                 <VaultIconSvg icon={icon} color={color} />
               </span>
             </button>
