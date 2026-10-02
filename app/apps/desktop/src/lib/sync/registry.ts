@@ -747,12 +747,21 @@ export class VaultRegistry {
   /** Paths (lower-cased) this pass may re-create that were mapped before it. */
   private restoreCandidatesCi = new Set<string>();
 
+  /** Notes already announced as restored this session (like attachments.ts). */
+  private readonly restoreNoticed = new Set<string>();
+
   /** A materialize just re-created `rp`: report it if it was a mapped note (D5). */
   private noteRestored(rp: string): void {
     if (!this.restoreCandidatesCi.delete(pathKey(rp))) return;
+    const docId = this.byPath.get(rp)?.docId;
+    // Once per note per session: a note re-created by more than one pull is
+    // still one thing to tell the user, not a fresh banner on every pull.
+    const noticeKey = docId ?? pathKey(rp);
+    if (this.restoreNoticed.has(noticeKey)) return;
+    this.restoreNoticed.add(noticeKey);
     reconcileReport.record({
       kind: "restoredFromServer",
-      docId: this.byPath.get(rp)?.docId,
+      docId,
       path: rp,
       detail: "removed on this device without reaching the team; restored from the server",
     });

@@ -99,8 +99,8 @@ describe("restored-file notice wording", () => {
     const files = summarizeReconcile([
       { kind: "restoredFromServer", path: "Team/report.pdf", docId: "f1", at },
     ]);
-    expect(files[0].text).toMatch(/^1 file you removed while offline was restored\./);
+    expect(files[0].text).toMatch(/^1 file you deleted didn't reach the server, so it was put back\./);
     const notes = summarizeReconcile([{ kind: "restoredFromServer", path: "a.md", docId: "n1", at }]);
-    expect(notes[0].text).toMatch(/^1 note you removed/);
+    expect(notes[0].text).toMatch(/^1 note you deleted/);
   });
 });

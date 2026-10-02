@@ -2565,7 +2565,7 @@ function SidebarAvatar({ peer }: { peer: VaultPeer }) {
   );
 }
 
-/** The overlapping avatar cluster shown at the right edge of a row. */
+/** The overlapping avatar cluster shown after a row's label, before its badges. */
 function SidebarPresence({ peers }: { peers: VaultPeer[] }) {
   if (peers.length === 0) return null;
   const shown =
@@ -2635,11 +2635,14 @@ function Node({
   const peers = peersForNode(node, presenceByDoc);
   // Compose arborist's per-level indent with the row's base inset so every
   // glyph on a level shares one left edge (no chevron column to misalign).
-  // 20 = 12 base + 8 compensating the tree's full-bleed negative margin.
+  // 20 = 12 base + 8 compensating the tree's full-bleed negative margin, the
+  // same inset as the Notes label (`.filetree-head`); minus 3 because the 15px
+  // icon sits centred in its 18px box with its own blank margin inside, so the
+  // DRAWN glyph — not its box — starts under the label's first letter.
   const indent = typeof style.paddingLeft === "number" ? style.paddingLeft : 0;
   return (
     <div
-      style={{ ...style, paddingLeft: indent + 20 }}
+      style={{ ...style, paddingLeft: indent + 17 }}
       data-tree-dir={isDir ? node.data.path : parentDir(node.data.path)}
       // Read back by `planDrop`, which hit-tests rows through the DOM: the
       // list is virtualized and scrolled, so the DOM is the only thing that
@@ -2756,6 +2759,9 @@ function Node({
           <span className="tree-label">
             {displayName(node.data.name, isDir)}
           </span>
+          {/* Left of the badges, so faces take room from the label and the
+              lock/sync columns stay put on every row. */}
+          <SidebarPresence peers={peers} />
           {/* The `lock` guard keeps two badges off one row — but a read-only
               vault padlocks EVERY row, and suppressing the hint everywhere
               would cost the whole vault a signal to spare a collision that is
@@ -2773,7 +2779,6 @@ function Node({
             </span>
           )}
           {syncIndex && <TreeSyncMark node={node} index={syncIndex} />}
-          <SidebarPresence peers={peers} />
           {!selectMode && (
             <button
               className="tree-more"
