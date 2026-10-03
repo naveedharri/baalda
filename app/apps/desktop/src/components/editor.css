@@ -563,6 +563,35 @@
   width: 58%;
   margin-bottom: var(--sp-3);
 }
+/* The note page inside the editor skeleton: a title, then paragraph groups
+   separated by a blank line's worth of space, filling ~60% of the pane from
+   the same top inset as the real text. It holds more paragraphs than the cap
+   shows; the clip is hidden by a short fade so no bar is visibly cut in half.
+   (`.skel-title`/`.skel-line` are also borrowed, unwrapped, by the Content
+   width preview — the grouping lives here so that miniature is unaffected.) */
+.skel-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+  max-height: 60%;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 82%, transparent);
+  mask-image: linear-gradient(to bottom, #000 82%, transparent);
+}
+.skel-page > .skel-title {
+  margin-bottom: 0;
+}
+.skel-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+/* Empty spans have no content height, so in an overflowing column they would
+   shrink to nothing instead of being clipped. */
+.skel-page > *,
+.skel-group > .skel-line {
+  flex-shrink: 0;
+}
 @keyframes skeleton-in {
   from {
     opacity: 0;

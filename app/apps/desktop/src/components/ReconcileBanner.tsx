@@ -12,15 +12,19 @@ import { useReviewPersistence } from "./useReviewPersistence";
  *  banner instead of re-rendering a growing one per note. */
 export const RECONCILE_BANNER_DEBOUNCE_MS = 600;
 
-/** How many report items the user has already dismissed this session. Module
- *  state on purpose: the banner remounting (a vault switch re-renders the
- *  chrome) must not re-announce what was dismissed. */
-let dismissedUpTo = 0;
+/** The report items the user has already dismissed this session, by identity
+ *  (the report can drop items when access comes back, so an index would shift).
+ *  Module state on purpose: the banner remounting (a vault switch re-renders
+ *  the chrome) must not re-announce what was dismissed. */
+const dismissed = new WeakSet<ReconcileItem>();
 
 /** What the banner announces: this session's new items only. Items seeded from
  *  the saved review were announced the session they happened in; raising them
  *  again on every launch and vault switch is what made the banner unkillable. */
-const announce = (all: readonly ReconcileItem[]) => all.slice(dismissedUpTo).filter((it) => !it.seeded);
+const announce = (all: readonly ReconcileItem[]) => all.filter((it) => !it.seeded && !dismissed.has(it));
+
+/** The user removed their own access: their copy is noted, nothing to review. */
+const isQuiet = (it: ReconcileItem) => it.kind === "selfRevoked";
 
 
 /**
@@ -37,7 +41,6 @@ export function ReconcileBanner() {
   useEffect(() => {
     let timer: number | undefined;
     const unsubscribe = reconcileReport.subscribe((all) => {
-      if (all.length < dismissedUpTo) dismissedUpTo = 0;
       window.clearTimeout(timer);
       timer = window.setTimeout(
         () => setItems(announce(all)),
@@ -58,15 +61,18 @@ export function ReconcileBanner() {
     [items, resolved],
   );
   const lines = useMemo(() => summarizeReconcile(unresolved), [unresolved]);
-  const reviewable = useMemo(() => reviewItems(items), [items]);
+  // A self-made revocation still lists its copy in Activity, but it is not a
+  // "change to review": the user did it a moment ago, on purpose.
+  const reviewable = useMemo(() => reviewItems(items.filter((it) => !isQuiet(it))), [items]);
   const pendingReview = pendingItems(reviewable, resolved).length;
+  const quiet = lines.length > 0 && lines.every((l) => l.kind === "selfRevoked") && pendingReview === 0;
   // Notices (restored notes, kept folders) are never reviewable: a launch with
   // only notices shows its sentences with Details/Dismiss and no Compare.
   const allResolved = reviewable.length > 0 && pendingReview === 0;
 
   const dismiss = () => {
     reconcileReport.drain();
-    dismissedUpTo = reconcileReport.items().length;
+    for (const it of reconcileReport.items()) dismissed.add(it);
     setItems([]);
   };
 
@@ -81,7 +87,7 @@ export function ReconcileBanner() {
     <Banner
       show={lines.length > 0 || pendingReview > 0 || allResolved}
       role="status"
-      className="reconcile-banner"
+      className={quiet ? "reconcile-banner reconcile-banner--quiet" : "reconcile-banner"}
     >
       <span className="reconcile-banner-lines">
         {allResolved && <span className="reconcile-banner-line">All resolved.</span>}

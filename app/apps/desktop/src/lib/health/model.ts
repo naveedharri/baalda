@@ -1154,7 +1154,7 @@ function buildIssues(
         meaning:
           "Every note asks the Remote Vault for permission before it syncs, and the " +
           "Remote Vault is turning this vault down. That happens when the vault was set " +
-          "to Private, when it was shared read-only and then withdrawn, or when " +
+          "to No access, when view access was withdrawn, or when " +
           `you were removed from it. Only ${ownerPhrase(owner)} can change that.`,
         next: "Nothing until access is granted. Baalda keeps asking, and will resume on its own the moment the answer changes.",
         fixes: [

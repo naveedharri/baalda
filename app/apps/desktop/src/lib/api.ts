@@ -343,8 +343,87 @@ export interface TeamAccessOverride {
  */
 export interface TeamAccess {
   mode: TeamAccessMode;
+  /**
+   * The raw vault posture behind `mode`. `none` means the vault was never
+   * shared: it behaves like No access, but members keep the notes they wrote.
+   * Absent on servers that predate it; derived from `mode` then.
+   */
+  posture: TeamAccessPosture;
   grantId: string | null;
   overrides: TeamAccessOverride[];
+}
+
+export type TeamAccessPosture = "edit" | "view" | "sealed" | "none";
+
+/** A person's vault-wide level as the members overview reports it. */
+export type MemberAccessLevel = "edit" | "view" | "none" | "custom";
+
+/** One row of `GET /api/orgs/:orgId/members/overview`. */
+export interface MemberOverview {
+  userId: string;
+  memberId: string;
+  role: "owner" | "admin" | "member";
+  name: string | null;
+  email: string | null;
+  image: string | null;
+  joinedAt: string | null;
+  lastActiveAt: string | null;
+  /** Who invited them, when the server knows (absent on older servers). */
+  invitedBy?: MemberRef | null;
+  /** Only for owner/admin callers. */
+  access?: { level: MemberAccessLevel };
+}
+
+/** A person named inside another record (an inviter, a grantor). */
+export interface MemberRef {
+  userId: string;
+  name: string | null;
+  email: string | null;
+}
+
+/** One row of `GET /api/orgs/:orgId/members/:userId/activity`, newest first. */
+export type MemberActivityEvent =
+  | { kind: "joined"; at: string; invitedBy: MemberRef | null }
+  | { kind: "created"; at: string; docId: string; path: string }
+  | { kind: "edited"; at: string; docId: string; path: string }
+  | {
+      kind: "accessGranted";
+      at: string;
+      by: MemberRef | null;
+      permission: "edit" | "view" | "readonly" | "denied" | "locked";
+      resourceType: "folder" | "file" | "vault";
+      resourceId: string;
+      path: string | null;
+    };
+
+export interface InvitationOverview {
+  id: string;
+  email: string;
+  role: string;
+  status: string;
+  createdAt: string | null;
+  expiresAt: string | null;
+  access: TeamAccessMode | null;
+}
+
+export interface MembersOverview {
+  members: MemberOverview[];
+  invitations: InvitationOverview[];
+  canManage: boolean;
+}
+
+export interface InviteManyInput {
+  emails: string[];
+  role: "member" | "admin";
+  /** null = whatever the vault's New members setting says. */
+  access: TeamAccessMode | null;
+}
+
+export interface InviteManyResult {
+  email: string;
+  invitationId?: string;
+  emailed: boolean;
+  error?: string;
 }
 
 /** What a whole-vault mode change actually did. */
@@ -2754,6 +2833,19 @@ export class ApiClient {
   }
 
   /**
+   * Back to the vault default for one member: deletes every per-user share row
+   * of theirs in the org (vault and items). Owner/admin only; the server kicks
+   * affected sockets and refreshes ACLs.
+   */
+  async resetMemberAccess(orgId: string, userId: string): Promise<{ removed: number; disconnectedDocs: number }> {
+    const { data } = await this.request<{ removed: number; disconnectedDocs: number }>(
+      "DELETE",
+      `/api/orgs/${encodeURIComponent(orgId)}/members/${encodeURIComponent(userId)}/shares`,
+    );
+    return data;
+  }
+
+  /**
    * The vault's team access in one shot: the vault-wide mode plus every
    * per-item org row underneath it. Owner/admin only.
    */
@@ -2762,11 +2854,47 @@ export class ApiClient {
       "GET",
       `/api/orgs/${encodeURIComponent(orgId)}/team-access`,
     );
+    const mode = data.mode ?? "private";
     return {
-      mode: data.mode ?? "private",
+      mode,
+      posture: data.posture ?? (mode === "open" ? "edit" : mode === "readonly" ? "view" : "sealed"),
       grantId: data.grantId ?? null,
       overrides: data.overrides ?? [],
     };
+  }
+
+  /** Members, pending invitations and (for owners/admins) each person's
+   * vault-wide access level, in one request. */
+  async getMembersOverview(orgId: string): Promise<MembersOverview> {
+    const { data } = await this.request<MembersOverview>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/members/overview`,
+    );
+    return {
+      members: data.members ?? [],
+      invitations: data.invitations ?? [],
+      canManage: data.canManage === true,
+    };
+  }
+
+  /** One member's recent activity in this vault, newest first. */
+  async getMemberActivity(orgId: string, userId: string, limit = 50): Promise<MemberActivityEvent[]> {
+    const { data } = await this.request<{ events: MemberActivityEvent[] }>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/members/${encodeURIComponent(userId)}/activity?limit=${limit}`,
+    );
+    return data.events ?? [];
+  }
+
+  /** Invite several addresses at once, each carrying a role and an access level.
+   * A 402 `member_limit_reached` throws like {@link inviteMember}. */
+  async inviteMany(orgId: string, input: InviteManyInput): Promise<InviteManyResult[]> {
+    const { data } = await this.request<{ results: InviteManyResult[] }>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(orgId)}/invitations`,
+      { body: input },
+    );
+    return data.results ?? [];
   }
 
   /**

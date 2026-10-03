@@ -13,6 +13,7 @@ export const RECONCILE_KIND_ORDER: readonly ReconcileKind[] = [
   "deletedByTeammate",
   "keptLocally",
   "externalEditSaved",
+  "selfRevoked",
   "restoredFromServer",
   "renamedConflict",
   "folderKept",
@@ -22,6 +23,7 @@ export const RECONCILE_KIND_ORDER: readonly ReconcileKind[] = [
 export const RECONCILE_KIND_LABEL: Record<ReconcileKind, string> = {
   deletedByTeammate: "Deleted by a teammate",
   keptLocally: "Kept on this device",
+  selfRevoked: "You removed your access",
   restoredFromServer: "Restored",
   renamedConflict: "Renamed",
   folderKept: "Folder kept",
@@ -91,6 +93,8 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
       }
       return `${notes(n)} ${one ? "is" : "are"} kept on this device only: you no longer have access, or can only read ${one ? "it" : "them"}. Copies are in .context/trash.`;
     }
+    case "selfRevoked":
+      return `You removed your own access to ${notes(n)}; ${one ? "its copy stays" : "their copies stay"} on this device.`;
     case "externalEditSaved":
       return `${notes(n)} changed by another app while you were offline could not be merged. Your ${one ? "version was" : "versions were"} saved to .context/trash.`;
     case "folderKept":

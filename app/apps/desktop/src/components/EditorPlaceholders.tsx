@@ -28,14 +28,37 @@ export function EditorSkeleton({ immediate = false }: { immediate?: boolean }) {
       role="status"
       aria-label="Opening note"
     >
-      <span className="skel-line skel-title" />
-      <span className="skel-line" style={{ width: "92%" }} />
-      <span className="skel-line" style={{ width: "78%" }} />
-      <span className="skel-line" style={{ width: "85%" }} />
-      <span className="skel-line" style={{ width: "45%" }} />
+      {/* `.skel-page` is capped at ~60% of the pane and fades out at its foot,
+          so the page reads as "a note's worth of text" at any window height
+          without measuring anything: there are more paragraphs here than the
+          cap ever shows, and the overflow is simply clipped. */}
+      <div className="skel-page">
+        <span className="skel-line skel-title" />
+        {SKELETON_PARAGRAPHS.map((widths, p) => (
+          <div className="skel-group" key={p}>
+            {widths.map((w, i) => (
+              <span className="skel-line" key={i} style={{ width: `${w}%` }} />
+            ))}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
+
+/* Paragraph shapes for the skeleton: 3–4 lines each, near-full lines with a
+   short last line, so the bars read as prose rather than as a list. Fixed (not
+   random) so the placeholder does not reshuffle between renders. */
+const SKELETON_PARAGRAPHS: readonly (readonly number[])[] = [
+  [96, 88, 93, 61],
+  [90, 84, 47],
+  [94, 97, 86, 72],
+  [89, 92, 38],
+  [95, 81, 90, 66],
+  [87, 93, 54],
+  [92, 85, 96, 70],
+  [90, 58],
+];
 
 /** No note open: the editor column's resting state. */
 export function EditorEmpty() {

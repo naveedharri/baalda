@@ -2,8 +2,13 @@ import { Banner } from "./Banner";
 import { AsyncButton } from "./AsyncButton";
 
 /**
- * The strip that meets a vault which was made **local only** from somewhere
- * else — the owner's other device, or a teammate's.
+ * The strip that meets a folder whose stamped vault this server answers 404
+ * for. Usually the vault was made **local only** from somewhere else (the
+ * owner's other device, or a teammate's) or deleted — but a 404 is all we know,
+ * and a vault on a DIFFERENT server answers the same, so the copy states the
+ * fact ("not found on this server") rather than guessing at intent. A stamp
+ * that contradicts this profile's binding never reaches here
+ * (`planUnsyncStamp` → `foreign`).
  *
  * Without it this is a silent dead end. The folder's `.context/config.json` is
  * still stamped for a vault that no longer exists, so the app cannot open it as
@@ -33,8 +38,8 @@ export function VaultUnsyncedBannerView({
   return (
     <Banner show={show} className="not-syncing-banner" role="alert">
       <span>
-        <strong>This vault was made local only</strong> — your notes are still here,
-        but they no longer sync.
+        <strong>This folder&apos;s synced vault wasn&apos;t found on this server</strong> — your
+        notes are still here, but they no longer sync.
       </span>
       <div className="banner-actions">
         <AsyncButton className="primary" onClick={onTurnOnSync}>

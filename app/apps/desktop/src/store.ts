@@ -75,7 +75,7 @@ import { renameInFolderSorts, type FolderSorts, type TreeSort } from "./lib/tree
 import type { AccountSettingsTab, SettingsTab } from "./lib/settingsTabs";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
-import { planTurnOnSync } from "./lib/vault/turnOnSync";
+import { foreignFolderMessage, planTurnOnSync } from "./lib/vault/turnOnSync";
 import { planUnsyncStamp } from "./lib/vault/unsyncPlan";
 import { forgetTeamAccessCache } from "./lib/teamAccessCache";
 import { planOpen } from "./lib/sync/openGate";
@@ -119,7 +119,7 @@ const registerFailureToasted = new Set<string>();
 
 /** One access change the Activity feed lists (session-only). */
 export type AccessEvent =
-  | { kind: "removed"; at: number; vaultId: string | null; docId: string; path: string }
+  | { kind: "removed"; at: number; vaultId: string | null; docId: string; path: string; self?: boolean }
   | { kind: "granted"; at: number; vaultId: string | null; count: number; paths?: string[] };
 const ACCESS_EVENTS_MAX = 200;
 
@@ -1084,6 +1084,15 @@ async function peekStampedOrgId(path: string): Promise<string | null> {
  * refusal would otherwise strand the folder.
  */
 const vaultsConfirmedGone = new Set<string>();
+
+/**
+ * Why the most recent `enableSyncForVault` call refused, when the reason is
+ * one a caller should report rather than guess at. Set by the stamp guard
+ * (folder stamped for a different vault) and cleared at the start of every
+ * call, so `turnOnSyncForCurrentVault` can tell "this folder belongs to
+ * another vault" apart from a genuine connection failure.
+ */
+let lastSyncRefusal: { kind: "stamp-mismatch"; stampedOrgId: string } | null = null;
 
 async function clearVaultStamp(vault: ipc.VaultInfo, orgId: string): Promise<boolean> {
   const tombstone = JSON.stringify({
@@ -2688,6 +2697,7 @@ export const useStore = create<AppStore>((set, get) => ({
             vaultId: syncManager.registry.vaultId ?? null,
             docId,
             path,
+            ...(syncManager.registry.isSelfRevocation(docId, path) ? { self: true } : {}),
           };
           set({ accessEvents: [...get().accessEvents, ev].slice(-ACCESS_EVENTS_MAX) });
         }
@@ -3229,15 +3239,20 @@ export const useStore = create<AppStore>((set, get) => ({
     if (plan.kind === "blocked-foreign") {
       // Creating a vault here would upload every note in this folder into a
       // fresh vault under the WRONG account — the exact duplication this plan
-      // exists to prevent. The dialog surfaces this message as-is.
-      throw new Error(
-        "This folder already belongs to a synced vault that this account can't access. " +
-          "Sign in with the account it was synced with to open it.",
-      );
+      // exists to prevent. The dialog surfaces this message as-is. The stamp
+      // carries no server URL, so the message covers both "another server" and
+      // "another account on this server".
+      throw new Error(foreignFolderMessage(plan.orgId));
     }
     if (plan.kind === "retry-active") {
       await get().enableSyncForVault();
       if (!get().syncEnabled) {
+        // The stamp guard refused: the folder belongs to another vault, which
+        // no amount of reconnecting fixes. Say so instead of blaming the network.
+        const refusal = lastSyncRefusal;
+        if (refusal?.kind === "stamp-mismatch") {
+          throw new Error(foreignFolderMessage(refusal.stampedOrgId));
+        }
         throw new Error(
           "Couldn't connect to this vault. Check your connection and try again.",
         );
@@ -3807,13 +3822,20 @@ export const useStore = create<AppStore>((set, get) => ({
     const stampedOrgId = await peekStampedOrgId(vault.path);
     // The cheap half: a folder with no stamp, or one stamped for a vault we are
     // plainly a member of, is answered locally and never touches the network.
-    // `"unknown"` here is a placeholder — the two `ok` branches don't read it.
+    // `"unknown"` here is a placeholder — the local branches don't read it, so
+    // anything but `unknown` is a final answer. That includes a stamp MISMATCH
+    // (this profile binds the folder to another vault we're in): the 404 such a
+    // stamp gets from this server proves nothing, and the turn-on-sync refusal
+    // already says what's wrong.
+    const boundOrgId =
+      Object.entries(readOrgVaults()).find(([, p]) => p === vault.path)?.[0] ?? null;
     if (
       planUnsyncStamp({
         stampedOrgId,
         knownOrgIds: get().organizations.map((o) => o.id),
         statusAnswer: "unknown",
-      }) === "ok"
+        boundOrgId,
+      }) !== "unknown"
     ) {
       if (get().vaultUnsynced) set({ vaultUnsynced: null });
       return;
@@ -3827,6 +3849,7 @@ export const useStore = create<AppStore>((set, get) => ({
       stampedOrgId: stamped,
       knownOrgIds: get().organizations.map((o) => o.id),
       statusAnswer: status.kind,
+      boundOrgId,
     });
     if (verdict === "local-only") vaultsConfirmedGone.add(stamped);
     set({
@@ -4412,6 +4435,7 @@ export const useStore = create<AppStore>((set, get) => ({
   setDocIdByPath: (map) => set({ docIdByPath: map }),
 
   enableSyncForVault: async (opts = {}) => {
+    lastSyncRefusal = null;
     const { session, vault } = get();
     // Every refusal below is an ANSWER — sync is not coming for this folder — so
     // each one releases the open gate rather than leaving the first click to
@@ -4445,6 +4469,7 @@ export const useStore = create<AppStore>((set, get) => ({
     const stamped = await peekStampedOrgId(vault.path);
     if (stale()) return;
     if (stamped && stamped !== orgId) {
+      lastSyncRefusal = { kind: "stamp-mismatch", stampedOrgId: stamped };
       set({ syncEnabled: false });
       resolveSyncGate();
       console.warn(

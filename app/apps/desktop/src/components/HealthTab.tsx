@@ -711,7 +711,7 @@ function InventoryComparison({
                   : comparisonStale
                     ? "The current Remote Vault contents cannot be confirmed"
                   : restrictedNotes > 0
-                    ? `${restrictedNotes.toLocaleString()} notes are private or restricted`
+                    ? `${restrictedNotes.toLocaleString()} notes have restricted access`
                     : "Notes and folders match"}
           </strong>
           <p>
@@ -729,7 +729,7 @@ function InventoryComparison({
                 : comparisonStale
                   ? "The Remote Vault is unavailable, so this last-known comparison may be out of date."
                 : restrictedNotes > 0
-                  ? `${restrictedNotes.toLocaleString()} private or restricted notes remain on the server.`
+                  ? `${restrictedNotes.toLocaleString()} notes with restricted access remain on the server.`
                   : `${confirmed.toLocaleString()} of ${totalTextNotes.toLocaleString()} text notes have confirmed content on the Remote Vault.`
               : "Your local files remain available on this computer."}
           </p>
@@ -776,7 +776,7 @@ function InventoryComparison({
           <span className="health-kicker">Your copies</span>
           <h3 id="health-inventory-title">This computer and the Remote Vault</h3>
           <p>
-            {stored ? "Server totals include private notes." : "Remote counts include only notes you can access."}
+            {stored ? "Server totals include notes not everyone can open." : "Remote counts include only notes you can access."}
           </p>
         </div>
         {inventory.server && (

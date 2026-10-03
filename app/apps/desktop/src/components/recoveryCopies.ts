@@ -16,6 +16,7 @@ export interface CopyRef {
 const COPY_KINDS: ReadonlySet<ReconcileKind> = new Set<ReconcileKind>([
   "deletedByTeammate",
   "keptLocally",
+  "selfRevoked",
   "externalEditSaved",
 ]);
 

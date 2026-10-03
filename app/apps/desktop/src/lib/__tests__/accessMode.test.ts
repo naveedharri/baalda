@@ -288,11 +288,11 @@ describe("effectiveVaultMode — the bug this function exists to fix", () => {
 });
 
 describe("MODE_LABEL", () => {
-  it("calls open mode Shared, matching every control on the page", () => {
+  it("uses the Members and access page words for every mode", () => {
     expect(MODE_LABEL).toEqual({
-      open: "Shared",
-      readonly: "Read-only",
-      private: "Private",
+      open: "Can edit",
+      readonly: "Can view",
+      private: "No access",
     });
   });
 });

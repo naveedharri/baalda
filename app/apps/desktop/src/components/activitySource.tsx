@@ -441,12 +441,12 @@ function accessFromLog(e: ActivityLogEntry, vaultId: string | null): AccessEvent
     return { kind: "granted", at: e.at, vaultId, count: Number(e.detail.slice(8)) || 0, paths: e.paths };
   }
   if (!e.docId) return null;
-  return { kind: "removed", at: e.at, vaultId, docId: e.docId, path: e.path };
+  return { kind: "removed", at: e.at, vaultId, docId: e.docId, path: e.path, ...(e.detail === "removed:self" ? { self: true } : {}) };
 }
 
 function accessLogEntry(e: AccessEvent): ActivityLogEntry {
   return e.kind === "removed"
-    ? { id: `a:r:${e.docId}@${e.at}`, kind: "access", path: e.path, docId: e.docId, detail: "removed", at: e.at }
+    ? { id: `a:r:${e.docId}@${e.at}`, kind: "access", path: e.path, docId: e.docId, detail: e.self ? "removed:self" : "removed", at: e.at }
     : {
         id: `a:g@${e.at}`,
         kind: "access",

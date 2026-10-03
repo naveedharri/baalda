@@ -107,7 +107,7 @@ export function pausedText(e: Pick<ShrinkBrakeEvent, "userName" | "noteCount">, 
 }
 
 export function accessText(e: AccessEvent): string {
-  if (e.kind === "removed") return "Access to this note was removed";
+  if (e.kind === "removed") return e.self ? "You removed your access" : "Access to this note was removed";
   return `${n(e.count)} ${e.count === 1 ? "note" : "notes"} became available to you`;
 }
 

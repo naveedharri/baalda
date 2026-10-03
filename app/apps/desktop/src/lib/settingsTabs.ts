@@ -15,12 +15,10 @@ export type SettingsTab =
   | "vaults"
   | "members"
   | "billing"
-  | "access"
   | "mcp"
   | "versioning"
   | "import-export"
-  | "appearance"
-  | "updates";
+  | "appearance";
 
 /** Account settings stay separate from vault settings but use the same
  * request-token pattern when another surface links to a particular page. */

@@ -37,3 +37,20 @@ export function canActOnMember({ canManage, myUserId, myRole, target }: MemberRo
 export function assignableRoles(args: MemberRoleArgs): AssignableRole[] {
   return canActOnMember(args) ? [...ASSIGNABLE_ROLES] : [];
 }
+
+/**
+ * May the caller change this person's ACCESS (not their role)? There is no
+ * role exemption on the server — an owner in a Can view vault is capped too —
+ * so this is deliberately wider than {@link canActOnMember}:
+ *
+ *   - owner: anyone, including themselves and other admins/owners — their own
+ *     row is the way back in after narrowing the whole vault;
+ *   - admin: plain members and themselves;
+ *   - member: nobody.
+ */
+export function canSetMemberAccess({ canManage, myUserId, myRole, target }: MemberRoleArgs): boolean {
+  if (!canManage) return false;
+  if (myRole === "owner") return true;
+  if (myRole === "admin") return target.role === "member" || target.userId === myUserId;
+  return false;
+}

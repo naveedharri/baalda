@@ -297,6 +297,20 @@ describe("checkUnsyncedVaultStamp — the other-device path", () => {
     expect(useStore.getState().vaultUnsynced).toBeNull();
   });
 
+  it("stays silent, and off the network, when the folder is bound to another vault we're in", async () => {
+    // Stamped for a vault on another server; this profile binds the path to
+    // org-local here. This server would 404 the stamp — that is not "gone".
+    ipcMock.peekVaultStamp.mockResolvedValueOnce({ organizationId: "org-prod", serverVaultId: "v9" });
+    storage["context.orgVaults"] = JSON.stringify({ "org-local": PATH });
+    useStore.setState({ organizations: [{ id: "org-local", name: "L" }] as never });
+    api.getOrgStatus.mockResolvedValue({ kind: "vault-not-found" });
+
+    await useStore.getState().checkUnsyncedVaultStamp();
+
+    expect(api.getOrgStatus).not.toHaveBeenCalled();
+    expect(useStore.getState().vaultUnsynced).toBeNull();
+  });
+
   it("stays silent when the server can't be reached", async () => {
     useStore.setState({ organizations: [] });
     api.getOrgStatus.mockResolvedValue({ kind: "unknown" });

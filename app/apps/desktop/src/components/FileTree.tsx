@@ -2062,14 +2062,14 @@ export function FileTree() {
               <li
                 className="disabled"
                 aria-disabled="true"
-                title="The vault is read-only — change it in Access"
+                title="Everyone can only view this vault — change it in Members and access"
                 onClick={(e) => e.stopPropagation()}
               >
                 Locked by the vault
               </li>
             ) : (
               <li
-                title="Read-only for everyone — changes won't sync"
+                title="View only for everyone — changes won't sync"
                 onClick={() => void lockFromMenu(menuTarget)}
               >
                 Lock for everyone
@@ -2725,7 +2725,7 @@ function Node({
       >
         {/* Opening must not replace this glyph: the unmount/remount was visible
             as a blink, especially now that every glyph may carry a colour. Slow
-            opens get a delayed ring around the stable icon instead. */}
+            opens hide the (still mounted) icon and centre a spinner in its box. */}
         <OpeningGlyph opening={isOpening}>
           {isDir
             ? node.isOpen && !isEmpty

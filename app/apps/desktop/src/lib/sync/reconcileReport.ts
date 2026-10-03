@@ -11,6 +11,7 @@ export type ReconcileKind =
   | "deletedByTeammate" // D1: a teammate deleted a note B had unseen edits to; B's version went to trash (local and/or server)
   | "renamedConflict" // D4: same-path create; B's later note renamed to newPath
   | "keptLocally" // D7: access revoked while B had unsent edits; kept under .context/trash, no longer synced
+  | "selfRevoked" // D7, but B removed their OWN access from this device moments before; same copy, quiet notice
   | "folderKept" // D8: teammate deleted a folder but B's new notes inside it kept it alive
   | "externalEditSaved"; // another app edited a never-opened note offline; the server's text won, the file went to trash (detail = trash path)
 
@@ -54,6 +55,7 @@ export const reconcileReport: {
   drain(): ReconcileItem[];
   subscribe(cb: ReconcileListener): () => void;
   clear(): void;
+  forgetReadable(docIds: ReadonlySet<string>): number;
 } = {
   record(item, opts) {
     // A seeded item keeps the time it HAPPENED: stamping it with now made the
@@ -81,4 +83,36 @@ export const reconcileReport: {
     drainedUpTo = 0;
     notify();
   },
+  /**
+   * Access came back: drop this session's "you lost this note" entries for
+   * docs the server lists as readable again, so the banner shrinks instead of
+   * claiming a loss that no longer holds. The recovery copy itself stays in
+   * `.context/trash`; only the report line goes. A read-only refusal (the note
+   * was readable all along) and items seeded from an earlier session are kept.
+   */
+  forgetReadable(docIds) {
+    if (docIds.size === 0 || all.length === 0) return 0;
+    let removed = 0;
+    let removedBeforeDrain = 0;
+    for (let i = all.length - 1; i >= 0; i--) {
+      const it = all[i];
+      if (!isForgettable(it, docIds)) continue;
+      all.splice(i, 1);
+      removed++;
+      if (i < drainedUpTo) removedBeforeDrain++;
+    }
+    if (removed === 0) return 0;
+    drainedUpTo -= removedBeforeDrain;
+    notify();
+    return removed;
+  },
 };
+
+/** Mirrors `READ_ONLY_DETAIL` (readOnlyRejections.ts), inlined to avoid an import cycle. */
+const READ_ONLY_PREFIX = "read-only";
+
+function isForgettable(it: ReconcileItem, docIds: ReadonlySet<string>): boolean {
+  if (it.seeded || !it.docId || !docIds.has(it.docId)) return false;
+  if (it.kind === "deletedByTeammate" || it.kind === "selfRevoked") return true;
+  return it.kind === "keptLocally" && !(it.detail ?? "").startsWith(READ_ONLY_PREFIX);
+}

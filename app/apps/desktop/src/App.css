@@ -133,7 +133,7 @@ button.primary.hero:hover:not(:disabled) {
 }
 .link-btn:hover {
   color: var(--accent-hover);
-  background: var(--accent-soft);
+  background: var(--bg-hover);
 }
 .link-btn.danger:hover {
   background: var(--danger-soft);
@@ -170,7 +170,7 @@ button.primary.hero:hover:not(:disabled) {
 }
 .graph-btn:hover {
   color: var(--accent);
-  background: var(--accent-soft);
+  background: var(--bg-hover);
 }
 
 /* ============================================================
@@ -1496,7 +1496,7 @@ body:has(.sidebar-resizer.dragging) {
 /* Hover is a lighter step of the selected row's violet, so the two states read
    as one family instead of a grey hover beside a violet selection. */
 .tree-row:hover {
-  background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
+  background: var(--bg-hover);
   color: var(--text-primary);
 }
 /* A one-shot "here it is" pulse on a row the app just revealed (store
@@ -1616,12 +1616,29 @@ body:has(.sidebar-resizer.dragging) {
     color var(--t-fast) var(--ease),
     transform var(--t-med) var(--ease-spring);
 }
-.tree-opening-spinner {
+/* The icon's own box. While a slow open shows the spinner the icon is hidden,
+   not unmounted (`OpeningGlyph`), so the 18px glyph box — and the row — keeps
+   its exact layout and the icon returns without a remount blink. */
+.tree-glyph-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.tree-glyph-icon[data-hidden] {
+  opacity: 0;
+}
+/* Centred in the glyph box in place of the icon. Two classes deep on purpose:
+   `.spinner-xs` is declared later in this file, so a single-class rule here
+   lost the size/border to it and pinned a 12px ring to the box's top-left
+   corner, half over the icon. */
+.tree-glyph .tree-opening-spinner {
   position: absolute;
-  inset: -1px;
-  width: 20px;
-  height: 20px;
-  border-width: 1.5px;
+  inset: 0;
+  margin: auto;
+  width: 14px;
+  height: 14px;
+  border-width: 1.6px;
   pointer-events: none;
 }
 .tree-glyph svg {
@@ -1821,7 +1838,7 @@ body:has(.sidebar-resizer.dragging) {
 }
 .tree-more:hover {
   opacity: 0.9;
-  background: color-mix(in srgb, var(--bg-surface) 55%, transparent);
+  background: var(--bg-hover);
   color: var(--text-secondary);
 }
 
@@ -1942,7 +1959,7 @@ body:has(.sidebar-resizer.dragging) {
     color var(--t-fast) var(--ease);
 }
 .context-menu li:hover {
-  background: var(--accent-soft);
+  background: var(--bg-hover);
   color: var(--text-primary);
 }
 /* Unavailable action (e.g. create at a frozen root). Still clickable so the
@@ -2037,7 +2054,7 @@ body:has(.sidebar-resizer.dragging) {
   cursor: pointer;
 }
 .context-menu li.menu-note.menu-link:hover {
-  background: var(--accent-soft);
+  background: var(--bg-hover);
   color: var(--text-primary);
 }
 /* The toolbar popover hangs off its button instead of the pointer, so it is
@@ -2081,6 +2098,15 @@ body:has(.sidebar-resizer.dragging) {
 }
 .context-menu.role-menu li {
   text-transform: capitalize;
+}
+/* Access menus carry sentence-case labels and a hint line: undo the role
+   list's `capitalize` (which would print "Can View") and give hints room. */
+.context-menu.role-menu.access-menu {
+  min-width: 232px;
+}
+.context-menu.role-menu.access-menu li {
+  text-transform: none;
+  align-items: flex-start;
 }
 .role-caret {
   color: var(--text-tertiary);
@@ -2828,7 +2854,7 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   opacity: 1;
 }
 .tab-close:hover {
-  background: var(--bg-active);
+  background: var(--bg-hover);
   color: var(--text-primary);
 }
 .tab-close svg {
@@ -3160,7 +3186,7 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
     border-color var(--t-fast) var(--ease);
 }
 .banner .banner-actions button:not(.primary):not(.link-btn):hover:not(:disabled) {
-  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  background: var(--bg-hover);
   border-color: color-mix(in srgb, currentColor 36%, transparent);
 }
 .banner .banner-actions button:not(.primary):not(.link-btn):disabled {
@@ -3328,22 +3354,8 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   pointer-events: none;
   z-index: 9999;
 }
-.update-detail {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  margin-top: var(--sp-3);
-}
-.release-notes {
-  white-space: pre-wrap;
-}
 
-/* ---- Updates tab (Settings) ---- */
-.updates-tab {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
+/* ---- Update check (Account settings → About) ---- */
 /* Button + inline status share one baseline row. The status sits beside the
    button (not below), so appearing/clearing it never changes the row height —
    the button governs it. That's what kills the "shake" on click. */
@@ -3354,15 +3366,59 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   min-height: 36px;
   padding: var(--sp-1) var(--sp-2);
 }
-.update-check-btn {
+/* About: one row — "Current version" + the version on the left with the
+   status as a muted sub-line, the action on the right. The row's min-height
+   fits both lines, so a status appearing or clearing never moves anything. */
+.about-update-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  min-height: 44px;
+  padding: var(--sp-1) var(--sp-2);
+}
+.about-update-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.about-version {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.about-version .mono {
+  color: var(--text-primary);
+}
+.about-update-text .update-status:empty {
+  display: none;
+}
+/* Secondary, like "Upload image", but outlined and quiet: a check is not the
+   page's primary action. Fixed width holds the label + spinner so the button
+   never resizes as it toggles between idle and busy. */
+.about-update-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--sp-2);
-  /* Fixed width holds the label + spinner so the button never resizes as it
-     toggles between idle and busy. */
+  height: 32px;
   min-width: 152px;
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-sm);
   flex: none;
+}
+button.secondary.about-update-btn {
+  border-color: var(--border);
+  font-weight: 500;
+}
+button.secondary.about-update-btn:disabled {
+  opacity: 1;
+  color: var(--text-secondary);
+}
+.about-update-btn.secondary .btn-spinner {
+  border-color: color-mix(in srgb, var(--text-secondary) 30%, transparent);
+  border-top-color: var(--text-secondary);
 }
 .update-status {
   font-size: var(--fs-sm);
@@ -3574,6 +3630,41 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
 .identity-row > .identity-bar {
   flex: 1;
   min-width: 0;
+}
+/* Local vault only: "On this device only · Turn on sync", above the identity
+   bar, with a divider inset to the bar's own padding. */
+.local-sync-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 var(--sp-2) var(--sp-1);
+  padding: 2px 0 var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.local-sync-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--text-tertiary);
+}
+.local-sync-label {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  line-height: var(--lh-tight);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.local-sync-row .local-sync-btn {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  padding: 2px var(--sp-2);
+  margin-right: calc(-1 * var(--sp-2));
+  white-space: nowrap;
 }
 .identity-bug {
   flex: none;
@@ -3956,6 +4047,10 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
     0 0 0 1.5px var(--bg-surface),
     0 0 0 3px var(--text-primary);
 }
+/* An uploaded image stays flush: the ring read as a frame drawn on the logo. */
+.vault-card.current .vault-tile.image {
+  box-shadow: none;
+}
 .vault-card-meta {
   flex: 1;
   min-width: 0;
@@ -4286,6 +4381,25 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   min-height: 0;
   overflow-y: auto;
 }
+/* The other settings dialog, pinned to the bottom of the nav. */
+.settings-nav-crosslink {
+  margin-top: auto;
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+}
+.settings-nav-crosslink .menu-item {
+  width: 100%;
+  color: var(--text-secondary);
+}
+.settings-nav-crosslink .menu-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.settings-nav-crosslink-arrow {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-tertiary);
+}
 .settings-content {
   flex: 1;
   min-width: 0;
@@ -4451,7 +4565,7 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
 
    Only direct children take part — plus `.versioning-tab`, the one tab that
    wraps itself in a plain div. A `.subhead` nested inside a card
-   (`.billing-card`, `.mcp-new-token`, `.update-detail`) sits in a FLEX
+   (`.billing-card`, `.mcp-new-token`) sits in a FLEX
    container whose `gap` already spaces it, and a margin there would add to
    the gap rather than collapse with it. The tab's own `<h2>` already carries
    the lead-in, so the first subhead after it takes nothing extra. */
@@ -4607,864 +4721,6 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   color: var(--warning);
 }
 
-/* ============================================================
-   Access panel (the locker) — unified structural view + who-can-access.
-   All colors via tokens so light/dark come for free.
-   ============================================================ */
-.access-panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-5);
-}
-.access-intro {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-body);
-}
-.access-intro strong {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-.access-default-card,
-.access-bulk-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-surface);
-  box-shadow: var(--shadow-sm);
-  padding: var(--sp-4);
-}
-.access-default-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-5);
-  background: var(--bg-card);
-  scroll-margin-top: var(--sp-5);
-}
-.access-default-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-}
-.access-default-copy strong {
-  color: var(--text-primary);
-  font-size: var(--fs-md);
-}
-.access-default-copy span,
-.access-default-loading {
-  color: var(--text-secondary);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-body);
-}
-.access-default-trigger {
-  min-width: 132px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  padding: 8px var(--sp-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-subtle);
-  color: var(--text-primary);
-  font: inherit;
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-.access-default-trigger:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  background: var(--bg-hover);
-}
-.access-default-trigger:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: var(--focus-ring);
-}
-.access-default-trigger:disabled,
-.access-default-loading {
-  opacity: 0.65;
-}
-.access-default-loading {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  white-space: nowrap;
-}
-.access-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-}
-/* The Access tab's own eyebrows. Same role as `.subhead`, so the same colour
-   reasoning: tertiary is the disabled grey, and a section heading is not
-   disabled. */
-.access-listlabel,
-.access-seclabel {
-  font-size: var(--fs-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin: 0 0 var(--sp-2);
-}
-
-/* --- master list --- */
-/* No scroll of its own. The settings page already scrolls, and a second scroll
-   region nested inside it is what sliced rows in half at the top edge — you
-   could never tell whether a row was cut off or simply short. The list grows to
-   its content and the page carries it; folders start collapsed, so what's on
-   screen by default is the vault's top level, not everything in it. */
-.access-master {
-  background: var(--bg-card);
-  border: 1px solid var(--border-subtle, var(--border));
-  border-radius: var(--radius-lg);
-  padding: var(--sp-3);
-  scroll-margin-top: var(--sp-5);
-}
-.access-view-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  margin: 0 var(--sp-2) var(--sp-3);
-  padding: var(--sp-2) 0 var(--sp-3);
-  border-bottom: 1px solid var(--border);
-  color: var(--text-secondary);
-  font-size: var(--fs-sm);
-}
-.access-view-toolbar .access-default-trigger {
-  max-width: min(320px, 65vw);
-}
-.access-listhead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  padding: var(--sp-1) var(--sp-2) var(--sp-2);
-  color: var(--text-tertiary);
-  font-size: var(--fs-xs);
-}
-.access-listhead .access-listlabel {
-  margin-bottom: 1px;
-}
-.access-select-all {
-  border: none;
-  background: transparent;
-  color: var(--accent);
-  padding: var(--sp-1) var(--sp-2);
-  border-radius: var(--radius-sm);
-  font: inherit;
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  cursor: pointer;
-}
-.access-select-all:hover {
-  background: var(--accent-soft);
-}
-.access-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-.access-row {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: 4px var(--sp-2);
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text-primary);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition:
-    background var(--t-fast) var(--ease),
-    border-color var(--t-fast) var(--ease);
-}
-.access-check {
-  width: 15px;
-  height: 15px;
-  margin: 0;
-  flex: 0 0 auto;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-.access-check:disabled {
-  cursor: default;
-}
-.access-vault-row {
-  margin-bottom: var(--sp-2);
-  padding: var(--sp-2);
-  background: var(--bg-surface);
-  border-color: var(--border-subtle, var(--border));
-}
-.access-row:hover {
-  background: var(--bg-hover);
-}
-.access-row.sel {
-  background: var(--accent-soft);
-  border-color: transparent;
-}
-.access-row.inherited {
-  border-color: color-mix(in srgb, var(--accent) 20%, transparent);
-  cursor: default;
-}
-.access-row.inherited .access-check {
-  opacity: 1;
-}
-.access-selection-source {
-  max-width: 132px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-tertiary);
-  font-size: var(--fs-xs);
-}
-/* One list line: twisty + row button, side by side. Indentation lives on the
-   line so the twisty indents with the row it belongs to. */
-.access-item {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  padding-right: var(--sp-2);
-}
-.access-item .access-row {
-  padding-left: 2px;
-}
-
-/* Folder twisty. Its own hit target beside the row button, so opening a folder
-   and selecting it stay separate intents. */
-.access-twisty {
-  width: 14px;
-  height: 14px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-tertiary);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition:
-    transform var(--t-fast) var(--ease),
-    color var(--t-fast) var(--ease);
-}
-.access-twisty.spacer {
-  cursor: default;
-}
-.access-twisty:not(.spacer):hover {
-  color: var(--text-primary);
-}
-.access-twisty.open {
-  transform: rotate(90deg);
-}
-.access-twisty svg {
-  width: 100%;
-  height: 100%;
-}
-/* The twisty is a sibling of the row, so it takes its selected colour from the
-   line, not from a descendant selector. */
-.access-item:has(.access-row.sel) .access-twisty {
-  color: var(--accent);
-}
-
-/* "Applying…" / "Resolving…" beside a section label. Permission writes fan out
-   into several round trips and a socket kick, so the wait is real and has to be
-   narrated — otherwise the panel just looks stuck. */
-.access-applying {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: var(--sp-2);
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-  color: var(--text-tertiary);
-}
-.access-seg.busy {
-  opacity: 0.55;
-  pointer-events: none;
-}
-
-.access-bulk-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-  background: var(--bg-card);
-  scroll-margin-top: var(--sp-5);
-}
-.access-bulk-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-}
-.access-bulk-heading .access-seclabel {
-  margin-bottom: 2px;
-}
-.access-bulk-heading strong {
-  color: var(--text-primary);
-  font-size: var(--fs-md);
-}
-.access-audience-tabs {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--sp-1);
-  padding: var(--sp-1);
-  border-radius: var(--radius-md);
-  background: var(--bg-app);
-  border: 1px solid var(--border-subtle, var(--border));
-}
-.access-audience-tabs button {
-  border: none;
-  border-radius: var(--radius-sm);
-  padding: 8px var(--sp-3);
-  background: transparent;
-  color: var(--text-secondary);
-  font: inherit;
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  cursor: pointer;
-}
-.access-audience-tabs button.active {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-sm);
-}
-.access-audience-tabs button:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-.access-bulk-note {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-body);
-}
-.access-member-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--sp-2);
-  scroll-margin-top: var(--sp-5);
-}
-.access-member-choice {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-width: 0;
-  padding: var(--sp-2);
-  border: 1px solid var(--border-subtle, var(--border));
-  border-radius: var(--radius-md);
-  color: var(--text-secondary);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-  background: var(--bg-surface);
-}
-.access-member-choice.selected {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--text-primary);
-}
-.access-member-choice input {
-  accent-color: var(--accent);
-}
-.access-member-choice .avatar {
-  width: 22px;
-  height: 22px;
-  flex: 0 0 auto;
-}
-.access-member-choice span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.access-bulk-card .access-seg {
-  margin: 0;
-}
-.access-current-state {
-  margin: calc(-1 * var(--sp-2)) 0 0;
-  color: var(--text-secondary);
-  font-size: var(--fs-xs);
-  line-height: var(--lh-body);
-}
-.access-seg {
-  transition: opacity var(--t-fast) var(--ease);
-}
-
-.access-glyph {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-  color: var(--text-tertiary);
-  display: inline-flex;
-}
-.access-row.sel .access-glyph {
-  color: var(--accent);
-}
-.access-glyph svg {
-  width: 100%;
-  height: 100%;
-}
-.access-rname {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--fs-sm);
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.access-rright {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-shrink: 0;
-}
-
-/* status badge (pill) */
-.access-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  padding: 3px 9px 3px 7px;
-  border-radius: var(--radius-pill);
-  white-space: nowrap;
-}
-.access-badge svg {
-  width: 11px;
-  height: 11px;
-}
-.access-badge.open {
-  background: var(--success-soft);
-  color: var(--success);
-}
-.access-badge.ro {
-  background: var(--warning-soft);
-  color: var(--warning);
-}
-.access-badge.priv {
-  background: var(--bg-hover);
-  color: var(--text-secondary);
-}
-/* The vault's mode hasn't arrived yet. A blank pill the width of a real one,
-   because the alternative — falling back to "Private" — states the opposite of
-   the truth in every shared vault for as long as the network takes. */
-.access-badge.loading {
-  background: var(--bg-hover);
-  color: var(--text-tertiary);
-  min-width: 66px;
-  justify-content: center;
-}
-
-/* whole-vault mode block, above the per-item list */
-.access-ws {
-  margin-bottom: var(--sp-4);
-  padding-bottom: var(--sp-4);
-  border-bottom: 1px solid var(--border-subtle, var(--border));
-}
-/* Shown only when the per-item settings, not the vault row, decide what the
-   team gets — the control marks the real answer active and this says why. */
-.access-ws-note {
-  margin: var(--sp-2) 0 0;
-  color: var(--text-secondary);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-body);
-}
-.access-ws-note strong {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-/* affected-people avatar stack */
-.access-avstack {
-  display: inline-flex;
-}
-.access-av-wrap {
-  width: 20px;
-  height: 20px;
-  border-radius: var(--radius-pill);
-  overflow: hidden;
-  display: inline-grid;
-  place-items: center;
-  flex-shrink: 0;
-}
-.access-avstack .access-av-wrap {
-  margin-left: -6px;
-  box-shadow: 0 0 0 2px var(--bg-subtle);
-}
-.access-row.sel .access-avstack .access-av-wrap {
-  box-shadow: 0 0 0 2px var(--accent-soft);
-}
-.access-av-wrap .avatar {
-  width: 20px;
-  height: 20px;
-}
-.access-av-wrap.locked {
-  position: relative;
-}
-.access-av-wrap.locked::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: color-mix(in srgb, var(--bg-app) 45%, transparent);
-}
-
-/* --- detail --- */
-.access-detail {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-  padding: var(--sp-5);
-}
-.access-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: var(--sp-8) var(--sp-4);
-  text-align: center;
-  /* The copy explains why the panel is empty and what to do about it, so it
-     reads at secondary; the glyph below keeps its own tertiary + opacity
-     because that one IS decoration. */
-  color: var(--text-secondary);
-}
-.access-empty p {
-  margin: 0;
-  font-size: var(--fs-sm);
-  max-width: 34ch;
-}
-.access-empty-glyph {
-  width: 34px;
-  height: 34px;
-  color: var(--text-tertiary);
-  opacity: 0.7;
-}
-.access-empty-glyph svg {
-  width: 100%;
-  height: 100%;
-}
-.access-crumb {
-  font-size: var(--fs-xs);
-  color: var(--text-tertiary);
-  min-height: 14px;
-}
-.access-dtitle {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin: 2px 0 var(--sp-3);
-}
-.access-tglyph {
-  width: 20px;
-  height: 20px;
-  color: var(--accent);
-  flex-shrink: 0;
-}
-.access-tglyph svg {
-  width: 100%;
-  height: 100%;
-}
-.access-dtitle h3 {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: var(--fs-lg);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.access-banner {
-  display: flex;
-  gap: var(--sp-2);
-  align-items: flex-start;
-  background: var(--bg-card);
-  border-radius: var(--radius-md);
-  padding: var(--sp-3);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-body);
-  color: var(--text-secondary);
-  margin-bottom: var(--sp-4);
-}
-.access-banner strong {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-.access-bico {
-  width: 15px;
-  height: 15px;
-  flex-shrink: 0;
-  margin-top: 2px;
-  color: var(--warning);
-}
-.access-jump {
-  border: none;
-  background: none;
-  padding: 0;
-  font: inherit;
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--accent);
-  cursor: pointer;
-}
-
-/* segmented tri-state */
-.access-seg {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--sp-1);
-  background: var(--bg-app);
-  border: 1px solid var(--border-subtle, var(--border));
-  border-radius: var(--radius-lg);
-  padding: var(--sp-1);
-  margin-bottom: var(--sp-5);
-}
-@media (prefers-reduced-motion: reduce) {
-  .access-row,
-  .access-twisty,
-  .access-seg,
-  .access-segbtn {
-    transition: none;
-  }
-}
-.access-segbtn {
-  border: 1px solid transparent;
-  background: transparent;
-  border-radius: var(--radius-md);
-  padding: var(--sp-3) var(--sp-3);
-  text-align: left;
-  cursor: pointer;
-  font: inherit;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  transition:
-    background var(--t-fast) var(--ease),
-    box-shadow var(--t-fast) var(--ease);
-}
-.access-segbtn:not(:disabled):hover {
-  background: var(--bg-hover);
-}
-.access-st-top {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.access-st-top svg {
-  width: 14px;
-  height: 14px;
-}
-.access-st-sub {
-  font-size: var(--fs-xs);
-  color: var(--text-tertiary);
-  line-height: 1.35;
-}
-.access-segbtn.active {
-  background: var(--bg-surface);
-  box-shadow: var(--shadow-sm);
-}
-.access-segbtn.active[data-mode="open"] {
-  box-shadow:
-    inset 0 0 0 1.5px var(--success),
-    var(--shadow-sm);
-}
-.access-segbtn.active[data-mode="open"] .access-st-top {
-  color: var(--success);
-}
-.access-segbtn.active[data-mode="readonly"] {
-  box-shadow:
-    inset 0 0 0 1.5px var(--warning),
-    var(--shadow-sm);
-}
-.access-segbtn.active[data-mode="readonly"] .access-st-top {
-  color: var(--warning);
-}
-/* Private had no accent, so the chosen card was told apart from its neighbours
-   only by a shadow — on a light ground that is not a selection, it is a guess.
-   It borrows the neutral the Private badge already uses rather than the danger
-   red: restricting a vault is a decision, not a mistake. */
-.access-segbtn.active[data-mode="private"] {
-  box-shadow:
-    inset 0 0 0 1.5px var(--text-secondary),
-    var(--shadow-sm);
-}
-.access-segbtn.active[data-mode="private"] .access-st-top {
-  color: var(--text-primary);
-}
-.access-segbtn:disabled {
-  cursor: default;
-}
-.access-segbtn.soon {
-  opacity: 0.6;
-}
-.access-soon-tag {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--accent);
-  background: var(--accent-soft);
-  padding: 1px 5px;
-  border-radius: var(--radius-pill);
-  margin-left: 2px;
-}
-
-/* who-can-access list */
-.access-people {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-.access-hint {
-  margin: var(--sp-2) 0 0;
-  padding: var(--sp-3);
-  background: var(--bg-subtle);
-  border-radius: var(--radius-md);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-body);
-  color: var(--text-secondary);
-}
-.access-hint strong {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-.access-prow {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: var(--sp-2) var(--sp-1);
-  border-radius: var(--radius-md);
-}
-.access-prow:hover {
-  background: var(--bg-subtle);
-}
-.access-prow.ai {
-  background: var(--accent-soft);
-  padding: var(--sp-2) var(--sp-3);
-  margin-bottom: var(--sp-2);
-}
-.access-prow.ai:hover {
-  background: var(--accent-soft-hover);
-}
-.access-av-wrap.ai {
-  background: var(--accent-gradient);
-  color: var(--text-on-accent);
-}
-.access-av-wrap.ai svg {
-  width: 13px;
-  height: 13px;
-}
-.access-pmain {
-  flex: 1;
-  min-width: 0;
-}
-.access-pname {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-md);
-  font-weight: 500;
-  color: var(--text-primary);
-}
-.access-you {
-  color: var(--text-tertiary);
-  font-weight: 400;
-}
-.access-prole {
-  font-size: var(--fs-xs);
-  color: var(--text-tertiary);
-  margin-top: 1px;
-}
-.access-tag {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-}
-.access-tag.ai {
-  color: var(--accent);
-  background: var(--bg-surface);
-}
-.access-lv {
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.access-lv.can {
-  color: var(--success);
-}
-.access-lv.view {
-  color: var(--warning);
-}
-.access-lv.no {
-  color: var(--text-tertiary);
-}
-/* Per-member picker in the Access panel. Same popover as the Members page's
-   role picker (see MenuSelect) — the native <select> that used to sit here was
-   the last piece of OS chrome in the product and read as unfinished beside it.
-   Sized a notch smaller than the role field because it sits inside a list row. */
-.access-choice-trigger {
-  background: var(--bg-subtle);
-  border: 1px solid transparent;
-  color: var(--text-primary);
-  border-radius: var(--radius-md);
-  padding: 5px var(--sp-2) 5px var(--sp-3);
-  font: inherit;
-  font-size: var(--fs-sm);
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  cursor: pointer;
-  white-space: nowrap;
-  flex-shrink: 0;
-  transition:
-    border-color var(--t-fast) var(--ease),
-    box-shadow var(--t-fast) var(--ease),
-    background var(--t-fast) var(--ease);
-}
-.access-choice-trigger:hover:not(:disabled) {
-  border-color: var(--border-strong);
-}
-.access-choice-trigger:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: var(--focus-ring);
-  background: var(--bg-surface);
-}
-.access-choice-trigger:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-/* Wider than the role menu (these labels carry a hint line), and with the
-   role list's `capitalize` undone — that exists for "owner"/"admin", and would
-   turn "Can view" into "Can View". Specificity matches `.context-menu.role-menu`
-   so it actually overrides it. */
-.context-menu.role-menu.access-choice-menu {
-  min-width: 232px;
-}
-.context-menu.role-menu.access-choice-menu li {
-  text-transform: none;
-  align-items: flex-start;
-}
 /* Second line on an option — says what the choice does, so "Private" doesn't
    have to be guessed at. */
 .menu-option-hint {
@@ -5548,7 +4804,7 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
     border-color var(--t-fast) var(--ease);
 }
 .oauth-btn:hover:not(:disabled) {
-  background: var(--bg-subtle);
+  background: var(--bg-hover);
   border-color: var(--border-strong, var(--border));
 }
 .oauth-btn:disabled {
@@ -6189,7 +5445,6 @@ button.sync-badge-retry:hover {
     transition: none;
   }
 }
-
 
 /* Remote cursors + selections: styled in components/editor.css (single source
    of truth). yCollab's selection highlight is kept; its inline caret is hidden
@@ -8051,7 +7306,7 @@ button.is-done:disabled {
 }
 .update-gate-actions .ghost-pill:hover:not(:disabled) {
   color: var(--text-primary);
-  background: var(--bg-subtle);
+  background: var(--bg-hover);
 }
 .update-gate .update-progress {
   width: 100%;
@@ -8259,7 +7514,7 @@ button.secondary:active:not(:disabled),
 }
 .row-more-btn:hover:not(:disabled),
 .row-more-btn.open {
-  background: var(--accent-soft);
+  background: var(--bg-hover);
   color: var(--text-primary);
 }
 .row-more-btn:disabled {
@@ -8276,6 +7531,11 @@ button.secondary:active:not(:disabled),
   flex-direction: column;
   gap: var(--sp-1);
   min-width: 0;
+}
+/* The user removed their own access: a neutral notice, not a warning. */
+.banner.reconcile-banner--quiet {
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
 }
 
 /* ---- Right panel (RightPanel.tsx): Activity / Versions ----
@@ -8436,28 +7696,32 @@ button.secondary:active:not(:disabled),
   justify-self: start;
   margin-top: 1px;
 }
-/* Text + actions on one line that WRAPS: the text grows to fill the line but
-   never shrinks below its basis, so when the actions don't fit beside it they
-   move under it (left-aligned) instead of crushing it to one word per line. */
+/* One line per row: path + time take the room left of the actions and
+   ellipsize (the full text is the row's tooltip); the actions keep their
+   natural width, right-aligned, and never drop under the text. */
 .activity-row-body {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: var(--sp-2) var(--sp-3);
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--sp-2);
   min-width: 0;
 }
 .activity-row-main {
   display: flex;
-  flex: 1 1 12rem;
-  flex-direction: column;
-  gap: 2px;
+  flex: 1 1 0;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--sp-2);
   min-width: 0;
+  overflow: hidden;
 }
 .activity-row-path {
   display: flex;
+  flex: 0 1 auto;
   align-items: center;
   gap: var(--sp-1);
   min-width: 0;
+  overflow: hidden;
   color: var(--text-primary);
 }
 .activity-row-path > * {
@@ -8468,26 +7732,31 @@ button.secondary:active:not(:disabled),
 }
 .activity-row-meta {
   display: flex;
-  flex-wrap: wrap;
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
   align-items: center;
   gap: var(--sp-1) var(--sp-2);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   font-size: var(--fs-xs);
 }
 .activity-row-actions {
   display: flex;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: flex-end;
   gap: var(--sp-1);
-  min-width: 0;
-  max-width: 100%;
+  margin-left: auto;
 }
 .activity-row-actions:empty {
   display: none;
 }
 .activity-row-actions .health-missing-actions {
-  flex-wrap: wrap;
-  gap: var(--sp-1) var(--sp-2);
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--sp-1);
 }
 .activity-more {
   align-self: flex-start;
@@ -8763,12 +8032,27 @@ button.secondary:active:not(:disabled),
 .vault-icon-settings {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
+  gap: var(--sp-2);
 }
-.vault-icon-current {
+/* One calm header row: preview · title + hint · actions. */
+.vault-icon-head {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
+}
+.vault-icon-preview {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+}
+/* Saving: a soft veil over the preview with a spinner in the middle. */
+.vault-icon-preview-busy {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-surface) 60%, transparent);
 }
 .vault-icon-preview .vault-tile {
   width: 56px;
@@ -8776,32 +8060,112 @@ button.secondary:active:not(:disabled),
   border-radius: var(--radius-md);
   font-size: var(--fs-xl);
 }
-.vault-icon-current-actions {
+.vault-icon-head-text {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-1);
   min-width: 0;
+  flex: 1;
+}
+.vault-icon-title {
+  font-size: var(--fs-md);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.vault-icon-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-shrink: 0;
+}
+/* "Choose icon and colour" — a quiet disclosure, like Health's "Ignored". */
+.vault-icon-disclosure {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.vault-icon-disclosure:hover {
+  color: var(--text-primary);
+}
+.vault-icon-disclosure:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+.vault-icon-chevron {
+  color: var(--text-tertiary);
+  transition: transform var(--t-fast) var(--ease);
+}
+.vault-icon-chevron[data-open] {
+  transform: rotate(90deg);
+}
+.vault-icon-customise {
+  --vault-icon-well: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-1) 0 var(--sp-2);
+}
+.vault-icon-label,
+.vault-icon-note {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.vault-icon-recent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.vault-icon-recent-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.vault-icon-thumb {
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+}
+.vault-icon-thumb .vault-tile {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
 }
 .vault-icon-colors {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--sp-2);
+  gap: 6px;
+}
+.vault-icon-colors .swatch {
+  width: 20px;
+  height: 20px;
 }
 .vault-icon-colors .swatch.active {
   box-shadow:
-    0 0 0 2px var(--bg-surface),
+    0 0 0 2px var(--vault-icon-well),
     0 0 0 3.5px var(--text-primary);
 }
 .vault-icon-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
-  gap: var(--sp-2);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 .vault-icon-option {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  aspect-ratio: 1;
+  width: 36px;
+  height: 36px;
   padding: 0;
   border: none;
   border-radius: var(--radius-sm);
@@ -8809,16 +8173,17 @@ button.secondary:active:not(:disabled),
   cursor: pointer;
 }
 .vault-icon-option .vault-tile {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border-radius: var(--radius-sm);
 }
 .vault-icon-option.active .vault-tile {
   box-shadow:
-    0 0 0 2px var(--bg-surface),
-    0 0 0 3.5px var(--text-primary);
+    0 0 0 2px var(--vault-icon-well),
+    0 0 0 3.5px var(--accent);
 }
-.vault-icon-option:disabled {
+.vault-icon-option:disabled,
+.vault-icon-thumb:disabled {
   cursor: default;
   opacity: 0.6;
 }
@@ -8906,9 +8271,1151 @@ button.secondary:active:not(:disabled),
     transparent calc(50% + 0.75px)
   );
 }
-.vault-icon-recent {
+
+/* ── Settings → Members and access ─────────────────────────────────────── */
+.members-access-intro {
+  margin: calc(-1 * var(--sp-2)) 0 var(--sp-4);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+.members-access-rows {
   display: flex;
   flex-direction: column;
+  margin-bottom: var(--sp-5);
+}
+.members-access-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0;
+}
+.members-access-rows > .members-access-row + .members-access-row {
+  border-top: 1px solid var(--border);
+}
+.members-access-row-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+}
+.members-access-row-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  font-size: var(--fs-xs);
+}
+.members-access-row-title {
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.members-access-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.members-access-trigger:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.members-access-trigger:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.members-access-pending {
+  display: inline-flex;
+  align-items: center;
   gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+.members-access-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+}
+.members-access-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+.members-access-search {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 1;
+  min-width: 0;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-tertiary);
+}
+.members-access-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+/* Like the search panel's `.search-box`: the wrapper owns the border and the
+   focus ring; the input inside is bare. The selectors match `.settings-page
+   input:not(…)` (and its :hover/:focus) so the filled-well rules lose. */
+.settings-page .members-access-search input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+.settings-page .members-access-search input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):hover,
+.settings-page .members-access-search input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus,
+.members-access-search input {
+  box-shadow: none;
+  border-radius: 0;
+  flex: 1;
+  min-width: 0;
+  padding: var(--sp-2) 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--fs-sm);
+}
+.members-access-search input::-webkit-search-cancel-button {
+  cursor: pointer;
+}
+/* Search and Invite share one height and centre line. */
+.members-access-search,
+.members-access-toolbar .primary {
+  height: 38px;
+  box-sizing: border-box;
+}
+.members-access-toolbar .primary {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.members-access-count {
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-xs);
+}
+.members-table {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  font-size: var(--fs-sm);
+}
+.members-table th {
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.members-table td {
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+.members-table tbody tr + tr td {
+  border-top: 1px solid var(--border);
+}
+.members-table tbody tr:hover td {
+  background: var(--bg-hover);
+}
+/* Member rows open the profile; invited rows have none and stay inert. */
+.members-table tbody tr.is-clickable {
+  cursor: pointer;
+}
+.members-table tbody tr.is-clickable:focus-visible {
+  outline: none;
+}
+.members-table tbody tr.is-clickable:focus-visible td {
+  background: var(--bg-hover);
+  box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent);
+}
+.members-table-person {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.members-table-names {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: var(--fs-xs);
+}
+.members-table-names > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.members-table-name {
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.members-table-actions {
+  width: 40px;
+  text-align: right;
+}
+.members-table .is-invited .members-table-name {
+  font-weight: 500;
+}
+@media (max-width: 720px) {
+  .members-table th:nth-child(4),
+  .members-table td:nth-child(4) {
+    display: none;
+  }
 }
 
+
+/* Quiet MCP tip under the table. */
+.members-access-mcp-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-4) 0 0;
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-body);
+}
+.members-access-mcp-hint svg {
+  flex: none;
+}
+.members-access-mcp-hint .link-btn {
+  font-size: inherit;
+}
+
+/* Profile dialog */
+/* A page inside the settings content area, not a modal: the sidebar stays. */
+.member-profile {
+  display: flex;
+  flex-direction: column;
+}
+.member-profile-back {
+  align-self: flex-start;
+  margin-bottom: var(--sp-4);
+  font-size: var(--fs-sm);
+}
+.member-profile-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.member-profile-names {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+.member-profile-name {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.member-profile-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  margin: var(--sp-4) 0 var(--sp-5);
+  border-bottom: 1px solid var(--border);
+}
+.member-profile-tab {
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: -1px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+.member-profile-tab:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+.member-profile-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+.member-profile-tab:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+.member-profile-about {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) 1fr;
+  align-items: center;
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+}
+.member-profile-about dt,
+.member-profile-about dd {
+  margin: 0;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+.member-profile-about dt {
+  color: var(--text-secondary);
+}
+.member-profile-about dd {
+  color: var(--text-primary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.member-profile-remove {
+  padding-top: var(--sp-4);
+}
+.member-access-board-pane {
+  margin: var(--sp-2) 0 0;
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+.member-access-view {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.member-access-view-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: calc(var(--radius-md) - 2px);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.member-access-view-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+.member-access-view-btn.is-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.member-activity {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+}
+.member-activity-summary {
+  margin: 0 0 var(--sp-3);
+  color: var(--text-secondary);
+}
+/* The trail: one 2px line behind every node, from the Now dot down to the
+   origin. Nodes and pills carry the surface colour so the line passes behind. */
+.member-activity-trail {
+  position: relative;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.member-activity-trail::before {
+  content: "";
+  position: absolute;
+  left: 13px;
+  top: 10px;
+  bottom: 14px;
+  width: 2px;
+  background: var(--border);
+}
+.member-activity-trail > li {
+  position: relative;
+}
+.member-activity-now {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  height: 20px;
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+}
+.member-activity-now-dot {
+  width: 10px;
+  height: 10px;
+  margin: 0 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--bg-surface);
+}
+.member-activity-day {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--sp-3) 0 var(--sp-1);
+}
+.member-activity-day-pill {
+  display: inline-block;
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+}
+.member-activity-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  animation: member-activity-in var(--t-fast) var(--ease) both;
+}
+.member-activity-node {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+.member-activity-entry.is-origin .member-activity-node {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg-surface);
+}
+.member-activity-body {
+  flex: 1;
+  min-width: 0;
+  padding-top: 4px;
+}
+.member-activity-text {
+  margin: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.member-activity-text strong,
+.member-activity-run strong {
+  font-weight: 600;
+}
+.member-activity-time {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.member-activity-note {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.member-activity-note:hover strong {
+  text-decoration: underline;
+}
+.member-activity-disclose {
+  margin-top: var(--sp-1);
+  font-size: var(--fs-xs);
+}
+.member-activity-run {
+  list-style: none;
+  margin: var(--sp-1) 0 0;
+  padding: 0 0 0 var(--sp-3);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.member-activity-empty {
+  margin: var(--sp-4) 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+@keyframes member-activity-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .member-activity-entry { animation: none; }
+}
+.member-profile-access {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.member-profile-loading {
+  display: grid;
+  place-items: center;
+  padding: var(--sp-6);
+}
+.member-access-tree {
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+.member-access-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  /* One height whether or not the row carries a pill. */
+  min-height: 40px;
+  padding-right: var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+}
+.member-access-row:hover {
+  background: var(--bg-hover);
+}
+/* Left: caret · checkbox · icon · name. */
+.member-access-main {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: 1;
+  min-width: 0;
+}
+.member-access-row.is-inherited .member-access-name,
+.member-access-row.is-inherited .member-access-icon {
+  color: var(--text-tertiary);
+}
+/* Same footprint as the sidebar's row glyph (.tree-glyph: 18px box, 15px
+   icon), widened to a comfortable hit target. */
+.member-access-twisty {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+button.member-access-twisty:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.member-access-twisty svg {
+  width: 15px;
+  height: 15px;
+  transition: transform var(--t-fast) var(--ease);
+}
+.member-access-twisty.is-open svg {
+  transform: rotate(90deg);
+}
+/* The label is the hit area; the box itself is the app's 16px checkbox.
+   `.modal input` (and any other surface's filled-well rule) sets inputs to
+   width: 100%, which once made the checkbox swallow the row. */
+.member-access-check {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+}
+.member-access-row input[type="checkbox"] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.member-access-row input[type="checkbox"]:disabled {
+  cursor: default;
+}
+.member-access-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-right: var(--sp-1);
+  color: var(--text-secondary);
+}
+.member-access-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.member-access-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+/* Annotations sit just left of the level column, muted. */
+.member-access-notes {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+.member-access-note {
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.member-access-tag {
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+/* A fixed right column so every pill lines up, as on the main page's rows. */
+.member-access-level {
+  display: inline-flex;
+  justify-content: flex-end;
+  flex: none;
+  width: 92px;
+}
+/* One pill shape for every level control in the profile tree: fixed width and
+   height so a label change ("Can view" → "Can edit" → "Mixed") never moves
+   it, text centred, caret a fixed 5px after the label. */
+.member-access-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  box-sizing: border-box;
+  width: 92px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+.member-access-pill:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.member-access-pill[aria-expanded="true"] {
+  border-color: var(--accent);
+}
+.member-access-pill:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.member-access-pill .role-caret {
+  flex: none;
+}
+/* "Across the vault": the same pill one size up, wide enough for
+   "Can view everything" so it never resizes either. */
+.member-access-pill.is-lg {
+  width: 172px;
+  height: 32px;
+  padding: 0 10px;
+  font-size: var(--fs-sm);
+}
+/* "Across the vault" row: inset from the card edge, dropdown never clipped. */
+.member-profile-access > .members-access-row {
+  padding: var(--sp-3) var(--sp-2);
+}
+.member-profile-access > .members-access-row .role-select-wrap,
+.member-access-level .role-select-wrap {
+  flex: none;
+}
+.member-profile,
+.member-profile-access {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Invite people dialog */
+.invite-people {
+  width: 520px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.invite-people .confirm-title {
+  margin: 0;
+  text-align: left;
+}
+.invite-people .confirm-actions {
+  justify-content: flex-end;
+}
+.invite-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: 40px;
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  cursor: text;
+}
+.invite-chips:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+.modal .invite-chips input,
+.modal .invite-chips input:hover,
+.modal .invite-chips input:focus {
+  flex: 1;
+  min-width: 140px;
+  padding: var(--sp-1);
+  border: none;
+  box-shadow: none;
+  background: transparent;
+}
+.invite-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 2px var(--sp-1) 2px var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+  font-size: var(--fs-xs);
+}
+.invite-chip.is-invalid {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.invite-chip button {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.invite-chip button:hover {
+  background: var(--bg-hover);
+}
+/* Role and Access: two equal bordered boxes, label left, value right — the
+   same height, border and radius as the email field above them. The label
+   element makes the whole box open its menu. */
+.invite-people-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+}
+.invite-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  min-width: 0;
+  height: 44px;
+  padding: 0 var(--sp-1) 0 var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease);
+}
+.invite-field:hover {
+  border-color: var(--border-strong);
+}
+.invite-field:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+.invite-field-label {
+  flex: none;
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs);
+}
+.invite-field-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+  padding: var(--sp-1) var(--sp-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.invite-field-trigger:focus-visible {
+  outline: none;
+}
+.invite-field-trigger:disabled {
+  color: var(--text-tertiary);
+  cursor: default;
+}
+/* Join code: one centred line, code in accent mono, Copy quiet on the right. */
+.invite-people-code {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  line-height: 1;
+}
+.invite-people-code-value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  background: none;
+  padding: 0;
+}
+.invite-people-copy {
+  margin-left: auto;
+  font-size: var(--fs-sm);
+}
+/* Footer: compact, equal-height buttons on the right. Disabled Send keeps a
+   readable label (accent text on the soft accent) instead of a washed-out fill. */
+.invite-people .invite-people-actions {
+  justify-content: flex-end;
+  margin-top: var(--sp-1);
+}
+.invite-people .invite-people-actions .primary,
+.invite-people .invite-people-actions .ghost-pill {
+  min-width: 0;
+  height: 36px;
+  padding: 0 var(--sp-4);
+  font-size: var(--fs-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.invite-people .invite-people-actions .primary:disabled {
+  opacity: 1;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* ---- Member profile: Access board (MemberAccessBoard.tsx) ----------------
+   Three columns (Can edit / Can view / No access); rows move by drag and drop
+   or by their arrows. Grey rows are path-only ancestors. */
+.access-board {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.access-board-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.access-board-intro {
+  margin: 0;
+  color: var(--text-secondary);
+}
+/* Nothing on the board is text to select: a drag used to paint selections
+   across column titles and the empty placeholder. */
+.access-board-column-head,
+.access-board-empty,
+.access-board-row,
+.access-board-ghost,
+.access-board.is-dragging,
+.access-board.is-dragging *,
+body.access-board-grabbing {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.access-board-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+.access-board-column {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  padding: 4px 8px 8px;
+  transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.access-board-column.is-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.access-board-column-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 40px;
+  padding: 0 4px 0 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.access-board-column-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.access-board-count {
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+.access-board-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-height: 36px;
+}
+.access-board-empty {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-size: 0.9em;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  margin-top: 2px;
+}
+.access-board-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding-right: 4px;
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  cursor: grab;
+  min-width: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.access-board-row:hover {
+  background: var(--bg-hover);
+}
+/* The source slot while its ghost is in the air. */
+.access-board-row.is-dragging {
+  opacity: 0.35;
+  background: var(--bg-hover);
+}
+.access-board-row[data-movable="false"] {
+  cursor: default;
+}
+body.access-board-grabbing,
+body.access-board-grabbing * {
+  cursor: grabbing !important;
+}
+/* The lifted row following the pointer; positioned by transform from JS. */
+.access-board-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 500;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
+  opacity: 0.9;
+}
+.access-board-ghost {
+  animation: access-board-lift 120ms ease-out both;
+}
+@keyframes access-board-lift {
+  from { scale: 1; rotate: 0deg; }
+  to { scale: 1.02; rotate: 1.2deg; }
+}
+.access-board-row.is-landing {
+  animation: access-board-land 220ms ease-out both;
+  background: var(--accent-soft);
+  transition: background 600ms var(--ease);
+}
+@keyframes access-board-land {
+  from { opacity: 0; transform: translateY(-6px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+/* The slot a moved row left closes instead of snapping shut. */
+.access-board-gap {
+  height: 0;
+  animation: access-board-gap 180ms ease-out both;
+  pointer-events: none;
+}
+@keyframes access-board-gap {
+  from { height: 36px; opacity: 1; }
+  to { height: 0; opacity: 0; }
+}
+.access-board-row.is-path {
+  color: var(--text-tertiary);
+  cursor: default;
+  pointer-events: none;
+}
+.access-board-row.is-path:hover {
+  background: none;
+}
+.access-board-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-secondary);
+}
+.access-board-row.is-path .access-board-icon {
+  color: var(--text-tertiary);
+}
+.access-board-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.access-board-arrows {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+}
+.access-board-arrow {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.access-board-arrow:hover:not(:disabled) {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+.access-board-arrow:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.access-board-drop-line {
+  height: 2px;
+  margin: 4px 6px 0;
+  border-radius: 1px;
+  background: var(--accent);
+}
+.access-board-loading {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+}
+.access-board-hint,
+.access-board-failed {
+  margin: 0;
+  font-size: 0.85em;
+  color: var(--text-tertiary);
+}
+/* "Set everything to": Reset sits in its own group under a rule. */
+.context-menu.access-board-everything-menu li:last-child {
+  position: relative;
+  margin-top: 9px;
+}
+.context-menu.access-board-everything-menu li:last-child::before {
+  content: "";
+  position: absolute;
+  left: var(--sp-2);
+  right: var(--sp-2);
+  top: -5px;
+  height: 1px;
+  background: var(--border);
+  pointer-events: none;
+}
+/* No value is ever "on" in these action menus: drop the tick column. */
+.context-menu.access-board-everything-menu .menu-tick,
+.context-menu.access-board-column-menu .menu-tick {
+  display: none;
+}
+/* The column menu's "Remove all" is destructive. */
+.context-menu.access-board-column-menu li:nth-child(2) .role-option-label {
+  color: var(--danger);
+}
+.context-menu.access-board-column-menu li:nth-child(2) .menu-option-hint {
+  color: var(--text-secondary);
+}
+@media (prefers-reduced-motion: reduce) {
+  .access-board-ghost {
+    animation: none;
+    scale: 1;
+    rotate: 0deg;
+  }
+  .access-board-row.is-landing {
+    animation: access-board-fade 120ms linear both;
+  }
+  .access-board-gap {
+    animation: none;
+  }
+  .access-board-column {
+    transition: none;
+  }
+}
+@keyframes access-board-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (max-width: 720px) {
+  .access-board-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

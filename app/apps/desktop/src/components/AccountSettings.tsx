@@ -41,6 +41,7 @@ import { ContentWidthPreview } from "./ContentWidthPreview";
 import { MenuSelect } from "./MenuSelect";
 import { serverFailureMessage } from "./serverFailureMessage";
 import { SettingsModal } from "./SettingsModal";
+import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
 import { ThemeToggle } from "./ThemeToggle";
 
@@ -129,6 +130,7 @@ export function AccountSettings({
 }) {
   const session = useStore((s) => s.session);
   const [tab, setTab] = useState<AccountTab>(initialTab ?? "profile");
+  const vaultOpen = useStore((s) => s.vault !== null);
 
   // Esc, click-away, focus and the backdrop all live in `SettingsModal`.
   if (!session) return null;
@@ -160,6 +162,15 @@ export function AccountSettings({
               <span className="menu-item-label">{t.label}</span>
             </button>
           ))}
+          {vaultOpen && (
+            <SettingsCrossLink
+              label="Vault settings"
+              onOpen={() => {
+                onClose();
+                useStore.getState().requestSettings("general");
+              }}
+            />
+          )}
         </nav>
 
         <section className="settings-content" aria-label={activeTab.label}>
@@ -744,35 +755,38 @@ function AboutTab({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="about-tab">
-      <div className="menu-row">
-        <span className="menu-row-label">Current version</span>
-        <span className="mono">{version ?? "…"}</span>
-      </div>
-
-      <div className="update-actions">
-        <button
-          className="primary sm update-check-btn"
-          disabled={busy}
-          aria-busy={busy}
-          onClick={() => void checkAndAutoInstall()}
-        >
-          {busy && <span className="btn-spinner" aria-hidden="true" />}
-          <span>Check for updates</span>
-        </button>
-        <span className={`update-status${statusError ? " error" : ""}`} role="status" aria-live="polite">
-          {statusText}
-        </span>
-      </div>
-
-      {/* The one moment worth a button: the bytes are in and we are holding the
-          restart for a pause in typing. Someone who is done can take it now. */}
-      {update.phase === "ready" && (
-        <div className="update-actions">
-          <button className="primary sm" onClick={() => void relaunchForUpdate()}>
+      {/* One row: version + status on the left, the action on the right. The
+          status line is always rendered (empty when idle) so a check never
+          shifts the row; the button keeps a fixed width for the same reason. */}
+      <div className="about-update-row">
+        <div className="about-update-text">
+          <div className="about-version">
+            <span className="menu-row-label">Current version</span>
+            <span className="mono">{version ?? "…"}</span>
+          </div>
+          <span className={`update-status${statusError ? " error" : ""}`} role="status" aria-live="polite">
+            {statusText}
+          </span>
+        </div>
+        {/* The one moment worth an accent button: the bytes are in and we are
+            holding the restart for a pause in typing. Someone who is done can
+            take it now. (The check button is disabled in this phase anyway.) */}
+        {update.phase === "ready" ? (
+          <button className="primary sm about-update-btn" onClick={() => void relaunchForUpdate()}>
             Restart now
           </button>
-        </div>
-      )}
+        ) : (
+          <button
+            className="secondary sm about-update-btn"
+            disabled={busy}
+            aria-busy={busy}
+            onClick={() => void checkAndAutoInstall()}
+          >
+            {busy && <span className="btn-spinner" aria-hidden="true" />}
+            <span>{update.phase === "checking" ? "Checking…" : busy ? "Updating…" : "Check for updates"}</span>
+          </button>
+        )}
+      </div>
 
       <div className="menu-sep" />
       <button

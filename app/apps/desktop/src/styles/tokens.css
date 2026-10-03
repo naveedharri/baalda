@@ -20,8 +20,8 @@
      the old lavender-cool greys read blue against the beige. */
   --bg-subtle: #f5f4f2;         /* subtle wells, input fills */
   --bg-card: #faf9f8;           /* panel cards in settings/health — the brand beige, same as --bg-app */
-  --bg-hover: #edecea;          /* hover fills */
-  --bg-active: #e5e4e1;         /* pressed / selected fills */
+  --bg-hover: color-mix(in srgb, var(--accent-soft) 60%, transparent); /* hover fills: the one app-wide hover, a light accent tint */
+  --bg-active: var(--accent-soft-hover); /* pressed / selected fills: a deeper step of the hover tint */
 
   /* Text */
   --text-primary: #1a1a1e;
@@ -230,8 +230,8 @@
   --bg-surface: #1c1c20;
   --bg-subtle: #242429;
   --bg-card: #242429;
-  --bg-hover: #2b2b31;
-  --bg-active: #35353d;
+  --bg-hover: #29273d;          /* hover: the accent at 13% over --bg-surface (solid, so contrast is checkable) */
+  --bg-active: #343156;         /* pressed / selected: the accent at 24% over --bg-surface; text-tertiary stays ≥ 4.5:1 */
 
   /* Off-white body copy is comfortable over long sessions. Secondary and
      tertiary copy remain above 4.5:1 even on the lighter interaction layers. */
@@ -284,8 +284,8 @@
     --bg-surface: #1c1c20;
     --bg-subtle: #242429;
     --bg-card: #242429;
-    --bg-hover: #2b2b31;
-    --bg-active: #35353d;
+    --bg-hover: #29273d;          /* hover: the accent at 13% over --bg-surface (solid, so contrast is checkable) */
+    --bg-active: #343156;         /* pressed / selected: the accent at 24% over --bg-surface; text-tertiary stays ≥ 4.5:1 */
 
     --text-primary: #ececf1;
     --text-secondary: #b8b8c0;

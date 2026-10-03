@@ -337,7 +337,7 @@ function InvitationRowActions({
             /* clipboard unavailable */
           }
         }
-        const how = copied ? "Its link is copied; share it with them." : "Share its link from Vault Settings → Members.";
+        const how = copied ? "Its link is copied; share it with them." : "Share its link from Vault Settings → Members and access.";
         toast(
           r.emailError ? `New invitation created, but the email failed: ${r.emailError} ${how}` : `New invitation created. ${how}`,
           r.emailError ? "error" : "success",
@@ -522,11 +522,11 @@ export function ActivityFeed() {
                 >
                   {row.label}
                 </span>
-                {/* Text and actions share one wrapping line: the text keeps a
-                    readable minimum and the actions drop beneath it when the
-                    panel is too narrow for both, never squeezing the text. */}
+                {/* Text and actions share one line: path and time ellipsize
+                    (the full text and clock time are the row's one tooltip),
+                    the actions stay right-aligned at their natural width. */}
                 <div className="activity-row-body">
-                  <span className="activity-row-main" title={rowTitle(row)}>
+                  <span className="activity-row-main" title={`${rowTitle(row)}\n${clockTime(row.at)}`}>
                     <span className="activity-row-path">
                       {row.path ? <PathText path={row.path} /> : "text" in row ? <span>{row.text}</span> : null}
                       {row.type === "reconcile" && row.item.newPath && (
@@ -538,7 +538,7 @@ export function ActivityFeed() {
                         </>
                       )}
                     </span>
-                    <span className="activity-row-meta muted" title={clockTime(row.at)}>
+                    <span className="activity-row-meta muted">
                       {rowMeta(row, now)}
                       {row.type === "trash" && row.item.hasUnsyncedContributions && (
                         <span

@@ -47,6 +47,7 @@ import { Checkpointer, checkpointBatchFor } from "./checkpoint";
 import { sha256Hex } from "../bridge/adapter";
 import { mergeSv, svFromBase64, svIsEmpty, svToBase64, unseenWork } from "./ackedSv";
 import { reconcileReport } from "./reconcileReport";
+import { isSelfAccessChange } from "./selfAccessChanges";
 
 /** Timestamped `.context/trash` folder for an inbound-removal recovery copy. */
 function recoveryStamp(): string {
@@ -749,6 +750,18 @@ export class VaultRegistry {
     } catch (e) {
       console.warn("[registry] accessGranted listener threw", e);
     }
+  }
+
+  /**
+   * Did this device's user just remove their OWN access to `docId` (the note,
+   * an ancestor folder, or the whole vault)? Only changes the WORDING of the
+   * report line; the removal and its recovery copy are decided before this.
+   */
+  isSelfRevocation(docId: string, path: string): boolean {
+    const ids: Array<string | null | undefined> = [docId, this.organizationId, this.vaultId];
+    const segs = path.split("/");
+    for (let i = segs.length - 1; i > 0; i--) ids.push(this.folderByPath.get(segs.slice(0, i).join("/")));
+    return isSelfAccessChange(ids);
   }
 
   /** Paths (lower-cased) this pass may re-create that were mapped before it. */
@@ -2419,7 +2432,9 @@ export class VaultRegistry {
         this.host?.noteRemoved(gone.docId, gone.path, trashedTo, gone.reason, bulkRemoval);
         if (trashedTo !== null) {
           reconcileReport.record({
-            kind: gone.reason === "revoked" ? "keptLocally" : "deletedByTeammate",
+            kind: gone.reason !== "revoked"
+              ? "deletedByTeammate"
+              : this.isSelfRevocation(gone.docId, gone.path) ? "selfRevoked" : "keptLocally",
             docId: gone.docId,
             path: gone.path,
             detail: trashedTo,
@@ -3503,6 +3518,9 @@ export class VaultRegistry {
     // Access GRANTS: notes readable now that were not in the previous pass's
     // listing. Measured against the listing, before anything below maps them.
     this.detectAccessGrants(serverNotes);
+    // A note listed again is readable again: its "you lost this" report line
+    // (kept locally / deleted by a teammate) no longer holds this session.
+    reconcileReport.forgetReadable(new Set(serverNotes.map((n) => noteDocId(n))));
 
     // 1. Inbound: apply the server's structural changes to disk. Runs first so the
     //    outbound steps below see a tree that already agrees about paths.
