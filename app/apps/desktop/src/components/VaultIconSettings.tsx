@@ -27,26 +27,6 @@ import { useVaultIconRaw, VaultTile } from "./VaultSwitcher";
 
 /** How many of the remembered uploads the picker offers. */
 const RECENT_SHOWN = 6;
-/** Device-local: whether the icon/colour picker is expanded. Default closed. */
-const CUSTOMISE_OPEN_KEY = "context.vaultIcon.customiseOpen";
-
-function readCustomiseOpen(): boolean {
-  try {
-    return localStorage.getItem(CUSTOMISE_OPEN_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeCustomiseOpen(open: boolean) {
-  try {
-    if (open) localStorage.setItem(CUSTOMISE_OPEN_KEY, "1");
-    else localStorage.removeItem(CUSTOMISE_OPEN_KEY);
-  } catch {
-    // Storage unavailable: the choice just doesn't outlive the dialog.
-  }
-}
-
 /**
  * Vault settings → General → Vault icon: pick a preset glyph and colour, or
  * upload an image. A synced vault's icon is the team's (stored on the server,
@@ -136,11 +116,6 @@ export function VaultIconSettings({
   const isSynced = identity.startsWith("org:");
   const usingImage = current.kind === "image";
   const shownRecent = recent.slice(0, RECENT_SHOWN);
-  const [open, setOpenState] = useState(readCustomiseOpen);
-  const setOpen = (next: boolean) => {
-    setOpenState(next);
-    writeCustomiseOpen(next);
-  };
 
   return (
     <div className="vault-icon-settings">
@@ -206,113 +181,86 @@ export function VaultIconSettings({
         </div>
       )}
 
-      <button
-        type="button"
-        className="vault-icon-disclosure"
-        aria-expanded={open}
-        aria-controls="vault-icon-customise"
-        onClick={() => setOpen(!open)}
-      >
-        <svg
-          className="vault-icon-chevron"
-          data-open={open ? "" : undefined}
-          viewBox="0 0 24 24"
-          width="14"
-          height="14"
-          aria-hidden="true"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="m9 6 6 6-6 6" />
-        </svg>
-        Choose icon and colour
-      </button>
-
-      {open && (
-        <div className="vault-icon-customise" id="vault-icon-customise" aria-busy={busy || undefined}>
-          {shownRecent.length > 0 && (
-            <div className="vault-icon-recent">
-              <span className="vault-icon-label">Recent uploads</span>
-              <div className="vault-icon-recent-row" role="radiogroup" aria-label="Recent uploads">
-                {shownRecent.map((src) => {
-                  const selected = current.kind === "image" && current.src === src;
-                  return (
-                    <button
-                      key={src}
-                      className={`vault-icon-thumb${selected ? " active" : ""}`}
-                      role="radio"
-                      aria-checked={selected}
-                      title="Use this image"
-                      disabled={!canEdit || busy}
-                      onClick={() => {
-                        rememberRecentUpload(src);
-                        void save(serializeVaultIcon({ kind: "image", src }), "image");
-                      }}
-                    >
-                      <span className="vault-tile image">
-                        <img src={src} alt="" draggable={false} />
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+      <div className="vault-icon-customise" aria-busy={busy || undefined}>
+        {shownRecent.length > 0 && (
+          <div className="vault-icon-recent">
+            <span className="vault-icon-label">Recent uploads</span>
+            <div className="vault-icon-recent-row" role="radiogroup" aria-label="Recent uploads">
+              {shownRecent.map((src) => {
+                const selected = current.kind === "image" && current.src === src;
+                return (
+                  <button
+                    key={src}
+                    className={`vault-icon-thumb${selected ? " active" : ""}`}
+                    role="radio"
+                    aria-checked={selected}
+                    title="Use this image"
+                    disabled={!canEdit || busy}
+                    onClick={() => {
+                      rememberRecentUpload(src);
+                      void save(serializeVaultIcon({ kind: "image", src }), "image");
+                    }}
+                  >
+                    <span className="vault-tile image">
+                      <img src={src} alt="" draggable={false} />
+                    </span>
+                  </button>
+                );
+              })}
             </div>
-          )}
+          </div>
+        )}
 
-          <div className="vault-icon-colors" role="radiogroup" aria-label="Icon colour">
-            {/* No background: the glyph alone, in the text colour. */}
+        <div className="vault-icon-colors" role="radiogroup" aria-label="Icon colour">
+          {/* No background: the glyph alone, in the text colour. */}
+          <button
+            className={`swatch swatch-none${color === NO_COLOR ? " active" : ""}`}
+            role="radio"
+            aria-checked={color === NO_COLOR}
+            title="None"
+            disabled={!canEdit || busy}
+            onClick={() => pickColor(NO_COLOR)}
+          />
+          {ITEM_COLORS.map((c) => (
             <button
-              className={`swatch swatch-none${color === NO_COLOR ? " active" : ""}`}
+              key={c.id}
+              className={`swatch${c.id === color ? " active" : ""}`}
+              style={{ background: c.value } as CSSProperties}
               role="radio"
-              aria-checked={color === NO_COLOR}
-              title="None"
+              aria-checked={c.id === color}
+              title={c.label}
               disabled={!canEdit || busy}
-              onClick={() => pickColor(NO_COLOR)}
+              onClick={() => pickColor(c.id)}
             />
-            {ITEM_COLORS.map((c) => (
-              <button
-                key={c.id}
-                className={`swatch${c.id === color ? " active" : ""}`}
-                style={{ background: c.value } as CSSProperties}
-                role="radio"
-                aria-checked={c.id === color}
-                title={c.label}
-                disabled={!canEdit || busy}
-                onClick={() => pickColor(c.id)}
-              />
-            ))}
-          </div>
-
-          {usingImage && (
-            <span className="vault-icon-note">
-              Using your uploaded image. Pick an icon to switch back.
-            </span>
-          )}
-          <div className="vault-icon-grid" role="radiogroup" aria-label="Icon">
-            {VAULT_ICON_NAMES.map((icon) => {
-              const selected = current.kind === "preset" && current.icon === icon;
-              return (
-                <button
-                  key={icon}
-                  className={`vault-icon-option${selected ? " active" : ""}`}
-                  role="radio"
-                  aria-checked={selected}
-                  title={icon}
-                  disabled={!canEdit || busy}
-                  onClick={() => pickPreset(icon)}
-                >
-                  <span className={`vault-tile${color === NO_COLOR ? " none" : ""}`}>
-                    <VaultIconSvg icon={icon} color={color} />
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+          ))}
         </div>
-      )}
+
+        {usingImage && (
+          <span className="vault-icon-note">
+            Using your uploaded image. Pick an icon to switch back.
+          </span>
+        )}
+        <div className="vault-icon-grid" role="radiogroup" aria-label="Icon">
+          {VAULT_ICON_NAMES.map((icon) => {
+            const selected = current.kind === "preset" && current.icon === icon;
+            return (
+              <button
+                key={icon}
+                className={`vault-icon-option${selected ? " active" : ""}`}
+                role="radio"
+                aria-checked={selected}
+                title={icon}
+                disabled={!canEdit || busy}
+                onClick={() => pickPreset(icon)}
+              >
+                <span className={`vault-tile${color === NO_COLOR ? " none" : ""}`}>
+                  <VaultIconSvg icon={icon} color={color} />
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

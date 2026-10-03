@@ -8077,35 +8077,6 @@ button.secondary:active:not(:disabled),
   gap: var(--sp-3);
   flex-shrink: 0;
 }
-/* "Choose icon and colour" — a quiet disclosure, like Health's "Ignored". */
-.vault-icon-disclosure {
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-1);
-  padding: var(--sp-1) 0;
-  background: none;
-  border: 0;
-  font: inherit;
-  font-size: var(--fs-sm);
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.vault-icon-disclosure:hover {
-  color: var(--text-primary);
-}
-.vault-icon-disclosure:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: var(--radius-sm);
-}
-.vault-icon-chevron {
-  color: var(--text-tertiary);
-  transition: transform var(--t-fast) var(--ease);
-}
-.vault-icon-chevron[data-open] {
-  transform: rotate(90deg);
-}
 .vault-icon-customise {
   --vault-icon-well: var(--bg-surface);
   display: flex;
