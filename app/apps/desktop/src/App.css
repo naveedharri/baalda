@@ -881,7 +881,7 @@ body:has(.sidebar-resizer.dragging) {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: calc(var(--sp-4) + var(--titlebar-inset)) var(--sp-3) var(--sp-3);
+  padding: calc(var(--sp-6) + var(--titlebar-inset)) var(--sp-3) var(--sp-3);
 }
 .sidebar-header-main {
   display: flex;
@@ -1123,7 +1123,8 @@ body:has(.sidebar-resizer.dragging) {
 .filetree-empty {
   color: var(--text-tertiary);
   font-size: var(--fs-sm);
-  padding: var(--sp-3);
+  /* Same left inset as the Notes label in `.filetree-head`. */
+  padding: var(--sp-3) var(--sp-3) var(--sp-3) calc(var(--sp-3) + var(--sp-2));
 }
 
 /* ============================================================
@@ -1320,15 +1321,18 @@ body:has(.sidebar-resizer.dragging) {
   align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-1) var(--sp-2);
-  padding: var(--sp-1) var(--sp-2) var(--sp-1) calc(var(--sp-3) + var(--sp-2));
+  /* Same 17px inset as the tree rows (`TreeRowView`'s paddingLeft), so the
+     select-all box sits in the rows' checkbox column. */
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) 17px;
   min-height: 30px;
   border-bottom: 1px solid var(--border);
   margin-bottom: var(--sp-1);
 }
 .selbar-check {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
+  /* Same size as the rows' `.tree-check`, so the column lines up exactly. */
+  width: 16px;
+  height: 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1350,8 +1354,8 @@ body:has(.sidebar-resizer.dragging) {
   border-color: var(--accent);
 }
 .selbar-check svg {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
 }
 .selbar-count {
   flex: 1;
@@ -1747,9 +1751,9 @@ body:has(.sidebar-resizer.dragging) {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  margin-left: var(--sp-1);
-  /* Sits between the label and the ⋯ button; never pushed off by a long name
-     (the label ellipsizes first). */
+  margin: 0 var(--sp-1);
+  /* Sits between the label and the lock/sync badges, so it never shifts their
+     column; a long name fades out first. */
 }
 .tree-presence-avatar {
   position: relative;
@@ -3752,7 +3756,8 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
    tuned for the settings pages that also use them. The popover is wider than
    the sidebar precisely so names get room; oversized rows spent that room on
    air instead. Scoped so AccountSettings' tab list keeps the larger scale. */
-.account-popover .menu-item {
+.account-popover .menu-item,
+.vault-switcher .menu-item {
   font-size: var(--fs-sm);
   padding: 5px var(--sp-2);
 }
@@ -3761,7 +3766,8 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   height: 18px;
   font-size: 10px;
 }
-.account-popover .menu-icon {
+.account-popover .menu-icon,
+.vault-switcher .menu-icon {
   width: 14px;
   height: 14px;
 }
@@ -3792,6 +3798,192 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   left: var(--sp-2);
   right: var(--sp-2);
 }
+
+/* ---- Vault switcher (Slack's workspace menu) ----
+   The vault name is the trigger; each vault is an icon card with its ⌘N. */
+.vault-switch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  max-width: 100%;
+  margin-left: calc(-1 * var(--sp-1));
+  padding: 1px var(--sp-1);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+/* The chevron follows a short name; a long name hides it (SidebarHeader
+   measures). The button is capped so the name stops on the tree rows' sync-dot
+   column: a 20px box centred 33px in from the right edge, i.e. 23px clear of
+   it — 19px here plus this button's own 4px right padding. The chevron's 3px
+   side padding makes its box those 20px. */
+.sidebar-header-main .vault-switch-btn {
+  max-width: calc(100% - 19px);
+}
+.vault-switch-btn .vault-name {
+  min-width: 0;
+  text-align: left;
+}
+.vault-switch-chevron {
+  box-sizing: content-box;
+  width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform var(--t-fast) var(--ease);
+}
+.vault-switch-btn.open .vault-switch-chevron {
+  transform: rotate(180deg);
+}
+/* Tile on the left spanning both lines; name row + path line on the right. */
+.sidebar-header-id {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.sidebar-header-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vault-switch-tile {
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+}
+/* A playful little wiggle on hover — it invites a click without the heavy
+   hover fill the name used to have. */
+.vault-switch-tile:hover .vault-tile {
+  animation: vault-tile-wiggle 520ms cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+@keyframes vault-tile-wiggle {
+  0% { transform: rotate(0) scale(1); }
+  20% { transform: rotate(-8deg) scale(1.06); }
+  45% { transform: rotate(6deg) scale(1.06); }
+  70% { transform: rotate(-3deg) scale(1.03); }
+  100% { transform: rotate(0) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vault-switch-tile:hover .vault-tile {
+    animation: none;
+  }
+}
+.vault-switch-tile .vault-tile {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-lg);
+}
+.vault-switcher {
+  /* Just under the tile + name block, opening rightward past the sidebar. */
+  top: calc(100% + var(--sp-1));
+  left: 0;
+  right: auto;
+  /* Same width as the account menu (`.account-popover`), so the two read as one family. */
+  width: 348px;
+  max-width: calc(100vw - var(--sp-4));
+  /* Four vaults and a handful of actions: it always fits, so never scroll. */
+  max-height: none;
+  overflow: visible;
+}
+.vault-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: 4px var(--sp-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.vault-card:hover {
+  background: var(--bg-hover);
+}
+.vault-tile {
+  overflow: hidden;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--tile-fill, var(--accent-soft));
+  color: var(--tile-ink, var(--accent));
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+.vault-icon-svg,
+.vault-icon-svg svg,
+.vault-tile.image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.vault-tile.image img {
+  object-fit: cover;
+}
+/* An uploaded image is shown as-is — no coloured square behind it, which
+   used to show through a logo's transparent corners. */
+.vault-tile.image {
+  background: none;
+}
+/* "None" colour: just the glyph, in the surrounding text colour. */
+.vault-tile.none {
+  background: none;
+  color: var(--text-secondary);
+}
+/* The open vault gets Slack's ring: a gap, then an outline. */
+.vault-card.current .vault-tile {
+  box-shadow:
+    0 0 0 1.5px var(--bg-surface),
+    0 0 0 3px var(--text-primary);
+}
+.vault-card-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.vault-card-name,
+.vault-card-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vault-card-name {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.vault-card-sub {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+.vault-card-kbd {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+
 .menu-account {
   display: flex;
   align-items: center;
@@ -8566,3 +8758,157 @@ button.secondary:active:not(:disabled),
   font-size: var(--fs-sm);
   color: var(--text-secondary);
 }
+
+/* ---- Vault settings → General → Vault icon ---- */
+.vault-icon-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.vault-icon-current {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.vault-icon-preview .vault-tile {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-xl);
+}
+.vault-icon-current-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.vault-icon-colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.vault-icon-colors .swatch.active {
+  box-shadow:
+    0 0 0 2px var(--bg-surface),
+    0 0 0 3.5px var(--text-primary);
+}
+.vault-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
+  gap: var(--sp-2);
+}
+.vault-icon-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+}
+.vault-icon-option .vault-tile {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+}
+.vault-icon-option.active .vault-tile {
+  box-shadow:
+    0 0 0 2px var(--bg-surface),
+    0 0 0 3.5px var(--text-primary);
+}
+.vault-icon-option:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* Account menu: where the vault items went. */
+.menu-moved-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+.menu-moved-note .menu-icon {
+  margin-top: 1px;
+}
+
+/* ---- Account settings → Profile → picture (styled like the vault icon picker) ---- */
+.profile-hero-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-shrink: 0;
+}
+/* The gallery sits in a quiet panel under the hero, so it reads as part of
+   the picture rather than a stray row between form fields. */
+.profile-characters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+}
+.profile-character-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 40px);
+  justify-content: space-between;
+  gap: var(--sp-3) var(--sp-2);
+}
+.profile-character-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  transition: transform var(--t-fast) var(--ease);
+}
+.profile-character-option:hover {
+  transform: scale(1.08);
+}
+.profile-character-option .avatar {
+  width: 40px;
+  height: 40px;
+}
+.profile-character-option.active .avatar {
+  box-shadow:
+    0 0 0 2px var(--bg-subtle),
+    0 0 0 3.5px var(--text-primary);
+}
+/* Autosave feedback under the profile form; reserves its line so nothing jumps. */
+.profile-save-status {
+  min-height: 1.4em;
+}
+
+/* The "None" colour swatch: an empty ring crossed by a slash. */
+.vault-icon-colors .swatch-none {
+  background: var(--bg-surface);
+  border: 1.5px solid var(--border-strong, var(--border));
+  background-image: linear-gradient(
+    135deg,
+    transparent calc(50% - 0.75px),
+    var(--text-tertiary) calc(50% - 0.75px),
+    var(--text-tertiary) calc(50% + 0.75px),
+    transparent calc(50% + 0.75px)
+  );
+}
+.vault-icon-recent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
