@@ -13,6 +13,7 @@ import {
 import { oauthConnectRoutes } from "./routes/oauth-connect.js";
 import { accountPageRoutes } from "./routes/account-pages.js";
 import { invitationRoutes } from "./routes/invitations.js";
+import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
 import { passwordResetRoutes } from "./routes/password-reset.js";
 import { openLinkRoutes } from "./routes/open-link.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
@@ -233,6 +234,11 @@ export function createApp(deps: AppDeps): Hono {
   // Invitation preview (public, by unguessable id) + the signed-in inbox that
   // sidesteps Better Auth's verified-email gate on list-user-invitations.
   app.route("/api", invitationRoutes);
+  app.route("/api", memberRoutes);
+  app.route(
+    "/api",
+    createMemberShareRoutes({ disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged }),
+  );
   // Password reset request that reports sent / no account / failed (Better
   // Auth's own endpoint is neutral and swallows send errors).
   app.route("/api", passwordResetRoutes);

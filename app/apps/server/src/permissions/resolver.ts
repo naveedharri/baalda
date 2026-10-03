@@ -27,6 +27,27 @@ import { pool as defaultPool } from "../db/pool.js";
  * `none`, full stop; an ORG deny (the item set to Private) leaves only the
  * creator and explicit per-user grants. See {@link isDenied}.
  *
+ * A PERSON'S VAULT LEVEL (a per-user row on the vault resource, principal
+ * 'user', permission edit/view/readonly/denied) is "person wins either way" at
+ * the whole-vault level. It REPLACES the vault-wide baseline for that one
+ * person — the org posture (Everyone row), the join snapshot, the owner/admin
+ * shortcut and the creator rule — and nothing else; owners and admins get no
+ * exemption. The item-level logic then runs unchanged on top of it:
+ *   - `edit`   → edit everywhere (a grant that lifts above Read-only, sealed or
+ *                a Private join snapshot);
+ *   - `view`   → view everywhere: it raises someone who had nothing AND caps
+ *                someone who would have had edit (posture, admin shortcut,
+ *                authorship, an `open` snapshot);
+ *   - `denied` → nothing from the vault itself (authorship withdrawn, like
+ *                `sealed`) AND no org grant on any item either (Everyone
+ *                folder/file shares are dropped, as under item-Private) —
+ *                only a per-user item grant can lift them.
+ * Item rows stay more specific than the person's vault level: a per-user
+ * folder/file grant still lifts above `view`/`denied` (an org item grant
+ * lifts above `view` only); a per-user
+ * item deny is still absolute; an item set Private still drops org grants; and
+ * locks/readonly still cap below `edit`. See {@link personalVaultLevel}.
+ *
  * Locks (permission = 'locked') are a cap overlay resolved AFTER the rules
  * above: when a lock matches the doc or any ancestor folder — for this user
  * (principal_type 'user') or the whole vault (principal_type 'org') — the
@@ -77,6 +98,9 @@ export interface ResolverCache {
   role(db: Queryable, organizationId: string, userId: string): Promise<string | null>;
   baseline(db: Queryable, organizationId: string): Promise<VaultPosture>;
   snapshot(db: Queryable, organizationId: string, userId: string): Promise<MemberAccessSnapshot | null>;
+  /** The person's own vault level ({@link personalVaultLevel}), a fact about
+   *  the (vault, user) like the three above — read at most once per request. */
+  personal(db: Queryable, organizationId: string, userId: string): Promise<PersonalVaultLevel>;
   ancestors(db: Queryable, folderId: string | null): Promise<string[]>;
   /**
    * Role, join snapshot and vault posture for one (vault, user) in ONE query,
@@ -120,6 +144,7 @@ export function createResolverCache(): ResolverCache {
   const roles = new Map<string, Promise<string | null>>();
   const baselines = new Map<string, Promise<VaultPosture>>();
   const snapshots = new Map<string, Promise<MemberAccessSnapshot | null>>();
+  const personals = new Map<string, Promise<PersonalVaultLevel>>();
   const chains = new Map<string, Promise<string[]>>();
   const memberships = new Map<string, Promise<MembershipFacts>>();
   const preloadedDocs = new Map<string, PreloadedDoc>();
@@ -141,6 +166,10 @@ export function createResolverCache(): ResolverCache {
     snapshot: (db, organizationId, userId) =>
       memo(snapshots, `${organizationId}\u0000${userId}`, () =>
         memberAccessSnapshot(db, organizationId, userId),
+      ),
+    personal: (db, organizationId, userId) =>
+      memo(personals, `${organizationId}\u0000${userId}`, () =>
+        personalVaultLevel(db, organizationId, userId),
       ),
     ancestors: (db, folderId) =>
       folderId === null
@@ -323,14 +352,36 @@ function rowsGrants(
   userId: string,
   organizationId: string,
   orgClause: boolean,
+  /** False when the person's own vault level replaces the org posture: the
+   *  org-principal VAULT row is then skipped (org item rows still count). */
+  orgVaultClause = true,
 ): ShareRow[] {
   return rows.filter((r) =>
     (r.resource_type === "file" || r.resource_type === "folder" ||
       (r.resource_type === "vault" && r.resource_id === organizationId)) &&
     (r.permission === "view" || r.permission === "edit" || r.permission === "readonly") &&
     ((r.principal_type === "user" && r.principal_id === userId) ||
-      (orgClause && r.principal_type === "org" && r.principal_id === organizationId)),
+      (orgClause && r.principal_type === "org" && r.principal_id === organizationId &&
+        (orgVaultClause || r.resource_type !== "vault"))),
   );
+}
+
+/**
+ * A person's own level for the whole vault — see {@link personalVaultLevel}.
+ * In-memory twin of its SELECT, over any superset of rows.
+ */
+function rowsPersonalVault(rows: readonly ShareRow[], userId: string, organizationId: string): PersonalVaultLevel {
+  const row = rows.find((r) =>
+    r.resource_type === "vault" && r.resource_id === organizationId &&
+    r.principal_type === "user" && r.principal_id === userId &&
+    (r.permission === "edit" || r.permission === "view" || r.permission === "readonly" || r.permission === "denied"),
+  );
+  return personalLevelOf(row?.permission);
+}
+
+/** In-memory {@link personalVaultLevel} from an {@link AccessIndex}. */
+function indexedPersonalVault(index: AccessIndex, userId: string): PersonalVaultLevel {
+  return rowsPersonalVault(index.shares.get(shareKey("vault", index.organizationId)) ?? [], userId, index.organizationId);
 }
 
 /** In-memory {@link isDenied}. The file branch matches `resource_type = 'file'`. */
@@ -357,8 +408,9 @@ function indexedGrantRows(
   folderIds: string[],
   organizationId: string,
   orgClause: boolean,
+  orgVaultClause = true,
 ): ShareRow[] {
-  return rowsGrants(indexedRows(index, docId, folderIds, organizationId), userId, organizationId, orgClause);
+  return rowsGrants(indexedRows(index, docId, folderIds, organizationId), userId, organizationId, orgClause, orgVaultClause);
 }
 
 /**
@@ -643,6 +695,9 @@ async function sharePermission(
   snapshot?: MemberAccessSnapshot | null,
   resourceCreatedAt?: Date,
   index?: AccessIndex,
+  /** False when the person's own vault level replaces the org posture — the
+   *  org VAULT row is skipped, org item rows still apply. */
+  orgVaultClause = true,
 ): Promise<Permission> {
   // Team (org-wide) grants apply ONLY to actual vault members — never to
   // outsiders who merely know a doc id. They can target a specific folder/file
@@ -656,14 +711,14 @@ async function sharePermission(
     ? `OR (principal_type = 'org' AND principal_id = $4 AND (
             ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
             OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
-            OR (resource_type = 'vault' AND resource_id = $4)
+            ${orgVaultClause ? "OR (resource_type = 'vault' AND resource_id = $4)" : ""}
           ))`
     : "";
   // $2 (the doc id) is always referenced with an explicit cast + null guard so
   // Postgres can infer its type even for a folder resource, where docId is null
   // and the file branch is inert.
   const { rows } = index
-    ? { rows: indexedGrantRows(index, userId, docId, folderIds, organizationId, isMember && orgGrantsApply) }
+    ? { rows: indexedGrantRows(index, userId, docId, folderIds, organizationId, isMember && orgGrantsApply, orgVaultClause) }
     : await db.query<{
     permission: string;
     principal_type: string;
@@ -800,6 +855,45 @@ function postureOf(p: string | null | undefined): VaultPosture {
 }
 
 /**
+ * The person's OWN level for the whole vault: their per-user row on the vault
+ * resource (`readonly` reads as `view`), or null when they have none and the
+ * org posture decides.
+ *
+ * "Person wins either way": when present it REPLACES, for this one person, the
+ * whole vault-wide baseline — the org posture row, the join snapshot, the
+ * owner/admin shortcut and the creator rule. `view` therefore caps as well as
+ * grants, and `denied` withdraws authorship like `sealed`. Item-level rows run
+ * unchanged on top of it (see the header of this file). Owners and admins are
+ * not exempt; management stays role-based so they can always undo it.
+ *
+ * At most one row exists: the table is unique on (resource_type, resource_id,
+ * principal_type, principal_id).
+ */
+export type PersonalVaultLevel = "edit" | "view" | "denied" | null;
+
+function personalLevelOf(p: string | null | undefined): PersonalVaultLevel {
+  if (p === "edit") return "edit";
+  if (p === "view" || p === "readonly") return "view";
+  return p === "denied" ? "denied" : null;
+}
+
+export async function personalVaultLevel(
+  db: Queryable,
+  organizationId: string,
+  userId: string,
+): Promise<PersonalVaultLevel> {
+  const { rows } = await db.query<{ permission: string }>(
+    `SELECT permission FROM shares
+      WHERE resource_type = 'vault' AND resource_id = $1
+        AND principal_type = 'user' AND principal_id = $2
+        AND permission IN ('edit', 'view', 'readonly', 'denied')
+      LIMIT 1`,
+    [organizationId, userId],
+  );
+  return personalLevelOf(rows[0]?.permission);
+}
+
+/**
  * {@link memberRole}, {@link memberAccessSnapshot} and {@link vaultBaseline} as
  * ONE round trip. Each column is that function's own SELECT, verbatim, as a
  * scalar subquery (the snapshot is keyed by its primary key, so the LEFT JOIN
@@ -926,14 +1020,18 @@ export async function effectivePermission(
     orgGrantsApply: boolean,
     snapshot?: MemberAccessSnapshot | null,
     resourceCreatedAt?: Date,
+    orgVaultClause = true,
   ) =>
     rows
       ? grantFromRows(
-          rowsGrants(rows, userId, loc.organizationId, isMember && orgGrantsApply),
+          rowsGrants(rows, userId, loc.organizationId, isMember && orgGrantsApply, orgVaultClause),
           snapshot,
           resourceCreatedAt,
         )
-      : sharePermission(db, userId, docId, folderIds, loc.organizationId, isMember, orgGrantsApply, snapshot, resourceCreatedAt);
+      : sharePermission(
+          db, userId, docId, folderIds, loc.organizationId, isMember, orgGrantsApply,
+          snapshot, resourceCreatedAt, undefined, orgVaultClause,
+        );
 
   // Denies are first and unconditional. Both kinds outrank the role branch
   // below: what you set in the Access panel applies to you too, or a vault
@@ -946,6 +1044,24 @@ export async function effectivePermission(
 
   const facts = cache ? await cache.membership(db, loc.organizationId, userId) : null;
   const role = facts ? facts.role : await memberRole(db, loc.organizationId, userId);
+
+  // The person's own vault level replaces the whole vault-wide baseline (org
+  // posture, join snapshot, role shortcut, authorship) — see
+  // {@link personalVaultLevel}. What remains is the item-level logic: the
+  // person's own vault row (edit/view) and every item grant, highest-wins, with
+  // the org VAULT row skipped and org item rows dropped under item-Private; the
+  // per-user item deny above already returned; locks cap below.
+  const personal = rows
+    ? rowsPersonalVault(rows, userId, loc.organizationId)
+    : await personalVaultLevel(db, loc.organizationId, userId);
+  if (personal !== null) {
+    // A personal `denied` drops org ITEM grants too, exactly like an item set
+    // Private: only per-user item grants can lift a person out of "No access".
+    const granted = await grant(role !== null, !itemPrivate && personal !== "denied", undefined, undefined, false);
+    if (granted !== "none" && (await locked())) return "view";
+    return granted;
+  }
+
   const snapshot = facts ? facts.snapshot : await memberAccessSnapshot(db, loc.organizationId, userId);
   const existingAtJoin = !!snapshot && loc.createdAt <= snapshot.snapshotAt;
 
@@ -1157,6 +1273,32 @@ export async function resolveAccessForUser(
     return { permission: "none", capped: false, denied: true };
   }
   const itemPrivate = await denied("org", ctx.organizationId);
+  // The person's own vault level — mirrors `effectivePermission` exactly.
+  const personal = index
+    ? indexedPersonalVault(index, userId)
+    : cache
+      ? await cache.personal(db, ctx.organizationId, userId)
+      : await personalVaultLevel(db, ctx.organizationId, userId);
+  if (personal !== null) {
+    const granted = await sharePermission(
+      db,
+      userId,
+      ctx.docId,
+      ctx.folderIds,
+      ctx.organizationId,
+      role !== null,
+      !itemPrivate && personal !== "denied",
+      undefined,
+      undefined,
+      index,
+      false,
+    );
+    if (granted === "none") return { permission: "none", capped: false, denied: itemPrivate || personal === "denied" };
+    const locked = await lockedFor();
+    if (locked && granted === "edit") return { permission: "view", capped: true };
+    if (locked) return { permission: "view", capped: false };
+    return { permission: granted, capped: false };
+  }
   const snapshot = cache
     ? await cache.snapshot(db, ctx.organizationId, userId)
     : await memberAccessSnapshot(db, ctx.organizationId, userId);

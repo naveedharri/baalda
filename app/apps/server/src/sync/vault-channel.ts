@@ -87,6 +87,12 @@ export interface VaultChannelDeps {
    * Unbound: never held.
    */
   brakeState?: (userId: string, vaultId: string) => { until: number; count: number } | null;
+  /**
+   * Record that this member was active in this vault (Members page "last
+   * active"). Called once per authenticated hello, fire-and-forget; the
+   * implementation throttles and never throws. Unbound: nothing is recorded.
+   */
+  noteLastSeen?: (userId: string, vaultId: string) => void;
 }
 
 /** Default coalescing window for structural-change broadcasts (ms). A reconcile
@@ -143,6 +149,7 @@ export class VaultChannel {
   private readonly sendPollMs: number;
   private readonly heartbeatMs: number;
   private readonly brakeState: VaultChannelDeps["brakeState"];
+  private readonly noteLastSeen: VaultChannelDeps["noteLastSeen"];
   /** Live connections, so the shared heartbeat has something to sweep. Entries
    *  remove themselves from `cleanup()`, i.e. on close/terminate/failure. */
   private readonly connections = new Set<VaultConnection>();
@@ -174,6 +181,7 @@ export class VaultChannel {
     this.heartbeatMs = deps.heartbeatMs ?? config.vaultHeartbeatMs;
     this.registryCoalesceMs = deps.registryCoalesceMs ?? REGISTRY_COALESCE_MS;
     this.brakeState = deps.brakeState;
+    this.noteLastSeen = deps.noteLastSeen;
   }
 
   /** Fan an incremental doc update out to the vault's subscribers (any instance). */
@@ -417,6 +425,7 @@ export class VaultChannel {
       sendStallMs: this.sendStallMs,
       sendPollMs: this.sendPollMs,
       brakeState: this.brakeState,
+      noteLastSeen: this.noteLastSeen,
       onGone: (c) => this.connections.delete(c),
     });
     this.connections.add(conn);
@@ -434,6 +443,7 @@ interface ConnDeps {
   sendStallMs: number;
   sendPollMs: number;
   brakeState?: VaultChannelDeps["brakeState"];
+  noteLastSeen?: VaultChannelDeps["noteLastSeen"];
   onGone: (conn: VaultConnection) => void;
 }
 
@@ -581,6 +591,11 @@ class VaultConnection {
     }
     this.userId = claims.userId;
     this.vaultId = claims.vaultId;
+    try {
+      this.deps.noteLastSeen?.(this.userId, this.vaultId);
+    } catch {
+      // never let a "last active" stamp affect the handshake
+    }
     if (this.closed) return; // closed while verifying — don't run the ACL query
 
     try {

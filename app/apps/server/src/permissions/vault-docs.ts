@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
-import { memberAccessSnapshot, vaultBaseline } from "./resolver.js";
+import { memberAccessSnapshot, personalVaultLevel, type PersonalVaultLevel, vaultBaseline } from "./resolver.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -41,12 +41,22 @@ type Queryable = Pick<pg.Pool, "query">;
  * else — the org-wide grant, which Shared and Read-only write and Private does
  * not — so all eight surfaces follow the posture without a line of their own.
  * See [[resolver]] `vaultBaseline`.
+ *
+ * A person's OWN vault level (`personal`, a per-user row on the vault resource)
+ * replaces the org posture for them — [[resolver]] `personalVaultLevel`:
+ * `edit`/`view` is vault-wide read whatever the posture, `denied` is NOT
+ * vault-wide read even in a Shared vault.
  */
 export async function vaultAccess(
   db: Queryable,
   userId: string,
   vaultId: string,
-): Promise<{ organizationId: string; role: string | null; vaultWide: boolean } | null> {
+): Promise<{
+  organizationId: string;
+  role: string | null;
+  vaultWide: boolean;
+  personal: PersonalVaultLevel;
+} | null> {
   const org = await db.query<{ organization_id: string; role: string | null }>(
     `SELECT v.organization_id, m.role
        FROM vaults v
@@ -57,7 +67,9 @@ export async function vaultAccess(
   );
   const row = org.rows[0];
   if (!row) return null;
-  const base = { organizationId: row.organization_id, role: row.role };
+  const personal = await personalVaultLevel(db, row.organization_id, userId);
+  const base = { organizationId: row.organization_id, role: row.role, personal };
+  if (personal !== null) return { ...base, vaultWide: personal !== "denied" };
   const orgClause = row.role !== null ? "principal_type = 'org' OR" : "";
   const grant = await db.query(
     `SELECT 1 FROM shares
@@ -204,7 +216,7 @@ async function listDocsInVault(
 ): Promise<Set<string>> {
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return new Set(); // unknown vault
-  const { organizationId, role, vaultWide } = access;
+  const { organizationId, role, vaultWide, personal } = access;
 
   // The ONLY difference between the two sets. `files` has no `deleted_at`
   // column, so a tombstone can never be a file — the UNIONs below drop out.
@@ -367,7 +379,11 @@ async function listDocsInVault(
   // per-user grants still lift, which is what makes "sealed vault, one folder
   // shared with the team" work. A vault that was merely never shared is NOT
   // this: there, people keep what they wrote.
-  const sealed = (await vaultBaseline(db, organizationId)) === "sealed";
+  //
+  // A person's own vault level replaces the posture for them, and drops
+  // authorship the same way (`view` reaches everything anyway; `denied` is the
+  // per-person sealed).
+  const sealed = personal !== null || (await vaultBaseline(db, organizationId)) === "sealed";
 
   let reachable: Set<string>;
   if (vaultWide) {
@@ -381,10 +397,14 @@ async function listDocsInVault(
     );
     reachable = new Set(rows.map((r) => r.id));
   } else {
-    reachable = await scopedDocs(true, !sealed);
+    // A personal `denied` drops org item grants too (resolver
+    // `personalVaultLevel`): only per-user shares reach the person.
+    reachable = await scopedDocs(personal !== "denied", !sealed);
   }
 
-  const snapshot = await memberAccessSnapshot(db, organizationId, userId);
+  // The join snapshot is part of the vault-wide baseline a person's own vault
+  // level replaces, so it is ignored when they have one.
+  const snapshot = personal !== null ? null : await memberAccessSnapshot(db, organizationId, userId);
   if (snapshot) {
     const existingRows = await db.query<{ id: string }>(
       opts.deleted
@@ -551,18 +571,21 @@ export async function listVisibleFolders(
   const orgDenied = await deniedFolderIds(db, "org", access.organizationId);
   // Neither deny is undone by authorship — see `listDocsInVault`.
   const hidden = (id: string) => userDenied.has(id) || orgDenied.has(id);
-  const snapshot = await memberAccessSnapshot(db, access.organizationId, userId);
+  // A person's own vault level replaces the join snapshot (see `listDocsInVault`).
+  const snapshot = access.personal !== null ? null : await memberAccessSnapshot(db, access.organizationId, userId);
   if (access.vaultWide && snapshot?.mode !== "private") {
     return all.rows.filter((f) => !hidden(f.id));
   }
 
   const readable = await listReadableDocsInVault(userId, vaultId, db);
-  const isMember = access.role !== null;
+  // A personal `denied` drops org item grants, so team folder shares seed nothing.
+  const isMember = access.role !== null && access.personal !== "denied";
   // Authorship seeds the tree everywhere EXCEPT in a SEALED vault, which drops
   // it for everyone (see `listDocsInVault`). Leaving it in would show a folder
   // whose every note has gone — the tree and the notes in it disagreeing about
   // the same setting.
-  const authorSeeds = (await vaultBaseline(db, access.organizationId)) !== "sealed";
+  const authorSeeds =
+    access.personal === null && (await vaultBaseline(db, access.organizationId)) !== "sealed";
   const { rows: visibleIds } = await db.query<{ id: string }>(
     `WITH RECURSIVE seed AS (
         SELECT id FROM folders WHERE vault_id = $2 AND $6 AND created_by = $1

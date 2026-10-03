@@ -10,6 +10,7 @@ import {
   memberAccessSnapshot,
   resolveAccessForUser,
   vaultBaseline,
+  personalVaultLevel,
   type ResolverCache,
 } from "./resolver.js";
 import { listReadableDocsInVault, vaultAccess } from "./vault-docs.js";
@@ -105,11 +106,16 @@ export async function canEditFolder(
     ? await cache.snapshot(db, row.organization_id, userId)
     : await memberAccessSnapshot(db, row.organization_id, userId);
   const existingAtJoin = !!snapshot && row.created_at <= snapshot.snapshotAt;
+  // A person's own vault level replaces posture, snapshot, role shortcut and
+  // authorship for them (resolver `personalVaultLevel`), so the resolver decides.
+  const personal = cache
+    ? await cache.personal(db, row.organization_id, userId)
+    : await personalVaultLevel(db, row.organization_id, userId);
 
   // An item set Private, a Read-only vault, a sealed vault and a pre-join
   // folder all skip the shortcuts AND the creator rule, and let the share
   // lookup decide — that is how a folder marked Shared still lifts someone out.
-  if (itemPrivate || readOnlyVault || sealedVault || existingAtJoin) {
+  if (personal !== null || itemPrivate || readOnlyVault || sealedVault || existingAtJoin) {
     const ctx = await buildAccessContext("folder", folderId, db, cache);
     if (!ctx) return false;
     return (await resolveAccessForUser(ctx, userId, role, db, cache)).permission === "edit";
@@ -365,6 +371,11 @@ export async function vaultRootWritable(
   db: Queryable = defaultPool,
   cache?: ResolverCache,
 ): Promise<boolean> {
+  // A person's own vault level decides for them, whatever the posture.
+  const personal = cache
+    ? await cache.personal(db, organizationId, userId)
+    : await personalVaultLevel(db, organizationId, userId);
+  if (personal !== null) return personal === "edit";
   const posture = cache
     ? await cache.baseline(db, organizationId)
     : await vaultBaseline(db, organizationId);

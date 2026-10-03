@@ -1,3 +1,4 @@
+import { noteLastSeenForVault } from "./members/last-seen.js";
 import { serve } from "@hono/node-server";
 import type { Server as HttpServer } from "node:http";
 import { config } from "./config.js";
@@ -78,6 +79,7 @@ async function main() {
     pubsub,
     // A client (re)connecting during a shrink-brake hold is told why (#252).
     brakeState: (userId, vaultId) => shrinkBrake.holdOf(userId, vaultId),
+    noteLastSeen: noteLastSeenForVault,
   });
 
   // Every publish below is fire-and-forget, and every one of them can reject

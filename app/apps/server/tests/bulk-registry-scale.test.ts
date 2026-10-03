@@ -61,15 +61,17 @@ describe("registration batch query count", () => {
   /**
    * 200 brand-new notes in ONE folder.
    *
-   * 11 statements, and every one of them is named:
+   * 12 statements, and every one of them is named:
    *   1 — the adopt probe, prefilled for all 200 paths with `lower(rel_path) = ANY`
    *   1 — the parent-folder map, ditto for the one directory they name
-   *   8 — `canCreateIn` on that folder (memoised per folder, as it always was;
-   *       one of them is the member's join snapshot, memoised per vault)
+   *   9 — `canCreateIn` on that folder (memoised per folder, as it always was;
+   *       one of them is the member's join snapshot and one the caller's own
+   *       per-user vault level — resolver `personalVaultLevel` — both memoised
+   *       per (vault, user) for the request)
    *   1 — the `INSERT … SELECT FROM unnest(…) ON CONFLICT (id) DO NOTHING`
    * The frozen-root latch adds none: nothing here resolves to the root.
    */
-  it("registers 200 new notes in one folder in a constant 11 statements", async () => {
+  it("registers 200 new notes in one folder in a constant 12 statements", async () => {
     await seedFolder(vault, null, "Docs", "Docs");
     const counter = countingDb();
     const ctx = registerCtx(vault, owner.userId, counter.db);
@@ -82,7 +84,7 @@ describe("registration batch query count", () => {
       })),
     );
     expect(out.every((r) => r.status === "created")).toBe(true);
-    expect(counter.count()).toBe(11);
+    expect(counter.count()).toBe(12);
 
     const { rows } = await pool.query<{ n: number }>(
       "SELECT count(*)::int AS n FROM notes WHERE vault_id = $1 AND deleted_at IS NULL",
@@ -130,12 +132,13 @@ describe("registration batch query count", () => {
       })),
     );
     expect(out.every((r) => r.status === "created")).toBe(true);
-    // 106 = 1 adopt probe + 1 folder map + 1 insert + 103 for the write gate
-    // (~5 per folder; the member role, the vault baseline and the join snapshot
-    // are memoised for the whole request, down from ~7). Before this change the same call was
+    // 107 = 1 adopt probe + 1 folder map + 1 insert + 104 for the write gate
+    // (~5 per folder; the member role, the vault baseline, the join snapshot
+    // and the caller's per-user vault level are memoised for the whole request,
+    // so the last costs +1 per request, not per folder; down from ~7). Before this change the same call was
     // ~740 statements — 200 adopt probes + 200 parent lookups + 20×7 + 200
     // inserts — run serially on one connection. The number that matters is that
     // NOTHING here scales with the note count any more.
-    expect(counter.count()).toBe(106);
+    expect(counter.count()).toBe(107);
   });
 });

@@ -10,6 +10,7 @@ import {
   isActiveStatus,
 } from "../../billing/store.js";
 import { announceMemberJoined } from "../../sync/member-events.js";
+import { applyInvitationAccess } from "../../members/invitation-access.js";
 import { billingEnabled } from "../../config.js";
 import { dispatchMail, emailEnabled } from "../../email/mailer.js";
 import { memberLeftEmail, youLeftVaultEmail } from "../../email/templates.js";
@@ -558,6 +559,17 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       throw err;
     } finally {
       client.release();
+    }
+
+    // The invite's chosen access (invitation_access, m046) applies here too:
+    // the code is just the door an invited person walked through. Only a LIVE
+    // invite counts, like the role above. After COMMIT, so the member row
+    // (and its m032 snapshot) exists.
+    if (liveInvite) {
+      await applyInvitationAccess(
+        { invitationIds: [liveInvite.id], organizationId, userId: session.userId },
+        { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
+      );
     }
 
     // Announce to teammates already live in the vault (this path bypasses

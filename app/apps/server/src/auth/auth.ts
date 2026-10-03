@@ -14,6 +14,7 @@ import { isValidVaultIcon } from "./vault-icon.js";
 import { isValidProfileImage } from "./profile-image.js";
 import { hasExpiryNotice } from "../invitations/expiries.js";
 import { invitationActivityChanged } from "../invitations/sweep.js";
+import { applyInvitationAccess } from "../members/invitation-access.js";
 
 /**
  * Better Auth (spec 04 §1/§2).
@@ -305,6 +306,13 @@ export const auth = betterAuth({
         // creation adds the owner via `afterAddMember`, which we deliberately
         // don't hook — no one should be "welcomed" to their own new vault.)
         afterAcceptInvitation: async (data) => {
+          // Apply the access the inviter chose (invitation_access, m046). The
+          // member row exists by now; best-effort, never fails the accept.
+          await applyInvitationAccess({
+            invitationIds: [data.invitation.id],
+            organizationId: data.organization.id,
+            userId: data.user.id,
+          });
           const name = data.user.name?.trim() || data.user.email;
           await announceMemberJoined(data.organization.id, name);
         },
