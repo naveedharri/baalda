@@ -310,3 +310,30 @@ keeps the Assistant available when operator billing is enabled, disabled, or con
 later. `cloud` (the fail-closed default) requires Pro even without payment
 credentials and enforces the Free note cap. Self-hosting `.env.example` opts in
 explicitly; no managed configuration is stored in this repository.
+
+## Members and access page (2026-10-04)
+
+Vault Settings' Members and Access tabs are merged into one **Members and access** tab. Owners and
+admins set the **Everyone** row (Can edit / Can view / No access, the same `open`/`readonly`/`private`
+wire values), the **New members** row (the existing `join_default`) and a per-person level (Can edit
+everything / Can view everything / No access / Custom). A person's profile has an Access tab with
+per-folder checkboxes that apply immediately; plain members see a read-only roster. Existing
+per-folder Everyone overrides can only be reset, not created. **Invite people** sends invitations
+with a role and an access level, applied on acceptance by email link or join code. On the server a
+per-user vault row is now that person's absolute vault level ("person wins either way"), kept in
+lockstep across the resolver, the readable set, the create gates and the locks listing. Migration 046
+adds `member.last_seen_at` and `invitation_access`; `GET /api/orgs/:orgId/members/overview` and
+`POST /api/orgs/:orgId/invitations` are new. Invitations last 7 days by default
+(`INVITATION_EXPIRES_HOURS`).
+
+Later the same day: the member profile has Personal info / Access / Activity tabs, and the Access
+tab toggles (per device, `context.memberAccess.view`) between **List**, the checkbox tree,
+and **Board**, the default (Can edit / Can view / No access columns, drag-and-drop or arrows, Set everything to
++ Reset to vault default; same one-resource bulk-access writes; single-row moves need no confirm
+and report through the standard toast, with no undo; pointer-event drag, since Tauri swallows
+native HTML5 drag-and-drop). The overview
+now carries `invitedBy`, and `GET /api/orgs/:orgId/members/:userId/activity` (owner/admin or self;
+404 `not_member`) returns joined / created / edited / accessGranted events filtered to the
+caller's readable set. Vault Settings lost its Updates tab (now Account Settings → About), the
+Health tab is hidden behind `SHOW_HEALTH_TAB` pending #289, the two settings dialogs cross-link,
+and hover/pressed colours are one accent tint (`--bg-hover`/`--bg-active`).

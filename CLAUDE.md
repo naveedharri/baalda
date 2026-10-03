@@ -272,9 +272,14 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   (`conflictPath`) and registered as its own note — never adopted onto the other's id. A rename made
   while the app was closed is paired back by content hash at startup (`pairClosedAppRenames`) so the
   `doc_id` survives. Every such action is recorded as a `ReconcileKind` (`restoredFromServer`,
-  `deletedByTeammate`, `renamedConflict`, `keptLocally`, `folderKept`, `externalEditSaved`) and shown
-  once per session as one plain-words summary (`ReconcileBanner`, details in Health's
-  `HealthReconcile`); nothing in the report persists.
+  `deletedByTeammate`, `renamedConflict`, `keptLocally`, `selfRevoked`, `folderKept`,
+  `externalEditSaved`) and shown once per session as one plain-words summary (`ReconcileBanner`,
+  details in Health's `HealthReconcile`); nothing in the report persists. `selfRevoked` is a
+  revocation caused by an access change THIS device made for the signed-in user in the last 60 s
+  (`sync/selfAccessChanges.ts` `markSelfAccessChange`/`isSelfAccessChange`): the same safety outcome
+  as `keptLocally`, reported quietly and left out of the "N changes to review" count.
+  `reconcileReport.forgetReadable(docIds)` drops `keptLocally`/`deletedByTeammate`/`selfRevoked`
+  entries for docs the server lists again on a later pull, so regained access shrinks the banner.
 - **Paths compare case-insensitively everywhere** — notes (`samePath`) AND folders in `planInbound`, like
   the server's `lower(path)` unique indexes and the outbound `registry.ts` adoption. A vault whose disk
   said `Projects/community` while the server said `Projects/Community` (with empty server folders under
@@ -315,14 +320,39 @@ and the title widget's `eq()` compares only `{path, readOnly, hasFrontmatter, mo
   `frontmatterView(state)` is the single authority for which of the three renderings the region gets —
   two block replaces over one range would throw.
 
-`AccessPanel` treats the vault mode as **unknown until fetched** (`teamAccess: TeamAccess | null`;
-`lib/teamAccessCache.ts` seeds the paint from localStorage but can never authorise a write, which
-waits for the real GET) — falling back to Private flashed the opposite of the truth on every open of
-a shared vault. `lib/accessMode.ts` `effectiveTeamMode` is the single authority for both the row
-badges and the detail pane's tri-state, mirroring `permissions/resolver.ts` at the org level.
-The panel now edits one or many folder/file rows through the atomic bulk-access API; its synthetic
-Entire vault row is mutually exclusive with item selections. **Everyone** replaces both org and
-per-member overrides in the selected subtrees, while a named audience replaces only those members.
+Vault Settings has ONE **Members and access** tab (id `members`; the old `access` tab and
+`AccessPanel.tsx` are gone): `components/MembersAccessTab.tsx`, `MemberProfilePage.tsx` (a PAGE
+inside Vault Settings with a back link, not a dialog; rows open it on click; tabs Personal info /
+Access / Activity), `InvitePeopleDialog.tsx`, pure logic in `lib/membersAccess.ts`. Owners/admins see the
+**Everyone in <vault>** row (Can edit / Can view / No access = wire `open`/`readonly`/`private`), the
+**New members** row ("For notes made before they joined": Can edit / Can view / No access
+= `join_default`), and a per-person Access cell (Can edit everything / Can view everything /
+No access / Custom) plus a ⋯ menu (View profile, Manage access, Make admin/member, Remove). Plain
+members get a read-only roster from `GET /orgs/:orgId/members/overview`. "Owners and admins can always
+manage access" means *manage*, never an exemption from the caps they set. Existing per-folder
+Everyone overrides are only shown and reset (the "N folders have different access for everyone"
+banner → `PUT team-access`); no UI creates new ones. One person's per-folder checkboxes live in
+their profile's Access tab and apply immediately through the atomic bulk-access API (users
+audience); the tree updates optimistically and re-reads only the affected subtree plus its ancestors,
+never a fresh `listAccessTree`. The Access tab has a segmented icon toggle (top-right) between two
+views, persisted per device in localStorage `context.memberAccess.view`: **List** (that
+checkbox tree with the "Across the vault" level) and **Board** (default; `MemberAccessBoard.tsx`, the same
+bulk-access writes, one resource per write): columns Can edit / Can view / No access, rows moved by
+drag-and-drop or arrows, grey ancestor rows showing only the path (up to 5 levels), a "Set
+everything to" menu with Reset to vault default and per-column Add all / Remove all. A single-row
+move applies at once with no confirm and no undo; the app's standard toast states the result
+("Sara can now view X."). Only Set everything to (when lowering), Remove all and Reset ask first.
+Board drag uses **pointer events**, never native HTML5 drag-and-drop: Tauri's `dragDropEnabled`
+swallows HTML5 drag events inside the webview, so they never fire. A press becomes a drag after
+4px, the drop target is the whole column band under the pointer, and moves animate (lift, column
+highlight, landing).
+Personal info shows Name, Email, Role, Joined ("…, invited by X"), Last active and Status
+(Online/Away from vault presence); Activity renders `GET …/members/:userId/activity`. Vault Settings
+no longer has an Updates tab (version + Check for updates live in Account Settings → About), and
+each settings dialog cross-links the other bottom-left. Hover/pressed colours are one accent tint
+app-wide (`--bg-hover`/`--bg-active` in `tokens.css`). A quiet tip under the list links to the MCP tab. The vault mode is **unknown until fetched** (`lib/teamAccessCache.ts` seeds the paint
+from localStorage but can never authorise a write); `lib/accessMode.ts` `effectiveTeamMode` stays
+the single authority for resolved modes, mirroring `permissions/resolver.ts` at the org level.
 `readonly` is the item-level combined grant+cap (the vault posture still stores `view`).
 
 Automatic sidebar colours are a deterministic, account-personal fallback for FOLDERS without an
@@ -332,7 +362,8 @@ always win and participate in that neighbour check. Automatic colours are stable
 can be turned off in Account Settings → Appearance; they are ON by default (an explicit off is
 kept). The palette pairs baalda.com's pastel fills with a deeper outline of the same hue.
 
-Vault Health reads `vaultSyncStatus` from the vault channel independently of the open note's
+The Vault Settings Health tab is hidden behind `SHOW_HEALTH_TAB` pending #289; what follows
+describes it as built. Vault Health reads `vaultSyncStatus` from the vault channel independently of the open note's
 `syncStatus`, which still controls editor permissions. A note-level refusal is not lost vault
 membership. Inbound safety refusals are `inbound-blocked` issues, distinct from disk write failures;
 large issue lists render in pages.
@@ -367,7 +398,9 @@ pre-deploy via `node dist/db/migrate.js`). MCP writes
 flow through the same sync server via `createDocWriter` so AI edits persist/broadcast like human edits.
 - `auth/auth.ts` — Better Auth; **argon2id** (overrides default scrypt) via `@node-rs/argon2`; `bearer` +
   `organization` plugins (org = **vault**, the user-facing unified entity — Local / Synced / Remote states;
-  roles owner/admin/member; 48h invitations). Session token is
+  roles owner/admin/member; invitations last `INVITATION_EXPIRES_HOURS`, default 7 days, and may carry
+  an access level — `invitation_access`, applied as a per-user vault row on acceptance by the
+  `afterAcceptInvitation` hook AND the join-code path, see `src/members/`). Session token is
   opaque (instant revocation), stored client-side only in the OS keychain.
   Desktop "Remember password" is a separate explicit opt-in: `rememberedPassword.ts`
   keeps only the last successfully authenticated password in the OS keychain,
@@ -380,6 +413,20 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   1 → 5 → 15 min on repeat lockouts; success and `onPasswordReset` clear it. Unknown addresses
   are counted identically, so the response never reveals whether an account exists (#237).
 - `http/routes/` — `registry` (vaults/folders/notes/files), `shares` (folder/file ACL), `orgs` (join codes),
+  `members` (`GET /orgs/:orgId/members/overview` — roster + `last_seen_at`, access levels for
+  owner/admin only, plus `invitedBy` = inviter of the latest accepted invitation for that email, null
+  for the owner or a join-by-code; `GET /orgs/:orgId/members/:userId/activity?limit=50` (max 100) —
+  `{events}` newest first: `joined` (+ invitedBy), `created`, `edited` (authored `note_versions` +
+  `notes.last_edited_*`, one per doc per UTC day), `accessGranted` (per-user share rows; `path` null
+  when the caller cannot see the resource); owner/admin or self, else 403; 404 `not_member`;
+  created/edited filtered to the CALLER's readable set, no role exemption;
+  `DELETE /orgs/:orgId/members/:userId/shares` (`createMemberShareRoutes`, the Access tab Board's "Reset
+  to vault default") → `{removed, disconnectedDocs}`: one transaction deletes every per-user share row
+  the member holds in the org (vault/folder/file, their own `denied`/`locked` too, so it can widen as
+  well as narrow), leaves `member_access_snapshots` alone, disconnects docs that left their readable
+  set (before/after) and fires `onAclChanged` per vault; owner → anyone, admin → plain members or
+  self, else 403 `access_manager_required`; 404 `not_member`;
+  `POST /orgs/:orgId/invitations` {emails, role, access}),
   `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`, `billing`,
   `public-links` (`/api/notes/:docId/public-link` mint/inspect/revoke + public `GET /p/:token`
   read-only page — token is the capability; renders via the escape-first `render/note-html.ts`,
@@ -411,12 +458,23 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   view even for admins. **The vault posture is a baseline for everyone** (`vaultBaseline`): Read-only
   caps every shortcut at view; a vault that was never shared withdraws the owner/admin shortcut but
   keeps authorship (the private-by-default space); and **`sealed`** — an org `denied` row on the
-  vault resource, which is what the Access panel's Private now writes — withdraws authorship too, so
+  vault resource, which is what Everyone → No access now writes — withdraws authorship too, so
   nobody reads anything until a grant lifts it. An org grant on a folder/note still lifts out of a
   sealed vault (a floor, not a wall); an *item* set to Private drops those too, because there the
   point is withdrawing one item from a team that can otherwise reach it. Creation follows reading:
   `vaultRootWritable` refuses a root create in a sealed vault, since a note you cannot read is not
-  worth making. Keep
+  worth making. **A per-user row on the vault resource is that person's ABSOLUTE level**
+  (`personalVaultLevel`, "person wins either way"): for them alone it replaces the org posture, the
+  join snapshot, the owner/admin shortcut and authorship — `edit` = edit everywhere, `view` = view
+  everywhere (raises AND caps), `denied` = nothing, and org (Everyone) folder/file grants do not lift
+  it; only that person's own folder/file rows do. Item-level per-user rows still override inside
+  their subtree and locks still cap. `ResolverCache.personal(db, orgId, userId)` memoises that level
+  once per request (`canEditFolder`, `vaultRootWritable`, `resolveAccessForUser`). Lockstep: `effectivePermission` + `resolveAccessForUser` + the
+  indexed/cached paths, `vault-docs.ts vaultAccess.personal`, `http-gates.ts`
+  `canEditFolder`/`vaultRootWritable`, `POST /shares` (accepts a per-user vault `denied`) and
+  `GET /vaults/:id/locks` (synthetic `vault:<orgId>` lock when the caller's personal level is `view`;
+  their own per-user vault `edit` is a lift). `GET team-access` also returns
+  `posture: edit|view|sealed|none`. Keep
   `vault-docs.ts vaultAccess` in lockstep: it reads the same grant rather than short-circuiting on the
   role, which is what makes the readable set, the folder tree, blob reads, the graph, MCP search, the
   registry pull and `ready.revoked` follow the posture for free. Management stays role-based
@@ -528,7 +586,8 @@ camelCase quoted, migration 001), app tables (all ids `TEXT`, migration 002+): `
 (id==doc_id, soft-delete via `deleted_at`), `files` (id==doc_id), `shares`, `doc_updates`, `doc_snapshots`,
 `blobs` (`doc_id` = the `files` row these bytes are, or NULL for an `attachments/` drop — m028),
 `blob_text` (a file's extracted text + vector; derived, purgeable, cascades with the blob and the
-vault — m028), `org_join_codes`, `note_index`, `note_links`, `mcp_tokens`, `public_links` (one
+vault — m028), `invitation_access` (access chosen at invite, applied then deleted on accept — m046;
+the same migration adds `member.last_seen_at`, stamped at most every 10 min), `org_join_codes`, `note_index`, `note_links`, `mcp_tokens`, `public_links` (one
 plaintext token per note; revoke = DELETE).
 
 ## Server env vars (`app/apps/server/.env`)
@@ -549,6 +608,12 @@ there, Reply-To = reporter — `http/routes/bug-reports.ts`; unset ⇒ the icon 
   the drift that let a phantom root folder appear (2026-08-27).
 - **`.context/` is sacred and hidden** — never walk, sync, or index it. It holds `index.sqlite`, the CRDT
   store, and `config.json` (server vault id + doc-id map; travels with the vault).
+- **The folder's stamp outranks the profile's binding when it names a vault this account cannot see.**
+  `planTurnOnSync` (`lib/vault/turnOnSync.ts`) returns `blocked-foreign` (`foreignFolderMessage`)
+  even when `orgVaults` binds the path to a visible vault, and `planUnsyncStamp` takes `boundOrgId`
+  so a stamp/binding mismatch answers "foreign" locally without asking the server. Before, a
+  production vault id 404'd on a local server, showed the "made local only" banner and could wipe
+  the stamp.
 - **Reuse patterns, not code.** We study OSS references (Noteriv, Relay, Hocuspocus, Better Auth) but write
   our own implementation.
 - **Debounce timings are load-bearing:** watcher/ingest ~150ms, egest ~300ms. Changing them affects the

@@ -93,9 +93,11 @@ install the app updates itself: it checks, downloads, installs and restarts at a
 verified with Baalda's own signing key, and then shows a short What's New for that version.
 
 ## How do I share notes with my team?
-Sign in, turn on sync for your vault, invite people by email or share a join code. New vaults
-are shared with the whole team by default; you can make any folder or note private, share it
-with specific people, and choose view or edit for each. Roles are owner, admin, member.
+Sign in, turn on sync for your vault, then open Vault Settings → **Members and access** →
+**Invite people**. Add email addresses, choose a role and an access level, or share the join code.
+New vaults are shared with the whole team by default. The **Everyone** row sets Can edit, Can view
+or No access for all members; each person can get their own level, which wins for them, and their
+profile's **Access** tab lets you pick folders one by one. Roles are owner, admin, member.
 
 ## Can I share a note with someone who does not use Baalda?
 Yes. "Copy link" on a note offers a public link: a read-only web page anyone with the link can

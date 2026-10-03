@@ -151,9 +151,12 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 
 ## Team collaboration
 
-- **Invite** teammates by email, or hand out a **join code**. Invitations expire after 48 hours.
+- **Invite** teammates from Vault Settings → **Members and access** → **Invite people**: type
+  one or more email addresses, pick their role and how much they can see (Can edit everything,
+  Can view everything or No access), or hand out the **join code** shown in the same dialog. The
+  access you pick is applied the moment they accept. Invitations expire after 7 days.
   On a server with email configured (the managed service does) the invitee gets an email with a
-  link that opens Baalda on the invitation; otherwise Members shows a **Copy link** for each
+  link that opens Baalda on the invitation; otherwise Members and access shows a **Copy link** for each
   pending invitation to paste into chat. Someone invited by email who uses the join code instead
   ends up in exactly the same place, with the invited role.
 - **Roles**: owner, admin, member.
@@ -168,14 +171,21 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   and small presence dots in the sidebar showing who is in which note or folder. Ping a
   teammate to get their attention.
 - **Sharing model**: new vaults are shared with the whole team by default (vaults created before
-  mid-2026 stayed private until their owner flips them in Access). Any folder or note
-  can be made **private** (visible only to people you name), **shared with the team**, or shared
-  with specific people, each as **view** or **edit**. A person can also be blocked from an item.
-  Permissions cascade down folders; the most permissive grant wins, except that "denied" and
-  "locked" override. **Private really means nobody**: not the owner, not an admin, not even the
-  person who wrote the note, until they are named on the item's list. So when you make your own
-  folder private, add yourself. Owners and admins can always change the setting back.
-- The MCP screen in the app puts the AI rule in one line: "It gets the same access you do."
+  mid-2026 stayed private until their owner changes them on the Members and access page). The
+  **Everyone** row sets the default for every member: **Can edit**, **Can view** or **No access**.
+  Each person can then be given their own level (**Can edit everything**, **Can view everything**,
+  **No access**) and that person's level wins either way, for them only. A person's level can also
+  be **Custom**: per-folder choices made in their profile. Permissions cascade down folders, and
+  "locked" still makes things read-only. **No access really means nobody**: not the owner, not an
+  admin, not even the person who wrote the note, until someone gives them access. So when you
+  close off the whole vault, give yourself access too. Owners and admins can always manage access
+  and change the setting back.
+- **New members**: a separate row decides what someone who joins later sees of the notes that
+  already existed: **Can edit**, **Can view** or **No access** (they start with only new and shared notes).
+- The MCP screen in the app puts the AI rule plainly: "Connect any MCP-compatible AI client to
+  this vault. It gets the same access you do: read, search, create, edit and delete notes and
+  folders. Owners and admins can also manage the team's access from the same chat — ask Claude or
+  ChatGPT to share a folder with someone, make it view only, or set what new members see."
   Deleting a token cuts the AI off immediately.
 - **Locks**: lock a note or folder so it is read-only for everyone, admins included, until
   unlocked. Setting the whole vault to read-only shows that same lock on every folder and note,
@@ -188,11 +198,23 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   any time. **Private links** (`baalda://note/...`) open a note for teammates who already have
   access; they carry no access themselves.
 - **Push-to-talk voice**: hold a button to talk to everyone in the vault. Nothing is recorded.
-- **Access panel** (owners/admins): a tree of every folder and note in the vault with its sharing
-  state, independent of what is on your own disk. The **"Entire vault"** choice at the top applies
-  to every folder and note at once and replaces whatever you had set on individual folders and
-  notes, so the app asks you to confirm and tells you how many of those settings it is about to
-  clear; people you shared something with by name keep their access either way.
+- **Members and access** (Vault Settings): one page for people and permissions. Everyone sees the
+  member list; owners and admins also see and change access. The **Everyone** row applies to every
+  folder and note at once. If some folders still have their own older setting for everyone, a
+  banner says how many, and **Reset** brings them back in line; people given access by name keep
+  it either way. Each person's **⋯** menu has View profile, Manage access, Make admin or Make
+  member, and Remove. Clicking a person opens their profile as a page inside Vault settings (a back
+  link returns to the list). The profile has three tabs. **Personal info** shows name, email, role,
+  when they joined and who invited them, when they were last active, and whether they are online
+  now. **Access** has two views, picked with a small switch at its top-right and remembered on this
+  device. **List** has a checkbox per folder; each change applies straight away.
+  **Board** (the default) sets the same access with Can edit, Can view and No access columns: drag folders and
+  notes between columns, set everything at once, or reset to the vault default. Moving one item
+  applies straight away and a short message says what changed; only the bigger changes ask first. **Activity** lists what
+  they did recently: joining, notes they created or edited, and access they were given. You only
+  see notes you can open yourself. Owners and
+  admins can see anyone's profile; members can see their own activity. A short tip points to the MCP tab for managing access by chatting
+  with an AI assistant.
 
 ## History and recovery
 
@@ -237,7 +259,9 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - **Updates itself.** Baalda checks for a new version, downloads it, installs it and restarts
   at a quiet moment, on every platform — nothing to click. Every update is verified with
   Baalda's own signing key. On the first launch after one, a short **What's New** shows a
-  handful of points covering only the version you just received. Releases at
+  handful of points covering only the version you just received. To see your version or check
+  for an update by hand, open Account settings → About (Vault settings no longer has an Updates
+  tab). Releases at
   github.com/naveedharri/baalda/releases.
 - **Planned**: iOS app. No web app for editing (public links are read-only pages).
 
