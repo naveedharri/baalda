@@ -116,6 +116,58 @@ async function anyDenyRows(
   return rows.length > 0;
 }
 
+/**
+ * A PER-USER deny decides only where it is the deepest of that person's rows
+ * ([[resolver]] `userItemVerdict`): a per-user grant (edit/view/readonly) on a
+ * deeper folder or on the file lifts it, a deeper deny re-applies it. `locked`
+ * never decides. `dec` walks every folder of the vault top-down carrying the
+ * nearest per-user decisive permission.
+ */
+const USER_DECISION_CTE = `
+  user_rows AS (
+     SELECT resource_type, resource_id, permission FROM shares
+      WHERE principal_type = 'user' AND principal_id = $1
+        AND resource_type IN ('folder', 'file')
+        AND permission IN ('edit', 'view', 'readonly', 'denied')
+  ),
+  dec AS (
+     SELECT f.id, u.permission AS perm
+       FROM folders f
+       LEFT JOIN user_rows u ON u.resource_type = 'folder' AND u.resource_id = f.id
+      WHERE f.vault_id = $2 AND f.parent_id IS NULL
+     UNION ALL
+     SELECT f.id, COALESCE(u.permission, d.perm)
+       FROM folders f
+       JOIN dec d ON f.parent_id = d.id
+       LEFT JOIN user_rows u ON u.resource_type = 'folder' AND u.resource_id = f.id
+  )`;
+
+async function userDeniedDocsInVault(db: Queryable, userId: string, vaultId: string): Promise<Set<string>> {
+  const { rows } = await db.query<{ id: string }>(
+    `WITH RECURSIVE ${USER_DECISION_CTE}
+     SELECT n.id FROM notes n
+       LEFT JOIN dec d ON d.id = n.folder_id
+       LEFT JOIN user_rows u ON u.resource_type = 'file' AND u.resource_id = n.id
+      WHERE n.vault_id = $2 AND COALESCE(u.permission, d.perm) = 'denied'
+     UNION
+     SELECT fi.id FROM files fi
+       LEFT JOIN dec d ON d.id = fi.folder_id
+       LEFT JOIN user_rows u ON u.resource_type = 'file' AND u.resource_id = fi.id
+      WHERE fi.vault_id = $2 AND COALESCE(u.permission, d.perm) = 'denied'`,
+    [userId, vaultId],
+  );
+  return new Set(rows.map((r) => r.id));
+}
+
+async function userDeniedFolderIds(db: Queryable, userId: string, vaultId: string): Promise<Set<string>> {
+  const { rows } = await db.query<{ id: string }>(
+    `WITH RECURSIVE ${USER_DECISION_CTE}
+     SELECT id FROM dec WHERE perm = 'denied'`,
+    [userId, vaultId],
+  );
+  return new Set(rows.map((r) => r.id));
+}
+
 async function deniedDocsInVault(
   db: Queryable,
   principalType: "user" | "org",
@@ -123,6 +175,7 @@ async function deniedDocsInVault(
   vaultId: string,
 ): Promise<Set<string>> {
   if (!(await anyDenyRows(db, principalType, principalId))) return new Set();
+  if (principalType === "user") return userDeniedDocsInVault(db, principalId, vaultId);
   const { rows } = await db.query<{ id: string }>(
     `WITH RECURSIVE denied_seed AS (
         SELECT resource_id AS id FROM shares
@@ -176,10 +229,12 @@ async function deniedFolderIds(
   db: Queryable,
   principalType: "user" | "org",
   principalId: string,
+  vaultId: string,
 ): Promise<Set<string>> {
   // Same short-circuit as {@link deniedDocsInVault}: an empty seed can only fold
   // down to an empty set, so the recursive walk is worth a cheap probe first.
   if (!(await anyDenyRows(db, principalType, principalId))) return new Set();
+  if (principalType === "user") return userDeniedFolderIds(db, principalId, vaultId);
   const { rows } = await db.query<{ id: string }>(
     `WITH RECURSIVE denied_seed AS (
         SELECT resource_id AS id FROM shares
@@ -567,14 +622,52 @@ export async function listVisibleFolders(
   // (item Private) hides it from the TEAM — so it does not apply to an
   // owner/admin or to someone with a personal vault grant, and a folder the
   // user created themselves stays visible either way (that's "only you").
-  const userDenied = await deniedFolderIds(db, "user", userId);
-  const orgDenied = await deniedFolderIds(db, "org", access.organizationId);
+  const userDenied = await deniedFolderIds(db, "user", userId, vaultId);
+  const orgDenied = await deniedFolderIds(db, "org", access.organizationId, vaultId);
   // Neither deny is undone by authorship — see `listDocsInVault`.
   const hidden = (id: string) => userDenied.has(id) || orgDenied.has(id);
+  // A per-user grant deeper than a per-user deny lifts that subfolder, so its
+  // denied ANCESTORS stay in the tree as the path to it (names only; their
+  // notes stay hidden) — the same "never a missing link" rule as below.
+  // Folders a per-user deny hides but that hold a note a deeper per-user row
+  // lifted — the path to that note. Only read when such a deny exists.
+  const liftedHomes = new Set<string>();
+  if (userDenied.size > 0) {
+    const readableHere = await listReadableDocsInVault(userId, vaultId, db);
+    const { rows: homes } = await db.query<{ folder_id: string }>(
+      `SELECT DISTINCT folder_id FROM notes
+        WHERE vault_id = $1 AND deleted_at IS NULL AND folder_id = ANY($2::text[]) AND id = ANY($3::text[])
+       UNION
+       SELECT DISTINCT folder_id FROM files
+        WHERE vault_id = $1 AND folder_id = ANY($2::text[]) AND id = ANY($3::text[])`,
+      [vaultId, [...userDenied], [...readableHere]],
+    );
+    for (const h of homes) if (!orgDenied.has(h.folder_id)) liftedHomes.add(h.folder_id);
+  }
+  const finish = (shown: VaultFolderRow[]): VaultFolderRow[] => {
+    const byId = new Map(all.rows.map((f) => [f.id, f]));
+    const ids = new Set(shown.map((f) => f.id));
+    const starts = [...shown];
+    for (const id of liftedHomes) {
+      const home = byId.get(id);
+      if (home && !ids.has(id)) {
+        ids.add(id);
+        starts.push(home);
+      }
+    }
+    for (const f of starts) {
+      let parent = f.parent_id;
+      while (parent && !ids.has(parent) && userDenied.has(parent) && !orgDenied.has(parent)) {
+        ids.add(parent);
+        parent = byId.get(parent)?.parent_id ?? null;
+      }
+    }
+    return all.rows.filter((f) => ids.has(f.id));
+  };
   // A person's own vault level replaces the join snapshot (see `listDocsInVault`).
   const snapshot = access.personal !== null ? null : await memberAccessSnapshot(db, access.organizationId, userId);
   if (access.vaultWide && snapshot?.mode !== "private") {
-    return all.rows.filter((f) => !hidden(f.id));
+    return finish(all.rows.filter((f) => !hidden(f.id)));
   }
 
   const readable = await listReadableDocsInVault(userId, vaultId, db);
@@ -656,5 +749,5 @@ export async function listVisibleFolders(
       }
     }
   }
-  return all.rows.filter((f) => visible.has(f.id) && !hidden(f.id));
+  return finish(all.rows.filter((f) => visible.has(f.id) && !hidden(f.id)));
 }

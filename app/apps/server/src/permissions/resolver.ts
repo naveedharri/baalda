@@ -332,37 +332,123 @@ function indexedRows(index: AccessIndex, docId: string | null, folderIds: string
  * the deny/lock checks); the resource filter here drops them, so a caller can
  * pass one superset to all three.
  */
-function rowsDenied(rows: readonly ShareRow[], principalType: "user" | "org", principalId: string): boolean {
-  return rows.some((r) =>
-    (r.resource_type === "file" || r.resource_type === "folder") &&
-    r.permission === "denied" && r.principal_type === principalType && r.principal_id === principalId,
-  );
+/**
+ * The SAME person's rows on an item and its ancestors decide by DEPTH: the
+ * deepest per-user row wins. A per-user file row beats a per-user row on any
+ * ancestor folder, and a deeper folder row beats a shallower one (a per-user
+ * folder/file row also beats that person's VAULT row — see
+ * {@link personalVaultLevel} — because item rows are applied on top of it).
+ *
+ * Walking from the doc up (`folderIds` is ordered: the folder itself first,
+ * then each parent — {@link ancestorFolderIds}):
+ *   - `locked`   caps at view and does NOT decide: the walk goes on for a grant;
+ *   - `denied`   → no access (owners and admins included);
+ *   - `readonly` → view AND a cap (the board's "Can view");
+ *   - `view`     → view (a grant). It shields from ancestor per-user
+ *                  denies/caps, but an ancestor per-user `edit` still wins —
+ *                  a plain `view` share can only RAISE (spec 04 §3);
+ *   - `edit`     → edit (a grant), lifting any ancestor per-user readonly or
+ *                  deny.
+ * Org rows are NOT part of this: org locks/readonly still cap everyone, org
+ * denies are item-Private, org grants combine highest-wins.
+ */
+interface UserItemVerdict {
+  deny: boolean;
+  grant: Permission;
+  cap: boolean;
 }
 
-function rowsLocked(rows: readonly ShareRow[], userId: string): boolean {
-  return rows.some((r) =>
-    (r.resource_type === "file" || r.resource_type === "folder") &&
-    (r.permission === "locked" || r.permission === "readonly") &&
-    (r.principal_type === "org" || (r.principal_type === "user" && r.principal_id === userId)),
-  );
-}
-
-function rowsGrants(
+function userItemVerdict(
   rows: readonly ShareRow[],
   userId: string,
+  docId: string | null,
+  folderIds: readonly string[],
+): UserItemVerdict {
+  const order: Array<[string, string]> = [];
+  if (docId !== null) order.push(["file", docId]);
+  for (const f of folderIds) order.push(["folder", f]);
+  let cap = false;
+  let viewFound = false;
+  for (const [type, id] of order) {
+    const r = rows.find((x) =>
+      x.resource_type === type && x.resource_id === id &&
+      x.principal_type === "user" && x.principal_id === userId,
+    );
+    if (!r) continue;
+    if (viewFound) {
+      // Below a found `view`, only an ancestor `edit` grant still counts.
+      if (r.permission === "edit") return { deny: false, grant: "edit", cap };
+      continue;
+    }
+    if (r.permission === "locked") {
+      cap = true;
+      continue;
+    }
+    if (r.permission === "denied") return { deny: true, grant: "none", cap };
+    if (r.permission === "readonly") return { deny: false, grant: "view", cap: true };
+    if (r.permission === "view") {
+      viewFound = true;
+      continue;
+    }
+    if (r.permission === "edit") return { deny: false, grant: "edit", cap };
+  }
+  return { deny: false, grant: viewFound ? "view" : "none", cap };
+}
+
+function rowsDenied(
+  rows: readonly ShareRow[],
+  principalType: "user" | "org",
+  principalId: string,
+  docId: string | null,
+  folderIds: readonly string[],
+): boolean {
+  if (principalType === "user") return userItemVerdict(rows, principalId, docId, folderIds).deny;
+  return rows.some((r) =>
+    (r.resource_type === "file" || r.resource_type === "folder") &&
+    r.permission === "denied" && r.principal_type === "org" && r.principal_id === principalId,
+  );
+}
+
+function rowsLocked(rows: readonly ShareRow[], userId: string, docId: string | null, folderIds: readonly string[]): boolean {
+  return (
+    rows.some((r) =>
+      (r.resource_type === "file" || r.resource_type === "folder") &&
+      (r.permission === "locked" || r.permission === "readonly") &&
+      r.principal_type === "org",
+    ) || userItemVerdict(rows, userId, docId, folderIds).cap
+  );
+}
+
+/**
+ * Highest-wins grant for a doc/folder over a row superset: the person's vault
+ * row, org grants (when `orgClause`), and the per-user item verdict (deepest
+ * per-user row — {@link userItemVerdict}). Org grants a join snapshot already
+ * accounts for are skipped by {@link grantFromRows}.
+ */
+function rowsGrant(
+  rows: readonly ShareRow[],
+  userId: string,
+  docId: string | null,
+  folderIds: readonly string[],
   organizationId: string,
   orgClause: boolean,
   /** False when the person's own vault level replaces the org posture: the
    *  org-principal VAULT row is then skipped (org item rows still count). */
   orgVaultClause = true,
-): ShareRow[] {
-  return rows.filter((r) =>
-    (r.resource_type === "file" || r.resource_type === "folder" ||
-      (r.resource_type === "vault" && r.resource_id === organizationId)) &&
+  snapshot?: MemberAccessSnapshot | null,
+  resourceCreatedAt?: Date,
+): Permission {
+  const base = rows.filter((r) =>
     (r.permission === "view" || r.permission === "edit" || r.permission === "readonly") &&
-    ((r.principal_type === "user" && r.principal_id === userId) ||
+    ((r.principal_type === "user" && r.principal_id === userId &&
+      r.resource_type === "vault" && r.resource_id === organizationId) ||
       (orgClause && r.principal_type === "org" && r.principal_id === organizationId &&
-        (orgVaultClause || r.resource_type !== "vault"))),
+        (r.resource_type === "file" || r.resource_type === "folder" ||
+          (orgVaultClause && r.resource_type === "vault" && r.resource_id === organizationId)))),
+  );
+  return maxPermission(
+    grantFromRows(base, snapshot, resourceCreatedAt),
+    userItemVerdict(rows, userId, docId, folderIds).grant,
   );
 }
 
@@ -392,25 +478,12 @@ function indexedIsDenied(
   docId: string | null,
   folderIds: string[],
 ): boolean {
-  return rowsDenied(indexedRows(index, docId, folderIds), principalType, principalId);
+  return rowsDenied(indexedRows(index, docId, folderIds), principalType, principalId, docId, folderIds);
 }
 
 /** In-memory {@link isLocked}: an org row matches whatever its principal id. */
 function indexedIsLocked(index: AccessIndex, userId: string, docId: string | null, folderIds: string[]): boolean {
-  return rowsLocked(indexedRows(index, docId, folderIds), userId);
-}
-
-/** In-memory row set of {@link sharePermission}'s SELECT. */
-function indexedGrantRows(
-  index: AccessIndex,
-  userId: string,
-  docId: string | null,
-  folderIds: string[],
-  organizationId: string,
-  orgClause: boolean,
-  orgVaultClause = true,
-): ShareRow[] {
-  return rowsGrants(indexedRows(index, docId, folderIds, organizationId), userId, organizationId, orgClause, orgVaultClause);
+  return rowsLocked(indexedRows(index, docId, folderIds), userId, docId, folderIds);
 }
 
 /**
@@ -643,14 +716,16 @@ export async function ancestorFolderIds(
 ): Promise<string[]> {
   if (!folderId) return [];
   const { rows } = await db.query<{ id: string }>(
+    // Ordered: the folder itself first, then each parent — the per-user rows
+    // on this chain decide by depth ({@link userItemVerdict}).
     `WITH RECURSIVE chain AS (
-        SELECT id, parent_id FROM folders WHERE id = $1
+        SELECT id, parent_id, 0 AS depth FROM folders WHERE id = $1
         UNION ALL
-        SELECT f.id, f.parent_id
+        SELECT f.id, f.parent_id, c.depth + 1
           FROM folders f
           JOIN chain c ON f.id = c.parent_id
      )
-     SELECT id FROM chain`,
+     SELECT id FROM chain ORDER BY depth`,
     [folderId],
   );
   return rows.map((r) => r.id);
@@ -708,7 +783,7 @@ async function sharePermission(
   // Shared: the org branch drops out for that resource, so the vault-wide grant
   // stops reaching it while explicit personal grants still do.
   const orgGrantClause = isMember && orgGrantsApply
-    ? `OR (principal_type = 'org' AND principal_id = $4 AND (
+    ? `OR (principal_type = 'org' AND principal_id = $4 AND permission IN ('view', 'edit', 'readonly') AND (
             ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
             OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
             ${orgVaultClause ? "OR (resource_type = 'vault' AND resource_id = $4)" : ""}
@@ -717,26 +792,49 @@ async function sharePermission(
   // $2 (the doc id) is always referenced with an explicit cast + null guard so
   // Postgres can infer its type even for a folder resource, where docId is null
   // and the file branch is inert.
-  const { rows } = index
-    ? { rows: indexedGrantRows(index, userId, docId, folderIds, organizationId, isMember && orgGrantsApply, orgVaultClause) }
-    : await db.query<{
-    permission: string;
-    principal_type: string;
-    access_revision: string | number;
-  }>(
-    `SELECT permission, principal_type, access_revision FROM shares
-      WHERE permission IN ('view', 'edit', 'readonly')
-        AND (
-          (principal_type = 'user' AND principal_id = $1 AND (
-            ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
-            OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
-            OR (resource_type = 'vault' AND resource_id = $4)
-          ))
-          ${orgGrantClause}
-        )`,
-    [userId, docId, folderIds, organizationId],
+  // Per-user rows on the item and its chain are read in EVERY permission so
+  // the deepest one can decide ({@link userItemVerdict}); the per-user VAULT
+  // row and org rows only as grants.
+  const rows = index
+    ? indexedRows(index, docId, folderIds, organizationId)
+    : (
+        await db.query<ShareRow>(
+          `SELECT resource_type, resource_id, principal_type, principal_id, permission, access_revision
+             FROM shares
+            WHERE (principal_type = 'user' AND principal_id = $1 AND (
+                    ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
+                    OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
+                    OR (resource_type = 'vault' AND resource_id = $4
+                        AND permission IN ('view', 'edit', 'readonly'))
+                  ))
+                  ${orgGrantClause}`,
+          [userId, docId, folderIds, organizationId],
+        )
+      ).rows;
+  return rowsGrant(
+    rows, userId, docId, folderIds, organizationId, isMember && orgGrantsApply, orgVaultClause,
+    snapshot, resourceCreatedAt,
   );
-  return grantFromRows(rows, snapshot, resourceCreatedAt);
+}
+
+/** This person's rows on a doc (as a file) and on each folder in its chain. */
+async function userItemRows(
+  db: Queryable,
+  userId: string,
+  docId: string | null,
+  folderIds: string[],
+): Promise<ShareRow[]> {
+  const { rows } = await db.query<ShareRow>(
+    `SELECT resource_type, resource_id, principal_type, principal_id, permission, access_revision
+       FROM shares
+      WHERE principal_type = 'user' AND principal_id = $1
+        AND (
+          ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
+          OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
+        )`,
+    [userId, docId, folderIds],
+  );
+  return rows;
 }
 
 /** Highest-wins over {@link sharePermission}'s matching rows, skipping the org
@@ -779,21 +877,22 @@ export async function isLocked(
 ): Promise<boolean> {
   // $2 (doc id) is always referenced with a cast + null guard so Postgres can
   // infer its type for a folder resource (docId null → file branch inert).
-  const { rows } = await db.query<{ ok: number }>(
-    `SELECT 1 AS ok FROM shares
-      WHERE permission IN ('locked', 'readonly')
-        AND (
-          principal_type = 'org'
-          OR (principal_type = 'user' AND principal_id = $1)
-        )
+  // One read: org locks/readonly cap everyone; per-user rows cap only when no
+  // deeper per-user row lifts them ({@link userItemVerdict}).
+  const { rows } = await db.query<ShareRow>(
+    `SELECT resource_type, resource_id, principal_type, principal_id, permission, access_revision
+       FROM shares
+      WHERE (
+              (principal_type = 'org' AND permission IN ('locked', 'readonly'))
+              OR (principal_type = 'user' AND principal_id = $1)
+            )
         AND (
           ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
           OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
-        )
-      LIMIT 1`,
+        )`,
     [userId, docId, folderIds],
   );
-  return rows.length > 0;
+  return rowsLocked(rows, userId, docId, folderIds);
 }
 
 /**
@@ -970,6 +1069,10 @@ export async function isDenied(
   docId: string | null,
   folderIds: string[],
 ): Promise<boolean> {
+  // A per-user deny decides only when it is the deepest per-user row.
+  if (principalType === "user") {
+    return userItemVerdict(await userItemRows(db, principalId, docId, folderIds), principalId, docId, folderIds).deny;
+  }
   const { rows } = await db.query<{ ok: number }>(
     `SELECT 1 AS ok FROM shares
       WHERE permission = 'denied'
@@ -1013,8 +1116,10 @@ export async function effectivePermission(
   // against.
   const rows = pre ? pre.rows : cache ? await docShareRows(db, userId, docId, folderIds, loc.organizationId) : null;
   const denied = async (principalType: "user" | "org", principalId: string) =>
-    rows ? rowsDenied(rows, principalType, principalId) : isDenied(db, principalType, principalId, docId, folderIds);
-  const locked = async () => (rows ? rowsLocked(rows, userId) : isLocked(db, userId, docId, folderIds));
+    rows
+      ? rowsDenied(rows, principalType, principalId, docId, folderIds)
+      : isDenied(db, principalType, principalId, docId, folderIds);
+  const locked = async () => (rows ? rowsLocked(rows, userId, docId, folderIds) : isLocked(db, userId, docId, folderIds));
   const grant = async (
     isMember: boolean,
     orgGrantsApply: boolean,
@@ -1023,10 +1128,9 @@ export async function effectivePermission(
     orgVaultClause = true,
   ) =>
     rows
-      ? grantFromRows(
-          rowsGrants(rows, userId, loc.organizationId, isMember && orgGrantsApply, orgVaultClause),
-          snapshot,
-          resourceCreatedAt,
+      ? rowsGrant(
+          rows, userId, docId, folderIds, loc.organizationId, isMember && orgGrantsApply, orgVaultClause,
+          snapshot, resourceCreatedAt,
         )
       : sharePermission(
           db, userId, docId, folderIds, loc.organizationId, isMember, orgGrantsApply,

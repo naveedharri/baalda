@@ -14,10 +14,18 @@ vi.mock("../../lib/auth/authManager", () => ({
   authManager: { api, getServerUrl: () => "http://test.invalid" },
 }));
 vi.mock("../FileTree", () => ({ iconForPath: () => null }));
+vi.mock("../../lib/sync/docSession", () => ({ syncManager: { registry: { vaultId: "v1" } } }));
 const selfMark = vi.hoisted(() => vi.fn());
 vi.mock("../../lib/sync/selfAccessChanges", () => ({ markSelfAccessChange: selfMark }));
 const toast = vi.hoisted(() => vi.fn());
 vi.mock("../../lib/toast", () => ({ toast }));
+vi.mock("../../store", async () => {
+  const { create } = await import("zustand");
+  return { useStore: create(() => ({ locks: [], tree: null })) };
+});
+import { useStore } from "../../store";
+const patchStore = (state: Record<string, unknown>) =>
+  (useStore as unknown as { setState: (state: Record<string, unknown>) => void }).setState(state);
 
 const member = {
   userId: "u2", memberId: "m2", role: "member" as const, name: "Sara Khan", email: "sara@team.test",
@@ -35,6 +43,7 @@ describe("Member access board", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    patchStore({ locks: [], tree: null });
     // The first-visit drag hint has its own test; keep it out of the others.
     window.localStorage.setItem("context.accessBoard.dragHintShown", "1");
     api.listAccessTree.mockResolvedValue({
@@ -139,6 +148,101 @@ describe("Member access board", () => {
     expect(toast).not.toHaveBeenCalledWith("Sara can now edit Welcome.");
   });
 
+  /** The column as drawn, grey path rows marked with ~. */
+  const drawn = (mode: string) =>
+    [...column(mode).querySelectorAll<HTMLElement>(".access-board-list > li.access-board-row")]
+      .map((li) => `${li.classList.contains("is-path") ? "~" : ""}${li.querySelector(".access-board-name")?.textContent}`);
+
+  it("floats a moved row to the top of its level, newest first, with the landing pulse", async () => {
+    await render();
+    await act(async () => button("Move Welcome left").click());
+    await settle();
+    expect(drawn("open")).toEqual(["Welcome", "Specs", "API"]);
+    expect(row("open", "Welcome").dataset.pulse).toBe("true");
+    await act(async () => button("Move Roadmap left").click());
+    await settle();
+    await act(async () => button("Move Roadmap left").click());
+    await settle();
+    expect(drawn("open")).toEqual(["Roadmap", "Welcome", "Specs", "API"]);
+    expect(row("open", "Roadmap").dataset.pulse).toBe("true");
+    expect(row("open", "Welcome").dataset.pulse).toBeUndefined();
+    expect(column("open").textContent).not.toContain("Recently moved");
+    expect(column("open").querySelectorAll('[data-row-key="note:n2"]')).toHaveLength(1);
+  });
+
+  it("a moved nested row rises with its grey path, keeping the tree", async () => {
+    await render();
+    await act(async () => button("Move API right").click());
+    await settle();
+    expect(drawn("readonly")).toEqual(["~Specs", "API", "Welcome"]);
+    expect(drawn("open")).toEqual(["Specs"]);
+  });
+
+  it("inside a folder, the moved child comes first", async () => {
+    api.listAccessTree.mockResolvedValue({
+      folders: [{ id: "f1", path: "Specs" }],
+      notes: [
+        { id: "n1", relPath: "Specs/API.md" },
+        { id: "n4", relPath: "Specs/Zeta.md" },
+        { id: "n2", relPath: "Welcome.md" },
+      ],
+    });
+    modes = { f1: "mixed", n1: "readonly", n4: "open", n2: "readonly" };
+    await render();
+    expect(drawn("readonly")).toEqual(["~Specs", "API", "Welcome"]);
+    await act(async () => button("Move Zeta right").click());
+    await settle();
+    expect(drawn("readonly")).toEqual(["Specs", "Zeta", "API", "Welcome"]);
+  });
+
+  it("a row locked for everyone shows a lock, cannot go to Can edit, and says why", async () => {
+    patchStore({
+      locks: [{ id: "l1", resourceType: "file", resourceId: "n2", principalType: "org", principalId: "org-1", permission: "locked" }],
+    });
+    await render();
+    const welcome = row("readonly", "Welcome");
+    expect(welcome.querySelector(".access-board-lock")?.getAttribute("title"))
+      .toBe("Locked for everyone — unlock it from the sidebar to allow editing");
+    expect(button("Move Welcome left").disabled).toBe(true);
+    expect(button("Move Welcome right").disabled).toBe(false);
+    const original = document.elementFromPoint;
+    document.elementFromPoint = () => column("open");
+    try {
+      await act(async () => { pointer("pointerdown", welcome, 10, 10); });
+      await act(async () => { pointer("pointermove", window, 50, 40); });
+      await act(async () => { pointer("pointerup", window, 50, 40); });
+    } finally {
+      document.elementFromPoint = original;
+    }
+    await settle();
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith("Welcome is locked for everyone. Unlock it from the sidebar first.", "neutral");
+    expect(toast).not.toHaveBeenCalledWith(expect.anything(), "error");
+    expect(names("readonly")).toContain("Welcome");
+  });
+
+  it("only a move to No access confirms: Set everything to → Can view and Add all apply at once", async () => {
+    await render({ personVaultMode: "open" });
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Set everything to"]')!.click());
+    const view = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find((li) => li.textContent?.startsWith("Can view"))!;
+    await act(async () => view.click());
+    expect(dialog()).toBeNull();
+    expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
+    expect(api.setBulkAccess.mock.calls[0][1]).toMatchObject({ resources: [{ resourceType: "vault", resourceId: "org-1" }], mode: "readonly" });
+    await settle();
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Can view actions"]')!.click());
+    const addAll = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find((li) => li.textContent?.startsWith("Add all"))!;
+    await act(async () => addAll.click());
+    expect(dialog()).toBeNull();
+    expect(api.setBulkAccess).toHaveBeenCalledTimes(2);
+    await settle();
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Set everything to"]')!.click());
+    const none = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find((li) => li.textContent?.startsWith("No access"))!;
+    await act(async () => none.click());
+    expect(dialog()).not.toBeNull();
+    expect(api.setBulkAccess).toHaveBeenCalledTimes(2);
+  });
+
   it("lowering one row writes at once, without a confirm, and toasts", async () => {
     await render();
     await act(async () => button("Move Welcome right").click());
@@ -201,7 +305,7 @@ describe("Member access board", () => {
       await act(async () => { pointer("pointermove", window, 400, 40); });
       expect(document.querySelector(".access-board-ghost")?.textContent).toContain("Welcome");
       expect(column("private").classList.contains("is-over")).toBe(true);
-      expect(column("private").querySelector(".access-board-drop-line")).not.toBeNull();
+      expect(column("private").querySelector(".access-board-list > li:first-child")?.classList.contains("access-board-drop-line")).toBe(true);
       await act(async () => { pointer("pointerup", window, 400, 40); });
     } finally {
       document.elementFromPoint = original;

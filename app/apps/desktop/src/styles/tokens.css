@@ -81,6 +81,16 @@
   --warning: #d98a00;
   --warning-soft: #fff4e0;
 
+  /* Access board columns (Can edit / Can view / No access): baalda.com's
+     green / yellow tints with a deeper text colour of the same hue, plus a
+     neutral grey. Each fg is >= 4.5:1 on its bg. */
+  --access-edit-bg: #e9f6ef;
+  --access-edit-fg: #2f7044;
+  --access-view-bg: #fff4e0;
+  --access-view-fg: #7a6212;
+  --access-none-bg: #f0f0f2;
+  --access-none-fg: #55555f;
+
   /* Borders */
   --border: rgba(30, 27, 24, 0.09);
   --border-strong: rgba(30, 27, 24, 0.15);
@@ -268,6 +278,13 @@
   --warning: #f0b429;
   --warning-soft: rgba(240, 180, 41, 0.16);
 
+  --access-edit-bg: rgba(48, 164, 108, 0.18);
+  --access-edit-fg: #74d39c;
+  --access-view-bg: rgba(240, 180, 41, 0.16);
+  --access-view-fg: #f2c45c;
+  --access-none-bg: rgba(255, 255, 255, 0.06);
+  --access-none-fg: #b6b6bf;
+
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.18);
   --focus-ring: 0 0 0 3px rgba(143, 132, 255, 0.40);
@@ -315,6 +332,13 @@
     --success-soft: rgba(48, 164, 108, 0.18);
     --warning: #f0b429;
     --warning-soft: rgba(240, 180, 41, 0.16);
+
+    --access-edit-bg: rgba(48, 164, 108, 0.18);
+    --access-edit-fg: #74d39c;
+    --access-view-bg: rgba(240, 180, 41, 0.16);
+    --access-view-fg: #f2c45c;
+    --access-none-bg: rgba(255, 255, 255, 0.06);
+    --access-none-fg: #b6b6bf;
 
     --border: rgba(255, 255, 255, 0.09);
     --border-strong: rgba(255, 255, 255, 0.18);

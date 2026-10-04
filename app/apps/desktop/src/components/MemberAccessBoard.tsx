@@ -4,6 +4,7 @@ import type { AccessTreeResponse, BulkAccessResource, MemberOverview, TeamAccess
 import { authManager } from "../lib/auth/authManager";
 import {
   BOARD_COLUMNS,
+  orderByRecent,
   notAppliedMessage,
   columnRows,
   firstName,
@@ -16,13 +17,18 @@ import {
 } from "../lib/accessBoard";
 import { createAccessSummaryBatcher } from "../lib/accessSummaryBatch";
 import { accessResourceType, ancestorPaths, entriesFromServer, rowsFromEntries, type AccessRow } from "../lib/accessTree";
-import { isNarrowing, reduceAccessCopy, type ReduceScope } from "../lib/membersAccess";
+import { needsAccessConfirm, reduceAccessCopy, type ReduceScope } from "../lib/membersAccess";
 import { markSelfAccessChange } from "../lib/sync/selfAccessChanges";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { iconForPath } from "./FileTree";
 import { MenuSelect } from "./MenuSelect";
 import { Spinner } from "./Spinner";
 import { toast } from "../lib/toast";
+import { buildOrgRowsByPath } from "../lib/accessMode";
+import { itemLockRows, resourceIdsByPath } from "../lib/locks";
+import { useStore } from "../store";
+
+const LOCKED_TITLE = "Locked for everyone — unlock it from the sidebar to allow editing";
 
 /** One batcher for the board: a render's reads go out as one request. */
 const summaries = createAccessSummaryBatcher({
@@ -34,8 +40,8 @@ const summaries = createAccessSummaryBatcher({
 const BOARD_SUMMARY_TIMEOUT_MS = 5000;
 /** Pixels a press must travel before it becomes a drag (FileTree uses the same). */
 const DRAG_THRESHOLD = 4;
-/** How long the landing / leaving animations run, plus slack. */
-const LAND_MS = 420;
+/** How long the landing (slide-in, ring pulse, tint fade) and leaving animations run, plus slack. */
+const LAND_MS = 1500;
 /** First-visit drag hint: once per device, after the rows have loaded. */
 export const DRAG_HINT_KEY = "context.accessBoard.dragHintShown";
 export const DRAG_HINT_DELAY_MS = 1200;
@@ -124,6 +130,9 @@ export function MemberAccessBoard({
   const ghostRef = useRef<HTMLDivElement | null>(null);
   /** The row that just moved (plays the land animation) and the gap it left. */
   const [landing, setLanding] = useState<{ key: string; token: number } | null>(null);
+  /** Rows moved during this board session, newest first: they float to the
+   *  top of their level in the tree. Never persisted. */
+  const [recent, setRecent] = useState<readonly string[]>([]);
   const [leaving, setLeaving] = useState<{ mode: TeamAccessMode; index: number; token: number } | null>(null);
   const motionSeq = useRef(0);
 
@@ -142,13 +151,29 @@ export function MemberAccessBoard({
     [entries],
   );
   const rowByKey = useMemo(() => new Map(allRows.map((r) => [r.key, r])), [allRows]);
+  // Team-wide locks ("Lock for everyone"): an org `locked`/`readonly` row on the
+  // item or an ancestor caps EVERYONE at view, so Can edit can never apply.
+  // Same data and rule as the List view's "View (locked)".
+  const storeLocks = useStore((s) => s.locks);
+  const storeTree = useStore((s) => s.tree);
+  const teamLocked = useMemo(() => {
+    const orgRows = buildOrgRowsByPath(entries, resourceIdsByPath(storeTree), null, itemLockRows(storeLocks ?? []), []);
+    const capped = (p: string) => {
+      const set = orgRows.get(p);
+      return !!set && (set.has("locked") || set.has("readonly"));
+    };
+    return new Set(allRows.filter((r) => [...ancestorPaths(r.path), r.path].some(capped)).map((r) => r.key));
+  }, [entries, allRows, storeLocks, storeTree]);
   // A mixed folder with no answered children sits at the person's own
   // vault-wide level, else Everyone's.
   const fallback: TeamAccessMode = personVaultMode && personVaultMode !== "custom" ? personVaultMode : everyoneMode ?? "private";
   const own = useMemo(() => ownModes(allRows, summaryModes, fallback), [allRows, summaryModes, fallback]);
   const columns = useMemo(
-    () => BOARD_COLUMNS.map((c) => ({ ...c, rows: columnRows(allRows, own, c.mode) })),
-    [allRows, own],
+    () => BOARD_COLUMNS.map((c) => {
+      const rows = columnRows(allRows, own, c.mode);
+      return { ...c, rows, display: orderByRecent(rows, recent) };
+    }),
+    [allRows, own, recent],
   );
 
   const readModes = (targets: readonly AccessRow[]) => {
@@ -233,7 +258,7 @@ export function MemberAccessBoard({
 
   /** Ask before taking access away; widening runs at once. */
   const guarded = (from: TeamAccessMode | "custom" | null, to: TeamAccessMode, scope: ReduceScope, run: () => Promise<void>) => {
-    if (to === "open" || !isNarrowing(from, to)) return void run();
+    if (to === "open" || !needsAccessConfirm(from, to)) return void run();
     setConfirm({ ...reduceAccessCopy(scope, to), danger: to === "private", apply: run });
   };
 
@@ -241,9 +266,10 @@ export function MemberAccessBoard({
   const animateMove = (row: AccessRow, from: TeamAccessMode) => {
     motionSeq.current += 1;
     const token = motionSeq.current;
-    const source = columns.find((c) => c.mode === from)?.rows ?? [];
-    const index = source.findIndex((r) => r.row.key === row.key);
+    const source = columns.find((c) => c.mode === from)?.display ?? [];
+    const index = source.findIndex((r) => !r.grey && r.row.key === row.key);
     setLanding({ key: row.key, token });
+    setRecent((prev) => [row.key, ...prev.filter((k) => k !== row.key)]);
     setLeaving(index >= 0 ? { mode: from, index, token } : null);
     window.setTimeout(() => {
       if (!live.current) return;
@@ -260,6 +286,10 @@ export function MemberAccessBoard({
     if (!canSetAccess || busy) return;
     const fromOwn = own.get(row.key);
     if (!fromOwn || fromOwn === to) return;
+    if (to === "open" && teamLocked.has(row.key)) {
+      toast(`${row.name} is locked for everyone. Unlock it from the sidebar first.`, "neutral");
+      return;
+    }
     animateMove(row, fromOwn);
     void (async () => {
       if (!(await write([row], to, row.key))) return;
@@ -474,6 +504,16 @@ export function MemberAccessBoard({
   const failedCount = allRows.filter((r) => failed.has(r.key) && !summaryModes.has(r.key)).length;
   const dragRow = dragKey ? rowByKey.get(dragKey) : undefined;
 
+  // Bring a landed row into view (its column may be scrolled, or the pinned
+  // group may sit above the fold).
+  useEffect(() => {
+    if (!landing) return;
+    const el = [...(boardRef.current?.querySelectorAll<HTMLElement>(".access-board-row[data-row-key]") ?? [])]
+      .find((r) => r.dataset.rowKey === landing.key);
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    el?.scrollIntoView?.({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
+  }, [landing, own]);
+
   /**
    * The one-time "these rows move" nudge: a real movable row lifts, slides
    * toward its neighbour column and settles back, the neighbour tinting while
@@ -578,12 +618,21 @@ export function MemberAccessBoard({
                   />
                 </header>
                 <ul className="access-board-list" role="list">
-                  {col.rows.flatMap((r, index) => {
-                    const item = (
+                  {/* At the top: a moved row lands first in its level. */}
+                  {overColumn === col.mode && dragKey && own.get(dragKey) !== col.mode && (
+                    <li className="access-board-drop-line" aria-hidden="true" />
+                  )}
+                  {col.display.flatMap((r, index) => {
+                    const out: React.ReactNode[] = [];
+                    if (leaving?.mode === col.mode && leaving.index === index) {
+                      out.push(<li key={`gap-${leaving.token}`} className="access-board-gap" aria-hidden="true" />);
+                    }
+                    out.push(
                       <BoardRowItem
                         key={r.row.key}
                         item={r}
-                        canLeft={i > 0}
+                        canLeft={i > 0 && !(teamLocked.has(r.row.key) && neighbourMode(col.mode, -1) === "open")}
+                        teamLocked={teamLocked.has(r.row.key)}
                         canRight={i < BOARD_COLUMNS.length - 1}
                         disabled={locked}
                         dragging={dragKey === r.row.key}
@@ -594,19 +643,14 @@ export function MemberAccessBoard({
                           if (to) move(r.row, to);
                         }}
                         onPointerDown={(e) => beginProbe(r.row, e)}
-                      />
+                      />,
                     );
-                    return leaving?.mode === col.mode && leaving.index === index
-                      ? [<li key={`gap-${leaving.token}`} className="access-board-gap" aria-hidden="true" />, item]
-                      : [item];
+                    return out;
                   })}
-                  {leaving?.mode === col.mode && leaving.index >= col.rows.length && (
+                  {leaving?.mode === col.mode && leaving.index >= col.display.length && (
                     <li key={`gap-${leaving.token}`} className="access-board-gap" aria-hidden="true" />
                   )}
                   {col.rows.length === 0 && <li className="access-board-empty">Nothing here</li>}
-                  {overColumn === col.mode && dragKey && own.get(dragKey) !== col.mode && (
-                    <li className="access-board-drop-line" aria-hidden="true" />
-                  )}
                 </ul>
                 {i === 0 && loading && <div className="access-board-loading"><Spinner /></div>}
               </section>
@@ -643,7 +687,7 @@ export function MemberAccessBoard({
   );
 }
 
-function BoardRowItem({ item, canLeft, canRight, disabled, dragging, landing, hint, onArrow, onPointerDown }: {
+function BoardRowItem({ item, canLeft, canRight, disabled, dragging, landing, hint, teamLocked, onArrow, onPointerDown }: {
   item: BoardRow;
   canLeft: boolean;
   canRight: boolean;
@@ -653,6 +697,8 @@ function BoardRowItem({ item, canLeft, canRight, disabled, dragging, landing, hi
   landing: boolean;
   /** First-visit nudge toward this side, or null. */
   hint: "left" | "right" | null;
+  /** Capped at view for everyone by a team lock. */
+  teamLocked: boolean;
   onArrow: (step: -1 | 1) => void;
   onPointerDown: (e: React.PointerEvent<HTMLElement>) => void;
 }) {
@@ -672,11 +718,21 @@ function BoardRowItem({ item, canLeft, canRight, disabled, dragging, landing, hi
       style={style}
       data-path={row.path}
       data-movable={disabled ? "false" : "true"}
+      data-row-key={row.key}
+      data-pulse={landing ? "true" : undefined}
       data-hint={hint ?? undefined}
       onPointerDown={onPointerDown}
     >
       <span className="access-board-icon" aria-hidden="true">{rowGlyph(row)}</span>
       <span className="access-board-name">{row.name}</span>
+      {teamLocked && (
+        <span className="access-board-lock" title={LOCKED_TITLE} aria-label={LOCKED_TITLE} role="img">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="5" y="11" width="14" height="10" rx="2" />
+            <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+          </svg>
+        </span>
+      )}
       <span className="access-board-arrows">
         <button
           type="button"

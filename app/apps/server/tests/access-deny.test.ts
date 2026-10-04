@@ -61,7 +61,10 @@ describe("per-member deny", () => {
     expect(await effectivePermission(member, doc)).toBe("none");
   });
 
-  it("beats an explicit per-user edit share on the note itself", async () => {
+  // The deepest of a person's own rows decides (resolver `userItemVerdict`):
+  // a folder deny no longer beats that person's edit share on a note inside it,
+  // and a deny on the note itself still beats a folder edit share.
+  it("loses to a deeper per-user edit share on the note itself, wins when it is the deeper row", async () => {
     const org = await seedOrg("Acme", "deny-share");
     const member = await seedUser("m@a.com");
     await seedMember(org, member, "member");
@@ -72,7 +75,12 @@ describe("per-member deny", () => {
 
     expect(await effectivePermission(member, doc)).toBe("edit");
     await seedDeny(org, "folder", folder, member);
-    expect(await effectivePermission(member, doc)).toBe("none");
+    expect(await effectivePermission(member, doc)).toBe("edit");
+
+    const other = await seedNote(vault, folder, "HR/other.md");
+    expect(await effectivePermission(member, other)).toBe("none");
+    await seedDeny(org, "file", other, member);
+    expect(await effectivePermission(member, other)).toBe("none");
   });
 
   it("beats owner and admin — a lock only caps them at view, a deny removes them", async () => {

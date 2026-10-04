@@ -450,27 +450,17 @@ export function FileTree() {
    * True when a path's padlock comes ONLY from the whole-vault Read-only
    * posture — there is no lock row on the item to unlock.
    *
-   * The Lock/Unlock controls speak to an item's own row, so on these rows they
-   * have nothing to act on: Unlock would find no share, and Lock would write a
-   * redundant per-item row that changes nothing except the wording of the badge
-   * it already has. The vault posture is changed in Access, not here.
+   * Unlock speaks to an item's own row, so on these rows it has nothing to act
+   * on. The vault posture is changed in Members and access, not here.
    */
   const vaultLockedOnly = (path: string) => lockByPath.get(path) === "vault";
 
-  // Owners/admins can lock and unlock straight from the row menu.
+  // Owners/admins can remove a legacy item lock straight from the row menu.
+  // Creating one is retired from the UI: per-item team locks conflict with the
+  // per-person access model, so only Unlock remains for vaults that have them.
   const myRole = members.find((m) => m.userId === session?.user.id)?.role;
   const canManage = myRole === "owner" || myRole === "admin";
 
-  /**
-   * Whether the selection bar's Lock/Unlock pair has anything to do.
-   *
-   * Hidden outright when every selected row is padlocked by the vault posture
-   * alone: Lock would write rows that change nothing and Unlock would find none
-   * to remove, so the pair would report success and leave every padlock exactly
-   * where it was. One selected row with a real item lock is enough to keep them.
-   */
-  const bulkLockUseful =
-    selected.size === 0 || [...selected].some((p) => !vaultLockedOnly(p));
 
   /** Resolve a path (+ kind) to a server share resource, if the vault is synced. */
   function shareTargetForPath(
@@ -666,26 +656,16 @@ export function FileTree() {
     exitSelect();
   }
 
-  async function bulkLock() {
-    const store = useStore.getState();
-    for (const p of selected) {
-      const n = nodeByPath.get(p);
-      if (!n) continue;
-      const target = shareTargetForPath(p, n.isDir, n.name);
-      if (!target) continue;
-      // Skip anything already locked directly (avoids a duplicate share row).
-      if (locks.some((l) => shareResourceId(l) === target.resourceId)) continue;
-      // And anything the read-only vault already covers: the row would change
-      // nothing an unlock could then undo.
-      if (vaultLockedOnly(p)) continue;
-      try {
-        await store.createLock(target.resourceType, target.resourceId, null);
-      } catch (e) {
-        console.error("bulk lock failed", p, e);
-      }
-    }
-    exitSelect();
-  }
+  /**
+   * Whether the selection bar's Unlock has anything to do: at least one
+   * selected row carries a legacy lock row of its own. Locks can no longer be
+   * created from the UI, so the button only exists to clear old ones.
+   */
+  const bulkUnlockUseful = [...selected].some((p) => {
+    const n = nodeByPath.get(p);
+    const target = n ? shareTargetForPath(p, n.isDir, n.name) : null;
+    return !!target && locks.some((l) => shareResourceId(l) === target.resourceId);
+  });
 
   async function bulkUnlock() {
     const store = useStore.getState();
@@ -1594,24 +1574,15 @@ export function FileTree() {
   // Create/import from this menu would land at a frozen root.
   const menuCreateBlocked = menuDir === "" && rootFrozen;
 
-  // The lock applied DIRECTLY to the menu's node (not inherited), so the menu
-  // can offer Unlock with the right share id.
+  // The legacy lock applied DIRECTLY to the menu's node (not inherited), so the
+  // menu can offer Unlock with the right share id. There is no Lock entry: new
+  // per-item team locks are retired from the UI.
   const menuTarget = menu?.node ? shareTargetFor(menu.node) : null;
   const menuLock = menuTarget
     ? (locks.find((l) => shareResourceId(l) === menuTarget.resourceId) ?? null)
     : null;
   // The padlock on this row comes from the vault posture and nothing else.
   const menuVaultLockedOnly = !!menu?.node && vaultLockedOnly(menu.node.data.path);
-
-  async function lockFromMenu(target: ShareTarget) {
-    try {
-      await useStore
-        .getState()
-        .createLock(target.resourceType, target.resourceId, null);
-    } catch (e) {
-      console.error("lock failed", e);
-    }
-  }
 
   async function unlockFromMenu(shareId: string) {
     try {
@@ -1844,32 +1815,21 @@ export function FileTree() {
           <span className="selbar-count">{selected.size} selected</span>
           {selected.size > 0 && (
             <div className="selbar-actions">
-              {canManage && syncEnabled && bulkLockUseful && (
-                <>
-                  {/* One server round trip per selected item, so a lock over a
-                      large selection is a real wait. `replaceLabel` swaps the
-                      padlock for the spinner — an icon button has no room for
-                      both, and a 28px control that grows would push its
-                      neighbours under the cursor mid-click. */}
-                  <AsyncButton
-                    className="selbar-icon"
-                    onClick={bulkLock}
-                    replaceLabel
-                    title="Lock selected"
-                    aria-label="Lock selected"
-                  >
-                    {ICON_LOCK}
-                  </AsyncButton>
-                  <AsyncButton
-                    className="selbar-icon"
-                    onClick={bulkUnlock}
-                    replaceLabel
-                    title="Unlock selected"
-                    aria-label="Unlock selected"
-                  >
-                    {ICON_UNLOCK}
-                  </AsyncButton>
-                </>
+              {canManage && syncEnabled && bulkUnlockUseful && (
+                // One server round trip per selected item, so an unlock over a
+                // large selection is a real wait. `replaceLabel` swaps the
+                // padlock for the spinner — an icon button has no room for
+                // both, and a 28px control that grows would push its
+                // neighbours under the cursor mid-click.
+                <AsyncButton
+                  className="selbar-icon"
+                  onClick={bulkUnlock}
+                  replaceLabel
+                  title="Unlock selected"
+                  aria-label="Unlock selected"
+                >
+                  {ICON_UNLOCK}
+                </AsyncButton>
               )}
               <button
                 className={`selbar-icon danger${confirmDelete ? " armed" : ""}`}
@@ -2067,14 +2027,7 @@ export function FileTree() {
               >
                 Locked by the vault
               </li>
-            ) : (
-              <li
-                title="View only for everyone — changes won't sync"
-                onClick={() => void lockFromMenu(menuTarget)}
-              >
-                Lock for everyone
-              </li>
-            ))}
+            ) : null)}
           {menu.node && (() => {
             // What the row actually shows: a hand-picked colour, else the
             // automatic one — so the menu and the sidebar never disagree.

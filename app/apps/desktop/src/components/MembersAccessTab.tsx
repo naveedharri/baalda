@@ -17,15 +17,16 @@ import {
   everyoneLabel,
   filterPeople,
   invitationAccessLabel,
-  isNarrowing,
+  needsAccessConfirm,
   LEVEL_TO_MODE,
+  levelClass,
   lastActiveLabel,
   NEW_MEMBER_OPTIONS,
   PERSON_LEVEL_LABEL,
   reduceAccessCopy,
-  REMOVAL_SENTENCE,
   ROLE_LABEL,
   shortDate,
+  presentUserIds,
 } from "../lib/membersAccess";
 import { syncManager } from "../lib/sync/docSession";
 import { writeTeamAccessCache } from "../lib/teamAccessCache";
@@ -74,6 +75,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
   const session = useStore((s) => s.session);
   const organizations = useStore((s) => s.organizations);
   const presence = useStore((s) => s.vaultPresence);
+  const vaultStatus = useStore((s) => s.vaultSyncStatus);
   const serverUrl = useStore((s) => s.serverUrl);
   const orgId = session?.activeOrganizationId ?? null;
   const myUserId = session?.user.id;
@@ -184,7 +186,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
     if (!teamAccess) return;
     if (mode === teamAccess.mode && teamAccess.overrides.length === 0 && teamAccess.posture !== "none") return;
     const label = EVERYONE_OPTIONS.find((o) => o.value === mode)?.label ?? mode;
-    if (!isNarrowing(teamAccess.posture === "none" ? "private" : teamAccess.mode, mode)) {
+    if (!needsAccessConfirm(teamAccess.posture === "none" ? "private" : teamAccess.mode, mode)) {
       void writeEveryone(mode);
       return;
     }
@@ -200,24 +202,6 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
           <p>Every member gets <strong>{label}</strong> unless they have their own setting. People set by name keep theirs.</p>
           <p>{copy.outcome}</p>
         </>
-      ),
-    });
-  };
-
-  const resetOverrides = () => {
-    if (!teamAccess) return;
-    const n = teamAccess.overrides.length;
-    const label = EVERYONE_OPTIONS.find((o) => o.value === teamAccess.mode)?.label ?? "";
-    setConfirm({
-      title: `Reset ${n} ${n === 1 ? "folder" : "folders"} to the vault setting?`,
-      label: "Reset",
-      tone: "accent",
-      apply: () => writeEveryone(teamAccess.mode),
-      body: (
-        <p>
-          {n === 1 ? "This folder goes" : "These folders go"} back to <strong>{label}</strong> for everyone.
-          Settings for people chosen by name are kept. {REMOVAL_SENTENCE}
-        </p>
       ),
     });
   };
@@ -252,7 +236,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
     const level = m.access?.level ?? null;
     const from = level === null ? null : level === "custom" ? "custom" : LEVEL_TO_MODE[level];
     if (from === choice) return;
-    if (!isNarrowing(from, choice)) {
+    if (!needsAccessConfirm(from, choice)) {
       void writePerson(m, choice);
       return;
     }
@@ -330,7 +314,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
   const invitations = (overview?.invitations ?? []).filter((i) => i.status === "pending");
   const shown = useMemo(() => filterPeople(query, members, invitations), [query, members, invitations]);
   const myRole = members.find((m) => m.userId === myUserId)?.role;
-  const presentIds = useMemo(() => new Set(presence.map((p) => p.userId)), [presence]);
+  const presentIds = useMemo(() => presentUserIds(presence, myUserId, vaultStatus), [presence, myUserId, vaultStatus]);
   const now = Date.now();
   const profileMember = profile ? members.find((m) => m.userId === profile.userId) ?? null : null;
 
@@ -408,7 +392,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
                 onSelect={chooseEveryone}
                 disabled={busy}
                 ariaLabel={`Access for everyone in ${vaultName}`}
-                triggerClassName="members-access-trigger"
+                triggerClassName={`members-access-trigger is-level ${levelClass(teamAccess.posture === "none" ? "private" : teamAccess.mode)}`}
                 menuClassName="access-menu"
                 triggerContent={everyone?.label}
               />
@@ -431,21 +415,13 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
                 onSelect={(m) => void chooseDefault(m)}
                 disabled={busy}
                 ariaLabel="Access for new members"
-                triggerClassName="members-access-trigger"
+                triggerClassName={`members-access-trigger is-level ${levelClass(accessDefault.mode)}`}
                 menuClassName="access-menu"
               />
             ) : (
               <PillSkeleton label="Loading access for new members" />
             )}
           </div>
-          {teamAccess && teamAccess.overrides.length > 0 && (
-            <div className="members-access-banner">
-              <span>
-                {teamAccess.overrides.length} {teamAccess.overrides.length === 1 ? "folder has" : "folders have"} different access for everyone
-              </span>
-              <button className="link-btn" disabled={busy} onClick={resetOverrides}>Reset</button>
-            </div>
-          )}
         </div>
       )}
 
@@ -536,7 +512,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
                           onSelect={(c) => choosePerson(m, c)}
                           disabled={busy}
                           ariaLabel={`Access for ${name}`}
-                          triggerClassName="members-access-trigger"
+                          triggerClassName={`members-access-trigger is-level ${levelClass(m.access.level)}`}
                 menuClassName="access-menu"
                           triggerContent={PERSON_LEVEL_LABEL[m.access.level]}
                         />

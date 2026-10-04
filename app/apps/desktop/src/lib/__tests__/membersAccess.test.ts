@@ -4,7 +4,7 @@ import {
   everyoneLabel,
   filterPeople,
   invitationAccessLabel,
-  isNarrowing,
+  needsAccessConfirm,
   isValidEmail,
   tickGrantMode,
   reduceAccessCopy,
@@ -14,14 +14,17 @@ import {
 import { addChips } from "../../components/InvitePeopleDialog";
 
 describe("members and access rules", () => {
-  it("only a narrowing asks for confirmation", () => {
-    expect(isNarrowing("open", "readonly")).toBe(true);
-    expect(isNarrowing("readonly", "private")).toBe(true);
-    expect(isNarrowing("private", "open")).toBe(false);
-    expect(isNarrowing("readonly", "open")).toBe(false);
-    // Unknown or custom: anything short of edit may take something away.
-    expect(isNarrowing(null, "readonly")).toBe(true);
-    expect(isNarrowing("custom", "open")).toBe(false);
+  it("only taking access away entirely asks for confirmation", () => {
+    expect(needsAccessConfirm("open", "private")).toBe(true);
+    expect(needsAccessConfirm("readonly", "private")).toBe(true);
+    expect(needsAccessConfirm("custom", "private")).toBe(true);
+    expect(needsAccessConfirm(null, "private")).toBe(true);
+    // View-only and widening apply straight away.
+    expect(needsAccessConfirm("open", "readonly")).toBe(false);
+    expect(needsAccessConfirm(null, "readonly")).toBe(false);
+    expect(needsAccessConfirm("private", "open")).toBe(false);
+    // Already No access: nothing to confirm.
+    expect(needsAccessConfirm("private", "private")).toBe(false);
   });
 
   it("a never-shared vault reads as No access and says authors keep their notes", () => {

@@ -205,6 +205,28 @@ describe("Members and access tab", () => {
     expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Personal info");
   });
 
+  it("counts the viewer as present while their vault channel is connected", async () => {
+    api.listAccessTree.mockResolvedValue({ folders: [], notes: [] });
+    api.getMembersOverview.mockResolvedValue(overview([
+      { ...person("u1", "Owner One", "owner"), lastActiveAt: new Date(Date.now() - 5 * 60_000).toISOString() as never },
+      person("u2", "Sara Khan"),
+    ]));
+    patchStore({ vaultSyncStatus: "offline" });
+    await render();
+    await flush();
+    const ownRow = () => host.querySelector<HTMLElement>('[aria-label="Open profile of Owner One"]')!;
+    expect(ownRow().textContent).not.toContain("Now");
+    await act(async () => patchStore({ vaultSyncStatus: "synced" }));
+    expect([...ownRow().querySelectorAll("td")].some((td) => td.textContent === "Now")).toBe(true);
+    await act(async () => (ownRow().querySelector(".members-table-name") as HTMLElement).click());
+    await flush();
+    const dd = (label: string) =>
+      [...host.querySelectorAll(".member-profile-about dt")].find((dt) => dt.textContent === label)?.nextElementSibling?.textContent;
+    expect(dd("Status")).toBe("Online");
+    expect(dd("Last active")).toBe("Now");
+    patchStore({ vaultSyncStatus: "offline" });
+  });
+
   it("opens a profile with Enter on a focused row", async () => {
     api.getMembersOverview.mockResolvedValue(overview([person("u1", "Owner One", "owner"), person("u2", "Sara Khan")]));
     await render();
@@ -212,6 +234,27 @@ describe("Members and access tab", () => {
     const row = host.querySelector<HTMLElement>('[aria-label="Open profile of Sara Khan"]')!;
     await act(async () => row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     expect(host.querySelector(".member-profile-name")?.textContent).toBe("Sara Khan");
+  });
+
+  it("makes a person view-only straight away but asks before removing their access", async () => {
+    api.getMembersOverview.mockResolvedValue(overview([person("u1", "Owner One", "owner"), person("u2", "Sara Khan")]));
+    api.setBulkAccess.mockResolvedValue({ mode: "readonly", resourcesChanged: 1, overridesCleared: 0, membersAffected: 1, disconnectedDocs: 0 });
+    await render();
+    await flush();
+    const pick = async (label: string) => {
+      await act(async () => document.body.querySelector<HTMLButtonElement>('[aria-label="Access for Sara Khan"]')!.click());
+      const item = [...document.body.querySelectorAll('[role="menuitemradio"]')]
+        .find((n) => n.textContent?.startsWith(label)) as HTMLElement;
+      await act(async () => item.click());
+      await flush();
+    };
+    await pick("Can view everything");
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
+    expect(api.setBulkAccess.mock.calls[0][1]).toMatchObject({ mode: "readonly", audience: { type: "users", userIds: ["u2"] } });
+    await pick("No access");
+    expect(document.body.querySelector('[role="alertdialog"] .confirm-title')?.textContent).toBe("Remove Sara Khan's access to this vault?");
+    expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
   });
 
   it("gives a plain member a read-only roster", async () => {

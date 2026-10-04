@@ -50,17 +50,15 @@ export const LEVEL_TO_MODE: Record<Exclude<MemberAccessLevel, "custom">, TeamAcc
   none: "private",
 };
 
-const RANK: Record<TeamAccessMode, number> = { open: 2, readonly: 1, private: 0 };
 
 /**
- * Does moving from `from` to `to` take access away? Only a narrowing asks for
- * confirmation, because only a narrowing removes content from devices. An
- * unknown or custom starting point counts as narrowing unless the target is
- * the widest mode: we cannot promise nothing is lost.
+ * Does this change ask for confirmation first? Only taking access away
+ * entirely (to No access) does — that is the one change that removes content
+ * from someone's devices. Making something view-only, or widening, applies
+ * straight away. Every confirm on the Members and access surfaces uses this.
  */
-export function isNarrowing(from: TeamAccessMode | "custom" | null, to: TeamAccessMode): boolean {
-  if (from === null || from === "custom") return to !== "open";
-  return RANK[to] < RANK[from];
+export function needsAccessConfirm(from: TeamAccessMode | "custom" | null, to: TeamAccessMode): boolean {
+  return to === "private" && from !== "private";
 }
 
 /** The Everyone row's label. A never-shared vault reads as No access, with a
@@ -96,6 +94,21 @@ export function countLine(query: string, people: number, invites: number): strin
   if (query.trim()) return `${plural(people + invites, "person", "people")} found`;
   const base = plural(people, "person", "people");
   return invites > 0 ? `${base} · ${plural(invites, "invite", "invites")} pending` : base;
+}
+
+/**
+ * Who is in the vault right now. The vault channel's presence lists OTHER
+ * peers only, so the signed-in user counts as present whenever their own
+ * vault channel is connected.
+ */
+export function presentUserIds(
+  peers: ReadonlyArray<{ userId: string }>,
+  selfId: string | null | undefined,
+  vaultStatus: string,
+): Set<string> {
+  const ids = new Set(peers.map((p) => p.userId));
+  if (selfId && (vaultStatus === "synced" || vaultStatus === "read-only")) ids.add(selfId);
+  return ids;
 }
 
 /** The Last active column: "Now" when present on the vault channel. */
@@ -217,4 +230,24 @@ export function reduceAccessCopy(
     title = to === "private" ? "Set everyone to No access?" : "Make the vault view only for everyone?";
   }
   return { title, button, outcome };
+}
+
+/** Colour class for a level pill: green edit, amber view, grey none, neutral mixed. */
+export function levelClass(level: TeamAccessMode | MemberAccessLevel | "mixed" | null | undefined): string {
+  switch (level) {
+    case "open":
+    case "edit":
+      return "is-edit";
+    case "readonly":
+    case "view":
+      return "is-view";
+    case "private":
+    case "none":
+      return "is-none";
+    case "mixed":
+    case "custom":
+      return "is-mixed";
+    default:
+      return "";
+  }
 }

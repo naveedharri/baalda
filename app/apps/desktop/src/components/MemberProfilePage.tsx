@@ -5,7 +5,7 @@ import { buildOrgRowsByPath, effectiveTeamMode } from "../lib/accessMode";
 import { createAccessSummaryBatcher } from "../lib/accessSummaryBatch";
 import { accessResourceType, ancestorPaths, entriesFromServer, rowsFromEntries, type AccessRow } from "../lib/accessTree";
 import { resourceIdsByPath } from "../lib/locks";
-import { isNarrowing, LEVEL_TO_MODE, reduceAccessCopy, tickGrantMode, type ReduceScope, dateWithAgo, GRANT_LABEL, PERSON_LEVEL_LABEL, ROLE_LABEL, splitNotePath } from "../lib/membersAccess";
+import { needsAccessConfirm, levelClass, LEVEL_TO_MODE, reduceAccessCopy, tickGrantMode, type ReduceScope, dateWithAgo, GRANT_LABEL, PERSON_LEVEL_LABEL, ROLE_LABEL, splitNotePath } from "../lib/membersAccess";
 import { syncManager } from "../lib/sync/docSession";
 import { activitySummary, buildTimeline, commonFolder, runNames, type TimelineEntry } from "../lib/memberActivity";
 import { relativeTime } from "../lib/health/format";
@@ -538,7 +538,7 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
   };
 
   const guarded = (from: TeamAccessMode | "custom" | null, to: TeamAccessMode, run: () => Promise<void>, scope: ReduceScope) => {
-    if (to === "open" || !isNarrowing(from, to)) return void run();
+    if (to === "open" || !needsAccessConfirm(from, to)) return void run();
     setConfirm({ ...reduceAccessCopy(scope, to), danger: to === "private", apply: run });
   };
 
@@ -565,7 +565,7 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
           triggerContent={level ? PERSON_LEVEL_LABEL[level] : "—"}
           disabled={busy}
           ariaLabel="Access across the vault"
-          triggerClassName="member-access-pill is-lg"
+          triggerClassName={`member-access-pill is-lg ${levelClass(level)}`}
                 menuClassName="access-menu"
           onSelect={(mode) => {
             if (mode === "custom") return;
@@ -698,7 +698,7 @@ function PersonAccessRow({ row, mode, failed, teamMode, tickMode, locked, setFor
             triggerContent={mode === "mixed" ? "Mixed" : mode === "open" ? "Can edit" : "Can view"}
             disabled={disabled}
             ariaLabel={`${row.name}: level`}
-            triggerClassName="member-access-pill"
+            triggerClassName={`member-access-pill ${levelClass(mode)}`}
             menuClassName="access-menu"
             onSelect={(m) => { if (m !== "mixed" && m !== mode) onChoose(from, m); }}
           />

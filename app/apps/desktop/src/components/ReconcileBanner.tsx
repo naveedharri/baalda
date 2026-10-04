@@ -5,7 +5,6 @@ import { reconcileReport, type ReconcileItem } from "../lib/sync/reconcileReport
 import { summarizeReconcile } from "../lib/reconcileSummary";
 import { pendingItems, reviewItems, reviewKey } from "./reviewModel";
 import { useReviewState } from "./ReviewTab";
-import { openReviewTab } from "./recoveryActions";
 import { useReviewPersistence } from "./useReviewPersistence";
 
 /** A burst of records (one reconnect reconciles many notes) settles into ONE
@@ -31,9 +30,9 @@ const isQuiet = (it: ReconcileItem) => it.kind === "selfRevoked";
  * What sync did on the user's behalf when it reconnected: a note put back, a
  * teammate's delete that sent offline edits to Trash, a clash rename. One line
  * per kind, one banner at a time. Dismiss drains the report; anything recorded
- * later raises the banner again with only the new items. Compare opens the
- * review tab WITHOUT draining: the banner stays while anything is pending, and
- * only Dismiss hides it for this session.
+ * later raises the banner again with only the new items. Details opens the
+ * Activity panel, where the review lives; only Dismiss hides the banner for
+ * this session.
  */
 export function ReconcileBanner() {
   useReviewPersistence();
@@ -67,7 +66,7 @@ export function ReconcileBanner() {
   const pendingReview = pendingItems(reviewable, resolved).length;
   const quiet = lines.length > 0 && lines.every((l) => l.kind === "selfRevoked") && pendingReview === 0;
   // Notices (restored notes, kept folders) are never reviewable: a launch with
-  // only notices shows its sentences with Details/Dismiss and no Compare.
+  // only notices shows its sentences with no review count.
   const allResolved = reviewable.length > 0 && pendingReview === 0;
 
   const dismiss = () => {
@@ -103,9 +102,6 @@ export function ReconcileBanner() {
         ))}
       </span>
       <div className="banner-actions">
-        {pendingReview > 0 && (
-          <button onClick={openReviewTab}>{`Compare (${pendingReview.toLocaleString()})`}</button>
-        )}
         <button onClick={details}>Details</button>
         <button className="secondary" onClick={dismiss}>
           Dismiss

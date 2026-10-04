@@ -141,15 +141,13 @@ describe("Member profile page, Access tab", () => {
     expect(host.querySelectorAll(".member-access-row .member-access-pill")).toHaveLength(3);
     const reads = api.resolveAccessSummaries.mock.calls.length;
 
-    // Across the vault: Custom → Can view everything (asks first).
+    // Across the vault: Custom → Can view everything. View-only never asks.
     serverMode = "readonly";
     await act(async () => document.body.querySelector<HTMLButtonElement>('[aria-label="Access across the vault"]')!.click());
     const viewAll = [...document.body.querySelectorAll('[role="menuitemradio"]')]
       .find((n) => n.textContent?.startsWith("Can view everything")) as HTMLElement;
     await act(async () => viewAll.click());
-    const confirm = [...document.body.querySelectorAll('[role="alertdialog"] button')]
-      .find((b) => b.textContent === "Make view only") as HTMLElement;
-    await act(async () => confirm.click());
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
     await settle();
 
     expect(onChanged).toHaveBeenCalledTimes(1);

@@ -111,6 +111,49 @@ export function columnRows(
     }));
 }
 
+/**
+ * Float this session's moves to the top WITHOUT leaving the tree: at every
+ * level, siblings whose subtree holds a recently moved row come first (newest
+ * move first), then the rest in their normal order. A moved row keeps its
+ * indentation and its grey ancestors, which rise with it. `recentKeys` is
+ * newest first; only interactive rows count, so a grey path row whose folder
+ * was moved to ANOTHER column does not rise here.
+ */
+export function orderByRecent(column: readonly BoardRow[], recentKeys: readonly string[]): BoardRow[] {
+  if (recentKeys.length === 0) return [...column];
+  const recency = new Map(recentKeys.map((k, i) => [k, i]));
+  const byPath = new Map(column.map((r) => [r.row.path, r]));
+  const children = new Map<BoardRow | null, BoardRow[]>();
+  for (const r of column) {
+    const parentPath = [...ancestorPaths(r.row.path)].reverse().find((p) => byPath.has(p));
+    const parent = parentPath === undefined ? null : byPath.get(parentPath)!;
+    const list = children.get(parent) ?? [];
+    list.push(r);
+    children.set(parent, list);
+  }
+  const rank = new Map<BoardRow, number>();
+  const rankOf = (r: BoardRow): number => {
+    const known = rank.get(r);
+    if (known !== undefined) return known;
+    let best = r.grey ? Infinity : recency.get(r.row.key) ?? Infinity;
+    for (const c of children.get(r) ?? []) best = Math.min(best, rankOf(c));
+    rank.set(r, best);
+    return best;
+  };
+  const out: BoardRow[] = [];
+  const walk = (parent: BoardRow | null) => {
+    const kids = (children.get(parent) ?? [])
+      .map((r, i) => ({ r, i, k: rankOf(r) }))
+      .sort((a, b) => (a.k === b.k ? a.i - b.i : a.k - b.k));
+    for (const { r } of kids) {
+      out.push(r);
+      walk(r);
+    }
+  };
+  walk(null);
+  return out;
+}
+
 /** Rows in a column with no interactive ancestor in the same column. */
 export function topLevelRows(column: readonly BoardRow[]): AccessRow[] {
   const live = new Set(column.filter((r) => !r.grey).map((r) => r.row.path));

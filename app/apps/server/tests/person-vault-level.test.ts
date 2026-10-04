@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
+import { applyBulkAccess } from "../src/permissions/access-management.js";
 import { summarizeAccess } from "../src/permissions/access-summary.js";
 import { canEditFolder, vaultRootWritable } from "../src/permissions/http-gates.js";
 import {
@@ -166,6 +167,78 @@ describe("per-person vault level", () => {
     expect((await listVisibleFolders(f.member, f.vault)).map((r) => r.id)).toEqual([f.folder]);
   });
 
+  describe("the deepest of a person's own rows wins", () => {
+    async function userRow(orgId: string, type: "folder" | "file", id: string, userId: string, permission: string) {
+      await pool.query(
+        `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+         VALUES ($1, $2, $3, $4, 'user', $5, $6)`,
+        [randomUUID(), orgId, type, id, userId, permission],
+      );
+    }
+
+    it("(a) per-user folder readonly + per-user file edit ⇒ edit, also for an owner at vault view", async () => {
+      const f = await fixture("edit");
+      await userRow(f.org, "folder", f.folder, f.member, "readonly");
+      await userRow(f.org, "file", f.doc, f.member, "edit");
+      expect(await allPaths(f.member, f.doc, f.org, "member")).toBe("edit");
+      expect(await allPaths(f.member, f.own, f.org, "member")).toBe("view"); // the folder cap still holds here
+
+      await personVault(f.org, f.owner, "view");
+      await userRow(f.org, "folder", f.folder, f.owner, "readonly");
+      await userRow(f.org, "file", f.doc, f.owner, "edit");
+      expect(await allPaths(f.owner, f.doc, f.org, "owner")).toBe("edit");
+      expect(await allPaths(f.owner, f.own, f.org, "owner")).toBe("view");
+    });
+
+    it("(b) per-user folder denied + per-user file view ⇒ view", async () => {
+      const f = await fixture("sealed");
+      await userRow(f.org, "folder", f.folder, f.member, "denied");
+      await userRow(f.org, "file", f.doc, f.member, "view");
+      expect(await allPaths(f.member, f.doc, f.org, "member")).toBe("view");
+      expect(await allPaths(f.member, f.own, f.org, "member")).toBe("none");
+      expect(await listReadableDocsInVault(f.member, f.vault)).toEqual(new Set([f.doc]));
+      // The denied folder stays in the tree as the path to the lifted note.
+      expect((await listVisibleFolders(f.member, f.vault)).map((r) => r.id)).toEqual([f.folder]);
+    });
+
+    it("(b2) a deeper per-user folder grant lifts a denied parent folder; its path stays visible", async () => {
+      const f = await fixture("edit");
+      const sub = await seedFolder(f.vault, f.folder, "Sub", "Docs/Sub", f.owner);
+      const inner = await seedNote(f.vault, sub, "Docs/Sub/i.md", f.owner);
+      await userRow(f.org, "folder", f.folder, f.member, "denied");
+      await userRow(f.org, "folder", sub, f.member, "edit");
+      expect(await allPaths(f.member, inner, f.org, "member")).toBe("edit");
+      expect(await allPaths(f.member, f.doc, f.org, "member")).toBe("none");
+      expect(await listReadableDocsInVault(f.member, f.vault)).toEqual(new Set([inner]));
+      expect((await listVisibleFolders(f.member, f.vault)).map((r) => r.id).sort()).toEqual([f.folder, sub].sort());
+      expect(await canEditFolder(f.member, sub)).toBe(true);
+      expect(await canEditFolder(f.member, f.folder)).toBe(false);
+    });
+
+    it("(c) per-user folder edit + per-user file denied ⇒ none", async () => {
+      const f = await fixture("edit");
+      await userRow(f.org, "folder", f.folder, f.member, "edit");
+      await userRow(f.org, "file", f.doc, f.member, "denied");
+      expect(await allPaths(f.member, f.doc, f.org, "member")).toBe("none");
+      expect(await allPaths(f.member, f.own, f.org, "member")).toBe("edit");
+      expect(await listReadableDocsInVault(f.member, f.vault)).toEqual(new Set([f.own]));
+    });
+
+    it("(d) per-user folder readonly with no file row ⇒ view (unchanged)", async () => {
+      const f = await fixture("edit");
+      await userRow(f.org, "folder", f.folder, f.member, "readonly");
+      expect(await allPaths(f.member, f.doc, f.org, "member")).toBe("view");
+      expect(await canEditFolder(f.member, f.folder)).toBe(false);
+    });
+
+    it("(e) ORG folder lock + per-user file edit ⇒ view (org locks unchanged)", async () => {
+      const f = await fixture("edit");
+      await seedLock(f.org, "folder", f.folder, { type: "org" });
+      await userRow(f.org, "file", f.doc, f.member, "edit");
+      expect(await allPaths(f.member, f.doc, f.org, "member")).toBe("view");
+    });
+  });
+
   it("a lock still caps a per-user vault edit", async () => {
     const f = await fixture("edit");
     await personVault(f.org, f.member, "edit");
@@ -256,6 +329,82 @@ describe("per-person vault level over HTTP", () => {
     });
     expect(res.status).toBe(201);
     expect(await effectivePermission(member.userId, doc)).toBe("none");
+  });
+
+  it("an owner's own vault `view` is lifted to edit by their per-user file/folder edit (bulk API)", async () => {
+    await seedVaultGrant(orgId, "edit");
+    const folder = await seedFolder(vaultId, null, "F", "F", owner.userId);
+    const doc = await seedNote(vaultId, folder, "F/n.md", owner.userId);
+    const other = await seedNote(vaultId, folder, "F/o.md", owner.userId);
+    const folder2 = await seedFolder(vaultId, null, "G", "G", owner.userId);
+    const inner = await seedNote(vaultId, folder2, "G/i.md", owner.userId);
+    const bulk = (resourceType: "vault" | "folder" | "file", resourceId: string, mode: "open" | "readonly") =>
+      applyBulkAccess({
+        organizationId: orgId,
+        actorUserId: owner.userId,
+        resources: [{ resourceType, resourceId }],
+        audience: { type: "users", userIds: [owner.userId] },
+        mode,
+      });
+    const summary = async (resourceType: "folder" | "file", resourceId: string) => {
+      const res = await call(owner, "POST", `/api/orgs/${orgId}/access/summaries`, {
+        groups: [[{ resourceType, resourceId }]],
+        userIds: [owner.userId],
+      });
+      expect(res.status).toBe(200);
+      return ((await res.json()) as { modes: string[] }).modes[0];
+    };
+
+    await bulk("vault", orgId, "readonly"); // the owner's own level: Can view
+    expect(await allPaths(owner.userId, doc, orgId, "owner")).toBe("view");
+    expect(await summary("file", doc)).toBe("readonly");
+
+    await bulk("file", doc, "open"); // that one note → Can edit
+    expect(await allPaths(owner.userId, doc, orgId, "owner")).toBe("edit");
+    expect(await allPaths(owner.userId, other, orgId, "owner")).toBe("view");
+    expect(await summary("file", doc)).toBe("open");
+    expect(await summary("file", other)).toBe("readonly");
+
+    await bulk("folder", folder2, "open"); // a whole folder → Can edit
+    expect(await allPaths(owner.userId, inner, orgId, "owner")).toBe("edit");
+    expect(await summary("folder", folder2)).toBe("open");
+  });
+
+  it("bulk: owner's folder set to Can view (per-user `readonly`), then one note in it to Can edit ⇒ edit, summary open", async () => {
+    await seedVaultGrant(orgId, "edit");
+    const concepts = await seedFolder(vaultId, null, "Concepts", "Concepts", owner.userId);
+    const doc = await seedNote(vaultId, concepts, "Concepts/a.md", owner.userId);
+    const sibling = await seedNote(vaultId, concepts, "Concepts/b.md", owner.userId);
+    const bulk = (resourceType: "folder" | "file", resourceId: string, mode: "open" | "readonly") =>
+      applyBulkAccess({
+        organizationId: orgId,
+        actorUserId: owner.userId,
+        resources: [{ resourceType, resourceId }],
+        audience: { type: "users", userIds: [owner.userId] },
+        mode,
+      });
+    const summary = async (resourceType: "folder" | "file", resourceId: string) =>
+      ((await (
+        await call(owner, "POST", `/api/orgs/${orgId}/access/summaries`, {
+          groups: [[{ resourceType, resourceId }]],
+          userIds: [owner.userId],
+        })
+      ).json()) as { modes: string[] }).modes[0];
+
+    await bulk("folder", concepts, "readonly");
+    const { rows } = await pool.query<{ permission: string }>(
+      `SELECT permission FROM shares WHERE resource_type = 'folder' AND resource_id = $1 AND principal_type = 'user'`,
+      [concepts],
+    );
+    expect(rows.map((r) => r.permission)).toEqual(["readonly"]); // the dev-DB row
+    expect(await allPaths(owner.userId, doc, orgId, "owner")).toBe("view");
+
+    await bulk("file", doc, "open");
+    expect(await allPaths(owner.userId, doc, orgId, "owner")).toBe("edit");
+    expect(await allPaths(owner.userId, sibling, orgId, "owner")).toBe("view");
+    expect(await summary("file", doc)).toBe("open");
+    expect(await summary("file", sibling)).toBe("readonly");
+    expect(await summary("folder", concepts)).toBe("mixed");
   });
 
   it("GET /locks lifts include the caller's per-user vault edit under Read-only", async () => {

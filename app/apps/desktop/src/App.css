@@ -8316,18 +8316,6 @@ button.secondary:active:not(:disabled),
   gap: var(--sp-2);
   font-size: var(--fs-sm);
 }
-.members-access-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  margin-top: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--radius-md);
-  background: var(--warning-soft);
-  color: var(--text-primary);
-  font-size: var(--fs-sm);
-}
 .members-access-toolbar {
   display: flex;
   align-items: center;
@@ -8521,6 +8509,61 @@ button.secondary:active:not(:disabled),
 .members-table .row-more-btn.open {
   background: var(--bg-surface);
   border-color: var(--border);
+}
+
+/* Access level colours: green edit, amber view, grey none, neutral mixed.
+   The members-page triggers take the pill shape only when they carry a level. */
+.members-access-trigger.is-level {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+}
+.member-access-pill.is-edit,
+.members-access-trigger.is-edit {
+  background: var(--access-edit-bg);
+  color: var(--access-edit-fg);
+  border-color: color-mix(in srgb, var(--access-edit-fg) 40%, transparent);
+}
+.member-access-pill.is-view,
+.members-access-trigger.is-view {
+  background: var(--access-view-bg);
+  color: var(--access-view-fg);
+  border-color: color-mix(in srgb, var(--access-view-fg) 40%, transparent);
+}
+.member-access-pill.is-none,
+.members-access-trigger.is-none {
+  background: var(--access-none-bg);
+  color: var(--access-none-fg);
+  border-color: color-mix(in srgb, var(--access-none-fg) 40%, transparent);
+}
+.member-access-pill.is-edit:hover:not(:disabled),
+.members-access-trigger.is-edit:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--access-edit-fg) 12%, var(--access-edit-bg));
+}
+.member-access-pill.is-view:hover:not(:disabled),
+.members-access-trigger.is-view:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--access-view-fg) 12%, var(--access-view-bg));
+}
+.member-access-pill.is-none:hover:not(:disabled),
+.members-access-trigger.is-none:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--access-none-fg) 12%, var(--access-none-bg));
+}
+/* Mixed / Custom: a plain neutral pill — no two-tone mark. */
+.member-access-pill.is-mixed,
+.members-access-trigger.is-mixed {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+.member-access-pill.is-mixed:hover:not(:disabled),
+.members-access-trigger.is-mixed:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.member-access-pill[class*="is-"] .role-caret,
+.members-access-trigger.is-level .role-caret {
+  color: currentColor;
+  opacity: 0.7;
 }
 
 /* Quiet MCP tip under the table. */
@@ -9206,50 +9249,78 @@ body.access-board-grabbing {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
-  align-items: start;
+  /* Every card runs as tall as the tallest, so a short column's highlight is
+     still in view while dragging far down a long one. */
+  align-items: stretch;
+}
+/* Each column's colour: green Can edit, amber Can view, grey No access.
+   Rows inherit these, so the drop tint and landing pulse match the column. */
+.access-board-column[data-mode="open"] {
+  --col-bg: var(--access-edit-bg);
+  --col-fg: var(--access-edit-fg);
+}
+.access-board-column[data-mode="readonly"] {
+  --col-bg: var(--access-view-bg);
+  --col-fg: var(--access-view-fg);
+}
+.access-board-column[data-mode="private"] {
+  --col-bg: var(--access-none-bg);
+  --col-fg: var(--access-none-fg);
 }
 .access-board-column {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
-  padding: 4px 8px 8px;
+  padding: 0 8px 8px;
   transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .access-board-column.is-over {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px var(--accent);
+  border-color: var(--col-fg);
+  background: var(--col-bg);
 }
 .access-board-column-head {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   height: 40px;
-  padding: 0 4px 0 6px;
+  /* Full-bleed tinted band across the card's top. */
+  margin: 0 -8px 4px;
+  padding: 0 12px 0 14px;
+  background: var(--col-bg);
   border-bottom: 1px solid var(--border);
-  margin-bottom: 4px;
+  border-radius: calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0 0;
 }
 .access-board-column-title {
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--col-fg, var(--text-primary));
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .access-board-count {
   font-weight: 400;
-  color: var(--text-tertiary);
+  color: var(--col-fg, var(--text-tertiary));
+  opacity: 0.8;
 }
 .access-board-list {
   list-style: none;
   margin: 0;
   padding: 0;
   min-height: 36px;
+  /* The empty space under the rows is still the card (and the drop target). */
+  flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 .access-board-empty {
-  height: 36px;
+  flex: 1;
+  min-height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -9258,6 +9329,9 @@ body.access-board-grabbing {
   border: 1px dashed var(--border);
   border-radius: var(--radius-md);
   margin-top: 2px;
+}
+.access-board-list > li:not(.access-board-empty) {
+  flex: none;
 }
 .access-board-row {
   display: flex;
@@ -9314,10 +9388,21 @@ body.access-board-grabbing * {
   from { scale: 1; rotate: 0deg; }
   to { scale: 1.02; rotate: 1.2deg; }
 }
+/* A landed row: slides in, then one soft accent ring expands and fades while
+   an accent tint drains back to the row's own background. */
 .access-board-row.is-landing {
-  animation: access-board-land 220ms ease-out both;
-  background: var(--accent-soft);
-  transition: background 600ms var(--ease);
+  animation:
+    access-board-land 220ms ease-out both,
+    access-board-pulse 700ms ease-out 220ms 1,
+    access-board-tint 1200ms ease-out 220ms 1 both;
+}
+@keyframes access-board-pulse {
+  from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--col-fg) 45%, transparent); }
+  to { box-shadow: 0 0 0 8px transparent; }
+}
+@keyframes access-board-tint {
+  from { background: var(--col-bg); }
+  to { background: transparent; }
 }
 @keyframes access-board-land {
   from { opacity: 0; transform: translateY(-6px) scale(0.98); }
@@ -9356,6 +9441,12 @@ body.access-board-grabbing * {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.access-board-lock {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-tertiary);
+  margin-left: -2px;
+}
 .access-board-arrows {
   display: inline-flex;
   flex: none;
@@ -9383,9 +9474,9 @@ body.access-board-grabbing * {
 }
 .access-board-drop-line {
   height: 2px;
-  margin: 4px 6px 0;
+  margin: 2px 6px 4px;
   border-radius: 1px;
-  background: var(--accent);
+  background: var(--col-fg, var(--accent));
 }
 .access-board-loading {
   display: flex;
@@ -9457,8 +9548,8 @@ body.access-board-grabbing * {
   animation: access-board-hint-target 1800ms ease-in-out both;
 }
 @keyframes access-board-hint-target {
-  0%, 28%, 75%, 100% { border-color: var(--border); background: var(--bg-surface); box-shadow: none; }
-  38%, 64% { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+  0%, 28%, 75%, 100% { background: var(--bg-surface); box-shadow: none; }
+  38%, 64% { background: var(--col-bg); box-shadow: inset 0 0 0 1px var(--col-fg); }
 }
 @media (prefers-reduced-motion: reduce) {
   .access-board-row[data-hint],
@@ -9471,7 +9562,7 @@ body.access-board-grabbing * {
     rotate: 0deg;
   }
   .access-board-row.is-landing {
-    animation: access-board-fade 120ms linear both;
+    animation: access-board-tint 1200ms ease-out both;
   }
   .access-board-gap {
     animation: none;
