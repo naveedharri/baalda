@@ -23,6 +23,13 @@ Three pieces; this open-source repo holds the first two.
   because the updater checks our minisign signature, not an OS certificate.
   There is no draft/review gate — pushing a `v*` tag ships to every running app on its next
   updater poll (Tauri updater polls `releases/latest`).
+  The server deploys in minutes but the release's four serial platform jobs publish `latest.json`
+  piecemeal, so a vault-channel `version-available` hint (the primary trigger; the 15-min poll is the
+  fallback) that finds no update, a `latest.json` missing this platform, or a 404 bundle parks the
+  updater in `pending` ("An update is on its way" in About) and retries at 2/4/8 min, capped at the poll,
+  for 60 min (`lib/updater.ts`) — never an error or the wall; a bad signature stays a real error. Raise
+  `MIN_CLIENT_VERSION` at least one release AFTER the build it needs; as a backstop, for
+  `MIN_CLIENT_VERSION_GRACE_MINUTES` (60) after boot a raised floor only refuses builds below 0.1.49.
   Because of that, review happens *before* main: PRs target the long-lived **`staging`** branch,
   and every push to it runs `.github/workflows/staging-release.yml`, which publishes a separate
   auto-updating **"Baalda Staging"** app (`com.baalda.context.staging`, version

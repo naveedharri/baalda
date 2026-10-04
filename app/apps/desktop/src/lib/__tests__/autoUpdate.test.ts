@@ -435,3 +435,110 @@ describe("the server's release hint (#269)", () => {
     expect(check).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("a release still being published (server ahead of the feed)", () => {
+  const MIN = 60_000;
+
+  it("treats a hinted newer version with no update as in progress: no error, backoff 2/4/8 min", async () => {
+    check.mockResolvedValue(null);
+    const updater = await loadUpdater();
+
+    await updater.onServerReleaseHint("0.1.61", () => 0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(updater.updateState()).toEqual({ phase: "pending", version: "0.1.61" });
+
+    await vi.advanceTimersByTimeAsync(2 * MIN);
+    expect(check).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(4 * MIN);
+    expect(check).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(8 * MIN - 1_000);
+    expect(check).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(check).toHaveBeenCalledTimes(4);
+    // Capped at the regular poll interval.
+    await vi.advanceTimersByTimeAsync(updater.UPDATE_POLL_MS);
+    expect(check).toHaveBeenCalledTimes(5);
+    expect(updater.updateState().phase).toBe("pending");
+    expect(relaunch).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the regular schedule after the window, still with no error", async () => {
+    check.mockResolvedValue(null);
+    const updater = await loadUpdater();
+    await updater.onServerReleaseHint("0.1.61", () => 0);
+    await vi.advanceTimersByTimeAsync(updater.RELEASE_PENDING_WINDOW_MS + updater.UPDATE_POLL_MS);
+    expect(updater.pendingRelease()).toBeNull();
+    expect(updater.updateState().phase).not.toBe("error");
+    const calls = check.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(updater.UPDATE_POLL_MS * 2);
+    expect(check.mock.calls.length).toBe(calls);
+  });
+
+  it("treats a half-published feed (no entry for this platform) as in progress", async () => {
+    check.mockRejectedValue(
+      new Error("None of the fallback platforms `[\"windows-x86_64\"]` were found in the response `platforms` object"),
+    );
+    const updater = await loadUpdater();
+    await updater.onServerReleaseHint("0.1.61", () => 0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(updater.updateState()).toEqual({ phase: "pending", version: "0.1.61" });
+  });
+
+  it("installs normally once a later retry finds the release", async () => {
+    check.mockResolvedValueOnce(null).mockResolvedValue(fakeUpdate("0.1.61"));
+    const updater = await loadUpdater();
+    await updater.onServerReleaseHint("0.1.61", () => 0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(updater.updateState().phase).toBe("pending");
+    await vi.advanceTimersByTimeAsync(2 * MIN);
+    expect(trace).toContain("download");
+    expect(relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a 404 on the bundle download as in progress, never the wall", async () => {
+    const half = fakeUpdate("0.1.61");
+    half.downloadAndInstall.mockRejectedValue(
+      new Error("Download request failed with status: 404 Not Found"),
+    );
+    check.mockResolvedValueOnce(half).mockResolvedValueOnce(half).mockResolvedValue(fakeUpdate("0.1.61"));
+    const updater = await loadUpdater();
+    await updater.backgroundUpdateCheck();
+    expect(updater.updateState()).toEqual({ phase: "pending", version: "0.1.61" });
+    await vi.advanceTimersByTimeAsync(2 * MIN);
+    expect(updater.updateState().phase).toBe("pending");
+    expect(updater.isUpdateBlocking(updater.updateState())).toBe(false);
+    await vi.advanceTimersByTimeAsync(4 * MIN);
+    expect(relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the real error for a bad signature", async () => {
+    const bad = fakeUpdate("0.1.61");
+    bad.downloadAndInstall.mockRejectedValue(new Error("signature verification failed"));
+    check.mockResolvedValue(bad);
+    const updater = await loadUpdater();
+    await updater.onServerReleaseHint("0.1.61", () => 0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(updater.updateState()).toEqual({ phase: "error", message: "signature verification failed" });
+    await vi.advanceTimersByTimeAsync(updater.AUTO_RETRY_DELAY_MS);
+    expect(updater.updateState().phase).toBe("failed");
+  });
+
+  it("ignores a hint for the version already running", async () => {
+    check.mockResolvedValue(null);
+    const updater = await loadUpdater();
+    await updater.onServerReleaseHint("0.1.60", () => 0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(updater.updateState().phase).toBe("uptodate");
+    expect(updater.pendingRelease()).toBeNull();
+  });
+
+  it("orders versions, staging builds included", async () => {
+    const updater = await loadUpdater();
+    expect(updater.isNewerVersion("0.1.61", "0.1.60")).toBe(true);
+    expect(updater.isNewerVersion("0.1.60", "0.1.60")).toBe(false);
+    expect(updater.isNewerVersion("0.1.60-staging.12", "0.1.60-staging.9")).toBe(true);
+    expect(updater.isNewerVersion("0.1.60", "0.1.60-staging.9")).toBe(true);
+    expect(updater.isReleaseNotReadyError("signature 404")).toBe(false);
+  });
+});

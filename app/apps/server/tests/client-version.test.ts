@@ -64,7 +64,7 @@ describe("client version policy (pure)", () => {
   });
 
   it("is configurable: a custom floor, `off`, and UNVERSIONED_CLIENTS=allow", () => {
-    const custom = clientVersionPolicy({ MIN_CLIENT_VERSION: "0.2.0" });
+    const custom = clientVersionPolicy({ MIN_CLIENT_VERSION: "0.2.0", MIN_CLIENT_VERSION_GRACE_MINUTES: "0" });
     expect(judgeClientVersion("0.1.99", custom)).toMatchObject({ ok: false });
     const off = clientVersionPolicy({ MIN_CLIENT_VERSION: "off" });
     expect(judgeClientVersion("0.0.1", off)).toEqual({ ok: true });
@@ -74,6 +74,26 @@ describe("client version policy (pure)", () => {
     // A present-but-old header is still judged against the floor.
     expect(judgeClientVersion("0.1.10", allow)).toMatchObject({ ok: false });
     expect(() => clientVersionPolicy({ MIN_CLIENT_VERSION: "latest" })).toThrow();
+  });
+});
+
+describe("floor grace after a deploy (release still publishing)", () => {
+  const boot = 1_000_000;
+  const min = 60_000;
+  it("holds a raised floor back for the grace window, then enforces it", () => {
+    const policy = clientVersionPolicy({ MIN_CLIENT_VERSION: "0.2.0" }, boot);
+    expect(judgeClientVersion("0.1.99", policy, boot + 59 * min)).toEqual({ ok: true });
+    expect(judgeClientVersion("0.1.99", policy, boot + 60 * min)).toMatchObject({ ok: false, reason: "below_minimum" });
+    expect(judgeClientVersion("0.2.0", policy, boot + 61 * min)).toEqual({ ok: true });
+  });
+  it("never lets a build below the hard safety floor through, grace or not", () => {
+    const policy = clientVersionPolicy({ MIN_CLIENT_VERSION: "0.2.0" }, boot);
+    expect(judgeClientVersion("0.1.48", policy, boot + 1)).toMatchObject({ ok: false, reason: "below_minimum" });
+  });
+  it("is configurable: 0 disables it, garbage throws", () => {
+    const policy = clientVersionPolicy({ MIN_CLIENT_VERSION: "0.2.0", MIN_CLIENT_VERSION_GRACE_MINUTES: "0" }, boot);
+    expect(judgeClientVersion("0.1.99", policy, boot)).toMatchObject({ ok: false });
+    expect(() => clientVersionPolicy({ MIN_CLIENT_VERSION_GRACE_MINUTES: "soon" })).toThrow();
   });
 });
 

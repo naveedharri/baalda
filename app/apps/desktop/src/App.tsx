@@ -58,7 +58,8 @@ import {
   justUpdatedTo,
   launchUpdateGate,
   RELEASES_PAGE_URL,
-  scheduleHintedUpdateCheck,
+  onServerReleaseHint,
+  UPDATE_POLL_MS,
   serverRequiresUpdate,
   useUpdateState,
 } from "./lib/updater";
@@ -97,12 +98,6 @@ const VaultPicker = lazy(() =>
 const AuthDialog = lazy(() =>
   import("./components/AuthDialog").then((m) => ({ default: m.AuthDialog })),
 );
-
-/** How often a running app re-checks for a new release (it also checks at
- *  launch). The check is one cheap GET of the release's static `latest.json`
- *  off GitHub's CDN; 15 minutes keeps a long-running app reasonably current
- *  without pinging GitHub all day. */
-const UPDATE_POLL_MS = 15 * 60 * 1000;
 
 /**
  * The file behind the open note vanished from disk (Finder, `rm`, a script, an
@@ -1140,7 +1135,7 @@ export default function App() {
         setInterval(() => void backgroundUpdateCheck(), UPDATE_POLL_MS);
         // The server's release hint (#269) runs the same check early; the
         // poll above stays as the fallback for servers that never send it.
-        setUpdateHintHandler(() => scheduleHintedUpdateCheck());
+        setUpdateHintHandler((v) => void onServerReleaseHint(v));
       }
     })();
   }, []);

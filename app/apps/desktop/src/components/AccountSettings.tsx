@@ -750,6 +750,11 @@ function AboutTab({ onClose }: { onClose: () => void }) {
     case "ready":
       statusText = `Version ${update.version} is installed — restarting shortly.`;
       break;
+    case "pending":
+      // The server already runs a newer release than the feed can serve yet;
+      // the check retries on its own. Quiet on purpose — nothing is wrong.
+      statusText = "An update is on its way.";
+      break;
     case "error":
       statusText = `Couldn't check for updates: ${update.message}`;
       statusError = true;
