@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useStore } from "../store";
+import { useNoticeSlot } from "./useNoticeSlot";
 import { Banner } from "./Banner";
 import { UpgradeDialog } from "./UpgradeDialog";
 
@@ -66,10 +67,13 @@ export function AttachmentSyncNotice({
   const billingEnabled = useStore((s) => s.billingConfig?.enabled === true);
   const [upgradeOpen, setUpgradeOpen] = useState(false);
 
+  // In the editor column it shares the one notice slot; it has a pending
+  // choice (Upgrade) or states a lasting fact, so it never fades.
+  const visible = useNoticeSlot("attachment-local-only", attachmentNoticeVisible(blocked, detected));
   return (
     <>
       <AttachmentLocalOnlyNoticeView
-        show={attachmentNoticeVisible(blocked, detected)}
+        show={visible}
         showUpgrade={billingEnabled}
         onUpgrade={() => setUpgradeOpen(true)}
       />

@@ -182,7 +182,7 @@ function diskDeleteCap(mappedCount: number): number {
 const FOLDER_MOVE_MIN_RATIO = 0.8;
 /** The Health row reason for a note held by an unanswered bulk delete. */
 export const DELETE_DECISION_REASON =
-  "removed from this folder in a bulk delete — waiting for you to delete it for everyone or restore it";
+  "removed from this folder in a bulk delete — it stays for your team and will be restored here";
 /** How long an appeared folder stays a candidate for a move's new half. */
 const FOLDER_CANDIDATE_TTL_MS = 10_000;
 
@@ -3186,16 +3186,17 @@ export class SyncManager implements InboundHost {
     });
   });
 
-  /** `InboundHost.heldDocIds`: the docs of an unanswered bulk delete. */
+  /** `InboundHost.heldDocIds`: the docs of a held bulk delete, until it is released. */
   heldDocIds(): ReadonlySet<string> {
     return this.deleteDecisionIds;
   }
 
   /**
-   * A live window removed more notes than the blast-radius cap allows. With the
-   * vault root present and the session live, that is the user's own doing, so
-   * ASK instead of undoing it (#221). With the root gone it is the unmounted
-   * case, and the whole batch is refused silently, as before.
+   * A live window removed more notes than the blast-radius cap allows. Such a
+   * delete is never propagated from disk. With the vault root present and the
+   * session live it is held briefly so the user is told (#221) before the pull
+   * puts the notes back; with the root gone it is the unmounted case, and the
+   * whole batch is refused silently, as before.
    */
   private async holdBulkDiskDelete(
     items: ReadonlyArray<{ docId: string; relPath: string }>,
@@ -3213,12 +3214,12 @@ export class SyncManager implements InboundHost {
     this.deleteDecision = [...merged.values()];
     this.deleteDecisionIds = new Set(merged.keys());
     console.info(
-      `[sync] ${items.length} notes removed from disk at once (cap ${cap}) — asking before syncing the change`,
+      `[sync] ${items.length} notes removed from disk at once (cap ${cap}) — kept for the team, restoring here`,
     );
     this.note(
       "warn",
       "bulk-delete-held",
-      `${this.deleteDecision.length} notes were removed from this folder at once — waiting for you to delete them for everyone or restore them`,
+      `${this.deleteDecision.length} notes were removed from this folder at once — they stay for the team and will be restored here`,
     );
     this.emitStructureNotice();
   }
@@ -3239,44 +3240,26 @@ export class SyncManager implements InboundHost {
   }
 
   /**
-   * The user answered the held bulk delete.
-   *
-   * "delete": the same soft delete the drain makes, uncapped this once — the
-   * user just confirmed it — batched above `BULK_THRESHOLD_DOCS`. Only notes
-   * still missing from disk go; one that came back is left alone.
-   * "restore": the normal pull, which re-materializes them with their content.
+   * Let go of the held bulk delete. Over the cap a disk delete is NEVER sent to
+   * the team: deleting for everyone happens inside the app, where the
+   * creator-only rule applies. Both answers the banner offers ("Restore now",
+   * and "Dismiss" or its fade) release the hold and run the normal pull, which
+   * no longer skips these docs and re-materializes them with their content.
+   * Nothing is deleted on the server either way.
    */
-  async resolveDeleteDecision(answer: "delete" | "restore"): Promise<void> {
+  async releaseDeleteDecision(how: "restore" | "dismiss" = "restore"): Promise<void> {
     const scope = this.scope;
     const items = this.deleteDecision;
     this.deleteDecision = null;
     this.deleteDecisionIds = new Set();
     this.emitStructureNotice();
     if (!items || !scope || !scope.isCurrent() || !this.enabled) return;
-    if (answer === "restore") {
-      this.note("info", "bulk-delete-restored", `Restoring ${items.length} notes from the server`);
-      this.handleRegistryChanged("delete-restore");
-      return;
-    }
-    if (!(await this.checkVaultRoot(scope)) || !scope.isCurrent()) return;
-    const still: Array<{ docId: string; relPath: string }> = [];
-    await runPool(
-      items,
-      async (item) => {
-        if (this.registry.getMapping(item.relPath)?.docId !== item.docId) return;
-        let missing = false;
-        try {
-          missing = !(await ipc.noteExists(item.relPath, scope.vaultEpoch));
-        } catch {
-          missing = false; // couldn't ask => never assume a delete
-        }
-        if (missing) still.push(item);
-      },
-      { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
+    this.note(
+      "info",
+      "bulk-delete-restored",
+      `Restoring ${items.length} notes from the server (${how === "restore" ? "restore now" : "dismissed"})`,
     );
-    if (!scope.isCurrent()) return;
-    if (still.length > 0) await this.propagateAndForget(still, scope);
-    if (scope.isCurrent()) this.handleRegistryChanged("delete-confirmed");
+    this.handleRegistryChanged("delete-restore");
   }
 
   /** Evaluate the closed-app change notice once per open (#221). */

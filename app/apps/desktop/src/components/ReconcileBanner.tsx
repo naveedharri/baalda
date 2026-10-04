@@ -7,6 +7,7 @@ import { isReadOnlyRejection } from "../lib/sync/readOnlyRejections";
 import { pendingItems, reviewItems, reviewKey } from "./reviewModel";
 import { useReviewState } from "./ReviewTab";
 import { useReviewPersistence } from "./useReviewPersistence";
+import { useNoticeSlot } from "./useNoticeSlot";
 
 /** A burst of records (one reconnect reconciles many notes) settles into ONE
  *  banner instead of re-rendering a growing one per note. */
@@ -86,9 +87,15 @@ export function ReconcileBanner() {
     dismiss();
   };
 
+  // Shares the one notice slot (second after a held delete) and fades like
+  // Dismiss after 20 s; every item stays in Activity ("Review changes (N)").
+  const visible = useNoticeSlot("reconcile", lines.length > 0 || pendingReview > 0 || allResolved, {
+    onFade: dismiss,
+  });
+
   return (
     <Banner
-      show={lines.length > 0 || pendingReview > 0 || allResolved}
+      show={visible}
       role="status"
       className={quiet ? "reconcile-banner reconcile-banner--quiet" : "reconcile-banner"}
     >

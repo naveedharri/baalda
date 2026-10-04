@@ -117,13 +117,14 @@ function TrashRowActions({
 
 function HeldRowActions({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false);
-  // Exactly the banner's handler (App.tsx BulkDeleteBanner).
-  const answer = (a: "delete" | "restore") => {
+  // Exactly the notice's handler (components/NoticeSlot.tsx): over the cap a
+  // disk delete is never sent to the team, so the only answer is to restore.
+  const restore = () => {
     setBusy(true);
     void useStore
       .getState()
-      .resolveBulkDelete(a)
-      .catch((e) => console.warn("[sync] bulk delete answer failed", e))
+      .releaseBulkDelete("restore")
+      .catch((e) => console.warn("[sync] bulk delete restore failed", e))
       .finally(() => {
         setBusy(false);
         onDone();
@@ -131,11 +132,8 @@ function HeldRowActions({ onDone }: { onDone: () => void }) {
   };
   return (
     <span className="health-missing-actions">
-      <button type="button" className="ghost-pill sm danger" disabled={busy} onClick={() => answer("delete")}>
-        Delete for everyone
-      </button>
-      <button type="button" className="ghost-pill sm" disabled={busy} onClick={() => answer("restore")}>
-        Restore
+      <button type="button" className="ghost-pill sm" disabled={busy} onClick={restore}>
+        Restore now
       </button>
     </span>
   );
@@ -356,7 +354,7 @@ function rowMeta(row: ActivityRow, now: number): string {
     return `${by}${when} · purges on ${formatDate(row.item.purgeAfter)}`;
   }
   if (row.type === "copy") return `${when} · ${formatBytes(row.copy.bytes)}`;
-  if (row.type === "held") return "Waiting for your answer";
+  if (row.type === "held") return "Restoring on this device";
   if (row.type === "invitation") {
     const by = row.invitation.inviterName ? `sent by ${row.invitation.inviterName} · ` : "";
     return `${by}${when}`;

@@ -4,7 +4,7 @@
    - server-Trash notes (a synced vault's soft-deleted notes),
    - local recovery copies in .context/trash NOT already named by a reconcile
      row (those carry their copy's actions on the reconcile row itself),
-   - a held bulk delete (the #221 banner's question, also asked here),
+   - a held bulk delete (the #221 notice, with the same Restore now),
    - server `pre-shrink` captures (a note that lost most of its text),
    - sync pauses the shrink burst brake put on a member (#252),
    - this session's access changes,
@@ -116,7 +116,7 @@ export const ACTIVITY_HINT = {
   reconcile: "What sync changed for you after being offline, since Baalda launched.",
   trash: "Deleted on the server. It stays in Trash until purged; Restore brings it back for everyone.",
   copy: "Local text sync set aside on this device, in .context/trash. It never syncs.",
-  held: "Many notes disappeared from the vault folder at once. Nothing was deleted for your team until you answer.",
+  held: "Many notes disappeared from the vault folder at once. Nothing was deleted for your team, and they are being restored here.",
   shrunk: "An edit left at most a fifth of this note. The server kept the text from before it.",
   paused:
     "Many notes were emptied at once from one account, so the server paused that account's sync. " +

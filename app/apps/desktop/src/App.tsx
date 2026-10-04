@@ -5,6 +5,9 @@ import { BackendBehindNotice } from "./components/BackendBehindNotice";
 import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
 import { ReconcileBanner } from "./components/ReconcileBanner";
+import { HeldDeleteNotice } from "./components/HeldDeleteNotice";
+import { NoteRemovedNotice } from "./components/NoteRemovedNotice";
+import { useNoticeSlot } from "./components/useNoticeSlot";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
 import { SyncPausedBannerView } from "./components/SyncPausedBanner";
 import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
@@ -117,8 +120,10 @@ function RemovedBanner() {
   // Latched when the file vanished, not read live: propagating the delete drops
   // the note's mapping, which would otherwise re-word the banner mid-sentence.
   const synced = useStore((s) => s.noteRemovedSynced);
+  // A pending choice (Close note): holds the slot until answered, never fades.
+  const visible = useNoticeSlot("removed-on-disk", !!noteRemoved && !!openNote);
   return (
-    <Banner show={!!noteRemoved && !!openNote}>
+    <Banner show={visible}>
       <span>
         <strong>{openNote ? noteLabel(openNote.path) : ""}</strong> was deleted on disk
         {synced ? " and permanently removed for the team." : "."}
@@ -135,36 +140,6 @@ function RemovedBanner() {
           }}
         >
           Close note
-        </button>
-      </div>
-    </Banner>
-  );
-}
-
-/**
- * A teammate (or an AI) deleted the note that was open, and we applied it here.
- *
- * Separate from `RemovedBanner`: that one means "the file vanished from under us"
- * and can only offer to close the note. This one knows the server confirmed a
- * deliberate deletion or access removal.
- */
-function DeletedByTeammateBanner() {
-  const removed = useStore((s) => s.noteRemovedByTeammate);
-  return (
-    <Banner show={!!removed}>
-      <span>
-        {removed?.reason === "revoked" ? (
-          <>Your access to this note was removed. It is no longer on this device.</>
-        ) : (
-          <>A teammate deleted this note. It was permanently removed from this device.</>
-        )}
-      </span>
-      <div className="banner-actions">
-        <button
-          className="primary"
-          onClick={() => useStore.setState({ noteRemovedByTeammate: null })}
-        >
-          Dismiss
         </button>
       </div>
     </Banner>
@@ -202,9 +177,11 @@ function NotSyncingBanner() {
     folderIsSynced,
     noteOpen,
   });
+  // Not transient: this strip IS the fact that sync is off (#145).
+  const visible = useNoticeSlot("not-syncing", reason != null);
   return (
     <NotSyncingBannerView
-      reason={reason}
+      reason={visible ? reason : null}
       onSignIn={() => useStore.getState().setAuthPrompt("sign-in")}
     />
   );
@@ -224,12 +201,16 @@ function SyncPausedBanner() {
     const id = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(id);
   }, [pause]);
+  const dismiss = () => useStore.getState().dismissSyncPause();
+  const visible = useNoticeSlot("sync-paused", pause != null && dismissed !== pause.since, {
+    onFade: dismiss,
+  });
   return (
     <SyncPausedBannerView
-      pause={pause}
+      pause={visible ? pause : null}
       dismissed={dismissed}
       now={now}
-      onDismiss={() => useStore.getState().dismissSyncPause()}
+      onDismiss={dismiss}
     />
   );
 }
@@ -266,9 +247,11 @@ function VaultUnsyncedBanner() {
       .catch((e) => console.warn("[vault] unsynced-stamp check failed", e));
   }, [vaultPath, authStatus, orgIds]);
 
+  // A pending choice (Keep local / Turn on sync): never fades.
+  const visible = useNoticeSlot("vault-unsynced", pending != null && pending.path === vaultPath);
   return (
     <VaultUnsyncedBannerView
-      show={pending != null && pending.path === vaultPath}
+      show={visible}
       onKeepLocal={() => useStore.getState().keepUnsyncedVaultLocal()}
       onTurnOnSync={() => useStore.getState().resyncUnsyncedVault()}
     />
@@ -295,9 +278,11 @@ function NoteLimitBanner() {
     runToken,
     dismissedRunToken,
   });
+  // A pending choice (Upgrade): never fades.
+  const visible = useNoticeSlot("note-limit", show);
   return (
     <NoteLimitBannerView
-      show={show}
+      show={visible}
       onUpgrade={() => useStore.getState().requestSettings("billing")}
       onDismiss={() => setDismissedRunToken(runToken)}
     />
@@ -320,10 +305,12 @@ function CreateRefusalBanner() {
     runToken,
     dismissedRunToken,
   });
+  const dismiss = () => setDismissedRunToken(runToken);
+  const visible = useNoticeSlot("create-refusal", text != null, { onFade: dismiss });
   return (
     <CreateRefusalBannerView
-      text={text}
-      onDismiss={() => setDismissedRunToken(runToken)}
+      text={visible ? text : null}
+      onDismiss={dismiss}
     />
   );
 }
@@ -351,9 +338,11 @@ function VaultRootMissingBanner() {
       setBusy(false);
     }
   };
+  // A pending choice (Restore here / Locate folder…): never fades.
+  const visible = useNoticeSlot("root-missing", missing);
   return (
     <VaultFolderMissingBannerView
-      show={missing}
+      show={visible}
       synced={synced}
       busy={busy}
       onRestore={run(() => useStore.getState().restoreVaultFolder())}
@@ -364,55 +353,22 @@ function VaultRootMissingBanner() {
 }
 
 /**
- * Many notes were removed from the vault folder at once with the app open
- * (#221). Past the blast-radius cap the change is held instead of undone:
- * nothing is deleted for the team and nothing is put back until one of these
- * two answers. Everything else keeps syncing meanwhile.
- */
-function BulkDeleteBanner() {
-  const pending = useStore((s) => s.structureNotice.pendingDelete);
-  const [busy, setBusy] = useState(false);
-  const answer = (a: "delete" | "restore") => {
-    setBusy(true);
-    void useStore
-      .getState()
-      .resolveBulkDelete(a)
-      .catch((e) => console.warn("[sync] bulk delete answer failed", e))
-      .finally(() => setBusy(false));
-  };
-  const n = pending?.count ?? 0;
-  return (
-    <Banner show={pending != null} role="alert">
-      <span>
-        You removed {n} {n === 1 ? "note" : "notes"}. Delete them for everyone, or restore them?
-      </span>
-      <div className="banner-actions">
-        <button className="primary" disabled={busy} onClick={() => answer("delete")}>
-          Delete for everyone
-        </button>
-        <button disabled={busy} onClick={() => answer("restore")}>
-          Restore
-        </button>
-      </div>
-    </Banner>
-  );
-}
-
-/**
  * Renames, moves or deletes were made while the app was closed (#221). Edits
  * were merged as always; the structure changes were not applied, and this is
  * the one place that says so. Shown once per open.
  */
 function ClosedAppChangesBanner() {
   const show = useStore((s) => s.structureNotice.closedAppChanges);
+  const dismiss = () => useStore.getState().dismissClosedAppChanges();
+  const visible = useNoticeSlot("closed-app-changes", show, { onFade: dismiss });
   return (
-    <Banner show={show} role="status">
+    <Banner show={visible} role="status">
       <span>
         Files changed while Baalda was closed. Edits were merged; renames, moves and deletes made
         while closed were not applied. Keep Baalda open when reorganising.
       </span>
       <div className="banner-actions">
-        <button onClick={() => useStore.getState().dismissClosedAppChanges()}>Dismiss</button>
+        <button onClick={dismiss}>Dismiss</button>
       </div>
     </Banner>
   );
@@ -1630,19 +1586,23 @@ export default function App() {
               </button>
             </div>
           </header>
-          <VaultUnsyncedBanner />
-          <VaultRootMissingBanner />
-          <BulkDeleteBanner />
-          <ClosedAppChangesBanner />
+          {/* ONE notice slot (lib/noticeSlot.ts): each of these claims it and
+              only the highest-priority claim shows — held delete, then the
+              reconcile summary, then the open note's removal, then the rest in
+              this order. Informational ones fade after 20 s. */}
+          <HeldDeleteNotice />
           <SilentBoundary label="Reconcile banner">
             <ReconcileBanner />
           </SilentBoundary>
+          <NoteRemovedNotice />
+          <VaultUnsyncedBanner />
+          <VaultRootMissingBanner />
+          <ClosedAppChangesBanner />
           <NotSyncingBanner />
           <SyncPausedBanner />
           <NoteLimitBanner />
           <CreateRefusalBanner />
           <RemovedBanner />
-          <DeletedByTeammateBanner />
           {attachmentLocalOnly && <AttachmentSyncNotice />}
           <div className="editor-wrap">
             {activeVirtual && <VirtualTabHost tab={activeVirtual} />}

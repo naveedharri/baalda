@@ -197,9 +197,12 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   is already gone). Three refusals: a doc that is not `isPushed` (its only copy may be local), a session
   that is not yet live (`liveSince` = vault channel `synced` + one completed pull, so a missing file at
   startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window — judged
-  FIRST, before any server call. Over the cap with the root present and the session live, the batch is
-  HELD, not abandoned (#221): a banner asks "Delete for everyone / Restore", the pull skips the held docs;
-  with the root gone it is still refused silently, because an unmounted volume
+  FIRST, before any server call. Over the cap a disk delete is NEVER propagated: deleting for everyone
+  happens inside the app, where the creator-only rule applies. With the root present and the session
+  live the batch is HELD briefly (#221): an informational notice says the notes stay for the team and
+  will be restored here, with Restore now and Dismiss; Restore now, Dismiss or its 20 s fade all call
+  `releaseDeleteDecision`, which clears the hold so the pull stops skipping those docs and
+  re-materializes them. With the root gone it is still refused silently, because an unmounted volume
   looks exactly like a bulk delete. A mapped FOLDER that vanishes while an unmapped folder appears is
   paired first (`drainFolderMoves`: ≥80% of its notes present at the same sub-path with matching content
   ⇒ ONE server folder move, every id kept; below that, per-note pairing then the drain). A vanished vault
@@ -284,7 +287,8 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   `doc_id` survives. Every such action is recorded as a `ReconcileKind` (`restoredFromServer`,
   `deletedByTeammate`, `renamedConflict`, `keptLocally`, `selfRevoked`, `folderKept`,
   `externalEditSaved`) and shown once per session as one plain-words summary (`ReconcileBanner`,
-  details in the Activity panel's Review changes); nothing in the report persists. `selfRevoked` is a
+  which fades after 20 s like Dismiss; details stay in the Activity panel's Review changes); nothing
+  in the report persists. `selfRevoked` is a
   revocation caused by an access change THIS device made for the signed-in user in the last 60 s
   (`sync/selfAccessChanges.ts` `markSelfAccessChange`/`isSelfAccessChange`): the same safety outcome
   as `keptLocally`, reported quietly and left out of the "N changes to review" count.
@@ -359,6 +363,14 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   through the watcher's `tree` event: one idle client pulled the full registry every ~1.5 s (#98).
 
 ### Desktop — React (`src/`)
+The top banners above the editor share ONE notice slot (`lib/noticeSlot.ts`, hook
+`components/useNoticeSlot.ts`): each claims it and only the highest-priority claim shows, in the
+order held bulk delete > reconcile summary > open note deleted/access removed > vault made local
+only > vault folder missing > closed-app changes > not syncing > sync paused > note limit > create
+refusal > open note's file gone on disk > attachments local only. Informational notices fade after
+`NOTICE_FADE_MS` (20 s) through their own Dismiss; notices with a pending choice (sign in, locate,
+upgrade, close note, keep local) stay until answered. A faded notice loses nothing: Activity keeps
+the record. The editor's inline locked/view-only banner is not part of the slot.
 `store.ts` is a Zustand **UI view-state mirror only** (vault, tree, open note, auth/session, org members,
 sync status, locks, prefs). Editor is CodeMirror 6 + `y-codemirror.next` (`yCollab`) — the buffer *is* the
 markdown. In `collab` mode CM6 history/onChange are dropped so Yjs owns undo. Graph view is a hand-rolled

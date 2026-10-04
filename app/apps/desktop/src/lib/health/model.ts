@@ -678,7 +678,7 @@ function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue
       path: f.path,
       kind: "inbound-blocked",
       severity: "warn",
-      title: "Removed on disk, waiting for your answer",
+      title: "Removed on disk, being restored",
       why: "This note was removed from the vault folder together with many others at once.",
       remedies: ["copy-details"],
       code: f.code,
@@ -687,10 +687,10 @@ function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue
           "Many notes disappeared from this folder in one go while Baalda was open. Baalda held " +
           "the change instead of syncing it, so the note is still on the Remote Vault and nothing " +
           "was deleted for your team.",
-        next: "Nothing happens to this note until you answer the banner at the top of the window.",
+        next: "It comes back on this device when the notice at the top is dismissed or fades.",
         fixes: [
-          "Choose Delete for everyone if you meant to remove these notes.",
-          "Or choose Restore to bring them back from the Remote Vault.",
+          "Choose Restore now to bring the notes back from the Remote Vault straight away.",
+          "To delete notes for everyone, delete them inside Baalda instead.",
         ],
         safety: "on-server",
       },

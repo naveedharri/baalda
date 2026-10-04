@@ -235,8 +235,8 @@ interface AppStore {
    * (#228) the open tabs close: every one of them names a file that is gone.
    */
   applyStructureNotice: (notice: StructureNotice) => void;
-  /** Answer the held bulk delete: delete for everyone, or restore. */
-  resolveBulkDelete: (answer: "delete" | "restore") => Promise<void>;
+  /** Release the held bulk delete so the pull restores the notes ("Restore now", Dismiss or fade). */
+  releaseBulkDelete: (how: "restore" | "dismiss") => Promise<void>;
   /** Hide the closed-app change notice for this open. */
   dismissClosedAppChanges: () => void;
   /** Follow an inbound rename: re-point the open note (and its descendants). */
@@ -1799,8 +1799,8 @@ export const useStore = create<AppStore>((set, get) => ({
     if (notice.rootMissing && !wasMissing) get().closeAllTabs();
   },
 
-  resolveBulkDelete: async (answer) => {
-    await syncManager.resolveDeleteDecision(answer);
+  releaseBulkDelete: async (how) => {
+    await syncManager.releaseDeleteDecision(how);
   },
   dismissClosedAppChanges: () => syncManager.dismissClosedChangesNotice(),
   revealRequest: null,
