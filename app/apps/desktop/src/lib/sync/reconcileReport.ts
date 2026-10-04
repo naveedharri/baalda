@@ -13,7 +13,8 @@ export type ReconcileKind =
   | "keptLocally" // D7: access revoked while B had unsent edits; kept under .context/trash, no longer synced
   | "selfRevoked" // D7, but B removed their OWN access from this device moments before; same copy, quiet notice
   | "folderKept" // D8: teammate deleted a folder but B's new notes inside it kept it alive
-  | "externalEditSaved"; // another app edited a never-opened note offline; the server's text won, the file went to trash (detail = trash path)
+  | "externalEditSaved" // another app edited a never-opened note offline; the server's text won, the file went to trash (detail = trash path)
+  | "conflictKeptServer"; // one-step create met DIFFERENT server text (adopt/conflict merge): server text kept, local text to trash (detail = trash path)
 
 export interface ReconcileItem {
   kind: ReconcileKind;
@@ -107,6 +108,39 @@ export const reconcileReport: {
     return removed;
   },
 };
+
+/**
+ * Who a recovery copy belongs to. The bridge's `saveRecoveryCopy` (adapter.ts)
+ * records every copy it writes, as `externalEditSaved` by default; a caller
+ * that KNOWS why the server's text is about to win over a file (the one-step
+ * create merge in `docSession.httpMergeOnce` / `noteSeeded`) claims the path
+ * for the duration of that write so the one entry carries the right kind and
+ * doc id instead of a second, contradictory one. Keyed case-insensitively,
+ * like every vault path. The returned function releases only its own claim.
+ */
+export interface RecoveryAttribution {
+  kind: ReconcileKind;
+  docId?: string;
+}
+
+const attributions = new Map<string, { attr: RecoveryAttribution; token: object }>();
+
+function attributionKey(path: string): string {
+  return path.normalize("NFC").toLowerCase();
+}
+
+export function attributeRecoveryCopies(path: string, attr: RecoveryAttribution): () => void {
+  const key = attributionKey(path);
+  const token = {};
+  attributions.set(key, { attr, token });
+  return () => {
+    if (attributions.get(key)?.token === token) attributions.delete(key);
+  };
+}
+
+export function recoveryAttribution(path: string): RecoveryAttribution | null {
+  return attributions.get(attributionKey(path))?.attr ?? null;
+}
 
 /** Mirrors `READ_ONLY_DETAIL` (readOnlyRejections.ts), inlined to avoid an import cycle. */
 const READ_ONLY_PREFIX = "read-only";

@@ -152,6 +152,7 @@ const KINDS: ReadonlySet<string> = new Set([
   "selfRevoked",
   "folderKept",
   "externalEditSaved",
+  "conflictKeptServer",
 ]);
 const RESOLUTIONS: ReadonlySet<string> = new Set(["kept", "restored", "restoredSibling", "skipped"]);
 

@@ -1286,3 +1286,115 @@ describe("explicit missing-file recovery", () => {
     expect(deleteFile).toHaveBeenCalledWith("a");
   });
 });
+
+describe("one-step file upload (files-with-bytes)", () => {
+  const PDF = "Docs/Report.pdf";
+
+  /** A new tree binary with a local index id; `oneStep` toggles the feature. */
+  function oneStepRig(
+    oneStep: boolean,
+    respond: (input: { relPath: string; sha256: string; size: number }) => unknown,
+    complete: () => unknown = () => ({}),
+  ) {
+    const registered: string[] = [];
+    const remembered: Array<{ relPath: string; id: string; authored?: boolean }> = [];
+    const registers: unknown[] = [];
+    const blocked: boolean[] = [];
+    const { deps, log } = makeTransport([{ relPath: PDF, bytes: new Uint8Array([1, 2, 3]) }], respond, {
+      filesWithBytes: async () => oneStep,
+      localFileIds: async () => new Map([[PDF, "local-pdf"]]),
+      knownFileId: () => null,
+      registerFile: async ({ relPath, id }) => {
+        registered.push(relPath);
+        return id;
+      },
+      rememberFileId: (relPath, id, opts) => {
+        remembered.push({ relPath, id, authored: opts?.authored });
+      },
+      onEntitlementBlocked: (b) => {
+        blocked.push(b);
+      },
+    });
+    const inner = deps.createIntent!;
+    deps.createIntent = async (input) => {
+      registers.push(input.register ?? null);
+      return inner(input);
+    };
+    deps.completeUpload = async (url, body) => {
+      log.completes.push({ url, body });
+      return complete() as never;
+    };
+    return { deps, log, registered, remembered, registers, blocked };
+  }
+
+  it("a new file sends register with the intent and records the id from complete", async () => {
+    const rig = oneStepRig(
+      true,
+      () => ({ ...SINGLE_INTENT, file: { id: "local-pdf", docId: "local-pdf", folderId: null, path: PDF, status: "pending" } }),
+      () => ({ file: { id: "local-pdf", docId: "local-pdf", folderId: "f-docs", path: PDF, status: "created" } }),
+    );
+    const res = await new AttachmentSync(rig.deps).reconcile();
+
+    expect(res.uploaded).toBe(1);
+    expect(rig.registered).toEqual([]); // no POST /api/files
+    expect(rig.registers).toEqual([{ docId: "local-pdf", relPath: PDF }]);
+    expect(rig.log.completes).toHaveLength(1);
+    expect(rig.remembered).toEqual([{ relPath: PDF, id: "local-pdf", authored: true }]);
+  });
+
+  it("a dedupe records the id from the intent, with no PUT or complete", async () => {
+    const rig = oneStepRig(true, () => ({
+      deduped: true,
+      blob: { id: "b-1", sha256: "sha", size: 3, mime: null, relPath: PDF, docId: "local-pdf" },
+      file: { id: "local-pdf", docId: "local-pdf", folderId: null, path: PDF, status: "created" },
+    }));
+    await new AttachmentSync(rig.deps).reconcile();
+
+    expect(rig.registered).toEqual([]);
+    expect(rig.log.puts).toEqual([]);
+    expect(rig.log.completes).toEqual([]);
+    expect(rig.remembered).toEqual([{ relPath: PDF, id: "local-pdf", authored: true }]);
+  });
+
+  it("adopted binds to the existing row's id and creates nothing", async () => {
+    const rig = oneStepRig(
+      true,
+      () => ({ ...SINGLE_INTENT, file: { id: "teammate-row", docId: "teammate-row", folderId: null, path: PDF, status: "adopted" } }),
+      () => ({}),
+    );
+    await new AttachmentSync(rig.deps).reconcile();
+
+    expect(rig.registered).toEqual([]);
+    expect(rig.remembered).toEqual([{ relPath: PDF, id: "teammate-row", authored: true }]);
+  });
+
+  it("a Pro refusal leaves no id and raises the attachment-local-only notice", async () => {
+    const rig = oneStepRig(true, () => serverError(402, "attachment_sync_requires_pro"));
+    await new AttachmentSync(rig.deps).reconcile();
+
+    expect(rig.registered).toEqual([]);
+    expect(rig.remembered).toEqual([]);
+    expect(rig.log.puts).toEqual([]);
+    expect(rig.blocked).toEqual([true]);
+    expect(rig.log.toasts.some((t) => t.includes("Upgrade to Pro"))).toBe(true);
+  });
+
+  it("an old server (feature absent) registers first, then uploads, unchanged", async () => {
+    const rig = oneStepRig(false, () => SINGLE_INTENT);
+    await new AttachmentSync(rig.deps).reconcile();
+
+    expect(rig.registered).toEqual([PDF]);
+    expect(rig.registers).toEqual([null]);
+    expect(rig.remembered).toEqual([{ relPath: PDF, id: "local-pdf", authored: true }]);
+    expect(rig.log.completes).toHaveLength(1);
+  });
+
+  it("a known file id uploads the old way even on a one-step server", async () => {
+    const rig = oneStepRig(true, () => SINGLE_INTENT);
+    rig.deps.knownFileId = () => "known-id";
+    await new AttachmentSync(rig.deps).reconcile();
+
+    expect(rig.registers).toEqual([null]);
+    expect(rig.registered).toEqual([]);
+  });
+});

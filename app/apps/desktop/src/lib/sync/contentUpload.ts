@@ -37,7 +37,7 @@
 // creation, timers) is injected, so the whole engine runs under vitest in Node.
 
 import type * as Y from "yjs";
-import { encodeStateAsUpdate } from "yjs";
+import { encodeStateAsUpdate, encodeStateVector } from "yjs";
 import type { NoteBridge } from "../bridge";
 import { UPLOAD_CONCURRENCY, runPool } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
@@ -186,6 +186,14 @@ export interface ContentUploaderOptions {
   isPushed: (docId: string) => boolean;
   /** Record a confirmed push (checkpointed by the registry). */
   markPushed: (docId: string) => void;
+  /**
+   * Record the state vector the server is now known to cover
+   * (`registry.recordAck`), after a flushed, editable push — the same ack the
+   * batch pusher records. Without it a doc pushed only through this per-doc path
+   * has no `ackedSv` until a later `ready.covered`, so an inbound delete judges
+   * it `unseen`/`unknown` more often than it needs to.
+   */
+  markAcked?: (docId: string, sv: Uint8Array) => void;
   /** Docs to leave alone — currently the open note, whose own editor session
    *  owns its provider (two providers on one doc is the one thing to avoid). */
   skip?: (docId: string) => boolean;
@@ -307,6 +315,37 @@ export interface UploadRunResult {
   cancelled: boolean;
 }
 
+/**
+ * The writable half of "pull, then fold the file in", AFTER the server's state
+ * has landed in `bridge.doc` (over a socket here, over `bootstrap` `only` in
+ * the HTTP merge). Never diff logic of its own: the bridge's three-way
+ * `reconcileAfterPull` (a no-op when the bridge was not waiting), the orphan
+ * seed, then — when the file was not already ingested before the pull — one
+ * ingest of whatever the file holds that the pulled doc does not.
+ */
+export async function mergeFileAfterPull(
+  bridge: NoteBridge,
+  opts: { ingestFromFile: boolean; preIngested: boolean },
+): Promise<void> {
+  await bridge.reconcileAfterPull();
+  // Seeds ONLY a genuine orphan (empty Y.Text) — see the module header.
+  await bridge.seedFromFileIfEmpty();
+  if (opts.ingestFromFile && !opts.preIngested) await bridge.ingestNow();
+}
+
+/**
+ * Per-note HocuspocusProvider upload.
+ *
+ * RETIREMENT (plan "one-step-note-sync", PR3 → PR6): new notes no longer come
+ * here on a server advertising `notes-with-state` — they register WITH their
+ * state, and a conflict or adopt is merged over HTTP (`bootstrap` `only` +
+ * docs/batch). This class remains ONLY for: (1) servers without
+ * `notes-with-state` / `bootstrap-only`; (2) the HTTP merge's explicit
+ * fallback (bootstrap failed, or a docs/batch push could not run); and the
+ * pre-existing closed-note / read-only-rebase follow-ups not yet moved to
+ * HTTP. Delete it when `MIN_CLIENT_VERSION` retires servers without those
+ * features (PR6).
+ */
 export class ContentUploader {
   private readonly opts: ContentUploaderOptions;
   private readonly progress: SyncProgressSink;
@@ -592,9 +631,9 @@ export class ContentUploader {
         // has been holding its file since `hydrate` (a no-op for one that was
         // not waiting, e.g. an empty doc). Before the flush wait below, so a
         // genuine external edit is part of what the server acknowledges.
-        await bridge.reconcileAfterPull();
-        // Seeds ONLY a genuine orphan (empty Y.Text) — see the module header.
-        await bridge.seedFromFileIfEmpty();
+        // The pure post-pull merge, shared with the HTTP pull-then-merge
+        // (`mergeFileAfterPull`, used by `docSession.ts` one-step creates).
+        await mergeFileAfterPull(bridge, { ingestFromFile: false, preIngested: true });
         // A doc that was empty before the pull couldn't take the pre-connect
         // ingest (that would seed before the server's state — the doubling
         // bug). Now the server's canonical state is in, fold in whatever the
@@ -650,6 +689,10 @@ export class ContentUploader {
       }
       this.streak = 0;
       this.opts.markPushed(docId);
+      // Flushed and editable: the server holds every op this doc had. A
+      // view-only doc is confirmed without a flush, so it proves nothing about
+      // local ops and records no ack (mirrors `confirmOpenDoc`).
+      if (!push.readOnly && bridge.doc) this.opts.markAcked?.(docId, encodeStateVector(bridge.doc));
       this.progress.doc(docId, "synced");
       this.progress.item("ok");
       return true;

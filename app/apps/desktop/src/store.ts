@@ -73,6 +73,7 @@ import {
 import type { PropertiesMode } from "./lib/editor/frontmatter";
 import { renameInFolderSorts, type FolderSorts, type TreeSort } from "./lib/tree/sort";
 import type { AccountSettingsTab, SettingsTab } from "./lib/settingsTabs";
+import type { BackendStatus } from "./lib/serverFeatures";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
 import { foreignFolderMessage, planTurnOnSync } from "./lib/vault/turnOnSync";
@@ -604,6 +605,13 @@ interface AppStore {
   accountSettingsRequest: { tab: AccountSettingsTab; token: number } | null;
   requestAccountSettings: (tab: AccountSettingsTab) => void;
   /**
+   * Whether the connected server lacks features this app needs (UI mirror
+   * only; `lib/serverFeatures.ts`). Null = unknown or not checked yet, which
+   * shows nothing. Written by `BackendBehindNotice`'s health poll.
+   */
+  backendStatus: BackendStatus | null;
+  setBackendStatus: (status: BackendStatus | null) => void;
+  /**
    * "The next time this note's editor mounts, put the cursor in its inline
    * title." Set by `createNoteIn`, consumed once by `InlineTitle` on mount.
    *
@@ -634,7 +642,9 @@ interface AppStore {
    */
   openInviteLink: (url: string) => Promise<void>;
   refreshBacklinks: () => Promise<void>;
-  setNoteRemoved: (removed: boolean) => void;
+  /** `synced` overrides the latch below with a value sampled earlier (the
+   *  deferred open-note removal check samples it when the file vanished). */
+  setNoteRemoved: (removed: boolean, synced?: boolean) => void;
   closeNote: () => void;
   /** Close one tab. Closing the active one activates its right-hand neighbour
    *  (left-hand when it was last); closing the only tab clears the editor. */
@@ -1808,6 +1818,8 @@ export const useStore = create<AppStore>((set, get) => ({
   settingsDismissToken: 0,
   dismissSettings: () => set((s) => ({ settingsDismissToken: s.settingsDismissToken + 1 })),
   accountSettingsRequest: null,
+  backendStatus: null,
+  setBackendStatus: (backendStatus) => set({ backendStatus }),
   revealedPath: null,
   backlinks: [],
   titles: [],
@@ -2492,13 +2504,16 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  setNoteRemoved: (removed) =>
+  setNoteRemoved: (removed, synced) =>
     set((s) => ({
       noteRemoved: removed,
       // Latched here: the sync layer drops the note's mapping when it propagates
       // the disk delete, so `noteRemovedSynced` has to be sampled at the moment
-      // the file vanished rather than read off the map later.
-      noteRemovedSynced: removed ? !!s.docIdByPath[s.openNote?.path ?? ""] : false,
+      // the file vanished rather than read off the map later — which is why a
+      // deferred caller passes the value it sampled then.
+      noteRemovedSynced: removed
+        ? (synced ?? !!s.docIdByPath[s.openNote?.path ?? ""])
+        : false,
     })),
 
   /**
@@ -2530,13 +2545,11 @@ export const useStore = create<AppStore>((set, get) => ({
     // Epoch-pinned: this spans awaits, so a vault switch mid-rename must be
     // refused by Rust rather than applied to the other vault.
     await ipc.renamePath(oldPath, newPath, epoch);
-    // The registry rename is what keeps `doc_id` stable across the move.
-    // Skipping it forks the note into a second server-side note at the new path.
-    try {
-      await syncManager.registry.renamePath(oldPath, newPath);
-    } catch (e) {
-      console.warn("[sync] renamePath failed", oldPath, e);
-    }
+    // Re-point the open note (and tabs, order, sorts) the moment the disk move
+    // lands, BEFORE the server PATCH. The watcher reports the old path as
+    // `removed` ~150ms later; with the PATCH still in flight the open note sat
+    // on a path that no longer existed and flashed "was removed". A PATCH
+    // failure only warns and keeps the disk rename, so the order is free.
     get().setItemOrder(renameInOrder(get().itemOrder, oldPath, newPath));
     {
       const sorts = renameInFolderSorts(get().folderSorts, oldPath, newPath);
@@ -2547,6 +2560,13 @@ export const useStore = create<AppStore>((set, get) => ({
       }
     }
     get().followNoteRename(oldPath, newPath);
+    // The registry rename is what keeps `doc_id` stable across the move.
+    // Skipping it forks the note into a second server-side note at the new path.
+    try {
+      await syncManager.registry.renamePath(oldPath, newPath);
+    } catch (e) {
+      console.warn("[sync] renamePath failed", oldPath, e);
+    }
     await get().refreshTree();
     await get().refreshTitles();
     return true;

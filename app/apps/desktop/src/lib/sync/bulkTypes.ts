@@ -51,6 +51,11 @@ export interface NoteBatchItem {
    *  the same request, which is what removes the cross-chunk ordering hazard a
    *  `folderId` would reintroduce. */
   folderPath?: string | null;
+  /** base64 `Y.encodeStateAsUpdate` of the local doc — only to a server that
+   *  advertises `notes-with-state` (see `seedRegister.ts`). */
+  state?: string;
+  /** sha256 hex of the text `state` yields; a server-side mismatch alarm only. */
+  textSha256?: string;
 }
 
 export interface NoteBatchResult {
@@ -63,6 +68,13 @@ export interface NoteBatchResult {
   title: string | null;
   code: string | null;
   error: string | null;
+  /** Present only when the item carried `state` AND the server is new enough.
+   *  Absent on an old server: treat as "not seeded" and push the old way. */
+  seeded?: boolean;
+  content?: "applied" | "covered" | "conflict" | "skipped" | "refused";
+  reason?: string;
+  /** base64 state vector the server covers; present when `seeded`. */
+  sv?: string;
 }
 
 export interface FileBatchItem {

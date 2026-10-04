@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
+import { BackendBehindNotice } from "./components/BackendBehindNotice";
 import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
 import { ReconcileBanner } from "./components/ReconcileBanner";
@@ -39,7 +40,11 @@ import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
 import * as perf from "./lib/perf";
 import { implicatedFolders, refreshWorthy } from "./lib/tree/lazyTree";
-import { syncManager } from "./lib/sync/docSession";
+import { DISK_DELETE_GRACE_MS, syncManager } from "./lib/sync/docSession";
+import {
+  OPEN_NOTE_REMOVED_SLACK_MS,
+  scheduleOpenNoteRemovedCheck,
+} from "./lib/openNoteRemoval";
 import { routesToAttachmentSync } from "./lib/sync/attachments";
 import {
   backgroundUpdateCheck,
@@ -1258,7 +1263,19 @@ export default function App() {
           // refresh is coalesced via scheduleRefresh below.
           if (open && e.path === open.path) {
             if (e.kind === "removed") {
-              useStore.getState().setNoteRemoved(true);
+              // Never on the raw event: a rename (in-app, Finder, an AI agent,
+              // a folder move) also reports the old path as `removed`, and the
+              // banner flashed until the move was paired. Ask again once the
+              // delete drain's grace window is over, and only if the note still
+              // sits on this path and the file is still missing.
+              const path = e.path;
+              const synced = !!useStore.getState().docIdByPath[path];
+              scheduleOpenNoteRemovedCheck(path, {
+                delayMs: DISK_DELETE_GRACE_MS + OPEN_NOTE_REMOVED_SLACK_MS,
+                currentPath: () => useStore.getState().openNote?.path ?? null,
+                exists: (p) => ipc.noteExists(p, useStore.getState().vault?.epoch),
+                setRemoved: () => useStore.getState().setNoteRemoved(true, synced),
+              });
             } else {
               // Route the edit into the bridge; it debounces, drops our own echo,
               // and merges genuine external edits live into the open Y.Text.
@@ -1499,6 +1516,12 @@ export default function App() {
             <FileTree />
           </div>
           <div className="sidebar-footer">
+            {/* Capability check against `/health`: shown only when the
+                server is demonstrably older than this app (never on an
+                unreachable one). */}
+            <ErrorBoundary label="Backend status">
+              <BackendBehindNotice />
+            </ErrorBoundary>
             {/* Boundary so a crash here degrades to a visible fallback instead of
                 silently emptying the corner — the identity bar must never just
                 vanish. */}

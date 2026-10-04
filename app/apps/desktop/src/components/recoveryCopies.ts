@@ -18,6 +18,7 @@ const COPY_KINDS: ReadonlySet<ReconcileKind> = new Set<ReconcileKind>([
   "keptLocally",
   "selfRevoked",
   "externalEditSaved",
+  "conflictKeptServer",
 ]);
 
 const STAMP_RE = /^[A-Za-z0-9_-]+$/;

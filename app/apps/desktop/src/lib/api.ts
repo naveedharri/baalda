@@ -1,3 +1,5 @@
+import type { SeedResultFields } from "./sync/seedRegister";
+import { parseHealth, type ServerHealth } from "./serverFeatures";
 import { CLIENT_OUTDATED_CODE, CLIENT_VERSION, CLIENT_VERSION_PARAM } from "./clientVersion";
 import type { AssistantProvider, HousekeeperStatus, HousekeeperScan, HousekeeperEdit, DiagnosticInput, DiagnosticReview } from "./housekeeper";
 // Type-only import: `bulkTypes.ts` is the hand-mirrored copy of the server's
@@ -597,10 +599,33 @@ export interface BlobUploadMultipart {
 
 export type BlobUpload = BlobUploadSingle | BlobUploadMultipart;
 
+/**
+ * The `files` row a one-step upload (`files-with-bytes`) registered or bound
+ * to. `created`: this upload made it. `adopted`: the path already had a row
+ * (possibly under another id) and these bytes are that file's. `pending`: the
+ * intent recorded the registration; `complete` creates the row.
+ */
+export interface OneStepFileRow {
+  id: string;
+  docId: string;
+  folderId: string | null;
+  path: string;
+  status: "pending" | "created" | "adopted";
+}
+
+/** `register` on a blob intent: create the `files` row WITH the bytes. */
+export interface BlobIntentRegister {
+  docId: string;
+  relPath: string;
+  folderId?: string | null;
+}
+
 /** The server already holds these bytes — send nothing. */
 export interface BlobIntentDeduped {
   deduped: true;
   blob: BlobMeta;
+  /** One-step upload only: the row these bytes now belong to. */
+  file?: OneStepFileRow;
 }
 
 /** The server wants the bytes, and this is where to PUT them. */
@@ -610,6 +635,9 @@ export interface BlobIntentUpload {
   upload: BlobUpload;
   /** Absolute URL to POST once every byte is in (bearer REQUIRED — ours). */
   completeUrl: string;
+  /** One-step upload only: `pending` until `complete`, or `adopted` when the
+   *  path already had a row (bind to that id). */
+  file?: OneStepFileRow;
 }
 
 export type BlobIntent = BlobIntentDeduped | BlobIntentUpload;
@@ -1440,6 +1468,31 @@ export class ApiClient {
     const ok =
       !!parsed && typeof parsed === "object" && (parsed as { ok?: unknown }).ok === true;
     if (!ok) throw new ServerCheckError("not-baalda", NOT_BAALDA_MESSAGE);
+  }
+
+  /**
+   * The server's `/health` body, parsed for capability detection
+   * (`lib/serverFeatures.ts`). Unlike {@link health} this never throws:
+   * any failure (timeout, network, 5xx, non-JSON, not Baalda) answers null,
+   * which the caller reads as "unknown", never as "outdated".
+   */
+  async getHealth(baseUrl?: string): Promise<ServerHealth | null> {
+    const base = stripTrailingSlash((baseUrl ?? this.baseUrl).trim());
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+    try {
+      const res = await this.fetchImpl(`${base}/health`, {
+        method: "GET",
+        headers: { Accept: "application/json", [ORIGIN_HEADER]: this.clientId },
+        signal: controller.signal,
+      });
+      if (!res.ok) return null;
+      return parseHealth(JSON.parse(await res.text()));
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // ---- Auth (Better Auth) -------------------------------------------------
@@ -2293,10 +2346,15 @@ export class ApiClient {
     title?: string | null;
     folderId?: string | null;
     docId?: string;
-  }): Promise<RegisteredNote & { created?: boolean }> {
-    const { data, status } = await this.request<RegisteredNote>("POST", "/api/notes", {
-      body: input,
-    });
+    /** One-step create (`notes-with-state` servers): base64 Yjs state. */
+    state?: string;
+    textSha256?: string;
+  }): Promise<RegisteredNote & { created?: boolean } & SeedResultFields> {
+    const { data, status } = await this.request<RegisteredNote & SeedResultFields>(
+      "POST",
+      "/api/notes",
+      { body: input },
+    );
     return { ...data, created: status === 201 };
   }
 
@@ -2506,10 +2564,15 @@ export class ApiClient {
   async createBootstrapSession(
     vaultId: string,
     have: string[] = [],
+    /** `bootstrap-only` servers: exactly these doc ids (HTTP pull-then-merge). */
+    only?: string[],
   ): Promise<BootstrapSession> {
+    const body: { have?: string[]; only?: string[] } = {};
+    if (have.length > 0) body.have = have;
+    if (only) body.only = only;
     const data = await this.bulk<BootstrapSession>(
       `/api/vaults/${encodeURIComponent(vaultId)}/bootstrap`,
-      have.length > 0 ? { have } : {},
+      body,
     );
     return {
       sessionId: data.sessionId,
@@ -3167,6 +3230,9 @@ export class ApiClient {
       /** See {@link uploadBlob}'s `baseSha`: 409 `stale_base` when the doc's
        *  current bytes are not the ones this edit started from. */
       baseSha?: string | null;
+      /** One-step upload (`files-with-bytes`): register the `files` row with
+       *  these bytes instead of a separate `POST /api/files` first. */
+      register?: BlobIntentRegister;
     },
   ): Promise<BlobIntent> {
     if (this.blobIntentSupported === false) {
@@ -3194,8 +3260,14 @@ export class ApiClient {
    * `completeUrl` comes from the intent and is absolute — the server owns the
    * path, and a multipart flow may point it elsewhere entirely.
    */
-  async completeBlob(completeUrl: string, body: BlobCompleteBody = {}): Promise<BlobMeta> {
-    return (await this.requestAbsolute<BlobMeta>("POST", completeUrl, body)) ?? ({} as BlobMeta);
+  async completeBlob(
+    completeUrl: string,
+    body: BlobCompleteBody = {},
+  ): Promise<BlobMeta & { file?: OneStepFileRow }> {
+    return (
+      (await this.requestAbsolute<BlobMeta & { file?: OneStepFileRow }>("POST", completeUrl, body)) ??
+      ({} as BlobMeta)
+    );
   }
 
   /** Fresh presigned URLs for parts whose own presign expired mid-upload. */

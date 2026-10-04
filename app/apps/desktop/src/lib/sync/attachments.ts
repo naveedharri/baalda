@@ -74,7 +74,9 @@ import type {
   BlobCompleteBody,
   BlobDownloadTarget,
   BlobIntent,
+  BlobIntentRegister,
   BlobUploadPart,
+  OneStepFileRow,
 } from "../api";
 
 /** Local attachment metadata (from `ipc.listAttachments`). */
@@ -765,9 +767,22 @@ export interface AttachmentSyncDeps {
     docId?: string | null;
     /** The sha this edit started from — 409 `stale_base` if the file moved on. */
     baseSha?: string | null;
+    /** One-step upload: register the `files` row WITH these bytes. */
+    register?: BlobIntentRegister;
   }) => Promise<BlobIntent>;
-  /** POST the intent's `completeUrl` once every byte is in. Idempotent. */
-  completeUpload?: (completeUrl: string, body: BlobCompleteBody) => Promise<void>;
+  /** POST the intent's `completeUrl` once every byte is in. Idempotent. A
+   *  one-step upload answers with the `files` row it created (`file`). */
+  completeUpload?: (
+    completeUrl: string,
+    body: BlobCompleteBody,
+  ) => Promise<{ file?: OneStepFileRow } | void>;
+  /**
+   * Does the server advertise `files-with-bytes` (one-step file upload)? A NEW
+   * tree binary then registers its `files` row through the blob intent's
+   * `register` instead of `POST /api/files` first. Absent or false: the old
+   * register-then-upload flow, unchanged.
+   */
+  filesWithBytes?: () => Promise<boolean>;
   /** Re-mint presigned part URLs whose own presign expired mid-upload. */
   requestParts?: (
     partsUrl: string,
@@ -958,6 +973,25 @@ export interface ReconcileResult {
   downloaded: number;
 }
 
+/** The intent's registration refusals (`files-with-bytes`): each one means no
+ *  row was written, and the old register-then-upload path decides. A 402
+ *  `attachment_sync_requires_pro` is NOT here — it stops the pass exactly as
+ *  the old intent's 402 does. */
+const ONE_STEP_REFUSALS = new Set([
+  "invalid_register",
+  "path_folder_mismatch",
+  "transient_file",
+  "no_write_access",
+  "root_frozen",
+  "not_readable",
+  // The Free note cap refuses the REGISTRATION, not the bytes: the old path
+  // uploads without a doc_id, as it does when `POST /api/files` hits it.
+  "note_limit_reached",
+]);
+function isOneStepRefusal(code: string | null | undefined): boolean {
+  return code != null && ONE_STEP_REFUSALS.has(code);
+}
+
 export class AttachmentSync {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
@@ -997,6 +1031,9 @@ export class AttachmentSync {
 
   /** relPath → server `files` id, for the paths registered this session. */
   private readonly fileIds = new Map<string, string>();
+  /** Paths whose one-step registration the server refused this session: they
+   *  take the old register-then-upload path, which owns those refusals. */
+  private readonly oneStepDeclined = new Set<string>();
   /** The local index's path → `files.id` map, read once per pass. */
   private localIds: Map<string, string> | null = null;
   /**
@@ -1385,7 +1422,10 @@ export class AttachmentSync {
     // request per chunk. Purely a pre-fill: `ensureFileRow` below then finds
     // each id remembered and every later decision is unchanged. Never fatal —
     // anything it could not settle falls through to the per-file path.
-    await this.preregisterFiles(toUpload);
+    //
+    // A server with one-step file upload (`files-with-bytes`) registers each new
+    // file WITH its bytes in the intent, so there is nothing to pre-fill.
+    if (!(await this.oneStepFilesEnabled())) await this.preregisterFiles(toUpload);
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
 
     let uploaded = 0;
@@ -1701,12 +1741,25 @@ export class AttachmentSync {
    *  this is the one retry after {@link forgetDeadFileId} dropped a dead id. */
   private async uploadOneClaimed(a: PlannedUpload, healed = false): Promise<boolean> {
     const mime = mimeForPath(a.relPath);
+    // One-step (`files-with-bytes`): a NEW tree binary registers its `files`
+    // row inside the intent, with the bytes. `register` is that local id, and
+    // `docId` stays unknown until the server names the row (dedupe, adopt or
+    // complete). Anything else keeps the old order below.
+    const register = await this.oneStepRegister(a);
     // A tree binary is a `files` row FIRST: the id has to exist before the
     // bytes, because it is what the blob carries as `doc_id` and what the
     // permission resolver answers for. A failure here is not fatal — the bytes
     // still go, with the pre-Stage-A path heuristic deciding who may read them.
-    const docId = await this.ensureFileRow(a);
+    let docId = register ? undefined : await this.ensureFileRow(a);
     if (this.unreadable.has(pathKey(a.relPath))) throw new HiddenFile();
+    /** Record the row a one-step upload created or bound to — exactly what
+     *  `ensureFileRow` records after `POST /api/files`. */
+    const bindOneStep = (file: OneStepFileRow | undefined): void => {
+      if (!register || !file?.id || file.status === "pending") return;
+      docId = file.id;
+      this.fileIds.set(a.relPath, file.id);
+      this.deps.rememberFileId?.(a.relPath, file.id, { authored: true });
+    };
     // The version this edit started from. The server refuses (409 `stale_base`)
     // when the file has moved on since, instead of retiring a teammate's edit.
     const baseSha = docId ? (a.baseSha ?? this.baseFor(docId)) : null;
@@ -1747,10 +1800,28 @@ export class AttachmentSync {
         filename: baseName(a.relPath),
         docId,
         ...(baseSha ? { baseSha } : {}),
+        ...(register ? { register } : {}),
       });
       this.intentSupported = true;
     } catch (e) {
       const status = errStatus(e);
+      if (register && status === 404) {
+        // No intent route after all: the old flow registers first.
+        this.intentSupported = false;
+        return this.uploadOneClaimed(a, healed);
+      }
+      if (register && isOneStepRefusal(errCode(e))) {
+        // The registration was refused and NOTHING was written. Those answers
+        // (path_folder_mismatch, no write access, frozen root, …) are owned by
+        // the old path's `ensureFileRow`, which uploads without a doc_id or
+        // retries next pass — so this file takes it, once per session.
+        if (errCode(e) === "not_readable") {
+          this.unreadable.add(pathKey(a.relPath));
+          throw new HiddenFile();
+        }
+        this.oneStepDeclined.add(a.relPath);
+        return this.uploadOneClaimed(a, healed);
+      }
       if (status === 404) {
         // A server from before this flow. Remembered, so the NEXT file skips
         // the probe entirely rather than paying a 404 each time.
@@ -1804,6 +1875,10 @@ export class AttachmentSync {
       throw e;
     }
 
+    // One-step: the intent names the row when it already exists (`adopted`,
+    // or `created` on a dedupe, where `complete` never runs).
+    bindOneStep(intent.file);
+
     if ("deduped" in intent && intent.deduped) {
       // Zero bytes moved — but the server now names the blob these bytes are,
       // which is all the text pass needs.
@@ -1831,7 +1906,7 @@ export class AttachmentSync {
           loadBytes,
         });
       await put();
-      await this.completeUpload(completeUrl, () => ({}), put);
+      bindOneStep((await this.completeUpload(completeUrl, () => ({}), put))?.file);
       this.setBase(docId, a.sha256);
       return true;
     }
@@ -1901,13 +1976,14 @@ export class AttachmentSync {
       return numbers.map((n) => ({ partNumber: n, etag: etags.get(n) as string }));
     };
     parts = await runParts();
-    await this.completeUpload(
+    const done = await this.completeUpload(
       completeUrl,
       () => ({ uploadId: upload.uploadId, parts }),
       async () => {
         parts = await runParts();
       },
     );
+    bindOneStep(done?.file);
     this.setBase(docId, a.sha256);
     return true;
   }
@@ -1988,16 +2064,46 @@ export class AttachmentSync {
     completeUrl: string,
     body: () => BlobCompleteBody,
     retryPut: () => Promise<unknown>,
-  ): Promise<void> {
+  ): Promise<{ file?: OneStepFileRow } | void> {
     const complete = this.deps.completeUpload;
     if (!complete) throw new Error("no way to complete an upload");
     try {
-      await complete(completeUrl, body());
+      return await complete(completeUrl, body());
     } catch (e) {
       if (errCode(e) !== "upload_incomplete") throw e;
       await retryPut();
-      await complete(completeUrl, body());
+      return await complete(completeUrl, body());
     }
+  }
+
+  /** Does this server register files with their bytes (`files-with-bytes`)?
+   *  Unknown or failing ⇒ false: the old flow works against every server. */
+  private async oneStepFilesEnabled(): Promise<boolean> {
+    if (!this.deps.filesWithBytes || !this.deps.createIntent) return false;
+    if (this.intentSupported === false) return false;
+    try {
+      return await this.deps.filesWithBytes();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The `register` a NEW tree binary's intent carries, or null for the old
+   * flow: an `attachments/` drop, a file whose `files` id is already known (an
+   * ordinary upload for that row), a path the server refused before (the old
+   * path owns that answer), a path the local index has no row for yet, or a
+   * server without `files-with-bytes`.
+   */
+  private async oneStepRegister(a: LocalAttachment): Promise<BlobIntentRegister | null> {
+    const relPath = a.relPath;
+    if (isUnderAttachments(relPath)) return null;
+    if (this.fileIds.get(relPath) ?? this.deps.knownFileId?.(relPath)) return null;
+    if (this.registerRefused.has(relPath) || this.oneStepDeclined.has(relPath)) return null;
+    if (!(await this.oneStepFilesEnabled())) return null;
+    const localId = (await this.localFileId(relPath)) ?? null;
+    if (!localId) return null;
+    return { docId: localId, relPath };
   }
 
   /** One toast per sync instance — a full vault is one fact, not one per file. */

@@ -229,6 +229,16 @@ export interface InboundPlan {
    */
   stubs: string[];
   /**
+   * Tombstoned doc_ids whose baseline path is now held on disk by ANOTHER note
+   * the server lists live at that path — a delete followed by a new note taking
+   * the same name ("Untitled.md" again). The path is that note's, so the dead
+   * doc's claim is simply stale: the executor drops it from the baseline and
+   * touches nothing on disk. Before, the path was stubbed, the new (empty) note
+   * deleted as a "zero-byte stub", and the materialize step then re-created it
+   * and reported it as a delete that "didn't reach the server".
+   */
+  releaseClaims: string[];
+  /**
    * doc_ids among {@link trash} whose `revoked` removal survives ONLY because an
    * authoritative pass lifted the safety cap.
    *
@@ -400,6 +410,7 @@ export function planInbound(input: InboundInput): InboundPlan {
     trash: [],
     suppress: new Set(),
     stubs: [],
+    releaseClaims: [],
     needsAccessCheck: [],
     rejected: [],
   };
@@ -542,6 +553,13 @@ export function planInbound(input: InboundInput): InboundPlan {
   // Every note path on disk, for the "we lost this doc's local identity" case
   // below. `input.local` is docId → path, so its values are exactly that set.
   const localPaths = new Set([...input.local.values()].map((p) => pathKey(p)));
+  // On-disk note paths held by a doc the server lists LIVE at that same path:
+  // provably that note's, whatever a tombstoned doc's baseline still says.
+  const livePaths = new Set<string>();
+  for (const [docId, path] of input.local) {
+    const srv = input.server.get(docId);
+    if (srv !== undefined && samePath(srv, path)) livePaths.add(pathKey(path));
+  }
   const docIds = new Set<string>([...input.baseline.keys(), ...input.server.keys()]);
   // A tombstoned id this disk still holds a note under, with NO baseline claim.
   // Without it the loop below never visits the id at all (or leaves at "never
@@ -623,7 +641,13 @@ export function planInbound(input: InboundInput): InboundPlan {
         // match we can't prove the file at that path is still this note, and a
         // wrong guess here deletes someone's work. It stays on disk as a purely
         // local note the user can remove themselves.
-        if (prev !== undefined && localPaths.has(pathKey(prev))) {
+        //
+        // Unless a LIVE note owns that path now (deleted, then a new note took
+        // the same name): then the file is provably not the dead one, and only
+        // the stale claim goes.
+        if (livePaths.has(pathKey(prev))) {
+          plan.releaseClaims.push(docId);
+        } else if (localPaths.has(pathKey(prev))) {
           plan.suppress.add(prev);
           plan.stubs.push(prev);
         }

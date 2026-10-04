@@ -257,7 +257,9 @@ export function VaultSettingsDialog({
           <span className="settings-eyebrow">
             {isSynced ? "Vault settings" : "Local vault"}
           </span>
-          <h1>{activeOrg?.name ?? vault?.name ?? "Vault"}</h1>
+          {/* The session's active org outlives a switch to a local folder, so
+              its name only titles the dialog while that vault is the synced one. */}
+          <h1>{(isSynced ? activeOrg?.name : null) ?? vault?.name ?? "Vault"}</h1>
         </div>
         <button className="icon-btn" onClick={onClose} aria-label="Close settings" title="Close (Esc)">
           ✕

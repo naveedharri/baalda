@@ -77,6 +77,16 @@ import { planInbound, samePath, type InboundPlan, type InboundTrash } from "./in
 import type { BootstrapResume } from "./bootstrap";
 import type { FolderBatchItem, NoteBatchItem, NoteDeleteResult } from "./bulkTypes";
 import {
+  base64ToBytes,
+  classifySeedResult,
+  packSeedChunks,
+  SEED_BATCH_MAX_ITEMS,
+  SEED_SINGLE_MAX_BYTES,
+} from "./seedRegister";
+import { NOTES_WITH_STATE } from "../serverFeatures";
+import { EMPTY_SHA256 } from "./emptyRename";
+import { bytesToBase64 } from "./vaultProtocol";
+import {
   BATCH_MAX_FOLDERS,
   BATCH_MAX_NOTES,
   IPC_CONCURRENCY,
@@ -419,6 +429,19 @@ export interface InboundHost {
    */
   heldDocIds?(): ReadonlySet<string>;
   /**
+   * PR4 (receiving side without placeholders): asked once per pull that is
+   * about to materialize at least `BULK_THRESHOLD_DOCS` server-only notes.
+   * When a bootstrap download is guaranteed to run after this pull (the bulk
+   * engine of `enable`, a `bootstrap` frame, or one already running), answer a
+   * predicate saying whether that download will deliver `docId` — i.e. this
+   * device holds no local CRDT for it. Those notes get NO 0-byte placeholder:
+   * `apply_bootstrap_batch` creates the file with its content. `null` (or no
+   * hook) keeps today's placeholders. The host MUST call
+   * {@link VaultRegistry.materializePendingFromBootstrap} when that download
+   * ends, however it ends, or the deferred notes stay absent until the next pull.
+   */
+  bootstrapWillDeliver?(count: number): ((docId: string) => boolean) | null;
+  /**
    * The signed-in user's id, or null when there is no session.
    *
    * Used to keep legacy authorship metadata attributable to one account.
@@ -463,6 +486,44 @@ export interface InboundHost {
    * immediately. Fire-and-forget: a throwing handler must not fail a pass.
    */
   noteServerCreated?(docIds: readonly string[]): void;
+
+  /**
+   * The server's advertised features (the cached `/health` answer, see
+   * `serverFeatures.ts`). Absent, or a set without `notes-with-state`, keeps
+   * today's two-step flow (register, then push).
+   */
+  serverFeatures?(): Promise<ReadonlySet<string>>;
+  /**
+   * The one-step create state for a note about to register: its local CRDT
+   * encoded, or — when the local doc is empty — a THROWAWAY doc seeded from the
+   * file. Never seeds the live local doc: that happens only after the server
+   * says it took this exact state (`noteSeeded`). null ⇒ send no state.
+   */
+  buildNoteState?(docId: string, relPath: string): Promise<NoteSeedState | null>;
+  /**
+   * The server now holds `seed.state` (`applied`, or `covered` on a retry).
+   * markPushed + recordAck(sv), and fold a throwaway seed into the local doc
+   * (same ops the server holds, so no doubling). Called only AFTER the
+   * response: a crash before it leaves the note unpushed and the retry is
+   * answered `covered`.
+   */
+  noteSeeded?(docId: string, sv: Uint8Array | null, seed: NoteSeedState): void | Promise<void>;
+  /**
+   * The server holds content this device has not seen (`conflict` on our id,
+   * or an adopt onto another id). HTTP pull-then-merge; never apply local
+   * state blindly onto it.
+   */
+  noteNeedsMerge?(docIds: readonly string[], loserIds?: readonly string[]): void;
+}
+
+/** What `InboundHost.buildNoteState` hands the registry. */
+export interface NoteSeedState {
+  /** `Y.encodeStateAsUpdate` (V1). */
+  state: Uint8Array;
+  /** sha256 hex of the text `state` yields. */
+  textSha256: string;
+  /** True when built on a throwaway doc from the file (local CRDT was empty). */
+  fresh: boolean;
 }
 
 export interface ReconcileInput {
@@ -766,6 +827,21 @@ export class VaultRegistry {
 
   /** Paths (lower-cased) this pass may re-create that were mapped before it. */
   private restoreCandidatesCi = new Set<string>();
+  /**
+   * Server-only notes this pull did NOT write a placeholder for because a
+   * bootstrap download will create them WITH content (PR4). `pathKey(relPath)`
+   * → docId, plus the reverse, so both of the bootstrap runner's callbacks
+   * (`markMaterialized(relPath)`, `markPushed(docId)`) clear an entry in O(1).
+   *
+   * In memory ONLY, on purpose: it is never persisted as "done". A killed or
+   * interrupted download leaves the files missing on disk, and the next pull's
+   * `toMaterialize` (a disk-vs-server difference) finds them again — deferring
+   * them to a resumed bootstrap or writing today's placeholder.
+   */
+  private pendingFromBootstrap = new Map<string, string>();
+  private pendingFromBootstrapByDoc = new Map<string, string>();
+  /** The vault epoch the pending set was recorded under; a flush in another vault drops it. */
+  private pendingFromBootstrapEpoch: number | null = null;
 
   /**
    * Registrations in flight: sync passes (`reconcile`, `pull`) and the eager
@@ -1310,6 +1386,22 @@ export class VaultRegistry {
     // order of magnitude past that is stale by definition.
     if (this.materialized.size > 20_000) this.materialized.clear();
     this.materialized.add(relPath);
+    this.clearPendingPath(relPath);
+  }
+
+  /** Drop a deferred materialization: its file now exists (or was meant to go). */
+  private clearPendingPath(relPath: string): void {
+    if (this.pendingFromBootstrap.size === 0) return;
+    const key = pathKey(relPath);
+    const docId = this.pendingFromBootstrap.get(key);
+    if (docId === undefined) return;
+    this.pendingFromBootstrap.delete(key);
+    this.pendingFromBootstrapByDoc.delete(docId);
+  }
+
+  /** Deferred server-only notes still waiting for their bootstrap page (PR4). */
+  pendingFromBootstrapCount(): number {
+    return this.pendingFromBootstrap.size;
   }
 
   /**
@@ -1594,6 +1686,12 @@ export class VaultRegistry {
 
   /** Record that `docId`'s content is on the server (checkpointed, batched). */
   markPushed(docId: string): void {
+    // Its content is stored locally now (a bootstrap page, a channel frame):
+    // no placeholder is owed for it any more.
+    if (this.pendingFromBootstrapByDoc.size > 0) {
+      const rp = this.pendingFromBootstrapByDoc.get(docId);
+      if (rp !== undefined) this.clearPendingPath(rp);
+    }
     if (this.pushed.has(docId)) return;
     this.pushed.add(docId);
     this.checkpoint?.touch();
@@ -2444,6 +2542,10 @@ export class VaultRegistry {
       }
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
+
+    // A tombstoned doc whose old path a live note has since taken: its baseline
+    // claim is all that is left of it, and keeping it would re-stub the path.
+    for (const docId of plan.releaseClaims) this.baselineDocs.delete(docId);
 
     // Paths the plan suppressed WITHOUT trashing: a tombstoned note whose file
     // is still on disk under an identity the index no longer ties to the
@@ -3856,13 +3958,22 @@ export class VaultRegistry {
     // `stopRun()` — so the two paths cannot report a vault differently.
     // Filled by the per-note path below; the batch path announces per chunk.
     const createdNow: string[] = [];
-    if (useBulkPath(missingNotes.length)) {
+    // One-step creates: a server that takes state with the registration gets
+    // EVERY new note through the batch route, whatever the count — 1 note is
+    // one request of one item, and no note opens a socket to upload.
+    // `BULK_THRESHOLD_DOCS` no longer gates creates there.
+    const oneStep =
+      missingNotes.length > 0 &&
+      !!this.host?.buildNoteState &&
+      (await this.oneStepCreates());
+    if (oneStep || useBulkPath(missingNotes.length)) {
       const bulk = await this.registerNotesBatched(vaultId, missingNotes, {
         titleByPath,
         idByPath,
         resolvedNotePaths,
         resolvedNotePathsCi,
         checkpoint,
+        oneStep,
       });
       if (bulk) mutated = true;
     } else
@@ -4051,15 +4162,48 @@ export class VaultRegistry {
     this.restoreCandidatesCi = new Set(
       toMaterialize.filter((rp) => priorMappedCi.has(pathKey(rp))).map((rp) => pathKey(rp)),
     );
-    this.sink.addTotal(toMaterialize.length);
+    // PR4: no placeholders for notes a bootstrap download is about to create
+    // WITH content. A fresh device joining a 20,000-note vault used to write
+    // 20,000 0-byte files here and show them empty for the whole download.
+    // Kept as placeholders (written now, exactly as before): a single live note
+    // or any small delta (below the bulk threshold, so the sub-second
+    // behaviour for a teammate's new note is unchanged), notes this device
+    // holds CRDT for (the bootstrap skips them; `materializeContent` fills
+    // them below), D5 restores (their report is written here), and everything
+    // when no bootstrap is guaranteed to follow.
+    let materializeNow = toMaterialize;
+    if (useBulkPath(toMaterialize.length)) {
+      const willDeliver = this.host?.bootstrapWillDeliver?.(toMaterialize.length) ?? null;
+      if (willDeliver) {
+        materializeNow = [];
+        const epoch = this.epoch();
+        if (this.pendingFromBootstrapEpoch !== epoch) {
+          this.pendingFromBootstrap.clear();
+          this.pendingFromBootstrapByDoc.clear();
+          this.pendingFromBootstrapEpoch = epoch;
+        }
+        for (const rp of toMaterialize) {
+          const docId = this.byPath.get(rp)?.docId ?? null;
+          if (docId && !this.restoreCandidatesCi.has(pathKey(rp)) && willDeliver(docId)) {
+            this.pendingFromBootstrap.set(pathKey(rp), docId);
+            this.pendingFromBootstrapByDoc.set(docId, rp);
+          } else {
+            materializeNow.push(rp);
+          }
+        }
+      }
+    }
+    this.sink.addTotal(materializeNow.length);
     // Materializing is the other half a pull can be bulk for — a fresh device
     // writes the whole vault here without registering a single row above.
     if (useBulkPath(toMaterialize.length)) checkpoint.setBulk(true);
-    if (useBulkPath(toMaterialize.length)) {
-      if (await this.materializeBatched(toMaterialize)) mutated = true;
+    if (materializeNow.length === 0) {
+      // Everything is deferred to the bootstrap download (or nothing to do).
+    } else if (useBulkPath(toMaterialize.length)) {
+      if (await this.materializeBatched(materializeNow)) mutated = true;
     } else
     await runPool(
-      toMaterialize,
+      materializeNow,
       async (rp) => {
         // Doubly guarded: the pool's shouldStop stops the run the instant the
         // vault changes, and the pinned epoch makes Rust refuse anything that
@@ -4267,6 +4411,34 @@ export class VaultRegistry {
     }
   }
 
+  /** Settle notes the server now holds our state for — only after its answer. */
+  private async settleSeeded(
+    list: ReadonlyArray<{ docId: string; sv: Uint8Array | null; seed: NoteSeedState }>,
+  ): Promise<void> {
+    const hook = this.host?.noteSeeded;
+    for (const { docId, sv, seed } of list) {
+      try {
+        if (hook) await hook.call(this.host, docId, sv, seed);
+        else {
+          this.markPushed(docId);
+          if (sv) this.recordAck(docId, sv);
+        }
+      } catch (e) {
+        console.warn(`[registry] settling the one-step create of ${docId} failed`, e);
+      }
+    }
+  }
+
+  /** Hand the session the ids that need an HTTP pull-then-merge. */
+  private announceMerge(docIds: readonly string[], loserIds: readonly string[] = []): void {
+    if (docIds.length === 0) return;
+    try {
+      this.host?.noteNeedsMerge?.(docIds, loserIds);
+    } catch (e) {
+      console.warn("[registry] noteNeedsMerge listener threw", e);
+    }
+  }
+
   private async registerNotesBatched(
     vaultId: string,
     notes: TreeNode[],
@@ -4276,21 +4448,106 @@ export class VaultRegistry {
       resolvedNotePaths: Set<string>;
       resolvedNotePathsCi: Set<string>;
       checkpoint: Checkpointer<VaultSyncConfig>;
+      /** Send each note's Yjs state with its registration (see `seedRegister.ts`). */
+      oneStep?: boolean;
     },
   ): Promise<boolean> {
     let mutated = false;
-    const chunks = chunked(notes, BATCH_MAX_NOTES);
+    const oneStep = ctx.oneStep === true;
+    const outer = chunked(notes, oneStep ? SEED_BATCH_MAX_ITEMS : BATCH_MAX_NOTES);
     await runPool(
-      chunks,
-      async (group) => {
-        const items: NoteBatchItem[] = group.map((n) => ({
-          relPath: n.path,
-          title: ctx.titleByPath.get(n.path) ?? n.name,
-          folderPath: parentDir(n.path) || null,
-          // The local index's doc_id, so one note has ONE identity across the
-          // `.md`, the CRDT store and the server (see the single-note path).
-          ...(ctx.idByPath.get(n.path) ? { docId: ctx.idByPath.get(n.path)! } : {}),
-        }));
+      outer,
+      async (outerGroup) => {
+        // States are built per outer group, so memory stays at
+        // REGISTRY_CONCURRENCY × 100 notes rather than the whole import.
+        const seeds = oneStep ? await this.buildSeeds(outerGroup, ctx.idByPath) : new Map<string, NoteSeedState>();
+        const groups = oneStep
+          ? packSeedChunks(
+              outerGroup.map((n) => ({ n, stateBytes: seeds.get(n.path)?.state.byteLength ?? 0 })),
+            ).map((c) => c.map((x) => x.n))
+          : [outerGroup];
+        for (const group of groups) {
+          if (this.stopRun()) return;
+          if (await this.sendNoteGroup(vaultId, group, seeds, ctx)) mutated = true;
+        }
+      },
+      { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
+    );
+    return mutated;
+  }
+
+  /** Is the server taking state with registrations? Cached per server URL. */
+  private async oneStepCreates(): Promise<boolean> {
+    try {
+      const features = await this.host?.serverFeatures?.();
+      return !!features && features.has(NOTES_WITH_STATE);
+    } catch {
+      return false; // unknown ⇒ old flow, which a new server still accepts
+    }
+  }
+
+  /**
+   * Build the one-step state for each note with a local doc_id. A note over
+   * the per-note ceiling, or one whose state cannot be built, registers
+   * WITHOUT state and takes today's path (where the pusher reports the size).
+   */
+  private async buildSeeds(
+    group: TreeNode[],
+    idByPath: Map<string, string>,
+  ): Promise<Map<string, NoteSeedState>> {
+    const seeds = new Map<string, NoteSeedState>();
+    const build = this.host?.buildNoteState;
+    if (!build) return seeds;
+    await runPool(
+      group,
+      async (n) => {
+        const docId = idByPath.get(n.path);
+        if (!docId) return;
+        try {
+          const seed = await build.call(this.host, docId, n.path);
+          if (seed && seed.state.byteLength > 0 && seed.state.byteLength <= SEED_SINGLE_MAX_BYTES) {
+            seeds.set(n.path, seed);
+          }
+        } catch (e) {
+          console.warn(`[registry] couldn't build state for ${n.path}; registering without it`, e);
+        }
+      },
+      { concurrency: 4, shouldStop: () => this.stopRun() },
+    );
+    return seeds;
+  }
+
+  /**
+   * One `notes/batch` request and its settle. Returns whether it mapped
+   * anything. With seeds, also settles content per item (`classifySeedResult`).
+   */
+  private async sendNoteGroup(
+    vaultId: string,
+    group: TreeNode[],
+    seeds: Map<string, NoteSeedState>,
+    ctx: {
+      titleByPath: Map<string, string>;
+      idByPath: Map<string, string>;
+      resolvedNotePaths: Set<string>;
+      resolvedNotePathsCi: Set<string>;
+      checkpoint: Checkpointer<VaultSyncConfig>;
+    },
+  ): Promise<boolean> {
+    let mutated = false;
+    {
+      {
+        const items: NoteBatchItem[] = group.map((n) => {
+          const seed = seeds.get(n.path);
+          return {
+            relPath: n.path,
+            title: ctx.titleByPath.get(n.path) ?? n.name,
+            folderPath: parentDir(n.path) || null,
+            // The local index's doc_id, so one note has ONE identity across the
+            // `.md`, the CRDT store and the server (see the single-note path).
+            ...(ctx.idByPath.get(n.path) ? { docId: ctx.idByPath.get(n.path)! } : {}),
+            ...(seed ? { state: bytesToBase64(seed.state), textSha256: seed.textSha256 } : {}),
+          };
+        });
         for (const n of group) {
           const docId = ctx.idByPath.get(n.path);
           if (docId) this.sink.doc(docId, "queued");
@@ -4309,7 +4566,7 @@ export class VaultRegistry {
               code: errorCode(out.error),
             }));
           }
-          return;
+          return mutated;
         }
         // The server echoes the path it was given, so results join on it; the
         // CANONICAL spelling it registered is in the same row and is what the
@@ -4326,6 +4583,9 @@ export class VaultRegistry {
         // Ids the server MADE in this chunk — announced once, after the loop
         // has mapped them all (see `InboundHost.noteServerCreated`).
         const createdInChunk: string[] = [];
+        const toMerge: string[] = [];
+        const mergeLosers: string[] = [];
+        const seededNow: Array<{ docId: string; sv: Uint8Array | null; seed: NoteSeedState }> = [];
         for (const n of group) {
           const rp = n.path;
           const localDocId = ctx.idByPath.get(rp) ?? null;
@@ -4373,7 +4633,39 @@ export class VaultRegistry {
             ctx.resolvedNotePathsCi.add(pathKey(rp));
             // `created` only — an ADOPTED row may already hold content, and
             // seeding one is the split-brain pull-before-seed exists to prevent.
-            if (res.status === "created") createdInChunk.push(res.docId);
+            const seed = seeds.get(rp);
+            const next = classifySeedResult(
+              res.status,
+              res,
+              !!seed,
+              !!localDocId && res.docId === localDocId,
+            );
+            if (next === "seeded" && seed) {
+              seededNow.push({ docId: res.docId, sv: base64ToBytes(res.sv), seed });
+            } else if (next === "merge") {
+              toMerge.push(res.docId);
+              if (localDocId && localDocId !== res.docId) {
+                // Adopted onto ANOTHER id: re-key the local index row to the
+                // winner BEFORE the merge, so the merge's write re-indexes under
+                // ONE id (as the pull's materialize does). Refused (false) when
+                // the winner already names another path; the mapping above
+                // still points this path at the winner either way.
+                mergeLosers.push(localDocId);
+                try {
+                  if (!(await ipc.rebindNoteId(rp, res.docId, this.epoch()))) {
+                    console.warn(`[registry] couldn't rebind ${rp} to ${res.docId} (id taken?)`);
+                  }
+                } catch (e) {
+                  console.warn(`[registry] rebinding ${rp} to ${res.docId} failed`, e);
+                }
+              }
+            } else if (res.status === "created") {
+              // Old server (no `seeded`), or no state sent: today's flow.
+              if (seed && typeof res.seeded !== "boolean") {
+                console.info(`[registry] server ignored state for ${rp}; pushing the old way`);
+              }
+              createdInChunk.push(res.docId);
+            }
             ctx.checkpoint.touch();
             mutated = true;
             this.sink.item("ok");
@@ -4389,10 +4681,47 @@ export class VaultRegistry {
           }));
         }
         this.announceCreated(createdInChunk);
-      },
-      { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
-    );
+        await this.settleSeeded(seededNow);
+        this.announceMerge(toMerge, mergeLosers);
+      }
+    }
     return mutated;
+  }
+
+  /**
+   * PR4: write the placeholders a pull deferred to a bootstrap download that
+   * did NOT deliver them — the docs the server holds no state for (its
+   * `emptyDocs`, the `ready.empty` class: they still need a file so the sidebar
+   * shows them and the user can type into them), plus anything a cancelled,
+   * failed or interrupted download never reached.
+   *
+   * Same batched, create-only `materialize_notes_batch` as the pull (chunks of
+   * `BATCH_MAX_NOTES`), so a path the bootstrap DID create comes back
+   * `created: false` and is left byte-for-byte alone; each path it creates owes
+   * one watcher echo (`markMaterialized`). The host calls this when the
+   * download ends however it ends; calling it with nothing pending is free.
+   * Returns whether it created anything.
+   */
+  async materializePendingFromBootstrap(): Promise<boolean> {
+    if (this.pendingFromBootstrap.size === 0) return false;
+    const epoch = this.pendingFromBootstrapEpoch;
+    const docIds = [...this.pendingFromBootstrapByDoc.keys()];
+    this.pendingFromBootstrap.clear();
+    this.pendingFromBootstrapByDoc.clear();
+    // Recorded in another vault: its paths name nothing here.
+    if (epoch !== this.epoch()) return false;
+    const held = this.host?.heldDocIds?.() ?? null;
+    // Re-resolve by doc id: a rename or delete may have landed meanwhile, and
+    // a doc no longer mapped is not owed a file.
+    const paths: string[] = [];
+    for (const docId of docIds) {
+      if (held?.has(docId)) continue;
+      const rp = this.pathForDocId(docId);
+      if (rp) paths.push(rp);
+    }
+    if (paths.length === 0) return false;
+    this.sink.addTotal(paths.length);
+    return this.materializeBatched(paths);
   }
 
   /**
@@ -4513,6 +4842,9 @@ export class VaultRegistry {
     }
     try {
       const folderId = this.folderByPath.get(parentDir(relPath)) ?? null;
+      // One-step create (`notes-with-state`): the same state the batch path
+      // sends, built by the same host hook. Null ⇒ register without state.
+      const seed = await this.eagerSeed(docId, relPath);
       const created = await this.api.createNote({
         vaultId,
         relPath,
@@ -4521,6 +4853,7 @@ export class VaultRegistry {
         // Reuse the local index doc_id so the server doesn't fork a second
         // identity for this note (see reconcile's idByPath note).
         docId,
+        ...(seed ? { state: bytesToBase64(seed.state), textSha256: seed.textSha256 } : {}),
       });
       if (this.stale() || this.serverVaultId !== vaultId) return null;
       const mapping = { vaultId, docId: noteDocId(created) };
@@ -4530,6 +4863,22 @@ export class VaultRegistry {
       // server's spelling unmapped and re-register it on every pass.
       this.setMapping(noteRelPath(created) ?? relPath, mapping.docId, vaultId);
       this.checkpoint?.touch();
+      // Settle the content exactly like a batch item: applied/covered ⇒
+      // settled + acked, conflict/adopted-elsewhere ⇒ the merge queue, no
+      // `seeded` (old server) or no state sent ⇒ today's flow, untouched.
+      if (seed && mapping.docId) {
+        const next = classifySeedResult(
+          created.created ? "created" : "adopted",
+          created,
+          true,
+          !!docId && mapping.docId === docId,
+        );
+        if (next === "seeded") {
+          await this.settleSeeded([{ docId: mapping.docId, sv: base64ToBytes(created.sv), seed }]);
+        } else if (next === "merge") {
+          this.announceMerge([mapping.docId]);
+        }
+      }
       return mapping;
     } catch (e) {
       this.recordFailure({
@@ -4539,6 +4888,34 @@ export class VaultRegistry {
         reason: reasonOf(e),
         code: errorCode(e),
       });
+      return null;
+    }
+  }
+
+  /**
+   * The one-step state for the eager single `registerNote`, built the way
+   * {@link buildSeeds} builds it for the batch path. Null (send no state) on an
+   * old server, without a local doc_id, when the host cannot build one, past
+   * the per-note ceiling, or for an EMPTY note (created empty in-app): that
+   * registers exactly as it always has.
+   */
+  private async eagerSeed(
+    docId: string | undefined,
+    relPath: string,
+  ): Promise<NoteSeedState | null> {
+    const build = this.host?.buildNoteState;
+    if (!docId || !build) return null;
+    if (!(await this.oneStepCreates())) return null;
+    try {
+      const seed = await build.call(this.host, docId, relPath);
+      if (!seed || seed.state.byteLength === 0 || seed.state.byteLength > SEED_SINGLE_MAX_BYTES) {
+        return null;
+      }
+      // A fresh seed of an empty file carries no text: nothing to send.
+      if (seed.fresh && seed.textSha256 === EMPTY_SHA256) return null;
+      return seed;
+    } catch (e) {
+      console.warn(`[registry] couldn't build state for ${relPath}; registering without it`, e);
       return null;
     }
   }
