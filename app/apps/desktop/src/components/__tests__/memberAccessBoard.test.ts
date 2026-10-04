@@ -119,7 +119,7 @@ describe("Member access board", () => {
       resources: [{ resourceType: "file", resourceId: "n2" }],
       audience: { type: "users", userIds: ["u2"] },
       mode: "open",
-    });
+    }, { timeoutMs: 30_000 });
     expect(onItemWritten).toHaveBeenCalledTimes(1);
     // Optimistic move.
     expect(names("open")).toContain("Welcome");
@@ -280,7 +280,7 @@ describe("Member access board", () => {
       resources: [{ resourceType: "vault", resourceId: "org-1" }],
       audience: { type: "users", userIds: ["u2"] },
       mode: "readonly",
-    });
+    }, { timeoutMs: 30_000 });
     expect(onChanged).toHaveBeenCalledTimes(1);
   });
 
@@ -402,5 +402,82 @@ describe("Member access board", () => {
     expect(api.resetMemberAccess).toHaveBeenCalledWith("org-1", "u2");
     expect(api.setBulkAccess).not.toHaveBeenCalled();
     expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+  describe("when the bulk write fails", () => {
+    const openMenu = async (label: string, item: string) => {
+      await act(async () => host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!.click());
+      const option = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
+        .find((li) => li.textContent?.startsWith(item))!;
+      await act(async () => option.click());
+    };
+
+    it("puts a moved row back and toasts the connection error", async () => {
+      await render();
+      api.setBulkAccess.mockRejectedValue(new TypeError("Load failed"));
+      await act(async () => button("Move Welcome left").click());
+      await settle();
+      expect(names("readonly")).toEqual(["Welcome"]);
+      expect(names("open")).not.toContain("Welcome");
+      expect(toast).toHaveBeenCalledWith("Couldn't update access, check your connection", "error");
+      expect(toast).not.toHaveBeenCalledWith("Sara can now edit Welcome.");
+      expect(onItemWritten).not.toHaveBeenCalled();
+      expect(host.querySelector(".auth-error")).toBeNull();
+      // The board stays usable.
+      expect(button("Move Welcome left").disabled).toBe(false);
+    });
+
+    it("Add all on Can view puts every row, root notes included, back in its column", async () => {
+      modes = { f1: "private", n1: "private", n2: "private", n3: "private" };
+      await render({ personVaultMode: "private" });
+      expect(names("private")).toEqual(["Specs", "API", "Roadmap", "Welcome"]);
+      api.setBulkAccess.mockRejectedValue(new DOMException("The operation was aborted.", "AbortError"));
+      await openMenu("Can view actions", "Add all");
+      await settle();
+      expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
+      expect(api.setBulkAccess.mock.calls[0][1]).toMatchObject({ resources: [{ resourceType: "vault", resourceId: "org-1" }], mode: "readonly" });
+      expect(api.setBulkAccess.mock.calls[0][2]).toEqual({ timeoutMs: 30_000 });
+      expect(names("private")).toEqual(["Specs", "API", "Roadmap", "Welcome"]);
+      expect(names("readonly")).toEqual([]);
+      expect(toast).toHaveBeenCalledWith("Couldn't update access, check your connection", "error");
+      expect(onChanged).not.toHaveBeenCalled();
+    });
+
+    it("shows what the server holds when the write committed but its answer was lost", async () => {
+      await render();
+      api.setBulkAccess.mockImplementation(async (_org: string, input: { resources: Array<{ resourceId: string }>; mode: string }) => {
+        for (const r of input.resources) modes[r.resourceId] = input.mode;
+        throw new TypeError("Load failed");
+      });
+      const reads = api.resolveAccessSummaries.mock.calls.length;
+      await act(async () => button("Move Roadmap left").click());
+      await settle();
+      expect(api.resolveAccessSummaries.mock.calls.length).toBeGreaterThan(reads);
+      expect(names("readonly")).toContain("Roadmap");
+      expect(names("private")).not.toContain("Roadmap");
+      expect(toast).toHaveBeenCalledWith("Couldn't update access, check your connection", "error");
+    });
+
+    it("a refusal the server explained is shown as is", async () => {
+      await render();
+      api.setBulkAccess.mockRejectedValue(Object.assign(new Error("Only the vault owner or an admin can manage access"), { name: "ApiError", status: 403 }));
+      await act(async () => button("Move Welcome left").click());
+      await settle();
+      expect(toast).toHaveBeenCalledWith("Only the vault owner or an admin can manage access", "error");
+      expect(names("readonly")).toEqual(["Welcome"]);
+    });
+
+    it("re-reads rows that failed to load once the connection comes back", async () => {
+      api.resolveAccessSummaries.mockRejectedValue(new TypeError("Load failed"));
+      await render();
+      await settle();
+      expect(host.querySelector(".access-board-failed")).not.toBeNull();
+      api.resolveAccessSummaries.mockImplementation(async (_org: string, groups: Array<Array<{ resourceId: string }>>) =>
+        groups.map((g) => modes[g[0].resourceId] ?? "private"));
+      await act(async () => { window.dispatchEvent(new Event("online")); });
+      await settle();
+      expect(host.querySelector(".access-board-failed")).toBeNull();
+      expect(names("readonly")).toEqual(["Welcome"]);
+      expect(names("private")).toEqual(["Roadmap"]);
+    });
   });
 });

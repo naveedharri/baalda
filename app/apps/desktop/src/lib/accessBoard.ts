@@ -162,6 +162,47 @@ export function topLevelRows(column: readonly BoardRow[]): AccessRow[] {
     .map((r) => r.row);
 }
 
+/**
+ * How long one bulk access write may take before the board gives up and puts
+ * its rows back. Without it a stalled connection leaves rows moved locally,
+ * and the board busy, while the server has nothing.
+ */
+export const BULK_WRITE_TIMEOUT_MS = 30_000;
+
+/** The toast when a write never reached the server or its answer was lost. */
+export const ACCESS_WRITE_FAILED = "Couldn't update access, check your connection";
+
+/**
+ * What to tell the owner when a bulk write fails. A refusal the server
+ * explained (4xx with a message) is shown as is; a network error, a timeout
+ * or a server failure gets the connection sentence.
+ */
+export function accessWriteFailureMessage(cause: unknown): string {
+  if (cause instanceof Error && cause.name === "ApiError") {
+    const status = (cause as Error & { status?: number }).status ?? 0;
+    if (status >= 400 && status < 500 && cause.message) return cause.message;
+  }
+  return ACCESS_WRITE_FAILED;
+}
+
+/**
+ * Undo an optimistic write: only the rows it touched go back to what they
+ * read before it (or to unknown, if they had no answer then). Rows answered
+ * meanwhile by other reads keep their newer value.
+ */
+export function revertModes<V>(
+  current: ReadonlyMap<string, V>,
+  before: ReadonlyMap<string, V>,
+  keys: Iterable<string>,
+): Map<string, V> {
+  const next = new Map(current);
+  for (const key of keys) {
+    if (before.has(key)) next.set(key, before.get(key)!);
+    else next.delete(key);
+  }
+  return next;
+}
+
 /** "Lee", from the member's name, else the email's local part. */
 export function firstName(member: Pick<MemberOverview, "name" | "email" | "userId">): string {
   const name = member.name?.trim();

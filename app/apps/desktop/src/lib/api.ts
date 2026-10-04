@@ -3011,11 +3011,15 @@ export class ApiClient {
   }
 
   /** Apply one access mode to one or more resource roots in a single transaction. */
-  async setBulkAccess(orgId: string, input: BulkAccessInput): Promise<BulkAccessResult> {
+  async setBulkAccess(
+    orgId: string,
+    input: BulkAccessInput,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<BulkAccessResult> {
     const { data } = await this.request<BulkAccessResult>(
       "POST",
       `/api/orgs/${encodeURIComponent(orgId)}/access/bulk`,
-      { body: input },
+      { body: input, timeoutMs: opts.timeoutMs },
     );
     return {
       mode: data.mode ?? input.mode,

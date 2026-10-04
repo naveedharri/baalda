@@ -12,6 +12,9 @@ import {
   neighbourMode,
   ownModes,
   topLevelRows,
+  accessWriteFailureMessage,
+  revertModes,
+  BULK_WRITE_TIMEOUT_MS,
   type BoardRow,
   type SummaryMode,
 } from "../lib/accessBoard";
@@ -210,6 +213,15 @@ export function MemberAccessBoard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allRows]);
 
+  // Back online: re-read every row that failed or never answered, so the
+  // board shows the server's truth rather than what it guessed while offline.
+  useEffect(() => {
+    const retry = () => readModes(allRows.filter((row) => failed.has(row.key) || !summaryModes.has(row.key)));
+    window.addEventListener("online", retry);
+    return () => window.removeEventListener("online", retry);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allRows, failed, summaryModes]);
+
   const who = firstName(member);
   const fullName = member.name || member.email || member.userId;
 
@@ -239,7 +251,7 @@ export function MemberAccessBoard({
         resources,
         audience: { type: "users", userIds: [member.userId] },
         mode,
-      });
+      }, { timeoutMs: BULK_WRITE_TIMEOUT_MS });
       if (!live.current) return true;
       readModes(allRows.filter((r) => r.key !== except && (affected.includes(r) || ancestors.has(r.path))));
       if (vaultWide) await onChanged();
@@ -247,8 +259,11 @@ export function MemberAccessBoard({
       return true;
     } catch (cause) {
       if (live.current) {
-        setSummaryModes(before);
-        setError(cause instanceof Error ? cause.message : String(cause));
+        // Put the moved rows back, then ask the server what is true: the
+        // write is atomic, but a lost answer can hide one that DID commit.
+        setSummaryModes((prev) => revertModes(prev, before, affected.map((r) => r.key)));
+        toast(accessWriteFailureMessage(cause), "error");
+        readModes(allRows.filter((r) => affected.includes(r) || ancestors.has(r.path)));
       }
       return false;
     } finally {
@@ -341,7 +356,7 @@ export function MemberAccessBoard({
       readModes(allRows);
       await onChanged();
     } catch (cause) {
-      if (live.current) setError(cause instanceof Error ? cause.message : String(cause));
+      if (live.current) toast(accessWriteFailureMessage(cause), "error");
     } finally {
       if (live.current) setBusy(false);
     }
