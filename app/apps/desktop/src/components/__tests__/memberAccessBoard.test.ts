@@ -35,6 +35,8 @@ describe("Member access board", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    // The first-visit drag hint has its own test; keep it out of the others.
+    window.localStorage.setItem("context.accessBoard.dragHintShown", "1");
     api.listAccessTree.mockResolvedValue({
       folders: [{ id: "f1", path: "Specs" }],
       notes: [
@@ -206,6 +208,30 @@ describe("Member access board", () => {
     }
     expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
     expect(api.setBulkAccess.mock.calls[0][1].mode).toBe("private");
+  });
+
+  it("nudges one real movable row once per device, and never again", async () => {
+    window.localStorage.removeItem("context.accessBoard.dragHintShown");
+    await render();
+    expect(host.querySelector("[data-hint]")).toBeNull();
+    await act(async () => { await new Promise((r) => setTimeout(r, 1300)); });
+    const hinted = host.querySelector<HTMLElement>(".access-board-row[data-hint]");
+    expect(hinted).not.toBeNull();
+    expect(hinted!.classList.contains("is-path")).toBe(false);
+    expect(hinted!.querySelector(".access-board-name")?.textContent).toBe("Specs");
+    expect(hinted!.dataset.hint).toBe("right");
+    expect(column("readonly").classList.contains("is-hint-target")).toBe(true);
+    expect(window.localStorage.getItem("context.accessBoard.dragHintShown")).toBe("1");
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    // Any press cancels it at once.
+    await act(async () => { pointer("pointerdown", document.body, 1, 1); });
+    expect(host.querySelector("[data-hint]")).toBeNull();
+
+    act(() => root.unmount());
+    root = createRoot(host);
+    await render();
+    await act(async () => { await new Promise((r) => setTimeout(r, 1300)); });
+    expect(host.querySelector("[data-hint]")).toBeNull();
   });
 
   it("a drag released outside any column, or cancelled with Escape, writes nothing", async () => {

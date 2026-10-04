@@ -8412,8 +8412,10 @@ button.secondary:active:not(:disabled),
 .members-table tbody tr + tr td {
   border-top: 1px solid var(--border);
 }
+/* Member rows: a lighter tint than the app-wide --bg-hover, so a row reads
+   as hovered without competing with the pills and the ⋯ button inside it. */
 .members-table tbody tr:hover td {
-  background: var(--bg-hover);
+  background: var(--members-row-hover);
 }
 /* Member rows open the profile; invited rows have none and stay inert. */
 .members-table tbody tr.is-clickable {
@@ -8423,7 +8425,7 @@ button.secondary:active:not(:disabled),
   outline: none;
 }
 .members-table tbody tr.is-clickable:focus-visible td {
-  background: var(--bg-hover);
+  background: var(--members-row-hover);
   box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent);
 }
 .members-table-person {
@@ -8462,6 +8464,61 @@ button.secondary:active:not(:disabled),
   }
 }
 
+
+/* Loading skeletons (the shimmer is editor.css's `.skel-line`). */
+.members-skel-pill {
+  display: inline-block;
+  flex: none;
+  width: 120px;
+  height: 28px;
+}
+.members-skel-count {
+  display: inline-block;
+  width: 120px;
+  height: 10px;
+}
+.members-table-skeleton tbody tr:hover td {
+  background: none;
+}
+.members-skel-avatar {
+  display: inline-block;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+.members-skel-names {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.members-skel-names .skel-line,
+.members-table-skeleton td > .skel-line {
+  display: block;
+  height: 10px;
+}
+.members-skel-name { width: 120px; }
+.members-skel-email { width: 160px; }
+.members-skel-role { width: 56px; }
+.members-table-skeleton td > .members-skel-access { width: 120px; height: 22px; }
+.members-skel-time { width: 64px; }
+
+/* The ⋯ quick action: legible at rest, and given a surface on a hovered row
+   so it stands out against the tint. */
+.members-table .row-more-btn {
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+}
+.members-table .row-more-btn:hover:not(:disabled),
+.members-table .row-more-btn.open {
+  color: var(--text-primary);
+}
+.members-table tbody tr:hover .row-more-btn,
+.members-table tbody tr:focus-within .row-more-btn,
+.members-table .row-more-btn.open {
+  background: var(--bg-surface);
+  border-color: var(--border);
+}
 
 /* Quiet MCP tip under the table. */
 .members-access-mcp-hint {
@@ -9365,7 +9422,46 @@ body.access-board-grabbing * {
 .context-menu.access-board-column-menu li:nth-child(2) .menu-option-hint {
   color: var(--text-secondary);
 }
+.access-board-intro-drag {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+/* First-visit drag hint: a real row lifts, slides toward its neighbour
+   column, holds while that column tints, and settles back (≈1.8 s). */
+.access-board-row[data-hint] {
+  position: relative;
+  z-index: 1;
+  animation: access-board-hint-right 1800ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.access-board-row[data-hint="left"] {
+  animation-name: access-board-hint-left;
+}
+@keyframes access-board-hint-right {
+  0% { transform: none; box-shadow: none; background: transparent; }
+  12% { transform: scale(1.02); box-shadow: var(--shadow-lg); background: var(--bg-surface); }
+  34%, 67% { transform: translateX(24px) scale(1.02) rotate(0.8deg); box-shadow: var(--shadow-lg); background: var(--bg-surface); }
+  90% { transform: scale(1.02); box-shadow: var(--shadow-md); background: var(--bg-surface); }
+  100% { transform: none; box-shadow: none; background: transparent; }
+}
+@keyframes access-board-hint-left {
+  0% { transform: none; box-shadow: none; background: transparent; }
+  12% { transform: scale(1.02); box-shadow: var(--shadow-lg); background: var(--bg-surface); }
+  34%, 67% { transform: translateX(-24px) scale(1.02) rotate(-0.8deg); box-shadow: var(--shadow-lg); background: var(--bg-surface); }
+  90% { transform: scale(1.02); box-shadow: var(--shadow-md); background: var(--bg-surface); }
+  100% { transform: none; box-shadow: none; background: transparent; }
+}
+.access-board-column.is-hint-target {
+  animation: access-board-hint-target 1800ms ease-in-out both;
+}
+@keyframes access-board-hint-target {
+  0%, 28%, 75%, 100% { border-color: var(--border); background: var(--bg-surface); box-shadow: none; }
+  38%, 64% { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+}
 @media (prefers-reduced-motion: reduce) {
+  .access-board-row[data-hint],
+  .access-board-column.is-hint-target {
+    animation: none;
+  }
   .access-board-ghost {
     animation: none;
     scale: 1;

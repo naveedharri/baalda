@@ -553,7 +553,7 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
       <div className="members-access-row">
         <span className="members-access-row-copy">
           <span className="members-access-row-title">Across the vault</span>
-          <span className="muted">Their setting wins over Everyone</span>
+          <span className="muted">{isSelf ? "Your" : "Their"} setting wins over the default setting</span>
         </span>
         <MenuSelect<TeamAccessMode | "custom">
           value={vaultFrom ?? "custom"}

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// The `.skel-line` shimmer lives with the editor skeleton (as ContentWidthPreview does).
+import "./editor.css";
 import type {
   AccessDefault,
   InvitationOverview,
@@ -26,7 +28,7 @@ import {
   shortDate,
 } from "../lib/membersAccess";
 import { syncManager } from "../lib/sync/docSession";
-import { readTeamAccessCache, writeTeamAccessCache } from "../lib/teamAccessCache";
+import { writeTeamAccessCache } from "../lib/teamAccessCache";
 import { toast } from "../lib/toast";
 import type { SettingsTab } from "../lib/settingsTabs";
 import { useStore } from "../store";
@@ -37,7 +39,6 @@ import { MemberProfilePage, type ProfileTab } from "./MemberProfilePage";
 import { canActOnMember, canSetMemberAccess } from "./memberRoles";
 import { MenuSelect } from "./MenuSelect";
 import { RowActionsMenu, type RowAction } from "./RowActionsMenu";
-import { Spinner } from "./Spinner";
 import { markSelfAccessChange } from "../lib/sync/selfAccessChanges";
 
 
@@ -80,7 +81,6 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
 
   const [overview, setOverview] = useState<MembersOverview | null>(null);
   const [teamAccess, setTeamAccess] = useState<TeamAccess | null>(null);
-  const [cachedMode, setCachedMode] = useState<TeamAccessMode | null>(null);
   const [accessDefault, setAccessDefault] = useState<AccessDefault | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -105,7 +105,6 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
     if (ov) setOverview(ov);
     if (team) {
       setTeamAccess(team);
-      setCachedMode(team.mode);
       writeTeamAccessCache(authManager.getServerUrl(), orgId, team.mode);
     }
     if (joining) setAccessDefault(joining);
@@ -122,7 +121,6 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
     setError(null);
     setConfirm(null);
     setProfile(null);
-    setCachedMode(orgId ? readTeamAccessCache(authManager.getServerUrl(), orgId) : null);
     void reload();
     return () => { loadGen.current++; };
   }, [orgId, canManage, reload]);
@@ -269,8 +267,8 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
         <>
           <p>
             {m.userId === myUserId
-              ? "This replaces your own settings across the vault. Your setting wins over Everyone, and owners and admins are not exempt."
-              : `This replaces ${displayName(m)}'s own settings across the vault. Their setting wins over Everyone.`}
+              ? "This replaces your own settings across the vault. Your setting wins over the default setting, and owners and admins are not exempt."
+              : `This replaces ${displayName(m)}'s own settings across the vault. Their setting wins over the default setting.`}
           </p>
           <p>{copy.outcome}</p>
         </>
@@ -415,10 +413,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
                 triggerContent={everyone?.label}
               />
             ) : (
-              <span className="members-access-pending muted" aria-busy="true">
-                {cachedMode ? EVERYONE_OPTIONS.find((o) => o.value === cachedMode)?.label : null}
-                <Spinner />
-              </span>
+              <PillSkeleton label={`Loading access for everyone in ${vaultName}`} />
             )}
           </div>
           <div className="members-access-row">
@@ -440,7 +435,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
                 menuClassName="access-menu"
               />
             ) : (
-              <span className="members-access-pending" aria-busy="true"><Spinner /></span>
+              <PillSkeleton label="Loading access for new members" />
             )}
           </div>
           {teamAccess && teamAccess.overrides.length > 0 && (
@@ -471,8 +466,10 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
       </div>
 
       <div className="members-access-count muted">
-        {overview ? countLine(query, shown.members.length, shown.invitations.length) : <Spinner />}
+        {overview ? countLine(query, shown.members.length, shown.invitations.length) : <span className="skel-line members-skel-count" aria-hidden="true" />}
       </div>
+
+      {!overview && <TableSkeleton manage={manage} />}
 
       {overview && (
         <table className="members-table">
@@ -669,6 +666,50 @@ function ClockIcon() {
       <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
       <path d="M3 3v5h5M12 7v5l3 2" />
     </svg>
+  );
+}
+
+/**
+ * Placeholders that hold the final layout while the server answers: no text
+ * and no mode until the state is authoritative, and nothing that jumps when it
+ * arrives. They borrow the editor skeleton's `.skel-line` shimmer.
+ */
+function PillSkeleton({ label }: { label: string }) {
+  return <span className="skel-line members-skel-pill" role="status" aria-busy="true" aria-label={label} />;
+}
+
+function TableSkeleton({ manage }: { manage: boolean }) {
+  return (
+    <table className="members-table members-table-skeleton" aria-busy="true" aria-label="Loading people">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Role</th>
+          {manage && <th>Access</th>}
+          <th>Last active</th>
+          {manage && <th aria-label="Actions" />}
+        </tr>
+      </thead>
+      <tbody aria-hidden="true">
+        {[0, 1, 2].map((i) => (
+          <tr key={i}>
+            <td>
+              <span className="members-table-person">
+                <span className="skel-line members-skel-avatar" />
+                <span className="members-skel-names">
+                  <span className="skel-line members-skel-name" />
+                  <span className="skel-line members-skel-email" />
+                </span>
+              </span>
+            </td>
+            <td><span className="skel-line members-skel-role" /></td>
+            {manage && <td><span className="skel-line members-skel-access" /></td>}
+            <td><span className="skel-line members-skel-time" /></td>
+            {manage && <td />}
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 

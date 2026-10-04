@@ -35,6 +35,10 @@ const BOARD_SUMMARY_TIMEOUT_MS = 5000;
 const DRAG_THRESHOLD = 4;
 /** How long the landing / leaving animations run, plus slack. */
 const LAND_MS = 420;
+/** First-visit drag hint: once per device, after the rows have loaded. */
+export const DRAG_HINT_KEY = "context.accessBoard.dragHintShown";
+export const DRAG_HINT_DELAY_MS = 1200;
+const DRAG_HINT_MS = 1800;
 
 const resourceOf = (row: { kind: AccessRow["kind"]; id: string }): BulkAccessResource => ({
   resourceType: accessResourceType(row.kind),
@@ -456,10 +460,54 @@ export function MemberAccessBoard({
   const failedCount = allRows.filter((r) => failed.has(r.key) && !summaryModes.has(r.key)).length;
   const dragRow = dragKey ? rowByKey.get(dragKey) : undefined;
 
+  /**
+   * The one-time "these rows move" nudge: a real movable row lifts, slides
+   * toward its neighbour column and settles back, the neighbour tinting while
+   * it holds. CSS only (driven by `data-hint` and a column class) — no write,
+   * no state beyond the hint itself, and any press cancels it.
+   */
+  const [hint, setHint] = useState<{ key: string; dir: "left" | "right"; target: TeamAccessMode } | null>(null);
+  const hintArmed = useRef(false);
+  const ready = serverTree !== null && !loading && allRows.length > 0 && canSetAccess;
+  useEffect(() => {
+    if (!ready || hintArmed.current) return;
+    hintArmed.current = true;
+    try {
+      if (window.localStorage.getItem(DRAG_HINT_KEY)) return;
+    } catch {
+      return;
+    }
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    let stop: number | undefined;
+    const start = window.setTimeout(() => {
+      if (!live.current || dragging.current || probe.current) return;
+      for (let i = 0; i < columns.length; i++) {
+        const first = columns[i].rows.find((r) => !r.grey);
+        if (!first) continue;
+        const step = i < columns.length - 1 ? 1 : -1;
+        setHint({ key: first.row.key, dir: step > 0 ? "right" : "left", target: columns[i + step].mode });
+        try { window.localStorage.setItem(DRAG_HINT_KEY, "1"); } catch { /* best effort */ }
+        stop = window.setTimeout(() => { if (live.current) setHint(null); }, DRAG_HINT_MS);
+        return;
+      }
+    }, DRAG_HINT_DELAY_MS);
+    return () => {
+      window.clearTimeout(start);
+      if (stop !== undefined) window.clearTimeout(stop);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+  useEffect(() => {
+    if (!hint) return;
+    const cancel = () => setHint(null);
+    window.addEventListener("pointerdown", cancel, true);
+    return () => window.removeEventListener("pointerdown", cancel, true);
+  }, [hint]);
+
   return (
     <div ref={boardRef} className={`access-board${dragKey ? " is-dragging" : ""}`}>
       <div className="access-board-head">
-        <p className="access-board-intro">Drag rows between columns, or use the arrows. Changes save right away.</p>
+        <p className="access-board-intro"><span className="access-board-intro-drag">Drag</span> rows between columns, or use the arrows. Changes save right away.</p>
         {!hideSetEverything && <MenuSelect<EverythingChoice | "none">
           value="none"
           options={[
@@ -492,7 +540,7 @@ export function MemberAccessBoard({
             return (
               <section
                 key={col.mode}
-                className={`access-board-column${overColumn === col.mode ? " is-over" : ""}`}
+                className={`access-board-column${overColumn === col.mode ? " is-over" : ""}${hint?.target === col.mode ? " is-hint-target" : ""}`}
                 aria-label={col.title}
                 data-mode={col.mode}
               >
@@ -526,6 +574,7 @@ export function MemberAccessBoard({
                         disabled={locked}
                         dragging={dragKey === r.row.key}
                         landing={landing?.key === r.row.key && !r.grey}
+                        hint={hint?.key === r.row.key && !r.grey ? hint.dir : null}
                         onArrow={(step) => {
                           const to = neighbourMode(col.mode, step);
                           if (to) move(r.row, to);
@@ -580,7 +629,7 @@ export function MemberAccessBoard({
   );
 }
 
-function BoardRowItem({ item, canLeft, canRight, disabled, dragging, landing, onArrow, onPointerDown }: {
+function BoardRowItem({ item, canLeft, canRight, disabled, dragging, landing, hint, onArrow, onPointerDown }: {
   item: BoardRow;
   canLeft: boolean;
   canRight: boolean;
@@ -588,6 +637,8 @@ function BoardRowItem({ item, canLeft, canRight, disabled, dragging, landing, on
   dragging: boolean;
   /** Just moved here: play the land animation. */
   landing: boolean;
+  /** First-visit nudge toward this side, or null. */
+  hint: "left" | "right" | null;
   onArrow: (step: -1 | 1) => void;
   onPointerDown: (e: React.PointerEvent<HTMLElement>) => void;
 }) {
@@ -607,6 +658,7 @@ function BoardRowItem({ item, canLeft, canRight, disabled, dragging, landing, on
       style={style}
       data-path={row.path}
       data-movable={disabled ? "false" : "true"}
+      data-hint={hint ?? undefined}
       onPointerDown={onPointerDown}
     >
       <span className="access-board-icon" aria-hidden="true">{rowGlyph(row)}</span>
