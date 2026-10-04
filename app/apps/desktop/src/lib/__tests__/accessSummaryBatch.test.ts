@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api";
-import { createAccessSummaryBatcher, SUMMARY_BATCH_MAX } from "../accessSummaryBatch";
+import { createAccessSummaryBatcher, SummaryCancelledError, SUMMARY_BATCH_MAX } from "../accessSummaryBatch";
 
 const folder = (id: string) => ({ resourceType: "folder" as const, resourceId: id });
 
@@ -27,12 +27,14 @@ describe("access summary batcher", () => {
     const timer = manual();
     const many = vi.fn(async (_org: string, groups: unknown[][]) => groups.map(() => "readonly" as const));
     const batcher = createAccessSummaryBatcher({ many, one: vi.fn() }, timer.schedule);
-    void batcher.read("org", folder("stale"), ["u1"], () => true);
+    const stale = batcher.read("org", folder("stale"), ["u1"], () => true);
     const a = batcher.read("org", folder("a"), ["u1"], () => false);
     const b = batcher.read("org", folder("b"), ["u2"], () => false);
     timer.flush();
     await Promise.all([a, b]);
     expect(many.mock.calls.map((call) => call[1])).toEqual([[[folder("a")]], [[folder("b")]]]);
+    // A dropped row still settles, so its caller can stop waiting.
+    await expect(stale).rejects.toBeInstanceOf(SummaryCancelledError);
   });
 
   it("chunks large trees", async () => {

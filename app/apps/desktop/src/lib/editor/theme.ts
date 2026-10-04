@@ -903,6 +903,19 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     lineHeight: "1",
   },
   ".prop-chip-input": { width: "6rem", flex: "1 1 6rem" },
+  // View-only rows: plain text in the same box metrics as the inputs, so a
+  // note going read-only while open does not shift the layout.
+  ".prop-row.is-readonly .prop-type-trigger": { cursor: "default" },
+  ".prop-static-name": { display: "inline-block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  ".prop-static-text, .prop-static-empty, .prop-static-checkbox": {
+    display: "inline-block",
+    padding: "var(--sp-1)",
+    fontFamily: "var(--font-body)",
+    fontSize: "var(--fs-sm)",
+    color: "var(--text-primary)",
+    overflowWrap: "anywhere",
+  },
+  ".prop-static-empty": { color: "var(--text-tertiary)" },
   ".prop-remove": {
     flex: "0 0 auto",
     border: "0",

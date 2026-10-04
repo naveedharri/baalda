@@ -62,6 +62,8 @@ const fakeRegistry = vi.hoisted(() => {
       reg.pushed.add(docId);
     }),
     flushCheckpoint: vi.fn(async () => {}),
+    materializePendingFromBootstrap: vi.fn(async () => false),
+    pendingFromBootstrapCount: vi.fn(() => 0),
     failures: vi.fn((): unknown[] => []),
     hasFailures: vi.fn(() => false),
     heldRefusals: vi.fn((): unknown[] => []),
@@ -2060,7 +2062,7 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     vi.useRealTimers();
   });
 
-  describe("a live delete above the cap asks instead of undoing", () => {
+  describe("a live delete above the cap is held, never propagated, then restored", () => {
     const notes = Array.from({ length: 50 }, (_, i) => ({ docId: `x${i}`, relPath: `X${i}.md` }));
 
     async function heldThirty(sm: SyncManager) {
@@ -2092,32 +2094,48 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
       vi.useRealTimers();
     });
 
-    it('"Delete for everyone" runs the soft delete uncapped, batched', async () => {
+    it("never offers a delete: the over-cap batch has no path to the server", async () => {
       const sm = new SyncManager();
       await heldThirty(sm);
-
-      await sm.resolveDeleteDecision("delete");
-      await drain(2);
-
-      expect(fakeRegistry.deletePaths).toHaveBeenCalledTimes(1);
-      expect(fakeRegistry.deletePaths.mock.calls[0][0]).toHaveLength(30);
-      expect(sm.pendingDeleteDecision()).toBeNull();
-      expect(sm.heldDocIds().size).toBe(0);
+      // The old "Delete for everyone" answer is gone; the only release restores.
+      expect((sm as unknown as Record<string, unknown>).resolveDeleteDecision).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+      expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
       vi.useRealTimers();
     });
 
-    it('"Restore" deletes nothing and lets the pull materialize them again', async () => {
+    it('"Restore now" deletes nothing and lets the pull materialize them again', async () => {
       const sm = new SyncManager();
       await heldThirty(sm);
       fakeRegistry.pull.mockClear();
 
-      await sm.resolveDeleteDecision("restore");
+      await sm.releaseDeleteDecision("restore");
       await drain(2);
 
       expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
       expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+      expect(sm.pendingDeleteDecision()).toBeNull();
       expect(sm.heldDocIds().size).toBe(0);
       expect(fakeRegistry.pull).toHaveBeenCalled();
+      vi.useRealTimers();
+    });
+
+    it("Dismiss (or the fade) releases the hold: the pull stops skipping them and restores", async () => {
+      const sm = new SyncManager();
+      await heldThirty(sm);
+      fakeRegistry.pull.mockClear();
+      expect(sm.heldDocIds().size).toBe(30);
+
+      await sm.releaseDeleteDecision("dismiss");
+      await drain(2);
+
+      expect(sm.heldDocIds().size).toBe(0);
+      expect(sm.structureNotice().pendingDelete).toBeNull();
+      expect(sm.syncFailures().registry.filter((f) => f.code === "delete_decision")).toHaveLength(0);
+      expect(fakeRegistry.pull).toHaveBeenCalled();
+      expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+      expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
       vi.useRealTimers();
     });
 

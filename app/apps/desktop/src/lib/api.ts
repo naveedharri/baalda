@@ -1,3 +1,6 @@
+import type { SeedResultFields } from "./sync/seedRegister";
+import { rememberAvatarImage } from "./avatarIdentity";
+import { parseHealth, type ServerHealth } from "./serverFeatures";
 import { CLIENT_OUTDATED_CODE, CLIENT_VERSION, CLIENT_VERSION_PARAM } from "./clientVersion";
 import type { AssistantProvider, HousekeeperStatus, HousekeeperScan, HousekeeperEdit, DiagnosticInput, DiagnosticReview } from "./housekeeper";
 // Type-only import: `bulkTypes.ts` is the hand-mirrored copy of the server's
@@ -298,6 +301,15 @@ export interface RegisteredFile {
   vaultId?: string;
   folderId?: string | null;
   path: string;
+  /** Who registered the file. `GET /api/files` sends the raw column,
+   *  `created_by`; the camel spelling is accepted defensively. */
+  createdBy?: string | null;
+  created_by?: string | null;
+}
+
+/** Who registered the `files` row, or null when the server didn't say. */
+export function fileCreatedBy(f: { createdBy?: string | null; created_by?: string | null }): string | null {
+  return f.createdBy ?? f.created_by ?? null;
 }
 
 export interface Share {
@@ -343,8 +355,87 @@ export interface TeamAccessOverride {
  */
 export interface TeamAccess {
   mode: TeamAccessMode;
+  /**
+   * The raw vault posture behind `mode`. `none` means the vault was never
+   * shared: it behaves like No access, but members keep the notes they wrote.
+   * Absent on servers that predate it; derived from `mode` then.
+   */
+  posture: TeamAccessPosture;
   grantId: string | null;
   overrides: TeamAccessOverride[];
+}
+
+export type TeamAccessPosture = "edit" | "view" | "sealed" | "none";
+
+/** A person's vault-wide level as the members overview reports it. */
+export type MemberAccessLevel = "edit" | "view" | "none" | "custom";
+
+/** One row of `GET /api/orgs/:orgId/members/overview`. */
+export interface MemberOverview {
+  userId: string;
+  memberId: string;
+  role: "owner" | "admin" | "member";
+  name: string | null;
+  email: string | null;
+  image: string | null;
+  joinedAt: string | null;
+  lastActiveAt: string | null;
+  /** Who invited them, when the server knows (absent on older servers). */
+  invitedBy?: MemberRef | null;
+  /** Only for owner/admin callers. */
+  access?: { level: MemberAccessLevel };
+}
+
+/** A person named inside another record (an inviter, a grantor). */
+export interface MemberRef {
+  userId: string;
+  name: string | null;
+  email: string | null;
+}
+
+/** One row of `GET /api/orgs/:orgId/members/:userId/activity`, newest first. */
+export type MemberActivityEvent =
+  | { kind: "joined"; at: string; invitedBy: MemberRef | null }
+  | { kind: "created"; at: string; docId: string; path: string }
+  | { kind: "edited"; at: string; docId: string; path: string }
+  | {
+      kind: "accessGranted";
+      at: string;
+      by: MemberRef | null;
+      permission: "edit" | "view" | "readonly" | "denied" | "locked";
+      resourceType: "folder" | "file" | "vault";
+      resourceId: string;
+      path: string | null;
+    };
+
+export interface InvitationOverview {
+  id: string;
+  email: string;
+  role: string;
+  status: string;
+  createdAt: string | null;
+  expiresAt: string | null;
+  access: TeamAccessMode | null;
+}
+
+export interface MembersOverview {
+  members: MemberOverview[];
+  invitations: InvitationOverview[];
+  canManage: boolean;
+}
+
+export interface InviteManyInput {
+  emails: string[];
+  role: "member" | "admin";
+  /** null = whatever the vault's New members setting says. */
+  access: TeamAccessMode | null;
+}
+
+export interface InviteManyResult {
+  email: string;
+  invitationId?: string;
+  emailed: boolean;
+  error?: string;
 }
 
 /** What a whole-vault mode change actually did. */
@@ -518,10 +609,33 @@ export interface BlobUploadMultipart {
 
 export type BlobUpload = BlobUploadSingle | BlobUploadMultipart;
 
+/**
+ * The `files` row a one-step upload (`files-with-bytes`) registered or bound
+ * to. `created`: this upload made it. `adopted`: the path already had a row
+ * (possibly under another id) and these bytes are that file's. `pending`: the
+ * intent recorded the registration; `complete` creates the row.
+ */
+export interface OneStepFileRow {
+  id: string;
+  docId: string;
+  folderId: string | null;
+  path: string;
+  status: "pending" | "created" | "adopted";
+}
+
+/** `register` on a blob intent: create the `files` row WITH the bytes. */
+export interface BlobIntentRegister {
+  docId: string;
+  relPath: string;
+  folderId?: string | null;
+}
+
 /** The server already holds these bytes — send nothing. */
 export interface BlobIntentDeduped {
   deduped: true;
   blob: BlobMeta;
+  /** One-step upload only: the row these bytes now belong to. */
+  file?: OneStepFileRow;
 }
 
 /** The server wants the bytes, and this is where to PUT them. */
@@ -531,6 +645,9 @@ export interface BlobIntentUpload {
   upload: BlobUpload;
   /** Absolute URL to POST once every byte is in (bearer REQUIRED — ours). */
   completeUrl: string;
+  /** One-step upload only: `pending` until `complete`, or `adopted` when the
+   *  path already had a row (bind to that id). */
+  file?: OneStepFileRow;
 }
 
 export type BlobIntent = BlobIntentDeduped | BlobIntentUpload;
@@ -1363,6 +1480,31 @@ export class ApiClient {
     if (!ok) throw new ServerCheckError("not-baalda", NOT_BAALDA_MESSAGE);
   }
 
+  /**
+   * The server's `/health` body, parsed for capability detection
+   * (`lib/serverFeatures.ts`). Unlike {@link health} this never throws:
+   * any failure (timeout, network, 5xx, non-JSON, not Baalda) answers null,
+   * which the caller reads as "unknown", never as "outdated".
+   */
+  async getHealth(baseUrl?: string): Promise<ServerHealth | null> {
+    const base = stripTrailingSlash((baseUrl ?? this.baseUrl).trim());
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+    try {
+      const res = await this.fetchImpl(`${base}/health`, {
+        method: "GET",
+        headers: { Accept: "application/json", [ORIGIN_HEADER]: this.clientId },
+        signal: controller.signal,
+      });
+      if (!res.ok) return null;
+      return parseHealth(JSON.parse(await res.text()));
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // ---- Auth (Better Auth) -------------------------------------------------
 
   /** Sign up with email+password. Returns the session token to persist. */
@@ -2151,20 +2293,14 @@ export class ApiClient {
     return data.confirmed ?? [];
   }
 
-  /** Owner/admin census of notes registered but never uploaded (#257). */
-  async uploadHealth(vaultId: string): Promise<{
-    stalled: number;
-    confirmedEmpty: number;
-    minAgeMinutes: number;
-    byCreator: Array<{ userId: string | null; name: string | null; count: number }>;
-  }> {
-    const { data } = await this.request<{
-      stalled: number;
-      confirmedEmpty: number;
-      minAgeMinutes: number;
-      byCreator: Array<{ userId: string | null; name: string | null; count: number }>;
-    }>("GET", `/api/vaults/${encodeURIComponent(vaultId)}/upload-health`);
-    return data;
+  /** The vault's readable tree binaries (`GET /api/files`), each with its
+   *  creator. The only listing that says who registered a file: the blob
+   *  listing carries no creator. */
+  async listFiles(vaultId: string): Promise<RegisteredFile[]> {
+    const { data } = await this.request<{ files: RegisteredFile[] }>("GET", "/api/files", {
+      query: { vaultId },
+    });
+    return data.files ?? [];
   }
 
   async listNotes(vaultId: string): Promise<RegisteredNote[]> {
@@ -2214,10 +2350,15 @@ export class ApiClient {
     title?: string | null;
     folderId?: string | null;
     docId?: string;
-  }): Promise<RegisteredNote & { created?: boolean }> {
-    const { data, status } = await this.request<RegisteredNote>("POST", "/api/notes", {
-      body: input,
-    });
+    /** One-step create (`notes-with-state` servers): base64 Yjs state. */
+    state?: string;
+    textSha256?: string;
+  }): Promise<RegisteredNote & { created?: boolean } & SeedResultFields> {
+    const { data, status } = await this.request<RegisteredNote & SeedResultFields>(
+      "POST",
+      "/api/notes",
+      { body: input },
+    );
     return { ...data, created: status === 201 };
   }
 
@@ -2427,10 +2568,15 @@ export class ApiClient {
   async createBootstrapSession(
     vaultId: string,
     have: string[] = [],
+    /** `bootstrap-only` servers: exactly these doc ids (HTTP pull-then-merge). */
+    only?: string[],
   ): Promise<BootstrapSession> {
+    const body: { have?: string[]; only?: string[] } = {};
+    if (have.length > 0) body.have = have;
+    if (only) body.only = only;
     const data = await this.bulk<BootstrapSession>(
       `/api/vaults/${encodeURIComponent(vaultId)}/bootstrap`,
-      have.length > 0 ? { have } : {},
+      body,
     );
     return {
       sessionId: data.sessionId,
@@ -2754,6 +2900,19 @@ export class ApiClient {
   }
 
   /**
+   * Back to the vault default for one member: deletes every per-user share row
+   * of theirs in the org (vault and items). Owner/admin only; the server kicks
+   * affected sockets and refreshes ACLs.
+   */
+  async resetMemberAccess(orgId: string, userId: string): Promise<{ removed: number; disconnectedDocs: number }> {
+    const { data } = await this.request<{ removed: number; disconnectedDocs: number }>(
+      "DELETE",
+      `/api/orgs/${encodeURIComponent(orgId)}/members/${encodeURIComponent(userId)}/shares`,
+    );
+    return data;
+  }
+
+  /**
    * The vault's team access in one shot: the vault-wide mode plus every
    * per-item org row underneath it. Owner/admin only.
    */
@@ -2762,11 +2921,51 @@ export class ApiClient {
       "GET",
       `/api/orgs/${encodeURIComponent(orgId)}/team-access`,
     );
+    const mode = data.mode ?? "private";
     return {
-      mode: data.mode ?? "private",
+      mode,
+      posture: data.posture ?? (mode === "open" ? "edit" : mode === "readonly" ? "view" : "sealed"),
       grantId: data.grantId ?? null,
       overrides: data.overrides ?? [],
     };
+  }
+
+  /** Members, pending invitations and (for owners/admins) each person's
+   * vault-wide access level, in one request. */
+  async getMembersOverview(orgId: string): Promise<MembersOverview> {
+    const { data } = await this.request<MembersOverview>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/members/overview`,
+    );
+    const members = data.members ?? [];
+    // Teach the shared avatar directory each member's picture, so surfaces
+    // that only carry an id (presence, version rows) draw the same face.
+    for (const m of members) rememberAvatarImage(m.userId, m.image ?? null);
+    return {
+      members,
+      invitations: data.invitations ?? [],
+      canManage: data.canManage === true,
+    };
+  }
+
+  /** One member's recent activity in this vault, newest first. */
+  async getMemberActivity(orgId: string, userId: string, limit = 50): Promise<MemberActivityEvent[]> {
+    const { data } = await this.request<{ events: MemberActivityEvent[] }>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/members/${encodeURIComponent(userId)}/activity?limit=${limit}`,
+    );
+    return data.events ?? [];
+  }
+
+  /** Invite several addresses at once, each carrying a role and an access level.
+   * A 402 `member_limit_reached` throws like {@link inviteMember}. */
+  async inviteMany(orgId: string, input: InviteManyInput): Promise<InviteManyResult[]> {
+    const { data } = await this.request<{ results: InviteManyResult[] }>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(orgId)}/invitations`,
+      { body: input },
+    );
+    return data.results ?? [];
   }
 
   /**
@@ -2812,11 +3011,15 @@ export class ApiClient {
   }
 
   /** Apply one access mode to one or more resource roots in a single transaction. */
-  async setBulkAccess(orgId: string, input: BulkAccessInput): Promise<BulkAccessResult> {
+  async setBulkAccess(
+    orgId: string,
+    input: BulkAccessInput,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<BulkAccessResult> {
     const { data } = await this.request<BulkAccessResult>(
       "POST",
       `/api/orgs/${encodeURIComponent(orgId)}/access/bulk`,
-      { body: input },
+      { body: input, timeoutMs: opts.timeoutMs },
     );
     return {
       mode: data.mode ?? input.mode,
@@ -3039,6 +3242,9 @@ export class ApiClient {
       /** See {@link uploadBlob}'s `baseSha`: 409 `stale_base` when the doc's
        *  current bytes are not the ones this edit started from. */
       baseSha?: string | null;
+      /** One-step upload (`files-with-bytes`): register the `files` row with
+       *  these bytes instead of a separate `POST /api/files` first. */
+      register?: BlobIntentRegister;
     },
   ): Promise<BlobIntent> {
     if (this.blobIntentSupported === false) {
@@ -3066,8 +3272,14 @@ export class ApiClient {
    * `completeUrl` comes from the intent and is absolute — the server owns the
    * path, and a multipart flow may point it elsewhere entirely.
    */
-  async completeBlob(completeUrl: string, body: BlobCompleteBody = {}): Promise<BlobMeta> {
-    return (await this.requestAbsolute<BlobMeta>("POST", completeUrl, body)) ?? ({} as BlobMeta);
+  async completeBlob(
+    completeUrl: string,
+    body: BlobCompleteBody = {},
+  ): Promise<BlobMeta & { file?: OneStepFileRow }> {
+    return (
+      (await this.requestAbsolute<BlobMeta & { file?: OneStepFileRow }>("POST", completeUrl, body)) ??
+      ({} as BlobMeta)
+    );
   }
 
   /** Fresh presigned URLs for parts whose own presign expired mid-upload. */

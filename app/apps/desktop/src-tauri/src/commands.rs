@@ -1468,6 +1468,41 @@ pub async fn get_disk_base(
     guard.get_disk_base(&doc_id)
 }
 
+/// One mapped note whose indexed file hash differs from its disk base.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriftEntry {
+    pub doc_id: String,
+    pub path: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskDrift {
+    pub doc_id: String,
+    pub path: String,
+    pub sha256: String,
+}
+
+/// The mapped notes whose file changed since this device last agreed with
+/// the CRDT on it (#284): `notes.sha256` (refreshed by the open-time rebuild)
+/// versus `yjs_disk_base`. Used at launch to push closed-app edits.
+#[tauri::command]
+pub async fn list_disk_drift(
+    state: State<'_, AppState>,
+    entries: Vec<DriftEntry>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<DiskDrift>> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let pairs: Vec<(String, String)> = entries.into_iter().map(|e| (e.doc_id, e.path)).collect();
+    let guard = index.lock().unwrap();
+    Ok(guard
+        .disk_drift(&pairs)?
+        .into_iter()
+        .map(|(doc_id, path, sha256)| DiskDrift { doc_id, path, sha256 })
+        .collect())
+}
+
 /// Record a doc's disk base after the bridge read a file INTO the doc.
 #[tauri::command]
 pub async fn set_disk_base(

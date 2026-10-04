@@ -246,6 +246,7 @@ pub fn run() {
             commands::clear_yjs_doc,
             commands::get_disk_base,
             commands::set_disk_base,
+            commands::list_disk_drift,
             commands::read_binary_file,
             commands::file_stat,
             commands::binary_exists,

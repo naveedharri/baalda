@@ -7,7 +7,7 @@ import { currentVaultEpoch } from "../sync/vaultScope";
 import { clearLinkRefusal, isSymlinkRefusal, noteLinkRefusal } from "../sync/linkRefusals";
 import { dismissToast, toast } from "../toast";
 import { NoteBridge } from "./noteBridge";
-import { reconcileReport } from "../sync/reconcileReport";
+import { reconcileReport, recoveryAttribution } from "../sync/reconcileReport";
 import type { BridgeIO } from "./types";
 
 /**
@@ -94,7 +94,15 @@ export function createTauriBridgeIO(epoch?: ipc.VaultEpoch): BridgeIO {
       const dest = await ipc.writeTrashCopy(
         path, new Date().toISOString().replace(/[:.]/g, "-"), content, epoch,
       );
-      reconcileReport.record({ kind: "externalEditSaved", path, detail: dest });
+      // A caller that knows WHY the server won (the one-step create merge)
+      // claimed this path: one entry, its kind, never a second generic one.
+      const attr = recoveryAttribution(path);
+      reconcileReport.record({
+        kind: attr?.kind ?? "externalEditSaved",
+        path,
+        ...(attr?.docId ? { docId: attr.docId } : {}),
+        detail: dest,
+      });
       return dest;
     },
     // A failed write is the one bridge error a person must see (#81): the .md is

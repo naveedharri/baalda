@@ -9,6 +9,8 @@
 import * as Y from "yjs";
 import { isBlankTruncation } from "./blankFile";
 import { applyDiff, changeRatio, computeDiff } from "./diff";
+import { markLocalEdit } from "./localEdits";
+import { isReadOnlyDoc, readOnlyCopyKeeper } from "./readOnlyDocs";
 import {
   DEFAULT_CONFIG,
   ORIGIN_DISK,
@@ -244,6 +246,11 @@ export class NoteBridge {
       if (this.text.length > 0) this.everHadContent = true;
       // A change we applied from the file must not be written back (spec 03 §5.B).
       if (tr.origin === ORIGIN_DISK) return;
+      // Typing, undo/redo and Properties edits are local transactions; remote
+      // applies are not, and persistence replay is not the user's doing.
+      if (tr.local && tr.origin !== ORIGIN_REMOTE && tr.origin !== "persistence") {
+        markLocalEdit(this.docId);
+      }
       this.scheduleEgest();
     };
   }
@@ -832,6 +839,28 @@ export class NoteBridge {
     }
     this.truncateReported = false;
 
+    // A doc this user may only READ never takes the file in: the op could never
+    // be sent, so every connect would re-send it and the server would answer
+    // `rejected` forever. Keep the file's bytes as a quiet recovery copy and
+    // write the doc's text back over it; with no copy the file stays as it is.
+    if (isReadOnlyDoc(this.docId)) {
+      // An EMPTY read-only doc has nothing to write back: its CRDT was dropped
+      // (access revoked, then re-granted) or it has not been pulled yet, and the
+      // file is most likely the server's text delivered with the regrant. Leave
+      // the file alone — never a recovery copy, never an empty write over it —
+      // and let the pull (or the rejected-frame rebase) converge the doc.
+      if (current.length === 0) return false;
+      const keep = readOnlyCopyKeeper();
+      const kept = keep
+        ? await keep(this.docId, this._path, fileText).catch(() => false)
+        : await this.saveAside(fileText);
+      if (kept && !this.destroyed) {
+        this.lastWrittenHash = fileHash;
+        this.scheduleEgest();
+      }
+      return false;
+    }
+
     // A diff against an EMPTY doc is not a merge, it is a seed: every byte of
     // the file is inserted as this device's own history. Seeding is ordered —
     // pull the server's canonical state FIRST, then `seedFromFileIfEmpty` only
@@ -966,7 +995,9 @@ export class NoteBridge {
     // a file that still has real bytes on disk, so refuse (a genuine clear-all
     // sets everHadContent first, so real deletions are unaffected). This closes
     // the import/background-feed clobber that zeroed notes on disk.
-    if (content.length === 0 && !this.everHadContent) {
+    // A read-only doc gets the same refusal even after it held text: it can
+    // never have produced that emptiness itself, so its file is not ours to clear.
+    if (content.length === 0 && (!this.everHadContent || isReadOnlyDoc(this.docId))) {
       let current = "";
       try {
         current = await this.io.readFile(this._path);

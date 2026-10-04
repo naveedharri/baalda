@@ -8,11 +8,14 @@
 import type { ReconcileItem, ReconcileKind } from "./sync/reconcileReport";
 import { READ_ONLY_DETAIL } from "./sync/readOnlyRejections";
 import { isNoteExt } from "./formats";
+import { NOT_CREATOR_DETAIL } from "./sync/deletePolicy";
 
 export const RECONCILE_KIND_ORDER: readonly ReconcileKind[] = [
   "deletedByTeammate",
   "keptLocally",
   "externalEditSaved",
+  "conflictKeptServer",
+  "selfRevoked",
   "restoredFromServer",
   "renamedConflict",
   "folderKept",
@@ -22,10 +25,12 @@ export const RECONCILE_KIND_ORDER: readonly ReconcileKind[] = [
 export const RECONCILE_KIND_LABEL: Record<ReconcileKind, string> = {
   deletedByTeammate: "Deleted by a teammate",
   keptLocally: "Kept on this device",
+  selfRevoked: "You removed your access",
   restoredFromServer: "Restored",
   renamedConflict: "Renamed",
   folderKept: "Folder kept",
   externalEditSaved: "Saved to trash",
+  conflictKeptServer: "Teammate's version kept",
 };
 
 export interface ReconcileLine {
@@ -63,6 +68,13 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
     case "deletedByTeammate":
       return `${notes(n)} you edited offline ${one ? "was" : "were"} deleted by a teammate. Your ${one ? "version is" : "versions are"} in Trash.`;
     case "restoredFromServer": {
+      // A delete refused because a member may delete only what they created.
+      const notMine = group.filter((it) => it.detail === NOT_CREATOR_DETAIL);
+      if (notMine.length === n) {
+        return one
+          ? `${base(group[0].path)} was put back: only the person who created it, or an admin, can delete it.`
+          : `${notes(n)} were put back: only the person who created them, or an admin, can delete them.`;
+      }
       // Binaries are restored too (#215); call them files when any are.
       const what = group.every((it) => isNoteExt(it.path))
         ? notes(n)
@@ -91,8 +103,14 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
       }
       return `${notes(n)} ${one ? "is" : "are"} kept on this device only: you no longer have access, or can only read ${one ? "it" : "them"}. Copies are in .context/trash.`;
     }
+    case "selfRevoked":
+      return `You removed your own access to ${notes(n)}; ${one ? "its copy stays" : "their copies stay"} on this device.`;
     case "externalEditSaved":
       return `${notes(n)} changed by another app while you were offline could not be merged. Your ${one ? "version was" : "versions were"} saved to .context/trash.`;
+    case "conflictKeptServer":
+      return one
+        ? `${base(group[0].path)}: a teammate's version was kept; your text is saved in recovery.`
+        : `${notes(n)}: a teammate's version was kept; your text is saved in recovery.`;
     case "folderKept":
       return one
         ? `Folder ${base(group[0].path)} was kept because you added notes to it.`

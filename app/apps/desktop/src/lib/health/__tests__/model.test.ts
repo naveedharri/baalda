@@ -415,7 +415,7 @@ describe("registry failures", () => {
   });
 
   // #221: a live bulk delete held for the user's answer.
-  it("lists a note held by an unanswered bulk delete as waiting, not failed", () => {
+  it("lists a note held by a bulk delete as being restored, not failed", () => {
     const r = buildHealthReport(input({ failures: {
       registry: [{ kind: "inbound-blocked", path: "Team/x.md", docId: "x-id",
         reason: "removed from this folder in a bulk delete", code: "delete_decision" }],
@@ -424,7 +424,8 @@ describe("registry failures", () => {
     const issue = r.issues.find((i) => i.path === "Team/x.md")!;
     expect(issue.kind).toBe("inbound-blocked");
     expect(issue.severity).toBe("warn");
-    expect(issue.title).toBe("Removed on disk, waiting for your answer");
+    expect(issue.title).toBe("Removed on disk, being restored");
+    expect(JSON.stringify(issue.explanation)).not.toContain("Delete for everyone");
     expect(issue.remedies).not.toContain("retry");
     expect(issue.code).toBe("delete_decision");
   });

@@ -26,9 +26,9 @@ export type OrgRow = "edit" | "view" | "readonly" | "locked" | "denied";
  * state nobody could find.
  */
 export const MODE_LABEL: Record<TeamMode, string> = {
-  open: "Shared",
-  readonly: "Read-only",
-  private: "Private",
+  open: "Can edit",
+  readonly: "Can view",
+  private: "No access",
 };
 
 export interface EffectiveTeamModeInput {

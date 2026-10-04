@@ -1,9 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { parseState, seedRegistered } from "../../registry/seed-on-register.js";
 import { config } from "../../config.js";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
-import { canCreateIn, canEditDoc, canEditFolder, canWriteBlob } from "../../permissions/http-gates.js";
+import {
+  canCreateIn,
+  canDeleteItem,
+  canEditDoc,
+  canEditFolder,
+  canWriteBlob,
+} from "../../permissions/http-gates.js";
+import type { DeleteRefusalCode } from "../../permissions/http-gates.js";
 import { deleteDocBlobs } from "./blobs.js";
 import { createResolverCache, effectivePermission } from "../../permissions/resolver.js";
 import {
@@ -640,7 +649,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (page === "invalid") {
       return c.json({ error: `limit must be an integer 1..${PAGE_LIMIT_MAX}` }, 400);
     }
-    const SELECT = `SELECT id, vault_id, folder_id, path, created_at
+    const SELECT = `SELECT id, vault_id, folder_id, path, created_by, created_at
          FROM files WHERE vault_id = $1`;
     const { rows } = page
       ? await pool.query(
@@ -747,6 +756,11 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await canEditFolder(session.userId, id))) {
       return c.json({ error: "You cannot delete this folder" }, 403);
     }
+    const folderOrg = await vaultOrg(row.vault_id);
+    const folderGate = folderOrg
+      ? await canDeleteItem(pool, { orgId: folderOrg, userId: session.userId, kind: "folder", id })
+      : ({ ok: false, code: "delete_not_creator" } as const);
+    if (!folderGate.ok) return c.json(deleteRefusal(folderGate.code), 403);
     const { deletedNoteIds } = await deleteFolderCascade(pool, id, session.userId);
     // Their derived index rows go with them (see the single-note delete below)…
     await purgeNoteIndex(deletedNoteIds);
@@ -781,7 +795,14 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
   });
 
   // ── notes (markdown docs; id == doc_id) ────────────────────────────────────
-  registryRoutes.post("/notes", async (c) => {
+  //
+  // Optional `state` (base64 `Y.encodeStateAsUpdate`) + `textSha256`: the note's
+  // first content rides the create, exactly as on `notes/batch` (see
+  // `registry/seed-on-register.ts`). One item, so up to `MAX_NOTE_MB` decoded,
+  // under a 16 MiB raw body. A body without `state` answers exactly as before;
+  // with it, the 200/201 payload adds `seeded`, `content`, `reason`, `sv`.
+  // Refusals (402/403/409/400) write neither a row nor state, as before.
+  registryRoutes.post("/notes", bodyLimit({ maxSize: 16 * 1024 * 1024 }), async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
 
@@ -790,6 +811,15 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (typeof vaultId !== "string" || typeof relPath !== "string") {
       return c.json({ error: "vaultId and relPath are required" }, 400);
     }
+    const requestedDocId = typeof body.docId === "string" && body.docId ? body.docId : undefined;
+    // Validated BEFORE registration: a malformed or oversized state gets no row.
+    const stateParse = parseState(body.state, body.textSha256 ?? body.textSha, requestedDocId);
+    if (!stateParse.ok) {
+      return stateParse.code === "note_too_large"
+        ? c.json({ error: stateParse.message, code: stateParse.code, seeded: false, content: "refused", reason: "too_large" }, 413)
+        : c.json({ error: stateParse.message, code: stateParse.code }, 400);
+    }
+    const state = stateParse.state;
     const org = await vaultOrg(vaultId);
     if (!org) return c.json({ error: "Unknown vault" }, 404);
     if (!(await orgRole(org, session.userId))) {
@@ -801,7 +831,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const ctx = registerCtx(vaultId, session.userId);
     const out = await registerNote(ctx, {
       relPath,
-      docId: typeof body.docId === "string" ? body.docId : undefined,
+      docId: requestedDocId,
       folderId: folderId ?? null,
       title: title ?? null,
       color: body.color,
@@ -817,7 +847,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json(NO_WRITE_ACCESS_ERROR("note"), 403);
     }
     const n = out.row;
-    const payload = {
+    const payload: Record<string, unknown> = {
       id: n.id,
       docId: n.id,
       vaultId,
@@ -825,7 +855,22 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       title: n.title,
       relPath: n.relPath,
     };
+    if (state) {
+      // Created, or the SAME id already registered without content: seed it
+      // (covered check, then `expectEmpty`). An adopt onto a different winner
+      // id writes nothing.
+      const sameId = out.status === "created" || (requestedDocId !== undefined && n.id === requestedDocId);
+      if (sameId) {
+        const seeded = await seedRegistered(vaultId, session.userId, [
+          { key: 0, docId: n.id, state, created: out.status === "created" },
+        ]);
+        Object.assign(payload, seeded.get(0));
+      } else {
+        Object.assign(payload, { seeded: false, content: "skipped", reason: "adopted" });
+      }
+    }
     if (out.status === "adopted") return c.json(payload, 200);
+    // After the state apply, so a receiver's pull finds content.
     changed(c, vaultId);
     return c.json(payload, 201);
   });
@@ -1020,6 +1065,11 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await canEditDoc(session.userId, id))) {
       return c.json({ error: "You cannot delete this note" }, 403);
     }
+    const noteOrg = await vaultOrg(row.vault_id);
+    const noteGate = noteOrg
+      ? await canDeleteItem(pool, { orgId: noteOrg, userId: session.userId, kind: "note", id })
+      : ({ ok: false, code: "delete_not_creator" } as const);
+    if (!noteGate.ok) return c.json(deleteRefusal(noteGate.code), 403);
     await pool.query(`UPDATE notes SET ${softDeleteSet("$2")} WHERE id = $1`, [id, session.userId]);
     // Drop the DERIVED search/graph rows with the note. They are a rebuildable
     // cache of the canonical Yjs state (migration 005), and note_index keeps a
@@ -1119,6 +1169,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (out.status === "gone") return c.body(null, 204);
     if (out.status === "not_member") return c.json({ error: "Not a member of this vault" }, 403);
     if (out.status === "forbidden") return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
+    if (out.status === "not_creator") return c.json(deleteRefusal("delete_not_creator"), 403);
     changed(c, out.vaultId);
     return c.body(null, 204);
   });
@@ -1130,7 +1181,19 @@ export type FileDeleteResult =
   | { status: "gone" }
   | { status: "not_member" }
   | { status: "forbidden" }
+  | { status: "not_creator" }
   | { status: "deleted"; vaultId: string; path: string };
+
+/** 403 body for a refusal from `canDeleteItem` (members delete only what they created). */
+export function deleteRefusal(code: DeleteRefusalCode): { error: string; code: DeleteRefusalCode } {
+  return {
+    error:
+      code === "folder_has_others_items"
+        ? "This folder holds items someone else created. Only an owner or admin can delete it."
+        : "Only the person who created this, or an owner or admin, can delete it.",
+    code,
+  };
+}
 
 /**
  * Delete a registered tree file — row, bytes, tombstone. Shared by
@@ -1158,6 +1221,10 @@ export async function deleteRegisteredFile(
     // vault, a locked share or a sealed posture refuses both ends.
     if (!(await canWriteBlob(userId, { vault_id: row.vault_id, rel_path: row.path, doc_id: id }))) {
       return { status: "forbidden" };
+    }
+    // Members delete only files they registered; owners/admins delete anything.
+    if (!(await canDeleteItem(pool, { orgId: org, userId, kind: "file", id })).ok) {
+      return { status: "not_creator" };
     }
 
     // Bytes first, row second. The other order would leave blobs whose `doc_id`

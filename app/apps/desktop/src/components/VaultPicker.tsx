@@ -634,7 +634,7 @@ export function VaultPicker() {
                   autoComplete="off"
                 />
                 <p className="new-vault-loc">
-                  Ask a teammate for it — Vault settings → Members.
+                  Ask a teammate for it — Vault settings → Members and access.
                 </p>
                 {joinError && <p className="error join-error">{joinError}</p>}
                 <div className="new-vault-buttons">

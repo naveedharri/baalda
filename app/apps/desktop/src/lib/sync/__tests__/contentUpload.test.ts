@@ -168,6 +168,7 @@ function rig(opts: RigOptions) {
   const pushedSet = opts.pushed ?? new Set<string>();
   const trashed: Array<{ relPath: string; content: string }> = [];
   const marked: string[] = [];
+  const acked = new Map<string, Uint8Array>();
   const sink = recordingSink();
   const uploader = new ContentUploader({
     vaultId: VAULT,
@@ -195,6 +196,7 @@ function rig(opts: RigOptions) {
       marked.push(id);
       pushedSet.add(id);
     },
+    markAcked: (id, sv) => acked.set(id, sv),
     skip: opts.skip,
     force: opts.force,
     include: opts.include,
@@ -211,7 +213,7 @@ function rig(opts: RigOptions) {
     syncTimeoutMs: 50,
     flushTimeoutMs: 50,
   });
-  return { uploader, store, server, harness, connects, marked, sink, pushedSet, trashed };
+  return { uploader, store, server, harness, connects, marked, acked, sink, pushedSet, trashed };
 }
 
 describe("ContentUploader — pre-network checks (readFile)", () => {
@@ -1093,5 +1095,35 @@ describe("ContentUploader — priority", () => {
     const r = rig({ files, notes, concurrency: 1 });
     await r.uploader.run();
     expect(r.connects).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("ContentUploader — ackedSv on the per-doc path", () => {
+  it("records the doc's state vector after a flushed push, like the batch pusher", async () => {
+    const r = rig({
+      files: { "Note.md": "hello" },
+      notes: [{ docId: "d1", relPath: "Note.md" }],
+    });
+    const result = await r.uploader.run();
+    expect(result).toMatchObject({ pushed: 1, failed: 0 });
+    expect(r.marked).toEqual(["d1"]);
+    const sv = r.acked.get("d1");
+    expect(sv).toBeInstanceOf(Uint8Array);
+    // The ack covers what the server now holds.
+    expect(r.server.text("d1")).toBe("hello");
+    expect(sv!.length).toBeGreaterThan(1);
+  });
+
+  it("records no ack for a view-only doc (confirmed without a flush)", async () => {
+    const server = new FakeServer();
+    server.seed("d1", "theirs");
+    const r = rig({
+      files: { "Note.md": "theirs" },
+      notes: [{ docId: "d1", relPath: "Note.md" }],
+      server,
+      behaviour: { readOnly: new Set(["d1"]) },
+    });
+    await r.uploader.run();
+    expect(r.acked.has("d1")).toBe(false);
   });
 });

@@ -4,6 +4,7 @@ import { createResolverCache } from "../../permissions/resolver.js";
 import { syncPermission } from "../../trash/access.js";
 import { mintSyncToken } from "../../tokens/sync-token.js";
 import { getSession } from "../session.js";
+import { noteLastSeenForVault } from "../../members/last-seen.js";
 
 /**
  * POST /api/sync-token  { docId }  (spec 03 §7, 04 §4)
@@ -60,5 +61,6 @@ syncTokenRoutes.post("/sync-token", async (c) => {
   // userId travels in the token so the sync server can attribute the edits that
   // arrive on this connection ("last edited by" + version authorship).
   const token = await mintSyncToken({ docId, vaultId, readOnly, userId: session.userId });
+  noteLastSeenForVault(session.userId, vaultId);
   return c.json({ token, docId, vaultId, readOnly, permission });
 });

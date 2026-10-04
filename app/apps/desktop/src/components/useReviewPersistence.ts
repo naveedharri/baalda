@@ -25,13 +25,14 @@ export function useReviewPersistence(): void {
     const key = vaultPath;
     // The report is app-global and never cleared; only what is recorded from
     // here on belongs to this vault.
-    const base = reconcileReport.items().length;
+    // By identity, not index: the report drops items when access comes back.
+    const before = new Set(reconcileReport.items());
     let loaded = false;
     let cancelled = false;
 
     const save = () => {
       if (!loaded || cancelled) return;
-      writePersisted(key, serializeReview(reconcileReport.items().slice(base), reviewState.get()));
+      writePersisted(key, serializeReview(reconcileReport.items().filter((it) => !before.has(it)), reviewState.get()));
     };
 
     (async () => {

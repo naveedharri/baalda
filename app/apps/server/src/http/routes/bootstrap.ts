@@ -27,6 +27,9 @@ import { getSession } from "../session.js";
  * reports the UNCOMPRESSED size so a progress bar matches `session.bytes`.
  */
 
+/** `/health` feature: `POST …/bootstrap` accepts `only: string[]`. */
+export const BOOTSTRAP_ONLY_FEATURE = "bootstrap-only";
+
 export const BOOTSTRAP_CONTENT_TYPE = "application/vnd.baalda.bootstrap";
 
 /** Auth, verbatim from `http/routes/vault-token.ts`: session → vault → member. */
@@ -53,10 +56,27 @@ bootstrapRoutes.post("/vaults/:vaultId/bootstrap", async (c) => {
   const have = Array.isArray(rawHave)
     ? rawHave.filter((d): d is string => typeof d === "string" && d !== "")
     : [];
+  // `only` (optional): exactly these doc ids, at most `config.batchMaxDocs`.
+  // Unreadable or unknown ids are dropped by the session, never a 403.
+  const rawOnly = (body as { only?: unknown }).only;
+  let only: string[] | undefined;
+  if (rawOnly !== undefined && rawOnly !== null) {
+    if (!Array.isArray(rawOnly)) {
+      return c.json({ error: "`only` must be an array of doc ids", code: "bad_request" }, 400);
+    }
+    if (rawOnly.length > config.batchMaxDocs) {
+      return c.json(
+        { error: `At most ${config.batchMaxDocs} ids per request`, code: "batch_too_large" },
+        400,
+      );
+    }
+    only = rawOnly.filter((d): d is string => typeof d === "string" && d !== "");
+  }
   const session = await createBootstrapSession({
     vaultId: auth.vaultId,
     userId: auth.userId,
     have,
+    only,
   });
   return c.json(session);
 });

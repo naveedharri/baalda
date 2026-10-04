@@ -4,7 +4,7 @@
    - server-Trash notes (a synced vault's soft-deleted notes),
    - local recovery copies in .context/trash NOT already named by a reconcile
      row (those carry their copy's actions on the reconcile row itself),
-   - a held bulk delete (the #221 banner's question, also asked here),
+   - a held bulk delete (the #221 notice, with the same Restore now),
    - server `pre-shrink` captures (a note that lost most of its text),
    - sync pauses the shrink burst brake put on a member (#252),
    - this session's access changes,
@@ -83,6 +83,26 @@ export function failureEntries(f: HealthFailures | null | undefined): FailedEntr
   return out;
 }
 
+/** Logged Failed rows to drop: sync no longer reports them and their note is
+ *  confirmed on the server, so the row would contradict the synced badge. */
+export function staleFailureIds(
+  log: readonly { id: string; kind: string; docId?: string }[],
+  liveKeys: ReadonlySet<string>,
+  isPushed: (docId: string) => boolean,
+): string[] {
+  const out: string[] = [];
+  for (const e of log) {
+    if (e.kind !== "failed" || liveKeys.has(e.id) || !e.docId) continue;
+    if (isPushed(e.docId)) out.push(e.id);
+  }
+  return out;
+}
+
+/** Retry on a doc that already synced has nothing to send: clear the row. */
+export function retryAction(docId: string, settled: (docId: string) => boolean): "clear" | "retry" {
+  return settled(docId) ? "clear" : "retry";
+}
+
 const n = (x: number) => x.toLocaleString("en-US");
 
 export function shrinkText(e: Pick<ShrinkEvent, "beforeChars" | "afterChars">): string {
@@ -107,7 +127,7 @@ export function pausedText(e: Pick<ShrinkBrakeEvent, "userName" | "noteCount">, 
 }
 
 export function accessText(e: AccessEvent): string {
-  if (e.kind === "removed") return "Access to this note was removed";
+  if (e.kind === "removed") return e.self ? "You removed your access" : "Access to this note was removed";
   return `${n(e.count)} ${e.count === 1 ? "note" : "notes"} became available to you`;
 }
 
@@ -116,7 +136,7 @@ export const ACTIVITY_HINT = {
   reconcile: "What sync changed for you after being offline, since Baalda launched.",
   trash: "Deleted on the server. It stays in Trash until purged; Restore brings it back for everyone.",
   copy: "Local text sync set aside on this device, in .context/trash. It never syncs.",
-  held: "Many notes disappeared from the vault folder at once. Nothing was deleted for your team until you answer.",
+  held: "Many notes disappeared from the vault folder at once. Nothing was deleted for your team, and they are being restored here.",
   shrunk: "An edit left at most a fifth of this note. The server kept the text from before it.",
   paused:
     "Many notes were emptied at once from one account, so the server paused that account's sync. " +

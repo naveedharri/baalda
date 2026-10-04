@@ -465,6 +465,17 @@ export const getDiskBase = (docId: string, expectedEpoch?: VaultEpoch) =>
   invoke<string | null>("get_disk_base", { docId, expectedEpoch: expectedEpoch ?? null });
 export const setDiskBase = (docId: string, sha256: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("set_disk_base", { docId, sha256, expectedEpoch: expectedEpoch ?? null });
+/** Mapped notes whose indexed file hash differs from their recorded disk base
+ *  (#284): edits made on disk while nothing ingested them. Notes with no base
+ *  or no indexed hash are left out. */
+export const listDiskDrift = (
+  entries: Array<{ docId: string; path: string }>,
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<Array<{ docId: string; path: string; sha256: string }>>("list_disk_drift", {
+    entries,
+    expectedEpoch: expectedEpoch ?? null,
+  });
 /** Create a note only if the path is free. Resolves true when it was created,
  *  false when a file was already there (untouched). The registry materializes
  *  server-only notes through THIS, never `writeNote`, so a wrong "this device

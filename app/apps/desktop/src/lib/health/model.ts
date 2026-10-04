@@ -678,7 +678,7 @@ function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue
       path: f.path,
       kind: "inbound-blocked",
       severity: "warn",
-      title: "Removed on disk, waiting for your answer",
+      title: "Removed on disk, being restored",
       why: "This note was removed from the vault folder together with many others at once.",
       remedies: ["copy-details"],
       code: f.code,
@@ -687,10 +687,10 @@ function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue
           "Many notes disappeared from this folder in one go while Baalda was open. Baalda held " +
           "the change instead of syncing it, so the note is still on the Remote Vault and nothing " +
           "was deleted for your team.",
-        next: "Nothing happens to this note until you answer the banner at the top of the window.",
+        next: "It comes back on this device when the notice at the top is dismissed or fades.",
         fixes: [
-          "Choose Delete for everyone if you meant to remove these notes.",
-          "Or choose Restore to bring them back from the Remote Vault.",
+          "Choose Restore now to bring the notes back from the Remote Vault straight away.",
+          "To delete notes for everyone, delete them inside Baalda instead.",
         ],
         safety: "on-server",
       },
@@ -1154,7 +1154,7 @@ function buildIssues(
         meaning:
           "Every note asks the Remote Vault for permission before it syncs, and the " +
           "Remote Vault is turning this vault down. That happens when the vault was set " +
-          "to Private, when it was shared read-only and then withdrawn, or when " +
+          "to No access, when view access was withdrawn, or when " +
           `you were removed from it. Only ${ownerPhrase(owner)} can change that.`,
         next: "Nothing until access is granted. Baalda keeps asking, and will resume on its own the moment the answer changes.",
         fixes: [

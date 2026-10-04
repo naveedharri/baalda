@@ -124,7 +124,7 @@ describe("lockScopesByPath", () => {
   });
 
   it("gives the vault scope its own tooltip, naming the vault rather than the item", () => {
-    expect(LOCK_TITLES.vault).toBe("This vault is read-only — changes won't sync");
+    expect(LOCK_TITLES.vault).toBe("Everyone can only view this vault — changes won't sync");
     expect(LOCK_TITLES.vault).not.toBe(LOCK_TITLES.all);
   });
 

@@ -95,10 +95,11 @@
    (see .presence-bar:hover .presence-avatar); a box behind them read as a shadow. */
 
 /* "Recent activity" — the roster's history section. Faces half the size of the
-   live rows above and dimmed, so past never reads as present. */
-.roster-recent-title {
+   live rows above and dimmed, so past never reads as present. Doubled class so
+   the later .peer-roster-title padding shorthand cannot reset padding-top. */
+.peer-roster-title.roster-recent-title {
   margin-top: var(--sp-2);
-  padding-top: var(--sp-2);
+  padding-top: var(--sp-3);
   border-top: 1px solid var(--border);
 }
 .roster-recent-row {
@@ -120,7 +121,9 @@
   overflow: hidden;
   filter: grayscale(0.4);
 }
-.roster-recent-avatar svg {
+.roster-recent-avatar svg,
+.roster-recent-avatar img {
+  object-fit: cover;
   width: 100%;
   height: 100%;
   display: block;
@@ -165,7 +168,9 @@
   /* Spring the faces on hover rather than casting a shadow. */
   transition: transform var(--t-fast) var(--ease-spring, var(--ease));
 }
-.presence-avatar svg {
+.presence-avatar svg,
+.presence-avatar img {
+  object-fit: cover;
   width: 100%;
   height: 100%;
   display: block;
@@ -355,15 +360,10 @@
   padding: var(--sp-3) var(--sp-4);
   font-family: var(--font-body);
   border-radius: var(--radius-lg);
-  /* Amber for a hard lock, neutral-accent for a plain view-only grant. */
+  /* Amber for every read-only reason. */
   color: var(--warning);
   background: var(--warning-soft);
   border: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
-}
-.editor-lockbanner.viewonly {
-  color: var(--text-secondary);
-  background: var(--bg-hover);
-  border-color: var(--border-strong);
 }
 .editor-lockbanner-icon {
   flex: 0 0 auto;
@@ -562,6 +562,35 @@
   height: 22px;
   width: 58%;
   margin-bottom: var(--sp-3);
+}
+/* The note page inside the editor skeleton: a title, then paragraph groups
+   separated by a blank line's worth of space, filling ~60% of the pane from
+   the same top inset as the real text. It holds more paragraphs than the cap
+   shows; the clip is hidden by a short fade so no bar is visibly cut in half.
+   (`.skel-title`/`.skel-line` are also borrowed, unwrapped, by the Content
+   width preview — the grouping lives here so that miniature is unaffected.) */
+.skel-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+  max-height: 60%;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 82%, transparent);
+  mask-image: linear-gradient(to bottom, #000 82%, transparent);
+}
+.skel-page > .skel-title {
+  margin-bottom: 0;
+}
+.skel-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+/* Empty spans have no content height, so in an overflowing column they would
+   shrink to nothing instead of being clipped. */
+.skel-page > *,
+.skel-group > .skel-line {
+  flex-shrink: 0;
 }
 @keyframes skeleton-in {
   from {

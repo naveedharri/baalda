@@ -22,7 +22,6 @@ interface AssistantProps {
   repairNotes?: Record<string, { path: string; docId?: string | null }[]>;
   brokenLinkNotes?: { path: string; docId?: string | null; detail?: string | null }[];
   diagnostics?: DiagnosticInput | null;
-  onOpenHealth?: () => void;
   onGoToGeneral?: () => void;
 }
 export function HousekeeperPanel({ onUpgrade, ...assistant }: AssistantProps & { onUpgrade: () => void }) {
@@ -38,7 +37,7 @@ export function HousekeeperPanel({ onUpgrade, ...assistant }: AssistantProps & {
     {...assistant} identity={JSON.stringify([server, user])} vaultId={user ? vaultId : null} notes={titles} onUpgrade={canUpgrade ? onUpgrade : undefined} />;
 }
 
-export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onOpenHealth, onGoToGeneral, identity, brokenLinkNotes = [], onInspectFinding, onDiagnosticAction, collectDiagnostics, renderFindingDetails, localFindings, onPrepareFix, repairNotes = {} }: AssistantProps & {
+export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onGoToGeneral, identity, brokenLinkNotes = [], onInspectFinding, onDiagnosticAction, collectDiagnostics, renderFindingDetails, localFindings, onPrepareFix, repairNotes = {} }: AssistantProps & {
   vaultId: string | null;
   notes: NoteTitle[];
   onUpgrade?: () => void;
@@ -192,7 +191,7 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onOpen
                   {note && <button className="primary" disabled={busy || !ready} onClick={() => void scanNote(note.id)}>Find a fix</button>}
                 </div>;
               })}
-              {renderFindingDetails ? renderFindingDetails(f.id) : <button className="secondary" onClick={() => onInspectFinding ? onInspectFinding(f.id) : onOpenHealth?.()}>Open details</button>}
+              {renderFindingDetails ? renderFindingDetails(f.id) : onInspectFinding && <button className="secondary" onClick={() => onInspectFinding(f.id)}>Open details</button>}
             </div>}
             </div>
           </li>; })}</ul>

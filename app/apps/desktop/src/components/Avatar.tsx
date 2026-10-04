@@ -18,7 +18,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { createAvatar } from "@dicebear/core";
 import { notionists } from "@dicebear/collection";
 import { PRESENCE_PALETTE } from "../lib/presence/color";
-import { characterSeed } from "../lib/profileAvatar";
+import { useResolvedAvatar, type AvatarIdentity } from "../lib/avatarIdentity";
 
 // Palette hex values without the leading "#", as DiceBear expects. DiceBear
 // deterministically picks one per seed, so each character gets its own colour.
@@ -34,49 +34,66 @@ export function characterSvg(seed: string): string {
   }).toString();
 }
 
-export interface FaceProps {
-  seed: string;
+export interface FaceProps extends AvatarIdentity {
   className?: string;
   style?: CSSProperties;
   title?: string;
   ariaHidden?: boolean;
 }
 
-/** The bare face span every caller used to hand-roll around `characterSvg`. */
-export function FaceSvg({ seed, className, style, title, ariaHidden }: FaceProps) {
-  const svg = useMemo(() => characterSvg(seed || "?"), [seed]);
-  return (
-    <span
-      className={className}
-      style={style}
-      title={title}
-      aria-hidden={ariaHidden || undefined}
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
-  );
-}
-
-export function Avatar({ label, image }: { label: string; image?: string | null }) {
-  // A picked character (`character:<seed>`) is still a generated face, just
-  // from a chosen seed instead of the person's name.
-  const picked = characterSeed(image);
-  const svg = useMemo(() => characterSvg(picked ?? (label || "?")), [picked, label]);
-  const photo = picked ? null : image;
-  // Prefer a real profile photo (e.g. from Google) when present; fall back to
-  // the generated character if there's no image or it fails to load.
+/** Photo-or-character markup for a resolved avatar, inside the caller's span. */
+function useAvatarMarkup(identity: AvatarIdentity) {
+  const { photo, seed } = useResolvedAvatar(identity);
+  const svg = useMemo(() => characterSvg(seed), [seed]);
+  // Prefer the person's photo; fall back to the generated character if it
+  // fails to load.
   const [imgFailed, setImgFailed] = useState(false);
   useEffect(() => setImgFailed(false), [photo]);
+  return { photo: photo && !imgFailed ? photo : null, svg, onError: () => setImgFailed(true) };
+}
 
-  if (photo && !imgFailed) {
+function PhotoImg({ src, onError }: { src: string; onError: () => void }) {
+  // Google's lh3.googleusercontent.com can 403 when a referrer is sent.
+  return <img src={src} alt="" referrerPolicy="no-referrer" onError={onError} />;
+}
+
+/**
+ * The face span every small avatar uses (presence stack, roster, sidebar
+ * presence, version rows): the person's stored picture, else the character
+ * seeded by their user id (`lib/avatarIdentity.ts`).
+ */
+export function FaceSvg({ className, style, title, ariaHidden, ...identity }: FaceProps) {
+  const { photo, svg, onError } = useAvatarMarkup(identity);
+  const common = { className, style, title, "aria-hidden": ariaHidden || undefined };
+  if (photo) {
+    return (
+      <span {...common}>
+        <PhotoImg src={photo} onError={onError} />
+      </span>
+    );
+  }
+  return <span {...common} dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+
+/**
+ * The account-sized avatar (account bar, Members and access, profile page,
+ * settings). `label` is the display name, used as the seed only when no user
+ * id is known (an invitation row, say).
+ */
+export function Avatar({
+  label,
+  image,
+  userId,
+}: {
+  label: string;
+  image?: string | null;
+  userId?: string | null;
+}) {
+  const { photo, svg, onError } = useAvatarMarkup({ userId, name: label, image });
+  if (photo) {
     return (
       <span className="avatar" aria-hidden="true">
-        <img
-          src={photo}
-          alt=""
-          // Google's lh3.googleusercontent.com can 403 when a referrer is sent.
-          referrerPolicy="no-referrer"
-          onError={() => setImgFailed(true)}
-        />
+        <PhotoImg src={photo} onError={onError} />
       </span>
     );
   }

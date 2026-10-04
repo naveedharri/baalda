@@ -263,7 +263,7 @@ Six changes that together make a vault something a team can actually govern.
 
 ## Housekeeper Pro preview
 
-- Reviewed broken-wikilink suggestions in Vault Settings → Health, using the
+- Reviewed broken-wikilink suggestions in Vault Settings → AI, using the
   OpenRouter SDK with Jev Decisions or a configurable structured-output chat model.
 - Strict server-side Pro/membership gates on status, scan, apply and undo;
   billing-disabled mode does not bypass this commercial feature.
@@ -310,3 +310,57 @@ keeps the Assistant available when operator billing is enabled, disabled, or con
 later. `cloud` (the fail-closed default) requires Pro even without payment
 credentials and enforces the Free note cap. Self-hosting `.env.example` opts in
 explicitly; no managed configuration is stored in this repository.
+
+## Members and access page (2026-10-04)
+
+Vault Settings' Members and Access tabs are merged into one **Members and access** tab. Owners and
+admins set the **Everyone** row (Can edit / Can view / No access, the same `open`/`readonly`/`private`
+wire values), the **New members** row (the existing `join_default`) and a per-person level (Can edit
+everything / Can view everything / No access / Custom). A person's profile has an Access tab with
+per-folder checkboxes that apply immediately; plain members see a read-only roster. Existing
+per-folder Everyone overrides can only be reset, not created. **Invite people** sends invitations
+with a role and an access level, applied on acceptance by email link or join code. On the server a
+per-user vault row is now that person's absolute vault level ("person wins either way"), kept in
+lockstep across the resolver, the readable set, the create gates and the locks listing. Migration 046
+adds `member.last_seen_at` and `invitation_access`; `GET /api/orgs/:orgId/members/overview` and
+`POST /api/orgs/:orgId/invitations` are new. Invitations last 7 days by default
+(`INVITATION_EXPIRES_HOURS`).
+
+Later the same day: the member profile has Personal info / Access / Activity tabs, and the Access
+tab toggles (per device, `context.memberAccess.view`) between **List**, the checkbox tree,
+and **Board**, the default (Can edit / Can view / No access columns, drag-and-drop or arrows, Set everything to
++ Reset to vault default; same one-resource bulk-access writes; single-row moves need no confirm
+and report through the standard toast, with no undo; pointer-event drag, since Tauri swallows
+native HTML5 drag-and-drop). The overview
+now carries `invitedBy`, and `GET /api/orgs/:orgId/members/:userId/activity` (owner/admin or self;
+404 `not_member`) returns joined / created / edited / accessGranted events filtered to the
+caller's readable set. Vault Settings lost its Updates tab (now Account Settings → About), the
+Health tab was removed for good on 2026-10-04 (#289), the two settings dialogs cross-link,
+and hover/pressed colours are one accent tint (`--bg-hover`/`--bg-active`).
+
+## One-step note sync, checkpoint healing, backend notice (2026-10-04)
+
+- **Notes register with their content.** On a server advertising `notes-with-state`, every new
+  note, one or thousands, registers through `notes/batch` carrying its binary Yjs state; the server
+  writes the row and the first state in the same request (`registry/seed-on-register.ts`). No new
+  note opens a per-note socket, and teammates never see a row without content. A conflict or an
+  adopt onto another id is merged over HTTP (`bootstrap` `only` + a docs/batch merge push), never
+  applied blindly. Old servers keep register-then-push; the per-doc uploader is now a fallback.
+- **Receivers skip placeholders** when a bootstrap download will create the files with content;
+  placeholders remain for server-empty docs, small deltas and single live notes.
+- **Rename banner fixed.** The open note's "was removed" banner waits out the delete-grace window and
+  re-checks the disk, and in-app renames re-point the open note before the server call. Renamed
+  empty notes now pair instead of reaching the server as delete + create.
+- **`ackedSv`** is recorded on every push path, including the per-doc uploader and one-step creates.
+- **Checkpoints heal.** A note's first content never triggers the daily checkpoint; captures defer
+  while uploads are in flight (120 s window, 30 min cap); late first content tops up the newest
+  checkpoint within 1 h; files and attachments are pinned per checkpoint (migration 047) and restored
+  under their original ids on revert.
+- **One-step file upload (server only).** A blob intent can carry the file's registration and
+  `complete` creates the `files` row with the bytes (migration 048, `files-with-bytes`); the Pro gate
+  runs before any row exists. The desktop does not use it yet.
+- **`GET /health`** reports `version`, `minDesktopVersion` and `features`; `[sync-metrics]` log lines
+  count seeds, `ready.empty`/`ready.behind` sizes and structure-only checkpoint notes.
+- **Backend-behind notice.** The desktop shows a persistent line at the bottom of the sidebar when its
+  server lacks a feature it needs (judged from `/health` `features`, never the version), with
+  separate copy for the managed service and self-hosted servers.

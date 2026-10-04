@@ -25,7 +25,7 @@ export type LockScope = "all" | "vault" | "you" | "member";
 
 export const LOCK_TITLES: Record<LockScope, string> = {
   all: "Locked for everyone — changes won't sync",
-  vault: "This vault is read-only — changes won't sync",
+  vault: "Everyone can only view this vault — changes won't sync",
   you: "Locked for you — changes won't sync",
   member: "Locked for a member",
 };

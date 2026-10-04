@@ -59,15 +59,15 @@ describe("reconcileCopyRef", () => {
 });
 
 describe("copyActions", () => {
-  it("needs a live note for compare and replace, write access for restore", () => {
+  it("needs a live note for replace, write access for restore", () => {
     expect(copyActions({ hasCopy: true, liveNoteExists: true, canWrite: true })).toEqual({
-      open: true, compare: true, restoreReplace: true, restoreSibling: true, delete: true,
+      open: true, restoreReplace: true, restoreSibling: true, delete: true,
     });
     expect(copyActions({ hasCopy: true, liveNoteExists: false, canWrite: true })).toEqual({
-      open: true, compare: false, restoreReplace: false, restoreSibling: true, delete: true,
+      open: true, restoreReplace: false, restoreSibling: true, delete: true,
     });
     expect(copyActions({ hasCopy: true, liveNoteExists: true, canWrite: false })).toEqual({
-      open: true, compare: true, restoreReplace: false, restoreSibling: false, delete: true,
+      open: true, restoreReplace: false, restoreSibling: false, delete: true,
     });
     expect(Object.values(copyActions({ hasCopy: false, liveNoteExists: true, canWrite: true }))
       .every((v) => v === false)).toBe(true);

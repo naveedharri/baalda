@@ -165,11 +165,19 @@ async function objectStillReferenced(
   provider: string | null | undefined,
   storageKey: string,
 ): Promise<boolean> {
+  // A vault checkpoint that pins these bytes (migration 047) counts as a live
+  // reference too: a deleted file's object is RETIRED while a checkpoint can
+  // still restore it, and re-queued by the pin trigger once the last such
+  // checkpoint is pruned.
   const { rows } = await db.query<{ live: boolean }>(
     `SELECT EXISTS (
        SELECT 1 FROM blobs
         WHERE storage_key = $1
           AND lower(coalesce(storage_provider, 'postgres')) = lower($2)
+     ) OR EXISTS (
+       SELECT 1 FROM vault_checkpoint_blobs
+        WHERE storage_key = $1
+          AND lower(storage_provider) = lower($2)
      ) AS live`,
     [storageKey, provider ?? "postgres"],
   );

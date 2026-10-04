@@ -80,6 +80,47 @@ const CHECKPOINT_CHECK_INTERVAL_MS = 5 * 60_000;
  * `captureCheckpoint` can keep the text from before the wipe instead.
  */
 export const SHRINK_CHECKPOINT_HOLD_MS = 2 * 60_000;
+/** After a deferred daily checkpoint, ask again this soon (not the full
+ *  {@link CHECKPOINT_CHECK_INTERVAL_MS}): an upload usually finishes in seconds. */
+export const CHECKPOINT_DEFER_RETRY_MS = 30_000;
+/** Top-up: first-content docs are collected per vault for this long, then
+ *  added to the open checkpoint in one pass. */
+export const TOPUP_DEBOUNCE_MS = 30_000;
+/** How long a vault's top-up window (or the absence of one) is cached. */
+const TOPUP_WINDOW_CACHE_MS = 60_000;
+
+/**
+ * Did the write that just landed give this doc its FIRST server content? True
+ * when the doc has no snapshot and at most one stored update — both write paths
+ * (`hocuspocus.ts onChange`, `doc-batch.ts applyDetached`) append the update
+ * BEFORE they report the edit, so the one row is this write. Route-agnostic: a
+ * seed through the live socket counts exactly like a bulk `expectEmpty` seed.
+ * One indexed probe (`doc_updates_doc_id_idx`, `doc_snapshots` pk).
+ */
+export async function isFirstContent(docId: string, db: Queryable = defaultPool): Promise<boolean> {
+  const { rows } = await db.query<{ updates: number; snap: boolean }>(
+    `SELECT (SELECT count(*) FROM (SELECT 1 FROM doc_updates WHERE doc_id = $1 LIMIT 2) u)::int AS updates,
+            EXISTS (SELECT 1 FROM doc_snapshots WHERE doc_id = $1) AS snap`,
+    [docId],
+  );
+  const r = rows[0];
+  return !!r && !r.snap && r.updates <= 1;
+}
+
+/** Same shape as `checkpoints.ts TopUpWindow`; declared here so this module
+ *  stays free of the checkpoint machinery (it is injected). */
+export interface CheckpointTopUpWindow {
+  checkpointId: string;
+  expiresAt: number;
+  docIds: Set<string>;
+}
+
+export interface CheckpointTopUp {
+  /** The vault's newest daily checkpoint still open for top-up, or null. */
+  window(vaultId: string): Promise<CheckpointTopUpWindow | null>;
+  /** Add these docs' current text to the checkpoint; returns the ids now in it. */
+  apply(vaultId: string, checkpointId: string, docIds: string[]): Promise<string[]>;
+}
 
 export type VersionCause = "idle" | "pre-revert" | "pre-shrink";
 
@@ -203,6 +244,16 @@ export interface VersionCaptureDeps {
    * `src/index.ts` wires it to `maybeDailyCheckpoint`.
    */
   dailyCheckpoint?: (vaultId: string) => Promise<unknown>;
+  /**
+   * "Was this the doc's first server content?" — a seed by any route, which
+   * never triggers the daily checkpoint (see {@link isFirstContent}, wired in
+   * `src/index.ts`). Omitted: only the bulk seed origin counts.
+   */
+  firstContent?: (docId: string) => Promise<boolean>;
+  /** Top-up of the newest checkpoint with first content (wired in `src/index.ts`). */
+  checkpointTopUp?: CheckpointTopUp;
+  /** Override {@link TOPUP_DEBOUNCE_MS} (tests). */
+  topUpDebounceMs?: number;
   db?: Queryable;
   /** Override the idle window (tests). */
   idleMs?: number;
@@ -221,6 +272,10 @@ export interface VersionCapture {
   preShrink(vaultId: string, docId: string, previousText: string): Promise<void>;
   /** Run a doc's pending idle capture NOW (test hook / shutdown). */
   flush(docId: string): Promise<void>;
+  /** Run a vault's pending checkpoint top-up NOW (test hook). */
+  flushTopUp(vaultId: string): Promise<void>;
+  /** Resolves once in-flight daily-checkpoint checks have settled (test hook). */
+  settled(): Promise<void>;
   /** Drop every pending timer. */
   stop(): void;
 }
@@ -258,6 +313,137 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
   /** Live sources, keyed by docId. Cleared with the doc's session, exactly as
    *  the throttle state did when it lived ON the session. */
   const docNotices = new Map<string, Notice>();
+  const topUpDebounceMs = deps.topUpDebounceMs ?? TOPUP_DEBOUNCE_MS;
+  /** Cached top-up window per vault; `window: null` caches "none open". */
+  const topUpWindows = new Map<
+    string,
+    { window: CheckpointTopUpWindow | null; checkedUntil: number }
+  >();
+  const topUpLoading = new Map<string, Promise<void>>();
+  const topUpPending = new Map<
+    string,
+    { checkpointId: string; docIds: Set<string>; timer?: ReturnType<typeof setTimeout> }
+  >();
+  const inFlight = new Set<Promise<unknown>>();
+
+  function track<T>(p: Promise<T>): Promise<T> {
+    inFlight.add(p);
+    void p.finally(() => inFlight.delete(p)).catch(() => {});
+    return p;
+  }
+
+  /**
+   * The activity-triggered daily checkpoint, minus two cases:
+   *  - the write was the doc's first content (a seed by any route): the
+   *    throttle stamp is handed back, so the next real edit asks at once;
+   *  - the checkpoint deferred (uploads in flight): ask again after
+   *    {@link CHECKPOINT_DEFER_RETRY_MS} instead of the full interval.
+   * Without `firstContent` the call happens synchronously, as it always did.
+   */
+  async function dailyCheck(vaultId: string, docId: string, stampedAt: number, prevStamp: number) {
+    try {
+      if (deps.firstContent && (await deps.firstContent(docId))) {
+        if (vaultChecked.get(vaultId) === stampedAt) {
+          if (prevStamp > 0) vaultChecked.set(vaultId, prevStamp);
+          else vaultChecked.delete(vaultId);
+        }
+        return;
+      }
+      const result = await deps.dailyCheckpoint!(vaultId);
+      if (isDeferred(result)) {
+        if (vaultChecked.get(vaultId) === stampedAt) {
+          vaultChecked.set(
+            vaultId,
+            Date.now() - CHECKPOINT_CHECK_INTERVAL_MS + CHECKPOINT_DEFER_RETRY_MS,
+          );
+        }
+      } else if (result && typeof result === "object" && "id" in result) {
+        // A new checkpoint: its structure-only notes are the next top-up set.
+        topUpWindows.delete(vaultId);
+      }
+    } catch (err) {
+      console.error(`[versions] daily checkpoint check failed for ${vaultId}:`, err);
+    }
+  }
+
+  async function loadTopUpWindow(vaultId: string, now: number): Promise<void> {
+    const topUp = deps.checkpointTopUp!;
+    let loading = topUpLoading.get(vaultId);
+    if (!loading) {
+      loading = (async () => {
+        try {
+          const window = await topUp.window(vaultId);
+          const until = window
+            ? Math.min(now + TOPUP_WINDOW_CACHE_MS, window.expiresAt)
+            : now + TOPUP_WINDOW_CACHE_MS;
+          topUpWindows.set(vaultId, { window, checkedUntil: until });
+        } catch (err) {
+          console.error(`[versions] top-up window lookup failed for ${vaultId}:`, err);
+          topUpWindows.set(vaultId, { window: null, checkedUntil: now + TOPUP_WINDOW_CACHE_MS });
+        } finally {
+          topUpLoading.delete(vaultId);
+        }
+      })();
+      topUpLoading.set(vaultId, loading);
+    }
+    await loading;
+  }
+
+  /**
+   * Queue `docId` for top-up when the vault's newest daily checkpoint (under
+   * an hour old) stored it structure-only. Cheap by construction: the window
+   * is one cached lookup per vault per minute, and a doc outside it costs a
+   * Set lookup. Any write to such a doc is its first content, by definition —
+   * the checkpoint found none.
+   */
+  async function considerTopUp(vaultId: string, docId: string, now: number): Promise<void> {
+    let cached = topUpWindows.get(vaultId);
+    if (!cached || now >= cached.checkedUntil) {
+      await loadTopUpWindow(vaultId, now);
+      cached = topUpWindows.get(vaultId);
+    }
+    const window = cached?.window;
+    if (!window || Date.now() >= window.expiresAt || !window.docIds.has(docId)) return;
+    let pending = topUpPending.get(vaultId);
+    if (pending && pending.checkpointId !== window.checkpointId) {
+      if (pending.timer) clearTimeout(pending.timer);
+      topUpPending.delete(vaultId);
+      pending = undefined;
+    }
+    if (!pending) {
+      pending = { checkpointId: window.checkpointId, docIds: new Set() };
+      topUpPending.set(vaultId, pending);
+    }
+    pending.docIds.add(docId);
+    if (!pending.timer) {
+      const timer = setTimeout(() => void runTopUp(vaultId), topUpDebounceMs);
+      if (typeof timer.unref === "function") timer.unref();
+      pending.timer = timer;
+    }
+  }
+
+  async function runTopUp(vaultId: string): Promise<void> {
+    const pending = topUpPending.get(vaultId);
+    if (!pending) return;
+    topUpPending.delete(vaultId);
+    if (pending.timer) clearTimeout(pending.timer);
+    const ids = [...pending.docIds];
+    if (ids.length === 0) return;
+    try {
+      const done = await deps.checkpointTopUp!.apply(vaultId, pending.checkpointId, ids);
+      const window = topUpWindows.get(vaultId)?.window;
+      if (window && window.checkpointId === pending.checkpointId) {
+        for (const id of done) window.docIds.delete(id);
+      }
+      if (done.length > 0) {
+        console.log(
+          `[checkpoints] vault ${vaultId}: topped up checkpoint ${pending.checkpointId} with ${done.length} note(s)' first content`,
+        );
+      }
+    } catch (err) {
+      console.error(`[versions] checkpoint top-up failed for ${vaultId}:`, err);
+    }
+  }
 
   async function captureIdle(docId: string): Promise<void> {
     const session = sessions.get(docId);
@@ -374,14 +560,27 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
       const shrunkAt = vaultShrunkAt.get(vaultId);
       const holding = shrunkAt !== undefined && now - shrunkAt < SHRINK_CHECKPOINT_HOLD_MS;
       if (shrunkAt !== undefined && !holding) vaultShrunkAt.delete(vaultId);
+      //
+      // A doc's FIRST content never triggers it either, whatever route it came
+      // by (`firstContent`): a first upload of 21 notes one at a time through
+      // the live socket used to take the vault's first checkpoint after note
+      // one, structure-only for the other twenty.
       if (deps.dailyCheckpoint && !holding && !NO_VERSION_SOURCES.has(source ?? "")) {
         const lastCheck = vaultChecked.get(vaultId) ?? 0;
         if (now - lastCheck > CHECKPOINT_CHECK_INTERVAL_MS) {
           vaultChecked.set(vaultId, now);
-          void deps.dailyCheckpoint(vaultId).catch((err) => {
-            console.error(`[versions] daily checkpoint check failed for ${vaultId}:`, err);
-          });
+          void track(dailyCheck(vaultId, docId, now, lastCheck));
         }
+      }
+
+      // Top-up rides EVERY source, the bulk seed included: a seed is exactly
+      // the first content a structure-only checkpoint row is missing.
+      if (deps.checkpointTopUp) {
+        void track(
+          considerTopUp(vaultId, docId, now).catch((err) => {
+            console.error(`[versions] checkpoint top-up check failed for ${docId}:`, err);
+          }),
+        );
       }
     },
 
@@ -408,6 +607,15 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
       return captureIdle(docId);
     },
 
+    async flushTopUp(vaultId) {
+      await Promise.all([...inFlight]);
+      await runTopUp(vaultId);
+    },
+
+    async settled() {
+      while (inFlight.size > 0) await Promise.all([...inFlight]);
+    },
+
     stop() {
       for (const session of sessions.values()) {
         if (session.timer) clearTimeout(session.timer);
@@ -417,6 +625,15 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
       vaultShrunkAt.clear();
       vaultNotices.clear();
       docNotices.clear();
+      for (const pending of topUpPending.values()) {
+        if (pending.timer) clearTimeout(pending.timer);
+      }
+      topUpPending.clear();
+      topUpWindows.clear();
     },
   };
+}
+
+function isDeferred(v: unknown): boolean {
+  return typeof v === "object" && v !== null && (v as { deferred?: unknown }).deferred === true;
 }

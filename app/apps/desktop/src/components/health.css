@@ -1,7 +1,5 @@
-/* Vault Settings → Health.
-   Loaded by `HealthTab.tsx` the way `graph.css` is loaded by `GraphView.tsx`,
-   so the whole page ships in the lazy settings chunk and costs nothing until
-   someone opens it.
+/* Vault diagnostics (`HealthView`, rendered by the AI tab's finding tools).
+   Loaded by `HealthTab.tsx` the way `graph.css` is loaded by `GraphView.tsx`.
 
    Every colour comes from `styles/tokens.css`. The page has exactly one colour
    idea: a row, a node, a bar segment, a tile or a badge declares `data-tone`,

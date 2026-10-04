@@ -1,9 +1,6 @@
-/* Vault Settings → Health. The page that answers, in this order: is my work
-   safe, where exactly does the pipeline stop, WHY, what do I do about it, what
-   did Baalda verify about these files, and what is in this vault.
-
-   Split in two on purpose. `HealthTab` is the container: it owns the hook, the
-   note list the inspector completes against, and the upgrade dialog.
+/* `HealthView`: the vault diagnostics renderer. The Vault Settings Health tab
+   that used to host it was removed on 2026-10-04 (#289); the AI tab's finding
+   tools (`AiSettingsTab`, mode "finding") are its only app caller now.
    `HealthView` is pure — hand it a `VaultHealthSnapshot` and it renders, which
    is what lets a fixture drive it without a vault, a server or a Tauri host
    underneath.
@@ -18,22 +15,18 @@
    The whole page has to survive a vault that has never synced: `report.counts`
    is null, the last two pipeline stages are `off`, and the analytics below are
    still the point. Nothing here may assume a server. */
-import { useEffect, useMemo, useState } from "react";
-import { useStore } from "../store";
+import { useEffect, useState } from "react";
 import type { NoteTitle } from "../lib/ipc";
 import type {
   HealthInventory,
   ServerStorage,
   VaultHealthSnapshot,
 } from "../lib/health/types";
-import { useVaultHealth } from "../lib/health/useVaultHealth";
-import { demoSnapshot, healthDemoEnabled } from "../lib/health/demoFixture";
 import { formatBytes } from "../lib/health/format";
 import { dedupeDifferences, localFilesBytes, runEach } from "../lib/health/attention";
 import { toast } from "../lib/toast";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { UpgradeDialog } from "./UpgradeDialog";
 import { LocalOnlyGroup, RemoteOnlyGroup } from "./HealthPlaceGroups";
 import { HealthIssues } from "./HealthIssues";
 import { HealthChecks, type CheckFocus } from "./HealthChecks";
@@ -41,8 +34,6 @@ import { useHealthIgnores } from "../lib/health/useHealthIgnores";
 import { HealthInspector } from "./HealthInspector";
 import { HealthTimeline } from "./HealthTimeline";
 import { HealthActivity, HealthLargest } from "./HealthStats";
-import { AttachmentSyncNotice } from "./AttachmentSyncNotice";
-import { StalledUploadsNotice } from "./StalledUploadsNotice";
 import {
   Glyph,
   Section,
@@ -54,72 +45,6 @@ import {
 import type { CheckActionPlan } from "../lib/health/checkActions";
 import type { VaultCheckId } from "../lib/health/types";
 import "./health.css";
-
-export interface HealthTabProps {
-  /** Open the plan dialog. Omitted ⇒ this tab raises its own, like Billing. */
-  onOpenUpgrade?: () => void;
-  onRequestSignIn?: () => void;
-  /** Jump to General, where sync is turned on. */
-  onGoToGeneral?: () => void;
-  /** Close settings — opening a note has to get the dialog out of the way. */
-  onClose?: () => void;
-  onOpenDiagnostics?: (id?: VaultCheckId) => void;
-}
-
-export function HealthTab({
-  onOpenUpgrade,
-  onRequestSignIn,
-  onGoToGeneral,
-  onClose,
-  onOpenDiagnostics,
-}: HealthTabProps) {
-  // Same shape as the Billing and Members tabs: the dialog is rendered by the
-  // tab that needs it rather than hoisted into VaultSettingsDialog, so the
-  // upgrade path is self-contained wherever it is raised from. A caller may
-  // still pass its own opener.
-  const [upgradeOpen, setUpgradeOpen] = useState(false);
-  const liveSnapshot = useVaultHealth({
-    onOpenUpgrade: onOpenUpgrade ?? (() => setUpgradeOpen(true)),
-    onRequestSignIn,
-  });
-  // DEV-only fixture mode (see `lib/health/demoFixture.ts`). `import.meta.env.DEV`
-  // folds to false in production, so the fixture never replaces live data there.
-  const demo = import.meta.env.DEV && healthDemoEnabled();
-  const demoData = useMemo(() => (demo ? demoSnapshot() : null), [demo]);
-  const snapshot = demoData ?? liveSnapshot;
-  // The one store read on this page, and it stays in the CONTAINER so
-  // `HealthView` keeps rendering from nothing but its props — a fixture, in the
-  // tests.
-  const notes = useStore((s) => s.titles);
-  const vaultPath = useStore((s) => s.vault?.path ?? null);
-  const standaloneFileSyncBlocked = useStore((s) => s.attachmentSyncBlocked) || demo;
-  const showAttachmentUpgrade = useStore((s) => s.billingConfig?.enabled === true);
-
-  return (
-    <>
-      <AttachmentSyncNotice
-        surface="health"
-        detected={snapshot.inventory.local.files > 0 || snapshot.inventory.serverOnlyFiles.length > 0}
-      />
-      {!demo && <StalledUploadsNotice />}
-      <HealthView
-        key={vaultPath}
-        mode="overview"
-        title="Health"
-        demo={demo}
-        onOpenDiagnostics={onOpenDiagnostics}
-        snapshot={snapshot}
-        notes={notes}
-        vaultPath={vaultPath}
-        standaloneFileSyncBlocked={standaloneFileSyncBlocked}
-        showAttachmentUpgrade={showAttachmentUpgrade}
-        onGoToGeneral={onGoToGeneral}
-        onClose={onClose}
-      />
-      {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
-    </>
-  );
-}
 
 // ── The page ──────────────────────────────────────────────────────────────────
 
@@ -711,7 +636,7 @@ function InventoryComparison({
                   : comparisonStale
                     ? "The current Remote Vault contents cannot be confirmed"
                   : restrictedNotes > 0
-                    ? `${restrictedNotes.toLocaleString()} notes are private or restricted`
+                    ? `${restrictedNotes.toLocaleString()} notes have restricted access`
                     : "Notes and folders match"}
           </strong>
           <p>
@@ -729,7 +654,7 @@ function InventoryComparison({
                 : comparisonStale
                   ? "The Remote Vault is unavailable, so this last-known comparison may be out of date."
                 : restrictedNotes > 0
-                  ? `${restrictedNotes.toLocaleString()} private or restricted notes remain on the server.`
+                  ? `${restrictedNotes.toLocaleString()} notes with restricted access remain on the server.`
                   : `${confirmed.toLocaleString()} of ${totalTextNotes.toLocaleString()} text notes have confirmed content on the Remote Vault.`
               : "Your local files remain available on this computer."}
           </p>
@@ -776,7 +701,7 @@ function InventoryComparison({
           <span className="health-kicker">Your copies</span>
           <h3 id="health-inventory-title">This computer and the Remote Vault</h3>
           <p>
-            {stored ? "Server totals include private notes." : "Remote counts include only notes you can access."}
+            {stored ? "Server totals include notes not everyone can open." : "Remote counts include only notes you can access."}
           </p>
         </div>
         {inventory.server && (

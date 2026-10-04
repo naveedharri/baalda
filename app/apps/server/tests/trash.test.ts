@@ -87,7 +87,8 @@ describe("note trash", () => {
   });
 
   it("DELETE records deleted_by + purge_after and evicts live sockets", async () => {
-    const doc = await seedNote(vault, null, "a.md", owner.userId);
+    // The member's own note: members delete only what they created.
+    const doc = await seedNote(vault, null, "a.md", member.userId);
     await softDelete(member, doc);
     const { rows } = await pool.query(
       `SELECT deleted_by, purge_after - deleted_at AS window FROM notes WHERE id = $1`,
@@ -101,7 +102,7 @@ describe("note trash", () => {
   it("delete-batch and folder delete also stamp deleted_by", async () => {
     const f = await seedFolder(vault, null, "Docs", "Docs", owner.userId);
     const inFolder = await seedNote(vault, f, "Docs/x.md", owner.userId);
-    const loose = await seedNote(vault, null, "y.md", owner.userId);
+    const loose = await seedNote(vault, null, "y.md", member.userId);
     expect((await req(owner, "DELETE", `/api/folders/${f}`)).status).toBe(200);
     expect(
       (await req(member, "POST", `/api/vaults/${vault}/notes/delete-batch`, { docIds: [loose] })).status,
@@ -160,7 +161,7 @@ describe("note trash", () => {
 
   it("lists trash filtered by readability, newest first, with unsynced contributions", async () => {
     const a = await seedNote(vault, null, "a.md", owner.userId);
-    const b = await seedNote(vault, null, "b.md", owner.userId);
+    const b = await seedNote(vault, null, "b.md", member.userId);
     await appendUpdate(a, updateFor("before delete"));
     await softDelete(owner, a);
     await pool.query("UPDATE notes SET deleted_at = deleted_at - interval '1 hour' WHERE id = $1", [a]);

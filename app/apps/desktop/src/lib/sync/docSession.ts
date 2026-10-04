@@ -10,6 +10,7 @@
 // When signed out / offline / unmapped, it falls back to a local Awareness and
 // the bridge's normal seed-from-file (pure local-first).
 
+import { NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
@@ -21,6 +22,7 @@ import {
   type SessionInfo,
 } from "../api";
 import * as ipc from "../ipc";
+import { runClosedAppEdits } from "./closedAppEdits";
 import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
@@ -37,8 +39,16 @@ import {
   type DocBatchPushResult,
   type DocPushWork,
 } from "./docBatchPush";
-import { ContentUploader, type UploadFailure } from "./contentUpload";
+import { ContentUploader, mergeFileAfterPull, type UploadFailure } from "./contentUpload";
+import { decodeBootstrapPage } from "./bootstrapCodec";
+import { SEED_BATCH_MAX_ITEMS } from "./seedRegister";
+import {
+  BOOTSTRAP_ONLY,
+  FILES_WITH_BYTES,
+  serverFeatures as cachedServerFeatures,
+} from "../serverFeatures";
 import { collectCrdtGarbage } from "./crdtGc";
+import { pickUniqueEmptyRename } from "./emptyRename";
 import {
   IPC_CONCURRENCY,
   REGISTRY_CONCURRENCY,
@@ -49,7 +59,12 @@ import { SyncProgressReporter } from "./progress";
 import { decideSeed } from "./startup";
 import { SessionRejectionGuard } from "./sessionGuard";
 import { DocSync, type SyncStatus } from "./syncManager";
-import { VaultRegistry, type InboundHost, type RegistryFailure } from "./registry";
+import {
+  VaultRegistry,
+  type InboundHost,
+  type NoteSeedState,
+  type RegistryFailure,
+} from "./registry";
 import { VaultDocStore, createIpcManifestStore } from "./vaultDocStore";
 import {
   isBulkPhase,
@@ -61,6 +76,8 @@ import {
 } from "./vaultScope";
 import { SyncLog } from "./syncLog";
 import { linkRefusals, resetLinkRefusals, SYMLINK_REFUSAL_REASON } from "./linkRefusals";
+import { attributeRecoveryCopies } from "./reconcileReport";
+import { samePathKey } from "../pathIdentity";
 import type { SyncLogEntry, SyncLogLevel } from "../health/types";
 import {
   VaultSyncEngine,
@@ -70,10 +87,17 @@ import {
 import { bytesToBase64, type VoiceFrame } from "./vaultProtocol";
 import { svFromBase64 } from "./ackedSv";
 import { ReadOnlyRejections } from "./readOnlyRejections";
+import { setReadOnlyCopyKeeper } from "../bridge/readOnlyDocs";
 import { SyncPauseTracker, type SyncPause } from "./syncPause";
+import {
+  createDeferredWithContent,
+  DeferredArrivalFlush,
+  liveArrivalPredicate,
+} from "./deferredArrival";
 import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
 import { VoicePlayer } from "../voice/playback";
 import { VoiceRoster, type VoiceSpeaker } from "../voice/roster";
+import { FailureGrace } from "./failureGrace";
 
 export type { VoiceSpeaker };
 
@@ -128,7 +152,7 @@ const LOCAL_CHANGE_RETRY_MS = 2_000;
  * still being far below the point where a user would notice their delete
  * "taking a while" to reach a teammate.
  */
-const DISK_DELETE_GRACE_MS = 2_500;
+export const DISK_DELETE_GRACE_MS = 2_500;
 /**
  * Minimum spacing of the idle CRDT sweep (`requestCrdtSweep`), and the quiet
  * period a completed pull waits before it sweeps.
@@ -159,7 +183,7 @@ function diskDeleteCap(mappedCount: number): number {
 const FOLDER_MOVE_MIN_RATIO = 0.8;
 /** The Health row reason for a note held by an unanswered bulk delete. */
 export const DELETE_DECISION_REASON =
-  "removed from this folder in a bulk delete — waiting for you to delete it for everyone or restore it";
+  "removed from this folder in a bulk delete — it stays for your team and will be restored here";
 /** How long an appeared folder stays a candidate for a move's new half. */
 const FOLDER_CANDIDATE_TTL_MS = 10_000;
 
@@ -355,6 +379,11 @@ export class SyncManager implements InboundHost {
   readonly registry = new VaultRegistry(api);
 
   constructor() {
+    // Every confirmed push, on every path (batch, per-doc uploader, one-step
+    // create, open-note confirm), clears that doc's failure rows: the sidebar
+    // badge and the failure list must never disagree.
+    // Optional call: test doubles of the registry may not carry it.
+    this.registry.setPushedListener?.((docId) => this.failureGrace.settle(docId));
     // The registry owns the only {relPath → docId} map there is, and the sidebar
     // needs it to badge a row (every sync fact is keyed by docId). Mirror it out
     // reactively — coalesced — instead of letting the UI read it imperatively
@@ -386,6 +415,8 @@ export class SyncManager implements InboundHost {
   /** docId of the open networked note (null when none) — the key its per-doc sync
    *  state is reported under. Keyed by docId, never by path. */
   private currentDocId: string | null = null;
+  /** relPath the open networked note was opened at (an adopt can re-key its id). */
+  private currentRelPath: string | null = null;
   private currentLocalAwareness: Awareness | null = null;
   /** Docs already reported as "you edited this but cannot send it" — one trash
    *  copy and one failure line per doc per session, however often it is
@@ -498,6 +529,10 @@ export class SyncManager implements InboundHost {
   // opening it. Present only while sync is enabled.
   private docStore: VaultDocStore | null = null;
   private vaultEngine: VaultSyncEngine | null = null;
+  /** Rebases read-only docs whose pushes the server rejected (see `readOnlyRejections.ts`). */
+  private readOnlyRejections: ReadOnlyRejections | null = null;
+  /** Read-only docs whose differing file already has its quiet copy this session. */
+  private readonly readOnlyCopied = new Set<string>();
   /**
    * The collection id {@link vaultEngine} was started for.
    *
@@ -623,6 +658,12 @@ export class SyncManager implements InboundHost {
    *  .md on disk. Drained by {@link runLocalChangePush}, debounced so a burst
    *  (an AI writing many files) coalesces into one run. */
   private localChanges = new Map<string, string>();
+  /** Resolvers waiting for the next local-change drain to finish (#284). */
+  private localDrainWaiters: Array<() => void> = [];
+  /** The closed-app edits pass ran for this vault open (#284). */
+  private closedEditsScanned = false;
+  /** The editor's lock view, supplied by the store (#284). */
+  private readOnlyPathCheck?: () => Promise<(relPath: string) => boolean>;
   private localChangeTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Disk deletes seen by the watcher, awaiting {@link DISK_DELETE_GRACE_MS}
@@ -783,6 +824,9 @@ export class SyncManager implements InboundHost {
   /** Doc failures invalidated after that local incarnation was removed. This
    * also hides rows retained by an already-finished uploader object. */
   private invalidatedFailures = new Set<string>();
+  /** Holds transient push failures back until retries run out, and drops any
+   *  failure of a doc a later push confirmed (see `failureGrace.ts`). */
+  private failureGrace = new FailureGrace();
   /** True while the run is reporting the vault channel's inbound queue. */
   private downloadPhase = false;
   /**
@@ -811,6 +855,13 @@ export class SyncManager implements InboundHost {
   /** Resolves when the current bulk run finishes (tests). */
   private bulkRun: Promise<void> | null = null;
   private bulkDownloadPending = false;
+  /**
+   * True only while `enable`'s first reconcile runs. A pull that materializes
+   * `BULK_THRESHOLD_DOCS`+ notes there is always followed by `runBulkEngine`
+   * (its gate, `mappedNotes()`, is a superset of what the pull materializes),
+   * which is what lets {@link bootstrapWillDeliver} defer placeholders (PR4).
+   */
+  private enableReconciling = false;
   /**
    * The idle CRDT sweep ({@link requestCrdtSweep}): armed by a completed pull,
    * a delete drain or a revocation, fired at most once per
@@ -1018,6 +1069,7 @@ export class SyncManager implements InboundHost {
   /** One note the content push could not get to the server. */
   private logUploadFailure(f: UploadFailure): void {
     this.invalidatedFailures.delete(f.docId);
+    this.failureGrace.record(f, Date.now());
     this.note(
       // A note the shrink brake holds is waiting, not broken (#274).
       f.kind === "shrink-held" ? "warn" : "error",
@@ -1589,6 +1641,68 @@ export class SyncManager implements InboundHost {
     if (this.liveSince != null) return;
     if (!this.channelSynced || !this.pulledOnce) return;
     this.liveSince = Date.now();
+    const scope = this.scope;
+    if (scope) {
+      void this.scanClosedAppEdits(scope).catch((e) =>
+        console.warn("[sync] closed-app edits pass failed", e),
+      );
+    }
+  }
+
+  /**
+   * Push edits made to mapped, unopened notes while the app was closed (#284).
+   * Runs once per vault open, the moment the session goes live. A running app
+   * needs no second pass after a long offline gap or a sleep: the watcher keeps
+   * running and queues the same notes through `handleLocalFilesChanged`.
+   */
+  private async scanClosedAppEdits(scope: VaultScope): Promise<void> {
+    if (this.closedEditsScanned || this.rootMissing) return;
+    this.closedEditsScanned = true;
+    const result = await runClosedAppEdits({
+      isLive: () => this.liveSince != null,
+      isCurrent: () => scope.isCurrent() && this.enabled,
+      mappedNotes: () => this.registry.mappedNotes(),
+      listDrift: (entries) => ipc.listDiskDrift(entries, scope.vaultEpoch),
+      openDocId: () => this.docStore?.suppressedDoc() ?? null,
+      isPermanentFailure: (docId) => this.permanentFailures.has(docId),
+      pathForDocId: (docId) => this.registry.pathForDocId(docId),
+      readOnlyPaths: this.readOnlyPathCheck,
+      // The same per-doc resolver answer the editor's read-only mode comes from.
+      canEdit: async (docId) => {
+        const token = await api.syncToken(docId);
+        return !token.readOnly && token.permission === "edit";
+      },
+      docText: (docId) => this.localText(docId),
+      fileText: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
+      recordBase: (docId, sha256) => ipc.setDiskBase(docId, sha256, scope.vaultEpoch),
+      enqueue: (chunk) => {
+        for (const n of chunk) {
+          this.emptyEverywhere.delete(n.docId);
+          if (!this.localChanges.has(n.docId)) this.localChanges.set(n.docId, n.relPath);
+        }
+        this.armLocalChangeDrain(scope, 0);
+      },
+      waitForDrain: () => new Promise<void>((resolve) => this.localDrainWaiters.push(resolve)),
+      log: (message) => this.note("info", "closed-app-edits", message),
+    });
+    if (result && result.queued > 0) {
+      this.note("info", "closed-app-edits-done", `Queued ${result.queued} notes edited while closed`);
+    }
+  }
+
+  /**
+   * Supply the editor's lock view (locks + Read-only posture, minus lifts) for
+   * the closed-app edits pass. The store owns that state; the sync layer must
+   * not import it.
+   */
+  setReadOnlyPathCheck(check: (() => Promise<(relPath: string) => boolean>) | undefined): void {
+    this.readOnlyPathCheck = check;
+  }
+
+  private settleLocalDrainWaiters(): void {
+    const waiters = this.localDrainWaiters;
+    this.localDrainWaiters = [];
+    for (const resolve of waiters) resolve();
   }
 
   /** True once a disk delete would be propagated (tests / diagnostics). */
@@ -2270,11 +2384,23 @@ export class SyncManager implements InboundHost {
           if (!unpaired.has(path) || metas.get(path)?.sha256) continue;
           metas.set(path, { ...(metas.get(path) ?? {}), path, sha256: sha } as ipc.NoteMeta);
         }
+        // Texts first: an EMPTY note pairs only when it is the window's one
+        // empty delete against its one empty candidate (`pickUniqueEmptyRename`
+        // — every empty file hashes the same, so the hash alone names none).
+        const texts: Array<string | null> = [];
         for (const item of gone) {
-          const text = await this.docText(item.docId, item.relPath);
+          texts.push(await this.docText(item.docId, item.relPath));
           if (!scope.isCurrent()) return;
+        }
+        const emptyGone = texts.filter((t) => t === "").length;
+        for (const [i, item] of gone.entries()) {
+          const text = texts[i];
           const renamedTo =
-            text == null ? null : await this.matchRename(text, item.relPath, unpaired, metas, scope);
+            text == null
+              ? null
+              : ((text === ""
+                  ? pickUniqueEmptyRename(item.relPath, emptyGone, unpaired, (p) => metas.get(p)?.sha256)
+                  : null) ?? (await this.matchRename(text, item.relPath, unpaired, metas, scope)));
           if (!scope.isCurrent()) return;
           if (renamedTo) {
             unpaired.delete(renamedTo);
@@ -2413,14 +2539,20 @@ export class SyncManager implements InboundHost {
       }
       if (!scope.isCurrent()) return propagated;
       const byPath = new Map(outcomes.map((o) => [o.path, o]));
+      const putBack: Array<{ docId: string; relPath: string }> = [];
       for (const d of deleted) {
         const out = byPath.get(d.relPath);
         if (out?.status === "deleted") {
           propagated.push(d);
           continue;
         }
+        if (isNotCreatorCode(out?.code)) {
+          putBack.push(d);
+          continue;
+        }
         refused(d, out?.reason ?? "the server did not answer for this note", out?.code ?? null);
       }
+      await this.putBackNotCreator(putBack, scope);
       return propagated;
     }
 
@@ -2431,6 +2563,10 @@ export class SyncManager implements InboundHost {
         try {
           await this.registry.deletePath(d.relPath);
         } catch (e) {
+          if (notCreatorCodeOf(e)) {
+            await this.putBackNotCreator([d], scope);
+            return;
+          }
           // Offline, or the server refused (no edit grant). The mapping is
           // untouched, so a later pull re-materializes the file WITH its
           // content — the delete simply did not happen, which is the honest
@@ -2444,6 +2580,30 @@ export class SyncManager implements InboundHost {
       { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
     );
     return propagated;
+  }
+
+  /**
+   * A disk delete the server refused on the creator rule (403
+   * `delete_not_creator` / `folder_has_others_items`: a member may delete only
+   * what they created). The file must not stay gone on this device only, so it
+   * is put back from this device's CRDT (`registry.restoreRefusedDelete`), one
+   * plain-words reconcile entry is recorded, and the delete is never retried —
+   * the mapping was never dropped, so nothing re-registers.
+   */
+  private async putBackNotCreator(
+    items: ReadonlyArray<{ docId: string; relPath: string }>,
+    scope: VaultScope,
+  ): Promise<void> {
+    for (const d of items) {
+      if (!scope.isCurrent()) return;
+      await this.registry.restoreRefusedDelete(d.relPath, d.docId);
+      this.note(
+        "info",
+        "disk-delete",
+        `${d.relPath} was put back: ${NOT_CREATOR_MESSAGE.toLowerCase()}`,
+        { docId: d.docId, path: d.relPath },
+      );
+    }
   }
 
   /**
@@ -2977,16 +3137,76 @@ export class SyncManager implements InboundHost {
     return this.checkVaultRoot(this.scope);
   }
 
-  /** `InboundHost.heldDocIds`: the docs of an unanswered bulk delete. */
+  /**
+   * `InboundHost.bootstrapWillDeliver` (PR4): may this pull skip the 0-byte
+   * placeholders of server-only notes because a bootstrap download is
+   * guaranteed to create them with content? Yes when one is about to start
+   * (`enable`'s bulk engine, a pending `bootstrap` frame the pull will hand to
+   * `settleAfterPull`) or is already running. Every one of those paths ends in
+   * `runBulkEngine`, which calls `registry.materializePendingFromBootstrap()`
+   * after its download phase AND once more when it finishes, however it ends —
+   * so a deferred note is never left without a file in this session.
+   *
+   * The predicate says no for docs this device already holds CRDT for: the
+   * session's `have` list (the store's durable manifest) excludes them from the
+   * download, so they keep the pull's placeholder + `materializeContent`.
+   *
+   * Sidebar: a deferred note simply is not on disk yet, so it appears when its
+   * page lands (no "downloading" row). Nothing can open it before then.
+   */
+  bootstrapWillDeliver(count: number): ((docId: string) => boolean) | null {
+    if (this.serverTooOld) return null;
+    const held = new Set(this.docStore?.knownDocs() ?? []);
+    if (useBulkPath(count)) {
+      const follows =
+        this.bulkPhase ||
+        this.enableReconciling ||
+        (this.bulkDownloadPending && !this.contentRunInFlight());
+      if (follows) return (docId) => !held.has(docId);
+    }
+    // Any other arrival (a teammate's new note, a small grant): the live vault
+    // channel backfills it a moment later, so the first content frame creates
+    // the file with its text (`createDeferred` in `startVaultEngine`). Bounded:
+    // whatever has not arrived in DEFERRED_ARRIVAL_WAIT_MS gets its placeholder.
+    const willDeliver = liveArrivalPredicate({
+      serverTooOld: this.serverTooOld,
+      channelSynced: this.docStore != null && this.vaultStatus === "synced",
+      live: this.isLive(),
+      liveOnly: this.vaultEngineLiveOnly,
+      held,
+      serverEmpty: this.serverEmpty,
+    });
+    if (willDeliver) this.deferredArrivalFlush.arm();
+    return willDeliver;
+  }
+
+  /**
+   * The bounded wait for deferred small arrivals: their placeholders are
+   * written when it fires, on a vault-channel drop, and at the existing flush
+   * points. Never while a bulk download is due, whose own end flush covers it.
+   */
+  private readonly deferredArrivalFlush = new DeferredArrivalFlush(() => {
+    // A bulk download is running or about to: its end flush (`runBulkEngine`)
+    // writes whatever it did not deliver, and flushing now would put 0-byte
+    // files under every note it is about to create with content.
+    if (this.bulkPhase || this.enableReconciling || this.bulkDownloadPending) return;
+    const scope = this.scope;
+    void this.materializeDeferred().then((created) => {
+      if (created && scope?.isCurrent()) this.onRegistryChanged?.();
+    });
+  });
+
+  /** `InboundHost.heldDocIds`: the docs of a held bulk delete, until it is released. */
   heldDocIds(): ReadonlySet<string> {
     return this.deleteDecisionIds;
   }
 
   /**
-   * A live window removed more notes than the blast-radius cap allows. With the
-   * vault root present and the session live, that is the user's own doing, so
-   * ASK instead of undoing it (#221). With the root gone it is the unmounted
-   * case, and the whole batch is refused silently, as before.
+   * A live window removed more notes than the blast-radius cap allows. Such a
+   * delete is never propagated from disk. With the vault root present and the
+   * session live it is held briefly so the user is told (#221) before the pull
+   * puts the notes back; with the root gone it is the unmounted case, and the
+   * whole batch is refused silently, as before.
    */
   private async holdBulkDiskDelete(
     items: ReadonlyArray<{ docId: string; relPath: string }>,
@@ -3004,12 +3224,12 @@ export class SyncManager implements InboundHost {
     this.deleteDecision = [...merged.values()];
     this.deleteDecisionIds = new Set(merged.keys());
     console.info(
-      `[sync] ${items.length} notes removed from disk at once (cap ${cap}) — asking before syncing the change`,
+      `[sync] ${items.length} notes removed from disk at once (cap ${cap}) — kept for the team, restoring here`,
     );
     this.note(
       "warn",
       "bulk-delete-held",
-      `${this.deleteDecision.length} notes were removed from this folder at once — waiting for you to delete them for everyone or restore them`,
+      `${this.deleteDecision.length} notes were removed from this folder at once — they stay for the team and will be restored here`,
     );
     this.emitStructureNotice();
   }
@@ -3030,44 +3250,26 @@ export class SyncManager implements InboundHost {
   }
 
   /**
-   * The user answered the held bulk delete.
-   *
-   * "delete": the same soft delete the drain makes, uncapped this once — the
-   * user just confirmed it — batched above `BULK_THRESHOLD_DOCS`. Only notes
-   * still missing from disk go; one that came back is left alone.
-   * "restore": the normal pull, which re-materializes them with their content.
+   * Let go of the held bulk delete. Over the cap a disk delete is NEVER sent to
+   * the team: deleting for everyone happens inside the app, where the
+   * creator-only rule applies. Both answers the banner offers ("Restore now",
+   * and "Dismiss" or its fade) release the hold and run the normal pull, which
+   * no longer skips these docs and re-materializes them with their content.
+   * Nothing is deleted on the server either way.
    */
-  async resolveDeleteDecision(answer: "delete" | "restore"): Promise<void> {
+  async releaseDeleteDecision(how: "restore" | "dismiss" = "restore"): Promise<void> {
     const scope = this.scope;
     const items = this.deleteDecision;
     this.deleteDecision = null;
     this.deleteDecisionIds = new Set();
     this.emitStructureNotice();
     if (!items || !scope || !scope.isCurrent() || !this.enabled) return;
-    if (answer === "restore") {
-      this.note("info", "bulk-delete-restored", `Restoring ${items.length} notes from the server`);
-      this.handleRegistryChanged("delete-restore");
-      return;
-    }
-    if (!(await this.checkVaultRoot(scope)) || !scope.isCurrent()) return;
-    const still: Array<{ docId: string; relPath: string }> = [];
-    await runPool(
-      items,
-      async (item) => {
-        if (this.registry.getMapping(item.relPath)?.docId !== item.docId) return;
-        let missing = false;
-        try {
-          missing = !(await ipc.noteExists(item.relPath, scope.vaultEpoch));
-        } catch {
-          missing = false; // couldn't ask => never assume a delete
-        }
-        if (missing) still.push(item);
-      },
-      { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
+    this.note(
+      "info",
+      "bulk-delete-restored",
+      `Restoring ${items.length} notes from the server (${how === "restore" ? "restore now" : "dismissed"})`,
     );
-    if (!scope.isCurrent()) return;
-    if (still.length > 0) await this.propagateAndForget(still, scope);
-    if (scope.isCurrent()) this.handleRegistryChanged("delete-confirmed");
+    this.handleRegistryChanged("delete-restore");
   }
 
   /** Evaluate the closed-app change notice once per open (#221). */
@@ -3131,9 +3333,9 @@ export class SyncManager implements InboundHost {
         this.armLocalChangeDrain(scope, LOCAL_CHANGE_RETRY_MS);
         return;
       }
-      void this.runLocalChangePush(scope).catch((e) =>
-        console.warn("[sync] local change push failed", e),
-      );
+      void this.runLocalChangePush(scope)
+        .catch((e) => console.warn("[sync] local change push failed", e))
+        .finally(() => this.settleLocalDrainWaiters());
     }, delayMs);
   }
 
@@ -3270,6 +3472,7 @@ export class SyncManager implements InboundHost {
           ipc.writeTrashCopy(relPath, stamp, content, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
+      markAcked: (docId, sv) => this.registry.recordAck?.(docId, sv),
       markPushed: (docId) => {
         this.registry.markPushed(docId);
         this.unhydratedPlaceholders.delete(docId);
@@ -3806,7 +4009,7 @@ export class SyncManager implements InboundHost {
    *
    * The open-time sweep sees only what was orphaned before this session; a
    * delete, a revocation or a duplicate cleanup later in the session used to
-   * wait for a manual "Reclaim" in Health. This re-runs the SAME sweep — the
+   * wait for a manual "Reclaim". This re-runs the SAME sweep — the
    * registry ids ∪ the local index ∪ {@link crdtSweepPinned} allow-list — once
    * the session is idle.
    *
@@ -3911,6 +4114,331 @@ export class SyncManager implements InboundHost {
       if (this.emptyEverywhere.has(docId) || this.permanentFailures.has(docId)) continue;
       this.serverEmpty.add(docId);
     }
+  }
+
+  // ---- One-step creates (plan "one-step-note-sync", PR3) -------------------
+  //
+  // The registry registers a new note WITH its Yjs state on a server that
+  // advertises `notes-with-state`; these are the `InboundHost` hooks it calls.
+  // No per-note socket: `applied`/`covered` settle from the HTTP answer, and a
+  // `conflict` or an adopt onto another id goes through `runHttpMerge`.
+
+  /** Doc ids waiting for an HTTP pull-then-merge. */
+  private pendingMerge = new Set<string>();
+  /** Local ids an adopt onto another id replaced; released before the merge. */
+  private pendingLoserRelease = new Set<string>();
+  /**
+   * Merge ids parked because the open note owns them (the id itself, or the
+   * path of an open adopt LOSER). Never dropped: `closeCurrent` and the next
+   * `runHttpMerge` put them back in `pendingMerge` once the editor lets go.
+   * Scoped, so a vault switch cannot replay them into another vault.
+   */
+  private deferredMerge = new Map<string, VaultScope>();
+  private httpMerging = false;
+
+  /** The cached `/health` features (shared with the sidebar poll). */
+  serverFeatures(): Promise<ReadonlySet<string>> {
+    return cachedServerFeatures(authManager.getServerUrl(), () => api.getHealth());
+  }
+
+  /**
+   * The state to register with. A doc with local CRDT sends it; an empty one
+   * sends a THROWAWAY doc seeded from the file, so the live local doc is
+   * seeded only once the server confirms it holds those exact ops
+   * (`noteSeeded`). Never the open note: its editor's `DocSync` owns it.
+   */
+  async buildNoteState(docId: string, relPath: string): Promise<NoteSeedState | null> {
+    const scope = this.scope;
+    const store = this.docStore;
+    if (!scope?.isCurrent() || !store || !this.syncable()) return null;
+    if (store.suppressedDoc() === docId || this.permanentFailures.has(docId)) return null;
+    const bridge = await store.promote(docId, relPath, {
+      seedFromFile: false,
+      markRecent: false,
+      pin: true,
+    });
+    try {
+      const text = bridge.serialize();
+      if (text.length > 0) {
+        return {
+          state: Y.encodeStateAsUpdate(bridge.doc),
+          textSha256: await sha256Hex(text),
+          fresh: false,
+        };
+      }
+      const file = await ipc.readNote(relPath, scope.vaultEpoch);
+      const tmp = new Y.Doc();
+      try {
+        if (file.length > 0) tmp.getText("content").insert(0, file);
+        return {
+          state: Y.encodeStateAsUpdate(tmp),
+          textSha256: await sha256Hex(file),
+          fresh: true,
+        };
+      } finally {
+        tmp.destroy();
+      }
+    } finally {
+      await store.demote(docId);
+    }
+  }
+
+  /**
+   * The server holds `seed.state` (`applied`, or `covered` on a retry). Only
+   * called after its answer, so a crash mid-request leaves the note unpushed.
+   */
+  async noteSeeded(docId: string, sv: Uint8Array | null, seed: NoteSeedState): Promise<void> {
+    const scope = this.scope;
+    const store = this.docStore;
+    if (!scope?.isCurrent()) return;
+    if (seed.fresh && store && store.suppressedDoc() !== docId) {
+      const relPath = this.registry.pathForDocId(docId);
+      if (relPath) {
+        // The file can change between build and answer; the egest below then
+        // replaces it with the seed (the server's text) and the bridge saves
+        // the newer bytes to `.context/trash`. Report that copy as what it is.
+        const unclaim = attributeRecoveryCopies(relPath, { kind: "conflictKeptServer", docId });
+        let raced = false;
+        try {
+          const bridge = await store.promote(docId, relPath, {
+            seedFromFile: false,
+            markRecent: false,
+            pin: true,
+          });
+          try {
+            if (bridge.serialize().length === 0) {
+              // The SAME ops the server holds (same client id and clocks): the
+              // later merge of the two is a no-op, never a doubled body.
+              bridge.applyRemote(seed.state);
+            } else {
+              raced = true;
+            }
+          } finally {
+            // Awaited retire (flush + persist) BEFORE any clear below.
+            await store.demote(docId).catch(() => {});
+          }
+        } finally {
+          unclaim();
+        }
+        if (raced) {
+          // Something seeded this doc between build and answer. Its ops are
+          // NOT the server's; merging them would double the text. Drop the
+          // local CRDT (the file keeps the text) and pull-merge instead. The
+          // bridge is already retired, so nothing can re-persist after the clear.
+          store.drop(docId);
+          await ipc.clearYjsDoc(docId, scope.vaultEpoch);
+          this.noteNeedsMerge([docId]);
+          return;
+        }
+      }
+    }
+    this.registry.markPushed(docId);
+    let ack = sv;
+    if (!ack) {
+      try {
+        ack = Y.encodeStateVectorFromUpdate(seed.state);
+      } catch {
+        ack = null; // only leaves the inbound gate more conservative
+      }
+    }
+    if (ack) this.registry.recordAck?.(docId, ack);
+    this.divergedDocs.delete(docId);
+    this.serverEmpty.delete(docId);
+    this.serverBehind.delete(docId);
+    this.syncPause.writeAccepted();
+    this.progress?.doc(docId, "synced");
+  }
+
+  /** Queue docs whose server copy we have not seen for an HTTP merge. */
+  noteNeedsMerge(docIds: readonly string[], loserIds: readonly string[] = []): void {
+    const scope = this.scope;
+    if (!scope?.isCurrent() || !this.syncable()) return;
+    // Local ids an adopt replaced (the registry already rebound the index row
+    // to the winner): their resident bridge, if any, must not keep writing the
+    // same file while the winner's merge does.
+    for (const l of loserIds) if (!docIds.includes(l)) this.pendingLoserRelease.add(l);
+    for (const d of docIds) {
+      if (!this.permanentFailures.has(d)) this.pendingMerge.add(d);
+    }
+    void this.runHttpMerge(scope).catch((e) => console.warn("[sync] HTTP merge failed", e));
+  }
+
+  /** Put parked merges whose note is no longer open back in the queue. */
+  private requeueDeferredMerges(): void {
+    if (this.deferredMerge.size === 0) return;
+    const open = this.docStore?.suppressedDoc() ?? null;
+    for (const [id, sc] of this.deferredMerge) {
+      if (!sc.isCurrent()) {
+        this.deferredMerge.delete(id);
+      } else if (id !== open) {
+        this.deferredMerge.delete(id);
+        if (!this.permanentFailures.has(id)) this.pendingMerge.add(id);
+      }
+    }
+  }
+
+  private async runHttpMerge(scope: VaultScope): Promise<void> {
+    if (this.httpMerging) return;
+    this.requeueDeferredMerges();
+    this.httpMerging = true;
+    try {
+      while (this.pendingMerge.size > 0 && scope.isCurrent()) {
+        const ids = [...this.pendingMerge].slice(0, SEED_BATCH_MAX_ITEMS);
+        for (const id of ids) this.pendingMerge.delete(id);
+        await this.httpMergeOnce(scope, ids);
+      }
+    } finally {
+      this.httpMerging = false;
+    }
+  }
+
+  /**
+   * HTTP pull-then-merge for docs the server holds content for that this
+   * device has not seen: fetch exactly those docs (`bootstrap` `only`), start
+   * each from an EMPTY local doc + the server's state, fold the file in with
+   * the uploader's own post-pull routine (`mergeFileAfterPull`), then push the
+   * merged state through docs/batch WITHOUT `expectEmpty` (a merge). Local
+   * state is never applied blindly onto a doc the server already filled.
+   * Fallback, for an old server or a failed pull: the per-doc uploader, which
+   * pulls before it seeds.
+   */
+  private async httpMergeOnce(scope: VaultScope, batch: string[]): Promise<void> {
+    const vaultId = this.registry.vaultId;
+    const store = this.docStore;
+    // An adopt LOSER that is the open note: the editor's bridge and DocSync are
+    // bound to that dead id and still write its file. Keep it queued (released
+    // when the note closes) and park the winner merge for the SAME path, or two
+    // bridges would write one file.
+    let openLoserPath: string | null = null;
+    if (store && this.pendingLoserRelease.size > 0) {
+      const losers = [...this.pendingLoserRelease];
+      this.pendingLoserRelease.clear();
+      for (const l of losers) {
+        if (store.suppressedDoc() === l) {
+          this.pendingLoserRelease.add(l);
+          openLoserPath = this.currentRelPath;
+          console.warn(
+            `[sync] open note ${l} was adopted onto another id; its merge waits until it closes`,
+          );
+          continue;
+        }
+        await store.release(l).catch(() => {});
+        store.drop(l);
+      }
+    }
+    // The editor owns these files: park them BEFORE any path (the HTTP merge
+    // or the uploader fallback) can open a second bridge on the same file.
+    const ownedByEditor = (docId: string, relPath: string | null): boolean =>
+      !!store &&
+      (store.suppressedDoc() === docId ||
+        (openLoserPath !== null && relPath !== null && samePathKey(relPath, openLoserPath)));
+    const ids: string[] = [];
+    for (const docId of batch) {
+      if (ownedByEditor(docId, this.registry.pathForDocId(docId))) {
+        this.deferredMerge.set(docId, scope);
+        console.info(`[sync] HTTP merge of ${docId} deferred: the note is open`);
+      } else {
+        ids.push(docId);
+      }
+    }
+    if (ids.length === 0) return;
+    const fallback = (list: readonly string[]) => {
+      for (const id of list) {
+        this.serverBehind.add(id);
+        this.divergedDocs.add(id);
+      }
+      this.startContentRunIfNeeded(scope);
+    };
+    const features = await this.serverFeatures();
+    if (!vaultId || !store || !features.has(BOOTSTRAP_ONLY)) return fallback(ids);
+
+    const pulled = new Map<string, Uint8Array>();
+    try {
+      const session = await api.createBootstrapSession(vaultId, [], ids);
+      let cursor: number | null = 0;
+      while (cursor !== null && scope.isCurrent()) {
+        const page = await api.fetchBootstrapPage(vaultId, session.sessionId, { cursor });
+        for (const d of decodeBootstrapPage(page.bytes)) {
+          pulled.set(d.docId, d.update.slice()); // pages are subarrays: copy
+        }
+        cursor = page.nextCursor;
+      }
+    } catch (e) {
+      console.warn("[sync] bootstrap `only` pull failed; per-doc fallback", e);
+      return fallback(ids);
+    }
+    if (!scope.isCurrent()) return;
+
+    const work: DocPushWork[] = [];
+    const leftovers: string[] = [];
+    for (const docId of ids) {
+      const relPath = this.registry.pathForDocId(docId);
+      if (!relPath) continue; // unmapped now (deleted / renamed away): nothing to merge into
+      if (ownedByEditor(docId, relPath)) {
+        // Opened during the pull. Merging under the editor would put a second
+        // bridge on the same path; park the id until the note closes.
+        this.deferredMerge.set(docId, scope);
+        console.info(`[sync] HTTP merge of ${docId} deferred: the note is open`);
+        continue;
+      }
+      // The fresh bridge saves the local text to `.context/trash` exactly when
+      // the server's text differs from a non-empty file (`unagreedFile`); that
+      // copy is reported as a kept-server conflict, nothing for a clean adopt.
+      const unclaim = attributeRecoveryCopies(relPath, { kind: "conflictKeptServer", docId });
+      try {
+        // Start from nothing: whatever this device built locally is not the
+        // server's history, and the file holds the text anyway. `release` is
+        // AWAITED: `drop` alone retires the old bridge in the background, and
+        // its final persist / disk-base write could land after the clear below,
+        // so the fresh bridge would hydrate the local ops next to the server's
+        // (the doubling this path exists to prevent).
+        await store.release(docId);
+        store.drop(docId); // the cached state vector etc.; the bridge is gone
+        await ipc.clearYjsDoc(docId, scope.vaultEpoch);
+        const bridge = await store.promote(docId, relPath, {
+          seedFromFile: false,
+          markRecent: false,
+          pin: true,
+        });
+        try {
+          const update = pulled.get(docId);
+          if (update && update.byteLength > 0) bridge.applyRemote(update);
+          // An id the server omitted (unreadable now) gets the file as an
+          // orphan seed only if it is really empty there — same as the uploader.
+          await mergeFileAfterPull(bridge, { ingestFromFile: true, preIngested: false });
+          await bridge.flushEgest();
+        } finally {
+          await store.demote(docId).catch(() => {});
+        }
+        work.push({ docId, relPath, serverEmpty: false });
+      } catch (e) {
+        console.warn(`[sync] HTTP merge of ${docId} failed; per-doc fallback`, e);
+        leftovers.push(docId);
+      } finally {
+        unclaim();
+      }
+    }
+    if (leftovers.length > 0) fallback(leftovers);
+    if (work.length === 0 || !scope.isCurrent()) return;
+    // A run already in flight owns the pusher slot; hand it these docs.
+    if (this.contentRunInFlight() || this.bulkPhase) {
+      return fallback(work.map((w) => w.docId));
+    }
+    const result = await this.runDocBatchPush(scope, vaultId, store, work);
+    if (!result) return fallback(work.map((w) => w.docId));
+    const notPushed = [
+      ...result.conflicts,
+      ...result.oversized.map((w) => w.docId),
+      ...result.deferred.map((w) => w.docId),
+      ...result.denied,
+      // A transient refusal or a missing answer: still unpushed (only
+      // `applied`/`skipped` mark a doc pushed), so the per-doc path retries it.
+      // Permanent refusals and the shrink brake stay where the run put them.
+      ...result.failures
+        .filter((f) => !f.permanent && f.kind !== "shrink-held")
+        .map((f) => f.docId),
+    ];
+    if (notPushed.length > 0) fallback(notPushed);
   }
 
   /**
@@ -4296,11 +4824,18 @@ export class SyncManager implements InboundHost {
       // has access to is the sidebar's lazy one. See `reconcile`.
       const primedStore = this.docStore;
       const parkMark = primedStore?.parkMark() ?? 0;
-      const { seeded } = await this.registry.reconcile({
-        organizationId: session.activeOrganizationId,
-        vaultName: vault.name,
-        seedIfEmpty: vault.seedIfEmpty,
-      });
+      this.enableReconciling = true;
+      let reconciled: { seeded: boolean };
+      try {
+        reconciled = await this.registry.reconcile({
+          organizationId: session.activeOrganizationId,
+          vaultName: vault.name,
+          seedIfEmpty: vault.seedIfEmpty,
+        });
+      } finally {
+        this.enableReconciling = false;
+      }
+      const { seeded } = reconciled;
       // The user may have switched vaults during the reconcile. Bringing sync up
       // now would start the engine for the OLD vault id while the NEW vault's
       // folder is open — exactly the state that merged two vaults.
@@ -4365,7 +4900,12 @@ export class SyncManager implements InboundHost {
         this.bulkRun = this.runBulkEngine(scope).catch((e) => {
           console.warn("[sync] bulk sync failed", e);
         });
-      } else if (this.vaultEngineLiveOnly) {
+      } else {
+        // Unreachable with a deferral in hand (the gate above is a superset of
+        // the pull's), but never leave deferred notes without a file.
+        void this.materializeDeferred();
+      }
+      if (!useBulkPath(this.registry.mappedNotes().length) && this.vaultEngineLiveOnly) {
         // The prime window sized the channel from the LOCAL doc map and put it
         // in live-only mode; the reconcile then found a vault below the
         // threshold. Nothing is going to page it down over HTTP, so give the
@@ -4475,6 +5015,11 @@ export class SyncManager implements InboundHost {
    * Scope-guarded like everything else here: a vault switch between the click
    * and the drain drops the work silently rather than pushing into the new vault.
    */
+  /** Confirmed on the server with no failure listed: a Retry has nothing to do. */
+  failureSettled(docId: string): boolean {
+    return this.registry.isPushed(docId) && this.failureGrace.isSettled(docId);
+  }
+
   async retryDoc(docId: string): Promise<void> {
     const scope = this.scope;
     if (!this.enabled || !scope || !scope.isCurrent()) return;
@@ -4561,14 +5106,39 @@ export class SyncManager implements InboundHost {
    * holds {@link bulkPhase} throughout, which is what keeps the per-doc run from
    * starting underneath it.
    */
+  /**
+   * Write the placeholders a pull deferred to the bootstrap download. Optional
+   * on the registry (test fakes omit it) and never throws: a failure here must
+   * not tear down the session or surface as an unhandled rejection.
+   */
+  private async materializeDeferred(): Promise<boolean> {
+    try {
+      return (await this.registry.materializePendingFromBootstrap?.()) ?? false;
+    } catch (e) {
+      console.warn("[sync] materializing deferred placeholders failed", e);
+      return false;
+    }
+  }
+
   private async runBulkEngine(scope: VaultScope): Promise<void> {
     const vaultId = this.registry.vaultId;
     const store = this.docStore;
     const progress = this.progress;
-    if (!vaultId || !store || !progress) return;
+    if (!vaultId || !store || !progress) {
+      // No download will run: write the placeholders a pull deferred to it.
+      await this.materializeDeferred();
+      return;
+    }
     this.bulkPhase = true;
     try {
       const bootstrap = await this.runBootstrapPhase(scope, vaultId, store);
+      if (!scope.isCurrent()) return;
+      // PR4: the download created every note it delivered WITH content. What a
+      // pull deferred and the download did not deliver — chiefly the docs the
+      // server holds no state for (`emptyDocs`) — gets its 0-byte placeholder
+      // now, in batched create-only IPC, BEFORE `settleServerEmpty` probes the
+      // disk for exactly those docs.
+      if (await this.materializeDeferred()) this.onRegistryChanged?.();
       if (!scope.isCurrent()) return;
       const conflicts = new Set(bootstrap?.conflicts ?? []);
       // The server's own statement of what it holds nothing for: the bootstrap
@@ -4603,6 +5173,11 @@ export class SyncManager implements InboundHost {
       this.bootstrapRunner = null;
       this.batchPusher = null;
     }
+    if (!scope.isCurrent()) return;
+    // A failed or cancelled download, or a pull that deferred notes while the
+    // phase ran (its session's doc set was already fixed): placeholders now, so
+    // no note is left absent until the next pull. Free when nothing is pending.
+    if (await this.materializeDeferred()) this.onRegistryChanged?.();
     if (!scope.isCurrent()) return;
     // Durably record everything the phase confirmed BEFORE anything claims the
     // vault is settled: this is the resume point a kill -9 falls back to.
@@ -4857,6 +5432,7 @@ export class SyncManager implements InboundHost {
         fileText.length === 0 &&
         (this.unhydratedPlaceholders.has(docId) ||
           this.registry.isUnhydratedPlaceholder?.(docId)),
+      markAcked: (docId, sv) => this.registry.recordAck?.(docId, sv),
       markPushed: (docId) => {
         this.registry.markPushed(docId);
         this.unhydratedPlaceholders.delete(docId);
@@ -5025,6 +5601,7 @@ export class SyncManager implements InboundHost {
       // …and it goes FIRST. Those notes have nothing at all on the server, so if
       // the run is cut short they are the work that had to happen.
       priority: (docId) => this.serverEmpty.has(docId),
+      markAcked: (docId, sv) => this.registry.recordAck?.(docId, sv),
       markPushed: (docId) => {
         this.registry.markPushed(docId);
         this.unhydratedPlaceholders.delete(docId);
@@ -5306,15 +5883,19 @@ export class SyncManager implements InboundHost {
     const seen = new Set(content.map((f) => f.docId));
     // The bulk engine's failures, before the per-doc uploader's: a doc in both
     // is listed once, and the bulk verdict is the more recent one.
+    const now = Date.now();
     for (const f of this.bulkFailures.values()) {
       if (this.invalidatedFailures.has(f.docId)) continue;
       if (seen.has(f.docId)) continue;
+      // A later push confirmed it, or automatic retries are still running.
+      if (!this.failureGrace.visible(f, now)) continue;
       seen.add(f.docId);
       content.push(f);
     }
     for (const f of this.uploader?.failedDocs() ?? []) {
       if (this.invalidatedFailures.has(f.docId)) continue;
       if (seen.has(f.docId)) continue;
+      if (!this.failureGrace.visible(f, now)) continue;
       // A doc sitting in the local-change queue is being pushed again right now
       // (an external write, or the Health page's Retry). The failure still in the
       // PREVIOUS run's uploader describes an attempt that has been superseded, so
@@ -5338,7 +5919,7 @@ export class SyncManager implements InboundHost {
       });
     }
     // A live bulk delete waiting for the user (#221): one row per note, so
-    // Health lists exactly what the banner's two answers act on.
+    // the diagnostics list exactly what the banner's two answers act on.
     for (const d of this.deleteDecision ?? []) {
       if (listed.has(d.relPath.toLowerCase())) continue;
       registry.push({
@@ -5453,6 +6034,8 @@ export class SyncManager implements InboundHost {
     this.deleteDecisionIds = new Set();
     this.closedChangesChecked = false;
     this.closedChangesNotice = false;
+    this.closedEditsScanned = false;
+    this.settleLocalDrainWaiters();
     this.emitStructureNotice();
     // The next vault starts un-live: its own reconcile + channel decide.
     this.liveSince = null;
@@ -5470,6 +6053,7 @@ export class SyncManager implements InboundHost {
     this.emptyEverywhere.clear();
     this.permanentFailures.clear();
     this.invalidatedFailures.clear();
+    this.failureGrace.clear();
     this.unhydratedPlaceholders.clear();
     this.emptyProbe = null; // a probe still in flight sees a stale scope and drops
     // The bulk run before the engine it borrows from: `stop()` makes every pool
@@ -5786,6 +6370,28 @@ export class SyncManager implements InboundHost {
         this.registry.markPushed(docId);
         this.serverEmpty.delete(docId);
       },
+      // A doc whose placeholder the pull deferred: its first content frame
+      // creates the file WITH the text, create-only, through the bootstrap
+      // apply. One owed watcher echo (`markMaterialized`), like a placeholder.
+      createDeferred: async (docId, path, update) => {
+        if (!scope.isCurrent()) return null;
+        const sv = await createDeferredWithContent(
+          {
+            deferredPathFor: (id) => this.registry.deferredPathFor?.(id) ?? null,
+            applyBatch: (entries) => ipc.applyBootstrapBatch(entries, scope.vaultEpoch),
+            markMaterialized: (relPath) => this.registry.markMaterialized(relPath),
+            markPushed: (id) => {
+              this.registry.markPushed(id);
+              this.serverEmpty.delete(id);
+            },
+          },
+          docId,
+          path,
+          update,
+        );
+        if (sv && scope.isCurrent()) this.onRegistryChanged?.();
+        return sv;
+      },
     });
     this.docStore = store;
     // Skip the server's cold backfill when the bulk engine is going to page the
@@ -5803,11 +6409,31 @@ export class SyncManager implements InboundHost {
     // this layer is built to avoid.
     if (this.currentDocId) store.setSuppressedDoc(this.currentDocId);
     // Read-only pushes the server dropped: keep the edit, once per doc per minute.
+    // …and rebase the doc onto the server once, so the stray ops stop repeating.
     const readOnlyRejections = new ReadOnlyRejections({
       pathOf: (docId) => this.registry.pathForDocId(docId),
       localText: (docId) => this.localText(docId),
       writeTrashCopy: (path, stamp, content) =>
         ipc.writeTrashCopy(path, stamp, content, scope.vaultEpoch),
+      readFile: (path) => ipc.readNote(path, scope.vaultEpoch),
+      serverState: (docId) => this.pullServerState(docId, scope),
+      replaceLocal: (docId, path, update, text) =>
+        this.replaceWithServerState(docId, path, update, text, scope),
+      isOpen: (docId) =>
+        this.currentDocId === docId || this.docStore?.suppressedDoc() === docId,
+    });
+    this.readOnlyRejections = readOnlyRejections;
+    // A read-only doc's file never enters its CRDT; a differing file is kept
+    // as a quiet recovery copy (once per doc per session) before the doc's
+    // text is written back over it.
+    setReadOnlyCopyKeeper(async (docId, path, text) => {
+      if (!scope.isCurrent()) return false;
+      if (this.readOnlyCopied.has(docId) || text.trim().length === 0) return true;
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const dest = await ipc.writeTrashCopy(path, stamp, text, scope.vaultEpoch);
+      this.readOnlyCopied.add(docId);
+      console.info(`[sync] ${path} is read-only for you; the file's differing text is at ${dest}`);
+      return true;
     });
     this.vaultEngine = new VaultSyncEngine({
       api,
@@ -5824,6 +6450,9 @@ export class SyncManager implements InboundHost {
         // clear it so the sidebar doesn't show ghosts (the engine re-announces
         // everyone on the next `synced`).
         if (s !== "synced") this.clearVaultPresence();
+        // Nothing more is coming over a dropped channel: deferred small
+        // arrivals get their placeholders now.
+        if (s !== "synced" && this.vaultStatus === "synced") this.deferredArrivalFlush.flushNow();
         this.vaultStatus = s;
         this.emitStatus();
         this.onVaultStatus?.(s);
@@ -5936,6 +6565,7 @@ export class SyncManager implements InboundHost {
   }
 
   private stopVaultEngine(): void {
+    this.deferredArrivalFlush.cancel();
     this.vaultEngine?.stop();
     this.vaultEngine = null;
     this.vaultEngineId = null;
@@ -6126,9 +6756,13 @@ export class SyncManager implements InboundHost {
           filename: input.filename,
           docId: input.docId,
           baseSha: input.baseSha,
+          ...(input.register ? { register: input.register } : {}),
         }),
+      // A one-step upload's complete names the `files` row it created.
       completeUpload: (completeUrl, body) =>
-        api.completeBlob(completeUrl, body).then(() => undefined),
+        api.completeBlob(completeUrl, body).then((r) => ({ file: r?.file })),
+      // One-step file upload (`files-with-bytes`), from the cached `/health`.
+      filesWithBytes: async () => (await this.serverFeatures()).has(FILES_WITH_BYTES),
       requestParts: (partsUrl, partNumbers) => api.requestBlobParts(partsUrl, partNumbers),
       putFile: (input) =>
         ipc.uploadAttachment(
@@ -6318,6 +6952,7 @@ export class SyncManager implements InboundHost {
     });
     this.current = sync;
     this.currentDocId = mapping.docId;
+    this.currentRelPath = relPath;
     // Take over the indicator from the vault channel right away with the
     // provider's initial status (it fires again as the socket progresses).
     this.docStatus = sync.status;
@@ -6495,6 +7130,7 @@ export class SyncManager implements InboundHost {
       this.current.destroy();
       this.current = null;
       this.currentDocId = null;
+      this.currentRelPath = null;
       // The closed note can't have outstanding local edits anymore — clear any
       // lingering "Saving…" so the next note starts clean.
       this.onPending?.(false);
@@ -6508,6 +7144,96 @@ export class SyncManager implements InboundHost {
     }
     // The note is no longer open — let the background feed resume syncing it.
     this.docStore?.setSuppressedDoc(null);
+    // A one-step merge (or an adopt loser's release) parked behind this note
+    // runs now. `httpMergeOnce` awaits `store.release`, which waits out the
+    // `holdUntil(closing)` above, so the editor's final egest lands first.
+    const scope = this.scope;
+    if (scope?.isCurrent() && (this.deferredMerge.size > 0 || this.pendingLoserRelease.size > 0)) {
+      this.requeueDeferredMerges();
+      void this.runHttpMerge(scope).catch((e) => console.warn("[sync] HTTP merge failed", e));
+    }
+    // A read-only note whose rejected ops had to wait for its editor: rebase it
+    // now (`replaceWithServerState` awaits `store.release`, i.e. the close).
+    if (closedDoc && scope?.isCurrent() && this.readOnlyRejections) {
+      void this.readOnlyRejections.closed(closedDoc);
+    }
+  }
+
+  /**
+   * The server's full state for one doc, over the bootstrap `only` pull. Null
+   * when it cannot say (old server, offline, the doc is not readable).
+   */
+  private async pullServerState(
+    docId: string,
+    scope: VaultScope,
+  ): Promise<{ update: Uint8Array; text: string } | null> {
+    const vaultId = this.registry.vaultId;
+    if (!vaultId || !scope.isCurrent()) return null;
+    const features = await this.serverFeatures();
+    if (!features.has(BOOTSTRAP_ONLY)) return null;
+    let update: Uint8Array | null = null;
+    const session = await api.createBootstrapSession(vaultId, [], [docId]);
+    let cursor: number | null = 0;
+    while (cursor !== null && scope.isCurrent()) {
+      const page = await api.fetchBootstrapPage(vaultId, session.sessionId, { cursor });
+      for (const d of decodeBootstrapPage(page.bytes)) {
+        if (d.docId === docId) update = d.update.slice(); // pages are subarrays: copy
+      }
+      cursor = page.nextCursor;
+    }
+    if (!update || update.byteLength === 0 || !scope.isCurrent()) return null;
+    const doc = new Y.Doc();
+    try {
+      Y.applyUpdate(doc, update);
+      return { update, text: doc.getText("content").toString() };
+    } finally {
+      doc.destroy();
+    }
+  }
+
+  /**
+   * Rebase a read-only doc onto the server: the same steps as the one-step
+   * merge (`httpMergeOnce`) without a file merge. Waits out a content run (its
+   * pinned bridge may be this doc), never runs under the editor.
+   */
+  private async replaceWithServerState(
+    docId: string,
+    relPath: string,
+    update: Uint8Array,
+    text: string,
+    scope: VaultScope,
+  ): Promise<void> {
+    const store = this.docStore;
+    if (!store || !scope.isCurrent()) throw new Error("vault changed");
+    for (let i = 0; i < 120 && (this.contentRunInFlight() || this.bulkPhase); i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (!scope.isCurrent()) throw new Error("vault changed");
+    }
+    if (store.suppressedDoc() === docId) throw new Error("the note is open");
+    // `release` is AWAITED: a retiring bridge's last persist must not land
+    // after the clear, or the fresh bridge would hydrate the stray ops again.
+    await store.release(docId);
+    store.drop(docId);
+    await ipc.clearYjsDoc(docId, scope.vaultEpoch);
+    // The file first, with the doc id: Rust records it as the disk base, so the
+    // fresh bridge sees file == base and the next launch sees no drift.
+    await ipc.writeNote(relPath, text, scope.vaultEpoch, docId);
+    const bridge = await store.promote(docId, relPath, {
+      seedFromFile: false,
+      markRecent: false,
+      pin: true,
+    });
+    try {
+      bridge.applyRemote(update);
+      bridge.abandonPull(true);
+      await bridge.flushEgest();
+    } finally {
+      await store.demote(docId).catch(() => {});
+    }
+    // The server's copy IS the content: nothing is left to send.
+    this.registry.markPushed(docId);
+    this.divergedDocs.delete(docId);
+    this.serverBehind.delete(docId);
   }
 
   /**

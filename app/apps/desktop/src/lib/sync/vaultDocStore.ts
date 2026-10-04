@@ -100,6 +100,12 @@ export interface VaultDocStoreOptions {
    * had already handed us over one socket apiece.
    */
   onConverged?: (docId: string) => void;
+  /**
+   * A cold apply for a doc whose placeholder the registry DEFERRED: create the
+   * file with this content in one create-only write and return the new state
+   * vector, or null to take the ordinary cold-apply path (`deferredArrival.ts`).
+   */
+  createDeferred?: (docId: string, path: string, update: Uint8Array) => Promise<Uint8Array | null>;
   /** Durable manifest. Defaults to {@link nullManifestStore}. */
   manifest?: ManifestStore;
   /** Injected in tests. */
@@ -129,6 +135,7 @@ export class VaultDocStore implements DocUpdateSink {
   private readonly resolvePath: (docId: string) => string | null;
   private readonly onExternalMerge?: (docId: string) => void;
   private readonly onConverged?: (docId: string) => void;
+  private readonly createDeferred?: VaultDocStoreOptions["createDeferred"];
   private readonly hotCap: number;
   private readonly manifest: ManifestStore;
   private readonly setT: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
@@ -177,6 +184,7 @@ export class VaultDocStore implements DocUpdateSink {
     this.resolvePath = opts.resolvePath;
     this.onExternalMerge = opts.onExternalMerge;
     this.onConverged = opts.onConverged;
+    this.createDeferred = opts.createDeferred;
     this.hotCap = opts.hotCap ?? HOT_DOC_CAP;
     this.manifest = opts.manifest ?? nullManifestStore;
     this.now = opts.now ?? (() => Date.now());
@@ -640,6 +648,16 @@ export class VaultDocStore implements DocUpdateSink {
       // on the lost base. Park it until the pull settles — see `settleParked`.
       this.park(docId, update);
       return;
+    }
+    // A deferred small arrival: its first content creates the file WITH the
+    // text, so no 0-byte placeholder ever shows. Anything the helper declines
+    // (an increment, a file that appeared meanwhile, local CRDT) merges below.
+    if (this.createDeferred) {
+      const sv = await this.createDeferred(docId, path, update);
+      if (sv) {
+        this.rememberSv(docId, sv);
+        return;
+      }
     }
     // Transient bridge: hydrate from local CRDT, apply the delta, write, persist,
     // evict. seedFromFile:false — the server feed is the source for background docs.

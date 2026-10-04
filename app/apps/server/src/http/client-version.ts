@@ -36,6 +36,14 @@ import type { MiddlewareHandler } from "hono";
  * can flip it and a self-host sees exactly what it configured:
  *  - `MIN_CLIENT_VERSION` — `x.y.z`; default {@link DEFAULT_MIN_CLIENT_VERSION}.
  *    `0` or `off` disables the version floor.
+ *  - `MIN_CLIENT_VERSION_GRACE_MINUTES` — default 60; `0` disables. For this
+ *    long after the process boots, a RAISED floor only refuses clients below
+ *    the hard safety floor {@link DEFAULT_MIN_CLIENT_VERSION}. The server
+ *    deploys in minutes but the desktop release (four serial platform builds)
+ *    takes far longer, so a floor raised in the same deploy as the release it
+ *    needs would lock every running app out with nothing to update to. The
+ *    rule is still: raise the floor at least one release AFTER the build it
+ *    needs; the grace only keeps a mistake from stranding the fleet.
  *  - `UNVERSIONED_CLIENTS` — what a request with NO version header gets:
  *    `allow` (default) or `refuse`. A header that is present but unparsable is
  *    treated as missing.
@@ -94,9 +102,19 @@ export interface ClientVersionPolicy {
   min: Version | null;
   minRaw: string | null;
   allowUnversioned: boolean;
+  /** Until this epoch ms, only the hard floor is enforced (see the grace note). */
+  graceUntil: number;
 }
 
-export function clientVersionPolicy(env: NodeJS.ProcessEnv = process.env): ClientVersionPolicy {
+/** When this process started; the floor grace counts from here. */
+const BOOTED_AT = Date.now();
+
+const DEFAULT_GRACE_MINUTES = 60;
+
+export function clientVersionPolicy(
+  env: NodeJS.ProcessEnv = process.env,
+  bootedAt: number = BOOTED_AT,
+): ClientVersionPolicy {
   const rawMin = (env.MIN_CLIENT_VERSION ?? "").trim();
   let min: Version | null;
   let minRaw: string | null;
@@ -115,8 +133,20 @@ export function clientVersionPolicy(env: NodeJS.ProcessEnv = process.env): Clien
   if (unversioned !== "" && unversioned !== "allow" && unversioned !== "refuse") {
     throw new Error(`UNVERSIONED_CLIENTS must be "allow" or "refuse" (got "${unversioned}")`);
   }
-  return { min, minRaw, allowUnversioned: unversioned !== "refuse" };
+  const rawGrace = (env.MIN_CLIENT_VERSION_GRACE_MINUTES ?? "").trim();
+  const graceMinutes = rawGrace === "" ? DEFAULT_GRACE_MINUTES : Number(rawGrace);
+  if (!Number.isFinite(graceMinutes) || graceMinutes < 0) {
+    throw new Error(`MIN_CLIENT_VERSION_GRACE_MINUTES must be a number of minutes (got "${rawGrace}")`);
+  }
+  return {
+    min,
+    minRaw,
+    allowUnversioned: unversioned !== "refuse",
+    graceUntil: bootedAt + graceMinutes * 60_000,
+  };
 }
+
+const HARD_FLOOR = parseClientVersion(DEFAULT_MIN_CLIENT_VERSION) as Version;
 
 export type ClientVersionVerdict =
   | { ok: true }
@@ -126,6 +156,7 @@ export type ClientVersionVerdict =
 export function judgeClientVersion(
   header: string | null | undefined,
   policy: ClientVersionPolicy = clientVersionPolicy(),
+  now: number = Date.now(),
 ): ClientVersionVerdict {
   const v = parseClientVersion(header);
   if (!v) {
@@ -133,6 +164,9 @@ export function judgeClientVersion(
     return { ok: false, reason: "missing", minVersion: policy.minRaw };
   }
   if (policy.min && below(v, policy.min)) {
+    // Inside the post-deploy grace a raised floor waits for its release to
+    // publish; the hard safety floor never waits.
+    if (now < policy.graceUntil && !below(v, HARD_FLOOR)) return { ok: true };
     return { ok: false, reason: "below_minimum", minVersion: policy.minRaw };
   }
   return { ok: true };

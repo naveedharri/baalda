@@ -3,33 +3,41 @@ import { Banner } from "./Banner";
 import { useStore } from "../store";
 import { reconcileReport, type ReconcileItem } from "../lib/sync/reconcileReport";
 import { summarizeReconcile } from "../lib/reconcileSummary";
+import { isReadOnlyRejection } from "../lib/sync/readOnlyRejections";
 import { pendingItems, reviewItems, reviewKey } from "./reviewModel";
 import { useReviewState } from "./ReviewTab";
-import { openReviewTab } from "./recoveryActions";
 import { useReviewPersistence } from "./useReviewPersistence";
+import { useNoticeSlot } from "./useNoticeSlot";
 
 /** A burst of records (one reconnect reconciles many notes) settles into ONE
  *  banner instead of re-rendering a growing one per note. */
 export const RECONCILE_BANNER_DEBOUNCE_MS = 600;
 
-/** How many report items the user has already dismissed this session. Module
- *  state on purpose: the banner remounting (a vault switch re-renders the
- *  chrome) must not re-announce what was dismissed. */
-let dismissedUpTo = 0;
+/** The report items the user has already dismissed this session, by identity
+ *  (the report can drop items when access comes back, so an index would shift).
+ *  Module state on purpose: the banner remounting (a vault switch re-renders
+ *  the chrome) must not re-announce what was dismissed. */
+const dismissed = new WeakSet<ReconcileItem>();
 
 /** What the banner announces: this session's new items only. Items seeded from
  *  the saved review were announced the session they happened in; raising them
- *  again on every launch and vault switch is what made the banner unkillable. */
-const announce = (all: readonly ReconcileItem[]) => all.slice(dismissedUpTo).filter((it) => !it.seeded);
+ *  again on every launch and vault switch is what made the banner unkillable.
+ *  A rejected read-only edit was already told once by a transient toast; it
+ *  stays in Activity but never raises this persistent bar. */
+const announce = (all: readonly ReconcileItem[]) =>
+  all.filter((it) => !it.seeded && !dismissed.has(it) && !isReadOnlyRejection(it));
+
+/** The user removed their own access: their copy is noted, nothing to review. */
+const isQuiet = (it: ReconcileItem) => it.kind === "selfRevoked";
 
 
 /**
  * What sync did on the user's behalf when it reconnected: a note put back, a
  * teammate's delete that sent offline edits to Trash, a clash rename. One line
  * per kind, one banner at a time. Dismiss drains the report; anything recorded
- * later raises the banner again with only the new items. Compare opens the
- * review tab WITHOUT draining: the banner stays while anything is pending, and
- * only Dismiss hides it for this session.
+ * later raises the banner again with only the new items. Details opens the
+ * Activity panel, where the review lives; only Dismiss hides the banner for
+ * this session.
  */
 export function ReconcileBanner() {
   useReviewPersistence();
@@ -37,7 +45,6 @@ export function ReconcileBanner() {
   useEffect(() => {
     let timer: number | undefined;
     const unsubscribe = reconcileReport.subscribe((all) => {
-      if (all.length < dismissedUpTo) dismissedUpTo = 0;
       window.clearTimeout(timer);
       timer = window.setTimeout(
         () => setItems(announce(all)),
@@ -58,15 +65,18 @@ export function ReconcileBanner() {
     [items, resolved],
   );
   const lines = useMemo(() => summarizeReconcile(unresolved), [unresolved]);
-  const reviewable = useMemo(() => reviewItems(items), [items]);
+  // A self-made revocation still lists its copy in Activity, but it is not a
+  // "change to review": the user did it a moment ago, on purpose.
+  const reviewable = useMemo(() => reviewItems(items.filter((it) => !isQuiet(it))), [items]);
   const pendingReview = pendingItems(reviewable, resolved).length;
+  const quiet = lines.length > 0 && lines.every((l) => l.kind === "selfRevoked") && pendingReview === 0;
   // Notices (restored notes, kept folders) are never reviewable: a launch with
-  // only notices shows its sentences with Details/Dismiss and no Compare.
+  // only notices shows its sentences with no review count.
   const allResolved = reviewable.length > 0 && pendingReview === 0;
 
   const dismiss = () => {
     reconcileReport.drain();
-    dismissedUpTo = reconcileReport.items().length;
+    for (const it of reconcileReport.items()) dismissed.add(it);
     setItems([]);
   };
 
@@ -77,11 +87,17 @@ export function ReconcileBanner() {
     dismiss();
   };
 
+  // Shares the one notice slot (second after a held delete) and fades like
+  // Dismiss after 20 s; every item stays in Activity ("Review changes (N)").
+  const visible = useNoticeSlot("reconcile", lines.length > 0 || pendingReview > 0 || allResolved, {
+    onFade: dismiss,
+  });
+
   return (
     <Banner
-      show={lines.length > 0 || pendingReview > 0 || allResolved}
+      show={visible}
       role="status"
-      className="reconcile-banner"
+      className={quiet ? "reconcile-banner reconcile-banner--quiet" : "reconcile-banner"}
     >
       <span className="reconcile-banner-lines">
         {allResolved && <span className="reconcile-banner-line">All resolved.</span>}
@@ -97,9 +113,6 @@ export function ReconcileBanner() {
         ))}
       </span>
       <div className="banner-actions">
-        {pendingReview > 0 && (
-          <button onClick={openReviewTab}>{`Compare (${pendingReview.toLocaleString()})`}</button>
-        )}
         <button onClick={details}>Details</button>
         <button className="secondary" onClick={dismiss}>
           Dismiss

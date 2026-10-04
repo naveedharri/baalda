@@ -396,6 +396,39 @@ describe("planInbound — deletes", () => {
     ]);
   });
 
+  it("leaves a NEW note that took a deleted note's path alone, releasing only the dead claim", () => {
+    // Delete "Untitled.md" (d-old), then ⌘N makes a new "Untitled.md" (d-new,
+    // empty, registered). The baseline still says d-old → Untitled.md. This used
+    // to stub the path: the new note was deleted as a zero-byte stub, re-created
+    // by materialize, and reported as a delete that "didn't reach the server".
+    const p = plan({
+      baseline: new Map([
+        ["d-old", "Untitled.md"],
+        ["d-new", "Untitled.md"],
+      ]),
+      server: new Map([["d-new", "Untitled.md"]]),
+      local: new Map([["d-new", "Untitled.md"]]),
+      tombstones: new Set(["d-old"]),
+    });
+    expect(p.stubs).toEqual([]);
+    expect(p.trash).toEqual([]);
+    expect([...p.suppress]).toEqual([]);
+    expect(p.releaseClaims).toEqual(["d-old"]);
+  });
+
+  it("still stubs a dead note's path held under an identity the server does not list", () => {
+    // The legacy placeholder case the stub branch exists for: same path, a fresh
+    // local index id, nothing live on the server owning it.
+    const p = plan({
+      baseline: new Map([["d-old", "Untitled.md"]]),
+      local: new Map([["idx-1", "Untitled.md"]]),
+      tombstones: new Set(["d-old"]),
+    });
+    expect(p.stubs).toEqual(["Untitled.md"]);
+    expect([...p.suppress]).toEqual(["Untitled.md"]);
+    expect(p.releaseClaims).toEqual([]);
+  });
+
   it("suppresses nothing for an un-baselined local note whose id is NOT tombstoned", () => {
     const p = plan({
       local: new Map([["d2", "new.md"]]),

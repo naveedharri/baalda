@@ -1,9 +1,13 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
+import { BackendBehindNotice } from "./components/BackendBehindNotice";
 import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
 import { ReconcileBanner } from "./components/ReconcileBanner";
+import { HeldDeleteNotice } from "./components/HeldDeleteNotice";
+import { NoteRemovedNotice } from "./components/NoteRemovedNotice";
+import { useNoticeSlot } from "./components/useNoticeSlot";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
 import { SyncPausedBannerView } from "./components/SyncPausedBanner";
 import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
@@ -39,7 +43,11 @@ import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
 import * as perf from "./lib/perf";
 import { implicatedFolders, refreshWorthy } from "./lib/tree/lazyTree";
-import { syncManager } from "./lib/sync/docSession";
+import { DISK_DELETE_GRACE_MS, syncManager } from "./lib/sync/docSession";
+import {
+  OPEN_NOTE_REMOVED_SLACK_MS,
+  scheduleOpenNoteRemovedCheck,
+} from "./lib/openNoteRemoval";
 import { routesToAttachmentSync } from "./lib/sync/attachments";
 import {
   backgroundUpdateCheck,
@@ -50,7 +58,8 @@ import {
   justUpdatedTo,
   launchUpdateGate,
   RELEASES_PAGE_URL,
-  scheduleHintedUpdateCheck,
+  onServerReleaseHint,
+  UPDATE_POLL_MS,
   serverRequiresUpdate,
   useUpdateState,
 } from "./lib/updater";
@@ -71,6 +80,8 @@ import { requestOpenVault, useStore } from "./store";
 import { clearPendingNoteLink } from "./lib/noteLinkFlow";
 import { prefetchAfterPaint } from "./lib/prefetch";
 import { revealWindowOnce } from "./lib/windowReveal";
+import { authManager } from "./lib/auth/authManager";
+import { createMemberPicturesLoader } from "./lib/memberPictures";
 
 /* Lazy chunks. Each of these is either a rare deliberate action (the graph),
    a modal (settings, auth), or big enough that the first paint should not wait
@@ -88,12 +99,6 @@ const AuthDialog = lazy(() =>
   import("./components/AuthDialog").then((m) => ({ default: m.AuthDialog })),
 );
 
-/** How often a running app re-checks for a new release (it also checks at
- *  launch). The check is one cheap GET of the release's static `latest.json`
- *  off GitHub's CDN; 15 minutes keeps a long-running app reasonably current
- *  without pinging GitHub all day. */
-const UPDATE_POLL_MS = 15 * 60 * 1000;
-
 /**
  * The file behind the open note vanished from disk (Finder, `rm`, a script, an
  * AI tidying the vault).
@@ -110,8 +115,10 @@ function RemovedBanner() {
   // Latched when the file vanished, not read live: propagating the delete drops
   // the note's mapping, which would otherwise re-word the banner mid-sentence.
   const synced = useStore((s) => s.noteRemovedSynced);
+  // A pending choice (Close note): holds the slot until answered, never fades.
+  const visible = useNoticeSlot("removed-on-disk", !!noteRemoved && !!openNote);
   return (
-    <Banner show={!!noteRemoved && !!openNote}>
+    <Banner show={visible}>
       <span>
         <strong>{openNote ? noteLabel(openNote.path) : ""}</strong> was deleted on disk
         {synced ? " and permanently removed for the team." : "."}
@@ -128,36 +135,6 @@ function RemovedBanner() {
           }}
         >
           Close note
-        </button>
-      </div>
-    </Banner>
-  );
-}
-
-/**
- * A teammate (or an AI) deleted the note that was open, and we applied it here.
- *
- * Separate from `RemovedBanner`: that one means "the file vanished from under us"
- * and can only offer to close the note. This one knows the server confirmed a
- * deliberate deletion or access removal.
- */
-function DeletedByTeammateBanner() {
-  const removed = useStore((s) => s.noteRemovedByTeammate);
-  return (
-    <Banner show={!!removed}>
-      <span>
-        {removed?.reason === "revoked" ? (
-          <>Your access to this note was removed. It is no longer on this device.</>
-        ) : (
-          <>A teammate deleted this note. It was permanently removed from this device.</>
-        )}
-      </span>
-      <div className="banner-actions">
-        <button
-          className="primary"
-          onClick={() => useStore.setState({ noteRemovedByTeammate: null })}
-        >
-          Dismiss
         </button>
       </div>
     </Banner>
@@ -195,11 +172,12 @@ function NotSyncingBanner() {
     folderIsSynced,
     noteOpen,
   });
+  // Not transient: this strip IS the fact that sync is off (#145).
+  const visible = useNoticeSlot("not-syncing", reason != null);
   return (
     <NotSyncingBannerView
-      reason={reason}
+      reason={visible ? reason : null}
       onSignIn={() => useStore.getState().setAuthPrompt("sign-in")}
-      onOpenHealth={() => useStore.getState().requestSettings("health")}
     />
   );
 }
@@ -218,13 +196,16 @@ function SyncPausedBanner() {
     const id = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(id);
   }, [pause]);
+  const dismiss = () => useStore.getState().dismissSyncPause();
+  const visible = useNoticeSlot("sync-paused", pause != null && dismissed !== pause.since, {
+    onFade: dismiss,
+  });
   return (
     <SyncPausedBannerView
-      pause={pause}
+      pause={visible ? pause : null}
       dismissed={dismissed}
       now={now}
-      onDismiss={() => useStore.getState().dismissSyncPause()}
-      onOpenHealth={() => useStore.getState().requestSettings("health")}
+      onDismiss={dismiss}
     />
   );
 }
@@ -261,9 +242,11 @@ function VaultUnsyncedBanner() {
       .catch((e) => console.warn("[vault] unsynced-stamp check failed", e));
   }, [vaultPath, authStatus, orgIds]);
 
+  // A pending choice (Keep local / Turn on sync): never fades.
+  const visible = useNoticeSlot("vault-unsynced", pending != null && pending.path === vaultPath);
   return (
     <VaultUnsyncedBannerView
-      show={pending != null && pending.path === vaultPath}
+      show={visible}
       onKeepLocal={() => useStore.getState().keepUnsyncedVaultLocal()}
       onTurnOnSync={() => useStore.getState().resyncUnsyncedVault()}
     />
@@ -290,9 +273,11 @@ function NoteLimitBanner() {
     runToken,
     dismissedRunToken,
   });
+  // A pending choice (Upgrade): never fades.
+  const visible = useNoticeSlot("note-limit", show);
   return (
     <NoteLimitBannerView
-      show={show}
+      show={visible}
       onUpgrade={() => useStore.getState().requestSettings("billing")}
       onDismiss={() => setDismissedRunToken(runToken)}
     />
@@ -315,11 +300,12 @@ function CreateRefusalBanner() {
     runToken,
     dismissedRunToken,
   });
+  const dismiss = () => setDismissedRunToken(runToken);
+  const visible = useNoticeSlot("create-refusal", text != null, { onFade: dismiss });
   return (
     <CreateRefusalBannerView
-      text={text}
-      onShow={() => useStore.getState().requestSettings("health")}
-      onDismiss={() => setDismissedRunToken(runToken)}
+      text={visible ? text : null}
+      onDismiss={dismiss}
     />
   );
 }
@@ -347,9 +333,11 @@ function VaultRootMissingBanner() {
       setBusy(false);
     }
   };
+  // A pending choice (Restore here / Locate folder…): never fades.
+  const visible = useNoticeSlot("root-missing", missing);
   return (
     <VaultFolderMissingBannerView
-      show={missing}
+      show={visible}
       synced={synced}
       busy={busy}
       onRestore={run(() => useStore.getState().restoreVaultFolder())}
@@ -360,55 +348,22 @@ function VaultRootMissingBanner() {
 }
 
 /**
- * Many notes were removed from the vault folder at once with the app open
- * (#221). Past the blast-radius cap the change is held instead of undone:
- * nothing is deleted for the team and nothing is put back until one of these
- * two answers. Everything else keeps syncing meanwhile.
- */
-function BulkDeleteBanner() {
-  const pending = useStore((s) => s.structureNotice.pendingDelete);
-  const [busy, setBusy] = useState(false);
-  const answer = (a: "delete" | "restore") => {
-    setBusy(true);
-    void useStore
-      .getState()
-      .resolveBulkDelete(a)
-      .catch((e) => console.warn("[sync] bulk delete answer failed", e))
-      .finally(() => setBusy(false));
-  };
-  const n = pending?.count ?? 0;
-  return (
-    <Banner show={pending != null} role="alert">
-      <span>
-        You removed {n} {n === 1 ? "note" : "notes"}. Delete them for everyone, or restore them?
-      </span>
-      <div className="banner-actions">
-        <button className="primary" disabled={busy} onClick={() => answer("delete")}>
-          Delete for everyone
-        </button>
-        <button disabled={busy} onClick={() => answer("restore")}>
-          Restore
-        </button>
-      </div>
-    </Banner>
-  );
-}
-
-/**
  * Renames, moves or deletes were made while the app was closed (#221). Edits
  * were merged as always; the structure changes were not applied, and this is
  * the one place that says so. Shown once per open.
  */
 function ClosedAppChangesBanner() {
   const show = useStore((s) => s.structureNotice.closedAppChanges);
+  const dismiss = () => useStore.getState().dismissClosedAppChanges();
+  const visible = useNoticeSlot("closed-app-changes", show, { onFade: dismiss });
   return (
-    <Banner show={show} role="status">
+    <Banner show={visible} role="status">
       <span>
         Files changed while Baalda was closed. Edits were merged; renames, moves and deletes made
         while closed were not applied. Keep Baalda open when reorganising.
       </span>
       <div className="banner-actions">
-        <button onClick={() => useStore.getState().dismissClosedAppChanges()}>Dismiss</button>
+        <button onClick={dismiss}>Dismiss</button>
       </div>
     </Banner>
   );
@@ -776,6 +731,11 @@ function UpdateGate({ launchVersion = null }: { launchVersion?: string | null })
  * the content jumping. Stays until dismissed (the stash survives a quit), so
  * an update never lands completely unannounced.
  */
+/** One loader for the app's life: its memory is what spaces the requests. */
+const loadMemberPictures = createMemberPicturesLoader({
+  fetch: (orgId) => authManager.api.getMembersOverview(orgId),
+});
+
 function WhatsNewModal() {
   const [updated, setUpdated] = useState<{ version: string; notes: string[] } | null>(
     null,
@@ -934,10 +894,6 @@ function SyncIndicator({
       // A run that could not proceed carries its own remedy: one click re-pulls
       // the registry and re-runs the content pass for everything unconfirmed.
       onRetry={syncEnabled ? () => void syncManager.retrySync() : undefined}
-      // …and the first click should EXPLAIN rather than retry blindly.
-      onOpenHealth={
-        syncEnabled ? () => useStore.getState().requestSettings("health") : undefined
-      }
     />
   );
 }
@@ -1033,6 +989,13 @@ export default function App() {
   const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
   // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
   const didAutoReopenRef = useRef(false);
+  const memberPicturesSynced = useStore(
+    (s) => s.authStatus === "signed-in" && s.syncEnabled && !!s.session?.activeOrganizationId,
+  );
+  const memberPicturesServer = useStore((s) => s.serverUrl);
+  const memberPicturesUser = useStore((s) => s.session?.user.id ?? null);
+  const memberPicturesOrg = useStore((s) => s.session?.activeOrganizationId ?? null);
+  const memberPicturesVault = useStore((s) => s.vault?.path ?? null);
 
   // Reveal the window on React's FIRST commit — deliberately not on the tree
   // or on `!booting`. That first commit is the themed shell, so the user gets a
@@ -1059,6 +1022,19 @@ export default function App() {
   // the app's whole life (not gated on a vault being open) because the very
   // first thing a link may have to do is switch vaults.
   useEffect(() => listenForNoteLinks(), []);
+
+  // Teammates' picked characters for presence dots and version rows, loaded
+  // once per synced-vault open (and per account or server change) through the
+  // members overview Vault Settings already uses. Keyed on plain values only,
+  // so a vault-channel reconnect or a refreshed session object does not refetch.
+  useEffect(() => {
+    loadMemberPictures({
+      synced: memberPicturesSynced,
+      serverUrl: memberPicturesServer,
+      userId: memberPicturesUser,
+      orgId: memberPicturesOrg,
+    });
+  }, [memberPicturesSynced, memberPicturesServer, memberPicturesUser, memberPicturesOrg, memberPicturesVault]);
 
   // Auto-reopen the last vault on launch, then restore the session (spec 04 §7)
   // and enable sync. Vault first so `enableSyncForVault` (called inside initAuth)
@@ -1159,7 +1135,7 @@ export default function App() {
         setInterval(() => void backgroundUpdateCheck(), UPDATE_POLL_MS);
         // The server's release hint (#269) runs the same check early; the
         // poll above stays as the fallback for servers that never send it.
-        setUpdateHintHandler(() => scheduleHintedUpdateCheck());
+        setUpdateHintHandler((v) => void onServerReleaseHint(v));
       }
     })();
   }, []);
@@ -1258,7 +1234,19 @@ export default function App() {
           // refresh is coalesced via scheduleRefresh below.
           if (open && e.path === open.path) {
             if (e.kind === "removed") {
-              useStore.getState().setNoteRemoved(true);
+              // Never on the raw event: a rename (in-app, Finder, an AI agent,
+              // a folder move) also reports the old path as `removed`, and the
+              // banner flashed until the move was paired. Ask again once the
+              // delete drain's grace window is over, and only if the note still
+              // sits on this path and the file is still missing.
+              const path = e.path;
+              const synced = !!useStore.getState().docIdByPath[path];
+              scheduleOpenNoteRemovedCheck(path, {
+                delayMs: DISK_DELETE_GRACE_MS + OPEN_NOTE_REMOVED_SLACK_MS,
+                currentPath: () => useStore.getState().openNote?.path ?? null,
+                exists: (p) => ipc.noteExists(p, useStore.getState().vault?.epoch),
+                setRemoved: () => useStore.getState().setNoteRemoved(true, synced),
+              });
             } else {
               // Route the edit into the bridge; it debounces, drops our own echo,
               // and merges genuine external edits live into the open Y.Text.
@@ -1499,6 +1487,12 @@ export default function App() {
             <FileTree />
           </div>
           <div className="sidebar-footer">
+            {/* Capability check against `/health`: shown only when the
+                server is demonstrably older than this app (never on an
+                unreachable one). */}
+            <ErrorBoundary label="Backend status">
+              <BackendBehindNotice />
+            </ErrorBoundary>
             {/* Boundary so a crash here degrades to a visible fallback instead of
                 silently emptying the corner — the identity bar must never just
                 vanish. */}
@@ -1587,25 +1581,29 @@ export default function App() {
               </button>
             </div>
           </header>
-          <VaultUnsyncedBanner />
-          <VaultRootMissingBanner />
-          <BulkDeleteBanner />
-          <ClosedAppChangesBanner />
+          {/* ONE notice slot (lib/noticeSlot.ts): each of these claims it and
+              only the highest-priority claim shows — held delete, then the
+              reconcile summary, then the open note's removal, then the rest in
+              this order. Informational ones fade after 20 s. */}
+          <HeldDeleteNotice />
           <SilentBoundary label="Reconcile banner">
             <ReconcileBanner />
           </SilentBoundary>
+          <NoteRemovedNotice />
+          <VaultUnsyncedBanner />
+          <VaultRootMissingBanner />
+          <ClosedAppChangesBanner />
           <NotSyncingBanner />
           <SyncPausedBanner />
           <NoteLimitBanner />
           <CreateRefusalBanner />
           <RemovedBanner />
-          <DeletedByTeammateBanner />
           {attachmentLocalOnly && <AttachmentSyncNotice />}
           <div className="editor-wrap">
             {activeVirtual && <VirtualTabHost tab={activeVirtual} />}
             {/* Stays MOUNTED under a virtual tab (display toggles, the tree does
-                not), so the note's live editor is still there for Compare's
-                right side and for "Replace current note". */}
+                not), so the note's live editor is still there for the
+                review's current side and for "Replace current note". */}
             <div className="editor-slot" style={{ display: activeVirtual ? "none" : "contents" }}>
             {openNote ? (
               <Suspense

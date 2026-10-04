@@ -6,6 +6,7 @@ import type { DocWriter } from "../mcp/doc-writer.js";
 import { sha256Hex } from "./capture.js";
 import { isSharpShrink } from "./shrink-guard.js";
 import { gcNoteTexts, storeNoteText, VERSION_CONTENT, VERSION_TEXT_JOIN } from "./texts.js";
+import { countRegisteredWithoutState, inc } from "../metrics/sync-metrics.js";
 
 /**
  * Vault-wide checkpoints: a snapshot of the folder/note STRUCTURE (JSONB) plus
@@ -34,6 +35,37 @@ export const DAILY_CHECKPOINT_MS = 24 * 60 * 60 * 1000;
  * by checkpoints for ever.
  */
 export const CHECKPOINT_SHRINK_CARRY_MS = DAILY_CHECKPOINT_MS;
+/**
+ * Upload-in-flight window for the daily checkpoint's deferral. A note created
+ * this recently with no server content yet, a `pending` blob, or a `files` row
+ * with no ready blob means a device is mid-upload: a checkpoint taken now would
+ * be structure-only for exactly the items arriving. The check is skipped and
+ * asked again on later activity.
+ */
+export const CHECKPOINT_DEFER_MS = 120_000;
+/**
+ * The final safety net for the deferral: once a vault has been deferred this
+ * long (a stuck pending row, a note whose content never arrives), the
+ * checkpoint is taken anyway, structure-only where it must be.
+ */
+export const CHECKPOINT_MAX_DEFER_MS = 30 * 60_000;
+/** Stateless notes confirmed per deferral check (each is one `peekContent`). */
+const DEFER_PEEK_LIMIT = 20;
+/**
+ * How long after an automatic checkpoint a note's FIRST content is still added
+ * to it ("top-up"). A note the checkpoint stored structure-only had no server
+ * text at capture time; restoring it to its first content is strictly better
+ * than leaving it alone, and waiting a day for the next checkpoint is not.
+ */
+export const CHECKPOINT_TOPUP_WINDOW_MS = 60 * 60_000;
+/**
+ * Bytes one checkpoint may pin in the POSTGRES blob store (plan risk 3). A
+ * pinned Postgres blob whose row is deleted is retired into
+ * `checkpoint_blob_bytes`, so a large pinned set is real table growth; on S3 a
+ * pin only delays an object's deletion and is not capped. Files past the cap
+ * are recorded structure-only and counted in the capture log, like notes.
+ */
+export const CHECKPOINT_BLOB_MAX_POSTGRES_BYTES = 2 * 1024 * 1024 * 1024;
 
 export type CheckpointKind = "auto" | "manual";
 
@@ -138,6 +170,8 @@ export interface CaptureCheckpointOptions {
   createdBy?: string | null;
   /** Checkpoint ids the prune must not touch (a revert's target, e.g.). */
   excludeFromPrune?: string[];
+  /** Override {@link CHECKPOINT_BLOB_MAX_POSTGRES_BYTES} (tests). */
+  blobMaxPostgresBytes?: number;
   /**
    * Sweep the vault's unreferenced `note_texts` afterwards (default true). A
    * revert's own undo snapshot passes false: it runs inside the revert's long
@@ -153,8 +187,17 @@ export interface CaptureCheckpointOptions {
  */
 export async function captureCheckpoint(
   opts: CaptureCheckpointOptions,
-): Promise<{ id: string; noteCount: number; carriedPreShrink: number }> {
+): Promise<{
+  id: string;
+  noteCount: number;
+  carriedPreShrink: number;
+  /** Notes stored structure-only because the server had no content for them. */
+  structureOnly: number;
+  /** Binaries pinned (tree files + attachments). */
+  blobCount: number;
+}> {
   const { db, vaultId } = opts;
+  const startedAt = Date.now();
   const structure = await readVaultStructure(db, vaultId);
   const id = randomUUID();
   const preShrink = await recentPreShrinkTexts(
@@ -225,6 +268,8 @@ export async function captureCheckpoint(
     noteCount++;
   }
 
+  const blobs = await captureCheckpointBlobs(db, vaultId, id, opts.blobMaxPostgresBytes);
+
   if (carried.length > 0) {
     await db.query(
       `UPDATE vault_checkpoints
@@ -252,11 +297,270 @@ export async function captureCheckpoint(
     );
   }
 
+  // §8 proof metric: one summary line per capture, ids and counts only.
+  // `structureOnly` should trend to 0 once notes arrive with their content.
+  inc("checkpoint.captures");
+  inc("checkpoint.docs.text", noteCount);
+  inc("checkpoint.docs.structureOnly", emptyCount);
+  inc("checkpoint.docs.oversized", oversizedCount);
+  console.info(
+    `[checkpoint] vault=${vaultId} kind=${opts.kind} notes=${structure.notes.length} text=${noteCount} ` +
+      `structureOnly=${emptyCount} oversized=${oversizedCount} carriedPreShrink=${carried.length} ` +
+      `blobs=${blobs.pinned} ms=${Date.now() - startedAt}`,
+  );
+
   await pruneCheckpoints(db, vaultId, [id, ...(opts.excludeFromPrune ?? [])]);
   // Housekeeping: drop texts no version or checkpoint points at any more. It
   // only ever touches `note_texts`, never an inline body of an older row.
   if (opts.gcTexts !== false) await gcNoteTexts(db, vaultId);
-  return { id, noteCount, carriedPreShrink: carried.length };
+  return {
+    id,
+    noteCount,
+    carriedPreShrink: carried.length,
+    structureOnly: emptyCount,
+    blobCount: blobs.pinned,
+  };
+}
+
+/**
+ * Pin the vault's binaries in checkpoint `checkpointId`: every registered tree
+ * file with a ready blob (its newest ready row — there is one per file) and
+ * every ready `attachments/` drop. One read, one bulk insert, no byte copies.
+ * Pinned bytes outlive their `blobs` row (migration 047), so a later revert can
+ * bring a deleted or overwritten file back under its SAME `files` id.
+ */
+async function captureCheckpointBlobs(
+  db: Queryable,
+  vaultId: string,
+  checkpointId: string,
+  postgresCap = CHECKPOINT_BLOB_MAX_POSTGRES_BYTES,
+): Promise<{ pinned: number; overCap: number }> {
+  const { rows } = await db.query<{
+    file_id: string | null;
+    rel_path: string;
+    folder_id: string | null;
+    sha256: string;
+    size: string | null;
+    mime: string | null;
+    blob_id: string;
+    storage_provider: string | null;
+    storage_key: string | null;
+  }>(
+    `SELECT * FROM (
+       SELECT DISTINCT ON (f.id)
+              f.id AS file_id, f.path AS rel_path, f.folder_id, b.sha256, b.size, b.mime,
+              b.id AS blob_id, b.storage_provider, b.storage_key
+         FROM files f
+         JOIN blobs b ON b.vault_id = f.vault_id AND b.doc_id = f.id
+        WHERE f.vault_id = $1 AND b.status = 'ready' AND b.sha256 IS NOT NULL
+        ORDER BY f.id, b.created_at DESC, b.id DESC
+     ) files_part
+     UNION ALL
+     SELECT NULL AS file_id, b.rel_path, NULL AS folder_id, b.sha256, b.size, b.mime,
+            b.id AS blob_id, b.storage_provider, b.storage_key
+       FROM blobs b
+      WHERE b.vault_id = $1 AND b.doc_id IS NULL AND b.status = 'ready'
+        AND b.rel_path IS NOT NULL AND b.sha256 IS NOT NULL`,
+    [vaultId],
+  );
+  if (rows.length === 0) return { pinned: 0, overCap: 0 };
+
+  // Postgres-store bytes count toward the cap once per distinct sha: two paths
+  // with the same content retire one copy.
+  const counted = new Set<string>();
+  let postgresBytes = 0;
+  let overCap = 0;
+  const keep: typeof rows = [];
+  const seenPath = new Set<string>();
+  for (const r of rows) {
+    const pathKey = r.rel_path.toLowerCase();
+    if (seenPath.has(pathKey)) continue;
+    const provider = (r.storage_provider ?? "postgres").toLowerCase();
+    if (provider === "postgres" && !counted.has(r.sha256)) {
+      const size = Number(r.size ?? 0);
+      if (postgresBytes + size > postgresCap) {
+        overCap++;
+        continue;
+      }
+      postgresBytes += size;
+      counted.add(r.sha256);
+    }
+    seenPath.add(pathKey);
+    keep.push(r);
+  }
+
+  if (keep.length > 0) {
+    await db.query(
+      `INSERT INTO vault_checkpoint_blobs
+         (checkpoint_id, vault_id, rel_path, file_id, folder_id, sha256, size, mime,
+          blob_id, storage_provider, storage_key)
+       SELECT $1, $2, t.rel_path, t.file_id, t.folder_id, t.sha256, t.size, t.mime,
+              t.blob_id, t.storage_provider, t.storage_key
+         FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::bigint[],
+                     $8::text[], $9::text[], $10::text[], $11::text[])
+           AS t(rel_path, file_id, folder_id, sha256, size, mime, blob_id, storage_provider, storage_key)
+       ON CONFLICT (checkpoint_id, rel_path) DO NOTHING`,
+      [
+        checkpointId,
+        vaultId,
+        keep.map((r) => r.rel_path),
+        keep.map((r) => r.file_id),
+        keep.map((r) => r.folder_id),
+        keep.map((r) => r.sha256),
+        keep.map((r) => (r.size == null ? null : String(r.size))),
+        keep.map((r) => r.mime),
+        keep.map((r) => r.blob_id),
+        keep.map((r) => (r.storage_provider ?? "postgres").toLowerCase()),
+        keep.map((r) => r.storage_key),
+      ],
+    );
+  }
+  if (overCap > 0) {
+    console.warn(
+      `[checkpoints] vault ${vaultId}: ${overCap} file(s) recorded structure-only, over the ` +
+        `${postgresCap}-byte Postgres pin cap for one checkpoint`,
+    );
+  }
+  return { pinned: keep.length, overCap };
+}
+
+/**
+ * Is a device mid-upload into this vault? True when, within `windowMs`: a note
+ * was created that the server holds no content for (confirmed through the doc
+ * writer, which also sees a live in-memory doc whose updates are not stored
+ * yet), a blob is still `pending`, or a `files` row has no ready blob.
+ */
+export async function vaultUploadInFlight(
+  db: Queryable,
+  docWriter: Pick<DocWriter, "peekContent">,
+  vaultId: string,
+  windowMs = CHECKPOINT_DEFER_MS,
+): Promise<boolean> {
+  return (await uploadInFlightReason(db, docWriter, vaultId, windowMs)) !== null;
+}
+
+/** Why a checkpoint is deferred: the first in-flight upload kind found. */
+export type CheckpointDeferReason = "pending-blobs" | "files-without-bytes" | "fresh-stateless-notes";
+
+/** {@link vaultUploadInFlight}, naming WHICH upload is in flight (null = none). */
+export async function uploadInFlightReason(
+  db: Queryable,
+  docWriter: Pick<DocWriter, "peekContent">,
+  vaultId: string,
+  windowMs = CHECKPOINT_DEFER_MS,
+): Promise<CheckpointDeferReason | null> {
+  const { rows: binaries } = await db.query<{ pending: boolean; unbacked: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM blobs b
+        WHERE b.vault_id = $1 AND b.status = 'pending'
+          AND b.created_at > now() - ($2::bigint * interval '1 millisecond')
+     ) AS pending, EXISTS (
+       SELECT 1 FROM files f
+        WHERE f.vault_id = $1
+          AND f.created_at > now() - ($2::bigint * interval '1 millisecond')
+          AND NOT EXISTS (
+            SELECT 1 FROM blobs b
+             WHERE b.vault_id = f.vault_id AND b.doc_id = f.id AND b.status = 'ready'
+          )
+     ) AS unbacked`,
+    [vaultId, windowMs],
+  );
+  if (binaries[0]?.pending) return "pending-blobs";
+  if (binaries[0]?.unbacked) return "files-without-bytes";
+
+  const { rows: notes } = await db.query<{ id: string }>(
+    `SELECT n.id FROM notes n
+      WHERE n.vault_id = $1 AND n.deleted_at IS NULL AND n.confirmed_empty_at IS NULL
+        AND n.created_at > now() - ($2::bigint * interval '1 millisecond')
+        AND NOT EXISTS (SELECT 1 FROM doc_snapshots s WHERE s.doc_id = n.id)
+        AND NOT EXISTS (SELECT 1 FROM doc_updates u WHERE u.doc_id = n.id)
+      ORDER BY n.created_at DESC
+      LIMIT $3`,
+    [vaultId, windowMs, DEFER_PEEK_LIMIT],
+  );
+  for (const n of notes) {
+    if ((await docWriter.peekContent(vaultId, n.id)) == null) return "fresh-stateless-notes";
+  }
+  return null;
+}
+
+/** The newest daily checkpoint still open for top-up, and the notes it stored
+ *  structure-only. Null when there is none younger than `windowMs`. */
+export interface TopUpWindow {
+  checkpointId: string;
+  /** Epoch ms after which the checkpoint is too old to top up. */
+  expiresAt: number;
+  docIds: Set<string>;
+}
+
+export async function loadTopUpWindow(
+  db: Queryable,
+  vaultId: string,
+  opts: { windowMs?: number; now?: number } = {},
+): Promise<TopUpWindow | null> {
+  const windowMs = opts.windowMs ?? CHECKPOINT_TOPUP_WINDOW_MS;
+  const now = opts.now ?? Date.now();
+  // Daily checkpoints only: a labelled `auto` is a revert's undo snapshot, and
+  // a manual one is a moment someone chose — neither should change afterwards.
+  const { rows } = await db.query<{ id: string; created_at: Date }>(
+    `SELECT id, created_at FROM vault_checkpoints
+      WHERE vault_id = $1 AND kind = 'auto' AND label IS NULL
+      ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [vaultId],
+  );
+  const cp = rows[0];
+  if (!cp) return null;
+  const expiresAt = new Date(cp.created_at).getTime() + windowMs;
+  if (now >= expiresAt) return null;
+  const { rows: missing } = await db.query<{ id: string }>(
+    `SELECT n->>'id' AS id
+       FROM vault_checkpoints c, jsonb_array_elements(coalesce(c.structure->'notes', '[]'::jsonb)) n
+      WHERE c.id = $1
+        AND NOT EXISTS (
+          SELECT 1 FROM vault_checkpoint_docs d
+           WHERE d.checkpoint_id = c.id AND d.doc_id = n->>'id'
+        )`,
+    [cp.id],
+  );
+  return { checkpointId: cp.id, expiresAt, docIds: new Set(missing.map((r) => r.id)) };
+}
+
+/**
+ * Add the current text of `docIds` to checkpoint `checkpointId`, for the ones
+ * that have server content now. Idempotent: an existing row is left alone, and
+ * a checkpoint pruned in the meantime gets nothing. Returns the doc ids that
+ * now have a row.
+ */
+export async function topUpCheckpoint(
+  db: Queryable,
+  docWriter: Pick<DocWriter, "peekContent">,
+  vaultId: string,
+  checkpointId: string,
+  docIds: string[],
+): Promise<string[]> {
+  const done: string[] = [];
+  for (const docId of docIds) {
+    const raw = await docWriter.peekContent(vaultId, docId);
+    if (raw == null) continue;
+    const body = pgText(raw);
+    if (Buffer.byteLength(body, "utf8") > MAX_CHECKPOINT_DOC_BYTES) continue;
+    const sha = sha256Hex(body);
+    // Text first, reference second, as in `captureCheckpoint`.
+    await storeNoteText(db, { vaultId, docId, sha, content: body });
+    const { rowCount } = await db.query(
+      `INSERT INTO vault_checkpoint_docs (checkpoint_id, doc_id, sha256, content)
+       SELECT $1, $2, $3, NULL
+        WHERE EXISTS (SELECT 1 FROM vault_checkpoints WHERE id = $1 AND vault_id = $4)
+       ON CONFLICT (checkpoint_id, doc_id) DO NOTHING`,
+      [checkpointId, docId, sha, vaultId],
+    );
+    const { rows } = await db.query<{ ok: boolean }>(
+      "SELECT EXISTS (SELECT 1 FROM vault_checkpoint_docs WHERE checkpoint_id = $1 AND doc_id = $2) AS ok",
+      [checkpointId, docId],
+    );
+    if ((rowCount ?? 0) > 0 || rows[0]?.ok) done.push(docId);
+  }
+  return done;
 }
 
 /**
@@ -372,14 +676,32 @@ export async function getCheckpointSummary(
  * simultaneously at midnight. Returns null when not due or when another caller
  * holds the lock.
  */
+/** First deferral per vault, for {@link CHECKPOINT_MAX_DEFER_MS}. Process-local:
+ *  another instance keeps its own, which only ever defers less. */
+const deferredSince = new Map<string, number>();
+
+export type DailyCheckpointOutcome =
+  | { id: string; noteCount: number; structureOnly: number }
+  | { deferred: true };
+
+export function isDeferredCheckpoint(v: unknown): v is { deferred: true } {
+  return typeof v === "object" && v !== null && (v as { deferred?: unknown }).deferred === true;
+}
+
 export async function maybeDailyCheckpoint(opts: {
   vaultId: string;
   docWriter: Pick<DocWriter, "peekContent">;
   pool?: pg.Pool;
   now?: () => number;
-}): Promise<{ id: string; noteCount: number } | null> {
+  /** Override {@link CHECKPOINT_DEFER_MS} (tests). 0 disables the deferral. */
+  deferMs?: number;
+  /** Override {@link CHECKPOINT_MAX_DEFER_MS} (tests). */
+  maxDeferMs?: number;
+}): Promise<DailyCheckpointOutcome | null> {
   const pool = opts.pool ?? defaultPool;
   const now = opts.now?.() ?? Date.now();
+  const deferMs = opts.deferMs ?? CHECKPOINT_DEFER_MS;
+  const maxDeferMs = opts.maxDeferMs ?? CHECKPOINT_MAX_DEFER_MS;
 
   const due = async (db: Queryable): Promise<boolean> => {
     const { rows } = await db.query<{ at: Date | null }>(
@@ -390,7 +712,30 @@ export async function maybeDailyCheckpoint(opts: {
     return !at || now - new Date(at).getTime() >= DAILY_CHECKPOINT_MS;
   };
 
-  if (!(await due(pool))) return null;
+  if (!(await due(pool))) {
+    deferredSince.delete(opts.vaultId);
+    return null;
+  }
+
+  // Deferral: a device mid-upload would leave this checkpoint structure-only
+  // for exactly the notes and files that are arriving. Ask again on later
+  // activity; past the cap, take it anyway (structure-only where it must be).
+  if (deferMs > 0) {
+    const since = deferredSince.get(opts.vaultId);
+    const capped = since !== undefined && now - since >= maxDeferMs;
+    const reason = capped ? null : await uploadInFlightReason(pool, opts.docWriter, opts.vaultId, deferMs);
+    if (reason) {
+      if (since === undefined) deferredSince.set(opts.vaultId, now);
+      await recordDeferral(pool, opts.vaultId, reason, since === undefined ? 0 : now - since, now);
+      return { deferred: true };
+    }
+    if (capped) {
+      console.warn(
+        `[checkpoints] vault ${opts.vaultId}: uploads still in flight after ${maxDeferMs} ms of deferral; ` +
+          "taking the daily checkpoint anyway",
+      );
+    }
+  }
 
   const outcome = await withVaultCheckpointLock(
     opts.vaultId,
@@ -406,5 +751,53 @@ export async function maybeDailyCheckpoint(opts: {
     },
     pool,
   );
+  if (outcome.acquired && outcome.value) deferredSince.delete(opts.vaultId);
   return outcome.acquired ? outcome.value : null;
+}
+
+/** Notes registered longer ago than this with no CRDT count as "stateless" (§8). */
+const STATELESS_GAUGE_AGE_S = 60;
+/** At most one deferral line (and one gauge query) per vault per this long. */
+const DEFERRAL_LOG_EVERY_MS = 60_000;
+const lastDeferralLog = new Map<string, number>();
+
+/**
+ * Count a deferral and, at most once a minute per vault, log it. The
+ * fresh-stateless-notes reason is the one place the "registered without state"
+ * gauge is already the question being asked, so the gauge rides along there
+ * instead of on a scheduled job:
+ *
+ *   [checkpoint] vault=<id> deferred reason=<reason> deferredMs=N statelessOver60s=N[+]
+ */
+async function recordDeferral(
+  db: Queryable,
+  vaultId: string,
+  reason: CheckpointDeferReason,
+  deferredMs: number,
+  now: number,
+): Promise<void> {
+  inc("checkpoint.deferred");
+  inc(`checkpoint.deferred.${reason}`);
+  const last = lastDeferralLog.get(vaultId);
+  if (last !== undefined && now - last < DEFERRAL_LOG_EVERY_MS) return;
+  lastDeferralLog.set(vaultId, now);
+  let gauge = "";
+  if (reason === "fresh-stateless-notes") {
+    try {
+      const { count, capped } = await countRegisteredWithoutState(db, vaultId, STATELESS_GAUGE_AGE_S);
+      gauge = ` statelessOver${STATELESS_GAUGE_AGE_S}s=${count}${capped ? "+" : ""}`;
+    } catch {
+      // The gauge is a diagnostic; a failed probe must never block the deferral.
+      gauge = ` statelessOver${STATELESS_GAUGE_AGE_S}s=?`;
+    }
+  }
+  console.info(
+    `[checkpoint] vault=${vaultId} deferred reason=${reason} deferredMs=${deferredMs}${gauge}`,
+  );
+}
+
+/** Forget every vault's deferral clock (tests). */
+export function resetCheckpointDeferrals(): void {
+  deferredSince.clear();
+  lastDeferralLog.clear();
 }

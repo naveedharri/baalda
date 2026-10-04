@@ -7,6 +7,7 @@ import { verifyVaultToken } from "../tokens/vault-token.js";
 import { listReadableDocsInVault } from "../permissions/vault-docs.js";
 import { listEmptyDocs, loadDocDiff } from "../yjs/persistence.js";
 import { deletedNotesAmong } from "../trash/access.js";
+import { observeCount } from "../metrics/sync-metrics.js";
 import {
   parseHello,
   parsePresence,
@@ -87,6 +88,12 @@ export interface VaultChannelDeps {
    * Unbound: never held.
    */
   brakeState?: (userId: string, vaultId: string) => { until: number; count: number } | null;
+  /**
+   * Record that this member was active in this vault (Members page "last
+   * active"). Called once per authenticated hello, fire-and-forget; the
+   * implementation throttles and never throws. Unbound: nothing is recorded.
+   */
+  noteLastSeen?: (userId: string, vaultId: string) => void;
 }
 
 /** Default coalescing window for structural-change broadcasts (ms). A reconcile
@@ -143,6 +150,7 @@ export class VaultChannel {
   private readonly sendPollMs: number;
   private readonly heartbeatMs: number;
   private readonly brakeState: VaultChannelDeps["brakeState"];
+  private readonly noteLastSeen: VaultChannelDeps["noteLastSeen"];
   /** Live connections, so the shared heartbeat has something to sweep. Entries
    *  remove themselves from `cleanup()`, i.e. on close/terminate/failure. */
   private readonly connections = new Set<VaultConnection>();
@@ -174,6 +182,7 @@ export class VaultChannel {
     this.heartbeatMs = deps.heartbeatMs ?? config.vaultHeartbeatMs;
     this.registryCoalesceMs = deps.registryCoalesceMs ?? REGISTRY_COALESCE_MS;
     this.brakeState = deps.brakeState;
+    this.noteLastSeen = deps.noteLastSeen;
   }
 
   /** Fan an incremental doc update out to the vault's subscribers (any instance). */
@@ -417,6 +426,7 @@ export class VaultChannel {
       sendStallMs: this.sendStallMs,
       sendPollMs: this.sendPollMs,
       brakeState: this.brakeState,
+      noteLastSeen: this.noteLastSeen,
       onGone: (c) => this.connections.delete(c),
     });
     this.connections.add(conn);
@@ -434,6 +444,7 @@ interface ConnDeps {
   sendStallMs: number;
   sendPollMs: number;
   brakeState?: VaultChannelDeps["brakeState"];
+  noteLastSeen?: VaultChannelDeps["noteLastSeen"];
   onGone: (conn: VaultConnection) => void;
 }
 
@@ -581,6 +592,11 @@ class VaultConnection {
     }
     this.userId = claims.userId;
     this.vaultId = claims.vaultId;
+    try {
+      this.deps.noteLastSeen?.(this.userId, this.vaultId);
+    } catch {
+      // never let a "last active" stamp affect the handshake
+    }
     if (this.closed) return; // closed while verifying — don't run the ACL query
 
     try {
@@ -648,6 +664,19 @@ class VaultConnection {
     // never received. Named so the client pushes them; the feed itself cannot.
     const behind = this.behind;
     const behindTruncated = this.behindTruncated;
+    // §8 proof metric: these two numbers per connect show whether the gap
+    // between "registered" and "has content" is closing for new clients.
+    // Bucketed counters only; the per-connect line is logged when non-zero so
+    // a healthy reconnect storm adds no log volume. Ids only, never paths.
+    observeCount("ready.empty.count", empty.length);
+    if (hello.mode !== "live-only") observeCount("ready.behind.count", behind.length);
+    if (empty.length > 0 || behind.length > 0) {
+      console.info(
+        `[ready] vault=${this.vaultId} user=${this.userId} empty=${empty.length}` +
+          `${emptyTruncated ? "+" : ""} behind=${behind.length}${behindTruncated ? "+" : ""} ` +
+          `mode=${hello.mode ?? "full"}`,
+      );
+    }
     // …and the mirror image: docs this client says it HOLDS that it may no
     // longer read. Pure set arithmetic over two things already in hand (the
     // hello manifest and `this.readable`), so it costs no query.

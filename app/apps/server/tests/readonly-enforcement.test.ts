@@ -435,13 +435,15 @@ async function structuralAttempts(
 /** A fresh folder + note inside the same vault, so a SUCCEEDING op cannot pull
  *  the target out from under the next one (a rename makes the following
  *  create's path a 400, which would read as a permission pass/fail). */
-async function freshTarget(f: Fixture, tag: string): Promise<Fixture> {
-  const folder = await seedFolder(f.vault, null, tag, tag);
+async function freshTarget(f: Fixture, tag: string, author?: TestUser): Promise<Fixture> {
+  // `author` makes the folder and note that user's own — the delete rule lets a
+  // plain member delete only what they created (`canDeleteItem`).
+  const folder = await seedFolder(f.vault, null, tag, tag, author?.userId ?? null);
   return {
     ...f,
     folder,
     folderPath: tag,
-    note: await seedNote(f.vault, folder, `${tag}/Note.md`, f.owner.userId),
+    note: await seedNote(f.vault, folder, `${tag}/Note.md`, (author ?? f.owner).userId),
   };
 }
 
@@ -805,9 +807,17 @@ describe("HTTP registry: structural writes require edit, not membership", () => 
     const f = await fixture();
     await seedVaultGrant(f.orgId, "edit");
     for (const [i, op] of STRUCTURAL_OPS.entries()) {
-      const target = await freshTarget(f, `Ctl${i}`);
+      // On items the member created: deletion is limited to one's own items.
+      const target = await freshTarget(f, `Ctl${i}`, f.member);
       const status = (await op.run(f.member, target)).status;
       expect([200, 201], `${op.what} should have been allowed (got ${status})`).toContain(status);
+    }
+    // …while an owner-created note and folder still refuse a member's delete.
+    const theirs = await freshTarget(f, "CtlTheirs");
+    for (const path of [`/api/notes/${theirs.note}`, `/api/folders/${theirs.folder}`]) {
+      const res = await req(f.member, "DELETE", path);
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { code: string }).code).toBe("delete_not_creator");
     }
   });
 

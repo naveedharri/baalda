@@ -1117,8 +1117,8 @@ export async function registerFile(
 
   try {
     await ctx.db.query(
-      "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
-      [id, ctx.vaultId, resolvedFolder, storedPath],
+      "INSERT INTO files (id, vault_id, folder_id, path, created_by) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING",
+      [id, ctx.vaultId, resolvedFolder, storedPath, ctx.userId],
     );
   } catch (err) {
     // 23505 on the PATH index: a concurrent registration of the same path

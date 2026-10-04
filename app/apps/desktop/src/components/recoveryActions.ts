@@ -1,6 +1,5 @@
 /* The side-effecting half of the recovery-copy actions (the pure half is
-   `recoveryCopies.ts`): open a copy or a Trash preview read-only, open a
-   compare, restore a copy over the current note (through its live editor, so
+   `recoveryCopies.ts`): open a copy or a Trash preview read-only, restore a copy over the current note (through its live editor, so
    through the CRDT) or beside it, delete a copy. */
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
@@ -13,7 +12,7 @@ import {
   stampTime,
   type CopyRef,
 } from "./recoveryCopies";
-import { compareTabId, REVIEW_TAB_ID, textTabId, type TextSource } from "./virtualTabs";
+import { REVIEW_TAB_ID, textTabId, type TextSource } from "./virtualTabs";
 
 /** How long "Replace current note" waits for the note's editor to mount. */
 export const LIVE_VIEW_WAIT_MS = 8000;
@@ -51,29 +50,6 @@ export function openTrashPreview(docId: string, relPath: string): void {
     source,
   });
   show();
-}
-
-export function openCompare(
-  left: { label: string; source: TextSource },
-  notePath: string,
-): void {
-  const right = { label: `Current: ${noteLabel(notePath)}`, source: { type: "note", path: notePath } as TextSource };
-  useStore.getState().openVirtualTab({
-    kind: "compare",
-    id: compareTabId(left.source, right.source),
-    title: `Compare ${noteLabel(notePath)}`,
-    left,
-    right,
-  });
-  show();
-}
-
-export function compareCopy(ref: CopyRef, notePath = originalPathOf(ref.relPath), modified?: number): void {
-  openCompare({ label: copyTabTitle(ref.relPath, copyTime(ref, modified)), source: copySource(ref) }, notePath);
-}
-
-export function compareTrash(docId: string, relPath: string): void {
-  openCompare({ label: `${noteLabel(relPath)} (deleted)`, source: { type: "trash", docId } }, relPath);
 }
 
 export function ipcTrashPath(ref: CopyRef): string {
@@ -156,10 +132,7 @@ export async function deleteCopy(ref: CopyRef): Promise<void> {
   const s = useStore.getState();
   const src = copySource(ref);
   for (const t of s.virtualTabs) {
-    const uses =
-      (t.kind === "text" && t.id === textTabId(src)) ||
-      (t.kind === "compare" && t.left.source.type === "copy" && t.id === compareTabId(src, t.right.source));
-    if (uses) s.closeVirtualTab(t.id);
+    if (t.kind === "text" && t.id === textTabId(src)) s.closeVirtualTab(t.id);
   }
 }
 

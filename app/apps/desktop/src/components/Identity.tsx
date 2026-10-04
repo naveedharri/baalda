@@ -30,9 +30,8 @@ export function syncRunPercent(progress: SyncProgress | null | undefined): numbe
  * The run as the pill sees it: one that ENDED with per-note failures reads as a
  * finished run. The pill speaks two words when sync is on and connected —
  * "Syncing" and "Synced" — and a note the server refused is not news that
- * belongs on it (nor is a stuck amber "N not synced" that never resolves): the
- * Health page names each failure and its fix, reading
- * `syncManager.syncFailures()`, which this leaves untouched.
+ * belongs on it (nor is a stuck amber "N not synced" that never resolves);
+ * `syncManager.syncFailures()` is left untouched.
  *
  * An `error` run with NO failed note is kept as it is: that is the channel
  * never connecting (the download watchdog), a genuine connectivity state. So
@@ -212,9 +211,8 @@ export function syncBadgeHold(args: {
  * remedy the user will click while worried about their notes.
  *
  * Only a run that could not proceed at all (`error` with no failed note — the
- * channel never connected) offers anything. `explain` outranks `retry` whenever
- * the caller can open the Health page: the reason comes first; the retry is one
- * click further in. A run that ended with failed NOTES offers nothing — the
+ * channel never connected) offers anything: a retry of the whole sync. A run
+ * that ended with failed NOTES offers nothing — the
  * pill reads "Synced" there (see {@link pillProgress}).
  *
  * `none` covers a run still moving (the counter is the honest report) and a
@@ -230,20 +228,12 @@ export function syncBadgeAction(args: {
   /** {@link SyncProgress.pullFailing}: likewise. */
   pullFailing?: boolean;
   hasRetry: boolean;
-  hasHealth: boolean;
-}): { kind: "none" | "retry" | "explain"; cta: string; title?: string } {
-  const { running, phase, failed = 0, refused = 0, pullFailing = false, hasRetry, hasHealth } = args;
+}): { kind: "none" | "retry"; cta: string; title?: string } {
+  const { running, phase, failed = 0, refused = 0, pullFailing = false, hasRetry } = args;
   // A run that ended with failed notes reads "Synced" (see `pillProgress`) and
-  // offers nothing: the failures live on the Health page, not on the pill.
-  if (running || phase !== "error" || (failed > 0 && refused === 0 && !pullFailing) || (!hasRetry && !hasHealth)) {
+  // offers nothing: the failures are not news for the pill.
+  if (running || phase !== "error" || (failed > 0 && refused === 0 && !pullFailing) || !hasRetry) {
     return { kind: "none", cta: "" };
-  }
-  if (hasHealth) {
-    return {
-      kind: "explain",
-      cta: "See why",
-      title: "Sync didn't finish — open Health to see why",
-    };
   }
   return { kind: "retry", cta: "Sync now", title: "Click to sync now" };
 }
@@ -266,7 +256,6 @@ export function SyncBadge({
   progress,
   noteOpen,
   onRetry,
-  onOpenHealth,
   rootMissing,
   pause,
 }: {
@@ -285,12 +274,6 @@ export function SyncBadge({
   /** When set, a run that could not proceed ("Sync incomplete" / "Retrying…")
    *  renders as a button that retries the whole sync. */
   onRetry?: () => void;
-  /**
-   * Opens the Health page. When given, a run that could not proceed offers
-   * "See why" instead of "Sync now" — the reason before the remedy. Falls back
-   * to {@link onRetry} when absent.
-   */
-  onOpenHealth?: () => void;
   /** The vault folder is gone — see {@link syncBadgeHold}. */
   rootMissing?: boolean;
   /** The server's shrink brake (`store.syncPause`) — see {@link syncBadgeHold}. */
@@ -321,8 +304,7 @@ export function SyncBadge({
       ? `${progress.done} of ${progress.total} ${progress.phase === "removing" ? "items checked" : "updates"} · ${percent}%`
       : undefined;
   // A run that could not proceed is actionable when the caller gave us the
-  // action: the pill becomes a button and one click either explains (Health) or
-  // retries everything.
+  // action: the pill becomes a button and one click retries everything.
   const action = syncBadgeAction({
     running,
     phase: progress?.phase,
@@ -330,10 +312,9 @@ export function SyncBadge({
     refused: progress?.refused,
     pullFailing: progress?.pullFailing,
     hasRetry: onRetry != null,
-    hasHealth: onOpenHealth != null,
   });
   const retryable = action.kind !== "none";
-  const onAct = action.kind === "explain" ? onOpenHealth : onRetry;
+  const onAct = onRetry;
   const title = retryable ? action.title : runTitle;
   const body = (
     <>

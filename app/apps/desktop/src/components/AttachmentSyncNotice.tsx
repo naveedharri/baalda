@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useStore } from "../store";
+import { useNoticeSlot } from "./useNoticeSlot";
 import { Banner } from "./Banner";
 import { UpgradeDialog } from "./UpgradeDialog";
 
@@ -19,19 +20,15 @@ export function AttachmentLocalOnlyNoticeView({
   show,
   showUpgrade,
   onUpgrade,
-  onOpenHealth,
-  surface = "preview",
 }: {
   show: boolean;
   showUpgrade: boolean;
   onUpgrade?: () => void;
-  onOpenHealth?: () => void;
-  surface?: "preview" | "health";
 }) {
   return (
     <Banner
       show={show}
-      className={`attachment-sync-notice attachment-sync-notice-${surface}`}
+      className="attachment-sync-notice attachment-sync-notice-preview"
       role="status"
     >
       <span className="attachment-sync-icon" aria-hidden="true">
@@ -44,25 +41,16 @@ export function AttachmentLocalOnlyNoticeView({
         <strong className="attachment-sync-title">
           Standalone files require Pro to sync
         </strong>
-        {surface !== "health" && (
-          <span className="attachment-sync-body">
-            Notes and their embedded attachments still sync. Standalone files stay on
-            this device and remain available to preview locally.
-          </span>
-        )}
+        <span className="attachment-sync-body">
+          Notes and their embedded attachments still sync. Standalone files stay on
+          this device and remain available to preview locally.
+        </span>
       </span>
-      {(showUpgrade || onOpenHealth) && (
+      {showUpgrade && onUpgrade && (
         <div className="banner-actions">
-          {showUpgrade && onUpgrade && (
-            <button className="primary sm attachment-sync-cta" onClick={onUpgrade}>
-              Upgrade to Pro
-            </button>
-          )}
-          {onOpenHealth && (
-            <button className="link-btn attachment-sync-health-link" onClick={onOpenHealth}>
-              Open Health
-            </button>
-          )}
+          <button className="primary sm attachment-sync-cta" onClick={onUpgrade}>
+            Upgrade to Pro
+          </button>
         </div>
       )}
     </Banner>
@@ -70,10 +58,8 @@ export function AttachmentLocalOnlyNoticeView({
 }
 
 export function AttachmentSyncNotice({
-  surface = "preview",
   detected = true,
 }: {
-  surface?: "preview" | "health";
   /** False/unknown callers keep the notice hidden until a local attachment exists. */
   detected?: boolean;
 }) {
@@ -81,18 +67,15 @@ export function AttachmentSyncNotice({
   const billingEnabled = useStore((s) => s.billingConfig?.enabled === true);
   const [upgradeOpen, setUpgradeOpen] = useState(false);
 
+  // In the editor column it shares the one notice slot; it has a pending
+  // choice (Upgrade) or states a lasting fact, so it never fades.
+  const visible = useNoticeSlot("attachment-local-only", attachmentNoticeVisible(blocked, detected));
   return (
     <>
       <AttachmentLocalOnlyNoticeView
-        show={attachmentNoticeVisible(blocked, detected)}
+        show={visible}
         showUpgrade={billingEnabled}
         onUpgrade={() => setUpgradeOpen(true)}
-        onOpenHealth={
-          surface === "preview"
-            ? () => useStore.getState().requestSettings("health")
-            : undefined
-        }
-        surface={surface}
       />
       {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
     </>

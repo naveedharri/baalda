@@ -88,6 +88,9 @@ export interface CreateSessionInput {
   /** docIds the client already holds CRDT state for; subtracted from the
    *  download set. A resume after a crash sends what actually landed. */
   have?: string[];
+  /** When present, the session covers EXACTLY these docs (readable ones only;
+   *  the rest are silently omitted) and `have` is ignored. */
+  only?: string[];
   db?: Queryable;
 }
 
@@ -103,8 +106,17 @@ export async function createBootstrapSession(input: CreateSessionInput): Promise
   );
 
   const readable = await listReadableDocsInVault(userId, vaultId, db);
-  const have = new Set(input.have ?? []);
-  const candidates = [...readable].filter((id) => !have.has(id));
+  // `only` names exactly the docs wanted (the desktop's HTTP pull half of an
+  // adopt/conflict merge): intersected with the readable set so an id the
+  // caller cannot read, or that does not exist, is silently omitted rather
+  // than failing the request. `have` is ignored when `only` is present.
+  let candidates: string[];
+  if (input.only) {
+    candidates = [...new Set(input.only)].filter((id) => readable.has(id));
+  } else {
+    const have = new Set(input.have ?? []);
+    candidates = [...readable].filter((id) => !have.has(id));
+  }
 
   const sessionId = randomUUID();
   const expiresAt = new Date(Date.now() + config.bootstrapTtlHours * 3600_000);

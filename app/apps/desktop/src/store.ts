@@ -3,6 +3,7 @@
 // and autosave. Phase 2/3 adds auth, vault (org), and sync view-state; the
 // heavy lifting lives in lib/auth, lib/sync — the store just mirrors it for React.
 
+import { setSelfAvatarImage } from "./lib/avatarIdentity";
 import { create } from "zustand";
 import * as ipc from "./lib/ipc";
 import { bridgeManager } from "./lib/bridge";
@@ -12,6 +13,7 @@ import {
   readItemColors,
   writeItemColors,
 } from "./lib/appearance";
+import { effectiveLockForPath, lockScopesByPath } from "./lib/locks";
 import { readItemOrder, renameInOrder, writeItemOrder, type ItemOrder } from "./lib/ordering";
 import { loadedFolderPaths, mergeChildren, nodeAt, setChildrenAt } from "./lib/tree/lazyTree";
 import { applyTitlePatch } from "./lib/tree/titles";
@@ -73,9 +75,10 @@ import {
 import type { PropertiesMode } from "./lib/editor/frontmatter";
 import { renameInFolderSorts, type FolderSorts, type TreeSort } from "./lib/tree/sort";
 import type { AccountSettingsTab, SettingsTab } from "./lib/settingsTabs";
+import type { BackendStatus } from "./lib/serverFeatures";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
-import { planTurnOnSync } from "./lib/vault/turnOnSync";
+import { foreignFolderMessage, planTurnOnSync } from "./lib/vault/turnOnSync";
 import { planUnsyncStamp } from "./lib/vault/unsyncPlan";
 import { forgetTeamAccessCache } from "./lib/teamAccessCache";
 import { planOpen } from "./lib/sync/openGate";
@@ -119,7 +122,7 @@ const registerFailureToasted = new Set<string>();
 
 /** One access change the Activity feed lists (session-only). */
 export type AccessEvent =
-  | { kind: "removed"; at: number; vaultId: string | null; docId: string; path: string }
+  | { kind: "removed"; at: number; vaultId: string | null; docId: string; path: string; self?: boolean }
   | { kind: "granted"; at: number; vaultId: string | null; count: number; paths?: string[] };
 const ACCESS_EVENTS_MAX = 200;
 
@@ -184,7 +187,7 @@ interface AppStore {
    *  `openNote.path`; this list is only which tabs exist, so the two never
    *  disagree about what's on screen. Session-only, vault-scoped. */
   openTabs: string[];
-  /** Non-note tabs (recovery copy, trash preview, compare, review). See
+  /** Non-note tabs (recovery copy, trash preview, review). See
    *  `components/virtualTabs.ts`. Session-only, vault-scoped. */
   virtualTabs: VirtualTab[];
   /** The virtual tab on screen, or null when the note editor is. Opening a note
@@ -232,8 +235,8 @@ interface AppStore {
    * (#228) the open tabs close: every one of them names a file that is gone.
    */
   applyStructureNotice: (notice: StructureNotice) => void;
-  /** Answer the held bulk delete: delete for everyone, or restore. */
-  resolveBulkDelete: (answer: "delete" | "restore") => Promise<void>;
+  /** Release the held bulk delete so the pull restores the notes ("Restore now", Dismiss or fade). */
+  releaseBulkDelete: (how: "restore" | "dismiss") => Promise<void>;
   /** Hide the closed-app change notice for this open. */
   dismissClosedAppChanges: () => void;
   /** Follow an inbound rename: re-point the open note (and its descendants). */
@@ -604,6 +607,13 @@ interface AppStore {
   accountSettingsRequest: { tab: AccountSettingsTab; token: number } | null;
   requestAccountSettings: (tab: AccountSettingsTab) => void;
   /**
+   * Whether the connected server lacks features this app needs (UI mirror
+   * only; `lib/serverFeatures.ts`). Null = unknown or not checked yet, which
+   * shows nothing. Written by `BackendBehindNotice`'s health poll.
+   */
+  backendStatus: BackendStatus | null;
+  setBackendStatus: (status: BackendStatus | null) => void;
+  /**
    * "The next time this note's editor mounts, put the cursor in its inline
    * title." Set by `createNoteIn`, consumed once by `InlineTitle` on mount.
    *
@@ -634,7 +644,9 @@ interface AppStore {
    */
   openInviteLink: (url: string) => Promise<void>;
   refreshBacklinks: () => Promise<void>;
-  setNoteRemoved: (removed: boolean) => void;
+  /** `synced` overrides the latch below with a value sampled earlier (the
+   *  deferred open-note removal check samples it when the file vanished). */
+  setNoteRemoved: (removed: boolean, synced?: boolean) => void;
   closeNote: () => void;
   /** Close one tab. Closing the active one activates its right-hand neighbour
    *  (left-hand when it was last); closing the only tab clears the editor. */
@@ -1084,6 +1096,15 @@ async function peekStampedOrgId(path: string): Promise<string | null> {
  * refusal would otherwise strand the folder.
  */
 const vaultsConfirmedGone = new Set<string>();
+
+/**
+ * Why the most recent `enableSyncForVault` call refused, when the reason is
+ * one a caller should report rather than guess at. Set by the stamp guard
+ * (folder stamped for a different vault) and cleared at the start of every
+ * call, so `turnOnSyncForCurrentVault` can tell "this folder belongs to
+ * another vault" apart from a genuine connection failure.
+ */
+let lastSyncRefusal: { kind: "stamp-mismatch"; stampedOrgId: string } | null = null;
 
 async function clearVaultStamp(vault: ipc.VaultInfo, orgId: string): Promise<boolean> {
   const tombstone = JSON.stringify({
@@ -1778,8 +1799,8 @@ export const useStore = create<AppStore>((set, get) => ({
     if (notice.rootMissing && !wasMissing) get().closeAllTabs();
   },
 
-  resolveBulkDelete: async (answer) => {
-    await syncManager.resolveDeleteDecision(answer);
+  releaseBulkDelete: async (how) => {
+    await syncManager.releaseDeleteDecision(how);
   },
   dismissClosedAppChanges: () => syncManager.dismissClosedChangesNotice(),
   revealRequest: null,
@@ -1799,6 +1820,8 @@ export const useStore = create<AppStore>((set, get) => ({
   settingsDismissToken: 0,
   dismissSettings: () => set((s) => ({ settingsDismissToken: s.settingsDismissToken + 1 })),
   accountSettingsRequest: null,
+  backendStatus: null,
+  setBackendStatus: (backendStatus) => set({ backendStatus }),
   revealedPath: null,
   backlinks: [],
   titles: [],
@@ -2483,13 +2506,16 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  setNoteRemoved: (removed) =>
+  setNoteRemoved: (removed, synced) =>
     set((s) => ({
       noteRemoved: removed,
       // Latched here: the sync layer drops the note's mapping when it propagates
       // the disk delete, so `noteRemovedSynced` has to be sampled at the moment
-      // the file vanished rather than read off the map later.
-      noteRemovedSynced: removed ? !!s.docIdByPath[s.openNote?.path ?? ""] : false,
+      // the file vanished rather than read off the map later — which is why a
+      // deferred caller passes the value it sampled then.
+      noteRemovedSynced: removed
+        ? (synced ?? !!s.docIdByPath[s.openNote?.path ?? ""])
+        : false,
     })),
 
   /**
@@ -2521,13 +2547,11 @@ export const useStore = create<AppStore>((set, get) => ({
     // Epoch-pinned: this spans awaits, so a vault switch mid-rename must be
     // refused by Rust rather than applied to the other vault.
     await ipc.renamePath(oldPath, newPath, epoch);
-    // The registry rename is what keeps `doc_id` stable across the move.
-    // Skipping it forks the note into a second server-side note at the new path.
-    try {
-      await syncManager.registry.renamePath(oldPath, newPath);
-    } catch (e) {
-      console.warn("[sync] renamePath failed", oldPath, e);
-    }
+    // Re-point the open note (and tabs, order, sorts) the moment the disk move
+    // lands, BEFORE the server PATCH. The watcher reports the old path as
+    // `removed` ~150ms later; with the PATCH still in flight the open note sat
+    // on a path that no longer existed and flashed "was removed". A PATCH
+    // failure only warns and keeps the disk rename, so the order is free.
     get().setItemOrder(renameInOrder(get().itemOrder, oldPath, newPath));
     {
       const sorts = renameInFolderSorts(get().folderSorts, oldPath, newPath);
@@ -2538,6 +2562,13 @@ export const useStore = create<AppStore>((set, get) => ({
       }
     }
     get().followNoteRename(oldPath, newPath);
+    // The registry rename is what keeps `doc_id` stable across the move.
+    // Skipping it forks the note into a second server-side note at the new path.
+    try {
+      await syncManager.registry.renamePath(oldPath, newPath);
+    } catch (e) {
+      console.warn("[sync] renamePath failed", oldPath, e);
+    }
     await get().refreshTree();
     await get().refreshTitles();
     return true;
@@ -2631,6 +2662,20 @@ export const useStore = create<AppStore>((set, get) => ({
 
   initAuth: async () => {
     syncManager.setStatusListener((status) => get().setSyncStatus(status));
+    // The closed-app edits pass (#284) skips padlocked notes, read from the same
+    // lock view the editor and sidebar use, fetched fresh (a throw = push nothing).
+    syncManager.setReadOnlyPathCheck?.(async () => {
+      const vaultId = syncManager.registry.vaultId;
+      if (!vaultId) throw new Error("no vault");
+      const overlay = await authManager.api.listVaultLocks(vaultId);
+      const locks = overlay
+        .filter((s) => s.permission === "locked" || s.permission === "readonly")
+        .map((s) => (s.permission === "readonly" ? { ...s, permission: "locked" as const } : s));
+      const lifts = overlay.filter((s) => s.permission === "edit");
+      const state = get();
+      const map = lockScopesByPath(state.tree, locks, state.session?.user.id, lifts);
+      return (relPath) => effectiveLockForPath(map, relPath) != null;
+    });
     syncManager.setSyncPauseListener((pause) => set({ syncPause: pause }));
     syncManager.setVaultStatusListener((status) =>
       set(
@@ -2688,6 +2733,7 @@ export const useStore = create<AppStore>((set, get) => ({
             vaultId: syncManager.registry.vaultId ?? null,
             docId,
             path,
+            ...(syncManager.registry.isSelfRevocation(docId, path) ? { self: true } : {}),
           };
           set({ accessEvents: [...get().accessEvents, ev].slice(-ACCESS_EVENTS_MAX) });
         }
@@ -3229,15 +3275,20 @@ export const useStore = create<AppStore>((set, get) => ({
     if (plan.kind === "blocked-foreign") {
       // Creating a vault here would upload every note in this folder into a
       // fresh vault under the WRONG account — the exact duplication this plan
-      // exists to prevent. The dialog surfaces this message as-is.
-      throw new Error(
-        "This folder already belongs to a synced vault that this account can't access. " +
-          "Sign in with the account it was synced with to open it.",
-      );
+      // exists to prevent. The dialog surfaces this message as-is. The stamp
+      // carries no server URL, so the message covers both "another server" and
+      // "another account on this server".
+      throw new Error(foreignFolderMessage(plan.orgId));
     }
     if (plan.kind === "retry-active") {
       await get().enableSyncForVault();
       if (!get().syncEnabled) {
+        // The stamp guard refused: the folder belongs to another vault, which
+        // no amount of reconnecting fixes. Say so instead of blaming the network.
+        const refusal = lastSyncRefusal;
+        if (refusal?.kind === "stamp-mismatch") {
+          throw new Error(foreignFolderMessage(refusal.stampedOrgId));
+        }
         throw new Error(
           "Couldn't connect to this vault. Check your connection and try again.",
         );
@@ -3807,13 +3858,20 @@ export const useStore = create<AppStore>((set, get) => ({
     const stampedOrgId = await peekStampedOrgId(vault.path);
     // The cheap half: a folder with no stamp, or one stamped for a vault we are
     // plainly a member of, is answered locally and never touches the network.
-    // `"unknown"` here is a placeholder — the two `ok` branches don't read it.
+    // `"unknown"` here is a placeholder — the local branches don't read it, so
+    // anything but `unknown` is a final answer. That includes a stamp MISMATCH
+    // (this profile binds the folder to another vault we're in): the 404 such a
+    // stamp gets from this server proves nothing, and the turn-on-sync refusal
+    // already says what's wrong.
+    const boundOrgId =
+      Object.entries(readOrgVaults()).find(([, p]) => p === vault.path)?.[0] ?? null;
     if (
       planUnsyncStamp({
         stampedOrgId,
         knownOrgIds: get().organizations.map((o) => o.id),
         statusAnswer: "unknown",
-      }) === "ok"
+        boundOrgId,
+      }) !== "unknown"
     ) {
       if (get().vaultUnsynced) set({ vaultUnsynced: null });
       return;
@@ -3827,6 +3885,7 @@ export const useStore = create<AppStore>((set, get) => ({
       stampedOrgId: stamped,
       knownOrgIds: get().organizations.map((o) => o.id),
       statusAnswer: status.kind,
+      boundOrgId,
     });
     if (verdict === "local-only") vaultsConfirmedGone.add(stamped);
     set({
@@ -4412,6 +4471,7 @@ export const useStore = create<AppStore>((set, get) => ({
   setDocIdByPath: (map) => set({ docIdByPath: map }),
 
   enableSyncForVault: async (opts = {}) => {
+    lastSyncRefusal = null;
     const { session, vault } = get();
     // Every refusal below is an ANSWER — sync is not coming for this folder — so
     // each one releases the open gate rather than leaving the first click to
@@ -4445,6 +4505,7 @@ export const useStore = create<AppStore>((set, get) => ({
     const stamped = await peekStampedOrgId(vault.path);
     if (stale()) return;
     if (stamped && stamped !== orgId) {
+      lastSyncRefusal = { kind: "stamp-mismatch", stampedOrgId: stamped };
       set({ syncEnabled: false });
       resolveSyncGate();
       console.warn(
@@ -4566,6 +4627,26 @@ function errMsg(e: unknown): string {
 if (import.meta.hot) {
   import.meta.hot.accept(() => {
     window.location.reload();
+  });
+}
+
+// The signed-in user's picture feeds the shared avatar rule: the directory (so
+// every surface that knows only their id draws the account bar's face) and the
+// presence payload (so teammates see the picked character too). A change is
+// re-published on any live presence at once.
+{
+  let lastImage: string | null | undefined;
+  const publishSelfAvatar = (session: AppStore["session"]) => {
+    const image = session?.user.image ?? null;
+    setSelfAvatarImage(session?.user.id, image);
+    if (image === lastImage) return;
+    const first = lastImage === undefined;
+    lastImage = image;
+    if (!first && session) syncManager.setPresenceStatus(useStore.getState().activityStatus);
+  };
+  publishSelfAvatar(useStore.getState().session);
+  useStore.subscribe((s, prev) => {
+    if (s.session !== prev.session) publishSelfAvatar(s.session);
   });
 }
 

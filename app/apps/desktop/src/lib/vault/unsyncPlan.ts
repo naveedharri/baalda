@@ -21,7 +21,9 @@ export type UnsyncStatusAnswer = OrgStatus["kind"];
 export type UnsyncStampVerdict =
   /** The vault is gone from the server: offer "keep local" / "sync again". */
   | "local-only"
-  /** It exists and belongs to someone else: today's `blocked-foreign` refusal stands. */
+  /** It exists and belongs to someone else, OR this profile binds the folder to
+   *  a different vault we ARE in (the stamp is from another server): today's
+   *  `blocked-foreign` refusal stands and its message explains it. */
   | "foreign"
   /** Nothing is wrong — no stamp, or we really are a member of the stamped vault. */
   | "ok"
@@ -40,6 +42,15 @@ export interface UnsyncPlanInput {
    * needs the network.
    */
   statusAnswer: UnsyncStatusAnswer;
+  /**
+   * The vault this app profile binds the folder to (`orgVaults`, by path), or
+   * null. When it names a vault we are a member of and the stamp names another,
+   * the folder was synced somewhere else — typically a different server, whose
+   * vault ids this server 404s. A 404 then proves nothing about the vault being
+   * gone, and the banner's buttons (clear the stamp, re-upload) would cut the
+   * folder off from the server it really belongs to.
+   */
+  boundOrgId?: string | null;
 }
 
 export function planUnsyncStamp(input: UnsyncPlanInput): UnsyncStampVerdict {
@@ -49,6 +60,10 @@ export function planUnsyncStamp(input: UnsyncPlanInput): UnsyncStampVerdict {
   // the launch path for every healthy vault.
   if (!stamped) return "ok";
   if (input.knownOrgIds.includes(stamped)) return "ok";
+  // Stamp and binding disagree, and the binding is a vault we can see: this is
+  // a stamp MISMATCH, not a vanished vault. Answered locally, no network.
+  const bound = input.boundOrgId ?? null;
+  if (bound && bound !== stamped && input.knownOrgIds.includes(bound)) return "foreign";
 
   switch (input.statusAnswer) {
     case "vault-not-found":

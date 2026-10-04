@@ -19,16 +19,16 @@ import { AsyncButton } from "./AsyncButton";
 import { PathText } from "./HealthShared";
 import { RecoveryCopyActions, TrashPreviewActions, useNoteExists } from "./RecoveryCopyActions";
 import { reconcileCopyRef } from "./recoveryCopies";
-import { compareTrash, openReviewTab, openTrashPreview } from "./recoveryActions";
+import { openReviewTab, openTrashPreview } from "./recoveryActions";
 import { usePendingReviewCount } from "./ReviewTab";
 import {
   ACTIVITY_HINT,
   type ActivityRow,
   type FailedEntry,
+  retryAction,
 } from "./activityRows";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { trashErrorMessage, useActivitySnapshot } from "./activitySource";
-import { openCompare } from "./recoveryActions";
 import { noteLabel } from "../lib/notePath";
 
 /** Rows shown before "Show more", like the Health lists. */
@@ -96,7 +96,6 @@ function TrashRowActions({
             docId={item.docId}
             relPath={item.relPath}
             onPreview={openTrashPreview}
-            onCompare={compareTrash}
           />
         )}
         <AsyncButton
@@ -119,13 +118,14 @@ function TrashRowActions({
 
 function HeldRowActions({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false);
-  // Exactly the banner's handler (App.tsx BulkDeleteBanner).
-  const answer = (a: "delete" | "restore") => {
+  // Exactly the notice's handler (components/NoticeSlot.tsx): over the cap a
+  // disk delete is never sent to the team, so the only answer is to restore.
+  const restore = () => {
     setBusy(true);
     void useStore
       .getState()
-      .resolveBulkDelete(a)
-      .catch((e) => console.warn("[sync] bulk delete answer failed", e))
+      .releaseBulkDelete("restore")
+      .catch((e) => console.warn("[sync] bulk delete restore failed", e))
       .finally(() => {
         setBusy(false);
         onDone();
@@ -133,11 +133,8 @@ function HeldRowActions({ onDone }: { onDone: () => void }) {
   };
   return (
     <span className="health-missing-actions">
-      <button type="button" className="ghost-pill sm danger" disabled={busy} onClick={() => answer("delete")}>
-        Delete for everyone
-      </button>
-      <button type="button" className="ghost-pill sm" disabled={busy} onClick={() => answer("restore")}>
-        Restore
+      <button type="button" className="ghost-pill sm" disabled={busy} onClick={restore}>
+        Restore now
       </button>
     </span>
   );
@@ -153,14 +150,6 @@ function ShrunkRowActions({
   onDone: () => void;
 }) {
   const [confirm, setConfirm] = useState(false);
-  const compare = () =>
-    openCompare(
-      {
-        label: `${noteLabel(event.relPath)} before it shrank`,
-        source: { type: "version", docId: event.docId, versionId: event.versionId },
-      },
-      event.relPath,
-    );
   const restore = async () => {
     setConfirm(false);
     try {
@@ -175,9 +164,6 @@ function ShrunkRowActions({
   return (
     <>
       <span className="health-missing-actions">
-        <button type="button" className="ghost-pill sm" disabled={!online} onClick={compare}>
-          Compare
-        </button>
         <button
           type="button"
           className="ghost-pill sm"
@@ -283,7 +269,15 @@ function GrantRowActions({ paths }: { paths: readonly string[] }) {
   );
 }
 
-function FailedRowActions({ failure, onDone }: { failure: FailedEntry; onDone: () => void }) {
+function FailedRowActions({
+  failure,
+  onDone,
+  onDismiss,
+}: {
+  failure: FailedEntry;
+  onDone: () => void;
+  onDismiss: (key: string) => void;
+}) {
   const exists = useNoteExists(failure.path || null) === true;
   if (!exists && !failure.retryable) return null;
   return (
@@ -294,7 +288,13 @@ function FailedRowActions({ failure, onDone }: { failure: FailedEntry; onDone: (
         <AsyncButton
           className="ghost-pill sm"
           onClick={async () => {
-            await syncManager.retryDoc(failure.docId as string);
+            const docId = failure.docId as string;
+            // Already synced: nothing to send, the row was simply stale.
+            if (retryAction(docId, (id) => syncManager.failureSettled(id)) === "clear") {
+              onDismiss(failure.key);
+            } else {
+              await syncManager.retryDoc(docId);
+            }
             onDone();
           }}
         >
@@ -337,7 +337,7 @@ function InvitationRowActions({
             /* clipboard unavailable */
           }
         }
-        const how = copied ? "Its link is copied; share it with them." : "Share its link from Vault Settings → Members.";
+        const how = copied ? "Its link is copied; share it with them." : "Share its link from Vault Settings → Members and access.";
         toast(
           r.emailError ? `New invitation created, but the email failed: ${r.emailError} ${how}` : `New invitation created. ${how}`,
           r.emailError ? "error" : "success",
@@ -369,7 +369,7 @@ function rowMeta(row: ActivityRow, now: number): string {
     return `${by}${when} · purges on ${formatDate(row.item.purgeAfter)}`;
   }
   if (row.type === "copy") return `${when} · ${formatBytes(row.copy.bytes)}`;
-  if (row.type === "held") return "Waiting for your answer";
+  if (row.type === "held") return "Restoring on this device";
   if (row.type === "invitation") {
     const by = row.invitation.inviterName ? `sent by ${row.invitation.inviterName} · ` : "";
     return `${by}${when}`;
@@ -432,7 +432,7 @@ export function ActivityFeed() {
   const now = useNow();
   const [limit, setLimit] = useState(PAGE);
   const snap = useActivitySnapshot();
-  const { rows, schedule, updating, activeFailures } = snap;
+  const { rows, schedule, updating, activeFailures, dismissFailure } = snap;
   const pending = usePendingReviewCount();
   const trash = { online: snap.trashOnline };
   const [confirmClear, setConfirmClear] = useState(false);
@@ -522,11 +522,11 @@ export function ActivityFeed() {
                 >
                   {row.label}
                 </span>
-                {/* Text and actions share one wrapping line: the text keeps a
-                    readable minimum and the actions drop beneath it when the
-                    panel is too narrow for both, never squeezing the text. */}
+                {/* Text and actions share one line: path and time ellipsize
+                    (the full text and clock time are the row's one tooltip),
+                    the actions stay right-aligned at their natural width. */}
                 <div className="activity-row-body">
-                  <span className="activity-row-main" title={rowTitle(row)}>
+                  <span className="activity-row-main" title={`${rowTitle(row)}\n${clockTime(row.at)}`}>
                     <span className="activity-row-path">
                       {row.path ? <PathText path={row.path} /> : "text" in row ? <span>{row.text}</span> : null}
                       {row.type === "reconcile" && row.item.newPath && (
@@ -538,7 +538,7 @@ export function ActivityFeed() {
                         </>
                       )}
                     </span>
-                    <span className="activity-row-meta muted" title={clockTime(row.at)}>
+                    <span className="activity-row-meta muted">
                       {rowMeta(row, now)}
                       {row.type === "trash" && row.item.hasUnsyncedContributions && (
                         <span
@@ -563,7 +563,7 @@ export function ActivityFeed() {
                     ) : row.type === "shrunk" ? (
                       <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
                     ) : row.type === "failed" ? (
-                      activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} /> : null
+                      activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} onDismiss={dismissFailure} /> : null
                     ) : row.type === "access" ? (
                       row.event.kind === "granted" ? <GrantRowActions paths={row.event.paths ?? []} /> : null
                     ) : row.type === "invitation" ? (

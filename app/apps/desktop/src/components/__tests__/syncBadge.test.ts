@@ -169,14 +169,13 @@ describe("syncBadgeLabel with a bulk sync run", () => {
     expect(syncBadgeTone({ status: "offline", noteOpen: false, progress: failedRun })).toBe(
       "synced",
     );
-    // …and it offers no "See why" button either.
+    // …and it offers no button either.
     expect(
       syncBadgeAction({
         running: false,
         phase: failedRun.phase,
         failed: failedRun.failed,
         hasRetry: true,
-        hasHealth: true,
       }).kind,
     ).toBe("none");
     // Genuine connectivity states still win over the settled run.
@@ -309,10 +308,10 @@ describe("syncBadgeLabel with a bulk sync run", () => {
 });
 
 /** What the pill offers after a run stops. Only a run that could not proceed
- *  (the channel never connected) offers anything, and it EXPLAINS before it
- *  retries. Failed notes are the Health page's and never reach the pill. */
+ *  (the channel never connected) offers anything: a retry. Failed notes
+ *  never reach the pill. */
 describe("syncBadgeAction", () => {
-  const base = { running: false, hasRetry: true, hasHealth: true };
+  const base = { running: false, hasRetry: true };
 
   it("offers nothing for a run that ended with failed notes (the pill reads Synced)", () => {
     expect(syncBadgeAction({ ...base, phase: "error", failed: 12 })).toEqual({
@@ -321,21 +320,8 @@ describe("syncBadgeAction", () => {
     });
   });
 
-  it("offers 'See why' over 'Sync now' when the run could not proceed", () => {
+  it("offers 'Sync now' when the run could not proceed", () => {
     const a = syncBadgeAction({ ...base, phase: "error", failed: 0 });
-    expect(a.kind).toBe("explain");
-    expect(a.cta).toBe("See why");
-  });
-
-  it("still explains when the run failed without naming a single note", () => {
-    // The download watchdog: nothing individually failed, the app never reached
-    // the server. Health is still where the situation is described.
-    const a = syncBadgeAction({ ...base, phase: "error", failed: 0 });
-    expect(a.title).toBe("Sync didn't finish — open Health to see why");
-  });
-
-  it("falls back to the retry when the caller has no Health page to open", () => {
-    const a = syncBadgeAction({ ...base, hasHealth: false, phase: "error", failed: 0 });
     expect(a).toEqual({ kind: "retry", cta: "Sync now", title: "Click to sync now" });
   });
 
@@ -349,7 +335,7 @@ describe("syncBadgeAction", () => {
 
   it("offers nothing when the caller gave no action at all", () => {
     expect(
-      syncBadgeAction({ running: false, phase: "error", hasRetry: false, hasHealth: false })
+      syncBadgeAction({ running: false, phase: "error", hasRetry: false })
         .kind,
     ).toBe("none");
   });
@@ -402,8 +388,8 @@ describe("a run with held create refusals", () => {
       expect(syncBadgeLabel({ status: "synced", now, progress })).toBe("Sync incomplete");
       expect(syncBadgeTone({ status: "synced", progress })).toBe("error");
       expect(
-        syncBadgeAction({ running: false, phase: "error", failed: progress.failed, refused: 2, hasRetry: true, hasHealth: true }).kind,
-      ).toBe("explain");
+        syncBadgeAction({ running: false, phase: "error", failed: progress.failed, refused: 2, hasRetry: true }).kind,
+      ).toBe("retry");
     }
   });
 
@@ -421,7 +407,7 @@ describe("a run whose registry pull keeps failing", () => {
   const withFailed: SyncProgress = { phase: "error", done: 3, total: 3, failed: 2, pullFailing: true };
   const alone: SyncProgress = { phase: "error", done: 0, total: 0, failed: 0, pullFailing: true };
 
-  it("reads Sync incomplete and offers the Health explanation", () => {
+  it("reads Sync incomplete and offers a retry", () => {
     for (const progress of [withFailed, alone]) {
       expect(syncBadgeLabel({ status: "synced", now, progress })).toBe("Sync incomplete");
       expect(syncBadgeTone({ status: "synced", progress })).toBe("error");
@@ -432,9 +418,8 @@ describe("a run whose registry pull keeps failing", () => {
           failed: progress.failed,
           pullFailing: true,
           hasRetry: true,
-          hasHealth: true,
         }).kind,
-      ).toBe("explain");
+      ).toBe("retry");
     }
   });
 

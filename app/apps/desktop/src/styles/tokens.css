@@ -13,6 +13,9 @@
 :root {
   color-scheme: light;
 
+  /* Toasts sit above every modal/overlay layer (highest is the lightbox, 1000). */
+  --z-toast: 1100;
+
   /* Surfaces (light) */
   --bg-app: #faf9f8;            /* app background / canvas — baalda.com's beige (#fcf9f7), cooled a touch */
   --bg-surface: #ffffff;        /* cards, editor sheet, dialogs — Notion's page white */
@@ -20,8 +23,9 @@
      the old lavender-cool greys read blue against the beige. */
   --bg-subtle: #f5f4f2;         /* subtle wells, input fills */
   --bg-card: #faf9f8;           /* panel cards in settings/health — the brand beige, same as --bg-app */
-  --bg-hover: #edecea;          /* hover fills */
-  --bg-active: #e5e4e1;         /* pressed / selected fills */
+  --bg-hover: color-mix(in srgb, var(--accent-soft) 60%, transparent); /* hover fills: the one app-wide hover, a light accent tint */
+  --bg-active: var(--accent-soft-hover); /* pressed / selected fills: a deeper step of the hover tint */
+  --members-row-hover: color-mix(in srgb, var(--accent-soft) 18%, transparent); /* member table rows: lighter than --bg-hover */
 
   /* Text */
   --text-primary: #1a1a1e;
@@ -76,6 +80,16 @@
   --success-soft: #e9f6ef;
   --warning: #d98a00;
   --warning-soft: #fff4e0;
+
+  /* Access board columns (Can edit / Can view / No access): baalda.com's
+     green / yellow tints with a deeper text colour of the same hue, plus a
+     neutral grey. Each fg is >= 4.5:1 on its bg. */
+  --access-edit-bg: #e9f6ef;
+  --access-edit-fg: #2f7044;
+  --access-view-bg: #fff4e0;
+  --access-view-fg: #7a6212;
+  --access-none-bg: #f0f0f2;
+  --access-none-fg: #55555f;
 
   /* Borders */
   --border: rgba(30, 27, 24, 0.09);
@@ -230,8 +244,9 @@
   --bg-surface: #1c1c20;
   --bg-subtle: #242429;
   --bg-card: #242429;
-  --bg-hover: #2b2b31;
-  --bg-active: #35353d;
+  --bg-hover: #29273d;          /* hover: the accent at 13% over --bg-surface (solid, so contrast is checkable) */
+  --bg-active: #343156;         /* pressed / selected: the accent at 24% over --bg-surface; text-tertiary stays ≥ 4.5:1 */
+  --members-row-hover: #201f29; /* member table rows: the accent at ~4% over --bg-surface */
 
   /* Off-white body copy is comfortable over long sessions. Secondary and
      tertiary copy remain above 4.5:1 even on the lighter interaction layers. */
@@ -263,6 +278,13 @@
   --warning: #f0b429;
   --warning-soft: rgba(240, 180, 41, 0.16);
 
+  --access-edit-bg: rgba(48, 164, 108, 0.18);
+  --access-edit-fg: #74d39c;
+  --access-view-bg: rgba(240, 180, 41, 0.16);
+  --access-view-fg: #f2c45c;
+  --access-none-bg: rgba(255, 255, 255, 0.06);
+  --access-none-fg: #b6b6bf;
+
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.18);
   --focus-ring: 0 0 0 3px rgba(143, 132, 255, 0.40);
@@ -284,8 +306,9 @@
     --bg-surface: #1c1c20;
     --bg-subtle: #242429;
     --bg-card: #242429;
-    --bg-hover: #2b2b31;
-    --bg-active: #35353d;
+    --bg-hover: #29273d;          /* hover: the accent at 13% over --bg-surface (solid, so contrast is checkable) */
+    --bg-active: #343156;         /* pressed / selected: the accent at 24% over --bg-surface; text-tertiary stays ≥ 4.5:1 */
+  --members-row-hover: #201f29; /* member table rows: the accent at ~4% over --bg-surface */
 
     --text-primary: #ececf1;
     --text-secondary: #b8b8c0;
@@ -309,6 +332,13 @@
     --success-soft: rgba(48, 164, 108, 0.18);
     --warning: #f0b429;
     --warning-soft: rgba(240, 180, 41, 0.16);
+
+    --access-edit-bg: rgba(48, 164, 108, 0.18);
+    --access-edit-fg: #74d39c;
+    --access-view-bg: rgba(240, 180, 41, 0.16);
+    --access-view-fg: #f2c45c;
+    --access-none-bg: rgba(255, 255, 255, 0.06);
+    --access-none-fg: #b6b6bf;
 
     --border: rgba(255, 255, 255, 0.09);
     --border-strong: rgba(255, 255, 255, 0.18);

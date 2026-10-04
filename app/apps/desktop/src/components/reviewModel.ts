@@ -149,8 +149,10 @@ const KINDS: ReadonlySet<string> = new Set([
   "deletedByTeammate",
   "renamedConflict",
   "keptLocally",
+  "selfRevoked",
   "folderKept",
   "externalEditSaved",
+  "conflictKeptServer",
 ]);
 const RESOLUTIONS: ReadonlySet<string> = new Set(["kept", "restored", "restoredSibling", "skipped"]);
 

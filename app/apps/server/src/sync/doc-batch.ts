@@ -313,6 +313,43 @@ export async function serverDocCoversUpdate(
   });
 }
 
+/**
+ * Does the server already hold every operation in `update`?
+ *
+ * The retry answer for a registration that carried state (`notes/batch` and
+ * `POST /api/notes` with `state`): a response lost after commit makes the retry
+ * find the row AND its content already there, and a plain `expectEmpty` would
+ * then call our own earlier write a `conflict`, making the client throw away its
+ * CRDT for a pull-merge it never needed. Unlike {@link serverDocCoversUpdate}
+ * this asks ONLY the state-vector question, never text equality: a teammate who
+ * typed into the note since the first attempt does not make our ops missing.
+ *
+ * A doc with no stored state covers nothing (returns false), so an empty-note
+ * seed on a stateless row still goes through the `expectEmpty` apply. Taken
+ * under the per-doc lock, like the apply it precedes; the two are separate lock
+ * holds, which is fine because a write landing in between can only turn the
+ * following `expectEmpty` apply into a `conflict`, never into a doubled seed.
+ */
+export async function serverStateCovers(
+  vaultId: string,
+  docId: string,
+  update: Uint8Array,
+): Promise<boolean> {
+  return withDocLock(docId, async () => {
+    const submitted = Y.encodeStateVectorFromUpdate(update);
+    const live = runtime?.server.hocuspocus.documents.get(formatDocName(vaultId, docId));
+    let serverSv: Uint8Array;
+    if (live) {
+      serverSv = Y.encodeStateVector(live);
+    } else {
+      const state = await loadDocState(docId);
+      if (!state) return false;
+      serverSv = Y.encodeStateVectorFromUpdate(state);
+    }
+    return !compareStateVectors(submitted, serverSv).clientAhead;
+  });
+}
+
 /** One doc's push, already decoded and already permitted. */
 export interface DocApplyItem {
   docId: string;

@@ -40,11 +40,118 @@ export type UpdateState =
   | { phase: "ready"; version: string }
   | { phase: "uptodate" }
   | { phase: "error"; message: string }
+  /**
+   * The server knows a newer release than the feed can serve yet: the server
+   * deploys in minutes, the GitHub release (four serial platform builds, each
+   * rewriting `latest.json`) takes far longer. Not an error — Settings → About
+   * says "An update is on its way" and the check retries with backoff.
+   */
+  | { phase: "pending"; version: string }
   /** The silent path gave up (install failed twice). This raises the wall. */
   | { phase: "failed"; version: string; message: string };
 
 /** How long after a failed silent install before the one silent retry. */
 export const AUTO_RETRY_DELAY_MS = 30_000;
+
+/** How often a running app re-checks for a new release (App.tsx; it also
+ *  checks at launch). The FALLBACK trigger: the vault channel's release hint
+ *  is the primary one. One cheap GET of the release's static `latest.json`. */
+export const UPDATE_POLL_MS = 15 * 60 * 1000;
+
+/** First retry while a release is in progress; doubles, capped at the poll. */
+export const RELEASE_PENDING_FIRST_RETRY_MS = 2 * 60 * 1000;
+
+/** How long a release may stay "in progress" before we fall back to the poll. */
+export const RELEASE_PENDING_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * An updater failure that means "the release is still being published", not
+ * "something is broken": `latest.json` not uploaded yet (404, "valid release
+ * JSON"), uploaded by an earlier platform job without THIS platform's entry
+ * ("None of the fallback platforms … were found"), or a bundle that 404s
+ * because its job has not finished. A signature failure is never this.
+ */
+export function isReleaseNotReadyError(message: string): boolean {
+  if (/signature/i.test(message)) return false;
+  return /\b404\b|not found|fallback platforms|valid release json/i.test(message);
+}
+
+/** A network blip rather than a verdict about the release. */
+function isTransientCheckError(message: string): boolean {
+  if (/signature/i.test(message)) return false;
+  return (
+    isReleaseNotReadyError(message) ||
+    /error sending request|timed? ?out|connection|network|dns|unreachable|offline/i.test(message)
+  );
+}
+
+type VersionKey = [number, number, number, number, number];
+
+/** `x.y.z[-pre.N]` as a comparable key; a release outranks its pre-releases. */
+function versionKey(raw: string): VersionKey | null {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]*?(\d+))?(?:\+.*)?$/.exec(raw.trim());
+  if (!m) return null;
+  const hasPre = raw.includes("-");
+  return [Number(m[1]), Number(m[2]), Number(m[3]), hasPre ? 0 : 1, m[4] ? Number(m[4]) : 0];
+}
+
+/** Is `candidate` strictly newer than `running`? False when either is unparsable. */
+export function isNewerVersion(candidate: string, running: string): boolean {
+  const a = versionKey(candidate);
+  const b = versionKey(running);
+  if (!a || !b) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] > b[i];
+  return false;
+}
+
+/**
+ * A release the server (or the feed itself) says exists but cannot be
+ * installed yet. While set, "no update" and release-shaped errors are not
+ * errors: they park in `pending` and retry at 2, 4, 8… minutes (capped at
+ * {@link UPDATE_POLL_MS}) until {@link RELEASE_PENDING_WINDOW_MS} has passed.
+ */
+let releasePending: { version: string; since: number; attempt: number } | null = null;
+let releasePendingTimer: ReturnType<typeof setTimeout> | null = null;
+/** Set by `installUpdate` when its failure was a release still publishing. */
+let installDeferred = false;
+
+function clearReleasePending(): void {
+  releasePending = null;
+  if (releasePendingTimer) clearTimeout(releasePendingTimer);
+  releasePendingTimer = null;
+}
+
+function enterReleasePending(version: string): void {
+  if (!releasePending) releasePending = { version, since: Date.now(), attempt: 0 };
+  else if (version && isNewerVersion(version, releasePending.version)) releasePending.version = version;
+}
+
+/** Park quietly and schedule the next retry, or give up past the window. */
+function parkReleasePending(): void {
+  if (!releasePending) return;
+  if (Date.now() - releasePending.since >= RELEASE_PENDING_WINDOW_MS) {
+    // Past the window: back to the regular poll, with no error to show.
+    clearReleasePending();
+    setState({ phase: "idle" });
+    return;
+  }
+  setState({ phase: "pending", version: releasePending.version });
+  if (releasePendingTimer) return;
+  const delay = Math.min(
+    RELEASE_PENDING_FIRST_RETRY_MS * 2 ** releasePending.attempt,
+    UPDATE_POLL_MS,
+  );
+  releasePending.attempt += 1;
+  releasePendingTimer = setTimeout(() => {
+    releasePendingTimer = null;
+    void backgroundUpdateCheck();
+  }, delay);
+}
+
+/** The release we are waiting on, or null (exposed for tests). */
+export function pendingRelease(): { version: string; since: number; attempt: number } | null {
+  return releasePending ? { ...releasePending } : null;
+}
 
 let pending: Update | null = null;
 let state: UpdateState = { phase: "idle" };
@@ -105,10 +212,27 @@ export async function checkForUpdate(
       return true;
     }
     pending = null;
+    if (releasePending) {
+      // The server said a newer build exists and the feed says "nothing": the
+      // release is still being published (or a CDN is behind). Wait for it.
+      if (isNewerVersion(releasePending.version, await getVersion())) {
+        parkReleasePending();
+        return false;
+      }
+      clearReleasePending();
+    }
     setState({ phase: "uptodate" });
     return false;
   } catch (e) {
-    setState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
+    const message = e instanceof Error ? e.message : String(e);
+    if (isReleaseNotReadyError(message) || (releasePending && isTransientCheckError(message))) {
+      // A half-published release (no `latest.json` yet, or one without this
+      // platform). Never an error to show; retry until it lands.
+      enterReleasePending(releasePending?.version ?? "");
+      parkReleasePending();
+      return false;
+    }
+    setState({ phase: "error", message });
     return false;
   }
 }
@@ -194,7 +318,16 @@ export async function installUpdate(
     return true;
   } catch (e) {
     await clearRelaunchFocus();
-    setState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
+    const message = e instanceof Error ? e.message : String(e);
+    if (isReleaseNotReadyError(message)) {
+      // `latest.json` names a bundle whose platform job has not uploaded it
+      // yet (404). Nothing was installed; wait for the release to finish.
+      installDeferred = true;
+      enterReleasePending(update.version);
+      parkReleasePending();
+      return false;
+    }
+    setState({ phase: "error", message });
     return false;
   }
 }
@@ -209,7 +342,16 @@ export async function installUpdate(
 async function autoInstall(options: { waitForQuiet?: boolean } = {}): Promise<void> {
   autoAttempts += 1;
   const version = "version" in state ? state.version : "";
+  installDeferred = false;
   if (await installUpdate(options)) return;
+  if (installDeferred) {
+    // A release still publishing is not a failed install: no attempt spent,
+    // no wall. The release-pending timer runs the next check.
+    installDeferred = false;
+    autoInstalling = false;
+    autoAttempts = 0;
+    return;
+  }
   if (autoAttempts >= 2) {
     autoInstalling = false;
     setState({
@@ -415,6 +557,28 @@ export function scheduleHintedUpdateCheck(random: () => number = Math.random): v
     hintTimer = null;
     void backgroundUpdateCheck();
   }, Math.floor(random() * UPDATE_HINT_JITTER_MS));
+}
+
+/**
+ * The vault channel's `version-available` hint (#269), the PRIMARY trigger.
+ * The server learned of `version` from the release feed, so the check that
+ * follows should find it — and when it does not yet (the release is still
+ * being published, or a platform's bundle is not up), that is "an update is
+ * on its way", retried with backoff, never an error. The regular poll stays
+ * the fallback.
+ */
+export async function onServerReleaseHint(
+  version: string,
+  random: () => number = Math.random,
+): Promise<void> {
+  let running: string | null = null;
+  try {
+    running = await getVersion();
+  } catch {
+    running = null;
+  }
+  if (running && version && isNewerVersion(version, running)) enterReleasePending(version);
+  scheduleHintedUpdateCheck(random);
 }
 
 /** The running app's version (from tauri.conf.json), for display. */

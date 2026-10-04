@@ -50,12 +50,17 @@ describe("OpeningGlyph", () => {
     act(() => vi.advanceTimersByTime(SPINNER_DELAY - 1));
     expect(host.querySelector(".tree-opening-spinner")).toBeNull();
 
+    expect(host.querySelector(".tree-glyph-icon")?.hasAttribute("data-hidden")).toBe(false);
+
     act(() => vi.advanceTimersByTime(1));
     expect(host.querySelector(".tree-opening-spinner")).not.toBeNull();
     expect(host.querySelector('[data-testid="file-glyph"]')).toBe(glyph);
+    // Swapped, not overlaid: the icon is hidden in place while the spinner shows.
+    expect(host.querySelector(".tree-glyph-icon")?.hasAttribute("data-hidden")).toBe(true);
 
     render(false);
     expect(host.querySelector(".tree-opening-spinner")).toBeNull();
     expect(host.querySelector('[data-testid="file-glyph"]')).toBe(glyph);
+    expect(host.querySelector(".tree-glyph-icon")?.hasAttribute("data-hidden")).toBe(false);
   });
 });

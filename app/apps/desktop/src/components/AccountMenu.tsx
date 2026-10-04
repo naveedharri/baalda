@@ -24,6 +24,49 @@ const AuthDialogLazy = lazy(() =>
 );
 
 /**
+ * "On this device only · Turn on sync": a quick way out of a LOCAL vault from
+ * the sidebar footer, sitting directly above the identity bar. Shown only once
+ * we know the folder is local — auth resolved, sync off, and the folder's own
+ * `.context` stamp names no vault (`openFolderIsSynced === false`; null means
+ * the peek hasn't landed, and a synced vault reconciling at boot also has
+ * `syncEnabled` false for a moment, so the stamp is what keeps it from
+ * flashing there). Signed in, the button opens Vault Settings → General, whose
+ * "Turn on sync & sharing" promo does the work; signed out it raises sign-in.
+ */
+function LocalVaultSyncRow({ onTurnOnSync }: { onTurnOnSync: () => void }) {
+  const vault = useStore((s) => s.vault);
+  const authStatus = useStore((s) => s.authStatus);
+  const syncEnabled = useStore((s) => s.syncEnabled);
+  const openFolderIsSynced = useStore((s) => s.openFolderIsSynced);
+  if (!vault || authStatus === "unknown" || syncEnabled || openFolderIsSynced !== false) {
+    return null;
+  }
+  return (
+    <div className="local-sync-row">
+      <svg
+        className="local-sync-icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <rect x="5" y="5" width="14" height="10" rx="1.5" />
+        <path d="M3 19h18" />
+      </svg>
+      <span className="local-sync-label" title="This vault lives only on this computer">
+        On this device only
+      </span>
+      <button type="button" className="link-btn local-sync-btn" onClick={onTurnOnSync}>
+        Turn on sync
+      </button>
+    </div>
+  );
+}
+
+/**
  * Account & vault menu (spec 04 §2/§6/§7), redesigned as the standard
  * desktop-app identity flow: the sidebar footer is a single compact identity
  * bar (avatar + name + presence). Clicking it opens a popover menu with
@@ -174,6 +217,7 @@ export function AccountMenu() {
     // state: the name only, until the restore says who is signed in.
     return (
       <div className="account-menu" ref={rootRef}>
+        <LocalVaultSyncRow onTurnOnSync={() => setAuthOpen(true)} />
         {/* Vault switching moved to the sidebar header, leaving signing in as
             the only thing a signed-out account menu could offer — so the bar
             does it directly instead of opening a one-item menu. */}
@@ -286,6 +330,7 @@ export function AccountMenu() {
 
   return (
     <div className="account-menu" ref={rootRef}>
+      <LocalVaultSyncRow onTurnOnSync={() => useStore.getState().requestSettings("general")} />
       <div className="identity-row">
         <button
           className={`identity-bar ${open ? "open" : ""}`}
@@ -297,7 +342,7 @@ export function AccountMenu() {
           }`}
         >
           <span className="identity-avatar-wrap">
-            <LazyAvatar label={userLabel} image={session.user.image} />
+            <LazyAvatar label={userLabel} image={session.user.image} userId={session.user.id} />
             <span className={`presence-light ${presence}`} aria-label={presenceLabel} />
           </span>
           <span className="identity-meta">
@@ -461,6 +506,30 @@ function AccountPopover({
         </MenuIcon>
         <span className="menu-item-label">Account settings</span>
         <span className="menu-hint">Profile, status, theme</span>
+      </button>
+      {/* Shortcuts straight to a page of Account settings, through the same
+          request the rest of the app uses (it closes this popover too). */}
+      <button
+        className="menu-item"
+        onClick={() => useStore.getState().requestAccountSettings("appearance")}
+      >
+        <MenuIcon>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 3a9 9 0 0 0 0 18Z" fill="currentColor" stroke="none" />
+        </MenuIcon>
+        <span className="menu-item-label">Appearance</span>
+        <span className="menu-hint">Theme, colours</span>
+      </button>
+      <button
+        className="menu-item"
+        onClick={() => useStore.getState().requestAccountSettings("connection")}
+      >
+        <MenuIcon>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+        </MenuIcon>
+        <span className="menu-item-label">Connection</span>
+        <span className="menu-hint">Server URL</span>
       </button>
 
       <div className="menu-sep" />

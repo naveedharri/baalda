@@ -192,7 +192,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "get_access_default",
     description:
-      "Get what future members initially see when they join this vault. Owner/admin only.",
+      "Get what future members initially see when they join this vault (the New members row): open (Can edit) / readonly (Can view) / private (No access). Owner/admin only.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
     handler: (ctx) => getAccessDefaultTool(ctx),
@@ -200,7 +200,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "set_access_default",
     description:
-      "Set future members' initial access to content that already exists when they join. Existing members are unchanged. Owner/admin only.",
+      "Set future members' initial access to content that already exists when they join (the New members row): open (Can edit) / readonly (Can view) / private (No access). Existing members are unchanged. Owner/admin only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -214,7 +214,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "list_resource_access",
     description:
-      "List every vault member's effective access to one folder or file. Owner/admin only.",
+      "List every vault member's effective access to one folder or file, after each person's own vault level (which wins for them either way), Everyone access and locks. Owner/admin only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -236,7 +236,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "manage_access",
     description:
-      "Replace access on one or more selected folders/files, or the whole vault. Everyone clears all custom member overrides in selected subtrees; selected users changes only those users. Owner/admin only.",
+      "Replace access on one or more selected folders/files, or the whole vault. Modes: open (Can edit) / readonly (Can view) / private (No access). Everyone clears all custom member overrides in selected subtrees; selected users changes only those users. A users-audience mode on the vault resource is that person's absolute vault level (Can edit everything / Can view everything / No access): it replaces Everyone access, the owner/admin shortcut and authorship for them, and only their own folder/file grants lift a No access. Owner/admin only.",
     inputSchema: {
       type: "object",
       properties: {

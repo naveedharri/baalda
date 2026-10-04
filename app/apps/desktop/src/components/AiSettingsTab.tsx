@@ -11,7 +11,7 @@ import type { VaultCheckId } from "../lib/health/types";
 import { AssistantLocalRepair } from "./AssistantLocalRepair";
 import { UpgradeDialog } from "./UpgradeDialog";
 
-export function AiSettingsTab({ onOpenHealth, onGoToGeneral, onClose, requestedCheck }: { onOpenHealth: () => void; onGoToGeneral: () => void; onClose: () => void; requestedCheck?: CheckFocus | null }) {
+export function AiSettingsTab({ onGoToGeneral, onClose, requestedCheck }: { onGoToGeneral: () => void; onClose: () => void; requestedCheck?: CheckFocus | null }) {
   const notes = useStore(s => s.titles);
   const path = useStore(s => s.vault?.path ?? null);
   const [proposal, setProposal] = useState<string | null>(null);
@@ -62,7 +62,7 @@ export function AiSettingsTab({ onOpenHealth, onGoToGeneral, onClose, requestedC
         }
       }
       throw new Error("This finding changed. Run diagnostics again.");
-    }} brokenLinkNotes={brokenLinkNotes} diagnostics={diagnostics} onUpgrade={() => setUpgrade(true)} onOpenHealth={onOpenHealth} onGoToGeneral={onGoToGeneral} />
+    }} brokenLinkNotes={brokenLinkNotes} diagnostics={diagnostics} onUpgrade={() => setUpgrade(true)} onGoToGeneral={onGoToGeneral} />
     {focus && <div ref={tools}><button className="secondary" onClick={() => setFocus(null)}>Close finding</button><HealthView key={`${path}:${focus.id}`} mode="finding" findingId={focus.id} snapshot={snapshot} notes={notes} vaultPath={path} onGoToGeneral={onGoToGeneral} onClose={onClose} /></div>}
     {proposal && <AssistantLocalRepair key={`${path}:${proposal}`} id={proposal} snapshot={snapshot} onClose={() => setProposal(null)} />}
     {upgrade && <UpgradeDialog onClose={() => setUpgrade(false)} />}

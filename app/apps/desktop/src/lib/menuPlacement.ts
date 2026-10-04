@@ -4,7 +4,7 @@
  * The file tree's context menu was positioned at the raw anchor point with no
  * viewport check at all, so right-clicking a row near the bottom of the window
  * pushed the tail of the menu below the fold. The items that live at the tail
- * are `Share…`, `Lock for everyone` and `Delete` — i.e. the menu got *shorter*
+ * are `Share…`, `Unlock` and `Delete` — i.e. the menu got *shorter*
  * exactly where its most important action is, and a user with a note at the
  * bottom of their sidebar had no way to delete it.
  *

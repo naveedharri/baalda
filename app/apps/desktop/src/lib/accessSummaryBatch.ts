@@ -19,6 +19,14 @@ interface Pending {
   reject: (error: unknown) => void;
 }
 
+/** Rejection for a row that was cancelled before its request went out. */
+export class SummaryCancelledError extends Error {
+  constructor() {
+    super("Access summary read cancelled");
+    this.name = "SummaryCancelledError";
+  }
+}
+
 /** Rows per request; the server accepts up to 500 groups. */
 export const SUMMARY_BATCH_MAX = 200;
 /** Long enough to gather every row that mounts in one render. */
@@ -48,7 +56,7 @@ export function createAccessSummaryBatcher(
     const worker = async () => {
       while (next < items.length) {
         const item = items[next++];
-        if (item.cancelled()) continue;
+        if (item.cancelled()) { item.reject(new SummaryCancelledError()); continue; }
         try {
           item.resolve(await transport.one(item.orgId, [item.resource], item.userIds));
         } catch (error) {
@@ -75,7 +83,13 @@ export function createAccessSummaryBatcher(
 
   const flush = () => {
     scheduled = false;
-    const live = queue.filter((item) => !item.cancelled());
+    const live: Pending[] = [];
+    for (const item of queue) {
+      // A dropped row still SETTLES: a promise that never resolves left its
+      // caller waiting (and its row spinning) forever.
+      if (item.cancelled()) item.reject(new SummaryCancelledError());
+      else live.push(item);
+    }
     queue = [];
     const byScope = new Map<string, Pending[]>();
     for (const item of live) {

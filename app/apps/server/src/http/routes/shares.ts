@@ -14,6 +14,7 @@ import {
   loadAccessIndex,
   resolveAccessForUser,
   type AccessIndex,
+  personalVaultLevel,
 } from "../../permissions/resolver.js";
 import {
   indexHoldsResource,
@@ -509,12 +510,11 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     //     by `PUT /orgs/:orgId/team-access`, and accepted here so the two
     //     surfaces cannot disagree about what Private is.
     //
-    // A per-USER deny on the vault resource stays refused: nothing reads it
-    // (`isDenied` resolves folders and files), so it would be a row that looks
-    // like a block and blocks nothing.
-    if (permission === "denied" && resourceType === "vault" && principalType !== "org") {
-      return c.json({ error: "a vault-wide block applies to the team" }, 400);
-    }
+    //   - resource 'vault' + principal 'user' — that PERSON's level for the
+    //     whole vault ("person wins either way", resolver
+    //     `personalVaultLevel`). `denied` here is "No access" for them: it
+    //     replaces the posture and withdraws authorship, owners and admins
+    //     included; management stays role-based, so it can always be undone.
 
     const gate = await canManage(session.userId, resourceType, resourceId);
     if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
@@ -687,9 +687,15 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     );
 
     const posture = await vaultPostureRow(pool, org);
-    if (posture?.permission === "view") {
+    // The caller's OWN vault level replaces the posture for them (resolver
+    // `personalVaultLevel`): a personal `view` padlocks everything for this
+    // caller even in a Shared vault, a personal `edit` frees them from a
+    // Read-only one (reported as a lift below), and a personal `denied` needs
+    // nothing here — their readable set is already empty.
+    const personal = await personalVaultLevel(pool, org, session.userId);
+    if (posture?.permission === "view" || personal === "view") {
       rows.push({
-        // NOT `posture.id`. That is the live vault GRANT row, and
+        // NOT `posture.id` (nor the caller's personal row id). That is the live vault GRANT row, and
         // `DELETE /shares/:id` would happily accept it from an owner — which is
         // "Entire vault → Private", silently, from something that looked like an
         // unlock. Nothing on the client reads this id (every unlock path
@@ -701,8 +707,8 @@ export function createShareRoutes(deps: ShareDeps): Hono {
         principal_type: "org",
         principal_id: org,
         permission: "locked",
-        created_by: posture.createdBy,
-        created_at: posture.createdAt,
+        created_by: posture?.createdBy ?? null,
+        created_at: posture?.createdAt ?? null,
       });
 
       const { rows: lifts } = await pool.query(
@@ -720,6 +726,10 @@ export function createShareRoutes(deps: ShareDeps): Hono {
               OR (s.resource_type = 'file' AND s.resource_id IN
                  (SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL
                   UNION SELECT id FROM files WHERE vault_id = $1))
+              -- The caller's own vault-level edit lifts the WHOLE vault out of
+              -- a Read-only posture (never another member's row).
+              OR (s.resource_type = 'vault' AND s.resource_id = $2
+                  AND s.principal_type = 'user' AND s.principal_id = $3)
             )`,
         [vaultId, org, session.userId],
       );
@@ -764,6 +774,14 @@ export function createShareRoutes(deps: ShareDeps): Hono {
         : null;
     return c.json({
       mode: modeOf(posture?.permission),
+      // The stored posture itself, so a vault with NO org vault row (pre-reversal
+      // vaults) is distinguishable from one sealed via Private — both read
+      // `mode: "private"`.
+      posture:
+        posture?.permission === "edit" ? "edit"
+          : posture?.permission === "view" ? "view"
+            : posture?.permission === "denied" ? "sealed"
+              : "none",
       grantId: posture?.id ?? null,
       overrides: await teamOverrides(pool, orgId, gate.vaultIds ?? []),
     });

@@ -6,7 +6,6 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
   type McpToolInfo,
   type McpTokenRow,
-  type Member,
   type MyBillingVault,
   type OrgBilling,
   type UnsyncPreview,
@@ -27,30 +26,20 @@ import {
   transferTargets,
 } from "../lib/billing";
 import * as ipc from "../lib/ipc";
-import {
-  checkForUpdate,
-  currentVersion,
-  installUpdate,
-  useUpdateState,
-} from "../lib/updater";
-import { readOrgVaults, useStore, type InviteResult } from "../store";
-import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
-import { AccessPanel } from "./AccessPanel";
+import { readOrgVaults, useStore } from "../store";
+import { MembersAccessTab } from "./MembersAccessTab";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
 import { useResetLocalCopy } from "./useResetLocalCopy";
 import { RowActionsMenu } from "./RowActionsMenu";
 import { AiSettingsTab } from "./AiSettingsTab";
-import { HealthTab } from "./HealthTab";
-import { useHealthAttentionCount } from "../lib/health/useHealthAttention";
-import { canActOnMember } from "./memberRoles";
-import { RoleSelect } from "./RoleSelect";
 // Static, not via ./Face: this module is itself a lazy chunk, so it pays for
 // the avatar chunk it is already loading.
-import { Avatar } from "./Avatar";
+import { LimitNudge } from "./LimitNudge";
 import { MenuIcon } from "./MenuIcon";
 import { SettingsModal } from "./SettingsModal";
+import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
 import { ThemeToggle } from "./ThemeToggle";
 import { formatPrice, perLabel, UpgradeDialog } from "./UpgradeDialog";
@@ -72,7 +61,6 @@ import type { SettingsTab } from "../lib/settingsTabs";
 // vault, and it says so itself.
 const TEAM_TABS = new Set<SettingsTab>([
   "members",
-  "access",
   "mcp",
   "versioning",
 ]);
@@ -89,21 +77,8 @@ const GENERAL_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
   ),
 };
 
-/** Health: what is synced, what is not and why, plus the vault's own numbers.
-   Deliberately NOT a team tab — a local folder has no server to report on, but
-   the pipeline's first three stages and every analytic below still apply. */
-const HEALTH_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
-  id: "health",
-  label: "Health",
-  icon: (
-    <MenuIcon>
-      <path d="M3 12h4l2-6 4 12 2-6h6" />
-    </MenuIcon>
-  ),
-};
-
 /** The AI (Beta) page is hidden for now; flip to bring it back. Anything that
- *  asks for the "ai" tab while it is hidden lands on Health instead. */
+ *  asks for the "ai" tab while it is hidden lands on General instead. */
 const SHOW_AI_TAB = false;
 
 const AI_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
@@ -125,22 +100,12 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNo
   },
   {
     id: "members",
-    label: "Members",
+    label: "Members and access",
     icon: (
       <MenuIcon>
         <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
         <circle cx="9" cy="7" r="4" />
         <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
-      </MenuIcon>
-    ),
-  },
-  {
-    id: "access",
-    label: "Access",
-    icon: (
-      <MenuIcon>
-        <rect x="4" y="11" width="16" height="10" rx="2" />
-        <path d="M8 11V7a4 4 0 0 1 8 0v4" />
       </MenuIcon>
     ),
   },
@@ -186,16 +151,6 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNo
       </MenuIcon>
     ),
   },
-  {
-    id: "updates",
-    label: "Updates",
-    icon: (
-      <MenuIcon>
-        <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-        <path d="M21 3v5h-5" />
-      </MenuIcon>
-    ),
-  },
 ];
 
 /** The Billing tab, inserted after Members only when the server has billing on. */
@@ -232,10 +187,8 @@ export function VaultSettingsDialog({
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locals = useLocalVaults();
-  const healthAttention = useHealthAttentionCount();
 
-  const [diagnosticFocus, setDiagnosticFocus] = useState<import("./HealthChecks").CheckFocus | null>(null);
-  const visibleTab = (t: SettingsTab): SettingsTab => (!SHOW_AI_TAB && t === "ai" ? "health" : t);
+  const visibleTab = (t: SettingsTab): SettingsTab => (!SHOW_AI_TAB && t === "ai" ? "general" : t);
   const [tab, setTabRaw] = useState<SettingsTab>(visibleTab(initialTab ?? "general"));
   const setTab = (t: SettingsTab) => setTabRaw(visibleTab(t));
 
@@ -252,7 +205,7 @@ export function VaultSettingsDialog({
   // are local folders to list — that's what "View all" opens into.
   const showVaults = !!session || locals.length > 0;
   const tabs = useMemo(() => {
-    const out = SHOW_AI_TAB ? [GENERAL_TAB, HEALTH_TAB, AI_TAB] : [GENERAL_TAB, HEALTH_TAB];
+    const out = SHOW_AI_TAB ? [GENERAL_TAB, AI_TAB] : [GENERAL_TAB];
     if (showVaults) out.push(...SETTINGS_TABS);
     else out.push(...SETTINGS_TABS.filter((t) => t.id !== "vaults"));
     if (billingEnabled) {
@@ -282,7 +235,9 @@ export function VaultSettingsDialog({
           <span className="settings-eyebrow">
             {isSynced ? "Vault settings" : "Local vault"}
           </span>
-          <h1>{activeOrg?.name ?? vault?.name ?? "Vault"}</h1>
+          {/* The session's active org outlives a switch to a local folder, so
+              its name only titles the dialog while that vault is the synced one. */}
+          <h1>{(isSynced ? activeOrg?.name : null) ?? vault?.name ?? "Vault"}</h1>
         </div>
         <button className="icon-btn" onClick={onClose} aria-label="Close settings" title="Close (Esc)">
           ✕
@@ -303,15 +258,6 @@ export function VaultSettingsDialog({
               >
                 {t.icon}
                 <span className="menu-item-label">{t.id === "ai" ? "AI (Beta)" : t.label}</span>
-                {t.id === "health" && healthAttention > 0 && (
-                  <span
-                    className="nav-count"
-                    aria-label={`${healthAttention} ${healthAttention === 1 ? "item needs" : "items need"} your action`}
-                    title="Sync items that need your action"
-                  >
-                    {healthAttention > 99 ? "99+" : healthAttention}
-                  </span>
-                )}
                 {locked && (
                   <svg
                     className="nav-lock"
@@ -330,11 +276,21 @@ export function VaultSettingsDialog({
               </button>
             );
           })}
+          {session && (
+            <SettingsCrossLink
+              label="Account settings"
+              onOpen={() => {
+                onClose();
+                useStore.getState().requestAccountSettings("profile");
+              }}
+            />
+          )}
         </nav>
 
         <section className="settings-content" aria-label={activeTab.label}>
-          {/* Health sets its own title, on one row with its page actions. */}
-          {tab !== "health" && <h2 className="settings-section-title">{activeTab.label}</h2>}
+          {/* Members and access swaps its title for a back link while a profile
+              is open. */}
+          {!(tab === "members" && !lockedTab) && <h2 className="settings-section-title">{activeTab.label}</h2>}
           {tab === "general" ? (
             <GeneralTab
               isSynced={isSynced}
@@ -343,33 +299,22 @@ export function VaultSettingsDialog({
               activeOrgName={activeOrg?.name ?? null}
               onRequestSignIn={onRequestSignIn}
             />
-          ) : tab === "health" ? (
-            <HealthTab
-              onOpenDiagnostics={id => { setDiagnosticFocus(id ? { id, n: Date.now() } : null); setTab("ai"); }}
-              onRequestSignIn={onRequestSignIn}
-              onGoToGeneral={() => setTab("general")}
-              onClose={onClose}
-            />
           ) : tab === "ai" ? (
-            <AiSettingsTab onClose={onClose} requestedCheck={diagnosticFocus} onOpenHealth={() => setTab("health")} onGoToGeneral={() => setTab("general")} />
+            <AiSettingsTab onClose={onClose} onGoToGeneral={() => setTab("general")} />
           ) : lockedTab ? (
             <SyncGate label={activeTab.label} onGoToSync={() => setTab("general")} />
           ) : tab === "vaults" ? (
             <VaultsTab />
           ) : tab === "members" ? (
-            <MembersTab canManage={canManage} />
+            <MembersAccessTab canManage={canManage} onOpenTab={setTab} onCloseSettings={onClose} />
           ) : tab === "billing" ? (
             <BillingTab canManage={canManage} isSynced={isSynced} />
-          ) : tab === "access" ? (
-            <AccessPanel canManage={canManage} />
           ) : tab === "mcp" ? (
             <McpTab />
           ) : tab === "versioning" ? (
             <VersioningTab canManage={canManage} />
           ) : tab === "import-export" ? (
             <ImportExportTab />
-          ) : tab === "updates" ? (
-            <UpdatesTab />
           ) : (
             <AppearanceTab />
           )}
@@ -400,7 +345,6 @@ function GeneralTab({
   onRequestSignIn?: () => void;
 }) {
   const vault = useStore((s) => s.vault);
-  const serverUrl = useStore((s) => s.serverUrl);
   const authStatus = useStore((s) => s.authStatus);
   // The sidebar paints before the session restore finishes, so this page can be
   // open while we still don't know whether anyone is signed in.
@@ -455,23 +399,11 @@ function GeneralTab({
             name={(isSynced ? activeOrgName : null) ?? vault?.name ?? ""}
             canEdit={!isSynced || canManage}
           />
-          <div className="menu-sep" />
+          {/* A synced vault's next row (Freeze vault root) brings its own divider. */}
+          {!isSynced && <div className="menu-sep" />}
         </>
       )}
-      {isSynced ? (
-        <>
-          <div className="muted">
-            This vault syncs to your team. Its notes stay as plain files on
-            disk and live-sync to everyone with access.
-          </div>
-          <div className="menu-row">
-            <span className="menu-row-label">Server</span>
-            <code className="vault-root-path" title={serverUrl}>
-              {serverUrl}
-            </code>
-          </div>
-        </>
-      ) : (
+      {!isSynced && (
         <>
           <div className="muted">
             {activeOrgName
@@ -483,8 +415,8 @@ function GeneralTab({
             <h3 className="sync-promo-title">Turn on sync &amp; sharing</h3>
             <p className="sync-promo-desc">
               Keeps the notes and folders already here — nothing to re-import.
-              Enables live collaboration and lets you invite people. Private by
-              default; you choose what to share.
+              Enables live collaboration and lets you invite people. Everyone in the
+              vault can edit by default; you choose who sees what.
             </p>
             <div className="row invite-bar">
               <input
@@ -1699,393 +1631,6 @@ function VaultsTab() {
   );
 }
 
-function MembersTab({ canManage }: { canManage: boolean }) {
-  const session = useStore((s) => s.session);
-  const members = useStore((s) => s.members);
-  const pendingInvitations = useStore((s) => s.pendingInvitations);
-  // Invite links are built against the server this vault lives on, not a
-  // constant: a self-hosted vault's invitation only resolves on its own server.
-  const serverUrl = useStore((s) => s.serverUrl);
-
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState<"member" | "admin">("member");
-  const [busy, setBusy] = useState(false);
-  const [code, setCode] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  // The invitation just created, so its link can be shown. Not read out of
-  // `pendingInvitations`: that list is keyed by email and makes no promise
-  // about which row is the one this click produced.
-  const [created, setCreated] = useState<InviteResult | null>(null);
-  // Which link was copied, by invitation id ("new" for the notice above the
-  // list) — one shared flag would tick every row at once.
-  const [copiedLink, setCopiedLink] = useState<string | null>(null);
-  // Revoking is destructive and unprompted-recoverable only by re-inviting, so
-  // it gets the same inline "Revoke → Confirm" as member removal.
-  const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
-  // Invite errors had no home before — surface them here (silent-failure fix).
-  const [inviteError, setInviteError] = useState<string | null>(null);
-  const [limitNudge, setLimitNudge] = useState<{ kind: LimitKind; limit: number | null } | null>(
-    null,
-  );
-  const [upgradeOpen, setUpgradeOpen] = useState(false);
-  // Member removal: an inline "Remove → Confirm" per row so it's never one click.
-  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
-  const [removeBusy, setRemoveBusy] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
-
-  // Role changes: no confirm step (reversible, unlike remove), one busy row
-  // at a time so a slow server can't interleave two changes.
-  const [roleBusyId, setRoleBusyId] = useState<string | null>(null);
-  const [roleError, setRoleError] = useState<string | null>(null);
-
-  // The caller's own role in this vault, so we mirror the server's rules and
-  // only offer Remove / role changes where they would actually succeed
-  // (see memberRoles.ts for the shared matrix).
-  const myRole = members.find((m) => m.userId === session?.user.id)?.role;
-  const canAct = (m: Member): boolean =>
-    canActOnMember({
-      canManage,
-      myUserId: session?.user.id,
-      myRole,
-      target: { userId: m.userId, role: m.role },
-    });
-
-  const doRemove = async (userId: string) => {
-    setRemoveBusy(true);
-    setRemoveError(null);
-    try {
-      await useStore.getState().removeMember(userId);
-      setConfirmRemoveId(null);
-    } catch (e) {
-      setRemoveError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRemoveBusy(false);
-    }
-  };
-
-  const doChangeRole = async (userId: string, role: "member" | "admin") => {
-    setRoleBusyId(userId);
-    setRoleError(null);
-    try {
-      await useStore.getState().updateMemberRole(userId, role);
-    } catch (e) {
-      setRoleError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRoleBusyId(null);
-    }
-  };
-
-  // The vault's shareable join code (owner/admin only; server creates it
-  // lazily). Older servers without the endpoint simply hide the section.
-  useEffect(() => {
-    if (!canManage) return;
-    let cancelled = false;
-    authManager.api
-      .getJoinCode()
-      .then((c) => {
-        if (!cancelled) setCode(c);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [canManage]);
-
-  const copyCode = async () => {
-    if (!code) return;
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard unavailable */
-    }
-  };
-
-  /** Copy one invitation's https link. `tag` keys the "Copied ✓" to its row. */
-  const copyInviteLink = async (invitationId: string, tag: string) => {
-    const link = buildInviteLink(serverUrl, invitationId);
-    if (!link) return;
-    try {
-      await navigator.clipboard.writeText(link);
-      setCopiedLink(tag);
-      window.setTimeout(() => setCopiedLink((c) => (c === tag ? null : c)), 1500);
-    } catch {
-      /* clipboard unavailable */
-    }
-  };
-
-  const revoke = async (invitationId: string) => {
-    setInviteError(null);
-    try {
-      await authManager.api.cancelInvitation(invitationId);
-      setConfirmRevokeId(null);
-      // Drop the just-created notice if it was about this invitation — its link
-      // is dead now, and offering to copy it would be worse than saying nothing.
-      setCreated((c) => (c?.invitation.id === invitationId ? null : c));
-      await useStore.getState().refreshVault();
-    } catch (e) {
-      setInviteError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  /**
-   * Re-send an invitation: invite the same address with the same role again.
-   * The server replaces the pending row with a fresh one (new link, new expiry)
-   * and emails it — which is what an expired invitation needs (#268).
-   */
-  const [resendBusyId, setResendBusyId] = useState<string | null>(null);
-  const resend = async (inv: { id: string; email: string; role: string }) => {
-    setResendBusyId(inv.id);
-    setInviteError(null);
-    setLimitNudge(null);
-    try {
-      const role = inv.role === "admin" ? "admin" : "member";
-      setCreated(await useStore.getState().inviteMember(inv.email, role));
-    } catch (e) {
-      const kind = classifyLimitError(e);
-      if (kind) setLimitNudge({ kind, limit: limitFromError(e) });
-      else setInviteError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setResendBusyId(null);
-    }
-  };
-
-  const invite = async () => {
-    if (!inviteEmail.trim()) return;
-    setBusy(true);
-    setInviteError(null);
-    setLimitNudge(null);
-    try {
-      setCreated(await useStore.getState().inviteMember(inviteEmail.trim(), inviteRole));
-      setInviteEmail("");
-    } catch (e) {
-      // A 402 member-cap rejection becomes an upgrade nudge; anything else is a
-      // real error (this tab had no error slot before — that was the bug).
-      const kind = classifyLimitError(e);
-      if (kind) setLimitNudge({ kind, limit: limitFromError(e) });
-      else setInviteError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <>
-      {canManage && code && (
-        <div className="join-code-row">
-          <div className="join-code-meta">
-            <span className="subhead">Join code</span>
-            <span className="muted">
-              Teammates pick “Join with code” in their account menu after signing in.
-              Someone who was also invited by email lands with the invited role either
-              way.
-            </span>
-          </div>
-          <code className="join-code">{code}</code>
-          <button className="link-btn" onClick={() => void copyCode()}>
-            {copied ? "Copied ✓" : "Copy"}
-          </button>
-        </div>
-      )}
-      {canManage && (
-        <div className="row invite-bar">
-          <input
-            type="email"
-            placeholder="email@team.com"
-            value={inviteEmail}
-            autoFocus
-            onChange={(e) => setInviteEmail(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void invite();
-            }}
-          />
-          <RoleSelect
-            variant="field"
-            value={inviteRole}
-            onSelect={setInviteRole}
-            ariaLabel="Invite role"
-          />
-          <button className="primary" disabled={busy} onClick={() => void invite()}>
-            Invite
-          </button>
-        </div>
-      )}
-      {inviteError && <div className="auth-error">{inviteError}</div>}
-      {/* Inline, not a toast: this modal has its own error/notice slots, and a
-          corner toast carrying a link the admin has to COPY is a link they will
-          lose. */}
-      {created && (
-        <div className={`invite-notice${created.emailError ? " is-warning" : ""}`}>
-          {created.emailed ? (
-            // A fact, not a hope: the server only says so once the mail
-            // provider has accepted the message.
-            <span>Invitation emailed to {created.invitation.email}.</span>
-          ) : (
-            <>
-              <span>
-                {created.emailError
-                  ? `Invitation created, but the email to ${created.invitation.email} couldn't be sent (${created.emailError}). Share this link instead:`
-                  : `Invitation created — this server doesn't send email, so share this link with ${created.invitation.email}:`}
-              </span>
-              <div className="invite-notice-link">
-                <code>{buildInviteLink(serverUrl, created.invitation.id) ?? ""}</code>
-                <button
-                  className="link-btn"
-                  onClick={() => void copyInviteLink(created.invitation.id, "new")}
-                >
-                  {copiedLink === "new" ? "Copied ✓" : "Copy"}
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      )}
-      {limitNudge && (
-        <LimitNudge
-          kind={limitNudge.kind}
-          limit={limitNudge.limit}
-          onUpgrade={() => setUpgradeOpen(true)}
-        />
-      )}
-
-      <div className="subhead">In this vault ({members.length})</div>
-      <ul className="member-list">
-        {members.map((m) => {
-          const label = m.user?.name || m.user?.email || m.userId;
-          return (
-            <li key={m.id}>
-              <Avatar label={label} />
-              <span className="member-name">
-                {label}
-                {m.userId === session?.user.id && <span className="muted"> (you)</span>}
-              </span>
-              {canAct(m) && (m.role === "member" || m.role === "admin") ? (
-                <RoleSelect
-                  variant="pill"
-                  value={m.role}
-                  disabled={roleBusyId !== null}
-                  ariaLabel={`Change role of ${label}`}
-                  onSelect={(r) => void doChangeRole(m.userId, r)}
-                />
-              ) : (
-                <span className={`member-role ${m.role}`}>{m.role}</span>
-              )}
-              {canAct(m) &&
-                (confirmRemoveId === m.userId ? (
-                  <>
-                    <AsyncButton
-                      className="link-btn danger"
-                      disabled={removeBusy}
-                      onClick={() => doRemove(m.userId)}
-                    >
-                      Confirm
-                    </AsyncButton>
-                    <button
-                      className="link-btn"
-                      disabled={removeBusy}
-                      onClick={() => setConfirmRemoveId(null)}
-                    >
-                      Cancel
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    className="link-btn danger"
-                    onClick={() => {
-                      setRemoveError(null);
-                      setConfirmRemoveId(m.userId);
-                    }}
-                  >
-                    Remove
-                  </button>
-                ))}
-            </li>
-          );
-        })}
-      </ul>
-      {removeError && <div className="auth-error">{removeError}</div>}
-      {roleError && <div className="auth-error">{roleError}</div>}
-
-      {pendingInvitations.length > 0 && (
-        <>
-          <div className="subhead">Invited — awaiting response</div>
-          <ul className="member-list">
-            {pendingInvitations.map((inv) => {
-              // Better Auth keeps an expired row at status "pending"; only the
-              // date says its link is dead.
-              const expired = isInvitationExpired(inv.expiresAt);
-              return (
-              <li key={inv.id}>
-                <Avatar label={inv.email} />
-                <span className="member-name">{inv.email}</span>
-                <span
-                  className="member-role pending"
-                  title={
-                    inv.expiresAt
-                      ? `${expired ? "Expired" : "Expires"} ${new Date(inv.expiresAt).toLocaleString()}`
-                      : undefined
-                  }
-                >
-                  {inv.role} · {expired ? "expired" : "pending"}
-                </span>
-                {canManage && (
-                  <>
-                    <button
-                      className="link-btn"
-                      disabled={resendBusyId !== null}
-                      onClick={() => void resend(inv)}
-                    >
-                      {resendBusyId === inv.id ? "Sending…" : "Resend"}
-                    </button>
-                    {/* The link is useful long after the invite was sent: the
-                        email may have bounced, or this server may not send any. */}
-                    <button
-                      className="link-btn"
-                      onClick={() => void copyInviteLink(inv.id, inv.id)}
-                    >
-                      {copiedLink === inv.id ? "Copied ✓" : "Copy link"}
-                    </button>
-                    {confirmRevokeId === inv.id ? (
-                      <>
-                        <AsyncButton
-                          className="link-btn danger"
-                          onClick={() => revoke(inv.id)}
-                        >
-                          Confirm
-                        </AsyncButton>
-                        <button
-                          className="link-btn"
-                          onClick={() => setConfirmRevokeId(null)}
-                        >
-                          Cancel
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        className="link-btn danger"
-                        onClick={() => {
-                          setInviteError(null);
-                          setConfirmRevokeId(inv.id);
-                        }}
-                      >
-                        Revoke
-                      </button>
-                    )}
-                  </>
-                )}
-              </li>
-              );
-            })}
-          </ul>
-        </>
-      )}
-
-      {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
-    </>
-  );
-}
-
 /**
  * BillingTab: the current vault's plan and seats, then every subscription the
  * signed-in user can act on (spec 04, #109/#110).
@@ -2593,46 +2138,6 @@ const LINE_FORMAT = {
 };
 
 /**
- * Inline upgrade nudge shown in the create-vault / invite-member error slot
- * when the server rejects with a 402 free-plan limit. Styled with --warning-soft
- * (reserved for upgrade nudges), not the danger palette — this isn't an error.
- */
-function LimitNudge({
-  kind,
-  limit,
-  onUpgrade,
-}: {
-  kind: LimitKind;
-  limit: number | null;
-  onUpgrade: () => void;
-}) {
-  const freeLimits = useStore((s) => s.billingConfig?.freeLimits);
-  // The server is the authority (the 402 carries `limit`, and billingConfig
-  // reports both caps); these are last-resort defaults for a nudge rendered
-  // before either arrived. Kept separate per kind so the two caps can move
-  // independently (members were 10 for a while; both are 3 since 2026-09-09).
-  const n =
-    limit ??
-    (kind === "note_limit" ? 20000 : kind === "member_limit"
-      ? (freeLimits?.membersPerVault ?? 3)
-      : (freeLimits?.vaultsPerUser ?? 3));
-  const message =
-    kind === "note_limit" ? `This Free vault has reached ${n.toLocaleString()} synced notes. Upgrade to Pro to sync more; additional notes stay on this device.` : kind === "member_limit"
-      ? `Free plan limit reached — this vault allows ${n} member${n === 1 ? "" : "s"}.`
-      : // The cap counts FREE vaults only: a Pro vault leaves the count, so
-        // upgrading one of them opens a slot for another free vault.
-        `You're using all ${n} free vault${n === 1 ? "" : "s"}. Upgrade one to Pro — Pro vaults don't count toward that limit — and you can create another.`;
-  return (
-    <div className="limit-nudge">
-      <span>{message}</span>
-      <button className="link-btn" onClick={onUpgrade}>
-        Upgrade →
-      </button>
-    </div>
-  );
-}
-
-/**
  * Versioning: the vault-wide safety net. Lists the vault's checkpoints (max 5 —
  * a daily automatic one plus manual ones), and lets an owner OR admin take one
  * and roll the whole vault back to it. Per-note history lives in the editor's
@@ -2913,7 +2418,10 @@ function McpTab() {
     <>
       <div className="muted">
         Connect any MCP-compatible AI client to this vault. It gets the same
-        access you do — read, search, create, edit and delete notes and folders.
+        access you do: read, search, create, edit and delete notes and folders.
+        Owners and admins can also manage the team's access from the same chat —
+        ask Claude or ChatGPT to share a folder with someone, make it view only,
+        or set what new members see.
       </div>
 
       <div className="subhead">Endpoint URL</div>
@@ -3088,96 +2596,6 @@ function clientLabel(ua: string | null): string {
   if (s.includes("node")) return "Node client";
   // Fall back to the leading token of the UA (e.g. "MyApp/1.2" → "MyApp").
   return ua.split(/[\s/]/)[0].slice(0, 40) || "Unknown client";
-}
-
-/**
- * Appearance: theme plus the vault's folder/note colors. Colors are assigned
- * from each item's ⋯ menu in the sidebar; this tab reviews and clears them.
- */
-/**
- * Updates tab — shows the running version and lets the user check for and
- * install a newer release on demand. The launch-time check populates the same
- * shared updater state, so if an update was already found this reflects it.
- */
-function UpdatesTab() {
-  const update = useUpdateState();
-  const [version, setVersion] = useState<string | null>(null);
-
-  useEffect(() => {
-    void currentVersion().then(setVersion);
-  }, []);
-
-  const busy = update.phase === "checking" ||
-    update.phase === "downloading" ||
-    update.phase === "installing";
-
-  // A single status line that stays mounted across phases so the card never
-  // reflows (and the button never jumps) as the check progresses. The button
-  // keeps one fixed label + width; the spinner and this line carry the state.
-  let statusText: string | null = null;
-  let statusError = false;
-  switch (update.phase) {
-    case "checking":
-      statusText = "Checking for updates…";
-      break;
-    case "uptodate":
-      statusText = "You're on the latest version.";
-      break;
-    case "available":
-      statusText = "An update is available.";
-      break;
-    case "downloading":
-      statusText = update.total > 0
-        ? `Downloading ${update.version} — ${Math.round((update.downloaded / update.total) * 100)}%`
-        : `Downloading ${update.version}…`;
-      break;
-    case "installing":
-      statusText = `Installing ${update.version} — the app will restart…`;
-      break;
-    case "error":
-      statusText = `Couldn't check for updates: ${update.message}`;
-      statusError = true;
-      break;
-  }
-
-  return (
-    <div className="updates-tab">
-      <div className="menu-row">
-        <span className="menu-row-label">Current version</span>
-        <span className="mono">{version ?? "…"}</span>
-      </div>
-
-      <div className="update-actions">
-        <button
-          className="primary sm update-check-btn"
-          disabled={busy}
-          aria-busy={busy}
-          onClick={() => void checkForUpdate()}
-        >
-          {busy && <span className="btn-spinner" aria-hidden="true" />}
-          <span>Check for updates</span>
-        </button>
-
-        <span
-          className={`update-status${statusError ? " error" : ""}`}
-          role="status"
-          aria-live="polite"
-        >
-          {statusText}
-        </span>
-      </div>
-
-      {update.phase === "available" && (
-        <div className="update-detail">
-          <div className="subhead">Version {update.version} available</div>
-          {update.notes && <div className="muted release-notes">{update.notes}</div>}
-          <AsyncButton className="primary sm" onClick={() => installUpdate()}>
-            Install &amp; Restart
-          </AsyncButton>
-        </div>
-      )}
-    </div>
-  );
 }
 
 const APPEARANCE_ICON = {

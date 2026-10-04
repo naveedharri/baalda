@@ -137,6 +137,9 @@ describe("activity feed: grants", () => {
     expect(rows[0]).toMatchObject({ type: "access", key: `a:g:${T}`, label: "Access", path: "" });
     expect(accessText(ev)).toBe("3 notes became available to you");
     expect(accessText({ ...ev, count: 1 })).toBe("1 note became available to you");
+    const removed = { kind: "removed" as const, at: 1, vaultId: null, docId: "d", path: "A.md" };
+    expect(accessText(removed)).toBe("Access to this note was removed");
+    expect(accessText({ ...removed, self: true })).toBe("You removed your access");
   });
 });
 
