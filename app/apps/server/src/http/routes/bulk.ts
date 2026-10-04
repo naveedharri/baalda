@@ -39,6 +39,20 @@ import type {
 import { softDeleteSet } from "../../trash/retention.js";
 import { trashChanged } from "../../trash/activity.js";
 import { syncPermission } from "../../trash/access.js";
+import {
+  parseState,
+  perNoteStateCap,
+  seedRegistered,
+  unseededFields,
+  type ParsedState,
+  type SeedCandidate,
+  type SeedFields,
+} from "../../registry/seed-on-register.js";
+
+/** A note batch item may carry its first content (plan §5.1). Kept local rather
+ *  than in `bulk-types.ts` until the desktop twin gains the same fields. */
+type NoteBatchItemWithState = NoteBatchItem & { state?: string; textSha256?: string; textSha?: string };
+type NoteBatchResultWithSeed = NoteBatchResult & Partial<SeedFields>;
 
 /**
  * Bulk registration + content push.
@@ -257,7 +271,21 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
   });
 
   // ── notes ────────────────────────────────────────────────────────────────
-  routes.post("/vaults/:vaultId/notes/batch", async (c) => {
+  //
+  // An item MAY carry `state` (base64 `Y.encodeStateAsUpdate`, binary Yjs only)
+  // and `textSha256`: the note's first content rides its registration and is
+  // applied right after the row exists — see `registry/seed-on-register.ts`.
+  // Items without `state` behave and answer exactly as before (no new fields).
+  //
+  // Limits. The raw body is capped at 16 MiB for every request (200 state-less
+  // items are a few tens of KB, so old clients never come near it). When ANY
+  // item carries state the request takes the docs/batch limits instead of the
+  // 200-item one: at most `batchMaxDocs` (100) items and `batchMaxDecodedBytes`
+  // (4 MiB) decoded state, except a single-item request, which may carry up to
+  // `MAX_NOTE_MB`. Both answer 400 `batch_too_large`, the docs/batch shape.
+  // A single item over `MAX_NOTE_MB` is refused per item (`note_too_large`) and
+  // gets no row.
+  routes.post("/vaults/:vaultId/notes/batch", bodyLimit({ maxSize: 16 * 1024 * 1024 }), async (c) => {
     const auth = await gate(c);
     if (auth instanceof Response) return auth;
     const body = await c.req.json().catch(() => null);
@@ -265,20 +293,42 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
     if (!Array.isArray(items)) return c.json(items, 400);
 
     const parsed = items.map((raw, index) => {
-      const it = (raw ?? {}) as Partial<NoteBatchItem>;
+      const it = (raw ?? {}) as Partial<NoteBatchItemWithState>;
+      const docId = typeof it.docId === "string" && it.docId ? it.docId : undefined;
       return {
         index,
         relPath: typeof it.relPath === "string" ? it.relPath : "",
-        docId: typeof it.docId === "string" && it.docId ? it.docId : undefined,
+        docId,
         title: typeof it.title === "string" ? it.title : null,
         // `folderPath` rather than a folderId: a path needs no cross-chunk
         // ordering, so a note can be registered in the same pass as its folder.
         // It is a CROSS-CHECK, not the location — see `folderPathDisagrees`.
         folderPath: typeof it.folderPath === "string" ? it.folderPath : null,
+        hasState: it.state !== undefined && it.state !== null,
+        stateParse: parseState(it.state, it.textSha256 ?? it.textSha, docId),
       };
     });
 
-    const results: NoteBatchResult[] = parsed.map((p) => ({
+    // Request-level caps, judged before anything is written.
+    const withState = parsed.filter((p) => p.hasState);
+    if (withState.length > 0) {
+      if (parsed.length > config.batchMaxDocs) {
+        return c.json(
+          { error: `at most ${config.batchMaxDocs} items per request when state is sent`, code: "batch_too_large" },
+          400,
+        );
+      }
+      let decodedTotal = 0;
+      for (const p of withState) {
+        if (p.stateParse.ok && p.stateParse.state) decodedTotal += p.stateParse.state.bytes.length;
+      }
+      const cap = parsed.length === 1 ? perNoteStateCap() : config.batchMaxDecodedBytes;
+      if (decodedTotal > cap) {
+        return c.json({ error: `at most ${cap} decoded bytes per request`, code: "batch_too_large" }, 400);
+      }
+    }
+
+    const results: NoteBatchResultWithSeed[] = parsed.map((p) => ({
       relPath: p.relPath,
       docId: null,
       status: "error" as BatchStatus,
@@ -287,6 +337,8 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       code: "invalid_body",
       error: "relPath is required",
     }));
+    // Items whose row may take their state, filled in by the register pass.
+    const seedCandidates: SeedCandidate[] = [];
 
     let wrote = false;
     await withRegisterCtx(auth.vaultId, auth.userId, async (ctx) => {
@@ -297,6 +349,21 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       const eligible: typeof parsed = [];
       for (const item of parsed) {
         if (item.relPath === "") continue;
+        // A malformed or oversized state is refused BEFORE registration, so it
+        // never leaves a row without content behind.
+        if (!item.stateParse.ok) {
+          results[item.index] = {
+            relPath: item.relPath,
+            docId: null,
+            status: "error",
+            folderId: null,
+            title: null,
+            code: item.stateParse.code,
+            error: item.stateParse.message,
+            ...unseededFields(item.stateParse.code === "note_too_large" ? "too_large" : item.stateParse.code, "refused"),
+          };
+          continue;
+        }
         if (folderPathDisagrees(item.relPath, item.folderPath)) {
           results[item.index] = {
             relPath: item.relPath,
@@ -306,6 +373,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
             title: null,
             code: "path_folder_mismatch",
             error: `"${item.relPath}" is not inside folder "${item.folderPath}"`,
+            ...(item.hasState ? unseededFields("path_folder_mismatch", "refused") : {}),
           };
           continue;
         }
@@ -338,6 +406,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
             title: null,
             code: null,
             error,
+            ...(item.hasState ? unseededFields("error", "refused") : {}),
           };
         }
         return;
@@ -345,6 +414,9 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
 
       outcomes.forEach((out, i) => {
         const item = eligible[i];
+        // Only items that SENT state get the new fields, so an old-shape item's
+        // answer is byte-identical to before.
+        const state: ParsedState | null = item.stateParse.ok ? item.stateParse.state : null;
         if (out.status === "conflict") {
           results[item.index] = {
             relPath: item.relPath,
@@ -354,6 +426,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
             title: null,
             code: out.code,
             error: out.message,
+            ...(state ? unseededFields(out.code, "refused") : {}),
           };
           return;
         }
@@ -366,8 +439,24 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
             title: null,
             code: out.code,
             error: out.message,
+            ...(state ? unseededFields(out.code, "refused") : {}),
           };
           return;
+        }
+        if (state) {
+          // `created`, or an adopt onto the SAME id (a half-registered row an old
+          // client or an interrupted run left): a seed candidate. An adopt onto a
+          // different winner id writes no content — the client's same-path logic
+          // owns that case.
+          const sameId = out.status === "created" || (item.docId !== undefined && out.row.id === item.docId);
+          if (sameId) {
+            seedCandidates.push({
+              key: item.index,
+              docId: out.row.id,
+              state,
+              created: out.status === "created",
+            });
+          }
         }
         wrote ||= out.wrote;
         // The row's CANONICAL spelling, exactly as `POST /api/notes` echoes
@@ -381,9 +470,24 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
           title: out.row.title,
           code: null,
           error: null,
+          ...(state && !seedCandidates.some((sc) => sc.key === item.index)
+            ? unseededFields("adopted", "skipped")
+            : {}),
         };
       });
     });
+
+    // The register connection is released; now the state, through the same
+    // apply docs/batch uses (per-doc lock, `expectEmpty`, live branch, shrink
+    // guard, seed origin, indexing). Quota and permission refusals above never
+    // reach this point, so they wrote neither a row nor state.
+    if (seedCandidates.length > 0) {
+      const seeded = await seedRegistered(auth.vaultId, auth.userId, seedCandidates);
+      for (const [index, fields] of seeded) results[index] = { ...results[index], ...fields };
+    }
+
+    // AFTER the state apply, so a receiver's pull finds the content and does not
+    // materialise a 0-byte placeholder for a note whose text is milliseconds away.
     if (wrote) changed(c, auth.vaultId);
     return c.json({ results });
   });

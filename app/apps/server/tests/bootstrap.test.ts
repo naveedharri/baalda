@@ -181,6 +181,50 @@ describe("bootstrap download", () => {
     expect([...seen.keys()]).toEqual([b]);
   });
 
+  it("`only` returns exactly the named readable docs and ignores `have`", async () => {
+    const member = await signUp("only@boot.test");
+    await seedMember(org, member.userId, "member");
+    const shared = await seedFolder(vault, null, "Shared", "Shared");
+    const secret = await seedFolder(vault, null, "Secret", "Secret");
+    const a = await seedNote(vault, shared, "Shared/a.md", owner.userId);
+    const b = await seedNote(vault, shared, "Shared/b.md", owner.userId);
+    const notAsked = await seedNote(vault, shared, "Shared/c.md", owner.userId);
+    const hidden = await seedNote(vault, secret, "Secret/h.md", owner.userId);
+    for (const [id, t] of [[a, "A"], [b, "B"], [notAsked, "C"], [hidden, "H"]] as const) {
+      await writeDoc(id, t);
+    }
+    await pool.query("DELETE FROM shares WHERE org_id = $1", [org]);
+    await seedShare(org, "folder", shared, member.userId, "view");
+
+    // `hidden` is unreadable and `randomUUID()` does not exist: both are
+    // silently omitted, the request still succeeds. `have: [a]` is ignored.
+    const res = await req(member, "POST", `/api/vaults/${vault}/bootstrap`, {
+      have: [a],
+      only: [a, b, hidden, randomUUID()],
+    });
+    expect(res.status).toBe(200);
+    const session = (await res.json()) as BootstrapSession;
+    expect(session.docs).toBe(2);
+    const { seen } = await drain(member, vault, session.sessionId);
+    expect([...seen.keys()].sort()).toEqual([a, b].sort());
+    expect(seen.get(a)!.text).toBe("A");
+  });
+
+  it("`only` over batchMaxDocs is 400 batch_too_large", async () => {
+    const ids = Array.from({ length: config.batchMaxDocs + 1 }, () => randomUUID());
+    const res = await req(owner, "POST", `/api/vaults/${vault}/bootstrap`, { only: ids });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("batch_too_large");
+  });
+
+  it("an empty `only` yields an empty session, not the whole vault", async () => {
+    const a = await seedNote(vault, null, "a.md", owner.userId);
+    await writeDoc(a, "A");
+    const res = await req(owner, "POST", `/api/vaults/${vault}/bootstrap`, { only: [] });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as BootstrapSession).docs).toBe(0);
+  });
+
   it("carries only the docs the caller may READ", async () => {
     const member = await signUp("member@boot.test");
     await seedMember(org, member.userId, "member");

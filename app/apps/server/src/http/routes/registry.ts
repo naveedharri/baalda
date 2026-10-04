@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { parseState, seedRegistered } from "../../registry/seed-on-register.js";
 import { config } from "../../config.js";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
@@ -781,7 +783,14 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
   });
 
   // ── notes (markdown docs; id == doc_id) ────────────────────────────────────
-  registryRoutes.post("/notes", async (c) => {
+  //
+  // Optional `state` (base64 `Y.encodeStateAsUpdate`) + `textSha256`: the note's
+  // first content rides the create, exactly as on `notes/batch` (see
+  // `registry/seed-on-register.ts`). One item, so up to `MAX_NOTE_MB` decoded,
+  // under a 16 MiB raw body. A body without `state` answers exactly as before;
+  // with it, the 200/201 payload adds `seeded`, `content`, `reason`, `sv`.
+  // Refusals (402/403/409/400) write neither a row nor state, as before.
+  registryRoutes.post("/notes", bodyLimit({ maxSize: 16 * 1024 * 1024 }), async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
 
@@ -790,6 +799,15 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (typeof vaultId !== "string" || typeof relPath !== "string") {
       return c.json({ error: "vaultId and relPath are required" }, 400);
     }
+    const requestedDocId = typeof body.docId === "string" && body.docId ? body.docId : undefined;
+    // Validated BEFORE registration: a malformed or oversized state gets no row.
+    const stateParse = parseState(body.state, body.textSha256 ?? body.textSha, requestedDocId);
+    if (!stateParse.ok) {
+      return stateParse.code === "note_too_large"
+        ? c.json({ error: stateParse.message, code: stateParse.code, seeded: false, content: "refused", reason: "too_large" }, 413)
+        : c.json({ error: stateParse.message, code: stateParse.code }, 400);
+    }
+    const state = stateParse.state;
     const org = await vaultOrg(vaultId);
     if (!org) return c.json({ error: "Unknown vault" }, 404);
     if (!(await orgRole(org, session.userId))) {
@@ -801,7 +819,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const ctx = registerCtx(vaultId, session.userId);
     const out = await registerNote(ctx, {
       relPath,
-      docId: typeof body.docId === "string" ? body.docId : undefined,
+      docId: requestedDocId,
       folderId: folderId ?? null,
       title: title ?? null,
       color: body.color,
@@ -817,7 +835,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json(NO_WRITE_ACCESS_ERROR("note"), 403);
     }
     const n = out.row;
-    const payload = {
+    const payload: Record<string, unknown> = {
       id: n.id,
       docId: n.id,
       vaultId,
@@ -825,7 +843,22 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       title: n.title,
       relPath: n.relPath,
     };
+    if (state) {
+      // Created, or the SAME id already registered without content: seed it
+      // (covered check, then `expectEmpty`). An adopt onto a different winner
+      // id writes nothing.
+      const sameId = out.status === "created" || (requestedDocId !== undefined && n.id === requestedDocId);
+      if (sameId) {
+        const seeded = await seedRegistered(vaultId, session.userId, [
+          { key: 0, docId: n.id, state, created: out.status === "created" },
+        ]);
+        Object.assign(payload, seeded.get(0));
+      } else {
+        Object.assign(payload, { seeded: false, content: "skipped", reason: "adopted" });
+      }
+    }
     if (out.status === "adopted") return c.json(payload, 200);
+    // After the state apply, so a receiver's pull finds content.
     changed(c, vaultId);
     return c.json(payload, 201);
   });
