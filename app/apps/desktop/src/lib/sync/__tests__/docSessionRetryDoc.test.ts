@@ -47,6 +47,8 @@ const fakeRegistry = vi.hoisted(() => {
       reg.pushed.delete(docId);
     }),
     flushCheckpoint: vi.fn(async () => {}),
+    materializePendingFromBootstrap: vi.fn(async () => false),
+    pendingFromBootstrapCount: vi.fn(() => 0),
     failures: vi.fn((): unknown[] => []),
     hasFailures: vi.fn(() => false),
     heldRefusals: vi.fn((): unknown[] => []),

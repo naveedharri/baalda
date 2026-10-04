@@ -4765,7 +4765,7 @@ export class SyncManager implements InboundHost {
       } else {
         // Unreachable with a deferral in hand (the gate above is a superset of
         // the pull's), but never leave deferred notes without a file.
-        void this.registry.materializePendingFromBootstrap();
+        void this.materializeDeferred();
       }
       if (!useBulkPath(this.registry.mappedNotes().length) && this.vaultEngineLiveOnly) {
         // The prime window sized the channel from the LOCAL doc map and put it
@@ -4963,13 +4963,27 @@ export class SyncManager implements InboundHost {
    * holds {@link bulkPhase} throughout, which is what keeps the per-doc run from
    * starting underneath it.
    */
+  /**
+   * Write the placeholders a pull deferred to the bootstrap download. Optional
+   * on the registry (test fakes omit it) and never throws: a failure here must
+   * not tear down the session or surface as an unhandled rejection.
+   */
+  private async materializeDeferred(): Promise<boolean> {
+    try {
+      return (await this.registry.materializePendingFromBootstrap?.()) ?? false;
+    } catch (e) {
+      console.warn("[sync] materializing deferred placeholders failed", e);
+      return false;
+    }
+  }
+
   private async runBulkEngine(scope: VaultScope): Promise<void> {
     const vaultId = this.registry.vaultId;
     const store = this.docStore;
     const progress = this.progress;
     if (!vaultId || !store || !progress) {
       // No download will run: write the placeholders a pull deferred to it.
-      await this.registry.materializePendingFromBootstrap();
+      await this.materializeDeferred();
       return;
     }
     this.bulkPhase = true;
@@ -4981,7 +4995,7 @@ export class SyncManager implements InboundHost {
       // server holds no state for (`emptyDocs`) — gets its 0-byte placeholder
       // now, in batched create-only IPC, BEFORE `settleServerEmpty` probes the
       // disk for exactly those docs.
-      if (await this.registry.materializePendingFromBootstrap()) this.onRegistryChanged?.();
+      if (await this.materializeDeferred()) this.onRegistryChanged?.();
       if (!scope.isCurrent()) return;
       const conflicts = new Set(bootstrap?.conflicts ?? []);
       // The server's own statement of what it holds nothing for: the bootstrap
@@ -5020,7 +5034,7 @@ export class SyncManager implements InboundHost {
     // A failed or cancelled download, or a pull that deferred notes while the
     // phase ran (its session's doc set was already fixed): placeholders now, so
     // no note is left absent until the next pull. Free when nothing is pending.
-    if (await this.registry.materializePendingFromBootstrap()) this.onRegistryChanged?.();
+    if (await this.materializeDeferred()) this.onRegistryChanged?.();
     if (!scope.isCurrent()) return;
     // Durably record everything the phase confirmed BEFORE anything claims the
     // vault is settled: this is the resume point a kill -9 falls back to.

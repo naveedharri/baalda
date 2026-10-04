@@ -192,19 +192,22 @@ describe("PR4 — no placeholders for notes a bootstrap download will create", (
     expect(calls).toHaveLength(1);
   });
 
-  it("an interrupted bootstrap re-materializes the missing notes on the next pull", async () => {
-    const api = fakeApi(serverOnly(30));
+  // Simulates page 1 (N0..N9) landing before a kill, then a second launch whose
+  // pull sees the rest of `total` server-only notes missing from disk.
+  async function relaunchAfterPage1(total: number): Promise<void> {
+    const api = fakeApi(serverOnly(total));
     const first = new VaultRegistry(api);
     first.setInboundHost(host({ follows: true }).h);
     await reconcileWithTree(first, { organizationId: ORG, vaultName: "v" }, emptyTree());
     // Page 1 landed (N0..N9), then the app was killed: nothing persisted the
     // deferred set as done.
     for (let i = 0; i < 10; i++) first.markMaterialized(`Remote/N${i}.md`);
-    expect(first.pendingFromBootstrapCount()).toBe(20);
+    expect(first.pendingFromBootstrapCount()).toBe(total - 10);
 
-    // Next launch, no download resumes: the disk still lacks N10..N29, so the
+    // Next launch, no download resumes: the disk still lacks the rest, so the
     // pull writes their placeholders (lazy hydrate on open fills them).
     vi.mocked(ipc.materializeNotesBatch).mockClear();
+    vi.mocked(ipc.writeNoteIfMissing).mockClear();
     const diskAfterPage1: TreeNode = {
       ...emptyTree(),
       children: [
@@ -216,8 +219,22 @@ describe("PR4 — no placeholders for notes a bootstrap download will create", (
     const second = new VaultRegistry(api);
     second.setInboundHost(host({ follows: false }).h);
     await reconcileWithTree(second, { organizationId: ORG, vaultName: "v" }, diskAfterPage1);
+  }
 
+  it("an interrupted bootstrap re-materializes the missing notes on the next pull", async () => {
+    // 30 missing notes: at/above BULK_THRESHOLD_DOCS, so the batched IPC runs.
+    await relaunchAfterPage1(40);
     expect(new Set(batchedPaths())).toEqual(
+      new Set(Array.from({ length: 30 }, (_, i) => `Remote/N${i + 10}.md`)),
+    );
+  });
+
+  it("below the bulk threshold the re-materialize uses the per-note write", async () => {
+    // 20 missing notes: under BULK_THRESHOLD_DOCS, so no batched IPC.
+    await relaunchAfterPage1(30);
+    expect(batchedPaths()).toEqual([]);
+    const written = vi.mocked(ipc.writeNoteIfMissing).mock.calls.map((c) => c[0]);
+    expect(new Set(written)).toEqual(
       new Set(Array.from({ length: 20 }, (_, i) => `Remote/N${i + 10}.md`)),
     );
   });

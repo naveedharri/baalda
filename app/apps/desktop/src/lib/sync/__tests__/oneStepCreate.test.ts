@@ -127,7 +127,7 @@ function fakeHost(features: string[] = ["notes-with-state", "bootstrap-only"], b
   const created: string[] = [];
   const host: InboundHost = {
     serverFeatures: async () => new Set(features),
-    buildNoteState: async (_docId, relPath): Promise<NoteSeedState> => {
+    buildNoteState: async (_docId: string, relPath: string): Promise<NoteSeedState> => {
       const n = bytes?.(relPath);
       return {
         state: n ? new Uint8Array(n).fill(1) : stateFor(`# ${relPath}`),
@@ -135,11 +135,11 @@ function fakeHost(features: string[] = ["notes-with-state", "bootstrap-only"], b
         fresh: true,
       };
     },
-    noteSeeded: async (docId, sv) => {
+    noteSeeded: async (docId: string, sv: Uint8Array | null) => {
       seeded.push({ docId, sv });
     },
-    noteNeedsMerge: (ids) => merged.push(...ids),
-    noteServerCreated: (ids) => created.push(...ids),
+    noteNeedsMerge: (ids: string[]) => merged.push(...ids),
+    noteServerCreated: (ids: string[]) => created.push(...ids),
   } as unknown as InboundHost;
   return { host, seeded, merged, created };
 }
@@ -198,7 +198,8 @@ describe("one-step register + seed", () => {
     const reg = new VaultRegistry(api);
     reg.setInboundHost(h.host);
     await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(250));
-    expect(calls.sizes).toEqual([100, 100, 50]);
+    // Groups go through runPool concurrently, so arrival order is not fixed.
+    expect([...calls.sizes].sort((a, b) => b - a)).toEqual([100, 100, 50]);
     expect(h.seeded).toHaveLength(250);
   });
 

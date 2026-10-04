@@ -40,6 +40,8 @@ const fakeRegistry = vi.hoisted(() => {
     isPushed: vi.fn(() => false),
     markPushed: vi.fn(),
     flushCheckpoint: vi.fn(async () => {}),
+    materializePendingFromBootstrap: vi.fn(async () => false),
+    pendingFromBootstrapCount: vi.fn(() => 0),
     failures: vi.fn((): unknown[] => []),
     hasFailures: vi.fn(() => false),
     heldRefusals: vi.fn((): unknown[] => []),

@@ -351,7 +351,8 @@ describe("registry: merge outcomes are never settled as pushed", () => {
     reg.setInboundHost(h.host);
     await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree());
 
-    expect(ipc.rebindNoteId).toHaveBeenCalledWith(PATH, "winner", expect.anything());
+    // getVaultConfig is mocked to null, so there is no epoch: the third arg is null.
+    expect(ipc.rebindNoteId).toHaveBeenCalledWith(PATH, "winner", null);
     expect(h.order).toEqual(["rebind", "merge"]);
     expect(h.merged).toEqual([{ ids: ["winner"], losers: ["loc-0"] }]);
     expect(h.seeded).toEqual([]);
