@@ -14,7 +14,8 @@ import {
 } from "../../permissions/http-gates.js";
 import type { DeleteRefusalCode } from "../../permissions/http-gates.js";
 import { deleteDocBlobs } from "./blobs.js";
-import { createResolverCache, effectivePermission } from "../../permissions/resolver.js";
+import { createResolverCache, effectivePermission, loadAccessIndex } from "../../permissions/resolver.js";
+import { boardModes, encodeBoardModes } from "../../permissions/access-board.js";
 import {
   listDeletedReadableDocsInVault,
   listReadableDocsInVault,
@@ -180,6 +181,44 @@ function compareC(a: string, b: string): number {
   return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
 }
 
+/** The access-tree listing: every folder, live note and file of one
+ *  collection, ACL-bypassed (owner/admin routes only), in path order. Shared by
+ *  `GET /access-tree` and `GET /access-board` so both answer the same arrays. */
+async function loadAccessTreeRows(vaultId: string): Promise<{
+  folders: Array<{ id: string; path: string; color: string | null }>;
+  notes: Array<{ id: string; relPath: string }>;
+  files: Array<{ id: string; path: string }>;
+}> {
+  const [folders, notes, files] = await Promise.all([
+    pool.query<{ id: string; path: string; color: string | null }>(
+      "SELECT id, path, color FROM folders WHERE vault_id = $1 ORDER BY path",
+      [vaultId],
+    ),
+    // Paths and titles only. This bypasses the ACL, so it carries the minimum
+    // that lets someone administer the tree and nothing that would let them
+    // read a note they've shut themselves out of.
+    pool.query<{ id: string; rel_path: string }>(
+      "SELECT id, rel_path FROM notes WHERE vault_id = $1 AND deleted_at IS NULL ORDER BY rel_path",
+      [vaultId],
+    ),
+    // `files` rows — the tree binaries. They are docs like any note (one
+    // `shares.resource_type = 'file'` namespace, one `effectivePermission`),
+    // so leaving them out made a `.pdf` in a shared folder the one thing in
+    // the vault whose access could be enforced but never seen or set.
+    // A hidden root `attachments/` blob has no `files` row at all — its bytes
+    // carry a null `doc_id` — so nothing here has to filter it out.
+    pool.query<{ id: string; path: string }>(
+      "SELECT id, path FROM files WHERE vault_id = $1 ORDER BY path",
+      [vaultId],
+    ),
+  ]);
+  return {
+    folders: folders.rows.map((f) => ({ id: f.id, path: f.path, color: f.color })),
+    notes: notes.rows.map((n) => ({ id: n.id, relPath: n.rel_path })),
+    files: files.rows.map((f) => ({ id: f.id, path: f.path })),
+  };
+}
+
 /**
  * Registry API (session-authenticated). Lets the client map local vault files to
  * server doc_ids: create/list/rename/delete vaults, folders, notes, files.
@@ -341,34 +380,58 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (role !== "owner" && role !== "admin") {
       return c.json({ error: "Only a vault owner or admin can manage access" }, 403);
     }
-    const [folders, notes, files] = await Promise.all([
-      pool.query<{ id: string; path: string; color: string | null }>(
-        "SELECT id, path, color FROM folders WHERE vault_id = $1 ORDER BY path",
-        [vaultId],
-      ),
-      // Paths and titles only. This bypasses the ACL, so it carries the minimum
-      // that lets someone administer the tree and nothing that would let them
-      // read a note they've shut themselves out of.
-      pool.query<{ id: string; rel_path: string }>(
-        "SELECT id, rel_path FROM notes WHERE vault_id = $1 AND deleted_at IS NULL ORDER BY rel_path",
-        [vaultId],
-      ),
-      // `files` rows — the tree binaries. They are docs like any note (one
-      // `shares.resource_type = 'file'` namespace, one `effectivePermission`),
-      // so leaving them out made a `.pdf` in a shared folder the one thing in
-      // the vault whose access could be enforced but never seen or set.
-      // A hidden root `attachments/` blob has no `files` row at all — its bytes
-      // carry a null `doc_id` — so nothing here has to filter it out.
-      pool.query<{ id: string; path: string }>(
-        "SELECT id, path FROM files WHERE vault_id = $1 ORDER BY path",
-        [vaultId],
-      ),
-    ]);
-    return c.json({
-      folders: folders.rows.map((f) => ({ id: f.id, path: f.path, color: f.color })),
-      notes: notes.rows.map((n) => ({ id: n.id, relPath: n.rel_path })),
-      files: files.rows.map((f) => ({ id: f.id, path: f.path })),
+    return c.json(await loadAccessTreeRows(vaultId));
+  });
+
+  /**
+   * The member Access tab in one request: the access-tree arrays plus `modes`,
+   * one char per item (folders, then notes, then files, each in the array
+   * order): `e` edit, `v` view, `n` none, `m` a folder whose subtree disagrees.
+   * Each char equals what `POST /orgs/:orgId/access/summaries` answers for that
+   * single row and this one person; the index is loaded once and every item is
+   * resolved once (`permissions/access-board.ts`). Same owner/admin gate and
+   * ACL bypass as access-tree: paths and modes only.
+   */
+  registryRoutes.get("/vaults/:vaultId/access-board", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const userId = c.req.query("userId");
+    if (!userId) return c.json({ error: "invalid_request", message: "userId is required" }, 400);
+    const org = await vaultOrg(vaultId);
+    if (!org) return c.json({ error: "Unknown vault" }, 404);
+    const role = await orgRole(org, session.userId);
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "Only a vault owner or admin can manage access" }, 403);
+    }
+    const targetRole = await orgRole(org, userId);
+    if (!targetRole) {
+      return c.json({ error: "not_member", message: "That person is not a member of this vault" }, 404);
+    }
+    const [index, tree] = await Promise.all([loadAccessIndex(pool, org), loadAccessTreeRows(vaultId)]);
+    const items = {
+      folderIds: tree.folders.map((f) => f.id),
+      noteIds: tree.notes.map((n) => n.id),
+      fileIds: tree.files.map((f) => f.id),
+    };
+    const result = await boardModes({
+      db: pool,
+      index,
+      cache: createResolverCache(),
+      vaultId,
+      userId,
+      role: targetRole,
+      items,
     });
+    const modes = encodeBoardModes(result, items);
+    const totals = { edit: 0, view: 0, none: 0, mixed: 0 };
+    for (const ch of modes) {
+      if (ch === "e") totals.edit++;
+      else if (ch === "v") totals.view++;
+      else if (ch === "n") totals.none++;
+      else totals.mixed++;
+    }
+    return c.json({ ...tree, modes, totals, complete: true as const });
   });
 
   /**

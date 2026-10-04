@@ -430,7 +430,10 @@ manage access" means *manage*, never an exemption from the caps they set. No UI 
 per-folder Everyone overrides; changing the Everyone row (`PUT team-access`) clears any that exist. One person's per-folder checkboxes live in
 their profile's Access tab and apply immediately through the atomic bulk-access API (users
 audience); the tree updates optimistically and re-reads only the affected subtree plus its ancestors,
-never a fresh `listAccessTree`. The Access tab has a segmented icon toggle (top-right) between two
+never a fresh `listAccessTree`. The Board and List load through
+`GET /vaults/:id/access-board?userId=` (`permissions/access-board.ts`: the access-tree arrays plus a
+`modes` string, one index load and one resolve per item per request, each char equal to that row's
+`access/summaries` answer); `POST access/summaries` stays for old desktops and small post-write re-reads. The Access tab has a segmented icon toggle (top-right) between two
 views, persisted per device in localStorage `context.memberAccess.view`: **List** (that
 checkbox tree with the "Across the vault" level) and **Board** (default; `MemberAccessBoard.tsx`, the same
 bulk-access writes, one resource per write): columns Can edit / Can view / No access, rows moved by
@@ -699,8 +702,8 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
 - `GET /health` (`http/app.ts`) answers `{ ok, version, minDesktopVersion, features }`: `version`
   is the server package version read once at startup, `minDesktopVersion` the live
   `client-version.ts` floor (null when off), `features` today `notes-with-state`
-  (`registry/seed-on-register.ts`), `bootstrap-only` (`routes/bootstrap.ts`) and `files-with-bytes`
-  (`routes/blobs.ts`). A missing `features` means none. Desktops pick their path from it once per
+  (`registry/seed-on-register.ts`), `bootstrap-only` (`routes/bootstrap.ts`), `files-with-bytes`
+  (`routes/blobs.ts`) and `access-board` (`routes/registry.ts`). A missing `features` means none. Desktops pick their path from it once per
   server URL; the per-item `seeded` flag stays the fallback.
 - **Registration with state** (`registry/seed-on-register.ts`, used by `POST
   /api/vaults/:vaultId/notes/batch` in `routes/bulk.ts` and `POST /api/notes` in
