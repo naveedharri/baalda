@@ -434,7 +434,7 @@ async function restorePinnedBlobs(
           await db.query("RELEASE SAVEPOINT revert_file");
           if ((err as { code?: string })?.code !== "23505") throw err;
           console.warn(
-            `[revert] skipping file ${pin.file_id}: another file already occupies ${pin.rel_path}`,
+            `[revert] skipping file ${pin.file_id}: another file already occupies its path`,
           );
           continue;
         }
@@ -495,7 +495,7 @@ async function insertPinnedBlob(
     );
     data = rows[0]?.data ?? null;
     if (!data) {
-      console.warn(`[revert] bytes for ${pin.rel_path} (${pin.sha256}) are gone; leaving it`);
+      console.warn(`[revert] bytes for file ${pin.file_id ?? "attachment"} (${pin.sha256}) are gone; leaving it`);
       return false;
     }
   } else if (!pin.storage_key) {

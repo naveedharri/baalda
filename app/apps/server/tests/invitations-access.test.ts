@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { auth } from "../src/auth/auth.js";
 import { createApp } from "../src/http/app.js";
 import { testAppDeps } from "./helpers/app.js";
@@ -61,6 +61,9 @@ describe("invitations with access", () => {
     owner = await signUp("owner@inv-access.test");
     orgId = (await createOrg(owner, "Inv", `inv-${Date.now()}`)).id;
   });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
   afterAll(async () => {
     await pool.end();
   });
@@ -86,6 +89,8 @@ describe("invitations with access", () => {
   });
 
   it("validates the body and gates on owner/admin", async () => {
+    // The seat-cap leg needs billing on; enable it here rather than rely on a local .env.
+    vi.stubEnv("POLAR_ACCESS_TOKEN", "test-polar-access-token");
     expect((await inviteMany(owner, orgId, { emails: [], role: "member", access: null })).status).toBe(400);
     expect((await inviteMany(owner, orgId, { emails: ["nope"], role: "member", access: null })).status).toBe(400);
     expect((await inviteMany(owner, orgId, { emails: ["x@y.zz"], role: "owner", access: null })).status).toBe(400);
@@ -102,7 +107,7 @@ describe("invitations with access", () => {
     await seedMember(orgId, member.userId, "member");
     expect((await inviteMany(member, orgId, { emails: ["z@y.zz"], role: "member", access: null })).status).toBe(403);
 
-    // Free seat cap (billing on in tests): owner + admin + member + the pending
+    // Free seat cap (billing stubbed on above): owner + admin + member + the pending
     // invite fill it, so every address fails ⇒ top-level 402 the desktop's
     // classifyLimitError understands, with per-email detail.
     const full = await inviteMany(owner, orgId, { emails: ["q@y.zz", "r@y.zz"], role: "member", access: null });

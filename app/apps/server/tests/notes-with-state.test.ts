@@ -25,7 +25,9 @@ import { config } from "../src/config.js";
 // Count every doc_updates row present at the moment `registry-changed` fires.
 const atBroadcast: Array<Promise<number>> = [];
 const rec = recordingAppDeps({
-  onRegistryChanged: (vaultId) => {
+  // This override replaces the helper's recorder, so it records the broadcast itself.
+  onRegistryChanged: (vaultId, originId) => {
+    rec.registryBroadcasts.push({ vaultId, originId });
     atBroadcast.push(
       pool
         .query<{ n: number }>(
