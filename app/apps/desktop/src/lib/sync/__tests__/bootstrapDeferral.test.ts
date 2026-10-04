@@ -130,9 +130,11 @@ describe("PR4 — no placeholders for notes a bootstrap download will create", (
     expect(reg.pendingFromBootstrapCount()).toBe(0);
   });
 
-  it("a small delta (one live note) keeps the sub-second placeholder", async () => {
+  it("a small delta keeps its placeholder when the host cannot promise delivery", async () => {
+    // The host is asked for every arrival now; the live-channel rule lives in
+    // `liveArrivalDeferral.test.ts`. A host answering null keeps placeholders.
     const reg = new VaultRegistry(fakeApi(serverOnly(1)));
-    reg.setInboundHost(host({ follows: true }).h);
+    reg.setInboundHost(host({ follows: false }).h);
     await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, emptyTree());
 
     expect(vi.mocked(ipc.writeNoteIfMissing).mock.calls.map((c) => c[0])).toEqual(["Remote/N0.md"]);

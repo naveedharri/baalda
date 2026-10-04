@@ -88,6 +88,11 @@ import { svFromBase64 } from "./ackedSv";
 import { ReadOnlyRejections } from "./readOnlyRejections";
 import { setReadOnlyCopyKeeper } from "../bridge/readOnlyDocs";
 import { SyncPauseTracker, type SyncPause } from "./syncPause";
+import {
+  createDeferredWithContent,
+  DeferredArrivalFlush,
+  liveArrivalPredicate,
+} from "./deferredArrival";
 import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
 import { VoicePlayer } from "../voice/playback";
 import { VoiceRoster, type VoiceSpeaker } from "../voice/roster";
@@ -3105,15 +3110,46 @@ export class SyncManager implements InboundHost {
    * page lands (no "downloading" row). Nothing can open it before then.
    */
   bootstrapWillDeliver(count: number): ((docId: string) => boolean) | null {
-    if (this.serverTooOld || !useBulkPath(count)) return null;
-    const follows =
-      this.bulkPhase ||
-      this.enableReconciling ||
-      (this.bulkDownloadPending && !this.contentRunInFlight());
-    if (!follows) return null;
+    if (this.serverTooOld) return null;
     const held = new Set(this.docStore?.knownDocs() ?? []);
-    return (docId) => !held.has(docId);
+    if (useBulkPath(count)) {
+      const follows =
+        this.bulkPhase ||
+        this.enableReconciling ||
+        (this.bulkDownloadPending && !this.contentRunInFlight());
+      if (follows) return (docId) => !held.has(docId);
+    }
+    // Any other arrival (a teammate's new note, a small grant): the live vault
+    // channel backfills it a moment later, so the first content frame creates
+    // the file with its text (`createDeferred` in `startVaultEngine`). Bounded:
+    // whatever has not arrived in DEFERRED_ARRIVAL_WAIT_MS gets its placeholder.
+    const willDeliver = liveArrivalPredicate({
+      serverTooOld: this.serverTooOld,
+      channelSynced: this.docStore != null && this.vaultStatus === "synced",
+      live: this.isLive(),
+      liveOnly: this.vaultEngineLiveOnly,
+      held,
+      serverEmpty: this.serverEmpty,
+    });
+    if (willDeliver) this.deferredArrivalFlush.arm();
+    return willDeliver;
   }
+
+  /**
+   * The bounded wait for deferred small arrivals: their placeholders are
+   * written when it fires, on a vault-channel drop, and at the existing flush
+   * points. Never while a bulk download is due, whose own end flush covers it.
+   */
+  private readonly deferredArrivalFlush = new DeferredArrivalFlush(() => {
+    // A bulk download is running or about to: its end flush (`runBulkEngine`)
+    // writes whatever it did not deliver, and flushing now would put 0-byte
+    // files under every note it is about to create with content.
+    if (this.bulkPhase || this.enableReconciling || this.bulkDownloadPending) return;
+    const scope = this.scope;
+    void this.materializeDeferred().then((created) => {
+      if (created && scope?.isCurrent()) this.onRegistryChanged?.();
+    });
+  });
 
   /** `InboundHost.heldDocIds`: the docs of an unanswered bulk delete. */
   heldDocIds(): ReadonlySet<string> {
@@ -6296,6 +6332,28 @@ export class SyncManager implements InboundHost {
         this.registry.markPushed(docId);
         this.serverEmpty.delete(docId);
       },
+      // A doc whose placeholder the pull deferred: its first content frame
+      // creates the file WITH the text, create-only, through the bootstrap
+      // apply. One owed watcher echo (`markMaterialized`), like a placeholder.
+      createDeferred: async (docId, path, update) => {
+        if (!scope.isCurrent()) return null;
+        const sv = await createDeferredWithContent(
+          {
+            deferredPathFor: (id) => this.registry.deferredPathFor?.(id) ?? null,
+            applyBatch: (entries) => ipc.applyBootstrapBatch(entries, scope.vaultEpoch),
+            markMaterialized: (relPath) => this.registry.markMaterialized(relPath),
+            markPushed: (id) => {
+              this.registry.markPushed(id);
+              this.serverEmpty.delete(id);
+            },
+          },
+          docId,
+          path,
+          update,
+        );
+        if (sv && scope.isCurrent()) this.onRegistryChanged?.();
+        return sv;
+      },
     });
     this.docStore = store;
     // Skip the server's cold backfill when the bulk engine is going to page the
@@ -6354,6 +6412,9 @@ export class SyncManager implements InboundHost {
         // clear it so the sidebar doesn't show ghosts (the engine re-announces
         // everyone on the next `synced`).
         if (s !== "synced") this.clearVaultPresence();
+        // Nothing more is coming over a dropped channel: deferred small
+        // arrivals get their placeholders now.
+        if (s !== "synced" && this.vaultStatus === "synced") this.deferredArrivalFlush.flushNow();
         this.vaultStatus = s;
         this.emitStatus();
         this.onVaultStatus?.(s);
@@ -6466,6 +6527,7 @@ export class SyncManager implements InboundHost {
   }
 
   private stopVaultEngine(): void {
+    this.deferredArrivalFlush.cancel();
     this.vaultEngine?.stop();
     this.vaultEngine = null;
     this.vaultEngineId = null;

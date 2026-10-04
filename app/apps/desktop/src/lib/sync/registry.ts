@@ -430,13 +430,14 @@ export interface InboundHost {
   heldDocIds?(): ReadonlySet<string>;
   /**
    * PR4 (receiving side without placeholders): asked once per pull that is
-   * about to materialize at least `BULK_THRESHOLD_DOCS` server-only notes.
-   * When a bootstrap download is guaranteed to run after this pull (the bulk
-   * engine of `enable`, a `bootstrap` frame, or one already running), answer a
-   * predicate saying whether that download will deliver `docId` — i.e. this
-   * device holds no local CRDT for it. Those notes get NO 0-byte placeholder:
-   * `apply_bootstrap_batch` creates the file with its content. `null` (or no
-   * hook) keeps today's placeholders. The host MUST call
+   * about to materialize server-only notes, `count` of them. When a bootstrap
+   * download is guaranteed to run after this pull (the bulk engine of
+   * `enable`, a `bootstrap` frame, or one already running) or the live vault
+   * channel will backfill them, answer a predicate saying whether `docId`'s
+   * content is coming — i.e. this device holds no local CRDT for it (and, for
+   * the channel, the server holds state for it). Those notes get NO 0-byte
+   * placeholder: `apply_bootstrap_batch` creates the file with its content.
+   * `null` (or no hook) keeps today's placeholders. The host MUST call
    * {@link VaultRegistry.materializePendingFromBootstrap} when that download
    * ends, however it ends, or the deferred notes stay absent until the next pull.
    */
@@ -1397,6 +1398,16 @@ export class VaultRegistry {
     if (docId === undefined) return;
     this.pendingFromBootstrap.delete(key);
     this.pendingFromBootstrapByDoc.delete(docId);
+  }
+
+  /**
+   * The deferred path of `docId`, or null when no placeholder is pending for
+   * it in THIS vault. Content arriving for such a doc creates the file with its
+   * text (`deferredArrival.ts`); `markMaterialized` then clears the entry.
+   */
+  deferredPathFor(docId: string): string | null {
+    if (this.pendingFromBootstrapEpoch !== this.epoch()) return null;
+    return this.pendingFromBootstrapByDoc.get(docId) ?? null;
   }
 
   /** Deferred server-only notes still waiting for their bootstrap page (PR4). */
@@ -4162,17 +4173,16 @@ export class VaultRegistry {
     this.restoreCandidatesCi = new Set(
       toMaterialize.filter((rp) => priorMappedCi.has(pathKey(rp))).map((rp) => pathKey(rp)),
     );
-    // PR4: no placeholders for notes a bootstrap download is about to create
-    // WITH content. A fresh device joining a 20,000-note vault used to write
-    // 20,000 0-byte files here and show them empty for the whole download.
-    // Kept as placeholders (written now, exactly as before): a single live note
-    // or any small delta (below the bulk threshold, so the sub-second
-    // behaviour for a teammate's new note is unchanged), notes this device
-    // holds CRDT for (the bootstrap skips them; `materializeContent` fills
-    // them below), D5 restores (their report is written here), and everything
-    // when no bootstrap is guaranteed to follow.
+    // PR4: no placeholders for notes that are about to arrive WITH content —
+    // a bootstrap download (a fresh device joining a 20,000-note vault used to
+    // write 20,000 0-byte files here) or, for a small arrival, the live vault
+    // channel's backfill (the host decides; see `bootstrapWillDeliver`).
+    // Kept as placeholders (written now, exactly as before): notes this device
+    // holds CRDT for (`materializeContent` fills them below), notes the server
+    // holds no state for, D5 restores (their report is written here), and
+    // everything when the host cannot promise delivery.
     let materializeNow = toMaterialize;
-    if (useBulkPath(toMaterialize.length)) {
+    if (toMaterialize.length > 0) {
       const willDeliver = this.host?.bootstrapWillDeliver?.(toMaterialize.length) ?? null;
       if (willDeliver) {
         materializeNow = [];

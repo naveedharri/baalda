@@ -325,9 +325,14 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   `InboundHost.bootstrapWillDeliver`): a pull large enough for the bulk path (`useBulkPath`) whose
   bootstrap is guaranteed to run records server-only notes instead of writing placeholders, and the
   bootstrap creates them WITH content (a fresh device joining a 20,000-note vault used to show
-  20,000 empty files for the whole download). Placeholders are still written now for small deltas
-  and single live notes (the sub-second path is unchanged), docs this device holds CRDT for
-  (`materializeContent` fills them), D5 restores, and everything when no bootstrap follows. When
+  20,000 empty files for the whole download). Small arrivals (a teammate's new note, a grant under
+  the bulk threshold) are deferred too while the vault channel is connected, live and backfilling
+  (`sync/deferredArrival.ts`): the first content frame's cold apply creates the file with its text
+  through `apply_bootstrap_batch` (create-only, `markMaterialized`), and whatever has not arrived in
+  `DEFERRED_ARRIVAL_WAIT_MS` (2 s), or on a channel drop, gets its placeholder; until then the note
+  is simply not on disk, so the sidebar has nothing to open. Placeholders are still written now for
+  docs the server holds no state for (`ready.empty`), docs this device holds CRDT for
+  (`materializeContent` fills them), D5 restores, and everything when nothing will deliver. When
   the download ends however it ends, `materializePendingFromBootstrap` writes create-only
   placeholders for what it did not deliver (the server-empty `ready.empty` class, or a cancelled
   run), re-resolved by `doc_id`. The pending set is memory only, never persisted as done: an
