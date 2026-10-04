@@ -17,7 +17,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { iconForPath } from "./FileTree";
 import { MenuSelect } from "./MenuSelect";
 import { RoleSelect } from "./RoleSelect";
-import { Spinner } from "./Spinner";
+import { ActivitySkeleton, RowLevelSkeleton, TreeSkeleton } from "./MemberProfileSkeletons";
 import { markSelfAccessChange } from "../lib/sync/selfAccessChanges";
 
 
@@ -256,9 +256,7 @@ function PersonActivity({ orgId, member, vaultName, isSelf, onOpenNote }: {
     return () => { live = false; };
   }, [orgId, member.userId]);
 
-  if (state.status === "loading") {
-    return <div className="member-profile-loading"><Spinner /></div>;
-  }
+  if (state.status === "loading") return <ActivitySkeleton />;
   if (state.status === "error") return <p className="member-activity-empty">Couldn't load activity.</p>;
   const now = Date.now();
   const days = buildTimeline(state.events, now, { at: member.joinedAt, invitedBy: member.invitedBy ?? null });
@@ -577,7 +575,7 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
       {view === "board" ? (
         <div className="member-access-board-pane">{board}</div>
       ) : !serverTree ? (
-        <div className="member-profile-loading">{error ? null : <Spinner />}</div>
+        error ? null : <TreeSkeleton />
       ) : (
         <ul className="member-access-tree" role="tree">
           {rows.map((row) => {
@@ -684,7 +682,7 @@ function PersonAccessRow({ row, mode, failed, teamMode, tickMode, locked, setFor
       <span className="member-access-notes">
         {setForEveryone && <span className="member-access-tag">Set for everyone</span>}
         {mode === null ? (
-          failed ? <span className="member-access-note" title="Couldn't load">—</span> : <Spinner />
+          failed ? <span className="member-access-note" title="Couldn't load">—</span> : <RowLevelSkeleton />
         ) : inherited ? (
           <span className="member-access-note">Same as everyone</span>
         ) : null}

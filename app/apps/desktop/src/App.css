@@ -8558,6 +8558,86 @@ button.secondary:active:not(:disabled),
   opacity: 0.7;
 }
 
+/* Member profile skeletons: the same `.skel-line` shimmer and bar shapes as
+   the Members table above, laid into the profile's own layouts. */
+.member-skel-avatar {
+  display: inline-block;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+.member-profile-skeleton .member-profile-head {
+  margin-bottom: var(--sp-4);
+}
+.member-skel-value,
+.member-skel-board-name,
+.member-skel-tree-name,
+.member-skel-activity-line {
+  display: inline-block;
+  height: 10px;
+  max-width: 100%;
+}
+.member-skel-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+}
+.member-skel-check {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0 7px;
+  border-radius: 3px;
+}
+.member-skel-level {
+  display: inline-block;
+  flex: none;
+  width: 72px;
+  height: 22px;
+}
+.member-skel-board-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 8px;
+}
+.member-skel-board .access-board-column-title {
+  color: var(--text-secondary);
+}
+.member-skel-day {
+  display: inline-block;
+  width: 72px;
+  height: 18px;
+}
+.member-skel-activity .member-activity-entry {
+  animation: none;
+}
+.member-skel-node {
+  display: inline-block;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+.member-skel-activity-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+  min-width: 0;
+}
+.member-skel-activity-time {
+  display: inline-block;
+  width: 56px;
+  height: 8px;
+}
+
 /* Quiet MCP tip under the table. */
 .members-access-mcp-hint {
   display: flex;

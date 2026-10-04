@@ -37,6 +37,7 @@ import { Avatar } from "./Avatar";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { InvitePeopleDialog } from "./InvitePeopleDialog";
 import { MemberProfilePage, type ProfileTab } from "./MemberProfilePage";
+import { ProfileSkeleton } from "./MemberProfileSkeletons";
 import { canActOnMember, canSetMemberAccess } from "./memberRoles";
 import { MenuSelect } from "./MenuSelect";
 import { RowActionsMenu, type RowAction } from "./RowActionsMenu";
@@ -326,6 +327,11 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
   // The Everyone row shows nothing current until the server has answered; a
   // cached mode only paints the trigger as a hint, it never authorises a write.
   const everyone = teamAccess ? everyoneLabel(teamAccess.mode, teamAccess.posture) : null;
+
+  // A profile asked for before the roster has arrived: hold its layout.
+  if (profile && orgId && !overview) {
+    return <div className="members-access"><ProfileSkeleton /></div>;
+  }
 
   if (profile && profileMember && orgId) {
     return (

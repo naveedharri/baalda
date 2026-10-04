@@ -25,7 +25,7 @@ import { markSelfAccessChange } from "../lib/sync/selfAccessChanges";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { iconForPath } from "./FileTree";
 import { MenuSelect } from "./MenuSelect";
-import { Spinner } from "./Spinner";
+import { BoardPendingRows, BoardSkeleton } from "./MemberProfileSkeletons";
 import { toast } from "../lib/toast";
 import { buildOrgRowsByPath } from "../lib/accessMode";
 import { itemLockRows, resourceIdsByPath } from "../lib/locks";
@@ -595,7 +595,7 @@ export function MemberAccessBoard({
       </div>
       {error && <div className="auth-error">{error}</div>}
       {!serverTree ? (
-        <div className="member-profile-loading">{error ? null : <Spinner />}</div>
+        error ? null : <BoardSkeleton />
       ) : (
         <div className="access-board-columns">
           {columns.map((col, i) => {
@@ -667,7 +667,7 @@ export function MemberAccessBoard({
                   )}
                   {col.rows.length === 0 && <li className="access-board-empty">Nothing here</li>}
                 </ul>
-                {i === 0 && loading && <div className="access-board-loading"><Spinner /></div>}
+                {i === 0 && loading && <BoardPendingRows />}
               </section>
             );
           })}
