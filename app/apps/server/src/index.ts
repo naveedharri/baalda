@@ -22,7 +22,7 @@ import { setInvitationActivityPublisher } from "./invitations/sweep.js";
 import { pool } from "./db/pool.js";
 import { invalidateReadableCache } from "./permissions/readable-cache.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
-import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
+import { createVersionCapture, isFirstContent, type VersionCapture } from "./versions/capture.js";
 import {
   BrakeGrowthCoalescer,
   isShrinkHeld,
@@ -34,7 +34,11 @@ import {
 } from "./versions/shrink-guard.js";
 import { recordBrakeEngaged, updateBrakeCount } from "./versions/brake-events.js";
 import { createReleaseWatch, releaseWatchConfig } from "./sync/release-watch.js";
-import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
+import {
+  loadTopUpWindow,
+  maybeDailyCheckpoint,
+  topUpCheckpoint,
+} from "./versions/checkpoints.js";
 
 /**
  * Entry point. Runs two listeners in one Node process:
@@ -273,6 +277,14 @@ async function main() {
     // Activity-triggered daily checkpoint — no scheduler, and the freshness
     // test runs under a per-vault advisory lock so instances don't stampede.
     dailyCheckpoint: (vaultId) => maybeDailyCheckpoint({ vaultId, docWriter }),
+    // A doc's first content (any route) never triggers the daily checkpoint,
+    // and tops up the newest one if it stored that doc structure-only.
+    firstContent: (docId) => isFirstContent(docId),
+    checkpointTopUp: {
+      window: (vaultId) => loadTopUpWindow(pool, vaultId),
+      apply: (vaultId, checkpointId, docIds) =>
+        topUpCheckpoint(pool, docWriter, vaultId, checkpointId, docIds),
+    },
   });
 
   const app = createApp({
