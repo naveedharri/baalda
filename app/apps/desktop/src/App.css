@@ -9679,3 +9679,9 @@ body.access-board-grabbing * {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
 }
+/* A collapsed folder's count of what is inside it in this column. */
+.access-board-row .access-board-descendants {
+  flex: none;
+  font-size: 0.85em;
+  color: var(--text-tertiary);
+}

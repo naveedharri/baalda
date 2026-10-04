@@ -154,6 +154,63 @@ export function orderByRecent(column: readonly BoardRow[], recentKeys: readonly 
   return out;
 }
 
+/** One row a column actually draws, after collapsed folders hide their contents. */
+export interface BoardViewRow {
+  item: BoardRow;
+  /** Position in the full column list (the leaving gap is measured there). */
+  index: number;
+  /** An interactive folder with rows under it in this column: it gets a toggle. */
+  expandable: boolean;
+  /** Interactive rows under it in this column (shown beside a collapsed folder). */
+  descendants: number;
+}
+
+/**
+ * What a column draws: interactive folders are collapsed unless their key is
+ * in `expanded`, and a collapsed folder hides every row under it in this
+ * column. Grey path rows never collapse, so the path to an item that lives
+ * here stays visible. `column` is in tree order (columnRows / orderByRecent
+ * both keep a folder's subtree right after it), so two linear passes do it:
+ * a depth stack closes each row's subtree to count it, then one hidden depth
+ * skips whatever sits under a collapsed folder. O(n), no ancestor scans.
+ */
+export function visibleBoardRows(column: readonly BoardRow[], expanded: ReadonlySet<string>): BoardViewRow[] {
+  const n = column.length;
+  // live[i] = interactive rows among the first i.
+  const live = new Array<number>(n + 1);
+  live[0] = 0;
+  for (let i = 0; i < n; i++) live[i + 1] = live[i] + (column[i].grey ? 0 : 1);
+  // end[i] = first index after row i's subtree.
+  const end = new Array<number>(n);
+  const open: number[] = [];
+  for (let i = 0; i <= n; i++) {
+    const depth = i < n ? column[i].row.depth : -1;
+    while (open.length > 0 && column[open[open.length - 1]].row.depth >= depth) end[open.pop()!] = i;
+    if (i < n) open.push(i);
+  }
+  const out: BoardViewRow[] = [];
+  let hiddenBelow = Infinity;
+  for (let i = 0; i < n; i++) {
+    const item = column[i];
+    if (item.row.depth > hiddenBelow) continue;
+    hiddenBelow = Infinity;
+    const expandable = !item.grey && item.row.kind === "folder" && end[i] > i + 1;
+    out.push({ item, index: i, expandable, descendants: live[end[i]] - live[i + 1] });
+    if (expandable && !expanded.has(item.row.key)) hiddenBelow = item.row.depth;
+  }
+  return out;
+}
+
+/** Every folder in a column that can be expanded ("Expand all"). */
+export function expandableKeys(column: readonly BoardRow[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < column.length; i++) {
+    const r = column[i];
+    if (!r.grey && r.row.kind === "folder" && (column[i + 1]?.row.depth ?? -1) > r.row.depth) out.push(r.row.key);
+  }
+  return out;
+}
+
 /** Rows in a column with no interactive ancestor in the same column. */
 export function topLevelRows(column: readonly BoardRow[]): AccessRow[] {
   const live = new Set(column.filter((r) => !r.grey).map((r) => r.row.path));
