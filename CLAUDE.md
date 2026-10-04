@@ -193,8 +193,8 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   that is not yet live (`liveSince` = vault channel `synced` + one completed pull, so a missing file at
   startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window — judged
   FIRST, before any server call. Over the cap with the root present and the session live, the batch is
-  HELD, not abandoned (#221): a banner asks "Delete for everyone / Restore", the pull skips the held docs
-  and Health lists them; with the root gone it is still refused silently, because an unmounted volume
+  HELD, not abandoned (#221): a banner asks "Delete for everyone / Restore", the pull skips the held docs;
+  with the root gone it is still refused silently, because an unmounted volume
   looks exactly like a bulk delete. A mapped FOLDER that vanishes while an unmapped folder appears is
   paired first (`drainFolderMoves`: ≥80% of its notes present at the same sub-path with matching content
   ⇒ ONE server folder move, every id kept; below that, per-note pairing then the drain). A vanished vault
@@ -275,7 +275,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   `doc_id` survives. Every such action is recorded as a `ReconcileKind` (`restoredFromServer`,
   `deletedByTeammate`, `renamedConflict`, `keptLocally`, `selfRevoked`, `folderKept`,
   `externalEditSaved`) and shown once per session as one plain-words summary (`ReconcileBanner`,
-  details in Health's `HealthReconcile`); nothing in the report persists. `selfRevoked` is a
+  details in the Activity panel's Review changes); nothing in the report persists. `selfRevoked` is a
   revocation caused by an access change THIS device made for the signed-in user in the last 60 s
   (`sync/selfAccessChanges.ts` `markSelfAccessChange`/`isSelfAccessChange`): the same safety outcome
   as `keptLocally`, reported quietly and left out of the "N changes to review" count.
@@ -301,7 +301,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   it falls back to the per-doc uploader. **Decided 2026-10-04:** on `adopted`/`conflict` with
   differing text the SERVER text wins, the local text is saved to `.context/trash` (the fresh
   bridge's `unagreedFile` → `saveAside`) and reported once as `conflictKeptServer` in the reconcile
-  banner and Health; a clean adopt (empty or identical local text) reports nothing. This is not the
+  banner and the Activity review; a clean adopt (empty or identical local text) reports nothing. This is not the
   `conflictPath` rule: `resolveSamePathConflicts` runs on the pull BEFORE registration and only for
   an unmapped non-empty local file at the path of a server note this device has never agreed on, in
   a collection it has a baseline for, so those stay two notes (`(conflict YYYY-MM-DD)`); `adopted`
@@ -425,28 +425,14 @@ always win and participate in that neighbour check. Automatic colours are stable
 can be turned off in Account Settings → Appearance; they are ON by default (an explicit off is
 kept). The palette pairs baalda.com's pastel fills with a deeper outline of the same hue.
 
-The Vault Settings Health tab is hidden behind `SHOW_HEALTH_TAB` pending #289; what follows
-describes it as built. Vault Health reads `vaultSyncStatus` from the vault channel independently of the open note's
-`syncStatus`, which still controls editor permissions. A note-level refusal is not lost vault
-membership. Inbound safety refusals are `inbound-blocked` issues, distinct from disk write failures;
-large issue lists render in pages.
-
-Vault Health keeps its local census separate from its server inventory. Local totals come from Rust's
-disk/index pass and refresh during sync and access cleanup. For owners and admins, stored server totals
-and missing-from-server checks use the access tree, including private notes; the registry remains the
-accessible inventory used for download comparisons. Other accounts see their accessible server inventory.
-The server view is explicitly last-known while offline, signed out, reconnecting or denied. Matching
-paths/counts never imply matching content — per-note pushed/sync state remains the content authority,
-and active work takes precedence over a healthy comparison.
+Vault Health tab removed 2026-10-04 (#289); vault-level sync state surfaces only through the sidebar
+badge, the reconcile banner / Activity review and file previews. `vaultSyncStatus` (vault channel) stays
+independent of the open note's `syncStatus`, which still controls editor permissions; a note-level
+refusal is not lost vault membership.
 An attachment-local-only notice is driven only by the server's explicit
 `attachment_sync_requires_pro` refusal. Do not infer it from a Free plan label:
 the vault may be Pro, and billing-disabled self-hosts may still sync attachments.
-The notice persists in file previews and Vault Health while notes continue to
-report their own sync state. Health includes server-only files when deciding
-whether to show the refusal. Missing binary files offer explicit single/all
-file downloads through the attachment mirror's readable listing and guarded
-transport; errors remain visible. Confirmed server removal uses the existing
-file-delete authorization and is serialized against the mirror's transfers.
+The notice shows in file previews while notes continue to report their own sync state.
 The vault Settings list shows account memberships and this app profile's recent
 local folders, not a scan of the managed root. Production and staging have
 separate recents even when they share a root; Open existing reopens a folder.
@@ -826,7 +812,7 @@ OpenRouter SDK through swappable Decisions/chat adapters. Personal provider keys
 `DocWriter.editContent` with revision/span guards under its lock. Preview tokens
 are scoped to user/vault, expire, and live in bounded process memory. No sync wire
 format or bridge timing changes. Setup, limits and isolated tests:
-[Baalda Assistant](docs/HOUSEKEEPER.md). Keys are user-owned and stored in the desktop OS keychain; inference supplies them per request. Diagnostic review sends aggregate counts only and returns allowlisted next-step recommendations. Advanced diagnostic tools live in AI; Health retains its basic overview.
+[Baalda Assistant](docs/HOUSEKEEPER.md). Keys are user-owned and stored in the desktop OS keychain; inference supplies them per request. Diagnostic review sends aggregate counts only and returns allowlisted next-step recommendations. Advanced diagnostic tools live in AI (the Health tab is gone).
 
 Baalda Agents follow observe → investigate → propose → approve → execute → verify.
 Finding cards are data-driven; models choose allowlisted capabilities, while

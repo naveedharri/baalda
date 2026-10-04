@@ -2283,22 +2283,6 @@ export class ApiClient {
     return data.confirmed ?? [];
   }
 
-  /** Owner/admin census of notes registered but never uploaded (#257). */
-  async uploadHealth(vaultId: string): Promise<{
-    stalled: number;
-    confirmedEmpty: number;
-    minAgeMinutes: number;
-    byCreator: Array<{ userId: string | null; name: string | null; count: number }>;
-  }> {
-    const { data } = await this.request<{
-      stalled: number;
-      confirmedEmpty: number;
-      minAgeMinutes: number;
-      byCreator: Array<{ userId: string | null; name: string | null; count: number }>;
-    }>("GET", `/api/vaults/${encodeURIComponent(vaultId)}/upload-health`);
-    return data;
-  }
-
   async listNotes(vaultId: string): Promise<RegisteredNote[]> {
     const { data } = await this.request<{ notes: RegisteredNote[] }>("GET", "/api/notes", {
       query: { vaultId },

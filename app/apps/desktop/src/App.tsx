@@ -204,7 +204,6 @@ function NotSyncingBanner() {
     <NotSyncingBannerView
       reason={reason}
       onSignIn={() => useStore.getState().setAuthPrompt("sign-in")}
-      onOpenHealth={() => useStore.getState().requestSettings("health")}
     />
   );
 }
@@ -229,7 +228,6 @@ function SyncPausedBanner() {
       dismissed={dismissed}
       now={now}
       onDismiss={() => useStore.getState().dismissSyncPause()}
-      onOpenHealth={() => useStore.getState().requestSettings("health")}
     />
   );
 }
@@ -323,7 +321,6 @@ function CreateRefusalBanner() {
   return (
     <CreateRefusalBannerView
       text={text}
-      onShow={() => useStore.getState().requestSettings("health")}
       onDismiss={() => setDismissedRunToken(runToken)}
     />
   );
@@ -939,10 +936,6 @@ function SyncIndicator({
       // A run that could not proceed carries its own remedy: one click re-pulls
       // the registry and re-runs the content pass for everything unconfirmed.
       onRetry={syncEnabled ? () => void syncManager.retrySync() : undefined}
-      // …and the first click should EXPLAIN rather than retry blindly.
-      onOpenHealth={
-        syncEnabled ? () => useStore.getState().requestSettings("health") : undefined
-      }
     />
   );
 }

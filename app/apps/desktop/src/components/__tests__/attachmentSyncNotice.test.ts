@@ -20,7 +20,6 @@ describe("AttachmentLocalOnlyNoticeView", () => {
         show: true,
         showUpgrade: true,
         onUpgrade: vi.fn(),
-        onOpenHealth: vi.fn(),
       }),
     );
 
@@ -29,7 +28,7 @@ describe("AttachmentLocalOnlyNoticeView", () => {
     expect(html).toContain("embedded attachments");
     expect(html).toContain("remain available to preview locally");
     expect(html).toContain("Upgrade to Pro");
-    expect(html).toContain("Open Health");
+    expect(html).not.toContain("Health");
   });
 
   it("does not offer managed billing when the server has billing disabled", () => {
@@ -38,7 +37,6 @@ describe("AttachmentLocalOnlyNoticeView", () => {
         show: true,
         showUpgrade: false,
         onUpgrade: vi.fn(),
-        surface: "health",
       }),
     );
 

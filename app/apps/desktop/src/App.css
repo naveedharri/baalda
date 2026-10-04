@@ -3296,18 +3296,6 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   white-space: nowrap;
   box-shadow: none;
 }
-.attachment-sync-health-link {
-  white-space: nowrap;
-  font-size: var(--fs-sm);
-}
-.attachment-sync-notice-health {
-  margin: 0 0 var(--sp-4);
-  padding: var(--sp-4);
-  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
-  border-left: 4px solid var(--accent);
-  border-radius: var(--radius-lg);
-  box-shadow: none;
-}
 
 @media (max-width: 760px) {
   .attachment-sync-notice .banner-actions {

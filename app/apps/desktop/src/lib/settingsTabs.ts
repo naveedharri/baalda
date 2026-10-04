@@ -2,7 +2,7 @@
 //
 // They live here rather than in `components/VaultSettingsDialog.tsx` because the
 // STORE now names one: anything in the app can ask for Settings to open on a
-// particular page (`requestSettings("health")`), and the store importing a
+// particular page (`requestSettings("members")`), and the store importing a
 // 2,900-line lazy-loaded component — even type-only — is a layering inversion
 // waiting to become an import cycle.
 //
@@ -10,7 +10,6 @@
 
 export type SettingsTab =
   | "general"
-  | "health"
   | "ai"
   | "vaults"
   | "members"

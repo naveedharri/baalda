@@ -18,14 +18,12 @@ export function SyncPausedBannerView({
   dismissed,
   now,
   onDismiss,
-  onOpenHealth,
 }: {
   pause: SyncPause | null;
   /** The `since` of the dismissed episode, if any. */
   dismissed: number | null;
   now: number;
   onDismiss: () => void;
-  onOpenHealth?: () => void;
 }) {
   const show = pause != null && dismissed !== pause.since;
   const remaining = pause ? syncPauseRemaining(pause, now) : null;
@@ -39,7 +37,6 @@ export function SyncPausedBannerView({
         </span>
       )}
       <div className="banner-actions">
-        {onOpenHealth != null && <button onClick={onOpenHealth}>Open Health</button>}
         <button onClick={onDismiss}>Dismiss</button>
       </div>
     </Banner>

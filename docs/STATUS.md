@@ -263,7 +263,7 @@ Six changes that together make a vault something a team can actually govern.
 
 ## Housekeeper Pro preview
 
-- Reviewed broken-wikilink suggestions in Vault Settings → Health, using the
+- Reviewed broken-wikilink suggestions in Vault Settings → AI, using the
   OpenRouter SDK with Jev Decisions or a configurable structured-output chat model.
 - Strict server-side Pro/membership gates on status, scan, apply and undo;
   billing-disabled mode does not bypass this commercial feature.
@@ -335,7 +335,7 @@ native HTML5 drag-and-drop). The overview
 now carries `invitedBy`, and `GET /api/orgs/:orgId/members/:userId/activity` (owner/admin or self;
 404 `not_member`) returns joined / created / edited / accessGranted events filtered to the
 caller's readable set. Vault Settings lost its Updates tab (now Account Settings → About), the
-Health tab is hidden behind `SHOW_HEALTH_TAB` pending #289, the two settings dialogs cross-link,
+Health tab was removed for good on 2026-10-04 (#289), the two settings dialogs cross-link,
 and hover/pressed colours are one accent tint (`--bg-hover`/`--bg-active`).
 
 ## One-step note sync, checkpoint healing, backend notice (2026-10-04)

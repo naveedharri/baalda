@@ -3871,7 +3871,7 @@ export class SyncManager implements InboundHost {
    *
    * The open-time sweep sees only what was orphaned before this session; a
    * delete, a revocation or a duplicate cleanup later in the session used to
-   * wait for a manual "Reclaim" in Health. This re-runs the SAME sweep — the
+   * wait for a manual "Reclaim". This re-runs the SAME sweep — the
    * registry ids ∪ the local index ∪ {@link crdtSweepPinned} allow-list — once
    * the session is idle.
    *
@@ -5772,7 +5772,7 @@ export class SyncManager implements InboundHost {
       });
     }
     // A live bulk delete waiting for the user (#221): one row per note, so
-    // Health lists exactly what the banner's two answers act on.
+    // the diagnostics list exactly what the banner's two answers act on.
     for (const d of this.deleteDecision ?? []) {
       if (listed.has(d.relPath.toLowerCase())) continue;
       registry.push({
