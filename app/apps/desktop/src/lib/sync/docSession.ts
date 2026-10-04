@@ -10,6 +10,7 @@
 // When signed out / offline / unmapped, it falls back to a local Awareness and
 // the bridge's normal seed-from-file (pure local-first).
 
+import { NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
@@ -2528,14 +2529,20 @@ export class SyncManager implements InboundHost {
       }
       if (!scope.isCurrent()) return propagated;
       const byPath = new Map(outcomes.map((o) => [o.path, o]));
+      const putBack: Array<{ docId: string; relPath: string }> = [];
       for (const d of deleted) {
         const out = byPath.get(d.relPath);
         if (out?.status === "deleted") {
           propagated.push(d);
           continue;
         }
+        if (isNotCreatorCode(out?.code)) {
+          putBack.push(d);
+          continue;
+        }
         refused(d, out?.reason ?? "the server did not answer for this note", out?.code ?? null);
       }
+      await this.putBackNotCreator(putBack, scope);
       return propagated;
     }
 
@@ -2546,6 +2553,10 @@ export class SyncManager implements InboundHost {
         try {
           await this.registry.deletePath(d.relPath);
         } catch (e) {
+          if (notCreatorCodeOf(e)) {
+            await this.putBackNotCreator([d], scope);
+            return;
+          }
           // Offline, or the server refused (no edit grant). The mapping is
           // untouched, so a later pull re-materializes the file WITH its
           // content — the delete simply did not happen, which is the honest
@@ -2559,6 +2570,30 @@ export class SyncManager implements InboundHost {
       { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
     );
     return propagated;
+  }
+
+  /**
+   * A disk delete the server refused on the creator rule (403
+   * `delete_not_creator` / `folder_has_others_items`: a member may delete only
+   * what they created). The file must not stay gone on this device only, so it
+   * is put back from this device's CRDT (`registry.restoreRefusedDelete`), one
+   * plain-words reconcile entry is recorded, and the delete is never retried —
+   * the mapping was never dropped, so nothing re-registers.
+   */
+  private async putBackNotCreator(
+    items: ReadonlyArray<{ docId: string; relPath: string }>,
+    scope: VaultScope,
+  ): Promise<void> {
+    for (const d of items) {
+      if (!scope.isCurrent()) return;
+      await this.registry.restoreRefusedDelete(d.relPath, d.docId);
+      this.note(
+        "info",
+        "disk-delete",
+        `${d.relPath} was put back: ${NOT_CREATOR_MESSAGE.toLowerCase()}`,
+        { docId: d.docId, path: d.relPath },
+      );
+    }
   }
 
   /**

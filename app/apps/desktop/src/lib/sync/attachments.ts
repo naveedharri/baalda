@@ -87,6 +87,12 @@ export interface LocalAttachment {
 }
 
 /** Server attachment metadata (from `api.listVaultBlobs`). */
+/** Who created the `files` row behind a blob, when the server says. */
+function blobCreatedBy(b: object): string | null {
+  const r = b as { createdBy?: string | null; created_by?: string | null };
+  return r.createdBy ?? r.created_by ?? null;
+}
+
 export interface ServerBlob {
   id: string;
   sha256: string;
@@ -907,7 +913,11 @@ export interface AttachmentSyncDeps {
     }>
   >;
   /** Remember a registered row for the next session. */
-  rememberFileId?: (relPath: string, id: string, opts?: { authored?: boolean }) => void;
+  rememberFileId?: (
+    relPath: string,
+    id: string,
+    opts?: { authored?: boolean; createdBy?: string | null },
+  ) => void;
   /**
    * The server HOLDS this path's bytes, as a fact rather than an inference
    * (`registry.confirmFileBytes`).
@@ -1239,7 +1249,7 @@ export class AttachmentSync {
           if (!this.current()) throw new Error("The open vault changed.");
           if (blob.docId) {
             this.fileIds.set(path, blob.docId);
-            this.deps.rememberFileId?.(path, blob.docId);
+            this.deps.rememberFileId?.(path, blob.docId, { createdBy: blobCreatedBy(blob) });
             // Downloaded, so the server holds it — same reading as the pass.
             this.deps.confirmFileBytes?.(path);
           }

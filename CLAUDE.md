@@ -206,7 +206,11 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   root pauses every materialize/register/delete step, closes the tabs and offers Restore here (recreate
   it at the old path and sync down — the Set-up prompt's empty-folder path) or Locate folder… (its
   open-folder path) from the banner, Settings → Vaults and the launch prompt (#228). The ingest side is
-  guarded too: a 0-byte file never clears a populated doc (`allowTruncateFromDisk`, default false).
+  guarded too: a 0-byte file never clears a populated doc (`allowTruncateFromDisk`, default false). A disk delete the server refuses on the creator rule (403
+  `delete_not_creator` / `folder_has_others_items`, per item in a batch) is put back, never retried:
+  `registry.restoreRefusedDelete` re-creates the file create-only, fills it from the local CRDT, owes
+  one `consumeMaterialized` echo and records one `restoredFromServer` entry (detail
+  `NOT_CREATOR_DETAIL`, `lib/sync/deletePolicy.ts`), the held banner's Delete for everyone included.
 - **`ready.empty` is filtered against disk** (`SyncManager.settleServerEmpty`): the server names every
   readable doc it holds no CRDT for on each connect, but a doc whose LOCAL file is empty too has nothing
   to push — it is marked pushed + badged synced and never queued (a vault with 307 zero-byte `_Index.md`
@@ -606,6 +610,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   selection bar's Lock were retired: they conflict with the per-person access model); legacy
   `locked` rows still render as padlocks and owners/admins remove them with the row menu's or
   selection bar's Unlock, shown only on rows that carry such a row (`FileTree.tsx`).
+  Delete is creator-only for plain members: the row menu's Delete and the selection bar's trash are
+  disabled ("Only the person who created this, or an admin, can delete it") unless
+  `registry.isAuthoredByMe` says every item is theirs, from authorship ids learned off the listing's
+  `createdBy` (missing = someone else's); owners/admins are ungated and a racing 403 toasts that sentence.
   Renaming a note someone ELSE created (`PATCH /api/notes/:id`, `registry/rename-guard.ts`) is
   refused when it adds a `(conflict YYYY-MM-DD)` suffix (409 `conflict_rename_refused`) and
   budgeted at 100 per (user, vault) per 5 min (429 `rename_rate_limited`) — a burst brake after one

@@ -99,6 +99,7 @@ import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { isSymlinkRefusal, SYMLINK_REFUSAL_REASON } from "./linkRefusals";
 import { toast } from "../toast";
 import { isHeldCreateCode } from "./createRefusals";
+import { NOT_CREATOR_DETAIL, NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { vaultScopes, type VaultScope, type VaultScopeSource } from "./vaultScope";
 
 export interface DocMapping {
@@ -658,6 +659,13 @@ function parentDir(path: string): string {
 }
 
 /** Server error `code` field, when the body carried one. */
+/** A creator-rule 403, re-worded to the sentence every surface shows; the
+ *  body (and so the code) is kept for callers that branch on it. */
+function creatorRefusal(err: unknown): ApiError {
+  const e = err as ApiError;
+  return new ApiError(403, NOT_CREATOR_MESSAGE, e.body);
+}
+
 function errorCode(err: unknown): string | null {
   if (!(err instanceof ApiError)) return null;
   const body = err.body;
@@ -1479,9 +1487,14 @@ export class VaultRegistry {
    * for compatibility with older clients; current removal policy does not
    * exempt the uploader. A DOWNLOAD calls this with `authored` off.
    */
-  setFileId(relPath: string, id: string, opts: { authored?: boolean } = {}): void {
+  setFileId(
+    relPath: string,
+    id: string,
+    opts: { authored?: boolean; createdBy?: string | null } = {},
+  ): void {
     if (this.stale()) return;
-    if (opts.authored) this.claimAuthorship(id);
+    const me = this.host?.localUserId?.() ?? null;
+    if (opts.authored || (me !== null && opts.createdBy === me)) this.claimAuthorship(id);
     if (this.fileByPath.get(relPath) === id) return;
     this.fileByPath.set(relPath, id);
     this.persist();
@@ -4872,6 +4885,9 @@ export class VaultRegistry {
       // the two converge — keying by our own `relPath` instead would leave the
       // server's spelling unmapped and re-register it on every pass.
       this.setMapping(noteRelPath(created) ?? relPath, mapping.docId, vaultId);
+      // The server stamps `created_by` = this user; know it now rather than
+      // on the next pull, so the sidebar can offer Delete on a note just made.
+      this.claimAuthorship(mapping.docId);
       this.checkpoint?.touch();
       // Settle the content exactly like a batch item: applied/covered ⇒
       // settled + acked, conflict/adopted-elsewhere ⇒ the merge queue, no
@@ -5051,6 +5067,76 @@ export class VaultRegistry {
   }
 
   /**
+   * Did THIS signed-in user create the item at `path`?
+   *
+   * A note or tree binary answers from the authorship ids learned from the
+   * listing's `createdBy` (and claimed on our own registrations); a folder is
+   * "mine" only when every mapped note and binary beneath it is. A path the
+   * server does not know yet is local-only and therefore ours. A missing or
+   * null `createdBy` is never ours. Purely local: no request.
+   */
+  isAuthoredByMe(path: string, isDir: boolean): boolean {
+    const me = this.host?.localUserId?.() ?? null;
+    const mine = (id: string) => me !== null && this.authoredBy === me && this.authoredDocs.has(id);
+    if (!isDir) {
+      const mapping = this.byPath.get(path);
+      if (mapping) return mine(mapping.docId);
+      const fileId = this.fileByPath.get(path);
+      if (fileId) return mine(fileId);
+      return true;
+    }
+    const root = pathKey(path);
+    const beneath = (candidate: string) => {
+      const value = pathKey(candidate);
+      return value === root || value.startsWith(root + "/");
+    };
+    for (const [p, m] of this.byPath) if (beneath(p) && !mine(m.docId)) return false;
+    for (const [p, id] of this.fileByPath) if (beneath(p) && !mine(id)) return false;
+    return true;
+  }
+
+  /**
+   * Put back a note whose disk delete the server refused on the creator rule.
+   *
+   * The same create-only path inbound materialisation takes: an empty
+   * placeholder (`write_note_if_missing`, its one watcher echo owed via
+   * {@link markMaterialized}), then this device's local CRDT written through
+   * it. The mapping was never dropped, so nothing is re-registered and the
+   * delete is not retried. Reported once per note per session.
+   */
+  async restoreRefusedDelete(relPath: string, docId: string): Promise<boolean> {
+    if (this.stale()) return false;
+    let created = false;
+    try {
+      created = await ipc.writeNoteIfMissing(relPath, "", this.epoch());
+    } catch (e) {
+      if (ipc.isVaultMismatch(e)) return false;
+      console.warn(`[registry] putting back ${relPath} failed`, e);
+      return false;
+    }
+    if (created) this.markMaterialized(relPath);
+    const host = this.host;
+    if (host) {
+      try {
+        await host.materializeContent(docId, relPath);
+      } catch (e) {
+        console.warn(`[registry] hydrating ${relPath} from local CRDT failed`, e);
+      }
+    }
+    const noticeKey = `not-creator:${docId}`;
+    if (!this.restoreNoticed.has(noticeKey)) {
+      this.restoreNoticed.add(noticeKey);
+      reconcileReport.record({
+        kind: "restoredFromServer",
+        docId,
+        path: relPath,
+        detail: NOT_CREATOR_DETAIL,
+      });
+    }
+    return true;
+  }
+
+  /**
    * Propagate a delete of a folder subtree or a note to the server.
    *
    * BINARIES are not its business: a tree file has no `notes` row and no folder
@@ -5078,6 +5164,7 @@ export class VaultRegistry {
       try {
         await this.api.deleteFolder(folderId);
       } catch (e) {
+        if (notCreatorCodeOf(e)) throw creatorRefusal(e);
         if (!(e instanceof ApiError && e.status === 404)) {
           if (!(e instanceof ApiError && e.status === 403)) throw e;
           // Revocation can leave a folder around its local-only files. Its
@@ -5112,6 +5199,7 @@ export class VaultRegistry {
       try {
         await this.api.deleteNote(mapping.docId);
       } catch (e) {
+        if (notCreatorCodeOf(e)) throw creatorRefusal(e);
         if (!(e instanceof ApiError && e.status === 404)) throw e;
       }
       if (this.stale() || this.serverVaultId !== vaultId) return;
@@ -5255,8 +5343,10 @@ export class VaultRegistry {
         }
         out.set(g.path, {
           path: g.path,
-          status: res.status === "denied" ? "denied" : "failed",
-          reason: res.error ?? res.code ?? "the server refused this delete",
+          status: res.status === "denied" || isNotCreatorCode(res.code) ? "denied" : "failed",
+          reason: isNotCreatorCode(res.code)
+            ? NOT_CREATOR_MESSAGE
+            : (res.error ?? res.code ?? "the server refused this delete"),
           code: res.code ?? null,
         });
       }

@@ -8,6 +8,7 @@
 import type { ReconcileItem, ReconcileKind } from "./sync/reconcileReport";
 import { READ_ONLY_DETAIL } from "./sync/readOnlyRejections";
 import { isNoteExt } from "./formats";
+import { NOT_CREATOR_DETAIL } from "./sync/deletePolicy";
 
 export const RECONCILE_KIND_ORDER: readonly ReconcileKind[] = [
   "deletedByTeammate",
@@ -67,6 +68,13 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
     case "deletedByTeammate":
       return `${notes(n)} you edited offline ${one ? "was" : "were"} deleted by a teammate. Your ${one ? "version is" : "versions are"} in Trash.`;
     case "restoredFromServer": {
+      // A delete refused because a member may delete only what they created.
+      const notMine = group.filter((it) => it.detail === NOT_CREATOR_DETAIL);
+      if (notMine.length === n) {
+        return one
+          ? `${base(group[0].path)} was put back: only the person who created it, or an admin, can delete it.`
+          : `${notes(n)} were put back: only the person who created them, or an admin, can delete them.`;
+      }
       // Binaries are restored too (#215); call them files when any are.
       const what = group.every((it) => isNoteExt(it.path))
         ? notes(n)

@@ -11,6 +11,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import { NOT_CREATOR_MESSAGE, canDeleteItem } from "../lib/sync/deletePolicy";
 import {
   Tree,
   type NodeApi,
@@ -80,6 +81,10 @@ const ShareDialog = lazy(() =>
   import("./ShareDialog").then((m) => ({ default: m.ShareDialog })),
 );
 import { placeMenu, type Placement } from "../lib/menuPlacement";
+
+/** A refusal reason carrying the creator-rule sentence (`registry.deletePath`). */
+const isNotCreatorReason = (reason: unknown) =>
+  typeof reason === "string" && reason.includes(NOT_CREATOR_MESSAGE);
 
 /** Tooltip on every root-create affordance while the vault's root is frozen. */
 const ROOT_FROZEN_HINT =
@@ -460,6 +465,12 @@ export function FileTree() {
   // per-person access model, so only Unlock remains for vaults that have them.
   const myRole = members.find((m) => m.userId === session?.user.id)?.role;
   const canManage = myRole === "owner" || myRole === "admin";
+  // Creator-only delete: a plain member may delete only what they created
+  // (`lib/sync/deletePolicy.ts`). Read straight from the registry's authorship
+  // ids at render time, so no request; the server stays the authority.
+  const canDeletePath = (path: string, isDir: boolean) =>
+    !syncEnabled ||
+    canDeleteItem(myRole, () => syncManager.registry.isAuthoredByMe(path, isDir));
 
 
   /** Resolve a path (+ kind) to a server share resource, if the vault is synced. */
@@ -602,6 +613,12 @@ export function FileTree() {
     setConfirmDelete(false);
   }, [selected]);
 
+  // Every pick must be deletable by this user: a mixed selection would leave
+  // some items behind with a refusal, so the whole button is disabled instead.
+  const bulkDeleteAllowed = [...selected].every((p) =>
+    canDeletePath(p, !!nodeByPath.get(p)?.isDir),
+  );
+
   async function bulkDelete() {
     const paths = [...selected];
     const store = useStore.getState();
@@ -631,7 +648,9 @@ export function FileTree() {
     });
     // A refused delete (offline, or no permission on the server) leaves the item
     // in place everywhere — silence here is what used to read as "it came back".
-    if (failed.length > 0) {
+    if (failed.length > 0 && failed.every((f) => isNotCreatorReason(f.reason))) {
+      toast(NOT_CREATOR_MESSAGE, "error");
+    } else if (failed.length > 0) {
       toast(
         failed.length === 1
           ? `Couldn't delete "${failed[0].path}" — ${failed[0].reason}`
@@ -1547,7 +1566,9 @@ export function FileTree() {
       deleteDisk: (p, epoch) => ipc.deletePath(p, epoch),
       unregister: (p) => syncManager.registry.deletePath(p),
     });
-    if (failed.length > 0) {
+    if (failed.length > 0 && isNotCreatorReason(failed[0].reason)) {
+      toast(NOT_CREATOR_MESSAGE, "error");
+    } else if (failed.length > 0) {
       toast(
         `Couldn't delete "${failed[0].path}" — ${failed[0].reason}`,
         "error",
@@ -1833,13 +1854,16 @@ export function FileTree() {
               )}
               <button
                 className={`selbar-icon danger${confirmDelete ? " armed" : ""}`}
+                disabled={!bulkDeleteAllowed}
                 onClick={() =>
                   confirmDelete ? void bulkDelete() : setConfirmDelete(true)
                 }
                 title={
-                  confirmDelete
-                    ? `Delete ${selected.size}? Click to confirm`
-                    : "Delete selected"
+                  !bulkDeleteAllowed
+                    ? NOT_CREATOR_MESSAGE
+                    : confirmDelete
+                      ? `Delete ${selected.size}? Click to confirm`
+                      : "Delete selected"
                 }
                 aria-label={
                   confirmDelete ? "Confirm delete" : "Delete selected"
@@ -2066,11 +2090,20 @@ export function FileTree() {
               </li>
             );
           })()}
-          {menu.node && (
-            <li className="danger" onClick={() => handleDelete(menu.node!)}>
-              Delete
-            </li>
-          )}
+          {menu.node &&
+            (canDeletePath(menu.node.data.path, menu.node.data.isDir) ? (
+              <li className="danger" onClick={() => handleDelete(menu.node!)}>
+                Delete
+              </li>
+            ) : (
+              <li
+                className="disabled"
+                aria-disabled="true"
+                title={NOT_CREATOR_MESSAGE}
+              >
+                Delete
+              </li>
+            ))}
         </ul>
       )}
 
