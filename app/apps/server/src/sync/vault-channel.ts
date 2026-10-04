@@ -7,6 +7,7 @@ import { verifyVaultToken } from "../tokens/vault-token.js";
 import { listReadableDocsInVault } from "../permissions/vault-docs.js";
 import { listEmptyDocs, loadDocDiff } from "../yjs/persistence.js";
 import { deletedNotesAmong } from "../trash/access.js";
+import { observeCount } from "../metrics/sync-metrics.js";
 import {
   parseHello,
   parsePresence,
@@ -663,6 +664,19 @@ class VaultConnection {
     // never received. Named so the client pushes them; the feed itself cannot.
     const behind = this.behind;
     const behindTruncated = this.behindTruncated;
+    // §8 proof metric: these two numbers per connect show whether the gap
+    // between "registered" and "has content" is closing for new clients.
+    // Bucketed counters only; the per-connect line is logged when non-zero so
+    // a healthy reconnect storm adds no log volume. Ids only, never paths.
+    observeCount("ready.empty.count", empty.length);
+    if (hello.mode !== "live-only") observeCount("ready.behind.count", behind.length);
+    if (empty.length > 0 || behind.length > 0) {
+      console.info(
+        `[ready] vault=${this.vaultId} user=${this.userId} empty=${empty.length}` +
+          `${emptyTruncated ? "+" : ""} behind=${behind.length}${behindTruncated ? "+" : ""} ` +
+          `mode=${hello.mode ?? "full"}`,
+      );
+    }
     // …and the mirror image: docs this client says it HOLDS that it may no
     // longer read. Pure set arithmetic over two things already in hand (the
     // hello manifest and `this.readable`), so it costs no query.
