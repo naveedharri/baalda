@@ -37,7 +37,7 @@
 
 import {
   type Compartment,
-  type EditorState,
+  EditorState,
   type Extension,
   Prec,
   type Range,
@@ -56,6 +56,7 @@ import { createElement, type ReactNode } from "react";
 import { InlineTitle } from "../../components/InlineTitle";
 import {
   addPropertyToNote,
+  PROPERTIES_USER_EVENT,
   PropertiesPanel,
 } from "../../components/properties/PropertiesPanel";
 import { bodyStart, getHeaderFocus } from "./headerFocus";
@@ -302,6 +303,17 @@ const titleSelectionMirror = ViewPlugin.fromClass(
   },
 );
 
+/**
+ * Defence in depth for view-only notes. The panel already renders static text
+ * and its dispatch helper refuses while `state.readOnly`, but a programmatic
+ * `view.dispatch` is never stopped by that facet on its own — so drop any
+ * Properties-tagged transaction that starts from a read-only state before
+ * `yCollab` can turn it into a Y.Text op the server would only reject.
+ */
+export const readOnlyPropertiesGuard = EditorState.transactionFilter.of((tr) =>
+  tr.startState.readOnly && tr.isUserEvent(PROPERTIES_USER_EVENT) ? [] : tr,
+);
+
 export function noteHeader(opts: NoteHeaderOptions): Extension {
   const modeExt = propertiesMode.of(opts.mode ?? "visible");
   const field = StateField.define<DecorationSet>({
@@ -320,6 +332,7 @@ export function noteHeader(opts: NoteHeaderOptions): Extension {
     frontmatterField,
     opts.modeCompartment ? opts.modeCompartment.of(modeExt) : modeExt,
     field,
+    readOnlyPropertiesGuard,
     titleSelectionMirror,
     // `Prec.high` so these beat defaultKeymap's own arrow handling.
     Prec.high(

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { EditorView } from "@codemirror/view";
 import { frontmatterField } from "../lib/editor/frontmatter";
 import { bodyStart, getHeaderFocus, registerHeaderFocus } from "../lib/editor/headerFocus";
-import { addPropertyToNote } from "./properties/PropertiesPanel";
+import { addPropertyToNote, viewOnlyNotice } from "./properties/PropertiesPanel";
 import { planInlineTitleRename, TITLE_REFUSAL_MESSAGE } from "../lib/editor/titlePlan";
 import { stemOf } from "../lib/notePath";
 import { useStore } from "../store";
@@ -43,12 +43,31 @@ export function InlineTitle({
   draftRef.current = draft;
   const pathRef = useRef(path);
   pathRef.current = path;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+
+  // Access revoked while a rename was being typed: the draft is void. Renaming
+  // needs edit permission on the server (PATCH /api/notes/:id), so a commit
+  // after the flip would only be refused there.
+  useEffect(() => {
+    if (!readOnly) return;
+    setDraft(null);
+    setWarning(null);
+  }, [readOnly]);
 
   const value = draft ?? stem;
 
   const commit = useCallback(async () => {
     const typed = draftRef.current;
     if (typed === null) return;
+    // Same flag as the body editor and the view-only banner (Editor.tsx feeds
+    // it into `EditorState.readOnly`); checked live, so a stale closure cannot
+    // rename a note that became view-only after the widget rendered.
+    if (readOnlyRef.current || view.state.readOnly) {
+      setDraft(null);
+      setWarning(null);
+      return;
+    }
     const plan = planInlineTitleRename(pathRef.current, typed);
     if (!plan.ok) {
       if (plan.reason === "unchanged") {
@@ -75,7 +94,7 @@ export function InlineTitle({
     }
     setDraft(null);
     setWarning(null);
-  }, [noteExists, renameTo]);
+  }, [noteExists, renameTo, view]);
 
   // A pending rename must survive the widget going away — a note switch, ⌘N, or
   // the window closing all unmount us with the draft uncommitted. The widget's
@@ -143,6 +162,14 @@ export function InlineTitle({
           setDraft(e.target.value);
         }}
         onKeyDown={(e) => {
+          if (
+            readOnly &&
+            (e.key.length === 1 || e.key === "Backspace" || e.key === "Delete") &&
+            !e.metaKey &&
+            !e.ctrlKey
+          ) {
+            viewOnlyNotice();
+          }
           if (e.key === "Enter") {
             e.preventDefault();
             void commit().then(() => {

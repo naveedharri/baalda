@@ -403,6 +403,10 @@ and the title widget's `eq()` compares only `{path, readOnly, hasFrontmatter, mo
   Per-vault types live in `.context/types.json`; the Visible/Hidden/Source mode is a device-local pref.
   `frontmatterView(state)` is the single authority for which of the three renderings the region gets —
   two block replaces over one range would throw.
+  Both widgets key on the SAME `state.readOnly` the body editor and the view-only banner use: read-only,
+  the panel renders static text with no inputs (`StaticRow`), the title refuses a rename and drops a
+  pending draft, and `readOnlyPropertiesGuard` drops any `input.properties` transaction from a
+  read-only state, because a programmatic `view.dispatch` is never stopped by that facet alone.
 
 Vault Settings has ONE **Members and access** tab (id `members`; the old `access` tab and
 `AccessPanel.tsx` are gone): `components/MembersAccessTab.tsx`, `MemberProfilePage.tsx` (a PAGE
