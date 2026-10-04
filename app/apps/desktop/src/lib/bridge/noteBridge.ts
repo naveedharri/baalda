@@ -844,6 +844,12 @@ export class NoteBridge {
     // `rejected` forever. Keep the file's bytes as a quiet recovery copy and
     // write the doc's text back over it; with no copy the file stays as it is.
     if (isReadOnlyDoc(this.docId)) {
+      // An EMPTY read-only doc has nothing to write back: its CRDT was dropped
+      // (access revoked, then re-granted) or it has not been pulled yet, and the
+      // file is most likely the server's text delivered with the regrant. Leave
+      // the file alone — never a recovery copy, never an empty write over it —
+      // and let the pull (or the rejected-frame rebase) converge the doc.
+      if (current.length === 0) return false;
       const keep = readOnlyCopyKeeper();
       const kept = keep
         ? await keep(this.docId, this._path, fileText).catch(() => false)
@@ -989,7 +995,9 @@ export class NoteBridge {
     // a file that still has real bytes on disk, so refuse (a genuine clear-all
     // sets everHadContent first, so real deletions are unaffected). This closes
     // the import/background-feed clobber that zeroed notes on disk.
-    if (content.length === 0 && !this.everHadContent) {
+    // A read-only doc gets the same refusal even after it held text: it can
+    // never have produced that emptiness itself, so its file is not ours to clear.
+    if (content.length === 0 && (!this.everHadContent || isReadOnlyDoc(this.docId))) {
       let current = "";
       try {
         current = await this.io.readFile(this._path);
