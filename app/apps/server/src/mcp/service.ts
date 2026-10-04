@@ -9,6 +9,7 @@ import {
   canReadAttachment,
   filterReadableBlobs,
   vaultRootWritable,
+  canDeleteItem,
 } from "../permissions/http-gates.js";
 import {
   TreeOpError,
@@ -78,7 +79,36 @@ export interface McpContext {
 }
 
 /** A tool tried to touch something it may not, or that doesn't exist. */
-export class McpToolError extends Error {}
+export class McpToolError extends Error {
+  /** Machine-readable refusal code, surfaced on the tool result (e.g. `delete_not_creator`). */
+  constructor(
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Members delete only what they created; owners/admins delete anything (`canDeleteItem`). */
+async function requireDeletable(
+  ctx: McpContext,
+  kind: "note" | "file" | "folder",
+  id: string,
+): Promise<void> {
+  const gate = await canDeleteItem(pool, {
+    orgId: ctx.auth.organizationId,
+    userId: ctx.auth.userId,
+    kind,
+    id,
+  });
+  if (gate.ok) return;
+  throw new McpToolError(
+    gate.code === "folder_has_others_items"
+      ? "This folder holds items someone else created. Only an owner or admin can delete it."
+      : "Only the person who created this, or an owner or admin, can delete it.",
+    gate.code,
+  );
+}
 
 function accessToolError(error: unknown): never {
   if (error instanceof AccessManagementError) throw new McpToolError(error.message);
@@ -374,6 +404,7 @@ export async function deleteFolder(
   if ((await folderWritePermission(ctx.auth, folderId)) !== "edit") {
     throw new McpToolError("You do not have edit access to delete this folder");
   }
+  await requireDeletable(ctx, "folder", folderId);
   if (!opts.recursive) {
     const { rows: files } = await pool.query<{ n: number }>(
       "SELECT count(*)::int AS n FROM files WHERE folder_id = $1",
@@ -945,6 +976,7 @@ export async function editNote(
 /** Soft-delete a note (matches the app: sets deleted_at, keeps CRDT history). */
 export async function deleteNote(ctx: McpContext, docId: string) {
   const note = await requireEditableNote(ctx.auth, docId);
+  await requireDeletable(ctx, "note", docId);
   await pool.query(`UPDATE notes SET ${softDeleteSet("$2")} WHERE id = $1`, [
     docId,
     ctx.auth.userId ?? null,
@@ -966,6 +998,12 @@ export async function deleteFileTool(ctx: McpContext, fileId: string) {
   if (out.status === "gone") throw new McpToolError(`Unknown file: ${fileId}`);
   if (out.status === "not_member") throw new McpToolError("This file is outside the scope of this token");
   if (out.status === "forbidden") throw new McpToolError("You do not have edit access to this file");
+  if (out.status === "not_creator") {
+    throw new McpToolError(
+      "Only the person who created this, or an owner or admin, can delete it.",
+      "delete_not_creator",
+    );
+  }
   ctx.disconnectDoc(out.vaultId, fileId);
   ctx.onRegistryChanged?.(out.vaultId);
   return { deleted: fileId, path: out.path };

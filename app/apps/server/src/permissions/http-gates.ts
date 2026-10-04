@@ -470,3 +470,85 @@ export async function canWriteBlob(
   }
   return canWriteAttachment(userId, vaultId, db);
 }
+
+export type DeleteRefusalCode = "delete_not_creator" | "folder_has_others_items";
+export type DeleteGate = { ok: true } | { ok: false; code: DeleteRefusalCode };
+
+/** True when a Better Auth role string (possibly comma-joined) names owner or admin. */
+function isManagerRole(role: string | null | undefined): boolean {
+  if (!role) return false;
+  return role.split(",").some((r) => {
+    const t = r.trim();
+    return t === "owner" || t === "admin";
+  });
+}
+
+/**
+ * The deletion rule: an owner or admin may delete anything; a plain member may
+ * delete only the notes, files and folders they created. A row with no
+ * recorded creator counts as someone else's. A member's FOLDER delete is
+ * refused as a whole (`folder_has_others_items`) when anything in its subtree
+ * — note, file or sub-folder — was created by someone else or has no creator.
+ *
+ * This only NARROWS: every caller still applies its existing edit gate
+ * (`canEditDoc`, `canEditFolder`, `canWriteBlob`, MCP's write checks) as well.
+ * Checkpoint revert and trash purge are server-internal and never ask.
+ * `orgRole` may be passed when the caller already knows it; otherwise it is read.
+ */
+export async function canDeleteItem(
+  db: Queryable,
+  input: {
+    orgId: string;
+    userId: string;
+    orgRole?: string | null;
+    kind: "note" | "file" | "folder";
+    id: string;
+  },
+): Promise<DeleteGate> {
+  const role =
+    input.orgRole !== undefined ? input.orgRole : await orgRole(input.orgId, input.userId, db);
+  if (isManagerRole(role)) return { ok: true };
+  const notCreator: DeleteGate = { ok: false, code: "delete_not_creator" };
+
+  if (input.kind === "note" || input.kind === "file") {
+    const table = input.kind === "note" ? "notes" : "files";
+    const { rows } = await db.query<{ created_by: string | null }>(
+      `SELECT created_by FROM ${table} WHERE id = $1`,
+      [input.id],
+    );
+    return rows[0]?.created_by === input.userId ? { ok: true } : notCreator;
+  }
+
+  const { rows: folders } = await db.query<{ created_by: string | null; path: string; vault_id: string }>(
+    "SELECT created_by, path, vault_id FROM folders WHERE id = $1",
+    [input.id],
+  );
+  const folder = folders[0];
+  if (!folder || folder.created_by !== input.userId) return notCreator;
+  // Same double match as `tree-ops.ts deleteFolderCascade` (folder_id subtree OR
+  // path prefix), so the check covers exactly what the cascade would remove.
+  const { rows } = await db.query<{ foreign: boolean }>(
+    `WITH RECURSIVE subtree AS (
+        SELECT id FROM folders WHERE id = $1
+        UNION
+        SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+     )
+     SELECT (
+          EXISTS (SELECT 1 FROM folders
+                   WHERE id IN (SELECT id FROM subtree)
+                     AND created_by IS DISTINCT FROM $5)
+       OR EXISTS (SELECT 1 FROM notes
+                   WHERE vault_id = $4 AND deleted_at IS NULL
+                     AND (folder_id IN (SELECT id FROM subtree)
+                          OR rel_path = $2 OR rel_path LIKE $3 || '/%' ESCAPE '\\')
+                     AND created_by IS DISTINCT FROM $5)
+       OR EXISTS (SELECT 1 FROM files
+                   WHERE vault_id = $4
+                     AND (folder_id IN (SELECT id FROM subtree)
+                          OR path = $2 OR path LIKE $3 || '/%' ESCAPE '\\')
+                     AND created_by IS DISTINCT FROM $5)
+     ) AS foreign`,
+    [input.id, folder.path, likeEscape(folder.path), folder.vault_id, input.userId],
+  );
+  return rows[0]?.foreign ? { ok: false, code: "folder_has_others_items" } : { ok: true };
+}

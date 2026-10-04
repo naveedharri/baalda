@@ -151,7 +151,8 @@ describe("notes delete batch", () => {
     const open = await seedFolder(vault, null, "Open", "Open", owner.userId);
     const locked = await seedFolder(vault, null, "Frozen", "Frozen", owner.userId);
     await seedLock(org, "folder", locked, { type: "org" });
-    const free = await seedNote(vault, open, "Open/ok.md", owner.userId);
+    // The member's own note: members delete only what they created.
+    const free = await seedNote(vault, open, "Open/ok.md", member.userId);
     const capped = await seedNote(vault, locked, "Frozen/no.md", owner.userId);
 
     const { body } = await deleteBatch(member, vault, [free, capped]);

@@ -559,7 +559,13 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   sealed vault (a floor, not a wall); an *item* set to Private drops those too, because there the
   point is withdrawing one item from a team that can otherwise reach it. Creation follows reading:
   `vaultRootWritable` refuses a root create in a sealed vault, since a note you cannot read is not
-  worth making. **A per-user row on the vault resource is that person's ABSOLUTE level**
+  worth making. **Deletion narrows further by authorship** (`http-gates.ts canDeleteItem`, behind
+  every note/file/folder delete route, the note batch and MCP `delete_*`): owners and admins delete
+  anything, a plain member only notes, files and folders they created (a row with no `created_by`,
+  e.g. a file registered before migration 049, counts as someone else's) → 403 `delete_not_creator`,
+  and a member's folder delete is refused whole with 403 `folder_has_others_items` when anything in
+  its subtree was created by someone else; checkpoint revert, restore and trash purge are exempt.
+  **A per-user row on the vault resource is that person's ABSOLUTE level**
   (`personalVaultLevel`, "person wins either way"): for them alone it replaces the org posture, the
   join snapshot, the owner/admin shortcut and authorship — `edit` = edit everywhere, `view` = view
   everywhere (raises AND caps), `denied` = nothing, and org (Everyone) folder/file grants do not lift

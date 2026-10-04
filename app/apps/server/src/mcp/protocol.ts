@@ -58,10 +58,11 @@ function toolResult(data: unknown): Record<string, unknown> {
   };
 }
 
-function toolError(message: string): Record<string, unknown> {
+function toolError(message: string, code?: string): Record<string, unknown> {
   return {
-    content: [{ type: "text", text: message }],
+    content: [{ type: "text", text: code ? `${code}: ${message}` : message }],
     isError: true,
+    ...(code ? { structuredContent: { code, error: message } } : {}),
   };
 }
 
@@ -122,7 +123,7 @@ export async function handleMcpMessage(
         return ok(msg.id, toolResult(data));
       } catch (err) {
         // Expected, user-facing failures (bad args, no access) → isError result.
-        if (err instanceof McpToolError) return ok(msg.id, toolError(err.message));
+        if (err instanceof McpToolError) return ok(msg.id, toolError(err.message, err.code));
         // Anything else is a bug on our side — log it, don't leak internals.
         console.error(`[mcp] tool ${params.name} failed:`, err);
         return ok(msg.id, toolError("Internal error running the tool"));

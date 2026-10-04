@@ -109,7 +109,9 @@ function chunked<T>(items: T[], size: number): T[][] {
 
 /** Auth, verbatim from `http/routes/vault-token.ts`: session → vault → member.
  *  Carries the contract's codes so a client can branch without string-matching. */
-async function gate(c: Context): Promise<{ userId: string; vaultId: string } | Response> {
+async function gate(
+  c: Context,
+): Promise<{ userId: string; vaultId: string; orgId: string; role: string } | Response> {
   const session = await getSession(c);
   if (!session) return c.json({ error: "Authentication required" }, 401);
   const vaultId = c.req.param("vaultId") ?? "";
@@ -117,7 +119,7 @@ async function gate(c: Context): Promise<{ userId: string; vaultId: string } | R
   if (!org) return c.json({ error: "Unknown vault", code: "unknown_vault" }, 404);
   const role = await orgRole(org, session.userId);
   if (!role) return c.json({ error: "Not a member of this vault", code: "not_a_member" }, 403);
-  return { userId: session.userId, vaultId };
+  return { userId: session.userId, vaultId, orgId: org, role };
 }
 
 /** `{ items: [...] }`, or a 400 describing what is wrong with it. */
@@ -802,6 +804,21 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       );
     });
 
+    // Members delete only notes they created (`canDeleteItem`, set-based here so
+    // a 500-item batch stays one query); owners/admins delete anything. A
+    // refused item is reported per item and the rest proceed.
+    const manager = auth.role.split(",").some((r) => r.trim() === "owner" || r.trim() === "admin");
+    const ownNotes = new Set<string>();
+    if (!manager) {
+      for (const slice of chunked([...inVault], DELETE_CHUNK)) {
+        const { rows } = await pool.query<{ id: string }>(
+          "SELECT id FROM notes WHERE id = ANY($1::text[]) AND created_by = $2",
+          [slice, auth.userId],
+        );
+        for (const r of rows) ownNotes.add(r.id);
+      }
+    }
+
     const deletable: string[] = [];
     docIds.forEach((docId, index) => {
       if (docId === "") return;
@@ -816,6 +833,10 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       }
       if (permission.get(docId) !== "edit") {
         results[index] = { docId, status: "denied", code: "no_edit_permission", error: null };
+        return;
+      }
+      if (!manager && !ownNotes.has(docId)) {
+        results[index] = { docId, status: "denied", code: "delete_not_creator", error: null };
         return;
       }
       results[index] = { docId, status: "deleted", code: null, error: null };
