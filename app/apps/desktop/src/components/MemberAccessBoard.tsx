@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { AccessTreeResponse, BulkAccessResource, MemberOverview, TeamAccessMode } from "../lib/api";
+import type { BulkAccessResource, MemberOverview, TeamAccessMode } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import {
   BOARD_COLUMNS,
@@ -21,6 +21,8 @@ import {
   type SummaryMode,
 } from "../lib/accessBoard";
 import { createAccessSummaryBatcher } from "../lib/accessSummaryBatch";
+import { ACCESS_MAP_REREAD_MAX } from "../lib/accessBoardLoad";
+import { useAccessMap, type AccessMap } from "./useAccessMap";
 import { accessResourceType, ancestorPaths, entriesFromServer, rowsFromEntries, type AccessRow } from "../lib/accessTree";
 import { needsAccessConfirm, reduceAccessCopy, type ReduceScope } from "../lib/membersAccess";
 import { markSelfAccessChange } from "../lib/sync/selfAccessChanges";
@@ -86,6 +88,8 @@ export interface MemberAccessBoardProps {
   onChanged: () => Promise<void>;
   /** The host already shows a vault-wide control: skip "Set everything to". */
   hideSetEverything?: boolean;
+  /** The Access tab's shared load (tree + modes). Absent: the board loads its own. */
+  accessMap?: AccessMap;
 }
 
 /**
@@ -106,10 +110,24 @@ export function MemberAccessBoard({
   onItemWritten,
   onChanged,
   hideSetEverything = false,
+  accessMap,
 }: MemberAccessBoardProps) {
-  const [serverTree, setServerTree] = useState<AccessTreeResponse | null>(null);
+  // The Access tab shares one load with the List; standalone, load our own.
+  const ownMap = useAccessMap(vaultId, member.userId, !accessMap);
+  const map = accessMap ?? ownMap;
+  const serverTree = map.tree;
   const [summaryModes, setSummaryModes] = useState<ReadonlyMap<string, SummaryMode>>(() => new Map());
   const [failed, setFailed] = useState<ReadonlySet<string>>(() => new Set());
+  // Seed from the shared load during render, so the first frame with a tree
+  // already carries every mode (no climbing counts, no summary reads).
+  const [seededSeq, setSeededSeq] = useState(0);
+  if (map.seq !== seededSeq) {
+    setSeededSeq(map.seq);
+    if (map.modes) {
+      setSummaryModes(new Map(map.modes));
+      setFailed(new Set());
+    }
+  }
   const inflight = useRef(new Set<string>());
   const live = useRef(true);
   useEffect(() => {
@@ -150,13 +168,7 @@ export function MemberAccessBoard({
     return next;
   }), []);
 
-  useEffect(() => {
-    let alive = true;
-    authManager.api.listAccessTree(vaultId)
-      .then((t) => { if (alive) setServerTree(t); })
-      .catch(() => { if (alive) setError("Couldn't load this vault's folders."); });
-    return () => { alive = false; };
-  }, [vaultId]);
+  useEffect(() => { if (map.error) setError(map.error); }, [map.error]);
 
   const entries = useMemo(() => (serverTree ? entriesFromServer(serverTree) : []), [serverTree]);
   // Every folder open: the board shows the whole tree.
@@ -272,11 +284,22 @@ export function MemberAccessBoard({
   // Back online: re-read every row that failed or never answered, so the
   // board shows the server's truth rather than what it guessed while offline.
   useEffect(() => {
-    const retry = () => readModes(allRows.filter((row) => failed.has(row.key) || !summaryModes.has(row.key)));
+    const retry = () => {
+      const stale = allRows.filter((row) => failed.has(row.key) || !summaryModes.has(row.key));
+      if (stale.length === 0) return;
+      if (map.complete && stale.length > ACCESS_MAP_REREAD_MAX) void map.reload();
+      else readModes(stale);
+    };
     window.addEventListener("online", retry);
     return () => window.removeEventListener("online", retry);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allRows, failed, summaryModes]);
+  }, [allRows, failed, summaryModes, map.complete, map.reload]);
+
+  /** Up to 200 rows: re-read them. More: one reload of the whole map (when the server has it). */
+  const rereadOrReload = (targets: readonly AccessRow[]) => {
+    if (map.complete && targets.length > ACCESS_MAP_REREAD_MAX) void map.reload();
+    else readModes(targets);
+  };
 
   const who = firstName(member);
   const fullName = member.name || member.email || member.userId;
@@ -313,7 +336,7 @@ export function MemberAccessBoard({
         mode,
       }, { timeoutMs: BULK_WRITE_TIMEOUT_MS });
       if (!live.current) return true;
-      readModes(allRows.filter((r) => r.key !== except && (affectedKeys.has(r.key) || ancestors.has(r.path))));
+      rereadOrReload(allRows.filter((r) => r.key !== except && (affectedKeys.has(r.key) || ancestors.has(r.path))));
       if (vaultWide) await onChanged();
       else onItemWritten();
       return true;
@@ -323,7 +346,7 @@ export function MemberAccessBoard({
         // write is atomic, but a lost answer can hide one that DID commit.
         setSummaryModes((prev) => revertModes(prev, before, affected.map((r) => r.key)));
         toast(accessWriteFailureMessage(cause), "error");
-        readModes(allRows.filter((r) => affectedKeys.has(r.key) || ancestors.has(r.path)));
+        rereadOrReload(allRows.filter((r) => affectedKeys.has(r.key) || ancestors.has(r.path)));
       }
       return false;
     } finally {
@@ -412,8 +435,11 @@ export function MemberAccessBoard({
       if (isSelf) markSelfAccessChange([orgId, ...entries.map((e) => e.id)]);
       await authManager.api.resetMemberAccess(orgId, member.userId);
       if (!live.current) return;
-      setSummaryModes(new Map());
-      readModes(allRows);
+      if (map.complete) await map.reload();
+      else {
+        setSummaryModes(new Map());
+        readModes(allRows);
+      }
       await onChanged();
     } catch (cause) {
       if (live.current) toast(accessWriteFailureMessage(cause), "error");

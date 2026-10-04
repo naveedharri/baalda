@@ -31,6 +31,8 @@ export class SummaryCancelledError extends Error {
 export const SUMMARY_BATCH_MAX = 200;
 /** Long enough to gather every row that mounts in one render. */
 export const SUMMARY_BATCH_DELAY_MS = 30;
+/** Batch requests in flight at once; the rest wait their turn. */
+export const SUMMARY_MAX_INFLIGHT = 4;
 
 /**
  * Coalesces the Access panel's per-row "what can these people do here?" reads
@@ -50,6 +52,9 @@ export function createAccessSummaryBatcher(
   let scheduled = false;
   /** Set once the server answered 404 for the batch route. */
   let batchUnsupported = false;
+  /** Chunks waiting for a slot, and how many are on the wire. */
+  const waiting: Pending[][] = [];
+  let active = 0;
 
   const sendOneByOne = async (items: Pending[]) => {
     let next = 0;
@@ -100,8 +105,28 @@ export function createAccessSummaryBatcher(
     }
     for (const items of byScope.values()) {
       for (let i = 0; i < items.length; i += SUMMARY_BATCH_MAX) {
-        void send(items.slice(i, i + SUMMARY_BATCH_MAX));
+        waiting.push(items.slice(i, i + SUMMARY_BATCH_MAX));
       }
+    }
+    pump();
+  };
+
+  // Bounded: a large tree used to fire every chunk at once (70 requests for
+  // 14,000 rows), each one a full-vault resolve on the server.
+  const pump = () => {
+    while (active < SUMMARY_MAX_INFLIGHT && waiting.length > 0) {
+      const chunk = waiting.shift()!;
+      const live = chunk.filter((item) => {
+        if (!item.cancelled()) return true;
+        item.reject(new SummaryCancelledError());
+        return false;
+      });
+      if (live.length === 0) continue;
+      active++;
+      void send(live).finally(() => {
+        active--;
+        pump();
+      });
     }
   };
 

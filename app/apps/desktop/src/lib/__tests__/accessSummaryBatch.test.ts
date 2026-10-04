@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api";
-import { createAccessSummaryBatcher, SummaryCancelledError, SUMMARY_BATCH_MAX } from "../accessSummaryBatch";
+import { createAccessSummaryBatcher, SummaryCancelledError, SUMMARY_BATCH_MAX, SUMMARY_MAX_INFLIGHT } from "../accessSummaryBatch";
 
 const folder = (id: string) => ({ resourceType: "folder" as const, resourceId: id });
 
@@ -68,5 +68,24 @@ describe("access summary batcher", () => {
     const read = batcher.read("org", folder("a"), ["u1"], () => false);
     timer.flush();
     await expect(read).rejects.toThrow("offline");
+  });
+
+  it("keeps at most four batch requests in flight", async () => {
+    const timer = manual();
+    let active = 0;
+    let peak = 0;
+    const many = vi.fn(async (_org: string, groups: unknown[][]) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((r) => setTimeout(r, 5));
+      active--;
+      return groups.map(() => "open" as const);
+    });
+    const batcher = createAccessSummaryBatcher({ many, one: vi.fn() }, timer.schedule);
+    const reads = Array.from({ length: SUMMARY_BATCH_MAX * 10 }, (_, i) => batcher.read("org", folder(`f${i}`), ["u1"], () => false));
+    timer.flush();
+    await Promise.all(reads);
+    expect(many).toHaveBeenCalledTimes(10);
+    expect(peak).toBe(SUMMARY_MAX_INFLIGHT);
   });
 });

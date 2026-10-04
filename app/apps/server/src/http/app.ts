@@ -20,6 +20,7 @@ import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
 import { passwordResetRoutes } from "./routes/password-reset.js";
 import { openLinkRoutes } from "./routes/open-link.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
+import { ACCESS_BOARD_FEATURE } from "../permissions/access-board.js";
 import { blobRoutes, FILES_WITH_BYTES_FEATURE, setBlobRegistryNotifier } from "./routes/blobs.js";
 import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
 import { createBulkRoutes } from "./routes/bulk.js";
@@ -218,6 +219,8 @@ export function createApp(deps: AppDeps): Hono {
   // an old server. `notes-with-state` = `notes/batch` and `POST /api/notes` take
   // an item's `state` and answer `seeded`. A missing field means none; the
   // per-item `seeded` flag stays the fallback (absent ⇒ not seeded).
+  // `access-board` = `GET /vaults/:id/access-board` answers the member Access
+  // tab in one request (desktops fall back to access-tree + summaries).
   // `version` is this server's package version (read once at startup);
   // `minDesktopVersion` is the floor `client-version.ts` enforces on content
   // writes, read live like the gate itself (null when the floor is off).
@@ -226,7 +229,7 @@ export function createApp(deps: AppDeps): Hono {
       ok: true,
       version: SERVER_VERSION,
       minDesktopVersion: clientVersionPolicy().minRaw,
-      features: [NOTES_WITH_STATE_FEATURE, BOOTSTRAP_ONLY_FEATURE, FILES_WITH_BYTES_FEATURE],
+      features: [NOTES_WITH_STATE_FEATURE, BOOTSTRAP_ONLY_FEATURE, FILES_WITH_BYTES_FEATURE, ACCESS_BOARD_FEATURE],
     }),
   );
 

@@ -37,7 +37,11 @@ export function indexHoldsResource(index: AccessIndex, resource: SummaryResource
  * every folder, live note and file; a folder root is itself, its descendant
  * folders and the live notes and files in them; a file root is itself.
  */
-export function summaryTargetsFromIndex(index: AccessIndex, resources: readonly SummaryResource[]): SummaryTarget[] {
+export function summaryTargetsFromIndex(
+  index: AccessIndex,
+  resources: readonly SummaryResource[],
+  children: ReadonlyMap<string, readonly string[]> = folderChildren(index),
+): SummaryTarget[] {
   const out = new Map<string, SummaryTarget>();
   const add = (resourceType: "folder" | "file", resourceId: string) =>
     out.set(`${resourceType}\u0000${resourceId}`, { resourceType, resourceId });
@@ -49,13 +53,6 @@ export function summaryTargetsFromIndex(index: AccessIndex, resources: readonly 
     return [...out.values()];
   }
 
-  const children = new Map<string, string[]>();
-  for (const [id, folder] of index.folders) {
-    if (folder.parentId === null) continue;
-    const list = children.get(folder.parentId);
-    if (list) list.push(id);
-    else children.set(folder.parentId, [id]);
-  }
   const subtree = new Set<string>();
   const stack = resources
     .filter((resource) => resource.resourceType === "folder" && index.folders.has(resource.resourceId))
@@ -76,6 +73,37 @@ export function summaryTargetsFromIndex(index: AccessIndex, resources: readonly 
   return [...out.values()];
 }
 
+/** Folder id → child folder ids, over every folder the index holds. Built once
+ *  per request and shared by every group (it used to be rebuilt per group). */
+export function folderChildren(index: AccessIndex): Map<string, string[]> {
+  const children = new Map<string, string[]>();
+  for (const [id, folder] of index.folders) {
+    if (folder.parentId === null) continue;
+    const list = children.get(folder.parentId);
+    if (list) list.push(id);
+    else children.set(folder.parentId, [id]);
+  }
+  return children;
+}
+
+/** The permission → summary mode mapping both summary paths use. */
+export function permissionMode(permission: "edit" | "view" | "none"): Exclude<SummaryMode, "mixed"> {
+  return permission === "edit" ? "open" : permission === "view" ? "readonly" : "private";
+}
+
+/** The authoritative answer for an empty scope: the posture and personal vault
+ *  grants applied to a synthetic root with no creator/folder/item overlay,
+ *  exactly the facts available for content that does not exist yet. */
+export function syntheticRootContext(index: AccessIndex): AccessContext {
+  return {
+    organizationId: index.organizationId,
+    docId: null,
+    folderIds: [],
+    createdBy: null,
+    createdAt: new Date(),
+  };
+}
+
 /** One summary per group of roots, each stopping at its first disagreement. */
 export async function summarizeAccess(input: {
   db: Queryable;
@@ -87,11 +115,12 @@ export async function summarizeAccess(input: {
 }): Promise<SummaryMode[]> {
   const { db, index, cache, userIds, roles } = input;
   const modes: SummaryMode[] = [];
+  const children = folderChildren(index);
   for (const group of input.groups) {
     let agreed: Exclude<SummaryMode, "mixed"> | null = null;
     let mixed = false;
     const note = (permission: "edit" | "view" | "none") => {
-      const mode = permission === "edit" ? "open" : permission === "view" ? "readonly" : "private";
+      const mode = permissionMode(permission);
       if (agreed === null) agreed = mode;
       else if (agreed !== mode) mixed = true;
     };
@@ -101,7 +130,7 @@ export async function summarizeAccess(input: {
         if (mixed) return;
       }
     };
-    for (const target of summaryTargetsFromIndex(index, group)) {
+    for (const target of summaryTargetsFromIndex(index, group, children)) {
       const ctx = await buildAccessContextFromIndex(index, target.resourceType, target.resourceId, db, cache);
       if (!ctx) continue; // deleted between expansion and resolution
       await resolveAll(ctx);
@@ -111,13 +140,7 @@ export async function summarizeAccess(input: {
       // An empty scope still has an authoritative posture and personal vault
       // grants. A synthetic root has no creator/folder/item overlay, exactly the
       // facts available for content that does not exist yet.
-      await resolveAll({
-        organizationId: index.organizationId,
-        docId: null,
-        folderIds: [],
-        createdBy: null,
-        createdAt: new Date(),
-      });
+      await resolveAll(syntheticRootContext(index));
     }
     modes.push(mixed ? "mixed" : agreed ?? "private");
   }

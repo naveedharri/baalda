@@ -259,6 +259,14 @@ export interface NoteLastEdited {
   at: string;
 }
 
+/** `GET /vaults/:id/access-board`: the access tree plus one person's mode per row. */
+export interface AccessBoardResponse extends AccessTreeResponse {
+  /** One char per item, aligned with folders ++ notes ++ files: e/v/n/m. */
+  modes: string;
+  totals?: { edit: number; view: number; none: number; mixed: number };
+  complete?: boolean;
+}
+
 /** Flat structure listing that powers the Access panel (see `listAccessTree`). */
 export interface AccessTreeResponse {
   folders: Array<{ id: string; path: string; color: string | null }>;
@@ -2194,6 +2202,32 @@ export class ApiClient {
       `/api/vaults/${encodeURIComponent(vaultId)}/access-tree`,
     );
     return { folders: data.folders ?? [], notes: data.notes ?? [], files: data.files ?? [] };
+  }
+
+  /**
+   * The access-tree payload plus every row's mode for ONE person, in one
+   * request (`access-board` feature). `modes` holds one char per item in
+   * folders ++ notes ++ files order: `e` open, `v` readonly, `n` private,
+   * `m` mixed. Null when the server predates the route (404/405).
+   */
+  async getAccessBoard(vaultId: string, userId: string): Promise<AccessBoardResponse | null> {
+    try {
+      const { data } = await this.request<AccessBoardResponse>(
+        "GET",
+        `/api/vaults/${encodeURIComponent(vaultId)}/access-board?userId=${encodeURIComponent(userId)}`,
+      );
+      return {
+        folders: data.folders ?? [],
+        notes: data.notes ?? [],
+        files: data.files ?? [],
+        modes: typeof data.modes === "string" ? data.modes : "",
+        totals: data.totals,
+        complete: data.complete,
+      };
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 404 || error.status === 405)) return null;
+      throw error;
+    }
   }
 
   async listFolders(vaultId: string): Promise<RegisteredFolder[]> {
