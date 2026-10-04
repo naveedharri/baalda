@@ -360,15 +360,10 @@
   padding: var(--sp-3) var(--sp-4);
   font-family: var(--font-body);
   border-radius: var(--radius-lg);
-  /* Amber for a hard lock, neutral-accent for a plain view-only grant. */
+  /* Amber for every read-only reason. */
   color: var(--warning);
   background: var(--warning-soft);
   border: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
-}
-.editor-lockbanner.viewonly {
-  color: var(--text-secondary);
-  background: var(--bg-hover);
-  border-color: var(--border-strong);
 }
 .editor-lockbanner-icon {
   flex: 0 0 auto;

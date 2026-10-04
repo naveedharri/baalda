@@ -342,10 +342,7 @@ export function Editor() {
   // That is why the loader looked broken in production and fine in dev.
   const openingNotePath = useStore((s) => s.openingNotePath);
   const syncEnabled = useStore((s) => s.syncEnabled);
-  const locks = useStore((s) => s.locks);
-  const lifts = useStore((s) => s.lifts);
   const session = useStore((s) => s.session);
-  const tree = useStore((s) => s.tree);
   const syncStatus = useStore((s) => s.syncStatus);
   // A version the user is hovering in the history panel, rendered over the live
   // editor. The live view stays mounted and synced underneath — this is a look,
@@ -444,21 +441,6 @@ export function Editor() {
     },
     [],
   );
-
-  // Is this note (or a containing folder) locked? Refines the read-only badge
-  // copy — a lock is deliberate protection, not a missing grant.
-  const lockScope =
-    notePath && syncEnabled
-      ? effectiveLockForPath(
-          lockScopesByPath(tree, locks, session?.user.id, lifts),
-          notePath,
-        )
-      : null;
-  // The banner speaks about THIS note, so a whole-vault Read-only posture is
-  // not a lock for its purposes — "this note is locked" would send someone
-  // hunting for a setting on a note that has none. The vault-wide state is
-  // exactly what "View-only access" already says, so it keeps that copy.
-  const itemLock = lockScope === "vault" ? null : lockScope;
 
   useEffect(() => {
     // Same test as the render branch below: only the `editor` family has a
@@ -905,10 +887,10 @@ export function Editor() {
       {(readOnly || showToolbar) && (
         <div className="editor-topbar">
           {readOnly && (
-            <div
-              className={`editor-lockbanner${itemLock ? " locked" : " viewonly"}`}
-              role="status"
-            >
+            // ONE banner for every read-only reason (lock, Read-only posture, a
+            // per-user view grant, a server readOnly token): the reason never
+            // changes what the reader can do, so it never changes the copy.
+            <div className="editor-lockbanner" role="status">
               <span className="editor-lockbanner-icon" aria-hidden="true">
                 <svg
                   viewBox="0 0 24 24"
@@ -926,13 +908,11 @@ export function Editor() {
                 <strong>
                   {syncStatus === "no-access"
                     ? "Access removed"
-                    : itemLock ? "This note is locked" : "View-only access"}
+                    : "View-only access"}
                 </strong>
                 <span className="editor-lockbanner-sub">
                   {syncStatus === "no-access"
                     ? "This local copy is not syncing. Editing is disabled."
-                    : itemLock
-                    ? "You can read it, but your changes won’t be saved or synced."
                     : "You can read this note, but you can’t edit it."}
                 </span>
               </span>
