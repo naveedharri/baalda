@@ -645,6 +645,8 @@ export class SyncManager implements InboundHost {
   private localDrainWaiters: Array<() => void> = [];
   /** The closed-app edits pass ran for this vault open (#284). */
   private closedEditsScanned = false;
+  /** The editor's lock view, supplied by the store (#284). */
+  private readOnlyPathCheck?: () => Promise<(relPath: string) => boolean>;
   private localChangeTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Disk deletes seen by the watcher, awaiting {@link DISK_DELETE_GRACE_MS}
@@ -1643,6 +1645,15 @@ export class SyncManager implements InboundHost {
       openDocId: () => this.docStore?.suppressedDoc() ?? null,
       isPermanentFailure: (docId) => this.permanentFailures.has(docId),
       pathForDocId: (docId) => this.registry.pathForDocId(docId),
+      readOnlyPaths: this.readOnlyPathCheck,
+      // The same per-doc resolver answer the editor's read-only mode comes from.
+      canEdit: async (docId) => {
+        const token = await api.syncToken(docId);
+        return !token.readOnly && token.permission === "edit";
+      },
+      docText: (docId) => this.localText(docId),
+      fileText: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
+      recordBase: (docId, sha256) => ipc.setDiskBase(docId, sha256, scope.vaultEpoch),
       enqueue: (chunk) => {
         for (const n of chunk) {
           this.emptyEverywhere.delete(n.docId);
@@ -1656,6 +1667,15 @@ export class SyncManager implements InboundHost {
     if (result && result.queued > 0) {
       this.note("info", "closed-app-edits-done", `Queued ${result.queued} notes edited while closed`);
     }
+  }
+
+  /**
+   * Supply the editor's lock view (locks + Read-only posture, minus lifts) for
+   * the closed-app edits pass. The store owns that state; the sync layer must
+   * not import it.
+   */
+  setReadOnlyPathCheck(check: (() => Promise<(relPath: string) => boolean>) | undefined): void {
+    this.readOnlyPathCheck = check;
   }
 
   private settleLocalDrainWaiters(): void {

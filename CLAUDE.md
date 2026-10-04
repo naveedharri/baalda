@@ -182,7 +182,9 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   `NoteBridge.hydrate` also ingests the file on reopen when it moved on while the doc was closed.
   Edits to mapped, unopened notes made while the app was closed are detected at launch, once the
   session is live, by comparing the index `notes.sha256` with `diskBase` (`list_disk_drift`,
-  `sync/closedAppEdits.ts`) and pushed through the same ingest + push queue in chunks of 50 (#284).
+  `sync/closedAppEdits.ts`) and pushed through the same ingest + push queue in chunks of 50 (#284);
+  padlocked notes, notes the server says this user cannot edit (an unanswered check counts as
+  read-only) and notes whose file already equals the local CRDT are never pushed.
 - **Disk deletes ARE propagated** (`SyncManager.drainDiskDeletes`, #93), after a `DISK_DELETE_GRACE_MS`
   (2.5 s) window that filters everything which merely looks like a delete: a `modified` for the same path
   cancels it (an editor's unlink-and-rewrite save, a rename-back), the file is re-checked on disk

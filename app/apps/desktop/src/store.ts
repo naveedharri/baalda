@@ -13,6 +13,7 @@ import {
   readItemColors,
   writeItemColors,
 } from "./lib/appearance";
+import { effectiveLockForPath, lockScopesByPath } from "./lib/locks";
 import { readItemOrder, renameInOrder, writeItemOrder, type ItemOrder } from "./lib/ordering";
 import { loadedFolderPaths, mergeChildren, nodeAt, setChildrenAt } from "./lib/tree/lazyTree";
 import { applyTitlePatch } from "./lib/tree/titles";
@@ -2661,6 +2662,20 @@ export const useStore = create<AppStore>((set, get) => ({
 
   initAuth: async () => {
     syncManager.setStatusListener((status) => get().setSyncStatus(status));
+    // The closed-app edits pass (#284) skips padlocked notes, read from the same
+    // lock view the editor and sidebar use, fetched fresh (a throw = push nothing).
+    syncManager.setReadOnlyPathCheck?.(async () => {
+      const vaultId = syncManager.registry.vaultId;
+      if (!vaultId) throw new Error("no vault");
+      const overlay = await authManager.api.listVaultLocks(vaultId);
+      const locks = overlay
+        .filter((s) => s.permission === "locked" || s.permission === "readonly")
+        .map((s) => (s.permission === "readonly" ? { ...s, permission: "locked" as const } : s));
+      const lifts = overlay.filter((s) => s.permission === "edit");
+      const state = get();
+      const map = lockScopesByPath(state.tree, locks, state.session?.user.id, lifts);
+      return (relPath) => effectiveLockForPath(map, relPath) != null;
+    });
     syncManager.setSyncPauseListener((pause) => set({ syncPause: pause }));
     syncManager.setVaultStatusListener((status) =>
       set(

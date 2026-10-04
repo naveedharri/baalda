@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { applyDiff, computeDiff } from "../../bridge/diff";
 import {
@@ -8,6 +8,7 @@ import {
   type ClosedAppEditsDeps,
   type DiskDrift,
 } from "../closedAppEdits";
+import { reconcileReport } from "../reconcileReport";
 
 /**
  * A fake vault: `files` is the indexed sha256 per path, `bases` the recorded
@@ -15,12 +16,22 @@ import {
  * The drain "pushes" what it was handed and records the new base + an ack, the
  * way the live ingest + push path does.
  */
-function harness(opts: {
-  notes: Array<{ docId: string; relPath: string; sha: string; base: string | null }>;
-  live?: boolean;
-  open?: string | null;
-  permanent?: string[];
-}) {
+type Note = {
+  docId: string;
+  relPath: string;
+  sha: string;
+  base: string | null;
+  /** Local CRDT text (default "doc text"); null = no local CRDT. */
+  doc?: string | null;
+  /** File text (default "file text"). */
+  file?: string;
+  /** The server's resolver says view-only. */
+  viewOnly?: boolean;
+  /** Under a padlock in the editor's lock view. */
+  locked?: boolean;
+};
+
+function harness(opts: { notes: Note[]; live?: boolean; open?: string | null; permanent?: string[] }) {
   const files = new Map(opts.notes.map((n) => [n.relPath, n.sha]));
   const bases = new Map(opts.notes.filter((n) => n.base != null).map((n) => [n.docId, n.base!]));
   const paths = new Map(opts.notes.map((n) => [n.docId, n.relPath]));
@@ -29,6 +40,10 @@ function harness(opts: {
   let live = opts.live ?? true;
   let queued: Array<{ docId: string; relPath: string }> = [];
   let listCalls = 0;
+  const trash: string[] = [];
+  const minted: string[] = [];
+  const byId = new Map(opts.notes.map((n) => [n.docId, n]));
+  const byPath = new Map(opts.notes.map((n) => [n.relPath, n]));
   const deps: ClosedAppEditsDeps = {
     isLive: () => live,
     isCurrent: () => true,
@@ -46,6 +61,19 @@ function harness(opts: {
     openDocId: () => opts.open ?? null,
     isPermanentFailure: (d) => (opts.permanent ?? []).includes(d),
     pathForDocId: (d) => paths.get(d) ?? null,
+    readOnlyPaths: async () => (p) => byPath.get(p)?.locked === true,
+    canEdit: async (d) => {
+      minted.push(d);
+      return byId.get(d)?.viewOnly !== true;
+    },
+    docText: async (d) => {
+      const n = byId.get(d)!;
+      return n.doc === undefined ? "doc text" : n.doc;
+    },
+    fileText: async (p) => byPath.get(p)?.file ?? "file text",
+    recordBase: async (d, sha) => {
+      bases.set(d, sha);
+    },
     enqueue: (chunk) => {
       chunks.push(chunk.map((c) => c.docId));
       queued = chunk;
@@ -58,10 +86,67 @@ function harness(opts: {
       queued = [];
     },
   };
-  return { deps, chunks, acked, bases, setLive: (v: boolean) => (live = v), listCalls: () => listCalls };
+  return { deps, chunks, acked, bases, trash, minted, setLive: (v: boolean) => (live = v), listCalls: () => listCalls };
 }
 
 describe("closed-app edits pass (#284)", () => {
+  beforeEach(() => reconcileReport.clear());
+
+  it("leaves a read-only note with a differing disk base alone: no push, no copy, no banner", async () => {
+    const h = harness({
+      notes: [
+        { docId: "ro", relPath: "ro.md", sha: "new", base: "old", viewOnly: true },
+        { docId: "lk", relPath: "locked/lk.md", sha: "new", base: "old", locked: true },
+      ],
+    });
+    const r = await runClosedAppEdits(h.deps);
+    expect(r).toMatchObject({ drifted: 2, queued: 0, readOnly: 2, chunks: 0 });
+    expect(h.chunks).toEqual([]);
+    expect(h.acked.size).toBe(0);
+    expect(h.trash).toEqual([]);
+    expect(reconcileReport.items()).toEqual([]);
+    // The padlocked note never even cost a permission request.
+    expect(h.minted).toEqual(["ro"]);
+    expect(h.bases.get("ro")).toBe("old");
+  });
+
+  it("treats an unanswered permission check as read-only", async () => {
+    const h = harness({ notes: [{ docId: "a", relPath: "a.md", sha: "new", base: "old" }] });
+    h.deps.canEdit = async () => {
+      throw new Error("403");
+    };
+    const r = await runClosedAppEdits(h.deps);
+    expect(r).toMatchObject({ queued: 0, readOnly: 1 });
+    expect(h.chunks).toEqual([]);
+  });
+
+  it("pushes nothing when the lock view cannot be read", async () => {
+    const h = harness({ notes: [{ docId: "a", relPath: "a.md", sha: "new", base: "old" }] });
+    h.deps.readOnlyPaths = async () => {
+      throw new Error("offline");
+    };
+    expect(await runClosedAppEdits(h.deps)).toBeNull();
+    expect(h.chunks).toEqual([]);
+  });
+
+  it("does not push when the file already equals the doc; re-records the base instead", async () => {
+    const h = harness({
+      notes: [{ docId: "a", relPath: "a.md", sha: "new", base: "stale", doc: "same", file: "same" }],
+    });
+    const r = await runClosedAppEdits(h.deps);
+    expect(r).toMatchObject({ drifted: 1, queued: 0, converged: 1 });
+    expect(h.chunks).toEqual([]);
+    expect(h.bases.get("a")).toBe("new");
+    expect(await runClosedAppEdits(h.deps)).toMatchObject({ drifted: 0 });
+  });
+
+  it("does not push a note with no local CRDT to merge into", async () => {
+    const h = harness({ notes: [{ docId: "a", relPath: "a.md", sha: "new", base: "old", doc: null }] });
+    const r = await runClosedAppEdits(h.deps);
+    expect(r).toMatchObject({ queued: 0, converged: 1 });
+    expect(h.chunks).toEqual([]);
+  });
+
   it("pushes a mapped closed note whose file changed and records its base and ack", async () => {
     const h = harness({
       notes: [
