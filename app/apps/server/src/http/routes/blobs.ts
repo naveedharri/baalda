@@ -27,6 +27,12 @@ import { docsReferencing } from "../../blobs/refs.js";
 import { canSyncAttachments, storageLimitBytes } from "../../billing/entitlements.js";
 import { verifyUploadToken } from "../../blobs/upload-token.js";
 import {
+  registerCtx,
+  registerFile,
+  type FileRow,
+  type StructResult,
+} from "../../registry/batch-ops.js";
+import {
   categoryForMime,
   hasMagicSignature,
   isAllowedMime,
@@ -84,6 +90,144 @@ import {
  * it, and they feature-detect the new flow by a 404 on intent.
  */
 export const blobRoutes = new Hono();
+
+/**
+ * `/health` feature: `POST /vaults/:vaultId/blobs/intent` accepts
+ * `register: { docId, relPath, folderId? }` and `complete` creates the `files`
+ * row with the bytes (one-step file upload, migration 048). A desktop that does
+ * not see it keeps the old `POST /api/files` + intent → PUT → complete flow,
+ * which is unchanged.
+ */
+export const FILES_WITH_BYTES_FEATURE = "files-with-bytes";
+
+/**
+ * Who hears that a one-step upload created or moved a `files` row.
+ *
+ * `blobRoutes` is a module-level router with no deps object, unlike the
+ * registry routes, so the app wires the same `onRegistryChanged` in here
+ * (`http/app.ts`). Unset (tests that mount the router alone) ⇒ no broadcast.
+ */
+let registryNotifier: ((vaultId: string, originId: string | null) => void) | null = null;
+export function setBlobRegistryNotifier(
+  fn: ((vaultId: string, originId: string | null) => void) | null | undefined,
+): void {
+  registryNotifier = fn ?? null;
+}
+/** Same header as `registry.ts ORIGIN_HEADER`; spelled out here because
+ *  `registry.ts` imports this module (a cycle otherwise). */
+const ORIGIN_HEADER = "x-baalda-origin";
+function registryChanged(c: Context, vaultId: string): void {
+  try {
+    registryNotifier?.(vaultId, c.req.header(ORIGIN_HEADER) ?? null);
+  } catch (err) {
+    console.warn(`[blobs] registry broadcast for ${vaultId} failed:`, err);
+  }
+}
+
+/** The registration a one-step intent carries, and the blob row stores. */
+interface PendingRegister {
+  docId: string;
+  relPath: string;
+  folderId: string | null;
+}
+
+/** `register` from an intent body, or a 400 reason. Absent ⇒ null (old flow). */
+function parseRegister(raw: unknown): PendingRegister | { invalid: string } | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) return { invalid: "register must be an object" };
+  const r = raw as Record<string, unknown>;
+  const docId = normalizeDocId(r.docId);
+  if (!docId) return { invalid: "register.docId is required" };
+  const relPath = typeof r.relPath === "string" ? r.relPath : null;
+  if (!relPath || relPath.length > 1024) return { invalid: "register.relPath is required" };
+  if (r.folderId !== undefined && r.folderId !== null && typeof r.folderId !== "string") {
+    return { invalid: "register.folderId must be a string or null" };
+  }
+  return { docId, relPath, folderId: typeof r.folderId === "string" && r.folderId ? r.folderId : null };
+}
+
+/** The stored column, read defensively (JSONB comes back parsed). */
+function storedRegister(raw: unknown): PendingRegister | null {
+  const parsed = parseRegister(raw);
+  return parsed && !("invalid" in parsed) ? parsed : null;
+}
+
+/**
+ * A refused registration, as `POST /api/files` answers it — same statuses,
+ * same codes, so the desktop explains a one-step refusal exactly like a
+ * two-step one.
+ */
+function registerRefusal(
+  c: Context,
+  out: Extract<StructResult<FileRow>, { status: "error" }>,
+): Response {
+  switch (out.code) {
+    case "note_limit_reached":
+      return c.json({ error: out.message, code: out.code, limit: 20000 }, 402);
+    case "path_folder_mismatch":
+    case "transient_file":
+      return c.json({ error: out.message, code: out.code }, 400);
+    case "root_frozen":
+      return c.json(
+        { error: "This vault's root is frozen — create this inside a folder instead.", code: "root_frozen" },
+        403,
+      );
+    case "not_readable":
+      return c.json({ error: out.message, code: out.code }, 409);
+    default:
+      return c.json(
+        { error: "You do not have permission to create a file here.", code: "no_write_access" },
+        403,
+      );
+  }
+}
+
+/**
+ * Run `registerFile` on one checked-out connection, inside a transaction.
+ *
+ * `commit: false` is the intent's DRY RUN: the exact gate sequence the files
+ * route runs (adopt-by-path, `resolveParentFolder` → `path_folder_mismatch`,
+ * `canCreateIn` / `vaultRootWritable`, frozen root) with the insert rolled
+ * back, so a 400/403 leaves nothing behind and a pass proves the create would
+ * succeed right now. `inTx` runs before COMMIT with the same client — that is
+ * how `complete` marks the blob ready in the transaction that creates the row.
+ */
+async function withRegistration<T>(
+  vaultId: string,
+  userId: string,
+  reg: PendingRegister,
+  commit: boolean,
+  inTx: (
+    out: StructResult<FileRow>,
+    client: import("pg").PoolClient,
+  ) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const ctx = registerCtx(vaultId, userId, client);
+    const out = await registerFile(ctx, {
+      path: reg.relPath,
+      docId: reg.docId,
+      folderId: reg.folderId,
+    });
+    let result: T;
+    try {
+      result = await inTx(out, client);
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    }
+    if (commit && out.status !== "error") await client.query("COMMIT");
+    else await client.query("ROLLBACK");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 const uploadBudget = new ByteBudget(MAX_INFLIGHT_UPLOAD_BYTES);
 
@@ -665,10 +809,12 @@ interface UploadRow {
   storage_provider: string | null;
   storage_key: string | null;
   doc_id: string | null;
+  /** One-step registration `complete` applies (migration 048), or null. */
+  pending_register?: unknown;
 }
 
 const UPLOAD_ROW_COLUMNS =
-  "id, vault_id, org_id, sha256, size, mime, rel_path, filename, status, storage_provider, storage_key, doc_id";
+  "id, vault_id, org_id, sha256, size, mime, rel_path, filename, status, storage_provider, storage_key, doc_id, pending_register";
 
 /**
  * Absolute origin for URLs this server hands a client.
@@ -806,21 +952,111 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   // `docId`: these bytes are a registered tree file. Same meaning as the legacy
   // POST's `x-doc-id` header — the path comes from the registry rather than the
   // request, and the write is gated on that file's folder.
-  const claimedDoc = normalizeDocId(body.docId);
-  const located = await resolveBlobRelPath(
-    vaultId,
-    claimedDoc,
-    typeof body.relPath === "string" ? body.relPath : filename,
-  );
+  let claimedDoc = normalizeDocId(body.docId);
+
+  // `register` (one-step file upload, `files-with-bytes`): these bytes are a
+  // tree file the registry does not know YET. The `files` row is created by
+  // `complete` (or right here on a dedupe hit), never before the bytes are
+  // accounted for — so every gate that decides whether it MAY exist runs now,
+  // before any row is written: Pro first (the plan is the real answer, see
+  // `unlocatedUpload`), then a rolled-back `registerFile` that runs the files
+  // route's exact sequence — adopt-by-path, `resolveParentFolder`
+  // (`path_folder_mismatch`), the CREATE gate on the destination folder
+  // (`canCreateIn` / `vaultRootWritable`) and the frozen root. A 402/403/400
+  // here leaves nothing behind.
+  const register = parseRegister(body.register);
+  if (register && "invalid" in register) {
+    return c.json({ error: register.invalid, code: "invalid_register" }, 400);
+  }
+  let pending: PendingRegister | null = null;
+  if (register) {
+    const { rows: known } = await pool.query(
+      "SELECT 1 FROM files WHERE id = $1 AND vault_id = $2",
+      [register.docId, vaultId],
+    );
+    if (known[0]) {
+      // Already registered: an ordinary upload for that file (the old flow).
+      claimedDoc = register.docId;
+    } else {
+      if (!(await canSyncAttachments(org))) return attachmentSyncRequired(c);
+      const dry = await withRegistration(vaultId, session.userId, register, false, async (out) => out);
+      if (dry.status === "error") return registerRefusal(c, dry);
+      // `adopted` ⇒ a file already lives at this path (under another id):
+      // the bytes are that file's, the ordinary flow, and the response names
+      // the canonical id. `created` ⇒ the registration waits on the bytes.
+      if (dry.status === "created") {
+        pending = { docId: dry.row.id, relPath: dry.row.path, folderId: dry.row.folderId };
+      }
+      claimedDoc = dry.row.id;
+    }
+  }
+
+  const located = pending
+    ? { relPath: pending.relPath, docId: pending.docId }
+    : await resolveBlobRelPath(
+        vaultId,
+        claimedDoc,
+        typeof body.relPath === "string" ? body.relPath : filename,
+      );
   if (!located) return unlocatedUpload(c, org);
   const { relPath, docId } = located;
   if (await attachmentSyncDenied(org, relPath, docId)) return attachmentSyncRequired(c);
 
   // Write access, now that we know WHAT is being written: a tree file answers
   // to its folder, an attachment to the vault posture (see `canWriteBlob`).
-  if (!(await canWriteBlob(session.userId, { vault_id: vaultId, rel_path: relPath, doc_id: docId }))) {
+  // A pending registration has no row for `canWriteBlob` to resolve; its gate
+  // was the create check above, and `complete` runs it again.
+  if (
+    !pending &&
+    !(await canWriteBlob(session.userId, { vault_id: vaultId, rel_path: relPath, doc_id: docId }))
+  ) {
     return c.json({ error: "This vault is read-only for you" }, 403);
   }
+
+  /** `file` on every intent answer that knows of one: the client keys its local
+   *  binary by `file.id`, which can differ from the docId it sent when the path
+   *  was already registered under another id. */
+  const fileInfo = (status: "pending" | "created" | "adopted", row: FileRow) => ({
+    id: row.id,
+    docId: row.id,
+    folderId: row.folderId,
+    path: row.path,
+    status,
+  });
+  const adoptedFile: FileRow | null =
+    register && !pending && docId ? { id: docId, folderId: null, path: relPath } : null;
+  if (adoptedFile) {
+    const { rows } = await pool.query<{ folder_id: string | null }>(
+      "SELECT folder_id FROM files WHERE id = $1",
+      [adoptedFile.id],
+    );
+    adoptedFile.folderId = rows[0]?.folder_id ?? null;
+  }
+
+  /**
+   * A dedupe hit. With a pending registration, the bytes are already here, so
+   * `complete` will never be called: the `files` row is created NOW, in this
+   * response, through the same `registerFile` — committed only if it passes
+   * (the gates may have moved since the dry run), then the blob is claimed.
+   */
+  const dedupedAnswer = async (hit: BlobRow): Promise<Response> => {
+    if (!pending) {
+      const blob = toMeta(await claimDoc(hit, docId));
+      return c.json(
+        { deduped: true, blob, ...(adoptedFile ? { file: fileInfo("adopted", adoptedFile) } : {}) },
+        200,
+      );
+    }
+    const reg = pending;
+    const out = await withRegistration(vaultId, session.userId, reg, true, async (o) => o);
+    if (out.status === "error") return registerRefusal(c, out);
+    if (out.wrote) registryChanged(c, vaultId);
+    const blob = toMeta(await claimDoc(hit, out.row.id));
+    return c.json(
+      { deduped: true, blob, file: fileInfo(out.status === "created" ? "created" : "adopted", out.row) },
+      200,
+    );
+  };
 
   const mime = normalizeMime(typeof body.mime === "string" ? body.mime : null) ||
     "application/octet-stream";
@@ -853,7 +1089,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   // is the case the whole flow exists for: a fresh device with a vault full of
   // attachments settles them all with one round trip each.
   const hit = await findBlob(vaultId, sha256, docId);
-  if (hit) return c.json({ deduped: true, blob: toMeta(await claimDoc(hit, docId)) }, 200);
+  if (hit) return dedupedAnswer(hit);
 
   // Optional `baseSha`: refuse an edit of a version the doc has moved on from,
   // rather than retiring a teammate's newer bytes (see `staleBaseConflict`).
@@ -879,11 +1115,15 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
             mime = $3,
             rel_path = $4,
             filename = $5,
-            doc_id = coalesce(blobs.doc_id, $6)
+            doc_id = coalesce(blobs.doc_id, $6),
+            pending_register = coalesce($7::jsonb, blobs.pending_register)
       WHERE vault_id = $1 AND sha256 = $2 AND status = 'pending'
-        AND (doc_id IS NULL OR doc_id = $6)
+        -- A one-step registration ($7) only reuses its OWN doc's pending row:
+        -- adopting an attachments/ drop's row would hand that upload's
+        -- complete a file registration it never asked for.
+        AND ((doc_id IS NULL AND $7::jsonb IS NULL) OR doc_id = $6)
       RETURNING ${UPLOAD_ROW_COLUMNS}`,
-    [vaultId, sha256, mime, relPath, filename, docId],
+    [vaultId, sha256, mime, relPath, filename, docId, pending ? JSON.stringify(pending) : null],
   );
   let row = existing.rows[0];
 
@@ -895,22 +1135,30 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
     const storageKey = store.provider === "postgres" ? null : objectKey(vaultId, sha256);
     const inserted = await pool.query<UploadRow>(
       `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
-                          storage_provider, storage_key, status, created_by, doc_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12)
+                          storage_provider, storage_key, status, created_by, doc_id,
+                          pending_register)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12, $13::jsonb)
        ON CONFLICT DO NOTHING
        RETURNING ${UPLOAD_ROW_COLUMNS}`,
       [id, vaultId, org, sha256, size, mime, relPath, filename, store.provider, storageKey,
-        session.userId, docId],
+        session.userId, docId, pending ? JSON.stringify(pending) : null],
     );
     row = inserted.rows[0];
     if (!row) {
       // Someone finished uploading this content between the dedupe read and the
       // insert. The winner's row is the answer, not a 409.
       const winner = await findBlob(vaultId, sha256, docId);
-      if (winner) return c.json({ deduped: true, blob: toMeta(await claimDoc(winner, docId)) }, 200);
+      if (winner) return dedupedAnswer(winner);
       return c.json({ error: "Upload conflicted — retry" }, 409);
     }
   }
+
+  // The file these bytes become: `pending` until `complete` creates it.
+  const uploadFileInfo = pending
+    ? { file: fileInfo("pending", { id: pending.docId, folderId: pending.folderId, path: pending.relPath }) }
+    : adoptedFile
+      ? { file: fileInfo("adopted", adoptedFile) }
+      : {};
 
   const origin = apiOrigin(c);
   const key = storageKeyForRow(row);
@@ -960,6 +1208,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
             partsUrl: `${origin}/api/blobs/${encodeURIComponent(row.id)}/parts?t=${encodeURIComponent(token)}`,
           },
           completeUrl,
+          ...uploadFileInfo,
         },
         200,
       );
@@ -978,6 +1227,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
           direct: single.direct,
         },
         completeUrl,
+        ...uploadFileInfo,
       },
       200,
     );
@@ -1212,6 +1462,90 @@ blobRoutes.post("/blobs/:id/parts", async (c) => {
  * integrity note in `blobs/s3-store.ts`. Size and magic bytes are what actually
  * protect the store; the sha is the content ADDRESS.
  */
+/**
+ * The last step of a one-step upload: the bytes are verified, so the `files`
+ * row is created and the blob published in ONE transaction. Either both land
+ * or neither does — there is no moment where a `files` row exists without its
+ * bytes, which is the gap the two-step flow left on a refusal or a crash.
+ *
+ * `registerFile` runs the full create sequence again rather than trusting the
+ * intent's dry run: access may have narrowed (or the path been taken) while the
+ * bytes were in flight. A refusal now drops the pending row — its object is
+ * queued by migration 027's trigger, which re-checks for a live row sharing the
+ * key — and answers exactly as `POST /api/files` would have.
+ */
+async function completeWithRegistration(
+  c: Context,
+  row: UploadRow,
+  vaultId: string,
+  userId: string,
+  reg: PendingRegister,
+  size: number,
+): Promise<Response> {
+  type Done =
+    | { kind: "refused"; out: Extract<StructResult<FileRow>, { status: "error" }> }
+    | { kind: "ready"; out: Exclude<StructResult<FileRow>, { status: "error" }>; blob: BlobRow };
+  const done = await withRegistration<Done>(vaultId, userId, reg, true, async (out, client) => {
+    if (out.status === "error") return { kind: "refused", out };
+    await client.query("SAVEPOINT mark_ready");
+    try {
+      const { rows } = await client.query<BlobRow>(
+        `UPDATE blobs SET status = 'ready', size = $2, doc_id = $3, pending_register = NULL,
+                          updated_at = now()
+          WHERE id = $1 AND status = 'pending'
+          RETURNING ${BLOB_ROW_COLUMNS}`,
+        [row.id, size, out.row.id],
+      );
+      if (rows[0]) return { kind: "ready", out, blob: rows[0] };
+      // A concurrent `complete` for the same row won; it registered the same
+      // file (its `registerFile` created it, ours adopted it). Its answer is ours.
+      const { rows: cur } = await client.query<BlobRow>(
+        `SELECT ${BLOB_ROW_COLUMNS} FROM blobs WHERE id = $1`,
+        [row.id],
+      );
+      if (!cur[0]) throw new Error(`blob ${row.id} vanished during complete`);
+      return { kind: "ready", out, blob: cur[0] };
+    } catch (err) {
+      // 23505 on `blobs_vault_sha_doc_idx` (m029): the path was adopted onto a
+      // file that ALREADY has a ready row with these exact bytes. That row is
+      // the answer; this pending duplicate goes (same transaction, so the file
+      // registration and the cleanup commit together).
+      if ((err as { code?: string })?.code !== "23505") throw err;
+      await client.query("ROLLBACK TO SAVEPOINT mark_ready");
+      const { rows: twin } = await client.query<BlobRow>(
+        `SELECT ${BLOB_ROW_COLUMNS} FROM blobs
+          WHERE vault_id = $1 AND sha256 = $2 AND doc_id = $3 AND status = 'ready'
+          LIMIT 1`,
+        [vaultId, row.sha256, out.row.id],
+      );
+      if (!twin[0]) throw err;
+      await client.query("DELETE FROM blobs WHERE id = $1 AND status = 'pending'", [row.id]);
+      return { kind: "ready", out, blob: twin[0] };
+    }
+  });
+
+  if (done.kind === "refused") {
+    await pool.query("DELETE FROM blobs WHERE id = $1 AND status = 'pending'", [row.id]);
+    return registerRefusal(c, done.out);
+  }
+  const { out, blob } = done;
+  if (out.wrote) registryChanged(c, vaultId);
+  await retireSupersededDocBlobs(out.row.id, blob.id);
+  return c.json(
+    {
+      ...toMeta(blob),
+      file: {
+        id: out.row.id,
+        docId: out.row.id,
+        folderId: out.row.folderId,
+        path: out.row.path,
+        status: out.status === "created" ? ("created" as const) : ("adopted" as const),
+      },
+    },
+    200,
+  );
+}
+
 blobRoutes.post("/blobs/:id/complete", async (c) => {
   const session = await getSession(c);
   if (!session) return c.json({ error: "Authentication required" }, 401);
@@ -1223,8 +1557,13 @@ blobRoutes.post("/blobs/:id/complete", async (c) => {
   if (!org || !(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
+  // A one-step upload's registration (migration 048). Its `files` row does not
+  // exist yet, so `canWriteBlob` has nothing to resolve: the CREATE gate runs
+  // instead, inside the transaction below that creates the row.
+  const pendingReg =
+    row.status === "pending" && row.vault_id ? storedRegister(row.pending_register) : null;
   if (await attachmentSyncDenied(org, row.rel_path, row.doc_id)) return attachmentSyncRequired(c);
-  if (row.vault_id && !(await canWriteBlob(session.userId, row))) {
+  if (row.vault_id && !pendingReg && !(await canWriteBlob(session.userId, row))) {
     return c.json({ error: "This vault is read-only for you" }, 403);
   }
 
@@ -1329,6 +1668,10 @@ blobRoutes.post("/blobs/:id/complete", async (c) => {
         await pool.query("DELETE FROM blobs WHERE id = $1 AND status = 'pending'", [row.id]);
         return c.json(quota, 402);
       }
+    }
+
+    if (pendingReg && row.vault_id) {
+      return await completeWithRegistration(c, row, row.vault_id, session.userId, pendingReg, head.size);
     }
 
     const { rows } = await pool.query<BlobRow>(

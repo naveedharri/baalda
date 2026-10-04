@@ -1,4 +1,7 @@
 import { Hono } from "hono";
+import { readFileSync } from "node:fs";
+import { NOTES_WITH_STATE_FEATURE } from "../registry/seed-on-register.js";
+import { BOOTSTRAP_ONLY_FEATURE } from "./routes/bootstrap.js";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from "better-auth/plugins";
@@ -17,7 +20,7 @@ import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
 import { passwordResetRoutes } from "./routes/password-reset.js";
 import { openLinkRoutes } from "./routes/open-link.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
-import { blobRoutes } from "./routes/blobs.js";
+import { blobRoutes, FILES_WITH_BYTES_FEATURE, setBlobRegistryNotifier } from "./routes/blobs.js";
 import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
 import { createBulkRoutes } from "./routes/bulk.js";
 import { bootstrapRoutes } from "./routes/bootstrap.js";
@@ -38,6 +41,21 @@ import { createBillingRoutes } from "./routes/billing.js";
 import { PolarBillingProvider } from "../billing/polar.js";
 import type { BillingProvider } from "../billing/provider.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
+
+
+/**
+ * The server's package version, read ONCE at startup. `../../package.json`
+ * resolves to the server package from both `src/http/` (tsx) and `dist/http/`.
+ */
+const SERVER_VERSION: string = (() => {
+  try {
+    const raw = readFileSync(new URL("../../package.json", import.meta.url), "utf8");
+    const v = (JSON.parse(raw) as { version?: unknown }).version;
+    return typeof v === "string" ? v : "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
 
 export interface AppDeps extends ShareDeps {
   /** Server-side note writer for the MCP tools (backed by the sync server). */
@@ -195,7 +213,22 @@ export function createApp(deps: AppDeps): Hono {
     return compressor(c, next);
   });
 
-  app.get("/health", (c) => c.json({ ok: true }));
+  // `features`: what this server accepts beyond the base protocol, so a desktop
+  // can pick a path with one call per server URL instead of wasting a chunk on
+  // an old server. `notes-with-state` = `notes/batch` and `POST /api/notes` take
+  // an item's `state` and answer `seeded`. A missing field means none; the
+  // per-item `seeded` flag stays the fallback (absent ⇒ not seeded).
+  // `version` is this server's package version (read once at startup);
+  // `minDesktopVersion` is the floor `client-version.ts` enforces on content
+  // writes, read live like the gate itself (null when the floor is off).
+  app.get("/health", (c) =>
+    c.json({
+      ok: true,
+      version: SERVER_VERSION,
+      minDesktopVersion: clientVersionPolicy().minRaw,
+      features: [NOTES_WITH_STATE_FEATURE, BOOTSTRAP_ONLY_FEATURE, FILES_WITH_BYTES_FEATURE],
+    }),
+  );
 
   // ── MCP OAuth discovery (RFC 8414 / RFC 9728) ─────────────────────────────
   // These MUST sit at the origin root: our protected-resource metadata names
@@ -279,6 +312,9 @@ export function createApp(deps: AppDeps): Hono {
     }),
   );
   app.route("/api", bootstrapRoutes);
+  // A one-step file upload (`files-with-bytes`) creates its `files` row at
+  // `complete`; it owes the same registry broadcast `POST /api/files` makes.
+  setBlobRegistryNotifier(deps.onRegistryChanged);
   app.route("/api", blobRoutes);
   app.route(
     "/api",
