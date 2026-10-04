@@ -586,8 +586,9 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `vaultRootWritable` refuses a root create in a sealed vault, since a note you cannot read is not
   worth making. **Deletion narrows further by authorship** (`http-gates.ts canDeleteItem`, behind
   every note/file/folder delete route, the note batch and MCP `delete_*`): owners and admins delete
-  anything, a plain member only notes, files and folders they created (a row with no `created_by`,
-  e.g. a file registered before migration 049, counts as someone else's) → 403 `delete_not_creator`,
+  anything, a plain member only notes, files and folders they created (a row with no `created_by`
+  counts as someone else's; migration 050 backfills a pre-049 file's creator from the blob uploader
+  where exactly one is recorded, and a file restored by checkpoint revert stays without a creator) → 403 `delete_not_creator`,
   and a member's folder delete is refused whole with 403 `folder_has_others_items` when anything in
   its subtree was created by someone else; checkpoint revert, restore and trash purge are exempt.
   **A per-user row on the vault resource is that person's ABSOLUTE level**
