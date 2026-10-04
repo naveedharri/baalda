@@ -10,6 +10,7 @@ import { relativeTime } from "../../lib/health/format";
 
 const api = vi.hoisted(() => ({
   listAccessTree: vi.fn(), resolveAccessSummary: vi.fn(), resolveAccessSummaries: vi.fn(), setBulkAccess: vi.fn(), getMemberActivity: vi.fn(),
+  getAccessBoard: vi.fn(), getHealth: vi.fn(), getBaseUrl: vi.fn(() => "http://test.invalid"),
 }));
 vi.mock("../../lib/auth/authManager", () => ({
   authManager: { api, getServerUrl: () => "http://test.invalid" },
@@ -94,6 +95,36 @@ describe("Member profile page, Access tab", () => {
     expect(byName("Welcome").querySelector(".member-access-pill")?.textContent).toContain("Can view");
     expect(byName("Welcome").textContent).not.toContain("Same as everyone");
     expect(byName("Archive").querySelector(".member-access-pill")).toBeNull();
+  });
+
+  it("with access-board, List and Board share one request and read no summaries", async () => {
+    const { forgetServerFeatures } = await import("../../lib/serverFeatures");
+    const { forgetAccessBoardSupport } = await import("../../lib/accessBoardLoad");
+    forgetServerFeatures();
+    forgetAccessBoardSupport();
+    api.getHealth.mockResolvedValue({ ok: true, features: ["access-board"] });
+    api.getAccessBoard.mockResolvedValue({
+      folders: [{ id: "f1", path: "Specs", color: null }], notes: [{ id: "n1", relPath: "Welcome.md" }], files: [], modes: "ev",
+    });
+    try {
+      await render();
+      await settle();
+      const rows = [...host.querySelectorAll(".member-access-row")];
+      const byName = (n: string) => rows.find((r) => r.querySelector(".member-access-name")?.textContent === n)!;
+      expect(byName("Specs").querySelector(".member-access-pill")?.textContent).toContain("Can edit");
+      expect(byName("Welcome").querySelector(".member-access-pill")?.textContent).toContain("Can view");
+      const boardBtn = host.querySelector<HTMLButtonElement>('[role="radiogroup"] [aria-label="Board view"]')!;
+      await act(async () => boardBtn.click());
+      await settle();
+      expect(host.querySelector('.access-board-column[data-mode="open"] .access-board-count')?.textContent).toBe("1");
+      expect(host.querySelector('.access-board-column[data-mode="readonly"] .access-board-count')?.textContent).toBe("1");
+      expect(api.getAccessBoard).toHaveBeenCalledTimes(1);
+      expect(api.listAccessTree).not.toHaveBeenCalled();
+      expect(api.resolveAccessSummaries).not.toHaveBeenCalled();
+    } finally {
+      forgetServerFeatures();
+      api.getHealth.mockReset();
+    }
   });
 
   it("is a page with a way back, not a dialog", async () => {

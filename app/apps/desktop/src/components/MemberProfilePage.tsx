@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { AccessTreeResponse, BulkAccessResource, MemberActivityEvent, MemberOverview, TeamAccess, TeamAccessMode } from "../lib/api";
+import type { BulkAccessResource, MemberActivityEvent, MemberOverview, TeamAccess, TeamAccessMode } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import { buildOrgRowsByPath, effectiveTeamMode } from "../lib/accessMode";
 import { createAccessSummaryBatcher } from "../lib/accessSummaryBatch";
@@ -13,6 +13,8 @@ import { toast } from "../lib/toast";
 import { useStore } from "../store";
 import { Avatar } from "./Avatar";
 import { MemberAccessBoard } from "./MemberAccessBoard";
+import { useAccessMap, type AccessMap } from "./useAccessMap";
+import { ACCESS_MAP_REREAD_MAX } from "../lib/accessBoardLoad";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { iconForPath } from "./FileTree";
 import { MenuSelect } from "./MenuSelect";
@@ -173,8 +175,9 @@ export function MemberProfilePage({
             viewToggle={viewToggle}
             view={accessView}
             onVaultWide={() => setBoardEpoch((n) => n + 1)}
-            board={
+            board={(accessMap) => (
               <MemberAccessBoard
+                accessMap={accessMap}
                 key={boardEpoch}
                 orgId={orgId}
                 vaultId={syncManager.registry.vaultId!}
@@ -187,7 +190,7 @@ export function MemberProfilePage({
                 onChanged={onChanged}
                 hideSetEverything
               />
-            }
+            )}
           />
         ) : (
           <PersonActivity orgId={orgId} member={member} vaultName={vaultName} isSelf={isSelf} onOpenNote={onOpenNote} />
@@ -407,7 +410,7 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
   viewToggle?: React.ReactNode;
   /** Board view keeps this header row and shows `board` in place of the tree. */
   view?: AccessView;
-  board?: React.ReactNode;
+  board?: React.ReactNode | ((map: AccessMap) => React.ReactNode);
   /** A vault-wide write from the header landed. */
   onVaultWide?: () => void;
 }) {
@@ -415,7 +418,10 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
   const locks = useStore((s) => s.locks);
   const denies = useStore((s) => s.denies);
   const tree = useStore((s) => s.tree);
-  const [serverTree, setServerTree] = useState<AccessTreeResponse | null>(null);
+  // ONE load shared by List and Board: on a server with `access-board` it
+  // carries every row's mode too, so neither view reads summaries on open.
+  const map = useAccessMap(syncManager.registry.vaultId, member.userId);
+  const serverTree = map.tree;
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   // Every row's mode lives here, keyed by row key, so a write can update the
   // affected rows in place instead of re-reading the whole tree (which made
@@ -437,15 +443,16 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<{ title: string; button: string; outcome: string; danger: boolean; apply: () => Promise<void> } | null>(null);
 
-  useEffect(() => {
-    let live = true;
-    const vaultId = syncManager.registry.vaultId;
-    if (!vaultId) return;
-    authManager.api.listAccessTree(vaultId)
-      .then((t) => { if (live) setServerTree(t); })
-      .catch(() => { if (live) setError("Couldn't load this vault's folders."); });
-    return () => { live = false; };
-  }, []);
+  useEffect(() => { if (map.error) setError(map.error); }, [map.error]);
+  // Seed during render so the first frame with a tree has its modes.
+  const [seededSeq, setSeededSeq] = useState(0);
+  if (map.seq !== seededSeq) {
+    setSeededSeq(map.seq);
+    if (map.modes) {
+      setModes(new Map(map.modes));
+      setFailed(new Set());
+    }
+  }
 
   const entries = useMemo(() => (serverTree ? entriesFromServer(serverTree) : []), [serverTree]);
   const rows = useMemo(() => rowsFromEntries(entries, expanded), [entries, expanded]);
@@ -519,9 +526,13 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
         return next;
       });
       const ancestors = path === null ? new Set<string>() : new Set(ancestorPaths(path));
+      const reread = rows.filter((row) => keys.has(row.key) || ancestors.has(row.path));
+      // A vault-wide or large write reloads the whole map once (when the
+      // server has it); a small one re-reads the affected rows.
+      if (map.complete && (path === null || keys.size + ancestors.size > ACCESS_MAP_REREAD_MAX)) await map.reload();
       // In board view the tree is hidden: forget its answers so the list
       // re-reads everything when it is shown again.
-      if (view === "list") readModes(rows.filter((row) => keys.has(row.key) || ancestors.has(row.path)));
+      else if (view === "list") readModes(reread);
       else setModes(new Map());
       if (path === null) {
         await onChanged();
@@ -573,7 +584,7 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
         {viewToggle}
       </div>
       {view === "board" ? (
-        <div className="member-access-board-pane">{board}</div>
+        <div className="member-access-board-pane">{typeof board === "function" ? board(map) : board}</div>
       ) : !serverTree ? (
         error ? null : <TreeSkeleton />
       ) : (
