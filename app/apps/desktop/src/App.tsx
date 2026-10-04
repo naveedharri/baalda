@@ -1627,8 +1627,8 @@ export default function App() {
           <div className="editor-wrap">
             {activeVirtual && <VirtualTabHost tab={activeVirtual} />}
             {/* Stays MOUNTED under a virtual tab (display toggles, the tree does
-                not), so the note's live editor is still there for Compare's
-                right side and for "Replace current note". */}
+                not), so the note's live editor is still there for the
+                review's current side and for "Replace current note". */}
             <div className="editor-slot" style={{ display: activeVirtual ? "none" : "contents" }}>
             {openNote ? (
               <Suspense

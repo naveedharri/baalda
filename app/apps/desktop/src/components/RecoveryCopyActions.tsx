@@ -1,6 +1,6 @@
 /* Row actions for one local recovery copy, shared by Vault Health's
    "Reconciled on reconnect" rows and its "Recovery copies" list: Open copy,
-   Compare, a Restore menu (replace the current note, or a sibling), Delete
+   a Restore menu (replace the current note, or a sibling), Delete
    copy. After a restore it offers to delete the copy. */
 import { useEffect, useState } from "react";
 import * as ipc from "../lib/ipc";
@@ -11,7 +11,6 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { RowActionsMenu, type RowAction } from "./RowActionsMenu";
 import { copyActions, originalPathOf, siblingRecoveredPath, type CopyRef } from "./recoveryCopies";
 import {
-  compareCopy,
   deleteCopy,
   openCopy,
   restoreCopyAsSibling,
@@ -126,15 +125,6 @@ export function RecoveryCopyActions({
         <button type="button" className="ghost-pill sm" onClick={() => openCopy(copy, modified)}>
           Open copy
         </button>
-        {avail.compare && (
-          <button
-            type="button"
-            className="ghost-pill sm"
-            onClick={() => compareCopy(copy, target, modified)}
-          >
-            Compare
-          </button>
-        )}
         <RowActionsMenu actions={restoreActions} ariaLabel="Restore or delete this copy" />
       </span>
       {error && (
@@ -172,30 +162,19 @@ export function RecoveryCopyActions({
   );
 }
 
-/** Preview (and Compare, when a live note sits at the same path) for one
- *  server Trash row. */
+/** Preview for one server Trash row. */
 export function TrashPreviewActions({
   docId,
   relPath,
   onPreview,
-  onCompare,
 }: {
   docId: string;
   relPath: string;
   onPreview: (docId: string, relPath: string) => void;
-  onCompare: (docId: string, relPath: string) => void;
 }) {
-  const exists = useNoteExists(relPath);
   return (
-    <>
-      <AsyncButton className="ghost-pill sm" onClick={() => onPreview(docId, relPath)}>
-        Preview
-      </AsyncButton>
-      {exists && (
-        <AsyncButton className="ghost-pill sm" onClick={() => onCompare(docId, relPath)}>
-          Compare
-        </AsyncButton>
-      )}
-    </>
+    <AsyncButton className="ghost-pill sm" onClick={() => onPreview(docId, relPath)}>
+      Preview
+    </AsyncButton>
   );
 }

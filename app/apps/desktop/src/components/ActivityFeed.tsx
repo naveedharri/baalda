@@ -19,7 +19,7 @@ import { AsyncButton } from "./AsyncButton";
 import { PathText } from "./HealthShared";
 import { RecoveryCopyActions, TrashPreviewActions, useNoteExists } from "./RecoveryCopyActions";
 import { reconcileCopyRef } from "./recoveryCopies";
-import { compareTrash, openReviewTab, openTrashPreview } from "./recoveryActions";
+import { openReviewTab, openTrashPreview } from "./recoveryActions";
 import { usePendingReviewCount } from "./ReviewTab";
 import {
   ACTIVITY_HINT,
@@ -28,7 +28,6 @@ import {
 } from "./activityRows";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { trashErrorMessage, useActivitySnapshot } from "./activitySource";
-import { openCompare } from "./recoveryActions";
 import { noteLabel } from "../lib/notePath";
 
 /** Rows shown before "Show more", like the Health lists. */
@@ -96,7 +95,6 @@ function TrashRowActions({
             docId={item.docId}
             relPath={item.relPath}
             onPreview={openTrashPreview}
-            onCompare={compareTrash}
           />
         )}
         <AsyncButton
@@ -153,14 +151,6 @@ function ShrunkRowActions({
   onDone: () => void;
 }) {
   const [confirm, setConfirm] = useState(false);
-  const compare = () =>
-    openCompare(
-      {
-        label: `${noteLabel(event.relPath)} before it shrank`,
-        source: { type: "version", docId: event.docId, versionId: event.versionId },
-      },
-      event.relPath,
-    );
   const restore = async () => {
     setConfirm(false);
     try {
@@ -175,9 +165,6 @@ function ShrunkRowActions({
   return (
     <>
       <span className="health-missing-actions">
-        <button type="button" className="ghost-pill sm" disabled={!online} onClick={compare}>
-          Compare
-        </button>
         <button
           type="button"
           className="ghost-pill sm"

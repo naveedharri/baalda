@@ -56,14 +56,13 @@ export function originalPathOf(relPath: string): string {
 
 export interface CopyActions {
   open: boolean;
-  compare: boolean;
   restoreReplace: boolean;
   restoreSibling: boolean;
   delete: boolean;
 }
 
 /**
- * Which actions a copy row offers. Compare and Replace need a live note at the
+ * Which actions a copy row offers. Replace needs a live note at the
  * original path; a read-only vault can open and delete but not restore.
  */
 export function copyActions(opts: {
@@ -74,7 +73,6 @@ export function copyActions(opts: {
   const { hasCopy, liveNoteExists, canWrite } = opts;
   return {
     open: hasCopy,
-    compare: hasCopy && liveNoteExists,
     restoreReplace: hasCopy && liveNoteExists && canWrite,
     restoreSibling: hasCopy && canWrite,
     delete: hasCopy,

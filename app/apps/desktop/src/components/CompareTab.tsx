@@ -1,7 +1,7 @@
 /* The editor area's non-note views: a read-only text tab (a recovery copy or a
-   deleted note's preview) and a compare tab (copy vs current note, side by
-   side or unified when narrow). Chosen by `VirtualTabView` from the store's
-   active virtual tab. */
+   deleted note's preview), chosen by `VirtualTabView` from the store's active
+   virtual tab, plus the side-by-side diff body (unified when narrow) that the
+   "Review changes" tab renders for each item. */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import "./compare.css";
 import { useStore } from "../store";
@@ -167,25 +167,14 @@ function TextTab({ tab }: { tab: Extract<VirtualTab, { kind: "text" }> }) {
  *  file does not depend on the review module. */
 export function VirtualTabView({
   tab,
-  renderCompareActions,
   renderReview,
 }: {
   tab: VirtualTab;
-  renderCompareActions?: (tab: Extract<VirtualTab, { kind: "compare" }>) => ReactNode;
   renderReview?: () => ReactNode;
 }) {
   switch (tab.kind) {
     case "text":
       return <TextTab key={tab.id} tab={tab} />;
-    case "compare":
-      return (
-        <CompareBody
-          key={tab.id}
-          left={tab.left}
-          right={tab.right}
-          actions={renderCompareActions?.(tab)}
-        />
-      );
     case "review":
       return <>{renderReview?.()}</>;
   }

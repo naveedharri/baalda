@@ -185,7 +185,7 @@ interface AppStore {
    *  `openNote.path`; this list is only which tabs exist, so the two never
    *  disagree about what's on screen. Session-only, vault-scoped. */
   openTabs: string[];
-  /** Non-note tabs (recovery copy, trash preview, compare, review). See
+  /** Non-note tabs (recovery copy, trash preview, review). See
    *  `components/virtualTabs.ts`. Session-only, vault-scoped. */
   virtualTabs: VirtualTab[];
   /** The virtual tab on screen, or null when the note editor is. Opening a note
