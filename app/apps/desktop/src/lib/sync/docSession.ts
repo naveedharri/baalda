@@ -86,6 +86,7 @@ import {
 import { bytesToBase64, type VoiceFrame } from "./vaultProtocol";
 import { svFromBase64 } from "./ackedSv";
 import { ReadOnlyRejections } from "./readOnlyRejections";
+import { setReadOnlyCopyKeeper } from "../bridge/readOnlyDocs";
 import { SyncPauseTracker, type SyncPause } from "./syncPause";
 import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
 import { VoicePlayer } from "../voice/playback";
@@ -516,6 +517,10 @@ export class SyncManager implements InboundHost {
   // opening it. Present only while sync is enabled.
   private docStore: VaultDocStore | null = null;
   private vaultEngine: VaultSyncEngine | null = null;
+  /** Rebases read-only docs whose pushes the server rejected (see `readOnlyRejections.ts`). */
+  private readOnlyRejections: ReadOnlyRejections | null = null;
+  /** Read-only docs whose differing file already has its quiet copy this session. */
+  private readonly readOnlyCopied = new Set<string>();
   /**
    * The collection id {@link vaultEngine} was started for.
    *
@@ -6308,11 +6313,31 @@ export class SyncManager implements InboundHost {
     // this layer is built to avoid.
     if (this.currentDocId) store.setSuppressedDoc(this.currentDocId);
     // Read-only pushes the server dropped: keep the edit, once per doc per minute.
+    // …and rebase the doc onto the server once, so the stray ops stop repeating.
     const readOnlyRejections = new ReadOnlyRejections({
       pathOf: (docId) => this.registry.pathForDocId(docId),
       localText: (docId) => this.localText(docId),
       writeTrashCopy: (path, stamp, content) =>
         ipc.writeTrashCopy(path, stamp, content, scope.vaultEpoch),
+      readFile: (path) => ipc.readNote(path, scope.vaultEpoch),
+      serverState: (docId) => this.pullServerState(docId, scope),
+      replaceLocal: (docId, path, update, text) =>
+        this.replaceWithServerState(docId, path, update, text, scope),
+      isOpen: (docId) =>
+        this.currentDocId === docId || this.docStore?.suppressedDoc() === docId,
+    });
+    this.readOnlyRejections = readOnlyRejections;
+    // A read-only doc's file never enters its CRDT; a differing file is kept
+    // as a quiet recovery copy (once per doc per session) before the doc's
+    // text is written back over it.
+    setReadOnlyCopyKeeper(async (docId, path, text) => {
+      if (!scope.isCurrent()) return false;
+      if (this.readOnlyCopied.has(docId) || text.trim().length === 0) return true;
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const dest = await ipc.writeTrashCopy(path, stamp, text, scope.vaultEpoch);
+      this.readOnlyCopied.add(docId);
+      console.info(`[sync] ${path} is read-only for you; the file's differing text is at ${dest}`);
+      return true;
     });
     this.vaultEngine = new VaultSyncEngine({
       api,
@@ -7027,6 +7052,88 @@ export class SyncManager implements InboundHost {
       this.requeueDeferredMerges();
       void this.runHttpMerge(scope).catch((e) => console.warn("[sync] HTTP merge failed", e));
     }
+    // A read-only note whose rejected ops had to wait for its editor: rebase it
+    // now (`replaceWithServerState` awaits `store.release`, i.e. the close).
+    if (closedDoc && scope?.isCurrent() && this.readOnlyRejections) {
+      void this.readOnlyRejections.closed(closedDoc);
+    }
+  }
+
+  /**
+   * The server's full state for one doc, over the bootstrap `only` pull. Null
+   * when it cannot say (old server, offline, the doc is not readable).
+   */
+  private async pullServerState(
+    docId: string,
+    scope: VaultScope,
+  ): Promise<{ update: Uint8Array; text: string } | null> {
+    const vaultId = this.registry.vaultId;
+    if (!vaultId || !scope.isCurrent()) return null;
+    const features = await this.serverFeatures();
+    if (!features.has(BOOTSTRAP_ONLY)) return null;
+    let update: Uint8Array | null = null;
+    const session = await api.createBootstrapSession(vaultId, [], [docId]);
+    let cursor: number | null = 0;
+    while (cursor !== null && scope.isCurrent()) {
+      const page = await api.fetchBootstrapPage(vaultId, session.sessionId, { cursor });
+      for (const d of decodeBootstrapPage(page.bytes)) {
+        if (d.docId === docId) update = d.update.slice(); // pages are subarrays: copy
+      }
+      cursor = page.nextCursor;
+    }
+    if (!update || update.byteLength === 0 || !scope.isCurrent()) return null;
+    const doc = new Y.Doc();
+    try {
+      Y.applyUpdate(doc, update);
+      return { update, text: doc.getText("content").toString() };
+    } finally {
+      doc.destroy();
+    }
+  }
+
+  /**
+   * Rebase a read-only doc onto the server: the same steps as the one-step
+   * merge (`httpMergeOnce`) without a file merge. Waits out a content run (its
+   * pinned bridge may be this doc), never runs under the editor.
+   */
+  private async replaceWithServerState(
+    docId: string,
+    relPath: string,
+    update: Uint8Array,
+    text: string,
+    scope: VaultScope,
+  ): Promise<void> {
+    const store = this.docStore;
+    if (!store || !scope.isCurrent()) throw new Error("vault changed");
+    for (let i = 0; i < 120 && (this.contentRunInFlight() || this.bulkPhase); i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (!scope.isCurrent()) throw new Error("vault changed");
+    }
+    if (store.suppressedDoc() === docId) throw new Error("the note is open");
+    // `release` is AWAITED: a retiring bridge's last persist must not land
+    // after the clear, or the fresh bridge would hydrate the stray ops again.
+    await store.release(docId);
+    store.drop(docId);
+    await ipc.clearYjsDoc(docId, scope.vaultEpoch);
+    // The file first, with the doc id: Rust records it as the disk base, so the
+    // fresh bridge sees file == base and the next launch sees no drift.
+    await ipc.writeNote(relPath, text, scope.vaultEpoch, docId);
+    const bridge = await store.promote(docId, relPath, {
+      seedFromFile: false,
+      markRecent: false,
+      pin: true,
+    });
+    try {
+      bridge.applyRemote(update);
+      bridge.abandonPull(true);
+      await bridge.flushEgest();
+    } finally {
+      await store.demote(docId).catch(() => {});
+    }
+    // The server's copy IS the content: nothing is left to send.
+    this.registry.markPushed(docId);
+    this.divergedDocs.delete(docId);
+    this.serverBehind.delete(docId);
   }
 
   /**

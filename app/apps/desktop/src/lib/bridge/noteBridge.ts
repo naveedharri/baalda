@@ -10,6 +10,7 @@ import * as Y from "yjs";
 import { isBlankTruncation } from "./blankFile";
 import { applyDiff, changeRatio, computeDiff } from "./diff";
 import { markLocalEdit } from "./localEdits";
+import { isReadOnlyDoc, readOnlyCopyKeeper } from "./readOnlyDocs";
 import {
   DEFAULT_CONFIG,
   ORIGIN_DISK,
@@ -837,6 +838,22 @@ export class NoteBridge {
       return false;
     }
     this.truncateReported = false;
+
+    // A doc this user may only READ never takes the file in: the op could never
+    // be sent, so every connect would re-send it and the server would answer
+    // `rejected` forever. Keep the file's bytes as a quiet recovery copy and
+    // write the doc's text back over it; with no copy the file stays as it is.
+    if (isReadOnlyDoc(this.docId)) {
+      const keep = readOnlyCopyKeeper();
+      const kept = keep
+        ? await keep(this.docId, this._path, fileText).catch(() => false)
+        : await this.saveAside(fileText);
+      if (kept && !this.destroyed) {
+        this.lastWrittenHash = fileHash;
+        this.scheduleEgest();
+      }
+      return false;
+    }
 
     // A diff against an EMPTY doc is not a merge, it is a seed: every byte of
     // the file is inserted as this device's own history. Seeding is ordered —

@@ -14,6 +14,7 @@ import type * as Y from "yjs";
 import { ApiClient, ApiError } from "../api";
 import { TokenRefreshScheduler } from "./tokenRefresh";
 import { TerminalSyncError } from "./contentUpload";
+import { markReadOnlyDoc } from "../bridge/readOnlyDocs";
 
 export type SyncStatus =
   | "offline" // no network provider / signed out
@@ -570,6 +571,7 @@ export class DocSync {
     try {
       const res = await this.api.syncToken(this.docId);
       this._readOnly = res.readOnly;
+      markReadOnlyDoc(this.docId, res.readOnly === true);
       // (Re)arm refresh based on the real token TTL.
       this.refresher.schedule(ttlFromToken(res.token));
       // A minted token is NOT a connected socket. Claiming "synced" here (and,
