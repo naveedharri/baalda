@@ -76,6 +76,8 @@ import { requestOpenVault, useStore } from "./store";
 import { clearPendingNoteLink } from "./lib/noteLinkFlow";
 import { prefetchAfterPaint } from "./lib/prefetch";
 import { revealWindowOnce } from "./lib/windowReveal";
+import { authManager } from "./lib/auth/authManager";
+import { createMemberPicturesLoader } from "./lib/memberPictures";
 
 /* Lazy chunks. Each of these is either a rare deliberate action (the graph),
    a modal (settings, auth), or big enough that the first paint should not wait
@@ -778,6 +780,11 @@ function UpdateGate({ launchVersion = null }: { launchVersion?: string | null })
  * the content jumping. Stays until dismissed (the stash survives a quit), so
  * an update never lands completely unannounced.
  */
+/** One loader for the app's life: its memory is what spaces the requests. */
+const loadMemberPictures = createMemberPicturesLoader({
+  fetch: (orgId) => authManager.api.getMembersOverview(orgId),
+});
+
 function WhatsNewModal() {
   const [updated, setUpdated] = useState<{ version: string; notes: string[] } | null>(
     null,
@@ -1031,6 +1038,13 @@ export default function App() {
   const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
   // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
   const didAutoReopenRef = useRef(false);
+  const memberPicturesSynced = useStore(
+    (s) => s.authStatus === "signed-in" && s.syncEnabled && !!s.session?.activeOrganizationId,
+  );
+  const memberPicturesServer = useStore((s) => s.serverUrl);
+  const memberPicturesUser = useStore((s) => s.session?.user.id ?? null);
+  const memberPicturesOrg = useStore((s) => s.session?.activeOrganizationId ?? null);
+  const memberPicturesVault = useStore((s) => s.vault?.path ?? null);
 
   // Reveal the window on React's FIRST commit — deliberately not on the tree
   // or on `!booting`. That first commit is the themed shell, so the user gets a
@@ -1057,6 +1071,19 @@ export default function App() {
   // the app's whole life (not gated on a vault being open) because the very
   // first thing a link may have to do is switch vaults.
   useEffect(() => listenForNoteLinks(), []);
+
+  // Teammates' picked characters for presence dots and version rows, loaded
+  // once per synced-vault open (and per account or server change) through the
+  // members overview Vault Settings already uses. Keyed on plain values only,
+  // so a vault-channel reconnect or a refreshed session object does not refetch.
+  useEffect(() => {
+    loadMemberPictures({
+      synced: memberPicturesSynced,
+      serverUrl: memberPicturesServer,
+      userId: memberPicturesUser,
+      orgId: memberPicturesOrg,
+    });
+  }, [memberPicturesSynced, memberPicturesServer, memberPicturesUser, memberPicturesOrg, memberPicturesVault]);
 
   // Auto-reopen the last vault on launch, then restore the session (spec 04 §7)
   // and enable sync. Vault first so `enableSyncForVault` (called inside initAuth)
