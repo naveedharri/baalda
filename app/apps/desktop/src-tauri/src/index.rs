@@ -2665,6 +2665,46 @@ impl Index {
             .optional()?)
     }
 
+    /// Mapped notes whose indexed file hash no longer equals their recorded disk
+    /// base (#284): the file moved on while nothing ingested it, e.g. a script
+    /// edited it while the app was closed. `entries` are `(doc_id, path)` pairs
+    /// from the registry (the index's own `notes.id` is a different id space on
+    /// vaults indexed before registration). A note with no disk base or no
+    /// indexed hash is skipped: there is nothing to compare. Two table scans and
+    /// a hash compare, whatever the vault size.
+    pub fn disk_drift(&self, entries: &[(String, String)]) -> AppResult<Vec<(String, String, String)>> {
+        let mut bases: HashMap<String, String> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare("SELECT doc_id, sha256 FROM yjs_disk_base")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (id, sha) = row?;
+                bases.insert(id, sha);
+            }
+        }
+        let mut hashes: HashMap<String, String> = HashMap::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT path, sha256 FROM notes WHERE sha256 IS NOT NULL AND sha256 != ''")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (path, sha) = row?;
+                hashes.insert(path, sha);
+            }
+        }
+        let mut out = Vec::new();
+        for (doc_id, path) in entries {
+            let (Some(base), Some(sha)) = (bases.get(doc_id), hashes.get(path)) else {
+                continue;
+            };
+            if base != sha {
+                out.push((doc_id.clone(), path.clone(), sha.clone()));
+            }
+        }
+        Ok(out)
+    }
+
     /// Record a doc's disk base: the sha256 of the bytes that are now both on
     /// disk and in the doc.
     pub fn set_disk_base(&self, doc_id: &str, sha256: &str) -> AppResult<()> {
@@ -3230,6 +3270,29 @@ mod tests {
         assert_eq!(idx.get_disk_base("d").unwrap().as_deref(), Some("bbb"));
         idx.clear_yjs_doc("d").unwrap();
         assert_eq!(idx.get_disk_base("d").unwrap(), None);
+    }
+
+    #[test]
+    fn disk_drift_names_only_notes_whose_file_left_their_base() {
+        let idx = Index::open_in_memory().unwrap();
+        for (id, path, sha) in [("i1", "a.md", "new"), ("i2", "b.md", "same"), ("i3", "c.md", "x")] {
+            idx.conn
+                .execute(
+                    "INSERT INTO notes (id, path, sha256) VALUES (?1, ?2, ?3)",
+                    params![id, path, sha],
+                )
+                .unwrap();
+        }
+        idx.set_disk_base("docA", "old").unwrap(); // changed while closed
+        idx.set_disk_base("docB", "same").unwrap(); // untouched
+        // docC: no base recorded => nothing to compare; docD: no index row.
+        idx.set_disk_base("docD", "zzz").unwrap();
+        let entries: Vec<(String, String)> = [("docA", "a.md"), ("docB", "b.md"), ("docC", "c.md"), ("docD", "d.md")]
+            .iter()
+            .map(|(d, p)| (d.to_string(), p.to_string()))
+            .collect();
+        let drift = idx.disk_drift(&entries).unwrap();
+        assert_eq!(drift, vec![("docA".to_string(), "a.md".to_string(), "new".to_string())]);
     }
 
     #[test]

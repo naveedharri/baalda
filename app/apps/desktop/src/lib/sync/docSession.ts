@@ -21,6 +21,7 @@ import {
   type SessionInfo,
 } from "../api";
 import * as ipc from "../ipc";
+import { runClosedAppEdits } from "./closedAppEdits";
 import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
@@ -640,6 +641,10 @@ export class SyncManager implements InboundHost {
    *  .md on disk. Drained by {@link runLocalChangePush}, debounced so a burst
    *  (an AI writing many files) coalesces into one run. */
   private localChanges = new Map<string, string>();
+  /** Resolvers waiting for the next local-change drain to finish (#284). */
+  private localDrainWaiters: Array<() => void> = [];
+  /** The closed-app edits pass ran for this vault open (#284). */
+  private closedEditsScanned = false;
   private localChangeTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Disk deletes seen by the watcher, awaiting {@link DISK_DELETE_GRACE_MS}
@@ -1613,6 +1618,50 @@ export class SyncManager implements InboundHost {
     if (this.liveSince != null) return;
     if (!this.channelSynced || !this.pulledOnce) return;
     this.liveSince = Date.now();
+    const scope = this.scope;
+    if (scope) {
+      void this.scanClosedAppEdits(scope).catch((e) =>
+        console.warn("[sync] closed-app edits pass failed", e),
+      );
+    }
+  }
+
+  /**
+   * Push edits made to mapped, unopened notes while the app was closed (#284).
+   * Runs once per vault open, the moment the session goes live. A running app
+   * needs no second pass after a long offline gap or a sleep: the watcher keeps
+   * running and queues the same notes through `handleLocalFilesChanged`.
+   */
+  private async scanClosedAppEdits(scope: VaultScope): Promise<void> {
+    if (this.closedEditsScanned || this.rootMissing) return;
+    this.closedEditsScanned = true;
+    const result = await runClosedAppEdits({
+      isLive: () => this.liveSince != null,
+      isCurrent: () => scope.isCurrent() && this.enabled,
+      mappedNotes: () => this.registry.mappedNotes(),
+      listDrift: (entries) => ipc.listDiskDrift(entries, scope.vaultEpoch),
+      openDocId: () => this.docStore?.suppressedDoc() ?? null,
+      isPermanentFailure: (docId) => this.permanentFailures.has(docId),
+      pathForDocId: (docId) => this.registry.pathForDocId(docId),
+      enqueue: (chunk) => {
+        for (const n of chunk) {
+          this.emptyEverywhere.delete(n.docId);
+          if (!this.localChanges.has(n.docId)) this.localChanges.set(n.docId, n.relPath);
+        }
+        this.armLocalChangeDrain(scope, 0);
+      },
+      waitForDrain: () => new Promise<void>((resolve) => this.localDrainWaiters.push(resolve)),
+      log: (message) => this.note("info", "closed-app-edits", message),
+    });
+    if (result && result.queued > 0) {
+      this.note("info", "closed-app-edits-done", `Queued ${result.queued} notes edited while closed`);
+    }
+  }
+
+  private settleLocalDrainWaiters(): void {
+    const waiters = this.localDrainWaiters;
+    this.localDrainWaiters = [];
+    for (const resolve of waiters) resolve();
   }
 
   /** True once a disk delete would be propagated (tests / diagnostics). */
@@ -3195,9 +3244,9 @@ export class SyncManager implements InboundHost {
         this.armLocalChangeDrain(scope, LOCAL_CHANGE_RETRY_MS);
         return;
       }
-      void this.runLocalChangePush(scope).catch((e) =>
-        console.warn("[sync] local change push failed", e),
-      );
+      void this.runLocalChangePush(scope)
+        .catch((e) => console.warn("[sync] local change push failed", e))
+        .finally(() => this.settleLocalDrainWaiters());
     }, delayMs);
   }
 
@@ -5887,6 +5936,8 @@ export class SyncManager implements InboundHost {
     this.deleteDecisionIds = new Set();
     this.closedChangesChecked = false;
     this.closedChangesNotice = false;
+    this.closedEditsScanned = false;
+    this.settleLocalDrainWaiters();
     this.emitStructureNotice();
     // The next vault starts un-live: its own reconcile + channel decide.
     this.liveSince = null;
