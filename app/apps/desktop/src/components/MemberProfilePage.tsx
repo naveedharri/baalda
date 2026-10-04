@@ -113,7 +113,7 @@ export function MemberProfilePage({
           ← Members and access
         </button>
         <header className="member-profile-head">
-          <Avatar label={name} image={member.image} />
+          <Avatar label={name} image={member.image} userId={member.userId} />
           <span className="member-profile-names">
             <span className="member-profile-name">{name}</span>
             {member.email && <span className="muted">{member.email}</span>}

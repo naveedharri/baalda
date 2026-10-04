@@ -1791,7 +1791,9 @@ body:has(.sidebar-resizer.dragging) {
 .tree-presence-avatar:first-child {
   margin-left: 0;
 }
-.tree-presence-avatar svg {
+.tree-presence-avatar svg,
+.tree-presence-avatar img {
+  object-fit: cover;
   width: 100%;
   height: 100%;
   display: block;
@@ -2476,7 +2478,9 @@ body:has(.sidebar-resizer.dragging) {
   border-radius: 50%;
   overflow: hidden;
 }
-.version-avatar svg {
+.version-avatar svg,
+.version-avatar img {
+  object-fit: cover;
   width: 100%;
   height: 100%;
   display: block;

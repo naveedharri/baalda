@@ -283,7 +283,11 @@ function ProfileTab() {
       {/* The picture is chosen right where it's shown: upload / reset beside
           the big avatar, the character gallery just under it. */}
       <div className="profile-hero">
-        <Avatar label={trimmedName || session.user.email} image={trimmedImage || null} />
+        <Avatar
+          label={trimmedName || session.user.email}
+          image={trimmedImage || null}
+          userId={session.user.id}
+        />
         <div className="profile-hero-meta">
           <strong>{trimmedName || "—"}</strong>
           <span className="muted">{session.user.email}</span>
@@ -292,6 +296,7 @@ function ProfileTab() {
       </div>
       <ProfileCharacterGrid
         label={trimmedName || session.user.email}
+        userId={session.user.id}
         image={trimmedImage}
         onChange={changeImage}
       />
@@ -403,10 +408,12 @@ function ProfilePictureActions({
 
 function ProfileCharacterGrid({
   label,
+  userId,
   image,
   onChange,
 }: {
   label: string;
+  userId: string;
   image: string;
   onChange: (image: string) => void;
 }) {
@@ -422,7 +429,7 @@ function ProfileCharacterGrid({
           title="Your default character"
           onClick={() => onChange("")}
         >
-          <Avatar label={label} />
+          <Avatar label={label} userId={userId} image={null} />
         </button>
         {PROFILE_CHARACTER_SEEDS.map((seed) => {
           const value = CHARACTER_PREFIX + seed;

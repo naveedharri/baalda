@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import "./editor.css";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { keymap, EditorView } from "@codemirror/view";
@@ -29,7 +29,7 @@ import { FilePreview } from "./FilePreview";
 import { viewerFor } from "../lib/formats";
 import { relativeAgo } from "./Identity";
 import { EditorEmpty, EditorSkeleton } from "./EditorPlaceholders";
-import { characterSvg } from "./Avatar";
+import { FaceSvg } from "./Avatar";
 import { agoFromIso, lastEditedTooltip } from "./versionFormat";
 import { noteContentReady, shouldShowNoteSkeleton } from "../lib/editor/noteLoading";
 import { registerLiveView } from "./liveEditorViews";
@@ -38,6 +38,8 @@ interface Peer {
   id: string;
   name: string;
   color: string;
+  /** Their picked character or photo URL, when their build broadcasts it. */
+  image?: string;
   /** Their chosen availability status, broadcast via awareness (`user.status`). */
   status?: ActivityStatus;
   /** Line their cursor is on (from the `activity` awareness field), if known. */
@@ -47,7 +49,7 @@ interface Peer {
 }
 
 interface AwarenessPeerState {
-  user?: { id?: string; name?: string; color?: string; status?: ActivityStatus };
+  user?: { id?: string; name?: string; color?: string; status?: ActivityStatus; image?: string };
   activity?: { line?: number; at?: number };
   ping?: { to?: string; name?: string; at?: number };
 }
@@ -67,6 +69,7 @@ function readPeers(awareness: Awareness): Peer[] {
         id: u.id,
         name: u.name ?? "Someone",
         color: u.color ?? colorForUser(u.id),
+        ...(typeof u.image === "string" && u.image ? { image: u.image } : {}),
         status: u.status,
         line,
         lastActive: at,
@@ -74,6 +77,7 @@ function readPeers(awareness: Awareness): Peer[] {
     } else {
       if (prev.line == null && line != null) prev.line = line;
       if (prev.status == null && u.status != null) prev.status = u.status;
+      if (prev.image == null && typeof u.image === "string" && u.image) prev.image = u.image;
       if (at != null && (prev.lastActive == null || at > prev.lastActive)) {
         prev.lastActive = at;
       }
@@ -118,9 +122,9 @@ function editableExtensions(readOnly: boolean) {
 const MAX_AVATARS = 4;
 
 /**
- * A single presence avatar: the peer's illustrated character (the same DiceBear
- * "notionists" art used for profile avatars, seeded by their name so it matches
- * their account avatar) framed by a ring in their unique presence colour. The
+ * A single presence avatar: the peer's face from the shared avatar rule
+ * (`lib/avatarIdentity.ts`: their picture, else the character seeded by their
+ * user id, so it matches their account avatar) framed by a ring in their unique presence colour. The
  * colour arrives as `--user-color` so the CSS owns the ring/glow treatment.
  */
 function PresenceAvatar({
@@ -133,18 +137,19 @@ function PresenceAvatar({
   /** When false the ring goes neutral gray — the local session isn't live. */
   online?: boolean;
 }) {
-  const svg = useMemo(() => characterSvg(peer.name || peer.id || "?"), [peer.name, peer.id]);
   // The ring shows the peer's unique colour only when the local session is live
   // AND the peer's own availability reads as present (online/busy). Away/invisible
   // peers — or any peer when we're offline — get the neutral gray ring.
   const tone = statusTone(peer.status);
   const live = online && ringShowsColor(tone);
   return (
-    <span
+    <FaceSvg
+      userId={peer.id}
+      name={peer.name}
+      image={peer.image}
       className={`presence-avatar tone-${tone}${live ? "" : " offline"}${className ? ` ${className}` : ""}`}
       style={{ "--user-color": live ? peer.color : PRESENCE_OFFLINE } as CSSProperties}
-      aria-hidden="true"
-      dangerouslySetInnerHTML={{ __html: svg }}
+      ariaHidden
     />
   );
 }
@@ -159,18 +164,14 @@ function PresenceAvatar({
 function RosterRecent({ notePath, now }: { notePath: string; now: number }) {
   const docId = syncManager.registry.getMapping(notePath)?.docId ?? null;
   const name = useStore((s) => (docId ? (s.noteLastEdited[docId]?.name ?? null) : null));
+  const userId = useStore((s) => (docId ? (s.noteLastEdited[docId]?.userId ?? null) : null));
   const at = useStore((s) => (docId ? (s.noteLastEdited[docId]?.at ?? null) : null));
-  const svg = useMemo(() => (name ? characterSvg(name) : null), [name]);
-  if (!svg || !at) return null;
+  if (!name || !at) return null;
   return (
     <>
       <div className="peer-roster-title roster-recent-title">Recent activity</div>
       <div className="roster-recent-row" title={lastEditedTooltip(name, at, now)}>
-        <span
-          className="roster-recent-avatar"
-          aria-hidden="true"
-          dangerouslySetInnerHTML={{ __html: svg }}
-        />
+        <FaceSvg userId={userId} name={name} className="roster-recent-avatar" ariaHidden />
         <span className="roster-recent-name">{name}</span>
         <span className="roster-recent-when">edited {agoFromIso(at, now)}</span>
       </div>

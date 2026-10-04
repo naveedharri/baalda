@@ -294,7 +294,8 @@ function VersionRow({
       onMouseEnter={onHover}
     >
       <Face
-        seed={version.authorName || version.authorId || "?"}
+        userId={version.authorId}
+        name={version.authorName}
         className="version-avatar"
         ariaHidden
       />

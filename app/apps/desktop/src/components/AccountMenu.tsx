@@ -342,7 +342,7 @@ export function AccountMenu() {
           }`}
         >
           <span className="identity-avatar-wrap">
-            <LazyAvatar label={userLabel} image={session.user.image} />
+            <LazyAvatar label={userLabel} image={session.user.image} userId={session.user.id} />
             <span className={`presence-light ${presence}`} aria-label={presenceLabel} />
           </span>
           <span className="identity-meta">

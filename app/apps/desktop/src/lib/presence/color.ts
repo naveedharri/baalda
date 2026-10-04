@@ -2,6 +2,7 @@
 // derived from their stable id so it's identical across every client and every
 // session — no server round-trip, no per-connection randomness.
 
+import { selfAvatarImage } from "../avatarIdentity";
 import type { ActivityStatus } from "../prefs";
 
 /**
@@ -53,6 +54,10 @@ export interface PresenceUser {
   color: string;
   /** The user's chosen activity status, so peers can show it beside cursors. */
   status?: ActivityStatus;
+  /** Their picked character (`character:<seed>`) or photo URL, when small
+   *  enough to broadcast (`wireAvatarImage`). Older builds omit it; readers
+   *  then fall back to the user-id seed. */
+  image?: string;
 }
 
 export function presenceUser(
@@ -60,7 +65,14 @@ export function presenceUser(
   name: string,
   status?: ActivityStatus,
 ): PresenceUser {
-  return { id: userId, name, color: colorForUser(userId), ...(status ? { status } : {}) };
+  const image = selfAvatarImage();
+  return {
+    id: userId,
+    name,
+    color: colorForUser(userId),
+    ...(status ? { status } : {}),
+    ...(image ? { image } : {}),
+  };
 }
 
 /**

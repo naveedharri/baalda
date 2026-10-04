@@ -490,7 +490,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
                 >
                   <td>
                     <span className="members-table-person">
-                      <Avatar label={name} image={m.image} />
+                      <Avatar label={name} image={m.image} userId={m.userId} />
                       <span className="members-table-names">
                         <span className="members-table-name">{name}{isMe && <span className="muted"> (you)</span>}</span>
                         {m.email && m.name && <span className="muted">{m.email}</span>}
@@ -538,7 +538,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
                 <tr key={inv.id} className="is-invited">
                   <td>
                     <span className="members-table-person">
-                      <Avatar label={inv.email} />
+                      <Avatar label={inv.email} image={null} />
                       <span className="members-table-names">
                         <span className="members-table-name">{inv.email}</span>
                         <span className="muted">

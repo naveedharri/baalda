@@ -3,6 +3,7 @@
 // and autosave. Phase 2/3 adds auth, vault (org), and sync view-state; the
 // heavy lifting lives in lib/auth, lib/sync — the store just mirrors it for React.
 
+import { setSelfAvatarImage } from "./lib/avatarIdentity";
 import { create } from "zustand";
 import * as ipc from "./lib/ipc";
 import { bridgeManager } from "./lib/bridge";
@@ -4611,6 +4612,26 @@ function errMsg(e: unknown): string {
 if (import.meta.hot) {
   import.meta.hot.accept(() => {
     window.location.reload();
+  });
+}
+
+// The signed-in user's picture feeds the shared avatar rule: the directory (so
+// every surface that knows only their id draws the account bar's face) and the
+// presence payload (so teammates see the picked character too). A change is
+// re-published on any live presence at once.
+{
+  let lastImage: string | null | undefined;
+  const publishSelfAvatar = (session: AppStore["session"]) => {
+    const image = session?.user.image ?? null;
+    setSelfAvatarImage(session?.user.id, image);
+    if (image === lastImage) return;
+    const first = lastImage === undefined;
+    lastImage = image;
+    if (!first && session) syncManager.setPresenceStatus(useStore.getState().activityStatus);
+  };
+  publishSelfAvatar(useStore.getState().session);
+  useStore.subscribe((s, prev) => {
+    if (s.session !== prev.session) publishSelfAvatar(s.session);
   });
 }
 

@@ -2506,7 +2506,8 @@ function SidebarAvatar({ peer }: { peer: VaultPeer }) {
   const live = ringShowsColor(tone);
   return (
     <Face
-      seed={peer.name || peer.userId || "?"}
+      userId={peer.userId}
+      name={peer.name}
       className={`tree-presence-avatar tone-${tone}${live ? "" : " offline"}`}
       style={
         {

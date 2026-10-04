@@ -1,4 +1,5 @@
 import type { SeedResultFields } from "./sync/seedRegister";
+import { rememberAvatarImage } from "./avatarIdentity";
 import { parseHealth, type ServerHealth } from "./serverFeatures";
 import { CLIENT_OUTDATED_CODE, CLIENT_VERSION, CLIENT_VERSION_PARAM } from "./clientVersion";
 import type { AssistantProvider, HousekeeperStatus, HousekeeperScan, HousekeeperEdit, DiagnosticInput, DiagnosticReview } from "./housekeeper";
@@ -2917,8 +2918,12 @@ export class ApiClient {
       "GET",
       `/api/orgs/${encodeURIComponent(orgId)}/members/overview`,
     );
+    const members = data.members ?? [];
+    // Teach the shared avatar directory each member's picture, so surfaces
+    // that only carry an id (presence, version rows) draw the same face.
+    for (const m of members) rememberAvatarImage(m.userId, m.image ?? null);
     return {
-      members: data.members ?? [],
+      members,
       invitations: data.invitations ?? [],
       canManage: data.canManage === true,
     };
