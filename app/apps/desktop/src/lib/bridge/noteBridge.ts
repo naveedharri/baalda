@@ -9,6 +9,7 @@
 import * as Y from "yjs";
 import { isBlankTruncation } from "./blankFile";
 import { applyDiff, changeRatio, computeDiff } from "./diff";
+import { markLocalEdit } from "./localEdits";
 import {
   DEFAULT_CONFIG,
   ORIGIN_DISK,
@@ -244,6 +245,11 @@ export class NoteBridge {
       if (this.text.length > 0) this.everHadContent = true;
       // A change we applied from the file must not be written back (spec 03 §5.B).
       if (tr.origin === ORIGIN_DISK) return;
+      // Typing, undo/redo and Properties edits are local transactions; remote
+      // applies are not, and persistence replay is not the user's doing.
+      if (tr.local && tr.origin !== ORIGIN_REMOTE && tr.origin !== "persistence") {
+        markLocalEdit(this.docId);
+      }
       this.scheduleEgest();
     };
   }

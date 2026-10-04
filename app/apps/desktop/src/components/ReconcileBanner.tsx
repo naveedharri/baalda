@@ -3,6 +3,7 @@ import { Banner } from "./Banner";
 import { useStore } from "../store";
 import { reconcileReport, type ReconcileItem } from "../lib/sync/reconcileReport";
 import { summarizeReconcile } from "../lib/reconcileSummary";
+import { isReadOnlyRejection } from "../lib/sync/readOnlyRejections";
 import { pendingItems, reviewItems, reviewKey } from "./reviewModel";
 import { useReviewState } from "./ReviewTab";
 import { useReviewPersistence } from "./useReviewPersistence";
@@ -19,8 +20,11 @@ const dismissed = new WeakSet<ReconcileItem>();
 
 /** What the banner announces: this session's new items only. Items seeded from
  *  the saved review were announced the session they happened in; raising them
- *  again on every launch and vault switch is what made the banner unkillable. */
-const announce = (all: readonly ReconcileItem[]) => all.filter((it) => !it.seeded && !dismissed.has(it));
+ *  again on every launch and vault switch is what made the banner unkillable.
+ *  A rejected read-only edit was already told once by a transient toast; it
+ *  stays in Activity but never raises this persistent bar. */
+const announce = (all: readonly ReconcileItem[]) =>
+  all.filter((it) => !it.seeded && !dismissed.has(it) && !isReadOnlyRejection(it));
 
 /** The user removed their own access: their copy is noted, nothing to review. */
 const isQuiet = (it: ReconcileItem) => it.kind === "selfRevoked";
