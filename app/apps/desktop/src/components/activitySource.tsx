@@ -20,7 +20,7 @@ import type { HealthFailures } from "../lib/health/model";
 import { syncManager } from "../lib/sync/docSession";
 import { reconcileReport, type ReconcileItem, type ReconcileKind } from "../lib/sync/reconcileReport";
 import * as ipc from "../lib/ipc";
-import { buildActivity, failureEntries, type ActivityRow, type FailedEntry } from "./activityRows";
+import { buildActivity, failureEntries, staleFailureIds, type ActivityRow, type FailedEntry } from "./activityRows";
 import { ACTIVITY_LOG_MAX_PATHS, appendLog, loadLog, removeFromLog, saveLog, type ActivityLogEntry } from "./activityLog";
 import {
   afterClear,
@@ -366,6 +366,8 @@ export interface ActivitySnapshot {
   schedule: () => void;
   /** Activity → Clear: hide every row so far and stop pending reviews asking. */
   clear: () => void;
+  /** Drop one logged Failed row (Retry on a note that already synced). */
+  dismissFailure: (key: string) => void;
 }
 
 const EMPTY: ActivitySnapshot = {
@@ -378,6 +380,7 @@ const EMPTY: ActivitySnapshot = {
   error: null,
   updating: false,
   schedule: () => {},
+  dismissFailure: () => {},
   clear: () => {},
 };
 
@@ -503,6 +506,7 @@ export function ActivityHost(): null {
       return next;
     });
   }, []);
+  const dismissFailure = useCallback((key: string) => forget([key]), [forget]);
 
   // A new reconcile item usually means a recovery copy was just written, and
   // a resolved one may have restored or deleted a copy: either way, refetch.
@@ -597,6 +601,12 @@ export function ActivityHost(): null {
 
   // ── Rows ──
   const activeFailures = useMemo(() => new Set(failures.map((f) => f.key)), [failures]);
+  useEffect(() => {
+    // A logged failure whose note has since synced: drop it, or the row would
+    // say Failed beside a green dot for good.
+    const stale = staleFailureIds(log, activeFailures, (id) => syncManager.registry.isPushed(id));
+    if (stale.length > 0) forget(stale);
+  }, [log, activeFailures, forget]);
   const allRows = useMemo(() => {
     const byId = new Map(log.map((e) => [e.id, e]));
     const seededReconcile = log.filter((e) => LOGGED_RECONCILE.has(e.kind as ReconcileKind)).map(reconcileFromLog);
@@ -683,8 +693,9 @@ export function ActivityHost(): null {
       updating,
       schedule,
       clear,
+      dismissFailure,
     });
-  }, [rows, unread, activeFailures, trash.online, trash.listing, trash.error, copiesError, updating, schedule, clear]);
+  }, [rows, unread, activeFailures, trash.online, trash.listing, trash.error, copiesError, updating, schedule, clear, dismissFailure]);
   useEffect(() => () => publish(EMPTY), []);
   return null;
 }

@@ -83,6 +83,26 @@ export function failureEntries(f: HealthFailures | null | undefined): FailedEntr
   return out;
 }
 
+/** Logged Failed rows to drop: sync no longer reports them and their note is
+ *  confirmed on the server, so the row would contradict the synced badge. */
+export function staleFailureIds(
+  log: readonly { id: string; kind: string; docId?: string }[],
+  liveKeys: ReadonlySet<string>,
+  isPushed: (docId: string) => boolean,
+): string[] {
+  const out: string[] = [];
+  for (const e of log) {
+    if (e.kind !== "failed" || liveKeys.has(e.id) || !e.docId) continue;
+    if (isPushed(e.docId)) out.push(e.id);
+  }
+  return out;
+}
+
+/** Retry on a doc that already synced has nothing to send: clear the row. */
+export function retryAction(docId: string, settled: (docId: string) => boolean): "clear" | "retry" {
+  return settled(docId) ? "clear" : "retry";
+}
+
 const n = (x: number) => x.toLocaleString("en-US");
 
 export function shrinkText(e: Pick<ShrinkEvent, "beforeChars" | "afterChars">): string {

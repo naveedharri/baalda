@@ -97,6 +97,7 @@ import {
 import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
 import { VoicePlayer } from "../voice/playback";
 import { VoiceRoster, type VoiceSpeaker } from "../voice/roster";
+import { FailureGrace } from "./failureGrace";
 
 export type { VoiceSpeaker };
 
@@ -378,6 +379,11 @@ export class SyncManager implements InboundHost {
   readonly registry = new VaultRegistry(api);
 
   constructor() {
+    // Every confirmed push, on every path (batch, per-doc uploader, one-step
+    // create, open-note confirm), clears that doc's failure rows: the sidebar
+    // badge and the failure list must never disagree.
+    // Optional call: test doubles of the registry may not carry it.
+    this.registry.setPushedListener?.((docId) => this.failureGrace.settle(docId));
     // The registry owns the only {relPath → docId} map there is, and the sidebar
     // needs it to badge a row (every sync fact is keyed by docId). Mirror it out
     // reactively — coalesced — instead of letting the UI read it imperatively
@@ -818,6 +824,9 @@ export class SyncManager implements InboundHost {
   /** Doc failures invalidated after that local incarnation was removed. This
    * also hides rows retained by an already-finished uploader object. */
   private invalidatedFailures = new Set<string>();
+  /** Holds transient push failures back until retries run out, and drops any
+   *  failure of a doc a later push confirmed (see `failureGrace.ts`). */
+  private failureGrace = new FailureGrace();
   /** True while the run is reporting the vault channel's inbound queue. */
   private downloadPhase = false;
   /**
@@ -1060,6 +1069,7 @@ export class SyncManager implements InboundHost {
   /** One note the content push could not get to the server. */
   private logUploadFailure(f: UploadFailure): void {
     this.invalidatedFailures.delete(f.docId);
+    this.failureGrace.record(f, Date.now());
     this.note(
       // A note the shrink brake holds is waiting, not broken (#274).
       f.kind === "shrink-held" ? "warn" : "error",
@@ -5005,6 +5015,11 @@ export class SyncManager implements InboundHost {
    * Scope-guarded like everything else here: a vault switch between the click
    * and the drain drops the work silently rather than pushing into the new vault.
    */
+  /** Confirmed on the server with no failure listed: a Retry has nothing to do. */
+  failureSettled(docId: string): boolean {
+    return this.registry.isPushed(docId) && this.failureGrace.isSettled(docId);
+  }
+
   async retryDoc(docId: string): Promise<void> {
     const scope = this.scope;
     if (!this.enabled || !scope || !scope.isCurrent()) return;
@@ -5868,15 +5883,19 @@ export class SyncManager implements InboundHost {
     const seen = new Set(content.map((f) => f.docId));
     // The bulk engine's failures, before the per-doc uploader's: a doc in both
     // is listed once, and the bulk verdict is the more recent one.
+    const now = Date.now();
     for (const f of this.bulkFailures.values()) {
       if (this.invalidatedFailures.has(f.docId)) continue;
       if (seen.has(f.docId)) continue;
+      // A later push confirmed it, or automatic retries are still running.
+      if (!this.failureGrace.visible(f, now)) continue;
       seen.add(f.docId);
       content.push(f);
     }
     for (const f of this.uploader?.failedDocs() ?? []) {
       if (this.invalidatedFailures.has(f.docId)) continue;
       if (seen.has(f.docId)) continue;
+      if (!this.failureGrace.visible(f, now)) continue;
       // A doc sitting in the local-change queue is being pushed again right now
       // (an external write, or the Health page's Retry). The failure still in the
       // PREVIOUS run's uploader describes an attempt that has been superseded, so
@@ -6034,6 +6053,7 @@ export class SyncManager implements InboundHost {
     this.emptyEverywhere.clear();
     this.permanentFailures.clear();
     this.invalidatedFailures.clear();
+    this.failureGrace.clear();
     this.unhydratedPlaceholders.clear();
     this.emptyProbe = null; // a probe still in flight sees a stale scope and drops
     // The bulk run before the engine it borrows from: `stop()` makes every pool

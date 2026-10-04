@@ -1710,8 +1710,21 @@ export class VaultRegistry {
     return this.pushed.has(docId);
   }
 
+  private onPushed: ((docId: string) => void) | null = null;
+
+  /** Told of every confirmed push, on every path, even for a doc already
+   *  marked: the session clears that doc's failure rows (`FailureGrace`). */
+  setPushedListener(cb: ((docId: string) => void) | null): void {
+    this.onPushed = cb;
+  }
+
   /** Record that `docId`'s content is on the server (checkpointed, batched). */
   markPushed(docId: string): void {
+    try {
+      this.onPushed?.(docId);
+    } catch (e) {
+      console.warn("[registry] pushed listener threw", e);
+    }
     // Its content is stored locally now (a bootstrap page, a channel frame):
     // no placeholder is owed for it any more.
     if (this.pendingFromBootstrapByDoc.size > 0) {

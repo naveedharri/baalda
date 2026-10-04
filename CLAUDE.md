@@ -226,7 +226,9 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   to push — it is marked pushed + badged synced and never queued (a vault with 307 zero-byte `_Index.md`
   stubs used to "re-sync 307 notes" on every reload). Files over `MAX_NOTE_BYTES` (10 MB, the server's
   `MAX_NOTE_MB`) fail once, permanently, without a socket (`permanentFailures`) instead of being rejected
-  by the server on every reconnect.
+  by the server on every reconnect. A transient push failure (timeout, network, 5xx) is listed only
+  after 3 attempts or 5 min (`sync/failureGrace.ts`), and any `registry.markPushed` clears the doc's
+  non-permanent failure rows, so Activity never says Failed beside a synced dot.
 - **`ready.behind` is the other authority** (`SyncManager.handleServerBehind`, #98): the server's backfill
   diff (`loadDocDiff`) treats a client whose state vector *covers* the server's as up to date — unequal is
   not behind — and flags `clientAhead` when the client holds ops the server never received; those docs are

@@ -25,6 +25,7 @@ import {
   ACTIVITY_HINT,
   type ActivityRow,
   type FailedEntry,
+  retryAction,
 } from "./activityRows";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { trashErrorMessage, useActivitySnapshot } from "./activitySource";
@@ -268,7 +269,15 @@ function GrantRowActions({ paths }: { paths: readonly string[] }) {
   );
 }
 
-function FailedRowActions({ failure, onDone }: { failure: FailedEntry; onDone: () => void }) {
+function FailedRowActions({
+  failure,
+  onDone,
+  onDismiss,
+}: {
+  failure: FailedEntry;
+  onDone: () => void;
+  onDismiss: (key: string) => void;
+}) {
   const exists = useNoteExists(failure.path || null) === true;
   if (!exists && !failure.retryable) return null;
   return (
@@ -279,7 +288,13 @@ function FailedRowActions({ failure, onDone }: { failure: FailedEntry; onDone: (
         <AsyncButton
           className="ghost-pill sm"
           onClick={async () => {
-            await syncManager.retryDoc(failure.docId as string);
+            const docId = failure.docId as string;
+            // Already synced: nothing to send, the row was simply stale.
+            if (retryAction(docId, (id) => syncManager.failureSettled(id)) === "clear") {
+              onDismiss(failure.key);
+            } else {
+              await syncManager.retryDoc(docId);
+            }
             onDone();
           }}
         >
@@ -417,7 +432,7 @@ export function ActivityFeed() {
   const now = useNow();
   const [limit, setLimit] = useState(PAGE);
   const snap = useActivitySnapshot();
-  const { rows, schedule, updating, activeFailures } = snap;
+  const { rows, schedule, updating, activeFailures, dismissFailure } = snap;
   const pending = usePendingReviewCount();
   const trash = { online: snap.trashOnline };
   const [confirmClear, setConfirmClear] = useState(false);
@@ -548,7 +563,7 @@ export function ActivityFeed() {
                     ) : row.type === "shrunk" ? (
                       <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
                     ) : row.type === "failed" ? (
-                      activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} /> : null
+                      activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} onDismiss={dismissFailure} /> : null
                     ) : row.type === "access" ? (
                       row.event.kind === "granted" ? <GrantRowActions paths={row.event.paths ?? []} /> : null
                     ) : row.type === "invitation" ? (
