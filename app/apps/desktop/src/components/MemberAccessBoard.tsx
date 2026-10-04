@@ -15,6 +15,8 @@ import {
   accessWriteFailureMessage,
   revertModes,
   BULK_WRITE_TIMEOUT_MS,
+  expandableKeys,
+  visibleBoardRows,
   type BoardRow,
   type SummaryMode,
 } from "../lib/accessBoard";
@@ -138,6 +140,15 @@ export function MemberAccessBoard({
   const [recent, setRecent] = useState<readonly string[]>([]);
   const [leaving, setLeaving] = useState<{ mode: TeamAccessMode; index: number; token: number } | null>(null);
   const motionSeq = useRef(0);
+  /** Folders opened on the board, by row key. Everything starts collapsed:
+   *  a large vault would otherwise draw every row of every folder. */
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => { setExpanded(new Set()); }, [member.userId, vaultId]);
+  const toggleExpanded = (key: string) => setExpanded((prev) => {
+    const next = new Set(prev);
+    if (!next.delete(key)) next.add(key);
+    return next;
+  });
 
   useEffect(() => {
     let alive = true;
@@ -178,6 +189,8 @@ export function MemberAccessBoard({
     }),
     [allRows, own, recent],
   );
+  // What each column draws: one linear pass per column, redone on a toggle.
+  const views = useMemo(() => columns.map((c) => visibleBoardRows(c.display, expanded)), [columns, expanded]);
 
   const readModes = (targets: readonly AccessRow[]) => {
     for (const row of targets) {
@@ -281,8 +294,8 @@ export function MemberAccessBoard({
   const animateMove = (row: AccessRow, from: TeamAccessMode) => {
     motionSeq.current += 1;
     const token = motionSeq.current;
-    const source = columns.find((c) => c.mode === from)?.display ?? [];
-    const index = source.findIndex((r) => !r.grey && r.row.key === row.key);
+    const source = views[columns.findIndex((c) => c.mode === from)] ?? [];
+    const index = source.findIndex((v) => !v.item.grey && v.item.row.key === row.key);
     setLanding({ key: row.key, token });
     setRecent((prev) => [row.key, ...prev.filter((k) => k !== row.key)]);
     setLeaving(index >= 0 ? { mode: from, index, token } : null);
@@ -600,7 +613,10 @@ export function MemberAccessBoard({
         <div className="access-board-columns">
           {columns.map((col, i) => {
             const count = col.rows.filter((r) => !r.grey).length;
-            const actions: Array<{ value: "add" | "remove"; label: string; hint: string }> = [
+            const view = views[i];
+            const actions: Array<{ value: ColumnAction; label: string; hint: string }> = [
+              { value: "expand", label: "Expand all", hint: "Show what's inside every folder" },
+              { value: "collapse", label: "Collapse all", hint: "Show only the top level" },
               { value: "add", label: "Add all", hint: "Move every folder and note here" },
             ];
             if (col.mode !== "private") {
@@ -617,17 +633,24 @@ export function MemberAccessBoard({
                   <span className="access-board-column-title">
                     {col.title} <span className="access-board-count">{count}</span>
                   </span>
-                  <MenuSelect<"add" | "remove" | "none">
+                  <MenuSelect<ColumnAction | "none">
                     value="none"
-                    options={actions}
+                    // Expand and collapse only change the view, so they stay
+                    // offered when moves are not (busy writes are guarded).
+                    options={canSetAccess ? actions : actions.filter((a) => a.value === "expand" || a.value === "collapse")}
                     triggerContent={dots}
                     caret={false}
-                    disabled={locked}
                     ariaLabel={`${col.title} actions`}
                     triggerClassName="row-more-btn access-board-column-more"
                     menuClassName="access-menu access-board-column-menu"
                     onSelect={(v) => {
-                      if (v === "add") addAll(col.mode);
+                      if (v === "expand") {
+                        const keys = expandableKeys(col.display);
+                        setExpanded((prev) => new Set([...prev, ...keys]));
+                      } else if (v === "collapse") {
+                        const keys = new Set(expandableKeys(col.display));
+                        setExpanded((prev) => new Set([...prev].filter((k) => !keys.has(k))));
+                      } else if (v === "add") addAll(col.mode);
                       else if (v === "remove") removeAll(col.rows);
                     }}
                   />
@@ -637,7 +660,7 @@ export function MemberAccessBoard({
                   {overColumn === col.mode && dragKey && own.get(dragKey) !== col.mode && (
                     <li className="access-board-drop-line" aria-hidden="true" />
                   )}
-                  {col.display.flatMap((r, index) => {
+                  {view.flatMap(({ item: r, expandable, descendants }, index) => {
                     const out: React.ReactNode[] = [];
                     if (leaving?.mode === col.mode && leaving.index === index) {
                       out.push(<li key={`gap-${leaving.token}`} className="access-board-gap" aria-hidden="true" />);
@@ -653,6 +676,10 @@ export function MemberAccessBoard({
                         dragging={dragKey === r.row.key}
                         landing={landing?.key === r.row.key && !r.grey}
                         hint={hint?.key === r.row.key && !r.grey ? hint.dir : null}
+                        expandable={expandable}
+                        expanded={expanded.has(r.row.key)}
+                        descendants={descendants}
+                        onToggle={() => toggleExpanded(r.row.key)}
                         onArrow={(step) => {
                           const to = neighbourMode(col.mode, step);
                           if (to) move(r.row, to);
@@ -662,7 +689,7 @@ export function MemberAccessBoard({
                     );
                     return out;
                   })}
-                  {leaving?.mode === col.mode && leaving.index >= col.display.length && (
+                  {leaving?.mode === col.mode && leaving.index >= view.length && (
                     <li key={`gap-${leaving.token}`} className="access-board-gap" aria-hidden="true" />
                   )}
                   {col.rows.length === 0 && <li className="access-board-empty">Nothing here</li>}
@@ -702,7 +729,12 @@ export function MemberAccessBoard({
   );
 }
 
-function BoardRowItem({ item, canLeft, canRight, disabled, dragging, landing, hint, teamLocked, onArrow, onPointerDown }: {
+type ColumnAction = "expand" | "collapse" | "add" | "remove";
+
+function BoardRowItem({
+  item, canLeft, canRight, disabled, dragging, landing, hint, teamLocked, expandable, expanded, descendants, onToggle,
+  onArrow, onPointerDown,
+}: {
   item: BoardRow;
   canLeft: boolean;
   canRight: boolean;
@@ -714,14 +746,36 @@ function BoardRowItem({ item, canLeft, canRight, disabled, dragging, landing, hi
   hint: "left" | "right" | null;
   /** Capped at view for everyone by a team lock. */
   teamLocked: boolean;
+  /** A folder with rows under it in this column: draw the toggle. */
+  expandable: boolean;
+  expanded: boolean;
+  /** Interactive rows under it in this column. */
+  descendants: number;
+  onToggle: () => void;
   onArrow: (step: -1 | 1) => void;
   onPointerDown: (e: React.PointerEvent<HTMLElement>) => void;
 }) {
   const { row, grey, indent } = item;
   const style = { paddingLeft: `${8 + indent * 16}px` };
+  // The List view's twisty: a real button (never a drag handle; beginProbe
+  // ignores presses on buttons), or a same-width spacer so names line up.
+  const twisty = expandable ? (
+    <button
+      type="button"
+      className={`member-access-twisty${expanded ? " is-open" : ""}`}
+      aria-label={expanded ? `Collapse ${row.name}` : `Expand ${row.name}`}
+      aria-expanded={expanded}
+      onClick={onToggle}
+    >
+      {chevron("m9 6 6 6-6 6")}
+    </button>
+  ) : (
+    <span className="member-access-twisty" aria-hidden="true" />
+  );
   if (grey) {
     return (
       <li className="access-board-row is-path" style={style} aria-disabled="true" data-path={row.path}>
+        {twisty}
         <span className="access-board-icon" aria-hidden="true">{rowGlyph(row)}</span>
         <span className="access-board-name">{row.name}</span>
       </li>
@@ -738,8 +792,12 @@ function BoardRowItem({ item, canLeft, canRight, disabled, dragging, landing, hi
       data-hint={hint ?? undefined}
       onPointerDown={onPointerDown}
     >
+      {twisty}
       <span className="access-board-icon" aria-hidden="true">{rowGlyph(row)}</span>
       <span className="access-board-name">{row.name}</span>
+      {expandable && !expanded && descendants > 0 && (
+        <span className="access-board-count access-board-descendants" title={`${descendants} inside`}>{descendants}</span>
+      )}
       {teamLocked && (
         <span className="access-board-lock" title={LOCKED_TITLE} aria-label={LOCKED_TITLE} role="img">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

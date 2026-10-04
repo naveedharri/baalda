@@ -99,9 +99,18 @@ describe("Member access board", () => {
   const row = (mode: string, name: string) =>
     [...column(mode).querySelectorAll<HTMLElement>(".access-board-row")]
       .find((r) => r.querySelector(".access-board-name")?.textContent === name)!;
+  /** Folders start collapsed: open every one, nested ones included. */
+  async function expandAll() {
+    for (;;) {
+      const next = host.querySelector<HTMLButtonElement>('button[aria-label^="Expand "]');
+      if (!next) return;
+      await act(async () => next.click());
+    }
+  }
 
   it("sorts each row into the column of its level, with counts", async () => {
     await render();
+    await expandAll();
     expect(names("open")).toEqual(["Specs", "API"]);
     expect(names("readonly")).toEqual(["Welcome"]);
     expect(names("private")).toEqual(["Roadmap"]);
@@ -155,6 +164,7 @@ describe("Member access board", () => {
 
   it("floats a moved row to the top of its level, newest first, with the landing pulse", async () => {
     await render();
+    await expandAll();
     await act(async () => button("Move Welcome left").click());
     await settle();
     expect(drawn("open")).toEqual(["Welcome", "Specs", "API"]);
@@ -172,6 +182,7 @@ describe("Member access board", () => {
 
   it("a moved nested row rises with its grey path, keeping the tree", async () => {
     await render();
+    await expandAll();
     await act(async () => button("Move API right").click());
     await settle();
     expect(drawn("readonly")).toEqual(["~Specs", "API", "Welcome"]);
@@ -190,8 +201,10 @@ describe("Member access board", () => {
     modes = { f1: "mixed", n1: "readonly", n4: "open", n2: "readonly" };
     await render();
     expect(drawn("readonly")).toEqual(["~Specs", "API", "Welcome"]);
+    await expandAll();
     await act(async () => button("Move Zeta right").click());
     await settle();
+    // Specs is now interactive here and keeps the expansion it had in Can edit.
     expect(drawn("readonly")).toEqual(["Specs", "Zeta", "API", "Welcome"]);
   });
 
@@ -403,6 +416,102 @@ describe("Member access board", () => {
     expect(api.setBulkAccess).not.toHaveBeenCalled();
     expect(onChanged).toHaveBeenCalledTimes(1);
   });
+  describe("collapsed folders", () => {
+    const nested = () => {
+      api.listAccessTree.mockResolvedValue({
+        folders: [
+          { id: "f1", path: "Specs" },
+          { id: "f2", path: "Specs/Deep" },
+          { id: "f3", path: "Plans" },
+        ],
+        notes: [
+          { id: "n1", relPath: "Specs/API.md" },
+          { id: "n4", relPath: "Specs/Deep/Inner.md" },
+          { id: "n5", relPath: "Plans/Q4.md" },
+          { id: "n2", relPath: "Welcome.md" },
+        ],
+      });
+      modes = { f1: "open", f2: "open", f3: "open", n1: "open", n4: "open", n5: "readonly", n2: "open" };
+    };
+    const pickMenu = async (label: string, item: string) => {
+      await act(async () => host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!.click());
+      const option = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
+        .find((li) => li.textContent?.startsWith(item))!;
+      await act(async () => option.click());
+    };
+
+    it("starts collapsed, with a toggle and a count only on folders that hold rows here", async () => {
+      nested();
+      await render();
+      expect(drawn("open")).toEqual(["Plans", "Specs", "Welcome"]);
+      // The header still counts every row in the column.
+      expect(column("open").querySelector(".access-board-column-title .access-board-count")?.textContent).toBe("6");
+      const toggle = button("Expand Specs");
+      expect(toggle.tagName).toBe("BUTTON");
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+      expect(row("open", "Specs").querySelector(".access-board-descendants")?.textContent).toBe("3");
+      expect(row("open", "Welcome").querySelector("button[aria-expanded]")).toBeNull();
+    });
+
+    it("the toggle shows a folder's children, and collapses them again", async () => {
+      nested();
+      await render();
+      await act(async () => button("Expand Specs").click());
+      expect(drawn("open")).toEqual(["Plans", "Specs", "Deep", "API", "Welcome"]);
+      expect(button("Collapse Specs").getAttribute("aria-expanded")).toBe("true");
+      expect(row("open", "Specs").querySelector(".access-board-descendants")).toBeNull();
+      await act(async () => button("Expand Deep").click());
+      expect(drawn("open")).toEqual(["Plans", "Specs", "Deep", "Inner", "API", "Welcome"]);
+      await act(async () => button("Collapse Specs").click());
+      expect(drawn("open")).toEqual(["Plans", "Specs", "Welcome"]);
+      // Re-opening the parent remembers the child was open.
+      await act(async () => button("Expand Specs").click());
+      expect(drawn("open")).toEqual(["Plans", "Specs", "Deep", "Inner", "API", "Welcome"]);
+      expect(api.setBulkAccess).not.toHaveBeenCalled();
+    });
+
+    it("pressing the toggle never starts a drag", async () => {
+      nested();
+      await render();
+      const toggle = button("Expand Specs");
+      pointer("pointerdown", toggle, 10, 10);
+      pointer("pointermove", window, 400, 10);
+      pointer("pointerup", window, 400, 10);
+      await settle();
+      expect(host.querySelector(".access-board-ghost")).toBeNull();
+      expect(api.setBulkAccess).not.toHaveBeenCalled();
+    });
+
+    it("Expand all and Collapse all in the column menu", async () => {
+      nested();
+      await render();
+      await pickMenu("Can edit actions", "Expand all");
+      expect(drawn("open")).toEqual(["Plans", "Specs", "Deep", "Inner", "API", "Welcome"]);
+      await pickMenu("Can edit actions", "Collapse all");
+      expect(drawn("open")).toEqual(["Plans", "Specs", "Welcome"]);
+      expect(api.setBulkAccess).not.toHaveBeenCalled();
+    });
+
+    it("grey path rows are always visible and never collapse", async () => {
+      nested();
+      await render();
+      // Plans lives in Can edit (no children there), Q4 in Can view under a grey Plans.
+      expect(drawn("readonly")).toEqual(["~Plans", "Q4"]);
+      expect(row("readonly", "Plans").querySelector("button")).toBeNull();
+      await pickMenu("Can view actions", "Collapse all");
+      expect(drawn("readonly")).toEqual(["~Plans", "Q4"]);
+    });
+
+    it("Expand all and Collapse all stay offered without permission to move", async () => {
+      nested();
+      await render({ canSetAccess: false });
+      await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Can edit actions"]')!.click());
+      const items = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].map((li) => li.textContent ?? "");
+      expect(items.some((t) => t.startsWith("Expand all"))).toBe(true);
+      expect(items.some((t) => t.startsWith("Add all"))).toBe(false);
+    });
+  });
+
   describe("when the bulk write fails", () => {
     const openMenu = async (label: string, item: string) => {
       await act(async () => host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!.click());
@@ -429,6 +538,7 @@ describe("Member access board", () => {
     it("Add all on Can view puts every row, root notes included, back in its column", async () => {
       modes = { f1: "private", n1: "private", n2: "private", n3: "private" };
       await render({ personVaultMode: "private" });
+      await expandAll();
       expect(names("private")).toEqual(["Specs", "API", "Roadmap", "Welcome"]);
       api.setBulkAccess.mockRejectedValue(new DOMException("The operation was aborted.", "AbortError"));
       await openMenu("Can view actions", "Add all");
