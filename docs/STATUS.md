@@ -337,3 +337,30 @@ now carries `invitedBy`, and `GET /api/orgs/:orgId/members/:userId/activity` (ow
 caller's readable set. Vault Settings lost its Updates tab (now Account Settings → About), the
 Health tab is hidden behind `SHOW_HEALTH_TAB` pending #289, the two settings dialogs cross-link,
 and hover/pressed colours are one accent tint (`--bg-hover`/`--bg-active`).
+
+## One-step note sync, checkpoint healing, backend notice (2026-10-04)
+
+- **Notes register with their content.** On a server advertising `notes-with-state`, every new
+  note, one or thousands, registers through `notes/batch` carrying its binary Yjs state; the server
+  writes the row and the first state in the same request (`registry/seed-on-register.ts`). No new
+  note opens a per-note socket, and teammates never see a row without content. A conflict or an
+  adopt onto another id is merged over HTTP (`bootstrap` `only` + a docs/batch merge push), never
+  applied blindly. Old servers keep register-then-push; the per-doc uploader is now a fallback.
+- **Receivers skip placeholders** when a bootstrap download will create the files with content;
+  placeholders remain for server-empty docs, small deltas and single live notes.
+- **Rename banner fixed.** The open note's "was removed" banner waits out the delete-grace window and
+  re-checks the disk, and in-app renames re-point the open note before the server call. Renamed
+  empty notes now pair instead of reaching the server as delete + create.
+- **`ackedSv`** is recorded on every push path, including the per-doc uploader and one-step creates.
+- **Checkpoints heal.** A note's first content never triggers the daily checkpoint; captures defer
+  while uploads are in flight (120 s window, 30 min cap); late first content tops up the newest
+  checkpoint within 1 h; files and attachments are pinned per checkpoint (migration 047) and restored
+  under their original ids on revert.
+- **One-step file upload (server only).** A blob intent can carry the file's registration and
+  `complete` creates the `files` row with the bytes (migration 048, `files-with-bytes`); the Pro gate
+  runs before any row exists. The desktop does not use it yet.
+- **`GET /health`** reports `version`, `minDesktopVersion` and `features`; `[sync-metrics]` log lines
+  count seeds, `ready.empty`/`ready.behind` sizes and structure-only checkpoint notes.
+- **Backend-behind notice.** The desktop shows a persistent line at the bottom of the sidebar when its
+  server lacks a feature it needs (judged from `/health` `features`, never the version), with
+  separate copy for the managed service and self-hosted servers.

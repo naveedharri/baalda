@@ -189,6 +189,9 @@ service, or your own?" — and you enter your URL there; it is checked before it
 Later you can change it in Account settings → Connection. To save your team the typing,
 send them `https://<your-server>/open/connect`: clicking it opens Baalda and asks them to
 confirm connecting to your server. Self-hosted servers have no plan limits.
+Keep the server updated: the app updates itself, and when it needs something your server does not
+offer yet it shows a notice at the bottom of the sidebar until you update the server (redeploy the
+Railway project, or pull the latest code and rebuild the Docker image).
 
 ## What is NOT there (so you do not overpromise)?
 Rich WYSIWYG block editing, in-app AI chat, comments and @mentions, end-to-end encryption,

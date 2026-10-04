@@ -734,6 +734,27 @@ usable `Host`.
 > `connect-src` allows all `https:` but only loopback for `http:`, so a LAN
 > server at `http://192.168.x.x:3010` needs TLS or an SSH tunnel.
 
+## Keep the server current
+
+The desktop app updates itself; your server does not. When the app needs something your server
+does not offer yet, it shows a persistent notice at the bottom of the sidebar saying your backend is
+behind. Sync keeps working on the older path where one exists, but some features stay off.
+
+To clear it, update the server: redeploy your Railway project from the latest release, or pull the
+latest code and rebuild the Docker image (with the Compose bundle, `git pull && docker compose up -d
+--build`). Migrations run before the server starts. The notice disappears on the app's next check (within ten minutes, or at once after
+a restart or reconnect).
+
+The app decides from `GET /health`, which lists what the server supports:
+
+```
+curl https://<your-server>/health
+{"ok":true,"version":"…","minDesktopVersion":null,"features":["notes-with-state","bootstrap-only","files-with-bytes"]}
+```
+
+A server that answers without `features` predates the list and counts as behind. A server the app
+cannot reach is never reported as behind.
+
 ## Scaling & high availability (spec 05)
 
 The default single-instance deploy scales to hundreds of concurrent users:
