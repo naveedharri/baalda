@@ -9580,3 +9580,30 @@ body.access-board-grabbing * {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* "Your backend is behind" (BackendBehindNotice): the local-sync-row,
+   as a full-width button, with the copy allowed to wrap to two lines. */
+.backend-behind-row {
+  width: calc(100% - 2 * var(--sp-2));
+  background: transparent;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.backend-behind-row:hover .backend-behind-label {
+  color: var(--text-primary);
+}
+.backend-behind-row .local-sync-icon {
+  align-self: flex-start;
+  margin-top: 1px;
+}
+.backend-behind-label {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
