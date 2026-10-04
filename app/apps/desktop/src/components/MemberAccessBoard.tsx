@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AccessTreeResponse, BulkAccessResource, MemberOverview, TeamAccessMode } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import {
@@ -144,11 +144,11 @@ export function MemberAccessBoard({
    *  a large vault would otherwise draw every row of every folder. */
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   useEffect(() => { setExpanded(new Set()); }, [member.userId, vaultId]);
-  const toggleExpanded = (key: string) => setExpanded((prev) => {
+  const toggleExpanded = useCallback((key: string) => setExpanded((prev) => {
     const next = new Set(prev);
     if (!next.delete(key)) next.add(key);
     return next;
-  });
+  }), []);
 
   useEffect(() => {
     let alive = true;
@@ -176,7 +176,8 @@ export function MemberAccessBoard({
       const set = orgRows.get(p);
       return !!set && (set.has("locked") || set.has("readonly"));
     };
-    return new Set(allRows.filter((r) => [...ancestorPaths(r.path), r.path].some(capped)).map((r) => r.key));
+    if (orgRows.size === 0) return new Set<string>();
+    return new Set(allRows.filter((r) => capped(r.path) || ancestorPaths(r.path).some(capped)).map((r) => r.key));
   }, [entries, allRows, storeLocks, storeTree]);
   // A mixed folder with no answered children sits at the person's own
   // vault-wide level, else Everyone's.
@@ -185,12 +186,60 @@ export function MemberAccessBoard({
   const columns = useMemo(
     () => BOARD_COLUMNS.map((c) => {
       const rows = columnRows(allRows, own, c.mode);
-      return { ...c, rows, display: orderByRecent(rows, recent) };
+      let count = 0;
+      for (const r of rows) if (!r.grey) count++;
+      return { ...c, rows, count, display: orderByRecent(rows, recent) };
     }),
     [allRows, own, recent],
   );
   // What each column draws: one linear pass per column, redone on a toggle.
   const views = useMemo(() => columns.map((c) => visibleBoardRows(c.display, expanded)), [columns, expanded]);
+
+  /**
+   * Answers are buffered and applied in ONE state update per microtask: a
+   * batch of 200 rows resolves together, and applying each answer on its own
+   * copied the whole map (and rebuilt the whole board model) once per row —
+   * quadratic on a vault of thousands of rows.
+   */
+  const answers = useRef<{ modes: Map<string, SummaryMode>; failed: Set<string>; scheduled: boolean }>({
+    modes: new Map(), failed: new Set(), scheduled: false,
+  });
+  const flushAnswers = () => {
+    const buf = answers.current;
+    buf.scheduled = false;
+    if (!live.current) return;
+    const modes = buf.modes;
+    const failedKeys = buf.failed;
+    buf.modes = new Map();
+    buf.failed = new Set();
+    if (modes.size > 0) {
+      setSummaryModes((prev) => {
+        const next = new Map(prev);
+        for (const [k, m] of modes) next.set(k, m);
+        return next;
+      });
+    }
+    setFailed((prev) => {
+      let next: Set<string> | null = null;
+      for (const k of failedKeys) {
+        if (modes.has(k) || prev.has(k)) continue;
+        (next ??= new Set(prev)).add(k);
+      }
+      for (const k of modes.keys()) {
+        if (!(next ?? prev).has(k)) continue;
+        (next ??= new Set(prev)).delete(k);
+      }
+      return next ?? prev;
+    });
+  };
+  const queueAnswer = (key: string, mode: SummaryMode | null) => {
+    const buf = answers.current;
+    if (mode === null) buf.failed.add(key);
+    else { buf.modes.set(key, mode); buf.failed.delete(key); }
+    if (buf.scheduled) return;
+    buf.scheduled = true;
+    queueMicrotask(flushAnswers);
+  };
 
   const readModes = (targets: readonly AccessRow[]) => {
     for (const row of targets) {
@@ -198,20 +247,14 @@ export function MemberAccessBoard({
       inflight.current.add(row.key);
       const markFailed = () => {
         if (!live.current) return;
-        setFailed((prev) => (prev.has(row.key) ? prev : new Set(prev).add(row.key)));
+        queueAnswer(row.key, null);
       };
       const timer = window.setTimeout(markFailed, BOARD_SUMMARY_TIMEOUT_MS);
       summaries
         .read(orgId, resourceOf(row), [member.userId], () => !live.current)
         .then((m) => {
           if (!live.current) return;
-          setSummaryModes((prev) => new Map(prev).set(row.key, m));
-          setFailed((prev) => {
-            if (!prev.has(row.key)) return prev;
-            const next = new Set(prev);
-            next.delete(row.key);
-            return next;
-          });
+          queueAnswer(row.key, m);
         })
         .catch(markFailed)
         .finally(() => {
@@ -246,9 +289,13 @@ export function MemberAccessBoard({
   const write = async (rows: readonly AccessRow[], mode: TeamAccessMode, except?: string): Promise<boolean> => {
     const vaultWide = rows.length === 0;
     const resources = vaultWide ? [{ resourceType: "vault" as const, resourceId: orgId }] : rows.map(resourceOf);
+    // A row is affected when it, or one of its ancestors, was written: one
+    // set lookup per path level instead of scanning every written row.
+    const written = new Set(rows.map((w) => w.path));
     const affected = vaultWide
       ? allRows
-      : allRows.filter((r) => rows.some((w) => r.path === w.path || r.path.startsWith(`${w.path}/`)));
+      : allRows.filter((r) => written.has(r.path) || ancestorPaths(r.path).some((a) => written.has(a)));
+    const affectedKeys = new Set(affected.map((r) => r.key));
     const ancestors = new Set(rows.flatMap((r) => ancestorPaths(r.path)));
     const before = summaryModes;
     setBusy(true);
@@ -266,7 +313,7 @@ export function MemberAccessBoard({
         mode,
       }, { timeoutMs: BULK_WRITE_TIMEOUT_MS });
       if (!live.current) return true;
-      readModes(allRows.filter((r) => r.key !== except && (affected.includes(r) || ancestors.has(r.path))));
+      readModes(allRows.filter((r) => r.key !== except && (affectedKeys.has(r.key) || ancestors.has(r.path))));
       if (vaultWide) await onChanged();
       else onItemWritten();
       return true;
@@ -276,7 +323,7 @@ export function MemberAccessBoard({
         // write is atomic, but a lost answer can hide one that DID commit.
         setSummaryModes((prev) => revertModes(prev, before, affected.map((r) => r.key)));
         toast(accessWriteFailureMessage(cause), "error");
-        readModes(allRows.filter((r) => affected.includes(r) || ancestors.has(r.path)));
+        readModes(allRows.filter((r) => affectedKeys.has(r.key) || ancestors.has(r.path)));
       }
       return false;
     } finally {
@@ -454,6 +501,16 @@ export function MemberAccessBoard({
 
   const moveRef = useRef(move);
   moveRef.current = move;
+  const beginProbeRef = useRef(beginProbe);
+  beginProbeRef.current = beginProbe;
+  /** Stable for every row, so a memoised row re-renders only when its own props change. */
+  const onRowArrow = useCallback((row: AccessRow, from: TeamAccessMode, step: -1 | 1) => {
+    const to = neighbourMode(from, step);
+    if (to) moveRef.current(row, to);
+  }, []);
+  const onRowPointerDown = useCallback((row: AccessRow, e: React.PointerEvent<HTMLElement>) => {
+    beginProbeRef.current(row, e);
+  }, []);
   const rowByKeyRef = useRef(rowByKey);
   rowByKeyRef.current = rowByKey;
   const lockedRef = useRef(locked);
@@ -528,8 +585,16 @@ export function MemberAccessBoard({
     if (dragKey && probe.current) placeGhost(probe.current.x, probe.current.y);
   }, [dragKey]);
 
-  const loading = serverTree !== null && allRows.some((r) => !summaryModes.has(r.key) && !failed.has(r.key));
-  const failedCount = allRows.filter((r) => failed.has(r.key) && !summaryModes.has(r.key)).length;
+  const { loading, failedCount } = useMemo(() => {
+    let pending = false;
+    let failures = 0;
+    for (const r of allRows) {
+      const answered = summaryModes.has(r.key);
+      if (!answered && !failed.has(r.key)) pending = true;
+      else if (!answered) failures++;
+    }
+    return { loading: serverTree !== null && pending, failedCount: failures };
+  }, [serverTree, allRows, summaryModes, failed]);
   const dragRow = dragKey ? rowByKey.get(dragKey) : undefined;
 
   // Bring a landed row into view (its column may be scrolled, or the pinned
@@ -612,7 +677,7 @@ export function MemberAccessBoard({
       ) : (
         <div className="access-board-columns">
           {columns.map((col, i) => {
-            const count = col.rows.filter((r) => !r.grey).length;
+            const count = col.count;
             const view = views[i];
             const actions: Array<{ value: ColumnAction; label: string; hint: string }> = [
               { value: "expand", label: "Expand all", hint: "Show what's inside every folder" },
@@ -679,12 +744,10 @@ export function MemberAccessBoard({
                         expandable={expandable}
                         expanded={expanded.has(r.row.key)}
                         descendants={descendants}
-                        onToggle={() => toggleExpanded(r.row.key)}
-                        onArrow={(step) => {
-                          const to = neighbourMode(col.mode, step);
-                          if (to) move(r.row, to);
-                        }}
-                        onPointerDown={(e) => beginProbe(r.row, e)}
+                        mode={col.mode}
+                        onToggle={toggleExpanded}
+                        onArrow={onRowArrow}
+                        onPointerDown={onRowPointerDown}
                       />,
                     );
                     return out;
@@ -731,8 +794,13 @@ export function MemberAccessBoard({
 
 type ColumnAction = "expand" | "collapse" | "add" | "remove";
 
-function BoardRowItem({
-  item, canLeft, canRight, disabled, dragging, landing, hint, teamLocked, expandable, expanded, descendants, onToggle,
+/**
+ * One row. Memoised: every handler it gets is stable and every other prop is a
+ * primitive or the row's own BoardRow, so a drag, a column highlight, a landing
+ * or a toggle elsewhere re-renders only the rows whose own props changed.
+ */
+export const BoardRowItem = memo(function BoardRowItem({
+  item, canLeft, canRight, disabled, dragging, landing, hint, teamLocked, expandable, expanded, descendants, mode, onToggle,
   onArrow, onPointerDown,
 }: {
   item: BoardRow;
@@ -751,10 +819,13 @@ function BoardRowItem({
   expanded: boolean;
   /** Interactive rows under it in this column. */
   descendants: number;
-  onToggle: () => void;
-  onArrow: (step: -1 | 1) => void;
-  onPointerDown: (e: React.PointerEvent<HTMLElement>) => void;
+  /** The column this row sits in (the arrows step from it). */
+  mode: TeamAccessMode;
+  onToggle: (key: string) => void;
+  onArrow: (row: AccessRow, from: TeamAccessMode, step: -1 | 1) => void;
+  onPointerDown: (row: AccessRow, e: React.PointerEvent<HTMLElement>) => void;
 }) {
+  if (import.meta.env?.MODE === "test") boardRowRenders.count++;
   const { row, grey, indent } = item;
   const style = { paddingLeft: `${8 + indent * 16}px` };
   // The List view's twisty: a real button (never a drag handle; beginProbe
@@ -765,7 +836,7 @@ function BoardRowItem({
       className={`member-access-twisty${expanded ? " is-open" : ""}`}
       aria-label={expanded ? `Collapse ${row.name}` : `Expand ${row.name}`}
       aria-expanded={expanded}
-      onClick={onToggle}
+      onClick={() => onToggle(row.key)}
     >
       {chevron("m9 6 6 6-6 6")}
     </button>
@@ -790,7 +861,7 @@ function BoardRowItem({
       data-row-key={row.key}
       data-pulse={landing ? "true" : undefined}
       data-hint={hint ?? undefined}
-      onPointerDown={onPointerDown}
+      onPointerDown={(e) => onPointerDown(row, e)}
     >
       {twisty}
       <span className="access-board-icon" aria-hidden="true">{rowGlyph(row)}</span>
@@ -812,7 +883,7 @@ function BoardRowItem({
           className="access-board-arrow"
           aria-label={`Move ${row.name} left`}
           disabled={disabled || !canLeft}
-          onClick={() => onArrow(-1)}
+          onClick={() => onArrow(row, mode, -1)}
         >
           {chevron("m15 6-6 6 6 6")}
         </button>
@@ -821,14 +892,17 @@ function BoardRowItem({
           className="access-board-arrow"
           aria-label={`Move ${row.name} right`}
           disabled={disabled || !canRight}
-          onClick={() => onArrow(1)}
+          onClick={() => onArrow(row, mode, 1)}
         >
           {chevron("m9 6 6 6-6 6")}
         </button>
       </span>
     </li>
   );
-}
+});
+
+/** Test probe: how many times a board row rendered (counted under vitest only). */
+export const boardRowRenders = { count: 0 };
 
 const dots = (
   <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">

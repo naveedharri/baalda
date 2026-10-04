@@ -162,16 +162,23 @@ export function entriesFromTree(
  * agree on. Sorted folders-first then alphabetically within each level, so the
  * list is stable however the server ordered it.
  */
+let sharedCollator: Intl.Collator | null = null;
+const collator = (): Intl.Collator => (sharedCollator ??= new Intl.Collator());
+
 export function rowsFromEntries(
   entries: readonly AccessEntry[],
   expanded: ReadonlySet<string>,
 ): AccessRow[] {
-  const sorted = [...entries].sort((a, b) => {
-    const ad = a.path.split("/").length;
-    const bd = b.path.split("/").length;
+  // Split each path once and compare with one shared collator: splitting inside
+  // the comparator (twice per call) and `localeCompare` dominated the sort for a
+  // vault of thousands of rows. Same order: a default Intl.Collator is what
+  // `localeCompare` with no arguments uses.
+  const compare = collator().compare;
+  const keyed = entries.map((e) => ({ e, parts: e.path.split("/") }));
+  keyed.sort(({ e: a, parts: aParts }, { e: b, parts: bParts }) => {
+    const ad = aParts.length;
+    const bd = bParts.length;
     // Compare level by level so a folder always precedes its own contents.
-    const aParts = a.path.split("/");
-    const bParts = b.path.split("/");
     for (let i = 0; i < Math.min(ad, bd); i++) {
       if (aParts[i] === bParts[i]) continue;
       // Notes and files sort together as one leaf class, interleaved by name:
@@ -180,15 +187,16 @@ export function rowsFromEntries(
       const aLeaf = i === ad - 1 && a.kind !== "folder";
       const bLeaf = i === bd - 1 && b.kind !== "folder";
       if (aLeaf !== bLeaf) return aLeaf ? 1 : -1; // folders before notes and files
-      return aParts[i].localeCompare(bParts[i]);
+      return compare(aParts[i], bParts[i]);
     }
     return ad - bd;
   });
+  const sorted = keyed.map((k) => k.e);
 
   const collapsed = new Set(sorted
     .filter((e) => e.kind === "folder" && !expanded.has(e.path))
     .map((e) => e.path));
-  const hidden = (path: string) => ancestorPaths(path).some((parent) => collapsed.has(parent));
+  const hidden = (path: string) => collapsed.size > 0 && ancestorPaths(path).some((parent) => collapsed.has(parent));
 
   return sorted
     .filter((e) => !hidden(e.path))
