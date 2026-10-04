@@ -97,7 +97,8 @@ shares (
 > `org_id` column — is the vault (organization) id, never the `vaults` note-collection row.
 
 **Effective permission** for a user on a file:
-0. A **`denied`** row for this *user* on the file or any containing folder → `none`, full stop.
+0. A **`denied`** row for this *user* on the file or any containing folder → `none`, unless a
+   deeper per-user row of the same user overrides it (step 0c).
 0b. A **per-user row on the vault resource** is that person's **absolute vault level** ("person
    wins either way", `personalVaultLevel`). For that person only it replaces the vault posture, the
    join snapshot, the owner/admin shortcut (step 2) and authorship (step 3): `edit` → edit
@@ -105,6 +106,14 @@ shares (
    and org (Everyone) folder/file grants do **not** lift it — only that person's own per-user
    folder/file grants do. Item-level per-user rows still override inside their subtree, and step 6
    locks still cap.
+0c. **Among one user's own per-user rows, the deepest row wins.** A per-user file row beats that
+   user's row on an ancestor folder in either direction: a file `edit` wins over a folder
+   `readonly`, `view` or `denied`, and a file `denied` wins over a folder `edit`. Likewise a
+   per-user folder row beats that user's vault-level row (step 0b). This ordering is per user only:
+   org-principal `readonly` / `locked` / `denied` rows (the team's) keep their cap semantics and
+   still cap per-user grants. The reason is the Board view: moving a folder to Can view writes a
+   per-user folder `readonly` row, and a later per-user file `edit` inside it must not be
+   swallowed by that row's cap.
 1. The **shortcuts** in 2–3 are skipped entirely when either of these holds, and step 4 decides
    alone:
    - a `denied` row for the *org* on the file or a containing folder (an item whose Everyone access is **No access**);
@@ -192,9 +201,8 @@ on 2026-10-04). Owners and admins see three controls; plain members see a read-o
   that stopped at the first folder someone had overridden could not answer "who can reach this
   vault". Per-**user** rows are untouched, so people given access by name keep it.
   `GET /api/orgs/:orgId/team-access` returns the mode, `posture: edit|view|sealed|none` and every
-  per-item org row. Existing per-folder Everyone overrides are **shown and reset only** — a banner
-  ("N folders have different access for everyone") whose Reset re-applies the current mode through
-  the same PUT; no control creates new per-folder Everyone overrides.
+  per-item org row. No control shows or creates per-folder Everyone overrides; changing the
+  Everyone row re-applies a mode through the same PUT, which clears any that exist.
 - **New members** ("For notes made before they joined") — **Can edit / Can view /
   No access**, the org `join_default` snapshotted at join time (migration 032).
 - **Each person** — an Access cell (**Can edit everything / Can view everything / No access /
@@ -213,7 +221,16 @@ rows moved by drag-and-drop or arrow buttons, grey ancestor rows that show only 
 levels deep), a "Set everything to" menu that includes Reset to vault default, Add all / Remove all
 per column. It issues the same bulk-access writes as List, one resource per write. Moving a single
 row applies immediately with no confirm and no undo; the standard toast states the result ("Sara
-can now view X."). Only Set everything to (when it lowers access), Remove all and Reset ask first.
+can now view X.").
+
+Confirmation dialogs appear **only for destructive changes**, meaning the target level is No access
+(`private`): the Everyone row, a person's vault-wide level, a per-row or per-note change in List,
+the board's Set everything to → No access, Remove all and Reset to vault default. Making something
+Can view or Can edit, Add all, Set everything to → Can view and the New members row never confirm.
+Access levels are colour-coded everywhere they appear (pills in List and the Members table, the
+board's column headers, its drag highlight and landing pulse): Can edit green, Can view amber, No
+access grey, Custom / Mixed neutral, from the `--access-{edit,view,none}-{bg,fg}` tokens in
+`src/styles/tokens.css` for light and dark.
 Dragging uses pointer events, since the Tauri webview swallows native HTML5 drag-and-drop: a press
 becomes a drag after 4px, the drop target is the whole column band under the pointer, and moves
 animate (lift, column highlight, landing). **Activity** lists that person's recent events.

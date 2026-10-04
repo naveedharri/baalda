@@ -329,9 +329,8 @@ Access / Activity), `InvitePeopleDialog.tsx`, pure logic in `lib/membersAccess.t
 = `join_default`), and a per-person Access cell (Can edit everything / Can view everything /
 No access / Custom) plus a ⋯ menu (View profile, Manage access, Make admin/member, Remove). Plain
 members get a read-only roster from `GET /orgs/:orgId/members/overview`. "Owners and admins can always
-manage access" means *manage*, never an exemption from the caps they set. Existing per-folder
-Everyone overrides are only shown and reset (the "N folders have different access for everyone"
-banner → `PUT team-access`); no UI creates new ones. One person's per-folder checkboxes live in
+manage access" means *manage*, never an exemption from the caps they set. No UI shows or creates
+per-folder Everyone overrides; changing the Everyone row (`PUT team-access`) clears any that exist. One person's per-folder checkboxes live in
 their profile's Access tab and apply immediately through the atomic bulk-access API (users
 audience); the tree updates optimistically and re-reads only the affected subtree plus its ancestors,
 never a fresh `listAccessTree`. The Access tab has a segmented icon toggle (top-right) between two
@@ -341,7 +340,13 @@ bulk-access writes, one resource per write): columns Can edit / Can view / No ac
 drag-and-drop or arrows, grey ancestor rows showing only the path (up to 5 levels), a "Set
 everything to" menu with Reset to vault default and per-column Add all / Remove all. A single-row
 move applies at once with no confirm and no undo; the app's standard toast states the result
-("Sara can now view X."). Only Set everything to (when lowering), Remove all and Reset ask first.
+("Sara can now view X."). **Confirms are for destructive changes only**, i.e. a target of No access
+(`private`): the Everyone row, a person's vault-wide level, a List row/note change, the board's Set
+everything to → No access, Remove all and Reset to vault default. Can view, Can edit, Add all, Set
+everything to → Can view and the New members row never confirm. Access levels are colour-coded
+everywhere (List and Members-table pills, board column headers, drag highlight, landing pulse):
+Can edit green, Can view amber, No access grey, Custom/Mixed neutral, from `--access-{edit,view,none}-{bg,fg}`
+in `src/styles/tokens.css` (light and dark).
 Board drag uses **pointer events**, never native HTML5 drag-and-drop: Tauri's `dragDropEnabled`
 swallows HTML5 drag events inside the webview, so they never fire. A press becomes a drag after
 4px, the drop target is the whole column band under the pointer, and moves animate (lift, column
@@ -468,7 +473,12 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   join snapshot, the owner/admin shortcut and authorship — `edit` = edit everywhere, `view` = view
   everywhere (raises AND caps), `denied` = nothing, and org (Everyone) folder/file grants do not lift
   it; only that person's own folder/file rows do. Item-level per-user rows still override inside
-  their subtree and locks still cap. `ResolverCache.personal(db, orgId, userId)` memoises that level
+  their subtree and locks still cap. **Among ONE user's own per-user rows, the deepest wins**: a
+  per-user file row beats that user's ancestor-folder row in either direction (file `edit` over
+  folder `readonly`/`view`/`denied`; file `denied` over folder `edit`), and a per-user folder row
+  beats their vault-level row. Org-principal `readonly`/`locked`/`denied` rows keep their cap
+  semantics and still cap per-user grants. (Why: the Board's Can view on a folder writes a per-user
+  folder `readonly`, which used to swallow a later per-user file `edit` inside it.) `ResolverCache.personal(db, orgId, userId)` memoises that level
   once per request (`canEditFolder`, `vaultRootWritable`, `resolveAccessForUser`). Lockstep: `effectivePermission` + `resolveAccessForUser` + the
   indexed/cached paths, `vault-docs.ts vaultAccess.personal`, `http-gates.ts`
   `canEditFolder`/`vaultRootWritable`, `POST /shares` (accepts a per-user vault `denied`) and
@@ -505,6 +515,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `GET /vaults/:id/locks` reports the Read-only posture as a synthetic `vault` lock row (id
   `vault:<orgId>`, `permission: 'locked'`) plus the **lifts** — the surviving org `edit` rows and the
   caller's own per-user `edit` rows — so the sidebar can padlock everything except what a grant frees.
+  The desktop can no longer CREATE a per-item team lock (the row menu's "Lock for everyone" and the
+  selection bar's Lock were retired: they conflict with the per-person access model); legacy
+  `locked` rows still render as padlocks and owners/admins remove them with the row menu's or
+  selection bar's Unlock, shown only on rows that carry such a row (`FileTree.tsx`).
   Renaming a note someone ELSE created (`PATCH /api/notes/:id`, `registry/rename-guard.ts`) is
   refused when it adds a `(conflict YYYY-MM-DD)` suffix (409 `conflict_rename_refused`) and
   budgeted at 100 per (user, vault) per 5 min (429 `rename_rate_limited`) — a burst brake after one

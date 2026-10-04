@@ -80,8 +80,8 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - `.html` files open as a sandboxed, read-only rendered page (scripts never run) with a
   Preview/Source toggle; they do not get live co-editing. `.txt` and `.canvas` open as text.
 - Light and dark themes. Colour-tag notes and folders in the sidebar; colours sync to the team.
-- Right-click any note or folder: rename, delete, move, share, lock, colour, reveal in
-  Finder/Explorer, export.
+- Right-click any note or folder: rename, delete, move, share, colour, reveal in
+  Finder/Explorer, export. A note or folder that still carries an old lock also offers Unlock.
 
 ## The note's name, and its properties
 
@@ -187,9 +187,11 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   folders. Owners and admins can also manage the team's access from the same chat — ask Claude or
   ChatGPT to share a folder with someone, make it view only, or set what new members see."
   Deleting a token cuts the AI off immediately.
-- **Locks**: lock a note or folder so it is read-only for everyone, admins included, until
-  unlocked. Setting the whole vault to read-only shows that same lock on every folder and note,
-  except the ones you were given edit access to.
+- **Locks**: new locks can no longer be created from the app; read-only access is now given per
+  person on the Members and access page. A note or folder locked before this change still shows a
+  padlock and stays read-only for everyone, admins included, until an owner or admin right-clicks
+  it (or selects several) and chooses Unlock. Setting the whole vault to read-only shows that same
+  padlock on every folder and note, except the ones you were given edit access to.
 - **Losing access** removes the note from the ex-reader's devices (the note itself stays on the
   server for everyone who can still read it); regaining access brings it back.
 - Not built (deferred): comments and @mentions, activity feed, audit log, sub-teams or custom
@@ -210,7 +212,10 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   device. **List** has a checkbox per folder; each change applies straight away.
   **Board** (the default) sets the same access with Can edit, Can view and No access columns: drag folders and
   notes between columns, set everything at once, or reset to the vault default. Moving one item
-  applies straight away and a short message says what changed; only the bigger changes ask first. **Activity** lists what
+  applies straight away and a short message says what changed. Baalda only asks "are you sure?" when a
+  change would take access away completely (No access, Remove all, or Reset to the vault default);
+  giving someone view or edit access never asks. Access levels have colours everywhere: green for
+  Can edit, amber for Can view, grey for No access. **Activity** lists what
   they did recently: joining, notes they created or edited, and access they were given. You only
   see notes you can open yourself. Owners and
   admins can see anyone's profile; members can see their own activity. A short tip points to the MCP tab for managing access by chatting
