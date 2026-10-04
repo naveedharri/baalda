@@ -266,3 +266,21 @@ describe("disk deletes — a refused delete is put back", () => {
     expect(reconcileReport.items().map((i) => i.path)).toEqual([THEIRS]);
   });
 });
+
+describe("files — creator learned from GET /api/files", () => {
+  it("a member's own file, mapped by a download that carried no creator, is theirs once the files listing names them", async () => {
+    const { reg, api } = await setup([MINE], new Set());
+    // The server's real row shape: raw columns, snake_case `created_by`.
+    (api as unknown as Record<string, unknown>).listFiles = vi.fn(async () => [
+      { id: "file-mine", vault_id: VAULT, folder_id: null, path: "mine.png", created_by: ME, created_at: "2026-10-01T00:00:00Z" },
+      { id: "file-theirs", vault_id: VAULT, folder_id: null, path: "theirs.png", created_by: "user-teammate", created_at: "2026-10-01T00:00:00Z" },
+    ]);
+    // A download: the blob listing has no creator, so nothing is claimed here.
+    reg.setFileId("mine.png", "file-mine", { createdBy: null });
+    reg.setFileId("theirs.png", "file-theirs", { createdBy: null });
+    expect(reg.isAuthoredByMe("mine.png", false)).toBe(false);
+    await (reg as unknown as { learnFileAuthorship(v: string): Promise<void> }).learnFileAuthorship(VAULT);
+    expect(reg.isAuthoredByMe("mine.png", false)).toBe(true);
+    expect(reg.isAuthoredByMe("theirs.png", false)).toBe(false);
+  });
+});

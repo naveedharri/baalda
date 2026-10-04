@@ -301,6 +301,15 @@ export interface RegisteredFile {
   vaultId?: string;
   folderId?: string | null;
   path: string;
+  /** Who registered the file. `GET /api/files` sends the raw column,
+   *  `created_by`; the camel spelling is accepted defensively. */
+  createdBy?: string | null;
+  created_by?: string | null;
+}
+
+/** Who registered the `files` row, or null when the server didn't say. */
+export function fileCreatedBy(f: { createdBy?: string | null; created_by?: string | null }): string | null {
+  return f.createdBy ?? f.created_by ?? null;
 }
 
 export interface Share {
@@ -2282,6 +2291,16 @@ export class ApiClient {
       { body: { docIds } },
     );
     return data.confirmed ?? [];
+  }
+
+  /** The vault's readable tree binaries (`GET /api/files`), each with its
+   *  creator. The only listing that says who registered a file: the blob
+   *  listing carries no creator. */
+  async listFiles(vaultId: string): Promise<RegisteredFile[]> {
+    const { data } = await this.request<{ files: RegisteredFile[] }>("GET", "/api/files", {
+      query: { vaultId },
+    });
+    return data.files ?? [];
   }
 
   async listNotes(vaultId: string): Promise<RegisteredNote[]> {

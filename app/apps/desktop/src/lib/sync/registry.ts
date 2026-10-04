@@ -27,11 +27,13 @@ import {
   ApiError,
   isServerTooOld,
   noteCreatedBy,
+  fileCreatedBy,
   noteDocId,
   noteLastEdited,
   noteRelPath,
   vaultOrgId,
   type NoteLastEdited,
+  type RegisteredFile,
   type RegisteredFolder,
   type RegisteredNote,
 } from "../api";
@@ -2089,6 +2091,36 @@ export class VaultRegistry {
   }
 
   /**
+   * Learn which tree binaries THIS user registered, from `GET /api/files`'s
+   * `created_by`. Best effort and off the pull's critical path: a failed or
+   * missing listing just leaves the set as it was (a file not known to be ours
+   * is treated as someone else's, which only makes Delete stricter).
+   */
+  private async learnFileAuthorship(vaultId: string): Promise<void> {
+    const me = this.host?.localUserId?.() ?? null;
+    const list = (this.api as { listFiles?: ApiClient["listFiles"] }).listFiles;
+    if (me === null || typeof list !== "function") return;
+    let files: RegisteredFile[];
+    try {
+      files = await list.call(this.api, vaultId);
+    } catch {
+      return;
+    }
+    if (this.stale() || (this.host?.localUserId?.() ?? null) !== me) return;
+    if (this.authoredBy !== me) {
+      this.authoredBy = me;
+      this.authoredDocs.clear();
+    }
+    let added = false;
+    for (const f of files) {
+      if (fileCreatedBy(f) !== me || this.authoredDocs.has(f.id)) continue;
+      this.authoredDocs.add(f.id);
+      added = true;
+    }
+    if (added) this.persist();
+  }
+
+  /**
    * Take the persisted authorship list only if it is THIS user's.
    *
    * Anything else — another account's list, or an older config's unattributed
@@ -3641,6 +3673,9 @@ export class VaultRegistry {
     // captured while the row is still LISTED — once access to it is taken away
     // the listing omits it, which is precisely the moment the answer is needed.
     this.learnAuthorship(serverNotes);
+    // Files too: the blob listing names no creator, so a member's own file
+    // pulled down on another device would otherwise never count as theirs.
+    void this.learnFileAuthorship(vaultId);
     // Access GRANTS: notes readable now that were not in the previous pass's
     // listing. Measured against the listing, before anything below maps them.
     this.detectAccessGrants(serverNotes);
