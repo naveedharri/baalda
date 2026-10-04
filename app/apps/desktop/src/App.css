@@ -7366,7 +7366,10 @@ button.is-done:disabled {
   position: fixed;
   right: var(--sp-4);
   bottom: var(--sp-4);
-  z-index: 60;
+  /* Above every modal, dialog and overlay layer (settings 200, dialogs 300,
+     update gate 400, lightbox 1000): a toast raised from inside Vault
+     Settings must be readable over it. */
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   align-items: flex-end;

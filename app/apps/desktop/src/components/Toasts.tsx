@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { dismissToast, useToasts, type Toast } from "../lib/toast";
 
@@ -17,7 +18,9 @@ export function Toasts() {
   const toasts = useToasts();
   const hovering = useRef(false);
 
-  return (
+  // Portalled to <body> so no ancestor's stacking context can trap it under
+  // a modal: Vault Settings used to blur toasts out behind its backdrop.
+  return createPortal(
     <div
       className="toast-viewport"
       onMouseEnter={() => {
@@ -32,7 +35,8 @@ export function Toasts() {
           <ToastRow key={t.id} toast={t} hovering={hovering} />
         ))}
       </AnimatePresence>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

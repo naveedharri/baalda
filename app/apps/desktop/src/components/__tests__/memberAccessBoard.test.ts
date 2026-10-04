@@ -48,7 +48,14 @@ describe("Member access board", () => {
     modes = { f1: "open", n1: "open", n2: "readonly", n3: "private" };
     api.resolveAccessSummaries.mockImplementation(async (_org: string, groups: Array<Array<{ resourceId: string }>>) =>
       groups.map((g) => modes[g[0].resourceId] ?? "private"));
-    api.setBulkAccess.mockResolvedValue({ mode: "open", resourcesChanged: 1, overridesCleared: 0, membersAffected: 1, disconnectedDocs: 0 });
+    // The fake server applies a write, so the post-move re-read agrees.
+    api.setBulkAccess.mockImplementation(async (_org: string, input: { resources: Array<{ resourceType: string; resourceId: string }>; mode: string }) => {
+      for (const r of input.resources) {
+        if (r.resourceType === "vault") for (const id of Object.keys(modes)) modes[id] = input.mode;
+        else modes[r.resourceId] = input.mode;
+      }
+      return { mode: input.mode, resourcesChanged: 1, overridesCleared: 0, membersAffected: 1, disconnectedDocs: 0 };
+    });
     onItemWritten = vi.fn<() => void>();
     onChanged = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
     host = document.createElement("div");
@@ -65,6 +72,9 @@ describe("Member access board", () => {
       orgId: "org-1", vaultId: "v1", member, isSelf: false, canSetAccess: true,
       everyoneMode: "open", personVaultMode: "custom", onItemWritten, onChanged, ...extra,
     } as never)));
+    await settle();
+  }
+  async function settle() {
     for (let i = 0; i < 3; i++) await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
   }
   const column = (mode: string) => host.querySelector<HTMLElement>(`.access-board-column[data-mode="${mode}"]`)!;
@@ -93,6 +103,7 @@ describe("Member access board", () => {
   it("an arrow is one bulk write for one resource and one user, then toasts", async () => {
     await render();
     await act(async () => button("Move Welcome left").click());
+    await settle();
     expect(dialog()).toBeNull();
     expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
     expect(api.setBulkAccess).toHaveBeenCalledWith("org-1", {
@@ -108,9 +119,30 @@ describe("Member access board", () => {
     expect(host.querySelector(".access-board-undo")).toBeNull();
   });
 
+  it("says so, in error style, when the server's re-read disagrees with the move", async () => {
+    await render();
+    // The write is accepted but the server still resolves Welcome as view only.
+    api.setBulkAccess.mockResolvedValue({ mode: "open", resourcesChanged: 1, overridesCleared: 0, membersAffected: 1, disconnectedDocs: 0 });
+    await act(async () => button("Move Welcome left").click());
+    expect(api.setBulkAccess.mock.calls[0][1]).toEqual({
+      resources: [{ resourceType: "file", resourceId: "n2" }],
+      audience: { type: "users", userIds: ["u2"] },
+      mode: "open",
+    });
+    // Optimistic first...
+    expect(names("open")).toContain("Welcome");
+    await settle();
+    // ...then the truth.
+    expect(names("readonly")).toContain("Welcome");
+    expect(names("open")).not.toContain("Welcome");
+    expect(toast).toHaveBeenCalledWith("Couldn't apply — Welcome is still Can view", "error");
+    expect(toast).not.toHaveBeenCalledWith("Sara can now edit Welcome.");
+  });
+
   it("lowering one row writes at once, without a confirm, and toasts", async () => {
     await render();
     await act(async () => button("Move Welcome right").click());
+    await settle();
     expect(dialog()).toBeNull();
     expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
     expect(api.setBulkAccess.mock.calls[0][1]).toMatchObject({

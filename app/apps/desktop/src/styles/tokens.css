@@ -13,6 +13,9 @@
 :root {
   color-scheme: light;
 
+  /* Toasts sit above every modal/overlay layer (highest is the lightbox, 1000). */
+  --z-toast: 1100;
+
   /* Surfaces (light) */
   --bg-app: #faf9f8;            /* app background / canvas — baalda.com's beige (#fcf9f7), cooled a touch */
   --bg-surface: #ffffff;        /* cards, editor sheet, dialogs — Notion's page white */
@@ -22,7 +25,7 @@
   --bg-card: #faf9f8;           /* panel cards in settings/health — the brand beige, same as --bg-app */
   --bg-hover: color-mix(in srgb, var(--accent-soft) 60%, transparent); /* hover fills: the one app-wide hover, a light accent tint */
   --bg-active: var(--accent-soft-hover); /* pressed / selected fills: a deeper step of the hover tint */
-  --members-row-hover: color-mix(in srgb, var(--accent-soft) 35%, transparent); /* member table rows: lighter than --bg-hover */
+  --members-row-hover: color-mix(in srgb, var(--accent-soft) 18%, transparent); /* member table rows: lighter than --bg-hover */
 
   /* Text */
   --text-primary: #1a1a1e;
@@ -233,7 +236,7 @@
   --bg-card: #242429;
   --bg-hover: #29273d;          /* hover: the accent at 13% over --bg-surface (solid, so contrast is checkable) */
   --bg-active: #343156;         /* pressed / selected: the accent at 24% over --bg-surface; text-tertiary stays ≥ 4.5:1 */
-  --members-row-hover: #232230; /* member table rows: the accent at ~7% over --bg-surface */
+  --members-row-hover: #201f29; /* member table rows: the accent at ~4% over --bg-surface */
 
   /* Off-white body copy is comfortable over long sessions. Secondary and
      tertiary copy remain above 4.5:1 even on the lighter interaction layers. */
@@ -288,7 +291,7 @@
     --bg-card: #242429;
     --bg-hover: #29273d;          /* hover: the accent at 13% over --bg-surface (solid, so contrast is checkable) */
     --bg-active: #343156;         /* pressed / selected: the accent at 24% over --bg-surface; text-tertiary stays ≥ 4.5:1 */
-  --members-row-hover: #232230; /* member table rows: the accent at ~7% over --bg-surface */
+  --members-row-hover: #201f29; /* member table rows: the accent at ~4% over --bg-surface */
 
     --text-primary: #ececf1;
     --text-secondary: #b8b8c0;

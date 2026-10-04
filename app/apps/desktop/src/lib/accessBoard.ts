@@ -127,7 +127,14 @@ export function firstName(member: Pick<MemberOverview, "name" | "email" | "userI
   return local || member.userId;
 }
 
-/** The undo bar's sentence: "Lee can now view Hiring loop." */
+/** Said when the server's answer after a move disagrees with it. */
+export function notAppliedMessage(what: string, actual: SummaryMode): string {
+  if (actual === "mixed") return `Couldn't apply everywhere — part of ${what} kept its level`;
+  const label = BOARD_COLUMNS.find((c) => c.mode === actual)?.title ?? actual;
+  return `Couldn't apply — ${what} is still ${label}`;
+}
+
+/** The toast's sentence: "Lee can now view Hiring loop." */
 export function moveMessage(who: string, self: boolean, what: string, mode: TeamAccessMode): string {
   const subject = self ? "You" : who;
   if (mode === "open") return `${subject} can now edit ${what}.`;

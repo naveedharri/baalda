@@ -4,6 +4,7 @@ import type { AccessTreeResponse, BulkAccessResource, MemberOverview, TeamAccess
 import { authManager } from "../lib/auth/authManager";
 import {
   BOARD_COLUMNS,
+  notAppliedMessage,
   columnRows,
   firstName,
   moveMessage,
@@ -192,7 +193,7 @@ export function MemberAccessBoard({
    * Optimistic: the written rows and their subtrees read `mode` at once, then
    * those plus their ancestors are re-read. Reverts on failure.
    */
-  const write = async (rows: readonly AccessRow[], mode: TeamAccessMode): Promise<boolean> => {
+  const write = async (rows: readonly AccessRow[], mode: TeamAccessMode, except?: string): Promise<boolean> => {
     const vaultWide = rows.length === 0;
     const resources = vaultWide ? [{ resourceType: "vault" as const, resourceId: orgId }] : rows.map(resourceOf);
     const affected = vaultWide
@@ -215,7 +216,7 @@ export function MemberAccessBoard({
         mode,
       });
       if (!live.current) return true;
-      readModes(allRows.filter((r) => affected.includes(r) || ancestors.has(r.path)));
+      readModes(allRows.filter((r) => r.key !== except && (affected.includes(r) || ancestors.has(r.path))));
       if (vaultWide) await onChanged();
       else onItemWritten();
       return true;
@@ -261,8 +262,21 @@ export function MemberAccessBoard({
     if (!fromOwn || fromOwn === to) return;
     animateMove(row, fromOwn);
     void (async () => {
-      if (!(await write([row], to))) return;
-      toast(moveMessage(who, isSelf, row.name, to));
+      if (!(await write([row], to, row.key))) return;
+      // Say it worked only once the server agrees: re-read this row directly
+      // (not through readModes, whose in-flight dedupe could hand back an
+      // answer from before the write) and let the board show the truth.
+      let actual: SummaryMode;
+      try {
+        actual = await summaries.read(orgId, resourceOf(row), [member.userId], () => !live.current);
+      } catch {
+        if (live.current) toast(`Saved, but couldn't check ${row.name} yet.`, "neutral");
+        return;
+      }
+      if (!live.current) return;
+      setSummaryModes((prev) => new Map(prev).set(row.key, actual));
+      if (actual === to) toast(moveMessage(who, isSelf, row.name, to));
+      else toast(notAppliedMessage(row.name, actual), "error");
     })();
   };
 
