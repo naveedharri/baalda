@@ -37,3 +37,34 @@ export async function announceMemberJoined(
     console.error("announceMemberJoined failed:", err);
   }
 }
+
+/** The vault's name/icon as they stand after an update (#306). */
+export type OrgChangedFields = { name?: string; logo?: string | null };
+type OrgChangedPublisher = (vaultId: string, change: OrgChangedFields) => void;
+
+let publishOrg: OrgChangedPublisher | null = null;
+
+export function setOrgChangedPublisher(fn: OrgChangedPublisher): void {
+  publishOrg = fn;
+}
+
+/**
+ * Tell everyone live in a vault that its name or icon changed, so their vault
+ * list updates without a reload. Same fan-out and best-effort contract as
+ * {@link announceMemberJoined}.
+ */
+export async function announceOrgChanged(
+  organizationId: string,
+  change: OrgChangedFields,
+): Promise<void> {
+  if (!publishOrg) return;
+  try {
+    const { rows } = await pool.query<{ id: string }>(
+      "SELECT id FROM vaults WHERE organization_id = $1",
+      [organizationId],
+    );
+    for (const { id } of rows) publishOrg(id, change);
+  } catch (err) {
+    console.error("announceOrgChanged failed:", err);
+  }
+}

@@ -6,7 +6,7 @@ import pg from "pg";
 import { config } from "../config.js";
 import { BRAND_NAME } from "../brand.js";
 import { canAddMember, canCreateOrganization } from "../billing/entitlements.js";
-import { announceMemberJoined } from "../sync/member-events.js";
+import { announceMemberJoined, announceOrgChanged } from "../sync/member-events.js";
 import { dispatchMail, emailEnabled } from "../email/mailer.js";
 import { verifyEmailEmail } from "../email/templates.js";
 import { clearThrottle } from "./signin-throttle.js";
@@ -257,6 +257,15 @@ export const auth = betterAuth({
               error: "invalid_vault_icon",
             });
           }
+        },
+        // Publish the new name/icon on the vault channel so other members'
+        // switchers update live instead of on their next re-list (#306).
+        afterUpdateOrganization: async ({ organization }) => {
+          if (!organization) return;
+          await announceOrgChanged(organization.id, {
+            name: organization.name,
+            logo: organization.logo ?? null,
+          });
         },
         beforeCreateOrganization: async (data) => {
           if (!isValidVaultIcon(data.organization.logo)) {
