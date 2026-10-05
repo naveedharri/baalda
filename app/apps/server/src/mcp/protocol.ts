@@ -99,9 +99,10 @@ export async function handleMcpMessage(
       return ok(msg.id, {
         tools: TOOLS.map((t) => ({
           name: t.name,
+          title: t.annotations.title,
           description: t.description,
           inputSchema: t.inputSchema,
-          ...(t.annotations ? { annotations: t.annotations } : {}),
+          annotations: t.annotations,
         })),
       });
 
