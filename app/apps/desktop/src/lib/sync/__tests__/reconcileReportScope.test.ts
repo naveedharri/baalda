@@ -85,4 +85,15 @@ describe("reconcileReport per vault", () => {
     reconcileReport.record(item, { at: 2000, seeded: true });
     expect(reconcileReport.items()).toHaveLength(2);
   });
+
+  it("clears a vault that is not open by its folder path", () => {
+    vaultScopes.begin(A);
+    reconcileReport.record({ kind: "keptLocally", docId: "a1", path: "A1.md", detail: "t/a1" });
+    vaultScopes.begin(B);
+    reconcileReport.record({ kind: "keptLocally", docId: "b1", path: "B1.md", detail: "t/b1" });
+    reconcileReport.clear(A.vaultPath);
+    expect(reconcileReport.items().map((it) => it.docId)).toEqual(["b1"]);
+    vaultScopes.begin(A);
+    expect(reconcileReport.items()).toEqual([]);
+  });
 });

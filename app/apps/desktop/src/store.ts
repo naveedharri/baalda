@@ -3780,6 +3780,7 @@ export const useStore = create<AppStore>((set, get) => ({
     // and clear the live report while this vault is still the open one.
     const removedPath = readOrgVaults()[organizationId] ?? null;
     if (removedPath) forgetPersisted(removedPath);
+    if (removedPath) reconcileReport.clear(removedPath);
     if (get().session?.activeOrganizationId === organizationId) reconcileReport.clear();
     // Forget this vault's local folder so it won't auto-open here again.
     forgetOrgVault(organizationId);

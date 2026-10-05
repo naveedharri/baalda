@@ -93,7 +93,8 @@ export const reconcileReport: {
   items(): ReconcileItem[];
   drain(): ReconcileItem[];
   subscribe(cb: ReconcileListener): () => void;
-  clear(): void;
+  /** Drop the open vault's entries, or those of the vault at `vaultPath`. */
+  clear(vaultPath?: string | null): void;
   forgetReadable(docIds: ReadonlySet<string>): number;
   /** The open vault changed: subscribers re-read, now filtered to the new one. */
   vaultChanged(): void;
@@ -125,8 +126,8 @@ export const reconcileReport: {
       listeners.delete(cb);
     };
   },
-  clear() {
-    const key = currentVault();
+  clear(vaultPath) {
+    const key = vaultPath === undefined ? currentVault() : vaultPath;
     for (let i = all.length - 1; i >= 0; i--) {
       if ((vaultOf.get(all[i]) ?? null) === key) all.splice(i, 1);
     }
