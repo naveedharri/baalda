@@ -231,7 +231,13 @@ export function BugReportDialog({ onClose }: { onClose: () => void }) {
               </svg>
             </span>
             <strong>Thanks — your report was sent.</strong>
-            <p>{email ? <>Any reply will come to {email}.</> : "Thanks for helping make Baalda better."}</p>
+            <p>
+              {email ? (
+                <>Sent to support. Any reply will come to {email}.</>
+              ) : (
+                "Sent to support. Thanks for helping make Baalda better."
+              )}
+            </p>
             <div className="bug-report-actions">
               <button type="button" className="primary" onClick={onClose}>
                 Done
