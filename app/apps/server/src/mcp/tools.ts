@@ -48,16 +48,41 @@ import type {
 
 type Args = Record<string, unknown>;
 
+/** MCP spec ToolAnnotations (all five fields, always set explicitly). */
+export interface McpToolAnnotations {
+  title: string;
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+}
+
+type Hints = Omit<McpToolAnnotations, "title">;
+
+// Every tool acts only on this server's vault data, so none is open-world.
+/** Reads only. */
+const READ: Hints = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+/** Adds content without removing any; a repeat adds again (append_note's
+ *  idempotencyKey is optional, so the tool as a whole is not idempotent). */
+const CREATE: Hints = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+/** Replaces the whole body (can drop existing text); the same body twice is a no-op. */
+const REPLACE: Hints = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
+/** Changes a location only; the same move twice lands in the same place. */
+const MOVE: Hints = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+/** Removes content (soft delete into Trash for notes). */
+const DELETE: Hints = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
+/** Can narrow or remove people's access; re-applying the same mode is a no-op. */
+const ACCESS: Hints = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
+
 export interface McpTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  /** Hints per the MCP spec — helps clients label read vs destructive tools. */
-  annotations?: {
-    readOnlyHint?: boolean;
-    destructiveHint?: boolean;
-    idempotentHint?: boolean;
-  };
+  /**
+   * MCP ToolAnnotations. Required on every tool: directory checks and clients
+   * treat a tool without readOnlyHint/destructiveHint as unclassified.
+   */
+  annotations: McpToolAnnotations;
   handler: (ctx: McpContext, args: Args) => Promise<unknown>;
 }
 
@@ -183,22 +208,23 @@ function parseEdits(raw: unknown): NoteEdit[] {
 export const TOOLS: McpTool[] = [
   {
     name: "list_vaults",
+    annotations: { title: "List vaults", ...READ },
     description:
       "List the top-level note collections you can access, each with a vaultId. Start here to get a vaultId for the other tools.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    annotations: { readOnlyHint: true },
     handler: (ctx) => listVaults(ctx),
   },
   {
     name: "get_access_default",
+    annotations: { title: "Get access default for new members", ...READ },
     description:
       "Get what future members initially see when they join this vault (the New members row): open (Can edit) / readonly (Can view) / private (No access). Owner/admin only.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    annotations: { readOnlyHint: true },
     handler: (ctx) => getAccessDefaultTool(ctx),
   },
   {
     name: "set_access_default",
+    annotations: { title: "Set access default for new members", ...ACCESS },
     description:
       "Set future members' initial access to content that already exists when they join (the New members row): open (Can edit) / readonly (Can view) / private (No access). Existing members are unchanged. Owner/admin only.",
     inputSchema: {
@@ -213,6 +239,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "list_resource_access",
+    annotations: { title: "List access on folders and files", ...READ },
     description:
       "List every vault member's effective access to one folder or file, after each person's own vault level (which wins for them either way), Everyone access and locks. Owner/admin only.",
     inputSchema: {
@@ -224,7 +251,6 @@ export const TOOLS: McpTool[] = [
       required: ["resourceType", "resourceId"],
       additionalProperties: false,
     },
-    annotations: { readOnlyHint: true },
     handler: (ctx, args) => {
       const resourceType = reqStr(args, "resourceType");
       if (resourceType !== "folder" && resourceType !== "file") {
@@ -235,6 +261,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "manage_access",
+    annotations: { title: "Change access", ...ACCESS },
     description:
       "Replace access on one or more selected folders/files, or the whole vault. Modes: open (Can edit) / readonly (Can view) / private (No access). Everyone clears all custom member overrides in selected subtrees; selected users changes only those users. A users-audience mode on the vault resource is that person's absolute vault level (Can edit everything / Can view everything / No access): it replaces Everyone access, the owner/admin shortcut and authorship for them, and only their own folder/file grants lift a No access. Owner/admin only.",
     inputSchema: {
@@ -278,6 +305,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "list_folders",
+    annotations: { title: "List folders", ...READ },
     description: "List every folder in a vault, with its path and parent.",
     inputSchema: {
       type: "object",
@@ -285,11 +313,11 @@ export const TOOLS: McpTool[] = [
       required: ["vaultId"],
       additionalProperties: false,
     },
-    annotations: { readOnlyHint: true },
     handler: (ctx, a) => listFolders(ctx, reqStr(a, "vaultId")),
   },
   {
     name: "list_notes",
+    annotations: { title: "List notes", ...READ },
     description:
       "List notes you can access in a vault (optionally within one folder). Returns each note's docId, title, path and your permission.",
     inputSchema: {
@@ -301,11 +329,11 @@ export const TOOLS: McpTool[] = [
       required: ["vaultId"],
       additionalProperties: false,
     },
-    annotations: { readOnlyHint: true },
     handler: (ctx, a) => listNotes(ctx, reqStr(a, "vaultId"), optStr(a, "folderId")),
   },
   {
     name: "read_note",
+    annotations: { title: "Read note", ...READ },
     description:
       "Read a note's full markdown content by its docId. Also returns its `revision` — pass it as expectedRevision to update_note / append_note / edit_note so a write is refused if the note changed in between.",
     inputSchema: {
@@ -314,11 +342,11 @@ export const TOOLS: McpTool[] = [
       required: ["docId"],
       additionalProperties: false,
     },
-    annotations: { readOnlyHint: true },
     handler: (ctx, a) => readNote(ctx, reqStr(a, "docId")),
   },
   {
     name: "search_notes",
+    annotations: { title: "Search notes and files", ...READ },
     description:
       "Semantic + keyword search over everything you can access in a vault: notes, and the text extracted from files (docx, xlsx, pdf, csv, code…). Each hit carries kind: 'note' or 'file' — read a note with read_note and a file's text with read_attachment_text.",
     inputSchema: {
@@ -335,7 +363,6 @@ export const TOOLS: McpTool[] = [
       required: ["vaultId", "query"],
       additionalProperties: false,
     },
-    annotations: { readOnlyHint: true },
     handler: (ctx, a) =>
       searchNotes(
         ctx,
@@ -347,6 +374,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "list_attachments",
+    annotations: { title: "List attachments", ...READ },
     description:
       "List the files (not notes) stored in a vault that you can access — spreadsheets, documents, PDFs, images, attachments. hasText tells you whether read_attachment_text has anything for one.",
     inputSchema: {
@@ -359,7 +387,6 @@ export const TOOLS: McpTool[] = [
       required: ["vaultId"],
       additionalProperties: false,
     },
-    annotations: { readOnlyHint: true },
     handler: (ctx, a) =>
       listAttachments(ctx, reqStr(a, "vaultId"), {
         folder: optStr(a, "folder"),
@@ -368,6 +395,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "read_attachment_text",
+    annotations: { title: "Read attachment text", ...READ },
     description:
       "Read the extracted plain text of a file — NOT the file itself. Identify it by relPath or blobId (both from list_attachments or a search_notes hit with kind 'file'). Returns an empty text if the file has not been indexed yet.",
     inputSchema: {
@@ -384,7 +412,6 @@ export const TOOLS: McpTool[] = [
       required: ["vaultId"],
       additionalProperties: false,
     },
-    annotations: { readOnlyHint: true },
     handler: (ctx, a) =>
       readAttachmentText(
         ctx,
@@ -395,6 +422,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "create_note",
+    annotations: { title: "Create note", ...CREATE },
     description:
       "Create a new markdown note. relPath is the vault-relative path ending in .md (e.g. 'Ideas/draft.md'); every folder in it must already exist (see list_folders / create_folder). If you also pass folderId it must be the folder whose path is relPath's directory. Optionally seed its content.",
     inputSchema: {
@@ -420,6 +448,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "update_note",
+    annotations: { title: "Replace note content", ...REPLACE },
     description:
       "Replace a note's entire markdown content. Prefer edit_note for a change to part of a note. Pass expectedRevision (from read_note) so the write is refused if the note changed since you read it.",
     inputSchema: {
@@ -434,12 +463,12 @@ export const TOOLS: McpTool[] = [
       required: ["docId", "content"],
       additionalProperties: false,
     },
-    annotations: { idempotentHint: true },
     handler: (ctx, a) =>
       updateNote(ctx, reqStr(a, "docId"), reqStr(a, "content"), optStr(a, "expectedRevision")),
   },
   {
     name: "append_note",
+    annotations: { title: "Append to note", ...CREATE },
     description:
       "Append text to the end of a note's markdown content. Pass an idempotencyKey when you may retry the call, so a retry cannot append the text twice.",
     inputSchema: {
@@ -463,6 +492,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "edit_note",
+    annotations: { title: "Edit note", ...CREATE },
     description:
       "Make targeted edits to a note without resending the whole body: replace exact text, insert before/after an anchor, or delete exact text. Each anchor must match exactly once (or set all: true for replace/delete); a missing or ambiguous anchor refuses the whole call with nothing written. Edits apply in order. Pass expectedRevision from read_note to also refuse the call if the note changed since you read it.",
     inputSchema: {
@@ -504,6 +534,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "delete_note",
+    annotations: { title: "Delete note", ...DELETE },
     description: "Delete a note (soft delete; its edit history is preserved).",
     inputSchema: {
       type: "object",
@@ -511,11 +542,11 @@ export const TOOLS: McpTool[] = [
       required: ["docId"],
       additionalProperties: false,
     },
-    annotations: { destructiveHint: true },
     handler: (ctx, a) => deleteNote(ctx, reqStr(a, "docId")),
   },
   {
     name: "delete_file",
+    annotations: { title: "Delete file", ...DELETE },
     description:
       "Delete a non-note file (pdf, image, office document, csv...) by its id from list_attachments. Removes it for everyone; teammates' stale copies are set aside rather than re-uploaded.",
     inputSchema: {
@@ -524,11 +555,11 @@ export const TOOLS: McpTool[] = [
       required: ["fileId"],
       additionalProperties: false,
     },
-    annotations: { destructiveHint: true },
     handler: (ctx, a) => deleteFileTool(ctx, reqStr(a, "fileId")),
   },
   {
     name: "move_file",
+    annotations: { title: "Move or rename file", ...MOVE },
     description:
       "Rename or move a non-note file, keeping its id. path is the new vault-relative path; its directory must be an existing folder.",
     inputSchema: {
@@ -540,11 +571,11 @@ export const TOOLS: McpTool[] = [
       required: ["fileId", "path"],
       additionalProperties: false,
     },
-    annotations: { idempotentHint: true },
     handler: (ctx, a) => moveFileTool(ctx, reqStr(a, "fileId"), reqStr(a, "path")),
   },
   {
     name: "create_folder",
+    annotations: { title: "Create folder", ...CREATE },
     description: "Create a folder in a vault. path is the vault-relative folder path.",
     inputSchema: {
       type: "object",
@@ -567,6 +598,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "delete_folder",
+    annotations: { title: "Delete folder", ...DELETE },
     description:
       "Delete a folder. By default only an empty one — pass recursive to delete its contents with it.",
     inputSchema: {
@@ -582,12 +614,12 @@ export const TOOLS: McpTool[] = [
       required: ["folderId"],
       additionalProperties: false,
     },
-    annotations: { destructiveHint: true },
     handler: (ctx, a) =>
       deleteFolder(ctx, reqStr(a, "folderId"), { recursive: optBool(a, "recursive") }),
   },
   {
     name: "move_note",
+    annotations: { title: "Move or rename note", ...MOVE },
     description:
       "Rename, move, or retitle a note. relPath moves the file (its directory must be an existing folder, which becomes the note's folder); folderId alone re-parents it keeping its filename (null for the vault root); title changes the display title. The note keeps its docId and its full history, so links and edits survive.",
     inputSchema: {
@@ -607,7 +639,6 @@ export const TOOLS: McpTool[] = [
       required: ["docId"],
       additionalProperties: false,
     },
-    annotations: { idempotentHint: true },
     handler: (ctx, a) =>
       moveNoteTool(ctx, {
         docId: reqStr(a, "docId"),
@@ -618,6 +649,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "move_folder",
+    annotations: { title: "Move or rename folder", ...MOVE },
     description:
       "Rename or move a folder. Its notes and subfolders move with it: every descendant path is rewritten in place and every docId preserved, so backlinks and edit history survive.",
     inputSchema: {
@@ -635,7 +667,6 @@ export const TOOLS: McpTool[] = [
       required: ["folderId"],
       additionalProperties: false,
     },
-    annotations: { idempotentHint: true },
     handler: (ctx, a) =>
       moveFolderTool(ctx, {
         folderId: reqStr(a, "folderId"),

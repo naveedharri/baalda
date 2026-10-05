@@ -155,6 +155,51 @@ describe("MCP access-management HTTP surface", () => {
     ]);
   });
 
+  it("annotates every tool so clients can tell readers from writers", async () => {
+    const owner = await seedUser(`owner-${randomUUID()}@mcp.test`);
+    const org = await seedOrg("MCP annotations", `mcp-annotations-${randomUUID()}`);
+    await seedMember(org, owner, "owner");
+    const token = await tokenFor(owner, org);
+
+    const body = (await (await rpc(token, "tools/list")).json()) as any;
+    const tools: any[] = body.result.tools;
+    const readOnly = new Set([
+      "list_vaults",
+      "list_folders",
+      "list_notes",
+      "read_note",
+      "search_notes",
+      "list_attachments",
+      "read_attachment_text",
+      "get_access_default",
+      "list_resource_access",
+    ]);
+    const destructive = new Set([
+      "delete_note",
+      "delete_file",
+      "delete_folder",
+      "update_note",
+      "manage_access",
+      "set_access_default",
+    ]);
+    for (const tool of tools) {
+      const a = tool.annotations;
+      expect(a, tool.name).toBeTruthy();
+      expect(typeof a.title, tool.name).toBe("string");
+      expect(tool.title, tool.name).toBe(a.title);
+      for (const hint of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]) {
+        expect(typeof a[hint], `${tool.name}.${hint}`).toBe("boolean");
+      }
+      expect(a.openWorldHint, tool.name).toBe(false);
+      expect(a.readOnlyHint, tool.name).toBe(readOnly.has(tool.name));
+      expect(a.destructiveHint, tool.name).toBe(destructive.has(tool.name));
+      if (a.readOnlyHint) expect(a.idempotentHint, tool.name).toBe(true);
+    }
+    // Every name in the expectation sets is a real tool.
+    const names = new Set(tools.map((t) => t.name));
+    for (const n of [...readOnly, ...destructive]) expect(names.has(n), n).toBe(true);
+  });
+
   it("applies bulk folder/file, Everyone/member, whole-vault, lock, and future-member rules", async () => {
     const org = await seedOrg("MCP access", `mcp-access-${randomUUID()}`);
     const owner = await seedUser(`owner-${randomUUID()}@mcp.test`);
