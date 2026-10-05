@@ -19,4 +19,14 @@ describe("parseServerControl — meta registry + activity frames", () => {
   it("parses the activity frame", () => {
     expect(parseServerControl(JSON.stringify({ t: "activity" }))).toEqual({ t: "activity" });
   });
+
+  // #306: a vault rename / icon change from another member.
+  it("parses the org frame, keeping only well-typed fields", () => {
+    expect(parseServerControl(JSON.stringify({ t: "org", name: "Team", logo: null }))).toEqual({
+      t: "org",
+      name: "Team",
+      logo: null,
+    });
+    expect(parseServerControl(JSON.stringify({ t: "org", name: 3, logo: 4 }))).toEqual({ t: "org" });
+  });
 });

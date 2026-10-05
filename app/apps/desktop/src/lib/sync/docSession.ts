@@ -471,6 +471,7 @@ export class SyncManager implements InboundHost {
     reason: "deleted" | "revoked",
   ) => void;
   private onMemberJoined?: (name: string) => void;
+  private onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
   /** Mirrors the registry's {relPath → docId} map to the UI (coalesced). */
   private onRegistryMap?: (map: Record<string, string>) => void;
   /** Mirrors the registry's {docId → last-edit} stamps to the UI. */
@@ -1436,6 +1437,13 @@ export class SyncManager implements InboundHost {
    */
   setMemberJoinedListener(cb: ((name: string) => void) | undefined): void {
     this.onMemberJoined = cb;
+  }
+
+  /** UI subscribes here to patch the open vault's name/icon live (#306). */
+  setOrgChangedListener(
+    cb: ((change: { name?: string; logo?: string | null }) => void) | undefined,
+  ): void {
+    this.onOrgChanged = cb;
   }
 
   /**
@@ -6497,6 +6505,8 @@ export class SyncManager implements InboundHost {
       onActivityChanged: () => this.notifyActivityChanged(scope),
       // A new teammate joined the vault — refresh roster + celebrate.
       onMemberJoined: (name) => this.onMemberJoined?.(name),
+      // The vault was renamed or got a new icon (#306).
+      onOrgChanged: (change) => this.onOrgChanged?.(change),
       // A teammate's viewing state changed — update the sidebar presence roster.
       onPresence: (peer) => this.handleVaultPresence(peer),
       // A teammate is talking. Play it as it lands; nothing is kept.

@@ -2761,6 +2761,27 @@ export const useStore = create<AppStore>((set, get) => ({
       syncManager.announcePresence();
       get().celebrateMemberJoined(name);
     });
+    // The open vault was renamed or got a new icon on another device (#306):
+    // patch it in place; with nothing usable in the frame, re-list.
+    syncManager.setOrgChangedListener((change) => {
+      const orgId = get().session?.activeOrganizationId ?? null;
+      const hasFields = change.name !== undefined || change.logo !== undefined;
+      if (!orgId || !hasFields || !get().organizations.some((o) => o.id === orgId)) {
+        void get().refreshVault();
+        return;
+      }
+      set({
+        organizations: get().organizations.map((o) =>
+          o.id === orgId
+            ? {
+                ...o,
+                ...(change.name !== undefined ? { name: change.name } : {}),
+                ...(change.logo !== undefined ? { logo: change.logo } : {}),
+              }
+            : o,
+        ),
+      });
+    });
     // Live sidebar presence — the vault channel tells us which teammate is
     // viewing which note; mirror the roster into the store for FileTree.
     syncManager.setVaultPresenceListener((peers) => set({ vaultPresence: peers }));

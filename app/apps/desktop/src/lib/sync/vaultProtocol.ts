@@ -151,6 +151,8 @@ export type ServerControl =
   /** The vault's Trash or shrink-event listings changed (#260). */
   | { t: "activity" }
   | { t: "member"; name: string }
+  /** The vault's name or icon changed (#306): patch the vault list in place. */
+  | { t: "org"; name?: string; logo?: string | null }
   | ({ t: "presence" } & PresenceState)
   /** A new release exists (#269): a hint to run the normal update check now. */
   | { t: "version-available"; version: string }
@@ -226,6 +228,13 @@ export function parseServerControl(text: string): ServerControl | null {
   if (t === "activity") return { t: "activity" };
   if (t === "member" && typeof (v as { name?: unknown }).name === "string") {
     return { t: "member", name: (v as { name: string }).name };
+  }
+  if (t === "org") {
+    const o = v as { name?: unknown; logo?: unknown };
+    const frame: { t: "org"; name?: string; logo?: string | null } = { t: "org" };
+    if (typeof o.name === "string") frame.name = o.name;
+    if (typeof o.logo === "string" || o.logo === null) frame.logo = o.logo;
+    return frame;
   }
   if (t === "presence") {
     const o = v as Record<string, unknown>;
