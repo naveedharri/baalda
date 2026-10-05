@@ -191,6 +191,8 @@ export function VaultSettingsDialog({
 
   const visibleTab = (t: SettingsTab): SettingsTab => (!SHOW_AI_TAB && t === "ai" ? "general" : t);
   const [tab, setTabRaw] = useState<SettingsTab>(visibleTab(initialTab ?? "general"));
+  /** Bumped when the active nav item is clicked again, so a tab can return to its first page. */
+  const [tabReset, setTabReset] = useState(0);
   const setTab = (t: SettingsTab) => setTabRaw(visibleTab(t));
 
   // Esc, click-away, focus and the backdrop all live in `SettingsModal`.
@@ -254,7 +256,11 @@ export function VaultSettingsDialog({
                 key={t.id}
                 type="button"
                 className={`menu-item${t.id === "ai" ? " settings-ai-item" : ""}${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
-                onClick={() => setTab(t.id)}
+                onClick={() => {
+                  // Re-clicking the active item resets its sub-pages (#308).
+                  if (tab === t.id) setTabReset((n) => n + 1);
+                  else setTab(t.id);
+                }}
                 title={locked ? "Turn on sync to unlock" : undefined}
               >
                 {t.icon}
@@ -307,7 +313,12 @@ export function VaultSettingsDialog({
           ) : tab === "vaults" ? (
             <VaultsTab />
           ) : tab === "members" ? (
-            <MembersAccessTab canManage={canManage} onOpenTab={setTab} onCloseSettings={onClose} />
+            <MembersAccessTab
+              canManage={canManage}
+              onOpenTab={setTab}
+              onCloseSettings={onClose}
+              resetToken={tabReset}
+            />
           ) : tab === "billing" ? (
             <BillingTab canManage={canManage} isSynced={isSynced} />
           ) : tab === "mcp" ? (
@@ -395,11 +406,22 @@ function GeneralTab({
     <>
       {iconIdentity && (
         <>
-          <VaultIconSettings
-            identity={iconIdentity}
-            name={(isSynced ? activeOrgName : null) ?? vault?.name ?? ""}
-            canEdit={!isSynced || canManage}
-          />
+          {/* The team's icon belongs to the org: only those who can change it
+              see it (#290). Everyone in a synced vault gets their own (#291). */}
+          {(!isSynced || canManage) && (
+            <VaultIconSettings
+              identity={iconIdentity}
+              name={(isSynced ? activeOrgName : null) ?? vault?.name ?? ""}
+            />
+          )}
+          {isSynced && canManage && <div className="menu-sep" />}
+          {isSynced && (
+            <VaultIconSettings
+              identity={iconIdentity}
+              name={activeOrgName ?? vault?.name ?? ""}
+              personal
+            />
+          )}
           {/* A synced vault's next row (Freeze vault root) brings its own divider. */}
           {!isSynced && <div className="menu-sep" />}
         </>
@@ -460,7 +482,7 @@ function GeneralTab({
         </>
       )}
 
-      {isSynced && <FreezeRootRow canManage={canManage} />}
+      {isSynced && canManage && <FreezeRootRow canManage={canManage} />}
 
       <div className="menu-sep" />
       <div className="subhead">Folder on disk</div>
@@ -807,13 +829,6 @@ function FreezeRootRow({ canManage }: { canManage: boolean }) {
           onChange={(next) => void flip(next)}
         />
       </label>
-      {!canManage && (
-        <div className="muted">
-          {rootFrozen
-            ? "This vault's root is frozen. Ask an owner or admin to unfreeze it."
-            : "Only an owner or admin can freeze this vault's root."}
-        </div>
-      )}
       {error && <div className="auth-error">{error}</div>}
     </>
   );

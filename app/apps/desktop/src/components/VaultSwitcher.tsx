@@ -89,25 +89,34 @@ export function useVaultShortcuts(rows: readonly VaultRow[]) {
  * for a synced vault (`org:<id>`), this device's local setting for a local one
  * (`local:<path>`). Re-renders when either changes.
  */
-export function useVaultIconRaw(identity: string): string | null {
+export type VaultIconSource = "resolved" | "shared" | "personal";
+
+/**
+ * The stored icon string for a vault. `resolved` (the default, what every tile
+ * paints) prefers this device's personal override of a synced vault, then the
+ * team's icon; `shared` / `personal` read just one of the two, for settings.
+ */
+export function useVaultIconRaw(identity: string, source: VaultIconSource = "resolved"): string | null {
   const isOrg = identity.startsWith("org:");
   const orgLogo = useStore((s) =>
     isOrg ? (s.organizations.find((o) => `org:${o.id}` === identity)?.logo ?? null) : null,
   );
-  const localPath = identity.startsWith("local:") ? identity.slice("local:".length) : null;
-  const [localIcon, setLocalIcon] = useState(() =>
-    localPath ? readLocalVaultIcon(localPath) : null,
-  );
+  // A local vault's icon and a synced vault's personal override share one store.
+  const localKey = identity.startsWith("local:") ? identity.slice("local:".length) : isOrg ? identity : null;
+  const [localIcon, setLocalIcon] = useState(() => (localKey ? readLocalVaultIcon(localKey) : null));
   useEffect(() => {
-    if (!localPath) {
+    if (!localKey) {
       setLocalIcon(null);
       return;
     }
-    const read = () => setLocalIcon(readLocalVaultIcon(localPath));
+    const read = () => setLocalIcon(readLocalVaultIcon(localKey));
     read();
     return onLocalVaultIconChange(read);
-  }, [localPath]);
-  return isOrg ? orgLogo : localIcon;
+  }, [localKey]);
+  if (!isOrg) return localIcon;
+  if (source === "shared") return orgLogo;
+  if (source === "personal") return localIcon;
+  return localIcon ?? orgLogo;
 }
 
 /**
@@ -115,8 +124,16 @@ export function useVaultIconRaw(identity: string): string | null {
  * character — a default picked from its identity. Keyed on the row's `key` so
  * the header, the menu and settings always paint the same vault the same way.
  */
-export function VaultTile({ identity, name }: { identity: string; name: string }) {
-  const icon = resolveVaultIcon(identity, useVaultIconRaw(identity));
+export function VaultTile({
+  identity,
+  name,
+  source = "resolved",
+}: {
+  identity: string;
+  name: string;
+  source?: VaultIconSource;
+}) {
+  const icon = resolveVaultIcon(identity, useVaultIconRaw(identity, source));
   if (icon.kind === "image") {
     return (
       <span className="vault-tile image" aria-hidden="true">

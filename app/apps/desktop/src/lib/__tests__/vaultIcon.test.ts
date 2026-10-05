@@ -42,3 +42,26 @@ describe("vault icons", () => {
     expect(isValidVaultIcon(null)).toBe(true);
   });
 });
+
+describe("personal icon for a synced vault (#291)", () => {
+  it("stores on this device under a key no folder path can take, and resets", async () => {
+    const store = new Map<string, string>();
+    const g = globalThis as unknown as Record<string, unknown>;
+    g.localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+    let fired = 0;
+    g.window = { dispatchEvent: () => { fired++; return true; } };
+    const { readPersonalVaultIcon, writePersonalVaultIcon, readLocalVaultIcon } = await import("../vaultIcon");
+    writePersonalVaultIcon("abc", "preset:book:violet");
+    expect(readPersonalVaultIcon("abc")).toBe("preset:book:violet");
+    expect(readLocalVaultIcon("abc")).toBeNull();
+    expect(fired).toBe(1);
+    writePersonalVaultIcon("abc", null);
+    expect(readPersonalVaultIcon("abc")).toBeNull();
+    delete g.localStorage;
+    delete g.window;
+  });
+});

@@ -66,8 +66,10 @@ interface Confirm {
  * bulk route with an org audience — because that endpoint is what clears the
  * per-folder team rows in the same transaction.
  */
-export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
+export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetToken = 0 }: {
   canManage: boolean;
+  /** Bumped when the active nav item is clicked again: back to the roster (#308). */
+  resetToken?: number;
   /** Switch the settings dialog to another page (the MCP hint uses it). */
   onOpenTab?: (tab: SettingsTab) => void;
   /** Close the settings dialog, so a note opened from a profile is visible. */
@@ -127,6 +129,14 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
     void reload();
     return () => { loadGen.current++; };
   }, [orgId, canManage, reload]);
+
+  // Clicking the already-active "Members and access" item returns to the
+  // first page of the tab: the roster, search cleared.
+  useEffect(() => {
+    if (resetToken === 0) return;
+    setProfile(null);
+    setQuery("");
+  }, [resetToken]);
 
   /** Everything that must follow an access write. */
   const afterAccessWrite = async () => {
