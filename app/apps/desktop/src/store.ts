@@ -95,7 +95,6 @@ import type { AccountLinkKind } from "./lib/accountLink";
 import { normalizeServerUrl } from "./lib/auth/serverChoice";
 import { readLastTab, writeLastTab, type RightPanelTab } from "./components/rightPanelTab";
 import { forgetPersisted } from "./components/reviewModel";
-import { reconcileReport } from "./lib/sync/reconcileReport";
 import {
   neighbourAfterClose,
   upsertTab,
