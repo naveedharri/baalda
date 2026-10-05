@@ -177,9 +177,9 @@ export function AccountMenu() {
     if (settingsDismissToken > 0) setMembersOpen(false);
   }, [settingsDismissToken]);
 
-  // Sign-out closes every dialog this component owns (#302). It stays mounted
-  // through sign-out → sign-in, so local open flags would otherwise bring the
-  // pre-sign-out dialog back on top of the vault.
+  // Sign-out closes every dialog this component owns (#302), for the case where
+  // it stays mounted through sign-out → sign-in (see the tokens below for the
+  // case where it does not).
   const hadSession = useRef(session != null);
   useEffect(() => {
     if (hadSession.current && session == null) {
@@ -191,15 +191,24 @@ export function AccountMenu() {
     hadSession.current = session != null;
   }, [session]);
 
+  // Requests are tokens kept in the store, so the last one outlives this
+  // component. Sign-out swaps the app for the sign-in screen and unmounts it;
+  // on sign-in it would mount, read that old request and reopen both settings
+  // dialogs (#302). Only a token newer than the one seen at mount opens a dialog.
+  const seenSettingsToken = useRef(settingsRequest?.token ?? 0);
+  const seenAccountSettingsToken = useRef(accountSettingsRequest?.token ?? 0);
+
   useEffect(() => {
-    if (!settingsRequest) return;
+    if (!settingsRequest || settingsRequest.token <= seenSettingsToken.current) return;
+    seenSettingsToken.current = settingsRequest.token;
     setOpen(false);
     setSettingsTab(settingsRequest.tab);
     setMembersOpen(true);
   }, [settingsRequest]);
 
   useEffect(() => {
-    if (!accountSettingsRequest) return;
+    if (!accountSettingsRequest || accountSettingsRequest.token <= seenAccountSettingsToken.current) return;
+    seenAccountSettingsToken.current = accountSettingsRequest.token;
     setOpen(false);
     setAccountSettingsTab(accountSettingsRequest.tab);
     setAccountOpen(true);
