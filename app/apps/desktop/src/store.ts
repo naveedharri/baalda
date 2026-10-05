@@ -40,6 +40,7 @@ import {
 import { authManager } from "./lib/auth/authManager";
 import { syncManager } from "./lib/sync/docSession";
 import { vaultScopes } from "./lib/sync/vaultScope";
+import { reconcileReport } from "./lib/sync/reconcileReport";
 import type { SyncStatus } from "./lib/sync/syncManager";
 import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
@@ -1559,6 +1560,8 @@ function leaveVaultSync(): void {
  */
 function enterVaultScope(info: ipc.VaultInfo, orgId: string | null): void {
   vaultScopes.ensure({ orgId, vaultPath: info.path, vaultEpoch: info.epoch });
+  // Reconcile entries are per vault; re-read them for the one now open.
+  reconcileReport.vaultChanged();
 }
 
 /**

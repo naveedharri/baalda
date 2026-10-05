@@ -76,7 +76,7 @@ import {
 } from "./vaultScope";
 import { SyncLog } from "./syncLog";
 import { linkRefusals, resetLinkRefusals, SYMLINK_REFUSAL_REASON } from "./linkRefusals";
-import { attributeRecoveryCopies } from "./reconcileReport";
+import { attributeRecoveryCopies, reconcileReport } from "./reconcileReport";
 import { samePathKey } from "../pathIdentity";
 import type { SyncLogEntry, SyncLogLevel } from "../health/types";
 import {
@@ -6110,6 +6110,9 @@ export class SyncManager implements InboundHost {
     // in flight reads as stale.
     this.scope = null;
     vaultScopes.end();
+    // The report's readers filter by the current scope; tell them it moved so
+    // the vault we left stops showing in the banner and Activity at once.
+    reconcileReport.vaultChanged();
     // Now that no scope is current, this publishes an EMPTY path→docId map (and
     // clears the coalescing timer, so nothing from the vault we left arrives
     // 100ms into the next one). The last-edit stamps go the same way.
