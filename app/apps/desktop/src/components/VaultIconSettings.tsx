@@ -16,7 +16,6 @@ import {
   VAULT_ICON_MAX_CHARS,
   VAULT_ICON_NAMES,
   writeLocalVaultIcon,
-  writePersonalVaultIcon,
   type VaultIconName,
 } from "../lib/vaultIcon";
 import { useStore } from "../store";
@@ -30,28 +29,23 @@ import { useVaultIconRaw, VaultTile } from "./VaultSwitcher";
 const RECENT_SHOWN = 6;
 /**
  * Vault settings → General → Vault icon: pick a preset glyph and colour, or
- * upload an image. A synced vault's shared icon is the team's (stored on the
- * server, owner/admin only, and only shown to them); a local vault's is this
- * device's. `personal` edits this device's own icon for a synced vault, which
- * any member may set and which wins over the team's in the switcher (#291).
+ * upload an image. A synced vault's icon is the team's (stored on the server):
+ * members see the same picker as owners/admins, with every action disabled.
+ * A local vault's icon is this device's.
  */
 export function VaultIconSettings({
   identity,
   name,
-  personal = false,
+  canEdit,
 }: {
   /** The switcher identity: `org:<id>` (synced) or `local:<path>`. */
   identity: string;
   name: string;
-  /** Edit this device's own icon for a synced vault instead of the team's. */
-  personal?: boolean;
+  canEdit: boolean;
 }) {
   const isSynced = identity.startsWith("org:");
-  const isPersonal = personal && isSynced;
-  const raw = useVaultIconRaw(identity, isPersonal ? "personal" : isSynced ? "shared" : "resolved");
-  // A personal icon not set yet starts from what the tile paints: the team's.
-  const sharedRaw = useVaultIconRaw(identity, "shared");
-  const current = resolveVaultIcon(identity, raw ?? (isPersonal ? sharedRaw : null));
+  const raw = useVaultIconRaw(identity);
+  const current = resolveVaultIcon(identity, raw);
   const isCustom = parseVaultIcon(raw) !== null;
   // The colour the preset grid is drawn in. Follows the current preset; an
   // image keeps the last picked (or default) colour for when you switch back.
@@ -70,9 +64,7 @@ export function VaultIconSettings({
 
   /** Store the icon (server for a synced vault, this device for a local one). Throws. */
   const persist = async (value: string | null) => {
-    if (isPersonal) {
-      writePersonalVaultIcon(identity.slice("org:".length), value);
-    } else if (isSynced) {
+    if (isSynced) {
       const orgId = identity.slice("org:".length);
       await authManager.api.updateOrganizationLogo(orgId, value);
       // Paint it now; teammates pick it up with their next vault list.
@@ -130,11 +122,7 @@ export function VaultIconSettings({
     <div className="vault-icon-settings">
       <div className="vault-icon-head">
         <span className="vault-icon-preview" aria-busy={busy || undefined}>
-          <VaultTile
-            identity={identity}
-            name={name}
-            source={isPersonal ? "resolved" : isSynced ? "shared" : "resolved"}
-          />
+          <VaultTile identity={identity} name={name} />
           {busy && (
             <span className="vault-icon-preview-busy">
               <Spinner size="sm" tone="neutral" />
@@ -142,30 +130,30 @@ export function VaultIconSettings({
           )}
         </span>
         <div className="vault-icon-head-text">
-          <span className="vault-icon-title">{isPersonal ? "Your icon" : "Vault icon"}</span>
+          <span className="vault-icon-title">Vault icon</span>
           <span className="field-hint">
-            {isPersonal
-              ? "Shown only to you, on this device. Everyone else sees the vault's icon."
-              : isSynced
+            {!isSynced
+              ? "Shown on this device only, until you turn on sync."
+              : canEdit
                 ? "Everyone in this vault sees this icon."
-                : "Shown on this device only, until you turn on sync."}
+                : "Everyone in this vault sees this icon. Only an owner or admin can change it."}
           </span>
         </div>
         <div className="vault-icon-head-actions">
           {isCustom && (
             <AsyncButton
               className="link-btn"
-              disabled={busy}
+              disabled={!canEdit || busy}
               onClick={() => save(null, "reset")}
             >
-              {isPersonal ? "Reset to the vault's icon" : "Reset"}
+              Reset
             </AsyncButton>
           )}
           {/* Not an AsyncButton: its click only opens the file picker, and the
               slow part starts later, in the input's onChange. */}
           <button
             className={`secondary sm${pending === "upload" ? " is-busy" : ""}`}
-            disabled={busy}
+            disabled={!canEdit || busy}
             aria-busy={pending === "upload" || undefined}
             onClick={() => fileRef.current?.click()}
           >
@@ -208,7 +196,7 @@ export function VaultIconSettings({
                     role="radio"
                     aria-checked={selected}
                     title="Use this image"
-                    disabled={busy}
+                    disabled={!canEdit || busy}
                     onClick={() => {
                       rememberRecentUpload(src);
                       void save(serializeVaultIcon({ kind: "image", src }), "image");
@@ -231,7 +219,7 @@ export function VaultIconSettings({
             role="radio"
             aria-checked={color === NO_COLOR}
             title="None"
-            disabled={busy}
+            disabled={!canEdit || busy}
             onClick={() => pickColor(NO_COLOR)}
           />
           {ITEM_COLORS.map((c) => (
@@ -242,7 +230,7 @@ export function VaultIconSettings({
               role="radio"
               aria-checked={c.id === color}
               title={c.label}
-              disabled={busy}
+              disabled={!canEdit || busy}
               onClick={() => pickColor(c.id)}
             />
           ))}
@@ -250,7 +238,7 @@ export function VaultIconSettings({
 
         {usingImage && (
           <span className="vault-icon-note">
-            Using your uploaded image. Pick an icon to switch back.
+            {canEdit ? "Using your uploaded image. Pick an icon to switch back." : "Using an uploaded image."}
           </span>
         )}
         <div className="vault-icon-grid" role="radiogroup" aria-label="Icon">
@@ -263,7 +251,7 @@ export function VaultIconSettings({
                 role="radio"
                 aria-checked={selected}
                 title={icon}
-                disabled={busy}
+                disabled={!canEdit || busy}
                 onClick={() => pickPreset(icon)}
               >
                 <span className={`vault-tile${color === NO_COLOR ? " none" : ""}`}>

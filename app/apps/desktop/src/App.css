@@ -8155,7 +8155,8 @@ button.secondary:active:not(:disabled),
     0 0 0 3.5px var(--accent);
 }
 .vault-icon-option:disabled,
-.vault-icon-thumb:disabled {
+.vault-icon-thumb:disabled,
+.vault-icon-colors .swatch:disabled {
   cursor: default;
   opacity: 0.6;
 }

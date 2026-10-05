@@ -157,20 +157,6 @@ export function writeLocalVaultIcon(path: string, raw: string | null): void {
   window.dispatchEvent(new Event(CHANGE_EVENT));
 }
 
-/**
- * A member's own icon for a SYNCED vault (#291): stored on this device only,
- * never on the organization, and preferred over the team's icon when painting
- * the switcher. Shares the local store (and its change event) with local vaults,
- * under a key no folder path can take.
- */
-export function readPersonalVaultIcon(orgId: string): string | null {
-  return readLocalVaultIcon(`org:${orgId}`);
-}
-
-export function writePersonalVaultIcon(orgId: string, raw: string | null): void {
-  writeLocalVaultIcon(`org:${orgId}`, raw);
-}
-
 // ---- Recent uploads: device-local, offered again in the picker ----
 
 const RECENT_KEY = "context.vaultIcon.recentUploads";

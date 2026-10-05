@@ -414,22 +414,13 @@ function GeneralTab({
     <>
       {iconIdentity && (
         <>
-          {/* The team's icon belongs to the org: only those who can change it
-              see it (#290). Everyone in a synced vault gets their own (#291). */}
-          {(!isSynced || canManage) && (
-            <VaultIconSettings
-              identity={iconIdentity}
-              name={(isSynced ? activeOrgName : null) ?? vault?.name ?? ""}
-            />
-          )}
-          {isSynced && canManage && <div className="menu-sep" />}
-          {isSynced && (
-            <VaultIconSettings
-              identity={iconIdentity}
-              name={activeOrgName ?? vault?.name ?? ""}
-              personal
-            />
-          )}
+          {/* One icon per vault. A synced vault's belongs to the org: members see
+              the owner's picker with every action disabled. */}
+          <VaultIconSettings
+            identity={iconIdentity}
+            name={(isSynced ? activeOrgName : null) ?? vault?.name ?? ""}
+            canEdit={!isSynced || canManage}
+          />
           {/* A synced vault's next row (Freeze vault root) brings its own divider. */}
           {!isSynced && <div className="menu-sep" />}
         </>
