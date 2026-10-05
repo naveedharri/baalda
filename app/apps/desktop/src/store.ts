@@ -94,6 +94,8 @@ import { parseInviteDeepLink } from "./lib/inviteLink";
 import type { AccountLinkKind } from "./lib/accountLink";
 import { normalizeServerUrl } from "./lib/auth/serverChoice";
 import { readLastTab, writeLastTab, type RightPanelTab } from "./components/rightPanelTab";
+import { forgetPersisted } from "./components/reviewModel";
+import { reconcileReport } from "./lib/sync/reconcileReport";
 import {
   neighbourAfterClose,
   upsertTab,
@@ -3752,6 +3754,12 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   removeVaultLocally: async (organizationId) => {
+    // The review queue is saved under the folder path, so a later join into
+    // the same folder would replay this membership's rows (#295). End it here,
+    // and clear the live report while this vault is still the open one.
+    const removedPath = readOrgVaults()[organizationId] ?? null;
+    if (removedPath) forgetPersisted(removedPath);
+    if (get().session?.activeOrganizationId === organizationId) reconcileReport.clear();
     // Forget this vault's local folder so it won't auto-open here again.
     forgetOrgVault(organizationId);
     forgetLastVault(organizationId);

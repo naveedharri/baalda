@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ReconcileItem } from "../../lib/sync/reconcileReport";
 import {
+  forgetPersisted,
   parseReview,
   prunePersisted,
   readPersisted,
@@ -38,6 +39,15 @@ describe("review persistence", () => {
     expect(back.items.map((i) => i.path)).toEqual(["a.md", "e.md"]);
     expect(back.items[0]).toEqual(copyA);
     expect(back.resolved).toEqual([[reviewKey(copyE), "skipped"]]);
+  });
+
+  it("forgets a vault's saved review on leave, so a rejoin starts clean (#295)", () => {
+    const { kv, m } = memory();
+    writePersisted("/v", serializeReview([copyA], new Map()), kv);
+    writePersisted("/other", serializeReview([copyA], new Map()), kv);
+    forgetPersisted("/v", kv);
+    expect(readPersisted("/v", kv)).toBeNull();
+    expect(m.has(REVIEW_STORAGE_PREFIX + "/other")).toBe(true);
   });
 
   it("removes the key when nothing is left to save", () => {
