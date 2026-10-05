@@ -143,7 +143,7 @@ export const ACTIVITY_HINT = {
     "Every emptied note was saved as a version first. Their edits stay on their device and sync " +
     "when the pause ends or an owner or admin releases it.",
   access: "Someone changed who can see this. Only this app session's changes are listed.",
-  failed: "Sync could not finish this item. It is also listed in Vault Health.",
+  failed: "Sync could not finish this item.",
   invitation: "Nobody accepted this invitation before it expired. Resend sends a new link with a fresh expiry.",
 } as const;
 
