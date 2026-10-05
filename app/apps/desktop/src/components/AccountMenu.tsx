@@ -177,6 +177,20 @@ export function AccountMenu() {
     if (settingsDismissToken > 0) setMembersOpen(false);
   }, [settingsDismissToken]);
 
+  // Sign-out closes every dialog this component owns (#302). It stays mounted
+  // through sign-out → sign-in, so local open flags would otherwise bring the
+  // pre-sign-out dialog back on top of the vault.
+  const hadSession = useRef(session != null);
+  useEffect(() => {
+    if (hadSession.current && session == null) {
+      setMembersOpen(false);
+      setAccountOpen(false);
+      setAuthOpen(false);
+      setOpen(false);
+    }
+    hadSession.current = session != null;
+  }, [session]);
+
   useEffect(() => {
     if (!settingsRequest) return;
     setOpen(false);
