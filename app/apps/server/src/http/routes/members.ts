@@ -168,7 +168,7 @@ memberRoutes.get("/orgs/:orgId/members/overview", async (c) => {
 });
 
 type ActivityEvent =
-  | { kind: "joined"; at: string; invitedBy: PersonRef | null }
+  | { kind: "joined"; at: string; invitedBy: PersonRef | null; rejoined?: boolean }
   | { kind: "created"; at: string; docId: string; path: string }
   | { kind: "edited"; at: string; docId: string; path: string }
   | {
@@ -315,6 +315,18 @@ memberRoutes.get("/orgs/:orgId/members/:userId/activity", async (c) => {
       resourceId: s.resource_id,
       path,
     });
+  }
+
+  // The member row is the CURRENT membership: leaving deletes it and a rejoin
+  // inserts a new one, while authored notes outlive both. Note activity older
+  // than this join can only come from an earlier membership, so say so instead
+  // of implying one continuous membership (#296).
+  const joined = events[0];
+  if (
+    joined.kind === "joined" &&
+    events.some((e) => (e.kind === "created" || e.kind === "edited") && e.at < joined.at)
+  ) {
+    joined.rejoined = true;
   }
 
   events.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));

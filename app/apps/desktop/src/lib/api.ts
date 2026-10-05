@@ -403,7 +403,7 @@ export interface MemberRef {
 
 /** One row of `GET /api/orgs/:orgId/members/:userId/activity`, newest first. */
 export type MemberActivityEvent =
-  | { kind: "joined"; at: string; invitedBy: MemberRef | null }
+  | { kind: "joined"; at: string; invitedBy: MemberRef | null; rejoined?: boolean }
   | { kind: "created"; at: string; docId: string; path: string }
   | { kind: "edited"; at: string; docId: string; path: string }
   | {

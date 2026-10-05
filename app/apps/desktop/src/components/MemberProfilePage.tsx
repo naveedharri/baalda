@@ -353,7 +353,7 @@ function runSentence(run: Extract<TimelineEntry, { type: "run" }>, voice: Voice)
 export function activitySentence(event: MemberActivityEvent, voice: Voice): React.ReactNode {
   switch (event.kind) {
     case "joined":
-      return <>{lead(voice, "joined")} {voice.vaultName}{event.invitedBy ? `, invited by ${personName(event.invitedBy)}` : ""}</>;
+      return <>{lead(voice, event.rejoined ? "rejoined" : "joined")} {voice.vaultName}{event.invitedBy ? `, invited by ${personName(event.invitedBy)}` : ""}</>;
     case "edited":
       return <>{lead(voice, "edited")} <NoteName path={event.path} voice={voice} /></>;
     case "created": {
