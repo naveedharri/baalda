@@ -7737,6 +7737,12 @@ button.secondary:active:not(:disabled),
   text-overflow: ellipsis;
   font-size: var(--fs-xs);
 }
+.activity-row-meta-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .activity-row-actions {
   display: flex;
   flex: 0 0 auto;
