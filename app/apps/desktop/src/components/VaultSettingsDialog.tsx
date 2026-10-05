@@ -4,6 +4,7 @@
    stays eager, and this chunk lands when someone actually opens settings. */
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
+  ApiError,
   type McpToolInfo,
   type McpTokenRow,
   type MyBillingVault,
@@ -1038,7 +1039,10 @@ function VaultsTab() {
       // open (only success clears it) so the error has somewhere to show.
       setActionError(message);
       // Destructive path: a failure here must never look like a success (#85).
-      toast(`Couldn't delete the vault — ${message}`, "error");
+      // The cancel-failed message is already a full sentence (#300).
+      const cancelFailed =
+        e instanceof ApiError && (e.body as { error?: unknown } | undefined)?.error === "subscription_cancel_failed";
+      toast(cancelFailed ? message : `Couldn't delete the vault — ${message}`, "error");
     } finally {
       setBusy(false);
     }
