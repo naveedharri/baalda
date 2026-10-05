@@ -28,7 +28,7 @@ import {
 } from "../lib/billing";
 import * as ipc from "../lib/ipc";
 import { readOrgVaults, useStore } from "../store";
-import { MembersAccessTab } from "./MembersAccessTab";
+import { MembersAccessTab, prefetchRoster } from "./MembersAccessTab";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
@@ -217,6 +217,14 @@ export function VaultSettingsDialog({
     }
     return out;
   }, [showVaults, billingEnabled]);
+
+  // Warm the Members tab's roster as the dialog opens (#307); paint only.
+  useEffect(() => {
+    const orgId = session?.activeOrganizationId ?? null;
+    const me = members.find((m) => m.userId === session?.user.id);
+    if (!orgId || !me) return;
+    prefetchRoster(orgId, me.role === "owner" || me.role === "admin");
+  }, [session, members]);
 
   if (!session && !vault) return null;
   const myMember = members.find((m) => m.userId === session?.user.id);

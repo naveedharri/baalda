@@ -82,6 +82,28 @@ const rosterCache = new Map<string, RosterSnapshot>();
 const rosterKey = (orgId: string, canManage: boolean) =>
   `${authManager.getServerUrl()}|${orgId}|${canManage ? "m" : "p"}`;
 
+/**
+ * Warm the roster cache when Vault Settings opens, so the Members tab paints
+ * at once (#307). Fills only an empty slot and swallows failures: the tab's
+ * own load still runs and stays authoritative.
+ */
+const prefetching = new Set<string>();
+export function prefetchRoster(orgId: string | null, canManage: boolean): void {
+  if (!orgId) return;
+  const key = rosterKey(orgId, canManage);
+  if (rosterCache.has(key) || prefetching.has(key)) return;
+  prefetching.add(key);
+  void Promise.all([
+    authManager.api.getMembersOverview(orgId).catch(() => null),
+    canManage ? authManager.api.getTeamAccess(orgId).catch(() => null) : Promise.resolve(null),
+    canManage ? authManager.api.getAccessDefault(orgId).catch(() => null) : Promise.resolve(null),
+  ]).then(([overview, teamAccess, accessDefault]) => {
+    prefetching.delete(key);
+    if (!overview || rosterCache.has(key)) return;
+    rosterCache.set(key, { overview, teamAccess, accessDefault });
+  });
+}
+
 export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetToken = 0 }: {
   canManage: boolean;
   /** Bumped when the active nav item is clicked again: back to the roster (#308). */
