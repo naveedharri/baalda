@@ -80,3 +80,43 @@ async function boardSupported(api: AccessMapApi): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * The last access map per (server, vault, person) this session (#307): a
+ * revisit of the same Access tab paints from it while the fresh load runs.
+ * PAINT ONLY: nothing reads it to decide or authorise a write. The board
+ * writes its live modes back after every optimistic update, revert and
+ * subtree re-read, so a revisit never paints a level the board already moved.
+ */
+export interface CachedAccessMap {
+  tree: AccessTreeResponse;
+  modes: ReadonlyMap<string, SummaryMode> | null;
+}
+const mapCache = new Map<string, CachedAccessMap>();
+const mapKey = (server: string, vaultId: string, userId: string) => `${server}|${vaultId}|${userId}`;
+
+export function readCachedAccessMap(server: string, vaultId: string, userId: string): CachedAccessMap | null {
+  return mapCache.get(mapKey(server, vaultId, userId)) ?? null;
+}
+
+export function writeCachedAccessMap(server: string, vaultId: string, userId: string, map: CachedAccessMap): void {
+  mapCache.set(mapKey(server, vaultId, userId), { tree: map.tree, modes: map.modes ? new Map(map.modes) : null });
+}
+
+/** Replace the cached modes with the board's live ones; no-op without a cached tree. */
+export function patchCachedAccessModes(
+  server: string,
+  vaultId: string,
+  userId: string,
+  modes: ReadonlyMap<string, SummaryMode>,
+): void {
+  const key = mapKey(server, vaultId, userId);
+  const prev = mapCache.get(key);
+  if (!prev) return;
+  mapCache.set(key, { tree: prev.tree, modes: new Map(modes) });
+}
+
+/** Drop one person's cached map (a write elsewhere made it unreliable). */
+export function forgetCachedAccessMap(server: string, vaultId: string, userId: string): void {
+  mapCache.delete(mapKey(server, vaultId, userId));
+}
