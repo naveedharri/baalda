@@ -70,6 +70,38 @@ class PolarNotFoundError extends Error {
 }
 
 /**
+ * Polar refused a cancel-at-period-end because the subscription is already
+ * cancelled or set to cancel at period end (403 `AlreadyCanceledSubscription`).
+ * The end state is exactly what the caller asked for, so `cancelSubscription`
+ * reads the subscription back instead of failing (#300).
+ */
+class PolarAlreadyCanceledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PolarAlreadyCanceledError";
+  }
+}
+
+/**
+ * Polar's `error` code from a failed call, read from the typed error class,
+ * the raw value a `ResponseValidationError` could not parse, or the JSON body.
+ */
+function polarErrorCode(e: { error?: unknown; body?: unknown; rawValue?: unknown }): string | null {
+  if (typeof e.error === "string") return e.error;
+  const raw = e.rawValue as { error?: unknown } | null | undefined;
+  if (raw && typeof raw === "object" && typeof raw.error === "string") return raw.error;
+  if (typeof e.body === "string") {
+    try {
+      const parsed = JSON.parse(e.body) as { error?: unknown } | null;
+      if (parsed && typeof parsed.error === "string") return parsed.error;
+    } catch {
+      /* not JSON */
+    }
+  }
+  return null;
+}
+
+/**
  * Run one Polar SDK call, converting its errors into something diagnosable.
  *
  * The SDK's `ResponseValidationError` carries a `message` of exactly
@@ -94,9 +126,14 @@ async function polarCall<T>(op: string, fn: () => Promise<T>): Promise<T> {
       name?: string;
       statusCode?: number;
       body?: string;
+      error?: unknown;
       rawValue?: unknown;
       pretty?: () => string;
     };
+    const code = polarErrorCode(e);
+    if (e.statusCode === 403 && code === "AlreadyCanceledSubscription") {
+      throw new PolarAlreadyCanceledError(`Polar ${op}: subscription already canceled (HTTP 403)`);
+    }
     // A 404 is not a failure for every caller: reconciliation asks about ids
     // that may have been deleted at Polar and must be able to tell "gone" from
     // "call broke". Every Polar error class extends `PolarError`, which carries
@@ -112,7 +149,9 @@ async function polarCall<T>(op: string, fn: () => Promise<T>): Promise<T> {
           `${e.pretty()}\nbody: ${body}`,
       );
       throw new Error(
-        `Polar ${op} returned a response this SDK could not parse (HTTP ${e.statusCode ?? "?"}) — see server logs`,
+        code
+          ? `Polar ${op} refused: ${code} (HTTP ${e.statusCode ?? "?"})`
+          : `Polar ${op} returned a response this SDK could not parse (HTTP ${e.statusCode ?? "?"}) — see server logs`,
       );
     }
     throw err;
@@ -250,13 +289,23 @@ export class PolarBillingProvider implements BillingProvider {
     // `cancelAtPeriodEnd: true` is Polar's "stop renewing but keep access"
     // switch — the same one their customer portal flips, so a cancel we make
     // and a cancel the owner makes end up in identical provider state.
-    const sub = await polarCall("subscriptions.update(cancelAtPeriodEnd)", () =>
-      client().subscriptions.update({
-        id: providerSubscriptionId,
-        subscriptionUpdate: { cancelAtPeriodEnd: true },
-      }),
-    );
-    return toSnapshot(sub);
+    try {
+      const sub = await polarCall("subscriptions.update(cancelAtPeriodEnd)", () =>
+        client().subscriptions.update({
+          id: providerSubscriptionId,
+          subscriptionUpdate: { cancelAtPeriodEnd: true },
+        }),
+      );
+      return toSnapshot(sub);
+    } catch (err) {
+      // Already cancelled (an earlier attempt got this far, or the owner
+      // cancelled in the portal): the state is what we wanted, so report it
+      // instead of refusing the teardown on every retry (#300).
+      if (!(err instanceof PolarAlreadyCanceledError)) throw err;
+      const snap = await this.getSubscription(providerSubscriptionId);
+      if (snap) return snap;
+      throw err;
+    }
   }
 
   async resumeSubscription(providerSubscriptionId: string): Promise<SubscriptionSnapshot> {
