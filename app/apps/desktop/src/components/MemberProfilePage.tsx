@@ -252,6 +252,9 @@ type ActivityState =
 
 const ACTIVITY_LIMIT = 50;
 
+/** Last activity answer per (org, person) this session: a revisit paints at once (#307). */
+const activityCache = new Map<string, MemberActivityEvent[]>();
+
 /** Mounted only while the Activity tab is shown, so it loads on first view. */
 function PersonActivity({ orgId, member, vaultName, isSelf, onOpenNote }: {
   orgId: string;
@@ -260,19 +263,28 @@ function PersonActivity({ orgId, member, vaultName, isSelf, onOpenNote }: {
   isSelf: boolean;
   onOpenNote?: (path: string) => void;
 }) {
-  const [state, setState] = useState<ActivityState>({ status: "loading" });
+  const cacheKey = `${authManager.getServerUrl()}|${orgId}|${member.userId}`;
+  const [state, setState] = useState<ActivityState>(() => {
+    const seen = activityCache.get(cacheKey);
+    return seen ? { status: "ready", events: seen } : { status: "loading" };
+  });
   useEffect(() => {
     let live = true;
-    setState({ status: "loading" });
+    const seen = activityCache.get(cacheKey);
+    setState(seen ? { status: "ready", events: seen } : { status: "loading" });
     authManager.api.getMemberActivity(orgId, member.userId, ACTIVITY_LIMIT)
-      .then((events) => { if (live) setState({ status: "ready", events }); })
+      .then((events) => {
+        activityCache.set(cacheKey, events);
+        if (live) setState({ status: "ready", events });
+      })
       .catch((e) => {
-        if (!live) return;
+        // A failed refresh keeps a previously loaded timeline on screen.
+        if (!live || activityCache.has(cacheKey)) return;
         setState(e instanceof ApiError && e.status === 403 ? { status: "forbidden" } : { status: "error" });
       });
     // A person change (or unmount) drops whatever the old request returns.
     return () => { live = false; };
-  }, [orgId, member.userId]);
+  }, [orgId, member.userId, cacheKey]);
 
   if (state.status === "loading") return <ActivitySkeleton />;
   if (state.status === "forbidden") {

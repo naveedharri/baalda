@@ -66,6 +66,17 @@ interface Confirm {
  * bulk route with an org audience — because that endpoint is what clears the
  * per-folder team rows in the same transaction.
  */
+/**
+ * The last roster answer per (server, org, manager view), kept in memory for
+ * the session so a revisit paints at once and re-fetches behind it (#307).
+ * Never persisted and never used to authorise anything: the fresh answer
+ * replaces it as soon as it lands.
+ */
+type RosterSnapshot = { overview: MembersOverview | null; teamAccess: TeamAccess | null; accessDefault: AccessDefault | null };
+const rosterCache = new Map<string, RosterSnapshot>();
+const rosterKey = (orgId: string, canManage: boolean) =>
+  `${authManager.getServerUrl()}|${orgId}|${canManage ? "m" : "p"}`;
+
 export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetToken = 0 }: {
   canManage: boolean;
   /** Bumped when the active nav item is clicked again: back to the roster (#308). */
@@ -113,6 +124,12 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       writeTeamAccessCache(authManager.getServerUrl(), orgId, team.mode);
     }
     if (joining) setAccessDefault(joining);
+    const prev = rosterCache.get(rosterKey(orgId, canManage));
+    rosterCache.set(rosterKey(orgId, canManage), {
+      overview: ov ?? prev?.overview ?? null,
+      teamAccess: team ?? prev?.teamAccess ?? null,
+      accessDefault: joining ?? prev?.accessDefault ?? null,
+    });
     if (!ov || (canManage && (!team || !joining))) {
       setError("Couldn't load everything on this page. Check your connection and reopen it.");
     }
@@ -120,9 +137,11 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
 
   useEffect(() => {
     loadGen.current++;
-    setOverview(null);
-    setTeamAccess(null);
-    setAccessDefault(null);
+    // A roster seen earlier this session paints at once; the reload refreshes it.
+    const seen = orgId ? rosterCache.get(rosterKey(orgId, canManage)) : undefined;
+    setOverview(seen?.overview ?? null);
+    setTeamAccess(seen?.teamAccess ?? null);
+    setAccessDefault(seen?.accessDefault ?? null);
     setError(null);
     setConfirm(null);
     setProfile(null);
