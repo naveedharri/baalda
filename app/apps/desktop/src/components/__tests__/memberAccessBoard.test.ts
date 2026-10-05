@@ -4,6 +4,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetMembersAccessCaches } from "../../lib/membersAccessCaches";
 import { MemberAccessBoard } from "../MemberAccessBoard";
 
 const api = vi.hoisted(() => ({
@@ -41,6 +42,7 @@ describe("Member access board", () => {
   let onItemWritten: ReturnType<typeof vi.fn<() => void>>;
   let onChanged: ReturnType<typeof vi.fn<() => Promise<void>>>;
   beforeEach(() => {
+    resetMembersAccessCaches();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     patchStore({ locks: [], tree: null });
@@ -72,6 +74,7 @@ describe("Member access board", () => {
     root = createRoot(host);
   });
   afterEach(() => {
+    resetMembersAccessCaches();
     act(() => root.unmount());
     host.remove();
   });

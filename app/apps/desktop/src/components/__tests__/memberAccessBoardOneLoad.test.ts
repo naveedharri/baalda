@@ -4,6 +4,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetMembersAccessCaches } from "../../lib/membersAccessCaches";
 import { MemberAccessBoard } from "../MemberAccessBoard";
 import { forgetServerFeatures } from "../../lib/serverFeatures";
 import { forgetAccessBoardSupport } from "../../lib/accessBoardLoad";
@@ -41,6 +42,7 @@ describe("Access board, one request", () => {
   let root: Root;
   let host: HTMLDivElement;
   beforeEach(() => {
+    resetMembersAccessCaches();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     forgetServerFeatures();
@@ -56,6 +58,7 @@ describe("Access board, one request", () => {
     root = createRoot(host);
   });
   afterEach(() => {
+    resetMembersAccessCaches();
     act(() => root.unmount());
     host.remove();
   });

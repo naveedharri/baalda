@@ -41,6 +41,7 @@ import { authManager } from "./lib/auth/authManager";
 import { syncManager } from "./lib/sync/docSession";
 import { vaultScopes } from "./lib/sync/vaultScope";
 import { reconcileReport } from "./lib/sync/reconcileReport";
+import { resetMembersAccessCaches } from "./lib/membersAccessCaches";
 import type { SyncStatus } from "./lib/sync/syncManager";
 import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
@@ -4685,3 +4686,16 @@ if (import.meta.hot) {
 // The editor text size is a CSS token on :root, so it must be published once at
 // startup (after restart) as well as on every change.
 applyEditorFontSize(useStore.getState().editorFontSize);
+
+// The Members and access caches are paint-only but keyed per server, not per
+// account: sign-out, a different account or a different server forgets them
+// so one account's roster never paints for another (#307).
+useStore.subscribe((state, prev) => {
+  if (
+    state.serverUrl !== prev.serverUrl ||
+    (prev.session != null && state.session == null) ||
+    (state.session?.user.id ?? null) !== (prev.session?.user.id ?? null)
+  ) {
+    resetMembersAccessCaches();
+  }
+});

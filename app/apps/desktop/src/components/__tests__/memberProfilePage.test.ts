@@ -4,6 +4,7 @@
 import { act, createElement, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetMembersAccessCaches } from "../../lib/membersAccessCaches";
 import { MemberProfilePage } from "../MemberProfilePage";
 import { useStore } from "../../store";
 import { relativeTime } from "../../lib/health/format";
@@ -40,6 +41,7 @@ describe("Member profile page, Access tab", () => {
   let onItemWritten: ReturnType<typeof vi.fn<() => void>>;
   let onChanged: ReturnType<typeof vi.fn<() => Promise<void>>>;
   beforeEach(() => {
+    resetMembersAccessCaches();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     patchStore({ locks: [], denies: [], tree: null });
@@ -59,6 +61,7 @@ describe("Member profile page, Access tab", () => {
     root = createRoot(host);
   });
   afterEach(() => {
+    resetMembersAccessCaches();
     act(() => root.unmount());
     host.remove();
   });
@@ -255,6 +258,7 @@ describe("Member profile page, Personal info and Activity tabs", () => {
   let root: Root;
   let host: HTMLDivElement;
   beforeEach(() => {
+    resetMembersAccessCaches();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     patchStore({ locks: [], denies: [], tree: null });
@@ -263,6 +267,7 @@ describe("Member profile page, Personal info and Activity tabs", () => {
     root = createRoot(host);
   });
   afterEach(() => {
+    resetMembersAccessCaches();
     act(() => root.unmount());
     host.remove();
   });
@@ -418,6 +423,7 @@ describe("Member profile page, Personal info and Activity tabs", () => {
   describe("Access view toggle", () => {
     let store: Record<string, string>;
     beforeEach(() => {
+      resetMembersAccessCaches();
       store = {};
       vi.stubGlobal("localStorage", {
         getItem: (k: string) => (k in store ? store[k] : null),

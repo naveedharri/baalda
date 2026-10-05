@@ -120,3 +120,8 @@ export function patchCachedAccessModes(
 export function forgetCachedAccessMap(server: string, vaultId: string, userId: string): void {
   mapCache.delete(mapKey(server, vaultId, userId));
 }
+
+/** Forget every cached access map (sign-out, account or server change, tests). */
+export function resetAccessMapCache(): void {
+  mapCache.clear();
+}

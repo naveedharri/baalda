@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "../lib/api";
 import type { BulkAccessResource, MemberActivityEvent, MemberOverview, TeamAccess, TeamAccessMode } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
+import { activityCache } from "../lib/membersAccessCaches";
 import { buildOrgRowsByPath, effectiveTeamMode } from "../lib/accessMode";
 import { createAccessSummaryBatcher } from "../lib/accessSummaryBatch";
 import { accessResourceType, ancestorPaths, entriesFromServer, rowsFromEntries, type AccessRow } from "../lib/accessTree";
@@ -251,9 +252,6 @@ type ActivityState =
   | { status: "ready"; events: MemberActivityEvent[] };
 
 const ACTIVITY_LIMIT = 50;
-
-/** Last activity answer per (org, person) this session: a revisit paints at once (#307). */
-const activityCache = new Map<string, MemberActivityEvent[]>();
 
 /** Mounted only while the Activity tab is shown, so it loads on first view. */
 function PersonActivity({ orgId, member, vaultName, isSelf, onOpenNote }: {

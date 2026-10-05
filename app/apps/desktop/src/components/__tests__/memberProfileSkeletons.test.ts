@@ -4,6 +4,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetMembersAccessCaches } from "../../lib/membersAccessCaches";
 import { MemberProfilePage } from "../MemberProfilePage";
 import { useStore } from "../../store";
 
@@ -38,6 +39,7 @@ describe("Member profile skeletons", () => {
   let root: Root;
   let host: HTMLDivElement;
   beforeEach(() => {
+    resetMembersAccessCaches();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     (useStore as unknown as { setState: (s: Record<string, unknown>) => void }).setState({ locks: [], denies: [], tree: null });
@@ -47,6 +49,7 @@ describe("Member profile skeletons", () => {
     root = createRoot(host);
   });
   afterEach(() => {
+    resetMembersAccessCaches();
     act(() => root.unmount());
     host.remove();
     localStorage.clear();

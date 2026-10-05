@@ -4,6 +4,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetMembersAccessCaches } from "../../lib/membersAccessCaches";
 import { MembersAccessTab } from "../MembersAccessTab";
 import { useStore } from "../../store";
 
@@ -45,6 +46,7 @@ describe("Members and access tab", () => {
   let root: Root;
   let host: HTMLDivElement;
   beforeEach(() => {
+    resetMembersAccessCaches();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     patchStore({
@@ -61,6 +63,7 @@ describe("Members and access tab", () => {
     root = createRoot(host);
   });
   afterEach(() => {
+    resetMembersAccessCaches();
     act(() => root.unmount());
     host.remove();
   });

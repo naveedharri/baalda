@@ -10,6 +10,7 @@ import type {
   TeamAccessMode,
 } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
+import { rosterCache, type RosterSnapshot } from "../lib/membersAccessCaches";
 import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
 import {
   countLine,
@@ -77,8 +78,6 @@ interface Confirm {
  * Never persisted and never used to authorise anything: the fresh answer
  * replaces it as soon as it lands.
  */
-type RosterSnapshot = { overview: MembersOverview | null; teamAccess: TeamAccess | null; accessDefault: AccessDefault | null };
-const rosterCache = new Map<string, RosterSnapshot>();
 const rosterKey = (orgId: string, canManage: boolean) =>
   `${authManager.getServerUrl()}|${orgId}|${canManage ? "m" : "p"}`;
 
