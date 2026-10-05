@@ -41,7 +41,8 @@ export function addChips(chips: readonly string[], text: string): string[] {
 export function InvitePeopleDialog({ orgId, onClose, onInvited }: {
   orgId: string;
   onClose: () => void;
-  onInvited: () => void;
+  /** Called with the per-address results so the roster can add rows at once. */
+  onInvited: (results: InviteManyResult[], sent: { role: string; access: TeamAccessMode | null }) => void;
 }) {
   const serverUrl = useStore((s) => s.serverUrl);
   const [chips, setChips] = useState<string[]>([]);
@@ -89,7 +90,7 @@ export function InvitePeopleDialog({ orgId, onClose, onInvited }: {
       });
       setResults(out);
       setChips(out.filter((r) => r.error).map((r) => r.email));
-      onInvited();
+      onInvited(out, { role, access: access === "default" ? null : access });
       void useStore.getState().refreshVault();
     } catch (e) {
       const kind = classifyLimitError(e);

@@ -27,6 +27,11 @@ import {
   ROLE_LABEL,
   shortDate,
   presentUserIds,
+  levelOfMode,
+  patchedTeamAccess,
+  withMemberLevel,
+  withNewInvitations,
+  withoutInvitation,
 } from "../lib/membersAccess";
 import { syncManager } from "../lib/sync/docSession";
 import { writeTeamAccessCache } from "../lib/teamAccessCache";
@@ -164,6 +169,29 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     await Promise.all([useStore.getState().refreshLocks(), reload()]);
   };
 
+  /**
+   * Patch the roster on screen (and its session cache) right after a write,
+   * then refresh once in the background so the server stays authoritative
+   * (#307). Paint only: no write ever reads this state to decide anything.
+   */
+  const patchRoster = (patch: (prev: RosterSnapshot) => RosterSnapshot) => {
+    if (!orgId) return;
+    const key = rosterKey(orgId, canManage);
+    const prev = rosterCache.get(key) ?? { overview, teamAccess, accessDefault };
+    const next = patch(prev);
+    rosterCache.set(key, next);
+    setOverview(next.overview);
+    setTeamAccess(next.teamAccess);
+    setAccessDefault(next.accessDefault);
+  };
+  /** The one background refresh after a patched write. */
+  const refreshBehind = () => {
+    cancelSideEffects();
+    syncManager.retryHeldRegistrations();
+    void useStore.getState().refreshLocks();
+    void reload();
+  };
+
   // Per-item writes from the profile page: retry held registrations and
   // refresh the sidebar padlocks ONCE after a burst of ticks, not per row, and
   // reload nothing (the page updates its own rows; the overview reloads when
@@ -208,7 +236,8 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     if (!orgId) return;
     markSelfAccessChange([orgId]); // Everyone includes the signed-in user
     await authManager.api.setTeamAccess(orgId, mode);
-    await afterAccessWrite();
+    patchRoster((r) => ({ ...r, teamAccess: r.teamAccess ? patchedTeamAccess(r.teamAccess, mode) : r.teamAccess }));
+    refreshBehind();
     toast(`Everyone in ${vaultName}: ${EVERYONE_OPTIONS.find((o) => o.value === mode)?.label}`);
   });
 
@@ -241,6 +270,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     if (!orgId || accessDefault?.mode === mode) return;
     const next = await authManager.api.setAccessDefault(orgId, mode);
     setAccessDefault(next);
+    patchRoster((r) => ({ ...r, accessDefault: next }));
     toast(`New members: ${NEW_MEMBER_OPTIONS.find((o) => o.value === next.mode)?.label}`);
   });
 
@@ -253,7 +283,11 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       audience: { type: "users", userIds: [m.userId] },
       mode,
     });
-    await afterAccessWrite();
+    patchRoster((r) => ({
+      ...r,
+      overview: r.overview ? withMemberLevel(r.overview, m.userId, levelOfMode(mode)) : r.overview,
+    }));
+    refreshBehind();
     toast(`${displayName(m)}: ${PERSON_LEVEL_LABEL[mode === "open" ? "edit" : mode === "readonly" ? "view" : "none"]}`);
   });
 
@@ -334,7 +368,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     tone: "danger",
     apply: () => run(async () => {
       await authManager.api.cancelInvitation(inv.id);
-      await Promise.all([reload(), useStore.getState().refreshVault()]);
+      patchRoster((r) => ({ ...r, overview: r.overview ? withoutInvitation(r.overview, inv.id) : r.overview }));
+      void reload();
+      void useStore.getState().refreshVault();
     }),
     body: <p>Its link stops working. You can invite them again later.</p>,
   });
@@ -635,7 +671,13 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
         <InvitePeopleDialog
           orgId={orgId}
           onClose={() => setInviteOpen(false)}
-          onInvited={() => void reload()}
+          onInvited={(results, sent) => {
+            patchRoster((r) => ({
+              ...r,
+              overview: r.overview ? withNewInvitations(r.overview, results, sent, new Date().toISOString()) : r.overview,
+            }));
+            void reload();
+          }}
         />
       )}
     </div>
