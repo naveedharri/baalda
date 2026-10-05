@@ -28,6 +28,7 @@ import { bootstrapRoutes } from "./routes/bootstrap.js";
 import { syncTokenRoutes } from "./routes/sync-token.js";
 import { vaultTokenRoutes } from "./routes/vault-token.js";
 import { desktopOauthRoutes } from "./routes/desktop-oauth.js";
+import { SITE_ICON_PNG_BASE64 } from "../site-icon.js";
 import { bugReportRoutes } from "./routes/bug-reports.js";
 import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
@@ -231,6 +232,36 @@ export function createApp(deps: AppDeps): Hono {
       minDesktopVersion: clientVersionPolicy().minRaw,
       features: [NOTES_WITH_STATE_FEATURE, BOOTSTRAP_ONLY_FEATURE, FILES_WITH_BYTES_FEATURE, ACCESS_BOARD_FEATURE],
     }),
+  );
+
+  // ── Site icon ─────────────────────────────────────────────────────────────
+  // Connector directories and favicon services look up the icon of the MCP
+  // server's own origin (this host), not baalda.com. Without these they found
+  // nothing here and fell back to stale caches of other icons. The root page
+  // exists only to carry the <link rel="icon"> for fetchers that read HTML.
+  const siteIcon = new Uint8Array(Buffer.from(SITE_ICON_PNG_BASE64, "base64"));
+  const iconHeaders = {
+    "Content-Type": "image/png",
+    "Cache-Control": "public, max-age=86400",
+  };
+  app.get("/favicon.ico", (c) => c.body(siteIcon, 200, iconHeaders));
+  app.get("/icon.png", (c) => c.body(siteIcon, 200, iconHeaders));
+  app.get("/apple-touch-icon.png", (c) => c.body(siteIcon, 200, iconHeaders));
+  app.get("/", (c) =>
+    c.html(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Baalda</title>
+<link rel="icon" type="image/png" sizes="256x256" href="/icon.png" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+</head>
+<body style="font-family: system-ui, sans-serif; margin: 3rem;">
+<p><img src="/icon.png" alt="Baalda" width="64" height="64" /></p>
+<p>This is the Baalda sync and MCP server. The app lives at <a href="https://baalda.com">baalda.com</a>.</p>
+</body>
+</html>`),
   );
 
   // ── MCP OAuth discovery (RFC 8414 / RFC 9728) ─────────────────────────────
