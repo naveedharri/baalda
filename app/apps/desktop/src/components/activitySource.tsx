@@ -20,6 +20,7 @@ import type { HealthFailures } from "../lib/health/model";
 import { syncManager } from "../lib/sync/docSession";
 import { reconcileReport, type ReconcileItem, type ReconcileKind } from "../lib/sync/reconcileReport";
 import * as ipc from "../lib/ipc";
+import { withoutMissingCopies } from "./recoveryCopies";
 import { buildActivity, failureEntries, staleFailureIds, type ActivityRow, type FailedEntry } from "./activityRows";
 import { ACTIVITY_LOG_MAX_PATHS, appendLog, loadLog, removeFromLog, saveLog, type ActivityLogEntry } from "./activityLog";
 import {
@@ -628,7 +629,10 @@ export function ActivityHost(): null {
     }
     const heldAt = byId.get(HELD_ID)?.at;
     return buildActivity({
-      reconcile: [...seededReconcile, ...reconcile],
+      reconcile:
+        copies && !copiesError
+          ? withoutMissingCopies([...seededReconcile, ...reconcile], copies)
+          : [...seededReconcile, ...reconcile],
       trash: trash.listing?.items ?? [],
       copies: copies ?? [],
       held: pendingDelete && heldAt != null ? { count: pendingDelete.count, at: heldAt } : null,
@@ -638,7 +642,7 @@ export function ActivityHost(): null {
       failures: failed,
       invitations: invitations.items,
     });
-  }, [log, reconcile, trash.listing, copies, pendingDelete, shrinks.items, invitations.items, brakes.listing, selfId, failures, vaultId]);
+  }, [log, reconcile, trash.listing, copies, pendingDelete, shrinks.items, invitations.items, brakes.listing, selfId, failures, vaultId, copiesError]);
 
   // ── Clear ──
   const [clearedAt, setClearedAt] = useState(() => (root ? loadClearedAt(root) : 0));
