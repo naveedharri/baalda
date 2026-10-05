@@ -319,9 +319,9 @@ describe("Member profile page, Personal info and Activity tabs", () => {
     expect(dd("Joined")).not.toContain("invited by");
   });
 
-  it("shows plain members Personal info and Activity only", async () => {
+  it("shows a plain member only Personal info on someone else's profile (#301)", async () => {
     await render({ showAccessTab: false });
-    expect(tabs()).toEqual(["Personal info", "Activity"]);
+    expect(tabs()).toEqual(["Personal info"]);
   });
 
   /** Each timeline entry's sentence without its " · 2 hours ago" tail. */
