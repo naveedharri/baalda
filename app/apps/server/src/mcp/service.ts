@@ -27,6 +27,7 @@ import {
 import { purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
 import type { McpAuth } from "./tokens.js";
 import {
+  NoteTooLargeError,
   StaleRevisionError,
   replacementOp,
   revisionOf,
@@ -768,9 +769,9 @@ async function writeOrToolError<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (err) {
-    if (err instanceof StaleRevisionError || err instanceof EditError) {
-      throw new McpToolError(err.message);
-    }
+    if (err instanceof StaleRevisionError) throw new McpToolError(err.message, "stale_revision");
+    if (err instanceof EditError) throw new McpToolError(err.message, err.code);
+    if (err instanceof NoteTooLargeError) throw new McpToolError(err.message, "note_too_large");
     throw err;
   }
 }
@@ -876,8 +877,19 @@ export type NoteEdit =
   | { type: "insert_after"; anchor: string; text: string }
   | { type: "delete"; find: string; all?: boolean };
 
-/** An edit's anchor was missing or ambiguous — nothing was written. */
-export class EditError extends Error {}
+/**
+ * An edit's anchor was missing or ambiguous — nothing was written. `code` is
+ * surfaced on the tool result (and counted in the sync metrics) so a refusal can
+ * be told apart from a crash without reading prose.
+ */
+export class EditError extends Error {
+  constructor(
+    message: string,
+    readonly code: "anchor_not_found" | "anchor_ambiguous" | "bad_edit" = "bad_edit",
+  ) {
+    super(message);
+  }
+}
 
 function occurrences(haystack: string, needle: string): number[] {
   const out: number[] = [];
@@ -894,6 +906,144 @@ function anchorOf(edit: NoteEdit): string {
   return edit.type === "replace" || edit.type === "delete" ? edit.find : edit.anchor;
 }
 
+// ── tolerant anchor matching ────────────────────────────────────────────────
+//
+// An agent copies its anchor out of `read_note`'s JSON, and that copy is not
+// always byte-exact: a model rewrites a non-breaking or ideographic space as a
+// plain space, drops zero-width characters it cannot see, straightens curly
+// quotes, turns an en/em dash into a hyphen, collapses doubled spaces, loses the
+// trailing spaces before a newline, or hands back NFC where the note holds NFD.
+// Each of those used to be "anchor not found" (an `isError` result), and they
+// were the bulk of edit_note's failures. Exact matching still runs first and
+// wins; folding is a FALLBACK that only engages when the exact anchor is absent,
+// and the same exactly-once rule applies to the folded text, so a tolerant match
+// can never pick between two candidates.
+//
+// `foldForMatch` returns the folded string plus `map`, where `map[i]` is the
+// original index of folded character `i` and `map[folded.length]` is the
+// original length. A folded span `[a, b)` therefore covers the original span
+// `[map[a], map[b])`, which is what the op deletes — the agent's replacement
+// text goes in verbatim; folding never rewrites the note.
+
+const UNICODE_SPACES = new Set([
+  "\u00a0", "\u1680", "\u2000", "\u2001", "\u2002", "\u2003", "\u2004", "\u2005",
+  "\u2006", "\u2007", "\u2008", "\u2009", "\u200a", "\u202f", "\u205f", "\u3000",
+]);
+const ZERO_WIDTH = new Set(["\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"]);
+const FOLD_CHAR: Record<string, string> = {
+  "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'", "\u2032": "'",
+  "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"', "\u2033": '"',
+  "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2015": "-", "\u2212": "-",
+};
+const COMBINING = /\p{M}/u;
+
+/** Fold one already-NFC character (or the empty string to drop it). */
+function foldChar(ch: string): string {
+  if (ch === "\t" || UNICODE_SPACES.has(ch)) return " ";
+  if (ZERO_WIDTH.has(ch)) return "";
+  return FOLD_CHAR[ch] ?? ch;
+}
+
+export interface Folded {
+  folded: string;
+  map: number[];
+}
+
+/**
+ * Normalise `s` for matching. Rules (all many-to-one or many-to-zero, never
+ * one-to-many, so every folded index maps back to one original index):
+ * CRLF/CR → LF · tabs and Unicode spaces → space · a run of spaces collapses to
+ * one, and vanishes before a line break or the end · zero-width characters and
+ * soft hyphens vanish · curly quotes, primes and dashes straighten · a base
+ * character plus its combining marks is NFC-composed as one group.
+ */
+export function foldForMatch(s: string): Folded {
+  const out: string[] = [];
+  const map: number[] = [];
+  const hasMarks = COMBINING.test(s);
+  let i = 0;
+  const n = s.length;
+  while (i < n) {
+    const start = i;
+    let group = s[i];
+    i++;
+    // Surrogate pair → one code point.
+    if (group.charCodeAt(0) >= 0xd800 && group.charCodeAt(0) <= 0xdbff && i < n) {
+      group += s[i];
+      i++;
+    }
+    if (hasMarks) {
+      while (i < n && COMBINING.test(s[i])) {
+        group += s[i];
+        i++;
+      }
+      group = group.normalize("NFC");
+    }
+    if (group === "\r") {
+      if (s[i] === "\n") i++;
+      out.push("\n");
+      map.push(start);
+      continue;
+    }
+    const folded = group.length === 1 ? foldChar(group) : group;
+    if (folded === " ") {
+      // Swallow the whole run; drop it entirely before a line break / the end.
+      while (i < n && (s[i] === " " || s[i] === "\t" || UNICODE_SPACES.has(s[i]))) i++;
+      const atBreak = i >= n || s[i] === "\n" || s[i] === "\r";
+      if (!atBreak) {
+        out.push(" ");
+        map.push(start);
+      }
+      continue;
+    }
+    for (const c of folded) {
+      out.push(c);
+      map.push(start);
+    }
+  }
+  map.push(n);
+  return { folded: out.join(""), map };
+}
+
+/** `[start, end)` original spans of `anchor` in `text`, exact first, folded as a fallback. */
+export function findAnchor(
+  text: string,
+  anchor: string,
+): { spans: Array<[number, number]>; folded: boolean } {
+  const exact = occurrences(text, anchor);
+  if (exact.length > 0) {
+    return { spans: exact.map((at) => [at, at + anchor.length]), folded: false };
+  }
+  const fa = foldForMatch(anchor).folded;
+  if (fa.length === 0) return { spans: [], folded: true };
+  const ft = foldForMatch(text);
+  const hits = occurrences(ft.folded, fa);
+  return {
+    spans: hits.map((at) => [ft.map[at], ft.map[at + fa.length]]),
+    folded: true,
+  };
+}
+
+/** 1-based line of `index` in `text`. */
+function lineAt(text: string, index: number): number {
+  let line = 1;
+  for (let i = 0; i < index && i < text.length; i++) if (text[i] === "\n") line++;
+  return line;
+}
+
+/**
+ * When the whole anchor is absent, say where its first line is — an agent that
+ * pasted a multi-line anchor usually got the first line right and drifted after
+ * it, and a line number lets it re-read just that part instead of guessing.
+ */
+function notFoundHint(text: string, anchor: string): string {
+  const first = anchor.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0);
+  if (!first || first === anchor.trim()) return "";
+  const { spans } = findAnchor(text, first);
+  if (spans.length !== 1) return "";
+  return ` Its first line appears alone at line ${lineAt(text, spans[0][0])}; the rest differs from the note.`;
+}
+
 /**
  * Turn `edits` into ops against `current`, in order — each edit is matched in
  * the text as left by the previous ones, and its ops are emitted with indices
@@ -902,7 +1052,8 @@ function anchorOf(edit: NoteEdit): string {
  * Strict on purpose: an anchor must occur EXACTLY once unless the edit says
  * `all`. "Not found" and "ambiguous" are both refused with the count, so an
  * agent gets a conflict it can reason about instead of a change in the wrong
- * place — the failure mode this tool exists to remove.
+ * place — the failure mode this tool exists to remove. Exact matches win; when
+ * there is none, the tolerant fold above gets one try under the same rule.
  */
 export function planEdits(current: string, edits: NoteEdit[]): TextOp[] {
   if (edits.length === 0) throw new EditError("edit_note needs at least one edit");
@@ -913,35 +1064,38 @@ export function planEdits(current: string, edits: NoteEdit[]): TextOp[] {
     if (typeof anchor !== "string" || anchor.length === 0) {
       throw new EditError(`edit ${n + 1}: the anchor text must be a non-empty string`);
     }
-    const hits = occurrences(text, anchor);
+    const { spans } = findAnchor(text, anchor);
     const all = (edit.type === "replace" || edit.type === "delete") && edit.all === true;
-    if (hits.length === 0) {
+    if (spans.length === 0) {
       throw new EditError(
-        `edit ${n + 1} (${edit.type}): anchor not found — the note may have changed; read it again`,
+        `edit ${n + 1} (${edit.type}): anchor not found — the note may have changed; read it again.` +
+          notFoundHint(text, anchor),
+        "anchor_not_found",
       );
     }
-    if (hits.length > 1 && !all) {
+    if (spans.length > 1 && !all) {
       throw new EditError(
-        `edit ${n + 1} (${edit.type}): anchor matches ${hits.length} times — include more surrounding text to make it unique` +
+        `edit ${n + 1} (${edit.type}): anchor matches ${spans.length} times — include more surrounding text to make it unique` +
           (edit.type === "replace" || edit.type === "delete" ? ", or set all: true" : ""),
+        "anchor_ambiguous",
       );
     }
-    const targets = all ? hits : [hits[0]];
+    const targets = all ? spans : [spans[0]];
     // Apply right-to-left so earlier indices stay valid within this one edit.
-    for (const at of [...targets].reverse()) {
+    for (const [at, end] of [...targets].reverse()) {
       let op: TextOp;
       switch (edit.type) {
         case "replace":
-          op = { index: at, deleteLength: anchor.length, insert: edit.replace };
+          op = { index: at, deleteLength: end - at, insert: edit.replace };
           break;
         case "delete":
-          op = { index: at, deleteLength: anchor.length, insert: "" };
+          op = { index: at, deleteLength: end - at, insert: "" };
           break;
         case "insert_before":
           op = { index: at, deleteLength: 0, insert: edit.text };
           break;
         case "insert_after":
-          op = { index: at + anchor.length, deleteLength: 0, insert: edit.text };
+          op = { index: end, deleteLength: 0, insert: edit.text };
           break;
       }
       ops.push(op);

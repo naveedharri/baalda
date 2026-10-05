@@ -101,6 +101,9 @@ export function replacementOp(current: string, next: string): TextOp[] {
 }
 
 /** A mutation's precondition failed: the note is not the text the caller read. */
+/** A write would push the note past `MAX_NOTE_MB`; nothing was written. */
+export class NoteTooLargeError extends Error {}
+
 export class StaleRevisionError extends Error {
   constructor(
     readonly expected: string,
@@ -231,7 +234,7 @@ export function createDocWriter(
   const capChars = () => config.maxNoteMb * 1024 * 1024;
   const requireUnderCap = (resulting: number): void => {
     if (resulting > capChars()) {
-      throw new Error(
+      throw new NoteTooLargeError(
         `note would exceed the ${config.maxNoteMb} MB size ceiling — split the content across smaller notes`,
       );
     }

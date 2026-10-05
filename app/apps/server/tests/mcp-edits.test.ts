@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { EditError, planEdits, replacementOp } from "../src/mcp/service.js";
+import { EditError, findAnchor, foldForMatch, planEdits, replacementOp } from "../src/mcp/service.js";
 import { revisionOf } from "../src/mcp/doc-writer.js";
+import { parseEdits } from "../src/mcp/tools.js";
 
 /**
  * The pure half of #78: how `edit_note` turns anchors into ops, and how
@@ -59,6 +60,99 @@ describe("planEdits", () => {
   it("rejects an empty anchor and an empty edit list", () => {
     expect(() => planEdits(note, [])).toThrow(EditError);
     expect(() => planEdits(note, [{ type: "delete", find: "" }])).toThrow(/non-empty/);
+  });
+});
+
+describe("planEdits — tolerant anchors", () => {
+  function fails(text: string, edits: Parameters<typeof planEdits>[1]): EditError {
+    try {
+      planEdits(text, edits);
+    } catch (e) {
+      return e as EditError;
+    }
+    throw new Error("expected a refusal");
+  }
+
+  it("carries a code on every refusal", () => {
+    expect(fails("a b", [{ type: "delete", find: "zzz" }]).code).toBe("anchor_not_found");
+    expect(fails("a a", [{ type: "delete", find: "a" }]).code).toBe("anchor_ambiguous");
+    expect(fails("a", [{ type: "delete", find: "" }]).code).toBe("bad_edit");
+  });
+
+  it("matches a plain space against a non-breaking space and deletes the original bytes", () => {
+    const note = "Price:\u00a0100 EUR\n";
+    const ops = planEdits(note, [{ type: "replace", find: "Price: 100", replace: "Price: 90" }]);
+    expect(apply(note, ops)).toBe("Price: 90 EUR\n");
+  });
+
+  it("matches across CRLF line endings without rewriting them elsewhere", () => {
+    const note = "# T\r\n\r\n- one\r\n- two\r\n";
+    const ops = planEdits(note, [{ type: "replace", find: "- one\n- two", replace: "- uno" }]);
+    expect(apply(note, ops)).toBe("# T\r\n\r\n- uno\r\n");
+  });
+
+  it("straightens curly quotes and dashes and ignores zero-width characters", () => {
+    const note = "She said \u201chello\u201d \u2014 twice\u200b.\n";
+    const ops = planEdits(note, [{ type: "replace", find: 'said "hello" - twice.', replace: "waved." }]);
+    expect(apply(note, ops)).toBe("She waved.\n");
+  });
+
+  it("ignores trailing spaces before a newline and collapsed double spaces", () => {
+    const note = "alpha  beta   \ngamma\n";
+    const ops = planEdits(note, [{ type: "insert_after", anchor: "alpha beta\n", text: "inserted\n" }]);
+    expect(apply(note, ops)).toBe("alpha  beta   \ninserted\ngamma\n");
+  });
+
+  it("matches an NFD anchor against an NFC note and the other way round", () => {
+    const nfc = "caf\u00e9 au lait\n";
+    const nfd = "cafe\u0301 au lait\n";
+    expect(apply(nfc, planEdits(nfc, [{ type: "replace", find: nfd.trim(), replace: "tea" }]))).toBe("tea\n");
+    expect(apply(nfd, planEdits(nfd, [{ type: "replace", find: nfc.trim(), replace: "tea" }]))).toBe("tea\n");
+  });
+
+  it("prefers an exact match and never folds when one exists", () => {
+    const note = "a\u00a0b\na b\n";
+    const ops = planEdits(note, [{ type: "delete", find: "a b\n" }]);
+    expect(apply(note, ops)).toBe("a\u00a0b\n");
+  });
+
+  it("still refuses an ambiguous anchor under folding", () => {
+    const note = "a\u00a0b\na\u2003b\n";
+    expect(fails(note, [{ type: "delete", find: "a b" }]).code).toBe("anchor_ambiguous");
+    expect(apply(note, planEdits(note, [{ type: "delete", find: "a b\n", all: true }]))).toBe("");
+  });
+
+  it("points at the first line when a multi-line anchor drifts after it", () => {
+    const note = "intro\n## Plan\n- step one\n- step two\n";
+    const err = fails(note, [{ type: "replace", find: "## Plan\n- step won", replace: "x" }]);
+    expect(err.code).toBe("anchor_not_found");
+    expect(err.message).toContain("line 2");
+  });
+
+  it("foldForMatch maps every folded index back to the original", () => {
+    const s = "x\r\n\u00a0\u00a0y\u200bz  \n";
+    const { folded, map } = foldForMatch(s);
+    expect(folded).toBe("x\n yz\n");
+    expect(map).toHaveLength(folded.length + 1);
+    expect(map[map.length - 1]).toBe(s.length);
+    expect(findAnchor(s, "yz\n").spans).toEqual([[5, s.length]]);
+  });
+});
+
+describe("parseEdits", () => {
+  it("accepts the anchor and text fields under either name", () => {
+    expect(parseEdits([{ type: "insert_after", find: "a", replace: "b" }])).toEqual([
+      { type: "insert_after", anchor: "a", text: "b" },
+    ]);
+    expect(parseEdits([{ type: "replace", anchor: "a", text: "b", all: true }])).toEqual([
+      { type: "replace", find: "a", replace: "b", all: true },
+    ]);
+    expect(parseEdits([{ type: "delete", anchor: "a" }])).toEqual([{ type: "delete", find: "a" }]);
+  });
+
+  it("refuses a bad shape with the bad_edit code", () => {
+    expect(() => parseEdits([{ type: "replace", find: "a" }])).toThrowError(/replace must be a string/);
+    expect(() => parseEdits([])).toThrowError(/non-empty/);
   });
 });
 

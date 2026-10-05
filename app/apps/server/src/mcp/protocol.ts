@@ -1,3 +1,4 @@
+import { inc } from "../metrics/sync-metrics.js";
 import { McpToolError, type McpContext } from "./service.js";
 import { TOOLS, TOOLS_BY_NAME } from "./tools.js";
 
@@ -119,13 +120,22 @@ export async function handleMcpMessage(
         params.arguments && typeof params.arguments === "object"
           ? (params.arguments as Record<string, unknown>)
           : {};
+      // Outcome counters per tool — names and codes only, never arguments —
+      // so an error rate seen in a client's dashboard can be split into
+      // refusals (by code) and crashes from the `[sync-metrics]` lines.
       try {
         const data = await tool.handler(ctx, args);
+        inc(`mcp.tool.${tool.name}.ok`);
         return ok(msg.id, toolResult(data));
       } catch (err) {
         // Expected, user-facing failures (bad args, no access) → isError result.
-        if (err instanceof McpToolError) return ok(msg.id, toolError(err.message, err.code));
+        if (err instanceof McpToolError) {
+          inc(`mcp.tool.${tool.name}.refused`);
+          if (err.code) inc(`mcp.tool.${tool.name}.refused.${err.code}`);
+          return ok(msg.id, toolError(err.message, err.code));
+        }
         // Anything else is a bug on our side — log it, don't leak internals.
+        inc(`mcp.tool.${tool.name}.internal`);
         console.error(`[mcp] tool ${params.name} failed:`, err);
         return ok(msg.id, toolError("Internal error running the tool"));
       }
