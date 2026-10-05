@@ -18,6 +18,8 @@ import {
   encodePubsubMetaChanged,
   encodePubsubActivityChanged,
   encodePubsubMemberJoined,
+  encodePubsubOrgChanged,
+  type OrgChange,
   encodePubsubRejected,
   encodePubsubBrake,
   encodePubsubPresence,
@@ -321,6 +323,12 @@ export class VaultChannel {
    *  celebration. (`vaultId` here is the note-collection id.) */
   async publishMemberJoined(vaultId: string, name: string): Promise<void> {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubMemberJoined(name));
+  }
+
+  /** The vault (organization) this collection belongs to was renamed or got a
+   *  new icon (#306); subscribers patch their vault list without a re-list. */
+  async publishOrgChanged(vaultId: string, change: OrgChange): Promise<void> {
+    await this.pubsub.publish(vaultTopic(vaultId), encodePubsubOrgChanged(change));
   }
 
   /** A read-only connection's edit was dropped (`ready`-independent; see the
@@ -1070,6 +1078,11 @@ class VaultConnection {
       // Org-wide news, not doc-scoped — forward to every subscriber of this
       // vault so their roster refreshes and the join celebration fires live.
       this.send({ t: "member", name: msg.name });
+      return;
+    }
+    if (msg.type === "org-changed") {
+      // Org-wide like a join: every subscriber patches the vault's name/icon.
+      this.send({ t: "org", ...msg.change });
       return;
     }
     if (msg.type === "presence") {

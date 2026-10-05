@@ -126,6 +126,29 @@ describe("member activity", () => {
     expect(ats).toEqual([...ats].sort().reverse());
   });
 
+  it("marks the join as a rejoin when note activity predates the current membership (#296)", async () => {
+    const { owner, orgId, vaultId } = await setup();
+    const m = await addMember(orgId, "rejoin@activity.test");
+    await seedVaultGrant(orgId, "edit");
+    const theirs = await seedNote(vaultId, null, "theirs.md", owner.userId);
+    // An edit from an earlier membership: an hour before the current member row.
+    await pool.query(
+      `UPDATE member SET "createdAt" = now() WHERE "organizationId" = $1 AND "userId" = $2`,
+      [orgId, m.userId],
+    );
+    await pool.query(
+      `INSERT INTO note_versions (doc_id, vault_id, content, sha256, cause, author_id, created_at)
+       VALUES ($1, $2, 'x', 'h', 'idle', $3, now() - interval '1 hour')`,
+      [theirs, vaultId, m.userId],
+    );
+    const joined = (await feed(owner, orgId, m.userId)).find((e) => e.kind === "joined");
+    expect(joined).toMatchObject({ kind: "joined", rejoined: true });
+
+    const fresh = await addMember(orgId, "fresh@activity.test");
+    const freshJoined = (await feed(owner, orgId, fresh.userId)).find((e) => e.kind === "joined");
+    expect(freshJoined).not.toHaveProperty("rejoined");
+  });
+
   it("reports a per-user share as accessGranted with granter and path", async () => {
     const { owner, orgId, vaultId } = await setup();
     const m = await addMember(orgId, "m@activity.test");

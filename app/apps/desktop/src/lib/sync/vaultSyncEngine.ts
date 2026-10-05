@@ -123,6 +123,9 @@ export interface VaultSyncEngineOptions {
   /** Fired when a new teammate joined the vault (`member`): the client
    *  refreshes its roster and shows a join celebration. */
   onMemberJoined?: (name: string) => void;
+  /** Fired when the vault's name or icon changed (`org`, #306); only the
+   *  fields present in the frame are set. */
+  onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
   /** Fired for each teammate presence update (`presence`): who is now viewing
    *  which note (docId null = they left / closed the note). The sink aggregates
    *  these into the sidebar roster. */
@@ -336,6 +339,7 @@ export class VaultSyncEngine {
   private readonly onRegistryChanged?: (meta?: boolean) => void;
   private readonly onActivityChanged?: () => void;
   private readonly onMemberJoined?: (name: string) => void;
+  private readonly onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
   private readonly onPresence?: (peer: VaultPeer) => void;
   private readonly onVoice?: (frame: VoiceFrame) => void;
   private readonly onInboundProgress?: (done: number, total: number) => void;
@@ -441,6 +445,7 @@ export class VaultSyncEngine {
     this.onRegistryChanged = opts.onRegistryChanged;
     this.onActivityChanged = opts.onActivityChanged;
     this.onMemberJoined = opts.onMemberJoined;
+    this.onOrgChanged = opts.onOrgChanged;
     this.onPresence = opts.onPresence;
     this.onVoice = opts.onVoice;
     this.onInboundProgress = opts.onInboundProgress;
@@ -888,6 +893,9 @@ export class VaultSyncEngine {
       } else if (control.t === "member") {
         // A new teammate joined — refresh the roster + celebrate.
         this.onMemberJoined?.(control.name);
+      } else if (control.t === "org") {
+        const { t: _t, ...change } = control;
+        this.onOrgChanged?.(change);
       } else if (control.t === "presence") {
         // A teammate's viewing state changed — feed the sidebar roster.
         this.onPresence?.({

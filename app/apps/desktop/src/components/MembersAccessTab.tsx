@@ -10,6 +10,7 @@ import type {
   TeamAccessMode,
 } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
+import { rosterCache, type RosterSnapshot } from "../lib/membersAccessCaches";
 import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
 import {
   countLine,
@@ -27,6 +28,11 @@ import {
   ROLE_LABEL,
   shortDate,
   presentUserIds,
+  levelOfMode,
+  patchedTeamAccess,
+  withMemberLevel,
+  withNewInvitations,
+  withoutInvitation,
 } from "../lib/membersAccess";
 import { syncManager } from "../lib/sync/docSession";
 import { writeTeamAccessCache } from "../lib/teamAccessCache";
@@ -66,8 +72,41 @@ interface Confirm {
  * bulk route with an org audience — because that endpoint is what clears the
  * per-folder team rows in the same transaction.
  */
-export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
+/**
+ * The last roster answer per (server, org, manager view), kept in memory for
+ * the session so a revisit paints at once and re-fetches behind it (#307).
+ * Never persisted and never used to authorise anything: the fresh answer
+ * replaces it as soon as it lands.
+ */
+const rosterKey = (orgId: string, canManage: boolean) =>
+  `${authManager.getServerUrl()}|${orgId}|${canManage ? "m" : "p"}`;
+
+/**
+ * Warm the roster cache when Vault Settings opens, so the Members tab paints
+ * at once (#307). Fills only an empty slot and swallows failures: the tab's
+ * own load still runs and stays authoritative.
+ */
+const prefetching = new Set<string>();
+export function prefetchRoster(orgId: string | null, canManage: boolean): void {
+  if (!orgId) return;
+  const key = rosterKey(orgId, canManage);
+  if (rosterCache.has(key) || prefetching.has(key)) return;
+  prefetching.add(key);
+  void Promise.all([
+    authManager.api.getMembersOverview(orgId).catch(() => null),
+    canManage ? authManager.api.getTeamAccess(orgId).catch(() => null) : Promise.resolve(null),
+    canManage ? authManager.api.getAccessDefault(orgId).catch(() => null) : Promise.resolve(null),
+  ]).then(([overview, teamAccess, accessDefault]) => {
+    prefetching.delete(key);
+    if (!overview || rosterCache.has(key)) return;
+    rosterCache.set(key, { overview, teamAccess, accessDefault });
+  });
+}
+
+export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetToken = 0 }: {
   canManage: boolean;
+  /** Bumped when the active nav item is clicked again: back to the roster (#308). */
+  resetToken?: number;
   /** Switch the settings dialog to another page (the MCP hint uses it). */
   onOpenTab?: (tab: SettingsTab) => void;
   /** Close the settings dialog, so a note opened from a profile is visible. */
@@ -111,6 +150,12 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
       writeTeamAccessCache(authManager.getServerUrl(), orgId, team.mode);
     }
     if (joining) setAccessDefault(joining);
+    const prev = rosterCache.get(rosterKey(orgId, canManage));
+    rosterCache.set(rosterKey(orgId, canManage), {
+      overview: ov ?? prev?.overview ?? null,
+      teamAccess: team ?? prev?.teamAccess ?? null,
+      accessDefault: joining ?? prev?.accessDefault ?? null,
+    });
     if (!ov || (canManage && (!team || !joining))) {
       setError("Couldn't load everything on this page. Check your connection and reopen it.");
     }
@@ -118,9 +163,11 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
 
   useEffect(() => {
     loadGen.current++;
-    setOverview(null);
-    setTeamAccess(null);
-    setAccessDefault(null);
+    // A roster seen earlier this session paints at once; the reload refreshes it.
+    const seen = orgId ? rosterCache.get(rosterKey(orgId, canManage)) : undefined;
+    setOverview(seen?.overview ?? null);
+    setTeamAccess(seen?.teamAccess ?? null);
+    setAccessDefault(seen?.accessDefault ?? null);
     setError(null);
     setConfirm(null);
     setProfile(null);
@@ -128,11 +175,42 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
     return () => { loadGen.current++; };
   }, [orgId, canManage, reload]);
 
+  // Clicking the already-active "Members and access" item returns to the
+  // first page of the tab: the roster, search cleared.
+  useEffect(() => {
+    if (resetToken === 0) return;
+    setProfile(null);
+    setQuery("");
+  }, [resetToken]);
+
   /** Everything that must follow an access write. */
   const afterAccessWrite = async () => {
     cancelSideEffects();
     syncManager.retryHeldRegistrations();
     await Promise.all([useStore.getState().refreshLocks(), reload()]);
+  };
+
+  /**
+   * Patch the roster on screen (and its session cache) right after a write,
+   * then refresh once in the background so the server stays authoritative
+   * (#307). Paint only: no write ever reads this state to decide anything.
+   */
+  const patchRoster = (patch: (prev: RosterSnapshot) => RosterSnapshot) => {
+    if (!orgId) return;
+    const key = rosterKey(orgId, canManage);
+    const prev = rosterCache.get(key) ?? { overview, teamAccess, accessDefault };
+    const next = patch(prev);
+    rosterCache.set(key, next);
+    setOverview(next.overview);
+    setTeamAccess(next.teamAccess);
+    setAccessDefault(next.accessDefault);
+  };
+  /** The one background refresh after a patched write. */
+  const refreshBehind = () => {
+    cancelSideEffects();
+    syncManager.retryHeldRegistrations();
+    void useStore.getState().refreshLocks();
+    void reload();
   };
 
   // Per-item writes from the profile page: retry held registrations and
@@ -179,7 +257,8 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
     if (!orgId) return;
     markSelfAccessChange([orgId]); // Everyone includes the signed-in user
     await authManager.api.setTeamAccess(orgId, mode);
-    await afterAccessWrite();
+    patchRoster((r) => ({ ...r, teamAccess: r.teamAccess ? patchedTeamAccess(r.teamAccess, mode) : r.teamAccess }));
+    refreshBehind();
     toast(`Everyone in ${vaultName}: ${EVERYONE_OPTIONS.find((o) => o.value === mode)?.label}`);
   });
 
@@ -212,6 +291,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
     if (!orgId || accessDefault?.mode === mode) return;
     const next = await authManager.api.setAccessDefault(orgId, mode);
     setAccessDefault(next);
+    patchRoster((r) => ({ ...r, accessDefault: next }));
     toast(`New members: ${NEW_MEMBER_OPTIONS.find((o) => o.value === next.mode)?.label}`);
   });
 
@@ -224,7 +304,11 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
       audience: { type: "users", userIds: [m.userId] },
       mode,
     });
-    await afterAccessWrite();
+    patchRoster((r) => ({
+      ...r,
+      overview: r.overview ? withMemberLevel(r.overview, m.userId, levelOfMode(mode)) : r.overview,
+    }));
+    refreshBehind();
     toast(`${displayName(m)}: ${PERSON_LEVEL_LABEL[mode === "open" ? "edit" : mode === "readonly" ? "view" : "none"]}`);
   });
 
@@ -305,7 +389,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
     tone: "danger",
     apply: () => run(async () => {
       await authManager.api.cancelInvitation(inv.id);
-      await Promise.all([reload(), useStore.getState().refreshVault()]);
+      patchRoster((r) => ({ ...r, overview: r.overview ? withoutInvitation(r.overview, inv.id) : r.overview }));
+      void reload();
+      void useStore.getState().refreshVault();
     }),
     body: <p>Its link stops working. You can invite them again later.</p>,
   });
@@ -606,7 +692,13 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings }: {
         <InvitePeopleDialog
           orgId={orgId}
           onClose={() => setInviteOpen(false)}
-          onInvited={() => void reload()}
+          onInvited={(results, sent) => {
+            patchRoster((r) => ({
+              ...r,
+              overview: r.overview ? withNewInvitations(r.overview, results, sent, new Date().toISOString()) : r.overview,
+            }));
+            void reload();
+          }}
         />
       )}
     </div>

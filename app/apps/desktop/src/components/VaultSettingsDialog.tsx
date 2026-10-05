@@ -4,6 +4,7 @@
    stays eager, and this chunk lands when someone actually opens settings. */
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
+  ApiError,
   type McpToolInfo,
   type McpTokenRow,
   type MyBillingVault,
@@ -27,7 +28,7 @@ import {
 } from "../lib/billing";
 import * as ipc from "../lib/ipc";
 import { readOrgVaults, useStore } from "../store";
-import { MembersAccessTab } from "./MembersAccessTab";
+import { MembersAccessTab, prefetchRoster } from "./MembersAccessTab";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
@@ -190,6 +191,8 @@ export function VaultSettingsDialog({
 
   const visibleTab = (t: SettingsTab): SettingsTab => (!SHOW_AI_TAB && t === "ai" ? "general" : t);
   const [tab, setTabRaw] = useState<SettingsTab>(visibleTab(initialTab ?? "general"));
+  /** Bumped when the active nav item is clicked again, so a tab can return to its first page. */
+  const [tabReset, setTabReset] = useState(0);
   const setTab = (t: SettingsTab) => setTabRaw(visibleTab(t));
 
   // Esc, click-away, focus and the backdrop all live in `SettingsModal`.
@@ -214,6 +217,14 @@ export function VaultSettingsDialog({
     }
     return out;
   }, [showVaults, billingEnabled]);
+
+  // Warm the Members tab's roster as the dialog opens (#307); paint only.
+  useEffect(() => {
+    const orgId = session?.activeOrganizationId ?? null;
+    const me = members.find((m) => m.userId === session?.user.id);
+    if (!orgId || !me) return;
+    prefetchRoster(orgId, me.role === "owner" || me.role === "admin");
+  }, [session, members]);
 
   if (!session && !vault) return null;
   const myMember = members.find((m) => m.userId === session?.user.id);
@@ -253,7 +264,11 @@ export function VaultSettingsDialog({
                 key={t.id}
                 type="button"
                 className={`menu-item${t.id === "ai" ? " settings-ai-item" : ""}${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
-                onClick={() => setTab(t.id)}
+                onClick={() => {
+                  // Re-clicking the active item resets its sub-pages (#308).
+                  if (tab === t.id) setTabReset((n) => n + 1);
+                  else setTab(t.id);
+                }}
                 title={locked ? "Turn on sync to unlock" : undefined}
               >
                 {t.icon}
@@ -306,7 +321,12 @@ export function VaultSettingsDialog({
           ) : tab === "vaults" ? (
             <VaultsTab />
           ) : tab === "members" ? (
-            <MembersAccessTab canManage={canManage} onOpenTab={setTab} onCloseSettings={onClose} />
+            <MembersAccessTab
+              canManage={canManage}
+              onOpenTab={setTab}
+              onCloseSettings={onClose}
+              resetToken={tabReset}
+            />
           ) : tab === "billing" ? (
             <BillingTab canManage={canManage} isSynced={isSynced} />
           ) : tab === "mcp" ? (
@@ -394,6 +414,8 @@ function GeneralTab({
     <>
       {iconIdentity && (
         <>
+          {/* One icon per vault. A synced vault's belongs to the org: members see
+              the owner's picker with every action disabled. */}
           <VaultIconSettings
             identity={iconIdentity}
             name={(isSynced ? activeOrgName : null) ?? vault?.name ?? ""}
@@ -459,7 +481,7 @@ function GeneralTab({
         </>
       )}
 
-      {isSynced && <FreezeRootRow canManage={canManage} />}
+      {isSynced && canManage && <FreezeRootRow canManage={canManage} />}
 
       <div className="menu-sep" />
       <div className="subhead">Folder on disk</div>
@@ -806,13 +828,6 @@ function FreezeRootRow({ canManage }: { canManage: boolean }) {
           onChange={(next) => void flip(next)}
         />
       </label>
-      {!canManage && (
-        <div className="muted">
-          {rootFrozen
-            ? "This vault's root is frozen. Ask an owner or admin to unfreeze it."
-            : "Only an owner or admin can freeze this vault's root."}
-        </div>
-      )}
       {error && <div className="auth-error">{error}</div>}
     </>
   );
@@ -1038,7 +1053,10 @@ function VaultsTab() {
       // open (only success clears it) so the error has somewhere to show.
       setActionError(message);
       // Destructive path: a failure here must never look like a success (#85).
-      toast(`Couldn't delete the vault — ${message}`, "error");
+      // The cancel-failed message is already a full sentence (#300).
+      const cancelFailed =
+        e instanceof ApiError && (e.body as { error?: unknown } | undefined)?.error === "subscription_cancel_failed";
+      toast(cancelFailed ? message : `Couldn't delete the vault — ${message}`, "error");
     } finally {
       setBusy(false);
     }

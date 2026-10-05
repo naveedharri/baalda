@@ -297,7 +297,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   `deletedByTeammate`, `renamedConflict`, `keptLocally`, `selfRevoked`, `folderKept`,
   `externalEditSaved`) and shown once per session as one plain-words summary (`ReconcileBanner`,
   which fades after 20 s like Dismiss; details stay in the Activity panel's Review changes); nothing
-  in the report persists. `selfRevoked` is a
+  in the report persists. Entries are PER VAULT: `reconcileReport` stamps each one with the current
+  `vaultScopes` folder path and every reader (`items`/`drain`/`forgetReadable`/`clear`/subscribers)
+  sees only the open vault's; `enterVaultScope` and the session teardown call `vaultChanged()` so a
+  switch re-renders the banner, the review count and Activity (vault A's rows used to show in B). `selfRevoked` is a
   revocation caused by an access change THIS device made for the signed-in user in the last 60 s
   (`sync/selfAccessChanges.ts` `markSelfAccessChange`/`isSelfAccessChange`): the same safety outcome
   as `keptLocally`, reported quietly and left out of the "N changes to review" count.
@@ -757,7 +760,12 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `read_note` returns a `revision` (sha256 of the body); `update_note`/`append_note`/`edit_note` take an
   optional `expectedRevision` and refuse a stale write (the check runs under the doc writer's per-doc
   lock, so check + apply are atomic). `edit_note` applies exact-anchor replace/insert/delete ops (an
-  anchor must match exactly once unless `all`), `update_note` sends only the changed span, and
+  anchor must match exactly once unless `all`; when no exact match exists, `foldForMatch` retries
+  ignoring CRLF, Unicode/doubled/trailing spaces, zero-width characters, curly quotes, dashes and
+  NFC/NFD under the same once-only rule, and `find`/`anchor`, `replace`/`text` are interchangeable —
+  the 7.4% error rate was mostly anchors that differed from the note by exactly those; refusals
+  carry `anchor_not_found`/`anchor_ambiguous`/`stale_revision`/`bad_edit`/`note_too_large` codes and
+  every tool counts `mcp.tool.<name>.ok|refused[.<code>]|internal` in the sync metrics), `update_note` sends only the changed span, and
   `append_note` accepts an `idempotencyKey` so a retried call cannot append twice.
   Structural tools (create/move/delete of folders and notes) broadcast `registry-changed` with a
   `null` origin, and content writes fan out through `createDocWriter`, so an AI edit lands live on

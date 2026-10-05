@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { ApiError } from "../lib/api";
 import type { BulkAccessResource, MemberActivityEvent, MemberOverview, TeamAccess, TeamAccessMode } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
+import { activityCache } from "../lib/membersAccessCaches";
 import { buildOrgRowsByPath, effectiveTeamMode } from "../lib/accessMode";
 import { createAccessSummaryBatcher } from "../lib/accessSummaryBatch";
 import { accessResourceType, ancestorPaths, entriesFromServer, rowsFromEntries, type AccessRow } from "../lib/accessTree";
@@ -95,12 +97,22 @@ export function MemberProfilePage({
   /** Open a note named by an Activity row; rows are plain text without it. */
   onOpenNote?: (path: string) => void;
 }) {
+  const isSelf = useStore((s) => s.session?.user.id) === member.userId;
+  // Another member's activity is owner/admin-only on the server (403 otherwise),
+  // so a plain member gets the tab on their own profile only (#301).
+  const showActivityTab = showAccessTab || isSelf;
   const [tab, setTab] = useState<ProfileTab>(
-    initialTab === "access" && !(canSetAccess && showAccessTab) ? "info" : initialTab,
+    (initialTab === "access" && !(canSetAccess && showAccessTab)) ||
+      (initialTab === "activity" && !showActivityTab)
+      ? "info"
+      : initialTab,
   );
   const name = member.name || member.email || member.userId;
-  const tabs: readonly ProfileTab[] = showAccessTab ? ["info", "access", "activity"] : ["info", "activity"];
-  const isSelf = useStore((s) => s.session?.user.id) === member.userId;
+  const tabs: readonly ProfileTab[] = [
+    "info",
+    ...(showAccessTab ? (["access"] as const) : []),
+    ...(showActivityTab ? (["activity"] as const) : []),
+  ];
   const level = member.access?.level ?? null;
   const vaultFrom = level === null ? null : level === "custom" ? "custom" : LEVEL_TO_MODE[level];
   const [accessView, setAccessView] = useState<AccessView>(readAccessView);
@@ -236,6 +248,7 @@ function joinedLabel(member: MemberOverview): string {
 type ActivityState =
   | { status: "loading" }
   | { status: "error" }
+  | { status: "forbidden" }
   | { status: "ready"; events: MemberActivityEvent[] };
 
 const ACTIVITY_LIMIT = 50;
@@ -248,18 +261,37 @@ function PersonActivity({ orgId, member, vaultName, isSelf, onOpenNote }: {
   isSelf: boolean;
   onOpenNote?: (path: string) => void;
 }) {
-  const [state, setState] = useState<ActivityState>({ status: "loading" });
+  const cacheKey = `${authManager.getServerUrl()}|${orgId}|${member.userId}`;
+  const [state, setState] = useState<ActivityState>(() => {
+    const seen = activityCache.get(cacheKey);
+    return seen ? { status: "ready", events: seen } : { status: "loading" };
+  });
   useEffect(() => {
     let live = true;
-    setState({ status: "loading" });
+    const seen = activityCache.get(cacheKey);
+    setState(seen ? { status: "ready", events: seen } : { status: "loading" });
     authManager.api.getMemberActivity(orgId, member.userId, ACTIVITY_LIMIT)
-      .then((events) => { if (live) setState({ status: "ready", events }); })
-      .catch(() => { if (live) setState({ status: "error" }); });
+      .then((events) => {
+        activityCache.set(cacheKey, events);
+        if (live) setState({ status: "ready", events });
+      })
+      .catch((e) => {
+        // A failed refresh keeps a previously loaded timeline on screen.
+        if (!live || activityCache.has(cacheKey)) return;
+        setState(e instanceof ApiError && e.status === 403 ? { status: "forbidden" } : { status: "error" });
+      });
     // A person change (or unmount) drops whatever the old request returns.
     return () => { live = false; };
-  }, [orgId, member.userId]);
+  }, [orgId, member.userId, cacheKey]);
 
   if (state.status === "loading") return <ActivitySkeleton />;
+  if (state.status === "forbidden") {
+    return (
+      <p className="member-activity-empty">
+        Only the vault owner or an admin can see another member's activity.
+      </p>
+    );
+  }
   if (state.status === "error") return <p className="member-activity-empty">Couldn't load activity.</p>;
   const now = Date.now();
   const days = buildTimeline(state.events, now, { at: member.joinedAt, invitedBy: member.invitedBy ?? null });
@@ -353,7 +385,7 @@ function runSentence(run: Extract<TimelineEntry, { type: "run" }>, voice: Voice)
 export function activitySentence(event: MemberActivityEvent, voice: Voice): React.ReactNode {
   switch (event.kind) {
     case "joined":
-      return <>{lead(voice, "joined")} {voice.vaultName}{event.invitedBy ? `, invited by ${personName(event.invitedBy)}` : ""}</>;
+      return <>{lead(voice, event.rejoined ? "rejoined" : "joined")} {voice.vaultName}{event.invitedBy ? `, invited by ${personName(event.invitedBy)}` : ""}</>;
     case "edited":
       return <>{lead(voice, "edited")} <NoteName path={event.path} voice={voice} /></>;
     case "created": {

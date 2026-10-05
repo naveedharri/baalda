@@ -370,9 +370,12 @@ describe("unsync and the subscription", () => {
       body: { confirmName: f.orgName },
     });
     expect(res.status).toBe(502);
-    const body = (await res.json()) as { error: string; message: string };
+    const body = (await res.json()) as { error: string; message: string; detail: string };
     expect(body.error).toBe("subscription_cancel_failed");
-    expect(body.message).toContain("polar is down");
+    expect(body.message).toBe(
+      "We couldn't stop this vault's subscription. Nothing was deleted. Try again, or cancel it from Billing first.",
+    );
+    expect(body.detail).toContain("polar is down");
 
     // A provider outage must not cost someone a vault while Polar keeps charging.
     expect(await countRows("SELECT count(*)::bigint AS c FROM organization WHERE id = $1", [f.orgId])).toBe(1);

@@ -4,6 +4,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetMembersAccessCaches } from "../../lib/membersAccessCaches";
 import { MembersAccessTab } from "../MembersAccessTab";
 import { useStore } from "../../store";
 
@@ -45,6 +46,7 @@ describe("Members and access tab", () => {
   let root: Root;
   let host: HTMLDivElement;
   beforeEach(() => {
+    resetMembersAccessCaches();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     patchStore({
@@ -61,6 +63,7 @@ describe("Members and access tab", () => {
     root = createRoot(host);
   });
   afterEach(() => {
+    resetMembersAccessCaches();
     act(() => root.unmount());
     host.remove();
   });
@@ -273,9 +276,9 @@ describe("Members and access tab", () => {
     expect(host.querySelector('[aria-label^="Actions for"]')).toBeNull();
     expect(host.textContent).toContain("Me (you)");
     expect(host.querySelector(".members-access-mcp-hint")).toBeNull();
-    // Rows still open a read-only profile: Personal info and Activity, no Access tab.
+    // Rows still open a read-only profile: Personal info only, no Access or Activity tab (#301).
     await act(async () => (host.querySelector('[aria-label="Open profile of Owner"] .members-table-name') as HTMLElement).click());
     expect(host.querySelector(".member-profile-name")?.textContent).toBe("Owner");
-    expect([...host.querySelectorAll('[role="tab"]')].map((t) => t.textContent)).toEqual(["Personal info", "Activity"]);
+    expect([...host.querySelectorAll('[role="tab"]')].map((t) => t.textContent)).toEqual(["Personal info"]);
   });
 });

@@ -539,7 +539,9 @@ export function ActivityFeed() {
                       )}
                     </span>
                     <span className="activity-row-meta muted">
-                      {rowMeta(row, now)}
+                      {/* Its own element: a bare text node in the flex row is an
+                          anonymous item that clips without an ellipsis (#293). */}
+                      <span className="activity-row-meta-text">{rowMeta(row, now)}</span>
                       {row.type === "trash" && row.item.hasUnsyncedContributions && (
                         <span
                           className="health-pill"

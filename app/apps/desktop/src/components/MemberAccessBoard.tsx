@@ -21,7 +21,7 @@ import {
   type SummaryMode,
 } from "../lib/accessBoard";
 import { createAccessSummaryBatcher } from "../lib/accessSummaryBatch";
-import { ACCESS_MAP_REREAD_MAX } from "../lib/accessBoardLoad";
+import { ACCESS_MAP_REREAD_MAX, patchCachedAccessModes } from "../lib/accessBoardLoad";
 import { useAccessMap, type AccessMap } from "./useAccessMap";
 import { accessResourceType, ancestorPaths, entriesFromServer, rowsFromEntries, type AccessRow } from "../lib/accessTree";
 import { needsAccessConfirm, reduceAccessCopy, type ReduceScope } from "../lib/membersAccess";
@@ -128,6 +128,13 @@ export function MemberAccessBoard({
       setFailed(new Set());
     }
   }
+  // Keep the session's cached map in step with every optimistic update,
+  // revert and re-read, so a revisit never paints a level already moved (#307).
+  useEffect(() => {
+    if (vaultId && serverTree && summaryModes.size > 0) {
+      patchCachedAccessModes(authManager.getServerUrl(), vaultId, member.userId, summaryModes);
+    }
+  }, [summaryModes, serverTree, vaultId, member.userId]);
   const inflight = useRef(new Set<string>());
   const live = useRef(true);
   useEffect(() => {

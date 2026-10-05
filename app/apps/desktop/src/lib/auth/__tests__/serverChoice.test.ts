@@ -91,10 +91,10 @@ describe("impliedServerChoice", () => {
 describe("decideAuthStep", () => {
   const def = "https://api.baalda.com";
 
-  it("asks on a first run with nothing persisted", () => {
+  it("opens a first run on the form, on the managed default (#305)", () => {
     expect(
       decideAuthStep({ choice: null, serverUrl: def, defaultServerUrl: def }),
-    ).toBe("choose-server");
+    ).toBe("form");
   });
 
   it("does not ask again once the question is answered", () => {

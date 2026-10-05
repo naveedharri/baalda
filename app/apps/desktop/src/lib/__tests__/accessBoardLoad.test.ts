@@ -72,3 +72,20 @@ describe("loadAccessMap", () => {
     expect(api.listAccessTree).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("session access map cache (#307)", () => {
+  it("returns the stored map, follows board patches, and forgets", async () => {
+    const m = await import("../accessBoardLoad");
+    const tree = { folders: [], notes: [], files: [] } as unknown as Parameters<typeof m.writeCachedAccessMap>[3]["tree"];
+    expect(m.readCachedAccessMap("s", "v", "u")).toBeNull();
+    m.patchCachedAccessModes("s", "v", "u", new Map([["a", "mixed" as const]]));
+    expect(m.readCachedAccessMap("s", "v", "u")).toBeNull();
+    m.writeCachedAccessMap("s", "v", "u", { tree, modes: new Map([["a", "private" as const]]) });
+    expect(m.readCachedAccessMap("s", "v", "u")?.modes?.get("a")).toBe("private");
+    m.patchCachedAccessModes("s", "v", "u", new Map([["a", "mixed" as const]]));
+    expect(m.readCachedAccessMap("s", "v", "u")?.modes?.get("a")).toBe("mixed");
+    expect(m.readCachedAccessMap("s", "v", "other")).toBeNull();
+    m.forgetCachedAccessMap("s", "v", "u");
+    expect(m.readCachedAccessMap("s", "v", "u")).toBeNull();
+  });
+});

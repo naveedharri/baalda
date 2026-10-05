@@ -200,6 +200,11 @@ export type ServerControl =
    */
   | { t: "activity" }
   | { t: "member"; name: string } // a new teammate joined the vault -> refresh + celebrate
+  /**
+   * The vault's name or icon changed (#306). Carries the new values so the
+   * client patches its vault list in place; old clients ignore an unknown `t`.
+   */
+  | { t: "org"; name?: string; logo?: string | null }
   | ({ t: "presence" } & PresenceState) // a teammate's live viewing state changed
   /**
    * A new desktop release exists (`sync/release-watch.ts`, #269). A HINT to run
@@ -431,6 +436,19 @@ export const PS_META_CHANGED = 0x09;
 export const PS_ACTIVITY_CHANGED = 0x0a;
 /** A user's shrink-brake hold engaged or lifted — see the `brake` frame. */
 export const PS_BRAKE = 0x0b;
+/** The vault's (organization's) name or icon changed — see the `org` frame. */
+export const PS_ORG_CHANGED = 0x0c;
+
+export type OrgChange = { name?: string; logo?: string | null };
+
+/** JSON body after the type: only the fields that are present. */
+export function encodePubsubOrgChanged(change: OrgChange): Uint8Array {
+  const body = enc.encode(JSON.stringify(change));
+  const out = new Uint8Array(1 + body.length);
+  out[0] = PS_ORG_CHANGED;
+  out.set(body, 1);
+  return out;
+}
 
 export function encodePubsubUpdate(docId: string, update: Uint8Array): Uint8Array {
   const body = frameDocPayload(docId, update);
@@ -548,6 +566,7 @@ export type PubsubMessage =
   | { type: "meta-changed" }
   | { type: "activity-changed" }
   | { type: "member-joined"; name: string }
+  | { type: "org-changed"; change: OrgChange }
   | { type: "presence"; presence: PresenceState }
   | { type: "presence-query" }
   | { type: "voice"; frame: Uint8Array; speakerId: string }
@@ -582,6 +601,17 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
       return { type: "activity-changed" };
     case PS_MEMBER_JOINED:
       return { type: "member-joined", name: dec.decode(bytes.subarray(1)) };
+    case PS_ORG_CHANGED: {
+      try {
+        const p = JSON.parse(dec.decode(bytes.subarray(1))) as { name?: unknown; logo?: unknown };
+        const change: OrgChange = {};
+        if (typeof p.name === "string") change.name = p.name;
+        if (typeof p.logo === "string" || p.logo === null) change.logo = p.logo;
+        return { type: "org-changed", change };
+      } catch {
+        return { type: "org-changed", change: {} };
+      }
+    }
     case PS_PRESENCE: {
       try {
         const p = JSON.parse(dec.decode(bytes.subarray(1))) as PresenceState;

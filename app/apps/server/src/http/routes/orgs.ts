@@ -279,7 +279,11 @@ export type VaultTeardown =
       counts: VaultContentCounts;
       subscription: SubscriptionEcho | null;
     }
-  | { ok: false; error: "subscription_cancel_failed"; message: string };
+  | { ok: false; error: "subscription_cancel_failed"; message: string; detail: string };
+
+/** The words a person sees when the provider will not stop the subscription. */
+export const SUBSCRIPTION_CANCEL_FAILED_MESSAGE =
+  "We couldn't stop this vault's subscription. Nothing was deleted. Try again, or cancel it from Billing first.";
 
 /**
  * Remove a vault from the server, completely. THE one teardown.
@@ -360,7 +364,10 @@ async function deleteVaultEverywhere(
         return {
           ok: false,
           error: "subscription_cancel_failed",
-          message: (err as Error).message || "provider cancel failed",
+          // Shown to the person as is (#300); the provider's reason stays in
+          // `detail` and the log line above.
+          message: SUBSCRIPTION_CANCEL_FAILED_MESSAGE,
+          detail: (err as Error).message || "provider cancel failed",
         };
       }
     }
@@ -598,7 +605,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     }
 
     const out = await deleteVaultEverywhere(deps, orgId, session.userId);
-    if (!out.ok) return c.json({ error: out.error, message: out.message }, 502);
+    if (!out.ok) return c.json({ error: out.error, message: out.message, detail: out.detail }, 502);
 
     return c.json({
       deleted: true,
@@ -678,7 +685,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     }
 
     const out = await deleteVaultEverywhere(deps, orgId, session.userId);
-    if (!out.ok) return c.json({ error: out.error, message: out.message }, 502);
+    if (!out.ok) return c.json({ error: out.error, message: out.message, detail: out.detail }, 502);
 
     return c.json({
       unsynced: true,

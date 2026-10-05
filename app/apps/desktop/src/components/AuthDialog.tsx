@@ -771,7 +771,11 @@ export function AuthDialog({
                   setStep("choose-server");
                 }}
               >
-                Change
+                {/* On the build's default (managed) server, name the escape
+                    hatch outright: a fresh install no longer asks first (#305). */}
+                {normalizeServerUrl(serverUrl) === normalizeServerUrl(DEFAULT_SERVER_URL)
+                  ? "Use a self-hosted server"
+                  : "Change"}
               </button>
             </p>
 

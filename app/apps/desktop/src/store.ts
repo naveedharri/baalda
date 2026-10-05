@@ -40,6 +40,8 @@ import {
 import { authManager } from "./lib/auth/authManager";
 import { syncManager } from "./lib/sync/docSession";
 import { vaultScopes } from "./lib/sync/vaultScope";
+import { reconcileReport } from "./lib/sync/reconcileReport";
+import { resetMembersAccessCaches } from "./lib/membersAccessCaches";
 import type { SyncStatus } from "./lib/sync/syncManager";
 import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
@@ -93,6 +95,7 @@ import { parseInviteDeepLink } from "./lib/inviteLink";
 import type { AccountLinkKind } from "./lib/accountLink";
 import { normalizeServerUrl } from "./lib/auth/serverChoice";
 import { readLastTab, writeLastTab, type RightPanelTab } from "./components/rightPanelTab";
+import { forgetPersisted } from "./components/reviewModel";
 import {
   neighbourAfterClose,
   upsertTab,
@@ -1559,6 +1562,8 @@ function leaveVaultSync(): void {
  */
 function enterVaultScope(info: ipc.VaultInfo, orgId: string | null): void {
   vaultScopes.ensure({ orgId, vaultPath: info.path, vaultEpoch: info.epoch });
+  // Reconcile entries are per vault; re-read them for the one now open.
+  reconcileReport.vaultChanged();
 }
 
 /**
@@ -2756,6 +2761,27 @@ export const useStore = create<AppStore>((set, get) => ({
       syncManager.announcePresence();
       get().celebrateMemberJoined(name);
     });
+    // The open vault was renamed or got a new icon on another device (#306):
+    // patch it in place; with nothing usable in the frame, re-list.
+    syncManager.setOrgChangedListener((change) => {
+      const orgId = get().session?.activeOrganizationId ?? null;
+      const hasFields = change.name !== undefined || change.logo !== undefined;
+      if (!orgId || !hasFields || !get().organizations.some((o) => o.id === orgId)) {
+        void get().refreshVault();
+        return;
+      }
+      set({
+        organizations: get().organizations.map((o) =>
+          o.id === orgId
+            ? {
+                ...o,
+                ...(change.name !== undefined ? { name: change.name } : {}),
+                ...(change.logo !== undefined ? { logo: change.logo } : {}),
+              }
+            : o,
+        ),
+      });
+    });
     // Live sidebar presence — the vault channel tells us which teammate is
     // viewing which note; mirror the roster into the store for FileTree.
     syncManager.setVaultPresenceListener((peers) => set({ vaultPresence: peers }));
@@ -3749,6 +3775,13 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   removeVaultLocally: async (organizationId) => {
+    // The review queue is saved under the folder path, so a later join into
+    // the same folder would replay this membership's rows (#295). End it here,
+    // and clear the live report while this vault is still the open one.
+    const removedPath = readOrgVaults()[organizationId] ?? null;
+    if (removedPath) forgetPersisted(removedPath);
+    if (removedPath) reconcileReport.clear(removedPath);
+    if (get().session?.activeOrganizationId === organizationId) reconcileReport.clear();
     // Forget this vault's local folder so it won't auto-open here again.
     forgetOrgVault(organizationId);
     forgetLastVault(organizationId);
@@ -4653,3 +4686,16 @@ if (import.meta.hot) {
 // The editor text size is a CSS token on :root, so it must be published once at
 // startup (after restart) as well as on every change.
 applyEditorFontSize(useStore.getState().editorFontSize);
+
+// The Members and access caches are paint-only but keyed per server, not per
+// account: sign-out, a different account or a different server forgets them
+// so one account's roster never paints for another (#307).
+useStore.subscribe((state, prev) => {
+  if (
+    state.serverUrl !== prev.serverUrl ||
+    (prev.session != null && state.session == null) ||
+    (state.session?.user.id ?? null) !== (prev.session?.user.id ?? null)
+  ) {
+    resetMembersAccessCaches();
+  }
+});

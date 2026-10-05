@@ -114,3 +114,28 @@ describe("confirm copy for taking access away", () => {
     }
   });
 });
+
+describe("roster patches after a write (#307)", () => {
+  it("patches one member's level, the Everyone row and invitations", async () => {
+    const m = await import("../membersAccess");
+    const ov = {
+      members: [
+        { userId: "a", access: { level: "edit" } },
+        { userId: "b", access: { level: "edit" } },
+      ],
+      invitations: [{ id: "i1", email: "x@y.z", role: "member", status: "pending", createdAt: null, expiresAt: null, access: null }],
+    } as unknown as Parameters<typeof m.withMemberLevel>[0];
+    const next = m.withMemberLevel(ov, "b", m.levelOfMode("private"));
+    expect(next.members.map((x) => x.access?.level)).toEqual(["edit", "none"]);
+    expect(m.withoutInvitation(ov, "i1").invitations).toEqual([]);
+    const inv = m.withNewInvitations(
+      ov,
+      [{ email: "X@y.z", invitationId: "i2", emailed: true }, { email: "bad@y.z", emailed: false, error: "no" }],
+      { role: "admin", access: "readonly" },
+      "2026-10-05T00:00:00.000Z",
+    );
+    expect(inv.invitations.map((i) => i.id)).toEqual(["i2"]);
+    const t = m.patchedTeamAccess({ mode: "open", posture: "edit", grantId: "g", overrides: [{} as never] }, "readonly");
+    expect(t).toMatchObject({ mode: "readonly", posture: "view", overrides: [] });
+  });
+});

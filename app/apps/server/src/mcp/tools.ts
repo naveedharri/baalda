@@ -174,32 +174,46 @@ function accessAudience(raw: unknown): AccessAudience {
   return { type, userIds: row.userIds as string[] };
 }
 
-/** Validate `edit_note`'s `edits` argument into typed edits (McpToolError on a bad shape). */
-function parseEdits(raw: unknown): NoteEdit[] {
+/**
+ * Validate `edit_note`'s `edits` argument into typed edits (McpToolError on a bad
+ * shape). The schema names the anchor `find` for replace/delete and `anchor` for
+ * the inserts, and the new text `replace` vs `text`; agents mix those up often
+ * enough that each is accepted under either name — there is no ambiguity in
+ * what was meant, so refusing bought nothing but an error.
+ */
+export function parseEdits(raw: unknown): NoteEdit[] {
   if (!Array.isArray(raw) || raw.length === 0) {
-    throw new McpToolError("edit_note requires a non-empty `edits` array");
+    throw new McpToolError("edit_note requires a non-empty `edits` array", "bad_edit");
   }
   return raw.map((e, i): NoteEdit => {
-    if (!e || typeof e !== "object") throw new McpToolError(`edits[${i}] must be an object`);
+    if (!e || typeof e !== "object") throw new McpToolError(`edits[${i}] must be an object`, "bad_edit");
     const o = e as Args;
-    const str = (key: string): string => {
-      const v = o[key];
-      if (typeof v !== "string") throw new McpToolError(`edits[${i}].${key} must be a string`);
+    const str = (key: string, alias?: string): string => {
+      const v = o[key] ?? (alias ? o[alias] : undefined);
+      if (typeof v !== "string") {
+        throw new McpToolError(`edits[${i}].${key} must be a string`, "bad_edit");
+      }
       return v;
     };
     const all = optBool(o, "all");
     switch (o.type) {
       case "replace":
-        return { type: "replace", find: str("find"), replace: str("replace"), ...(all !== undefined ? { all } : {}) };
+        return {
+          type: "replace",
+          find: str("find", "anchor"),
+          replace: str("replace", "text"),
+          ...(all !== undefined ? { all } : {}),
+        };
       case "delete":
-        return { type: "delete", find: str("find"), ...(all !== undefined ? { all } : {}) };
+        return { type: "delete", find: str("find", "anchor"), ...(all !== undefined ? { all } : {}) };
       case "insert_before":
-        return { type: "insert_before", anchor: str("anchor"), text: str("text") };
+        return { type: "insert_before", anchor: str("anchor", "find"), text: str("text", "replace") };
       case "insert_after":
-        return { type: "insert_after", anchor: str("anchor"), text: str("text") };
+        return { type: "insert_after", anchor: str("anchor", "find"), text: str("text", "replace") };
       default:
         throw new McpToolError(
           `edits[${i}].type must be one of replace, insert_before, insert_after, delete`,
+          "bad_edit",
         );
     }
   });
@@ -512,7 +526,7 @@ export const TOOLS: McpTool[] = [
                 enum: ["replace", "insert_before", "insert_after", "delete"],
                 description: "What to do at the anchor.",
               },
-              find: S("Exact text to replace or delete (replace / delete)"),
+              find: S("Exact text to replace or delete (replace / delete). Matched exactly first; if absent, matched ignoring differences in whitespace, quotes, dashes and Unicode form."),
               replace: S("Replacement text (replace)"),
               anchor: S("Exact text to insert next to (insert_before / insert_after)"),
               text: S("Text to insert (insert_before / insert_after)"),

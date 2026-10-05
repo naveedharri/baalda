@@ -49,6 +49,24 @@ export function reconcileCopyRef(item: Pick<ReconcileItem, "kind" | "detail">): 
   return parseTrashPath(item.detail);
 }
 
+/**
+ * Rows whose recovery copy is no longer in `.context/trash` lose their copy
+ * pointer (#292), so they read as a plain statement with no Open copy /
+ * Restore. Only applied against a listing that succeeded: unknown keeps all.
+ */
+export function withoutMissingCopies<T extends Pick<ReconcileItem, "kind" | "detail">>(
+  items: readonly T[],
+  copies: readonly Pick<TrashCopy, "stamp" | "relPath">[],
+): T[] {
+  const present = new Set(copies.map((c) => `${c.stamp}/${c.relPath}`));
+  return items.map((it) => {
+    const ref = reconcileCopyRef(it);
+    if (!ref || present.has(`${ref.stamp}/${ref.relPath}`)) return it;
+    const { detail: _gone, ...rest } = it;
+    return rest as T;
+  });
+}
+
 /** A copy stored under a collision name (`plan (2).md`) belongs to `plan.md`. */
 export function originalPathOf(relPath: string): string {
   return relPath.replace(/ \((\d+)\)(\.[^./]+)?$/, (_m, _n, ext: string | undefined) => ext ?? "");

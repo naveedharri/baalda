@@ -246,6 +246,16 @@ export function readPersisted(vaultKey: string, kv: KV | null = storage()): Pers
   }
 }
 
+/** Drop a vault's saved review (#295): leaving or removing a vault ends its
+ *  review queue, so a later join into the same folder starts clean. */
+export function forgetPersisted(vaultKey: string, kv: KV | null = storage()): void {
+  try {
+    kv?.removeItem(REVIEW_STORAGE_PREFIX + vaultKey);
+  } catch {
+    // Blocked storage: nothing was saved there either.
+  }
+}
+
 export function writePersisted(vaultKey: string, p: PersistedReview, kv: KV | null = storage()): void {
   try {
     if (!kv) return;

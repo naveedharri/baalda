@@ -8,6 +8,7 @@ import {
   reconcileCopyRef,
   siblingRecoveredPath,
   stampTime,
+  withoutMissingCopies,
 } from "../recoveryCopies";
 
 const STAMP = "2026-09-26T10-00-00-000Z";
@@ -113,5 +114,20 @@ describe("stampTime", () => {
   it("reads the ISO stamp the app writes", () => {
     expect(stampTime(STAMP)).toBe(Date.parse("2026-09-26T10:00:00.000Z"));
     expect(stampTime("manual")).toBeNull();
+  });
+});
+
+describe("withoutMissingCopies (#292)", () => {
+  const detail = `.context/trash/${STAMP}/a.md`;
+  it("drops the copy pointer only when the copy is gone", () => {
+    const items = [
+      { kind: "keptLocally" as const, path: "a.md", detail },
+      { kind: "restoredFromServer" as const, path: "b.md" },
+    ];
+    const gone = withoutMissingCopies(items, []);
+    expect(reconcileCopyRef(gone[0])).toBeNull();
+    expect(gone[1]).toBe(items[1]);
+    const kept = withoutMissingCopies(items, [{ stamp: STAMP, relPath: "a.md" }]);
+    expect(kept[0]).toBe(items[0]);
   });
 });

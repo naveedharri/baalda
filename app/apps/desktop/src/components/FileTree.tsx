@@ -77,6 +77,10 @@ import type { ShareTarget } from "./ShareDialog";
 
 /* Lazy: the sharing sheet is a context-menu action, and keeping it out of the
    eager graph is also what lets it static-import the avatar chunk. */
+/** The row menu's Share… is hidden until per-item sharing is reworked;
+ *  Members and access is where access is managed meanwhile. */
+const SHOW_SHARE_ITEM = false;
+
 const ShareDialog = lazy(() =>
   import("./ShareDialog").then((m) => ({ default: m.ShareDialog })),
 );
@@ -2030,7 +2034,7 @@ export function FileTree() {
               Reset manual order
             </li>
           )}
-          {menu.node && menuTarget && (
+          {SHOW_SHARE_ITEM && menu.node && menuTarget && (
             <li onClick={() => setShareTarget(menuTarget)}>Share…</li>
           )}
           {menu.node &&

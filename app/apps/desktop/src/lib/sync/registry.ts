@@ -51,6 +51,20 @@ import { mergeSv, svFromBase64, svIsEmpty, svToBase64, unseenWork } from "./acke
 import { reconcileReport } from "./reconcileReport";
 import { isSelfAccessChange } from "./selfAccessChanges";
 
+/** A frozen copy of `scope` that is never current, kept by `reset()` so the
+ *  registry reads as stale (not unbound) until it rebinds (#304). */
+function retiredScope(scope: VaultScope): VaultScope {
+  return {
+    generation: scope.generation,
+    orgId: scope.orgId,
+    vaultPath: scope.vaultPath,
+    vaultEpoch: scope.vaultEpoch,
+    signal: scope.signal,
+    serverVaultId: scope.serverVaultId,
+    isCurrent: () => false,
+  };
+}
+
 /** Timestamped `.context/trash` folder for an inbound-removal recovery copy. */
 function recoveryStamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
@@ -1297,7 +1311,13 @@ export class VaultRegistry {
     // habit) rewrites it to nothing — either way a surviving memo would make the
     // next identical write a no-op and leave the doc-id map unpersisted.
     this.lastWrittenConfig = null;
-    this.bound = null;
+    // Retired, never unbound (#304): a pass still awaiting when the vault
+    // switches must resume to `stale() === true` and an epoch Rust rejects.
+    // Nulling `bound` read as "fresh, unpinned" and let vault A's pass finish
+    // against vault B. Teardown runs before the scope manager's `end()`, so the
+    // old scope may still answer `isCurrent()`; the sentinel never does.
+    // `primeLocal` / `reconcileNow` rebind to the current scope.
+    this.bound = this.bound ? retiredScope(this.bound) : null;
     this.progress = nullProgressSink;
   }
 
@@ -1810,6 +1830,9 @@ export class VaultRegistry {
       try {
         text = await ipc.readNote(relPath, this.epoch());
       } catch {
+        // A failed read after the vault switched says nothing about THIS
+        // vault's disk (#304): refuse rather than accept outright.
+        if (this.stale()) return "unknown";
         return "none"; // no file ⇒ nothing on this disk to lose
       }
       if (text.trim().length === 0) return "none";

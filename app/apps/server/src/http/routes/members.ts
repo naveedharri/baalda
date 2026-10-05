@@ -72,7 +72,11 @@ async function invitersByUser(orgId: string, userIds: string[]): Promise<Map<str
   return out;
 }
 
+/** Members summarised at once by the overview; each is a vault-wide resolve. */
+const OVERVIEW_CONCURRENCY = 4;
+
 memberRoutes.get("/orgs/:orgId/members/overview", async (c) => {
+  const startedAt = Date.now();
   const session = await getSession(c);
   if (!session) return c.json({ error: "Authentication required" }, 401);
   const orgId = c.req.param("orgId");
@@ -127,19 +131,31 @@ memberRoutes.get("/orgs/:orgId/members/overview", async (c) => {
     const index = await loadAccessIndex(pool, orgId);
     const cache = createResolverCache();
     const roles = new Map(members.rows.map((m) => [m.user_id, m.role] as const));
-    levels = new Map();
-    for (const m of members.rows) {
-      const [mode] = await summarizeAccess({
-        db: pool,
-        index,
-        cache,
-        groups: [[{ resourceType: "vault", resourceId: orgId }]],
-        userIds: [m.user_id],
-        roles,
-      });
-      levels.set(m.user_id, LEVEL_OF[mode]);
-    }
+    const out = new Map<string, AccessLevel>();
+    // One vault-wide resolve per member over the shared index and cache, in
+    // parallel (bounded) rather than one after another (#307).
+    const queue = members.rows.slice();
+    const worker = async () => {
+      for (let m = queue.shift(); m; m = queue.shift()) {
+        const [mode] = await summarizeAccess({
+          db: pool,
+          index,
+          cache,
+          groups: [[{ resourceType: "vault", resourceId: orgId }]],
+          userIds: [m.user_id],
+          roles,
+        });
+        out.set(m.user_id, LEVEL_OF[mode]);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(OVERVIEW_CONCURRENCY, queue.length) }, worker),
+    );
+    levels = out;
   }
+  console.log(
+    `[members-overview] org=${orgId} members=${members.rows.length} levels=${levels ? 1 : 0} ms=${Date.now() - startedAt}`,
+  );
 
   return c.json({
     members: members.rows.map((m) => ({
@@ -168,7 +184,7 @@ memberRoutes.get("/orgs/:orgId/members/overview", async (c) => {
 });
 
 type ActivityEvent =
-  | { kind: "joined"; at: string; invitedBy: PersonRef | null }
+  | { kind: "joined"; at: string; invitedBy: PersonRef | null; rejoined?: boolean }
   | { kind: "created"; at: string; docId: string; path: string }
   | { kind: "edited"; at: string; docId: string; path: string }
   | {
@@ -180,6 +196,34 @@ type ActivityEvent =
       resourceId: string;
       path: string | null;
     };
+
+function loadShareRows(orgId: string, targetId: string, limit: number) {
+  return pool.query<{
+    resource_type: "folder" | "file" | "vault";
+    resource_id: string;
+    permission: "edit" | "view" | "readonly" | "denied" | "locked";
+    created_at: Date;
+    by_id: string | null;
+    by_name: string | null;
+    by_email: string | null;
+    folder_path: string | null;
+    note_path: string | null;
+    file_path: string | null;
+  }>(
+    `SELECT s.resource_type, s.resource_id, s.permission, s.created_at,
+            u.id AS by_id, u.name AS by_name, u.email AS by_email,
+            f.path AS folder_path, n.rel_path AS note_path, fl.path AS file_path
+       FROM shares s
+       LEFT JOIN "user" u ON u.id = s.created_by
+       LEFT JOIN folders f ON s.resource_type = 'folder' AND f.id = s.resource_id
+       LEFT JOIN notes n ON s.resource_type = 'file' AND n.id = s.resource_id AND n.deleted_at IS NULL
+       LEFT JOIN files fl ON s.resource_type = 'file' AND fl.id = s.resource_id
+      WHERE s.org_id = $1 AND s.principal_type = 'user' AND s.principal_id = $2
+      ORDER BY s.created_at DESC
+      LIMIT $3`,
+    [orgId, targetId, limit],
+  );
+}
 
 const DEFAULT_ACTIVITY = 50;
 const MAX_ACTIVITY = 100;
@@ -207,28 +251,33 @@ memberRoutes.get("/orgs/:orgId/members/:userId/activity", async (c) => {
   const rawLimit = Number(c.req.query("limit") ?? DEFAULT_ACTIVITY);
   const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), MAX_ACTIVITY) : DEFAULT_ACTIVITY;
 
-  const { rows: memberRows } = await pool.query<{ joined_at: Date }>(
-    `SELECT "createdAt" AS joined_at FROM member WHERE "organizationId" = $1 AND "userId" = $2`,
-    [orgId, targetId],
-  );
+  const startedAt = Date.now();
+  // Independent lookups start together (#307): membership, inviter, the org's
+  // collections and the target's share rows (filtered by visibility below).
+  const [{ rows: memberRows }, inviters, { rows: vaults }, sharesResult] = await Promise.all([
+    pool.query<{ joined_at: Date }>(
+      `SELECT "createdAt" AS joined_at FROM member WHERE "organizationId" = $1 AND "userId" = $2`,
+      [orgId, targetId],
+    ),
+    invitersByUser(orgId, [targetId]),
+    pool.query<{ id: string }>("SELECT id FROM vaults WHERE organization_id = $1", [orgId]),
+    loadShareRows(orgId, targetId, limit),
+  ]);
   if (!memberRows.length) return c.json({ error: "not_member", message: "That person is not a member of this vault" }, 404);
 
   const events: ActivityEvent[] = [];
-  const inviter = (await invitersByUser(orgId, [targetId])).get(targetId) ?? null;
+  const inviter = inviters.get(targetId) ?? null;
   events.push({ kind: "joined", at: new Date(memberRows[0].joined_at).toISOString(), invitedBy: inviter });
 
-  const { rows: vaults } = await pool.query<{ id: string }>(
-    "SELECT id FROM vaults WHERE organization_id = $1",
-    [orgId],
-  );
   // Caller-visible ids across the org's collections: notes (readable set) and folders.
   const readable = new Set<string>();
   const visibleFolders = new Set<string>();
-  for (const v of vaults) {
-    const [docs, folders] = await Promise.all([
-      listReadableDocsInVault(session.userId, v.id),
-      listVisibleFolders(session.userId, v.id),
-    ]);
+  const perVault = await Promise.all(
+    vaults.map((v) =>
+      Promise.all([listReadableDocsInVault(session.userId, v.id), listVisibleFolders(session.userId, v.id)]),
+    ),
+  );
+  for (const [docs, folders] of perVault) {
     for (const id of docs) readable.add(id);
     for (const f of folders) visibleFolders.add(f.id);
   }
@@ -276,31 +325,7 @@ memberRoutes.get("/orgs/:orgId/members/:userId/activity", async (c) => {
     }
   }
 
-  const { rows: shares } = await pool.query<{
-    resource_type: "folder" | "file" | "vault";
-    resource_id: string;
-    permission: "edit" | "view" | "readonly" | "denied" | "locked";
-    created_at: Date;
-    by_id: string | null;
-    by_name: string | null;
-    by_email: string | null;
-    folder_path: string | null;
-    note_path: string | null;
-    file_path: string | null;
-  }>(
-    `SELECT s.resource_type, s.resource_id, s.permission, s.created_at,
-            u.id AS by_id, u.name AS by_name, u.email AS by_email,
-            f.path AS folder_path, n.rel_path AS note_path, fl.path AS file_path
-       FROM shares s
-       LEFT JOIN "user" u ON u.id = s.created_by
-       LEFT JOIN folders f ON s.resource_type = 'folder' AND f.id = s.resource_id
-       LEFT JOIN notes n ON s.resource_type = 'file' AND n.id = s.resource_id AND n.deleted_at IS NULL
-       LEFT JOIN files fl ON s.resource_type = 'file' AND fl.id = s.resource_id
-      WHERE s.org_id = $1 AND s.principal_type = 'user' AND s.principal_id = $2
-      ORDER BY s.created_at DESC
-      LIMIT $3`,
-    [orgId, targetId, limit],
-  );
+  const shares = sharesResult.rows;
   for (const s of shares) {
     let path: string | null = null;
     if (s.resource_type === "folder" && visibleFolders.has(s.resource_id)) path = s.folder_path;
@@ -317,7 +342,20 @@ memberRoutes.get("/orgs/:orgId/members/:userId/activity", async (c) => {
     });
   }
 
+  // The member row is the CURRENT membership: leaving deletes it and a rejoin
+  // inserts a new one, while authored notes outlive both. Note activity older
+  // than this join can only come from an earlier membership, so say so instead
+  // of implying one continuous membership (#296).
+  const joined = events[0];
+  if (
+    joined.kind === "joined" &&
+    events.some((e) => (e.kind === "created" || e.kind === "edited") && e.at < joined.at)
+  ) {
+    joined.rejoined = true;
+  }
+
   events.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  console.log(`[member-activity] org=${orgId} events=${Math.min(events.length, limit)} ms=${Date.now() - startedAt}`);
   return c.json({ events: events.slice(0, limit) });
 });
 

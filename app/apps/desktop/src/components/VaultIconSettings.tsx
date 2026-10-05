@@ -29,8 +29,9 @@ import { useVaultIconRaw, VaultTile } from "./VaultSwitcher";
 const RECENT_SHOWN = 6;
 /**
  * Vault settings → General → Vault icon: pick a preset glyph and colour, or
- * upload an image. A synced vault's icon is the team's (stored on the server,
- * owner/admin only); a local vault's is this device's.
+ * upload an image. A synced vault's icon is the team's (stored on the server):
+ * members see the same picker as owners/admins, with every action disabled.
+ * A local vault's icon is this device's.
  */
 export function VaultIconSettings({
   identity,
@@ -42,6 +43,7 @@ export function VaultIconSettings({
   name: string;
   canEdit: boolean;
 }) {
+  const isSynced = identity.startsWith("org:");
   const raw = useVaultIconRaw(identity);
   const current = resolveVaultIcon(identity, raw);
   const isCustom = parseVaultIcon(raw) !== null;
@@ -62,7 +64,7 @@ export function VaultIconSettings({
 
   /** Store the icon (server for a synced vault, this device for a local one). Throws. */
   const persist = async (value: string | null) => {
-    if (identity.startsWith("org:")) {
+    if (isSynced) {
       const orgId = identity.slice("org:".length);
       await authManager.api.updateOrganizationLogo(orgId, value);
       // Paint it now; teammates pick it up with their next vault list.
@@ -113,7 +115,6 @@ export function VaultIconSettings({
     }
   };
 
-  const isSynced = identity.startsWith("org:");
   const usingImage = current.kind === "image";
   const shownRecent = recent.slice(0, RECENT_SHOWN);
 
@@ -131,11 +132,11 @@ export function VaultIconSettings({
         <div className="vault-icon-head-text">
           <span className="vault-icon-title">Vault icon</span>
           <span className="field-hint">
-            {canEdit
-              ? isSynced
+            {!isSynced
+              ? "Shown on this device only, until you turn on sync."
+              : canEdit
                 ? "Everyone in this vault sees this icon."
-                : "Shown on this device only, until you turn on sync."
-              : "Only an owner or admin can change the vault icon."}
+                : "Everyone in this vault sees this icon. Only an owner or admin can change it."}
           </span>
         </div>
         <div className="vault-icon-head-actions">
@@ -237,7 +238,7 @@ export function VaultIconSettings({
 
         {usingImage && (
           <span className="vault-icon-note">
-            Using your uploaded image. Pick an icon to switch back.
+            {canEdit ? "Using your uploaded image. Pick an icon to switch back." : "Using an uploaded image."}
           </span>
         )}
         <div className="vault-icon-grid" role="radiogroup" aria-label="Icon">

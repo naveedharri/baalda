@@ -148,8 +148,12 @@ export function decideAuthStep({
   defaultServerUrl?: string;
 }): AuthStep {
   if (pendingServerLink) return "confirm-link";
-  if (choice) return "form";
-  // Never asked. Only a device still sitting on the build's default has an
-  // unanswered question; anything else answered it by pointing elsewhere.
-  return impliedServerChoice(serverUrl, defaultServerUrl) ? "form" : "choose-server";
+  // Never asked lands on the form too (#305): a fresh install behaves as
+  // managed on the build's default server, which the form names with a
+  // one-click "Use a self-hosted server" link (the #91 safeguard, lighter).
+  // `choose-server` is reached only from that link.
+  void choice;
+  void serverUrl;
+  void defaultServerUrl;
+  return "form";
 }

@@ -8,6 +8,7 @@ import {
   encodePubsubAclChanged,
   encodePubsubRegistryChanged,
   encodePubsubMemberJoined,
+  encodePubsubOrgChanged,
   encodePubsubPresence,
   encodePubsubPresenceQuery,
   encodePubsubVoice,
@@ -70,6 +71,17 @@ describe("vault channel framing", () => {
     expect(decodePubsub(encodePubsubMemberJoined("François 🎉"))).toEqual({
       type: "member-joined",
       name: "François 🎉",
+    });
+  });
+
+  it("round-trips an org-changed payload (name and/or icon) (#306)", () => {
+    expect(decodePubsub(encodePubsubOrgChanged({ name: "Team", logo: "emoji:🚀" }))).toEqual({
+      type: "org-changed",
+      change: { name: "Team", logo: "emoji:🚀" },
+    });
+    expect(decodePubsub(encodePubsubOrgChanged({ logo: null }))).toEqual({
+      type: "org-changed",
+      change: { logo: null },
     });
   });
 

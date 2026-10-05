@@ -3,8 +3,11 @@
 
 import type {
   InvitationOverview,
+  InviteManyResult,
   MemberAccessLevel,
   MemberOverview,
+  MembersOverview,
+  TeamAccess,
   TeamAccessMode,
   TeamAccessPosture,
 } from "./api";
@@ -250,4 +253,55 @@ export function levelClass(level: TeamAccessMode | MemberAccessLevel | "mixed" |
     default:
       return "";
   }
+}
+
+// -- Roster patches after a write (#307) --
+// Paint-only: the tab patches what it shows at once, then refreshes once from
+// the server, which stays authoritative.
+
+/** The person level a vault-wide write of `mode` sets. */
+export function levelOfMode(mode: TeamAccessMode): MemberAccessLevel {
+  return mode === "open" ? "edit" : mode === "readonly" ? "view" : "none";
+}
+
+/** The roster with one member's vault-wide level replaced. */
+export function withMemberLevel(ov: MembersOverview, userId: string, level: MemberAccessLevel): MembersOverview {
+  return {
+    ...ov,
+    members: ov.members.map((m) => (m.userId === userId && m.access ? { ...m, access: { level } } : m)),
+  };
+}
+
+/** The Everyone row after `PUT team-access`: the mode, its posture, no org overrides left. */
+export function patchedTeamAccess(t: TeamAccess, mode: TeamAccessMode): TeamAccess {
+  const posture: TeamAccessPosture = mode === "open" ? "edit" : mode === "readonly" ? "view" : "sealed";
+  return { ...t, mode, posture, overrides: [] };
+}
+
+/** The roster without a revoked invitation. */
+export function withoutInvitation(ov: MembersOverview, invitationId: string): MembersOverview {
+  return { ...ov, invitations: ov.invitations.filter((i) => i.id !== invitationId) };
+}
+
+/** The roster with the invitations a send just created (or renewed), newest first. */
+export function withNewInvitations(
+  ov: MembersOverview,
+  results: readonly InviteManyResult[],
+  sent: { role: string; access: TeamAccessMode | null },
+  nowIso: string,
+): MembersOverview {
+  const added: InvitationOverview[] = results
+    .filter((r): r is InviteManyResult & { invitationId: string } => !r.error && !!r.invitationId)
+    .map((r) => ({
+      id: r.invitationId,
+      email: r.email,
+      role: sent.role,
+      status: "pending",
+      createdAt: nowIso,
+      expiresAt: null,
+      access: sent.access,
+    }));
+  if (!added.length) return ov;
+  const emails = new Set(added.map((i) => i.email.toLowerCase()));
+  return { ...ov, invitations: [...added, ...ov.invitations.filter((i) => !emails.has(i.email.toLowerCase()))] };
 }

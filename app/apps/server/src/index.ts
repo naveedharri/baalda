@@ -12,7 +12,7 @@ import {
 import { attachSyncUpgrade } from "./sync/http-upgrade.js";
 import { createPubSub } from "./sync/pubsub.js";
 import { VaultChannel } from "./sync/vault-channel.js";
-import { setMemberJoinedPublisher } from "./sync/member-events.js";
+import { setMemberJoinedPublisher, setOrgChangedPublisher } from "./sync/member-events.js";
 import { backfillIndex } from "./index/indexer.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
@@ -103,6 +103,10 @@ async function main() {
   // connected teammates refresh their roster + celebrate without a reload.
   setMemberJoinedPublisher((vaultId, name) => {
     void vaultChannel.publishMemberJoined(vaultId, name).catch(broadcastFailed("member-joined"));
+  });
+  // A vault rename / icon change reaches teammates' switchers live (#306).
+  setOrgChangedPublisher((vaultId, change) => {
+    void vaultChannel.publishOrgChanged(vaultId, change).catch(broadcastFailed("org-changed"));
   });
   // Soft delete / restore / purge → open Activity feeds refetch Trash (#260).
   setTrashActivityPublisher((vaultId) => {
