@@ -78,6 +78,7 @@ const sync = vi.hoisted(() => ({
   setAclListener: vi.fn(),
   setInboundListeners: vi.fn(),
   setMemberJoinedListener: vi.fn(),
+  setOrgChangedListener: vi.fn(),
   setVaultPresenceListener: vi.fn(),
   setVoiceListener: vi.fn(),
   setSyncProgressListener: vi.fn(),
