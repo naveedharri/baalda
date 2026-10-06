@@ -9,7 +9,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "simulate:windows": "vite --mode simulator --host 127.0.0.1 --port 1425 --strictPort --open /dev/window-simulator/?platform=windows",
+    "simulate:macos": "vite --mode simulator --host 127.0.0.1 --port 1425 --strictPort --open /dev/window-simulator/?platform=macos"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

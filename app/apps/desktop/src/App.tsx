@@ -32,6 +32,7 @@ import { SidebarHeader } from "./components/SidebarHeader";
 import { Spinner } from "./components/Spinner";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { SidebarToggle } from "./components/SidebarToggle";
+import { GraphButton } from "./components/GraphButton";
 import { TabBar } from "./components/TabBar";
 import { VirtualTabHost } from "./components/VirtualTabHost";
 import { Toasts } from "./components/Toasts";
@@ -1468,6 +1469,7 @@ export default function App() {
           })}
           searchOpen={searchOpen}
           onSearch={() => setSearchOpen((open) => !open)}
+          onGraph={document.documentElement.dataset.platform === "windows" ? () => setGraphOpen(true) : undefined}
         />
         {/* Centered overlay, not a sidebar panel — it searches the whole vault
             and its button lives in the main header. */}
@@ -1528,29 +1530,9 @@ export default function App() {
               {/* Same gate as history: a link is a doc_id, so it only exists for a
                   note the server knows about. */}
               {versionDocId && !isPreview && <ShareNoteButton docId={versionDocId} />}
-              <button
-                className="icon-btn graph-btn"
-                title="Graph view (⌘G)"
-                aria-label="Open graph view"
-                onClick={() => setGraphOpen(true)}
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <circle cx="5.5" cy="6" r="2.5" />
-                  <circle cx="18" cy="4.5" r="2" />
-                  <circle cx="12.5" cy="13" r="2.5" />
-                  <circle cx="6" cy="19" r="2" />
-                  <circle cx="19.5" cy="18.5" r="2.5" />
-                  <path d="M7.8 7.2 10.6 11M14.4 11.3 16.6 6M11 15 7.3 17.6M14.8 14.6l3 2.6" />
-                </svg>
-              </button>
+              {document.documentElement.dataset.platform !== "windows" && (
+                <GraphButton onClick={() => setGraphOpen(true)} />
+              )}
               {/* Far right: the Activity / Versions panel (push-to-talk lives in
                   its header now). */}
               <button

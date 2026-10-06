@@ -395,7 +395,11 @@ export function clampSidebarWidth(px: number, viewport = 1200): number {
   if (!Number.isFinite(px)) return SIDEBAR_WIDTH_DEFAULT;
   // Always leave room for the editor, even when the window is narrower than the
   // nominal maximum.
-  const max = Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, viewport - 320));
+  // Windows caption buttons share the app header, which needs more room than
+  // the editor alone to keep all actions reachable at the minimum window size.
+  const mainMinimum = typeof document !== "undefined" &&
+    document.documentElement.dataset.platform === "windows" ? 440 : 320;
+  const max = Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, viewport - mainMinimum));
   return Math.round(Math.min(max, Math.max(SIDEBAR_WIDTH_MIN, px)));
 }
 

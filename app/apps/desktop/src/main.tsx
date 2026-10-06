@@ -12,6 +12,7 @@ import "@fontsource/jetbrains-mono/400.css";
 import "./styles/tokens.css";
 
 import App from "./App";
+import { WindowsControls } from "./components/WindowsControls";
 import { initPlatform } from "./lib/platform";
 import { initTheme } from "./lib/theme";
 import { mirrorConsoleToTerminal } from "./lib/devConsole";
@@ -30,6 +31,7 @@ mirrorConsoleToTerminal();
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <App />
+    <WindowsControls />
   </React.StrictMode>,
 );
 // Render is synchronous up to the first commit's paint, so this is the cost of

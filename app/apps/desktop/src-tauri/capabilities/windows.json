@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "windows-chrome",
+  "description": "Custom titlebar window buttons on Windows",
+  "windows": ["main"],
+  "platforms": ["windows"],
+  "permissions": [
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
+  ]
+}

@@ -14,11 +14,12 @@
    dialog, ShareDialog) import it directly, which is correct: they pay for the
    chunk they are already in.
    ============================================================ */
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
 import { createAvatar } from "@dicebear/core";
 import { notionists } from "@dicebear/collection";
 import { PRESENCE_PALETTE } from "../lib/presence/color";
 import { useResolvedAvatar, type AvatarIdentity } from "../lib/avatarIdentity";
+import { scopeSvgIds } from "../lib/svgIds";
 
 // Palette hex values without the leading "#", as DiceBear expects. DiceBear
 // deterministically picks one per seed, so each character gets its own colour.
@@ -44,7 +45,8 @@ export interface FaceProps extends AvatarIdentity {
 /** Photo-or-character markup for a resolved avatar, inside the caller's span. */
 function useAvatarMarkup(identity: AvatarIdentity) {
   const { photo, seed } = useResolvedAvatar(identity);
-  const svg = useMemo(() => characterSvg(seed), [seed]);
+  const instance = useId();
+  const svg = useMemo(() => scopeSvgIds(characterSvg(seed), instance), [seed, instance]);
   // Prefer the person's photo; fall back to the generated character if it
   // fails to load.
   const [imgFailed, setImgFailed] = useState(false);

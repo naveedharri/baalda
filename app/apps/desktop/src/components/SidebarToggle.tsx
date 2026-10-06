@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { GraphButton } from "./GraphButton";
+
 /** Window-chrome control for showing and hiding the vault sidebar. */
 export function SidebarToggle({
   hidden,
   onToggle,
   searchOpen,
   onSearch,
+  onGraph,
 }: {
   hidden: boolean;
   onToggle: () => void;
   searchOpen: boolean;
   onSearch: () => void;
+  onGraph?: () => void;
 }) {
   return (
     <div className="titlebar-tools">
@@ -39,7 +43,7 @@ export function SidebarToggle({
       <button
         type="button"
         className="titlebar-tool titlebar-search"
-        title="Search notes (⌘F)"
+        title={document.documentElement.dataset.platform === "windows" ? "Search notes (Ctrl+F)" : "Search notes (⌘F)"}
         aria-label="Search notes"
         aria-pressed={searchOpen}
         onClick={onSearch}
@@ -57,6 +61,7 @@ export function SidebarToggle({
           <path d="m20 20-3.5-3.5" />
         </svg>
       </button>
+      {onGraph && <GraphButton titlebar onClick={onGraph} />}
     </div>
   );
 }

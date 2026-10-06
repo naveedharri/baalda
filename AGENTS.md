@@ -93,6 +93,24 @@ disposable test database before running them, including through the root test
 command. They require Postgres and migrations, run serially, and are not cached.
 Desktop sync integration tests are gated by `CONTEXT_IT=1` and need a live server.
 
+For a browser preview of Windows or macOS UI on a Mac, use the repository's
+[window-simulator skill](.agents/skills/window-simulator/SKILL.md). From
+`app/apps/desktop/`, run `pnpm run simulate:windows` or `pnpm run simulate:macos`.
+The real app renders with synthetic IPC/API fixtures on port 1425; no backend or
+real vault is needed. Keep fixture data equivalent across platforms, and check
+mock response shapes before treating empty preview panels as product bugs.
+Browser simulation does not verify native Windows window behavior. Follow the
+user's requested review/testing order and save screenshots outside tracked files.
+
+**UI changes must consider both Windows and macOS.** Before calling a UI change
+done, inspect the affected Windows layout as well as the macOS layout, using the
+browser simulator when a Windows machine is unavailable. Check relevant window
+chrome, icon alignment, text spacing, overlays/panels, and narrow-window behavior;
+do not assume a change that looks correct on macOS also works in WebView2. Keep
+platform-specific adjustments scoped, preserve shared behavior, and report any
+native Windows checks that could not be performed. This applies to every agent,
+including Claude.
+
 Run checks relevant to the change. Bridge changes need convergence/echo/roundtrip
 coverage; sync and permission changes need their relevant regression suites.
 Report what was actually verified and any prerequisites that prevented checks.

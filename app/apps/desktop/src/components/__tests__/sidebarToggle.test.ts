@@ -60,4 +60,13 @@ describe("SidebarToggle", () => {
     act(() => host.querySelector<HTMLButtonElement>(".titlebar-search")!.click());
     expect(onSearch).toHaveBeenCalledOnce();
   });
+
+  it("opens the graph from the Windows navigation group", () => {
+    const onGraph = vi.fn();
+    act(() => root.render(createElement(SidebarToggle, {
+      hidden: true, onToggle: vi.fn(), searchOpen: false, onSearch: vi.fn(), onGraph,
+    })));
+    act(() => host.querySelector<HTMLButtonElement>(".graph-btn")!.click());
+    expect(onGraph).toHaveBeenCalledOnce();
+  });
 });

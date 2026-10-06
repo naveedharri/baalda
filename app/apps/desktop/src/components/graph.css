@@ -81,6 +81,10 @@
   pointer-events: auto;
 }
 
+html[data-platform="windows"] .graph-header {
+  top: calc(var(--chrome-row-h) + var(--sp-2));
+}
+
 .graph-title {
   font-family: var(--font-display);
   font-weight: 600;

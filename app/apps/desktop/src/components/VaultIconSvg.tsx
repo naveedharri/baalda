@@ -3,11 +3,12 @@
    LAZY ONLY, like `./Avatar`: `@dicebear/collection` is heavy, so this module
    is reached through `React.lazy` in `./VaultSwitcher` (`VaultTile`) and never
    static-imported from the startup graph. */
-import { useMemo } from "react";
+import { useId, useMemo } from "react";
 import { createAvatar } from "@dicebear/core";
 import { icons } from "@dicebear/collection";
 import { ITEM_COLORS } from "../lib/appearance";
 import { NO_COLOR, type VaultIconName } from "../lib/vaultIcon";
+import { scopeSvgIds } from "../lib/svgIds";
 
 /**
  * The SVG for one preset. DiceBear draws a white glyph on a mid-tone square;
@@ -47,6 +48,7 @@ export default function VaultIconSvg({
   icon: VaultIconName;
   color: string;
 }) {
-  const svg = useMemo(() => vaultIconSvg(icon, color), [icon, color]);
+  const instance = useId();
+  const svg = useMemo(() => scopeSvgIds(vaultIconSvg(icon, color), instance), [icon, color, instance]);
   return <span className="vault-icon-svg" dangerouslySetInnerHTML={{ __html: svg }} />;
 }

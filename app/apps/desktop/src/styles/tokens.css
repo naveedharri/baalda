@@ -144,10 +144,10 @@
   /* Title → properties/body. */
   --inline-title-gap: var(--sp-4);
 
-  /* Height to keep clear at the very top of the window for system window
-     controls. Zero everywhere the OS still draws its own title bar above the
-     webview; only macOS runs `titleBarStyle: "Overlay"`, where the webview owns
-     the full height and the traffic lights float over our top-left corner.
+  /* Extra inset for native overlay controls. macOS runs `titleBarStyle:
+     "Overlay"` with traffic lights over our top-left corner. Windows places
+     custom caption buttons in the chrome row, so it needs no extra inset;
+     Linux draws its own title bar above the webview.
      `[data-platform]` is stamped on <html> by `lib/platform.ts`. */
   --titlebar-inset: 0px;
   /* Height of the top chrome row (tabs, sidebar/search tools, the floating

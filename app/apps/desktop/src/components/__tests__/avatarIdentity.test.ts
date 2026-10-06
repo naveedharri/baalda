@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it } from "vitest";
 import { Avatar, FaceSvg, characterSvg } from "../Avatar";
+import VaultIconSvg from "../VaultIconSvg";
 import {
   rememberAvatarImage,
   resetAvatarImages,
@@ -27,7 +28,9 @@ const presence = (wire: { id?: string; name?: string; image?: string }) =>
     createElement(FaceSvg, { userId: wire.id, name: wire.name, image: wire.image, className: "presence-avatar" }),
   );
 
-const svgOf = (html: string) => html.slice(html.indexOf("<svg"), html.lastIndexOf("</svg>") + 6);
+// Compare character art, independent of each mounted SVG's resource namespace.
+const svgOf = (html: string) => html.slice(html.indexOf("<svg"), html.lastIndexOf("</svg>") + 6)
+  .replace(/baalda-svg-[A-Za-z0-9_-]+?--/g, "");
 
 afterEach(() => {
   resetAvatarImages();
@@ -35,6 +38,28 @@ afterEach(() => {
 });
 
 describe("one avatar rule on every surface", () => {
+  it("isolates masks between vault icons, account faces, and repeated gallery characters", () => {
+    const html = renderToStaticMarkup(createElement("div", null,
+      createElement(VaultIconSvg, { icon: "book", color: "purple" }),
+      createElement(Avatar, { label: NAME, userId: USER }),
+      createElement(FaceSvg, { userId: USER, className: "presence-avatar" }),
+      createElement(Avatar, { label: NAME, image: "character:baalda-3" }),
+      createElement(Avatar, { label: NAME, image: "character:baalda-3" }),
+    ));
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    const ids = [...host.querySelectorAll("svg [id]")].map((element) => element.id);
+    expect(ids.length).toBeGreaterThanOrEqual(5);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const svg of host.querySelectorAll("svg")) {
+      const localIds = new Set([...svg.querySelectorAll("[id]")].map((element) => element.id));
+      for (const match of svg.outerHTML.matchAll(/url\(#([^\)]+)\)/g)) {
+        expect(localIds.has(match[1])).toBe(true);
+      }
+    }
+    const repeated = [...host.querySelectorAll(".avatar")].slice(-2);
+    expect(svgOf(repeated[0].innerHTML)).toBe(svgOf(repeated[1].innerHTML));
+  });
   it("seeds the generated face by user id, never by name", () => {
     expect(resolveAvatar({ userId: USER, name: NAME })).toEqual({ photo: null, seed: USER });
     expect(svgOf(accountBar(null))).toBe(characterSvg(USER));

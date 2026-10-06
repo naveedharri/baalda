@@ -5,6 +5,7 @@ import {
   useMemo,
   useState,
   type CSSProperties,
+  type HTMLAttributes,
   type ReactNode,
 } from "react";
 import * as ipc from "../lib/ipc";
@@ -162,10 +163,14 @@ function rowSubtitle(row: VaultRow): string {
 export function VaultSwitcherPopover({
   rows,
   onClose,
+  onPointerEnter,
+  onPointerLeave,
+  onPointerDownCapture,
+  onFocusCapture,
 }: {
   rows: readonly VaultRow[];
   onClose: () => void;
-}) {
+} & Pick<HTMLAttributes<HTMLDivElement>, "onPointerEnter" | "onPointerLeave" | "onPointerDownCapture" | "onFocusCapture">) {
   const signedIn = useStore((s) => s.authStatus === "signed-in" && !!s.session);
   const activeOrgId = useStore((s) => s.session?.activeOrganizationId ?? null);
   const members = useStore((s) => s.members);
@@ -173,7 +178,12 @@ export function VaultSwitcherPopover({
   const vault = useStore((s) => s.vault);
 
   return (
-    <div className="vault-popover vault-switcher" role="menu">
+    <div className="vault-popover vault-switcher" role="menu"
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
+      onPointerDownCapture={onPointerDownCapture}
+      onFocusCapture={onFocusCapture}
+    >
       {rows.map((row, i) => (
         <button
           key={row.key}

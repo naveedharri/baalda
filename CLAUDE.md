@@ -79,6 +79,16 @@ docs/               Baalda.md (index) · STATUS.md · specs/
 note buffer via the md↔CRDT bridge and all networked sync. The UI never touches the filesystem directly —
 it calls typed Rust commands (`src/lib/ipc.ts`) and hits the server over HTTP (`src/lib/api.ts`).
 
+Windows disables native window decorations before reveal (`src-tauri/src/lib.rs`)
+and renders one blended chrome row: sidebar/search/graph at the left, app actions
+and custom caption buttons at the right. `WindowsControls` mounts beside `App` so
+loading/welcome screens retain window controls; its write permissions are scoped
+to Windows in `capabilities/windows.json`. The Activity/Versions slide-out stays
+at the top edge and hides Windows caption controls while open, leaving its own
+close button; closing the panel restores the caption controls. macOS keeps its overlay traffic lights
+and Linux its native titlebar. Tauri drag regions retain drag and double-click
+maximize behavior.
+
 ## Build & run
 
 Prereqs: Node ≥ 22, Rust/cargo, Docker (for Postgres). Run `pnpm install` once from `app/`.

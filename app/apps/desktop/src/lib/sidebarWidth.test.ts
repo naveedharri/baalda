@@ -45,6 +45,18 @@ describe("clampSidebarWidth", () => {
     expect(clampSidebarWidth(9000, 700)).toBeLessThan(700);
   });
 
+  it("reserves room for app actions and caption buttons on Windows", () => {
+    const original = document.documentElement.dataset.platform;
+    document.documentElement.dataset.platform = "windows";
+    try {
+      expect(clampSidebarWidth(9000, 720)).toBe(280);
+      expect(720 - clampSidebarWidth(9000, 720)).toBe(440);
+    } finally {
+      if (original === undefined) delete document.documentElement.dataset.platform;
+      else document.documentElement.dataset.platform = original;
+    }
+  });
+
   it("still yields a usable sidebar on a window narrower than the minimum", () => {
     // Below this the floor wins: the window is too small to honour both the
     // editor's reserve and the sidebar's floor, and the sidebar keeps its.
