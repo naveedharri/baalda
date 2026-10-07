@@ -166,6 +166,11 @@ pub fn run() {
             relaunch::apply_on_launch(app.handle());
             #[cfg(desktop)]
             if let Some(win) = app.get_webview_window("main") {
+                // Windows draws the chrome in React so tabs and app controls
+                // share one row. Apply before reveal; macOS/Linux keep their
+                // existing window decorations and titlebar behavior.
+                #[cfg(windows)]
+                win.set_decorations(false)?;
                 // While it is still hidden, so the first frame is already the
                 // right size — resizing after reveal would visibly jump.
                 fit_window_to_screen(&win);

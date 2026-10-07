@@ -95,6 +95,7 @@ n/a = synchronous or sub-100ms by construction.
 
 | Action | Work | Latency | Feedback |
 | --- | --- | --- | --- |
+| Open vault switcher | local UI only | immediate | Hovering the vault tile opens a temporary menu; leaving tile/menu closes after a 220ms grace. Clicking the trigger or interacting inside pins it open. Another trigger click, outside click, Escape, or a completed menu action closes it. Same behavior on Windows and macOS. |
 | Switch vault (menu row) | folder already on device: 3 IPCs, tree swaps first; org activation + roster + reconcile follow in the background. No folder yet: 6+ round trips, then rediscover/mint | <0.2s (on-device) / 1–5s (no folder) | ✅ sidebar renames to target + spinner; tree fades and stops taking clicks (only visible on the no-folder path — the overlay's 180ms fade-in outlasts an on-device switch) |
 | Switch vault (settings) | same | same | ✅ per-button spinner + the above |
 | Accept invitation | accept → switch → bind folder → reconcile | 1–5s | ✅ spinner |

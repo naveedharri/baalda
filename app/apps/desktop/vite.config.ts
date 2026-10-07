@@ -5,7 +5,7 @@ import react from "@vitejs/plugin-react";
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
+export default defineConfig(async ({ mode }) => ({
   plugins: [react()],
 
   build: {
@@ -56,7 +56,14 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      ignored: [
+        "**/src-tauri/**",
+        // Simulator fixtures share this Vite root but must not reload a
+        // running native app when their synthetic data changes.
+        ...(mode === "simulator"
+          ? []
+          : ["**/dev/window-simulator/**", "**/windows-preview.local/**"]),
+      ],
     },
   },
 }));

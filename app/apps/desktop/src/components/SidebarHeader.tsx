@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { copyText } from "../lib/clipboard";
 import { toast } from "../lib/toast";
@@ -29,7 +29,35 @@ export function SidebarHeader() {
   const rootMissing = useStore((s) => s.structureNotice.rootMissing);
   const reduceMotion = useReducedMotion();
 
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuMode, setMenuMode] = useState<"closed" | "hover" | "pinned">("closed");
+  const menuOpen = menuMode !== "closed";
+  const hoverCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelHoverClose = useCallback(() => {
+    if (hoverCloseTimer.current !== null) clearTimeout(hoverCloseTimer.current);
+    hoverCloseTimer.current = null;
+  }, []);
+  const closeMenu = useCallback(() => {
+    cancelHoverClose();
+    setMenuMode("closed");
+  }, [cancelHoverClose]);
+  const togglePinnedMenu = () => {
+    cancelHoverClose();
+    // Clicking a hover preview pins it; only a second click closes it.
+    setMenuMode((mode) => mode === "pinned" ? "closed" : "pinned");
+  };
+  const pinMenu = () => {
+    cancelHoverClose();
+    setMenuMode("pinned");
+  };
+  const scheduleHoverClose = () => {
+    cancelHoverClose();
+    // Bridge the small gap between the tile and the popover without flicker.
+    hoverCloseTimer.current = setTimeout(() => {
+      hoverCloseTimer.current = null;
+      setMenuMode((mode) => mode === "hover" ? "closed" : mode);
+    }, 220);
+  };
+  useEffect(() => cancelHoverClose, [cancelHoverClose]);
   const rootRef = useRef<HTMLDivElement>(null);
   const rows = useSwitcherRows();
   useVaultShortcuts(rows);
@@ -37,10 +65,10 @@ export function SidebarHeader() {
   useEffect(() => {
     if (!menuOpen) return;
     const onPointerDown = (e: PointerEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setMenuOpen(false);
+      if (!rootRef.current?.contains(e.target as Node)) closeMenu();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuOpen(false);
+      if (e.key === "Escape") closeMenu();
     };
     window.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("keydown", onKey);
@@ -48,7 +76,7 @@ export function SidebarHeader() {
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKey);
     };
-  }, [menuOpen]);
+  }, [menuOpen, closeMenu]);
 
   // The chevron shows only while the whole name fits beside it; a long name
   // drops it and takes that room instead. Judged against the width WITH the
@@ -126,7 +154,13 @@ export function SidebarHeader() {
           className="vault-switch-tile"
           tabIndex={-1}
           aria-hidden="true"
-          onClick={() => setMenuOpen((v) => !v)}
+          onPointerEnter={(event) => {
+            if (event.pointerType !== "mouse") return;
+            cancelHoverClose();
+            setMenuMode((mode) => mode === "closed" ? "hover" : mode);
+          }}
+          onPointerLeave={scheduleHoverClose}
+          onClick={togglePinnedMenu}
         >
           <VaultTile identity={tileIdentity} name={name} />
         </button>
@@ -138,7 +172,7 @@ export function SidebarHeader() {
               aria-haspopup="menu"
               aria-expanded={menuOpen}
               title="Switch vault"
-              onClick={() => setMenuOpen((v) => !v)}
+              onClick={togglePinnedMenu}
             >
               {/* Keyed on the name so a switch cross-fades between the two vaults
                   rather than swapping the text in place. */}
@@ -211,7 +245,14 @@ export function SidebarHeader() {
           </div>
         </div>
         {/* Anchored to the tile + name block, so it opens right under it. */}
-        {menuOpen && <VaultSwitcherPopover rows={rows} onClose={() => setMenuOpen(false)} />}
+        {menuOpen && <VaultSwitcherPopover
+          rows={rows}
+          onClose={closeMenu}
+          onPointerEnter={cancelHoverClose}
+          onPointerLeave={scheduleHoverClose}
+          onPointerDownCapture={pinMenu}
+          onFocusCapture={pinMenu}
+        />}
       </div>
     </div>
   );

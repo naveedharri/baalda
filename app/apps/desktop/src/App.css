@@ -748,8 +748,8 @@ button.primary.hero:hover:not(:disabled) {
 }
 
 /* ---- Window drag regions ----
-   The window runs without a system title bar (`titleBarStyle: "Overlay"` in
-   tauri.conf.json) so the webview owns the full height. The trade Tauri makes
+   macOS uses an overlay titlebar and Windows disables native decorations,
+   so their webviews own the full height. The trade Tauri makes
    for that is that nothing is draggable by default, so the rows that sit along
    the top edge opt in with `data-tauri-drag-region`. Text inside them must not
    select, or a drag reads as a botched selection instead of moving the window. */
@@ -814,6 +814,103 @@ button.primary.hero:hover:not(:disabled) {
 }
 html[data-platform="macos"] .titlebar-tools {
   left: 84px;
+}
+
+/* Windows owns one blended chrome row, with navigation over the sidebar and
+   caption buttons at the window's right edge. */
+html[data-platform="windows"] .titlebar-tools {
+  /* Inset the navigation slightly within the vault tile's left edge. */
+  left: 16px;
+}
+html[data-platform="windows"] .titlebar-tool.graph-btn svg {
+  /* This drawing fills more of its viewBox than the sidebar/search glyphs. */
+  width: 16px;
+  height: 16px;
+}
+html[data-platform="windows"] .sidebar-header {
+  padding-top: var(--chrome-row-h);
+}
+html[data-platform="windows"] .main {
+  border-top-left-radius: 0;
+}
+html[data-platform="windows"] .main-header {
+  padding-left: var(--sp-3);
+  padding-right: 146px;
+  gap: var(--sp-2);
+}
+html[data-platform="windows"] .sidebar-hidden .main-header {
+  padding-left: 114px;
+}
+html[data-platform="windows"] .header-actions {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+html[data-platform="windows"] .global-banner {
+  padding-right: 150px;
+}
+.windows-controls {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: var(--chrome-row-h);
+  display: flex;
+  z-index: 10001;
+}
+/* The open side panel owns the top-right close action until it slides away. */
+html[data-platform="windows"]:has(.right-panel) .windows-controls {
+  display: none;
+}
+.windows-controls button {
+  width: 46px;
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+}
+.windows-controls button:hover {
+  background: var(--bg-hover);
+}
+.windows-controls button:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.windows-controls button.windows-close:hover {
+  background: #c42b1c;
+  color: white;
+}
+.windows-controls svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+}
+html[data-platform="windows"]:has(.graph-view) .windows-controls {
+  color: white;
+  background: #080910;
+}
+html[data-platform="windows"]:has(.graph-view) .windows-controls button {
+  color: white;
+}
+html[data-platform="windows"]:has(.graph-view) .windows-controls button:not(.windows-close):hover {
+  background: #282b35;
+}
+.windows-boot-drag {
+  display: none;
+  position: fixed;
+  inset: 0 138px auto 0;
+  height: var(--chrome-row-h);
+  z-index: 2;
+}
+html[data-platform="windows"]:has(.booting):not(:has(.app)) .windows-boot-drag {
+  display: block;
 }
 
 /* ---- Sidebar resize handle ----
@@ -3938,8 +4035,14 @@ button.secondary.about-update-btn:disabled {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Balance the title/path glyphs optically against the centred tile. */
+  transform: translateY(-2px);
 }
 .vault-switch-tile {
+  /* Match the tile's height exactly: an inline child otherwise leaves a
+     baseline gap, pushing the adjacent name/path below its visual centre. */
+  display: inline-flex;
+  align-items: center;
   flex-shrink: 0;
   padding: 0;
   border: none;
