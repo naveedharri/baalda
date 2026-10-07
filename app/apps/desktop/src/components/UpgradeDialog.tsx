@@ -5,8 +5,9 @@ import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
 import type { MyBillingAccount } from "../lib/api";
 import {
-  FREE_PLAN_EXPLANATION,
   FREE_PLAN_INCLUDES,
+  LEGACY_PRO_BENEFITS,
+  legacyFreePlanExplanation,
   TEAM_BENEFITS,
   defaultSeats,
   formatMoney,
@@ -268,7 +269,7 @@ export function UpgradeDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
-          <span>{teamMode ? "Upgrade" : "Upgrade to Team"}</span>
+          <span>{teamMode ? "Upgrade" : "Upgrade to Pro"}</span>
           <button className="icon-btn" onClick={onClose} aria-label="Close">
             ✕
           </button>
@@ -439,10 +440,10 @@ export function UpgradeDialog({
           <>
             {reason && <p className="upgrade-reason muted">{reason}</p>}
             <p className="upgrade-lead">
-              <strong>Team</strong> adds more people, unlimited synced vaults, standalone
-              file sync and Baalda Assistant. Pick how you'd like to pay.
+              <strong>Pro</strong> adds unlimited members, standalone file sync and Baalda
+              Assistant to this vault. Pick how you'd like to pay.
             </p>
-            <p className="muted">{FREE_PLAN_EXPLANATION}</p>
+            <p className="muted">{legacyFreePlanExplanation(billingConfig?.freeLimits)}</p>
 
             <div
               className="upgrade-plans"
@@ -489,7 +490,7 @@ export function UpgradeDialog({
             </div>
 
             <ul className="upgrade-features">
-              {TEAM_BENEFITS.map((benefit) => (
+              {LEGACY_PRO_BENEFITS.map((benefit) => (
                 <li key={benefit}>{benefit}</li>
               ))}
             </ul>
@@ -562,9 +563,11 @@ export function UpgradeDialog({
             <div className="upgrade-success-mark" aria-hidden="true">
               ✓
             </div>
-            <div className="subhead">You're on Team</div>
+            <div className="subhead">{teamMode ? "You're on Team" : "You're on Pro"}</div>
             <div className="muted">
-              Your vaults now sync standalone files, and your seats are ready for your team.
+              {teamMode
+                ? "Your vaults now sync standalone files, and your seats are ready for your team."
+                : "This vault now has unlimited members, standalone file sync and Baalda Assistant."}
             </div>
             <button className="primary sm" onClick={onClose}>
               Done

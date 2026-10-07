@@ -1,14 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { BillingConfig, BillingUsage, MyBillingAccount } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import {
+  classifyBillingConfigResult,
+  type BillingConfigState,
   discountLine,
   savingsLine,
   formatBytes,
   LAPSED_COPY,
+  PLAN_LOAD_ERROR_COPY,
   planPillLabel,
   planPriceLine,
   seatUsageLines,
+  SELF_HOSTED_PLAN_COPY,
 } from "../lib/billing";
 import * as ipc from "../lib/ipc";
 import { toast } from "../lib/toast";
@@ -31,7 +35,25 @@ function plural(n: number, singular: string, pluralNoun: string): string {
   return `${n} ${n === 1 ? singular : pluralNoun}`;
 }
 
-type Loaded = { config: BillingConfig; account: MyBillingAccount | null; usage: BillingUsage | null };
+type Loaded = {
+  state: Exclude<BillingConfigState, "error">;
+  config: BillingConfig;
+  account: MyBillingAccount | null;
+  usage: BillingUsage | null;
+};
+
+/** How long the tab waits before its one automatic retry of a failed fetch. */
+const RETRY_DELAY_MS = 2000;
+
+/** A request's value, or null when it failed — for the self-hosted page, which
+ *  shows what answers and never an error. */
+async function orNull<T>(p: Promise<T>): Promise<T | null> {
+  try {
+    return await p;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Account Settings → Plan & Billing (Team model). One billing account per owner:
@@ -48,23 +70,61 @@ export function AccountPlanTab() {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  /** One attempt. Throws on anything that is not a definitive answer. */
+  const fetchOnce = useCallback(async (): Promise<Loaded> => {
+    let config: BillingConfig;
+    let state: BillingConfigState;
+    try {
+      config = await authManager.api.probeBillingConfig();
+      state = classifyBillingConfigResult(config);
+    } catch (e) {
+      state = classifyBillingConfigResult(e);
+      if (state !== "disabled") throw e;
+      config = { enabled: false };
+    }
+    if (state === "error") throw new Error("unclassifiable billing config");
+    if (state === "disabled") {
+      // Billing off (self-hosted without a provider): the account routes may
+      // 404 too. Show whatever answers; never an error for this case.
+      const [account, usage] = await Promise.all([
+        orNull(authManager.api.getBillingAccount()),
+        orNull(authManager.api.getBillingUsage()),
+      ]);
+      return { state, config, account, usage };
+    }
+    if (state === "vault") return { state, config, account: null, usage: null };
+    const [account, usage] = await Promise.all([
+      authManager.api.getBillingAccount(),
+      authManager.api.getBillingUsage(),
+    ]);
+    return { state, config, account, usage };
+  }, []);
+
+  /** A failed fetch is never a verdict: retry once after 2 s, then show the
+   *  error with Try again. */
   const load = useCallback(async () => {
     setError(null);
-    try {
-      const config = await authManager.api.getBillingConfig();
-      if (!config.enabled || config.model !== "team") {
-        setData({ config, account: null, usage: null });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const loaded = await fetchOnce();
+        if (mounted.current) setData(loaded);
         return;
+      } catch {
+        if (attempt === 0) await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
       }
-      const [account, usage] = await Promise.all([
-        authManager.api.getBillingAccount(),
-        authManager.api.getBillingUsage(),
-      ]);
-      setData({ config, account, usage });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+    if (mounted.current) setError(PLAN_LOAD_ERROR_COPY);
+  }, [fetchOnce]);
+
+  const organizations = useStore((s) => s.organizations);
 
   useEffect(() => {
     void load();
@@ -83,10 +143,12 @@ export function AccountPlanTab() {
   if (!data) return <div className="muted">Loading…</div>;
 
   const { config, account, usage } = data;
-  if (!config.enabled) {
-    return <div className="muted perm-empty">Billing isn't enabled on this server.</div>;
+  if (data.state === "disabled") {
+    return (
+      <SelfHostedPlan account={account} usage={usage} fallbackVaults={organizations.length} />
+    );
   }
-  if (config.model !== "team" || !account) {
+  if (data.state === "vault" || !account) {
     return (
       <div className="muted perm-empty">
         Billing is per vault on this server; manage it in each vault's settings.
@@ -424,6 +486,112 @@ export function AccountPlanTab() {
           </p>
           {actionError && <div className="auth-error">{actionError}</div>}
         </ConfirmDialog>
+      )}
+    </>
+  );
+}
+
+/**
+ * Plan & Billing on a server with billing off (self-hosted without a provider):
+ * no plan to buy, so no Upgrade. Usage and people come from the account routes
+ * when they answer; otherwise the vault count falls back to the account's
+ * vault list and sections without data are left out.
+ */
+function SelfHostedPlan({
+  account,
+  usage,
+  fallbackVaults,
+}: {
+  account: MyBillingAccount | null;
+  usage: BillingUsage | null;
+  fallbackVaults: number;
+}) {
+  const vaults = usage ? (usage.totals.vaults ?? usage.vaults.length) : fallbackVaults;
+  const tiles: { key: string; caption: string; value: string; sub: string }[] = [
+    { key: "vaults", caption: "Synced vaults", value: String(vaults), sub: vaults === 1 ? "vault" : "vaults" },
+  ];
+  if (usage) {
+    const [bytesValue, bytesUnit] = formatBytes(usage.totals.storageBytes ?? 0).split(" ");
+    tiles.push(
+      {
+        key: "people",
+        caption: "People",
+        value: String(usage.totals.people),
+        sub: usage.totals.people === 1 ? "person" : "people",
+      },
+      { key: "notes", caption: "Notes", value: String(usage.totals.notes), sub: "across your vaults" },
+      { key: "attachments", caption: "Attachments", value: bytesValue ?? "0", sub: bytesUnit ?? "B" },
+    );
+  }
+  const people = account?.canManage ? account.people : [];
+  return (
+    <>
+      <div className="billing-card">
+        <div className="plan-page-head">
+          <div className="plan-page-summary">
+            <div className="billing-plan-head">
+              <span className="billing-plan-name">Self-hosted</span>
+              <span className="billing-status none">No limits</span>
+            </div>
+            <div className="billing-section-note">{SELF_HOSTED_PLAN_COPY}</div>
+          </div>
+        </div>
+      </div>
+
+      {(usage || vaults > 0) && (
+        <>
+          <div className="subhead">Usage on this account</div>
+          <div className="vault-usage-tiles">
+            {tiles.map((t) => (
+              <div key={t.key} className="vault-usage-tile">
+                <span className="vault-usage-caption">{t.caption}</span>
+                <span className="vault-usage-value">{t.value}</span>
+                <span className="vault-usage-sub" title={t.sub}>
+                  {t.sub}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {account && people.length > 0 && (
+        <>
+          <div className="subhead">People who count</div>
+          <table className="members-table plan-page-people">
+            <thead>
+              <tr>
+                <th>Person</th>
+                <th>Vaults</th>
+              </tr>
+            </thead>
+            <tbody>
+              {people.map((p) => (
+                <tr key={p.userId}>
+                  <td>
+                    <div className="members-table-names">
+                      <span className="members-table-name">{p.name || p.email}</span>
+                      {p.name && <span className="muted">{p.email}</span>}
+                    </div>
+                  </td>
+                  <td>
+                    <div className="plan-page-vault-chips">
+                      {p.vaults.map((id) => {
+                        const name = account.vaults.find((v) => v.orgId === id)?.name ?? id;
+                        return (
+                          <span key={id} className="plan-page-vault-chip">
+                            <VaultTile identity={`org:${id}`} name={name} />
+                            <span>{name}</span>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       )}
     </>
   );

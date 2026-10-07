@@ -507,3 +507,67 @@ describe("team-model vault limit copy", () => {
     expect(PEOPLE_LIMIT_REASON).toBe("Free includes 2 people. Team has no limit.");
   });
 });
+
+describe("classifyBillingConfigResult", () => {
+  it("reads a 404 from the billing routes as disabled", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(classifyBillingConfigResult(new ApiError(404, "Not found"))).toBe("disabled");
+  });
+  it("reads a 200 with enabled:false as disabled", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(classifyBillingConfigResult({ enabled: false })).toBe("disabled");
+  });
+  it("never reads a network failure as disabled", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(classifyBillingConfigResult(new TypeError("Failed to fetch"))).toBe("error");
+  });
+  it("never reads a 5xx or an auth failure as disabled", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(classifyBillingConfigResult(new ApiError(500, "HTTP 500"))).toBe("error");
+    expect(classifyBillingConfigResult(new ApiError(502, "HTTP 502"))).toBe("error");
+    expect(classifyBillingConfigResult(new ApiError(401, "HTTP 401"))).toBe("error");
+  });
+  it("treats an unparseable answer as an error", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(classifyBillingConfigResult(null)).toBe("error");
+    expect(classifyBillingConfigResult("<html>")).toBe("error");
+    expect(classifyBillingConfigResult({})).toBe("error");
+  });
+  it("routes a good config by its model", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(
+      classifyBillingConfigResult({
+        enabled: true,
+        model: "team",
+        team: { currency: "usd" },
+      }),
+    ).toBe("team");
+    expect(classifyBillingConfigResult({ enabled: true, model: "vault" })).toBe("vault");
+    expect(classifyBillingConfigResult({ enabled: true })).toBe("vault");
+  });
+});
+
+describe("legacy (per-vault) plan copy", () => {
+  it("keeps the old Pro promise apart from Team's", async () => {
+    const { LEGACY_PRO_BENEFITS, TEAM_BENEFITS } = await import("./billing");
+    expect(LEGACY_PRO_BENEFITS).toEqual([
+      "Unlimited team members",
+      "Standalone file sync",
+      "Baalda Assistant",
+      "Doesn't count toward your free vaults",
+    ]);
+    expect(LEGACY_PRO_BENEFITS).not.toEqual(TEAM_BENEFITS);
+  });
+  it("defaults to 3 members per vault and 2 free vaults", async () => {
+    const { LEGACY_FREE_PLAN_EXPLANATION } = await import("./billing");
+    expect(LEGACY_FREE_PLAN_EXPLANATION).toBe(
+      "Free includes 3 members per vault, 2 free vaults, note sync, embedded attachments and MCP. Pro adds unlimited members, standalone file sync and Baalda Assistant.",
+    );
+  });
+  it("reads the numbers from the server's freeLimits", async () => {
+    const { legacyFreePlanExplanation } = await import("./billing");
+    const line = legacyFreePlanExplanation({ vaultsPerUser: 1, membersPerVault: 5 });
+    expect(line).toMatch(/^Free includes 5 members per vault, 1 free vault, /);
+    expect(line).not.toMatch(/Team/);
+  });
+});

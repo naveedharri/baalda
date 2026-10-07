@@ -60,6 +60,30 @@ export const FREE_PLAN_INCLUDES = [
 /** @deprecated Use {@link TEAM_BENEFITS}. Kept for older imports. */
 export const PRO_BENEFITS = TEAM_BENEFITS;
 
+/** Pro's promise on servers that still bill PER VAULT (`model` absent or
+ *  `vault`). Only vault-mode branches use it; Team-model screens keep
+ *  {@link TEAM_BENEFITS}. */
+export const LEGACY_PRO_BENEFITS = [
+  "Unlimited team members",
+  "Standalone file sync",
+  "Baalda Assistant",
+  "Doesn't count toward your free vaults",
+] as const;
+
+/** The per-vault model's Free explanation, built from the server's own
+ *  `freeLimits` when it sends them (defaults: 3 members per vault, 2 free
+ *  vaults). Vault-mode branches only. */
+export function legacyFreePlanExplanation(
+  limits?: { vaultsPerUser?: number; membersPerVault?: number } | null,
+): string {
+  const members = limits?.membersPerVault ?? 3;
+  const vaults = limits?.vaultsPerUser ?? 2;
+  return `Free includes ${members} member${members === 1 ? "" : "s"} per vault, ${vaults} free vault${vaults === 1 ? "" : "s"}, note sync, embedded attachments and MCP. Pro adds unlimited members, standalone file sync and Baalda Assistant.`;
+}
+
+/** {@link legacyFreePlanExplanation} with the default limits. */
+export const LEGACY_FREE_PLAN_EXPLANATION = legacyFreePlanExplanation();
+
 /** What a Free account does not get, listed beside the upgrade. */
 export const FREE_PLAN_LACKS = [
   "More than 2 people",
@@ -477,3 +501,28 @@ export function membersSeatLine(
   }
   return `Free includes 2 people on this account (${account.seats.used} of 2 used)`;
 }
+
+/** What Account Settings → Plan & Billing should show for one config fetch. */
+export type BillingConfigState = "team" | "vault" | "disabled" | "error";
+
+/**
+ * Classify the outcome of `probeBillingConfig`: pass the config it resolved
+ * with, or the error it threw. Only a DEFINITIVE answer is a verdict — a 200
+ * with `enabled: false`, or a 404 (the billing routes 404 when the server has
+ * billing off). Anything else that failed (network, timeout, 5xx, 401) is
+ * `error`, never "disabled": a failed fetch says nothing about the server.
+ */
+export function classifyBillingConfigResult(result: unknown): BillingConfigState {
+  if (result instanceof ApiError) return result.status === 404 ? "disabled" : "error";
+  if (result instanceof Error || result == null || typeof result !== "object") return "error";
+  const config = result as Partial<BillingConfig>;
+  if (typeof config.enabled !== "boolean") return "error";
+  if (!config.enabled) return "disabled";
+  return config.model === "team" ? "team" : "vault";
+}
+
+/** The Plan tab's one sentence for a fetch that failed (after its retry). */
+export const PLAN_LOAD_ERROR_COPY = "Couldn't load your plan. Check your connection and try again.";
+
+/** The plan line on a server with billing off (self-hosted without a provider). */
+export const SELF_HOSTED_PLAN_COPY = "Everything is included on this server. There are no plan limits.";
