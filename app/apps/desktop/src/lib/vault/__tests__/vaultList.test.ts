@@ -59,8 +59,8 @@ describe("classifyLocalFolder", () => {
 describe("hiddenForeignFootnote", () => {
   it("is null for none and pluralises", () => {
     expect(hiddenForeignFootnote(0)).toBeNull();
-    expect(hiddenForeignFootnote(1)).toBe("1 folder synced with another account isn't shown.");
-    expect(hiddenForeignFootnote(3)).toBe("3 folders synced with another account aren't shown.");
+    expect(hiddenForeignFootnote(1)).toBe("1 more belongs to another account.");
+    expect(hiddenForeignFootnote(3)).toBe("3 more belong to other accounts.");
   });
 });
 

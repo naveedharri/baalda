@@ -22,6 +22,9 @@ import { useLocalFolderClasses, useLocalVaults } from "./useVaultLists";
 import { hiddenForeignFootnote, visibleFolders } from "../lib/vault/vaultList";
 import { formatDate, UnsyncConfirmDialog } from "./VaultSettingsDialog";
 
+const CURRENT_LINK_TIP =
+  'The active vault is also linked at "current", so tools like Claude Desktop can point at one fixed path.';
+
 function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
 }
@@ -425,12 +428,44 @@ export function AccountVaultsTab() {
     <>
       {session && (
         <>
-      <div className="subhead">Synced vaults ({organizations.length})</div>
-      <p className="muted">These are the vaults in your signed-in account. Other folders may still exist on disk, including vaults opened in another Baalda app. Use Open existing to reopen one. Removing a vault from the device list keeps its files.</p>
+      <div className="subhead account-vaults-head">
+        <span>Synced vaults ({organizations.length})</span>
+        {!creating && !joining && (
+          <span className="account-vaults-head-actions">
+            <button
+              type="button"
+              className="ghost-pill sm vault-tab-add"
+              onClick={() => setCreating(true)}
+            >
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              <span>New vault</span>
+            </button>
+            <button
+              type="button"
+              className="ghost-pill sm vault-tab-add"
+              onClick={() => setJoining(true)}
+            >
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" />
+              </svg>
+              <span>Join with code</span>
+            </button>
+          </span>
+        )}
+      </div>
       <ul className="member-list vault-list">
         {ordered.map((o) => {
           const isActive = isOpenOrg(o.id);
           const fname = folderName(o.id);
+          // "Hello 4 · Hello 4" said nothing twice: the folder is named only
+          // when it differs from the vault.
+          const folderSuffix = !fname
+            ? "· folder created on first open"
+            : fname.toLowerCase() !== o.name.toLowerCase()
+              ? `· ${fname}`
+              : null;
           return (
             <li key={o.id}>
               <span className="menu-swatch" aria-hidden="true">
@@ -438,10 +473,12 @@ export function AccountVaultsTab() {
               </span>
               <span className="member-name">
                 {o.name}
-                <span className="muted vault-folder">
-                  {" "}
-                  {fname ? `· ${fname}` : "· folder created on first open"}
-                </span>
+                {folderSuffix && (
+                  <span className="muted vault-folder">
+                    {" "}
+                    {folderSuffix}
+                  </span>
+                )}
                 {usageFor(o.id) && (
                   <span className="muted vault-folder">
                     {" · "}
@@ -573,108 +610,80 @@ export function AccountVaultsTab() {
       )}
       {reset.dialog}
 
-      <div className="vault-tab-actions">
-        {creating ? (
-          <form
-            className="vault-tab-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void createOrg();
-            }}
-          >
-            <input
-              autoFocus
-              placeholder="Vault name"
-              value={orgName}
-              onChange={(e) => setOrgName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") setCreating(false);
+      {(creating || joining) && (
+        <div className="vault-tab-actions">
+          {creating ? (
+            <form
+              className="vault-tab-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void createOrg();
               }}
-            />
-            <button
-              type="submit"
-              className="primary"
-              disabled={busy || !orgName.trim()}
             >
-              Create
-            </button>
-            <button
-              type="button"
-              className="ghost-pill"
-              disabled={busy}
-              onClick={() => setCreating(false)}
-            >
-              Cancel
-            </button>
-          </form>
-        ) : joining ? (
-          <form
-            className="vault-tab-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void joinByCode();
-            }}
-          >
-            <input
-              autoFocus
-              className="vault-tab-code"
-              placeholder="Join code, e.g. K7MPX2RA"
-              value={joinCode}
-              spellCheck={false}
-              autoCapitalize="characters"
-              onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") setJoining(false);
+              <input
+                autoFocus
+                placeholder="Vault name"
+                value={orgName}
+                onChange={(e) => setOrgName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setCreating(false);
+                }}
+              />
+              <button
+                type="submit"
+                className="primary"
+                disabled={busy || !orgName.trim()}
+              >
+                Create
+              </button>
+              <button
+                type="button"
+                className="ghost-pill"
+                disabled={busy}
+                onClick={() => setCreating(false)}
+              >
+                Cancel
+              </button>
+            </form>
+          ) : joining ? (
+            <form
+              className="vault-tab-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void joinByCode();
               }}
-            />
-            <button
-              type="submit"
-              className="primary"
-              disabled={busy || !joinCode.trim()}
             >
-              Join
-            </button>
-            <button
-              type="button"
-              className="ghost-pill"
-              disabled={busy}
-              onClick={() => setJoining(false)}
-            >
-              Cancel
-            </button>
-          </form>
-        ) : (
-          <>
-            <button
-              type="button"
-              className="ghost-pill vault-tab-add"
-              onClick={() => setCreating(true)}
-            >
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-              <span>New vault</span>
-            </button>
-            <button
-              type="button"
-              className="ghost-pill vault-tab-add"
-              onClick={() => setJoining(true)}
-            >
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" />
-              </svg>
-              <span>Join with code</span>
-            </button>
-            <AsyncButton
-              className="ghost-pill vault-tab-add"
-              disabled={busy}
-              onClick={openExisting}
-            >
-              <span>Open existing</span>
-            </AsyncButton>
-          </>
-        )}
-      </div>
+              <input
+                autoFocus
+                className="vault-tab-code"
+                placeholder="Join code, e.g. K7MPX2RA"
+                value={joinCode}
+                spellCheck={false}
+                autoCapitalize="characters"
+                onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setJoining(false);
+                }}
+              />
+              <button
+                type="submit"
+                className="primary"
+                disabled={busy || !joinCode.trim()}
+              >
+                Join
+              </button>
+              <button
+                type="button"
+                className="ghost-pill"
+                disabled={busy}
+                onClick={() => setJoining(false)}
+              >
+                Cancel
+              </button>
+            </form>
+          ) : null}
+        </div>
+      )}
       {joinError && <div className="auth-error">{joinError}</div>}
       {actionError && <div className="auth-error">{actionError}</div>}
       {limitNudge && (
@@ -687,14 +696,24 @@ export function AccountVaultsTab() {
         </>
       )}
 
-      {localsOrdered.length > 0 && (
+      {(localsOrdered.length > 0 || session) && (
         <>
           {session && <div className="menu-sep" />}
-          <div className="subhead">Local folders on this computer ({localsOrdered.length})</div>
-          <div className="muted">
-            Local folders open on this computer. They aren't on your account —
-            turn on sync from a vault's settings to reach it elsewhere.
+          <div className="subhead account-vaults-head">
+            <span>Local folders on this computer ({localsOrdered.length})</span>
+            {session && (
+              <span className="account-vaults-head-actions">
+                <AsyncButton
+                  className="ghost-pill sm vault-tab-add"
+                  disabled={busy}
+                  onClick={openExisting}
+                >
+                  <span>Open existing</span>
+                </AsyncButton>
+              </span>
+            )}
           </div>
+          {localsOrdered.length > 0 && (
           <ul className="member-list vault-list">
             {localsOrdered.map((r) => {
               const isCurrent = !syncEnabled && vault?.path === r.path;
@@ -776,23 +795,31 @@ export function AccountVaultsTab() {
               );
             })}
           </ul>
+          )}
+          {foreignFootnote && <p className="muted account-vaults-footnote">{foreignFootnote}</p>}
         </>
       )}
-      {foreignFootnote && <p className="muted">{foreignFootnote}</p>}
 
       {session && (
         <>
           <div className="menu-sep" />
           <div className="subhead">Vault folder location</div>
-          <div className="muted">
-            New vaults get their own folder here. The active vault is also
-            linked at <code>current</code> so tools like Claude Desktop can point at
-            one fixed path.
-          </div>
+          <div className="muted">New vaults are created here.</div>
           <div className="join-code-row">
             <code className="vault-root-path" title={root ?? ""}>
               {root ?? "…"}
             </code>
+            <span
+              className="account-vaults-info"
+              role="img"
+              aria-label={CURRENT_LINK_TIP}
+              title={CURRENT_LINK_TIP}
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 16v-4M12 8h.01" />
+              </svg>
+            </span>
             <button className="link-btn" onClick={() => void changeRoot()}>
               Change…
             </button>

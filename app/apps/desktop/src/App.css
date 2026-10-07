@@ -10316,3 +10316,29 @@ body.access-board-grabbing * {
   text-align: right;
   white-space: nowrap;
 }
+
+/* Account Settings → Vaults: a section label that carries its own actions on
+   the right (New vault / Join with code, Open existing). The label keeps its
+   small caps; the buttons inside it must not inherit them. */
+.settings-page .subhead.account-vaults-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+.account-vaults-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  text-transform: none;
+  letter-spacing: normal;
+}
+.account-vaults-footnote {
+  margin-top: var(--sp-2);
+}
+.account-vaults-info {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-secondary);
+  cursor: help;
+}

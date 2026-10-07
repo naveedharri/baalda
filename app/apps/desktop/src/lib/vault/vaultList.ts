@@ -65,8 +65,8 @@ export function classifyLocalFolder(
 export function hiddenForeignFootnote(count: number): string | null {
   if (count <= 0) return null;
   return count === 1
-    ? "1 folder synced with another account isn't shown."
-    : `${count} folders synced with another account aren't shown.`;
+    ? "1 more belongs to another account."
+    : `${count} more belong to other accounts.`;
 }
 
 /**
