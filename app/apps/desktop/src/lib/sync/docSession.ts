@@ -905,6 +905,12 @@ export class SyncManager implements InboundHost {
   private onVaultPresence?: (peers: VaultPeer[]) => void;
 
   /** UI subscribes here to render the connection indicator. */
+  /** True while the open note's last known grant is view-only. A reconnect
+   *  does not clear it; only an editable token does. */
+  get openDocReadOnly(): boolean {
+    return this.current?.readOnly === true;
+  }
+
   setStatusListener(cb: ((status: SyncStatus) => void) | undefined): void {
     this.onStatus = cb;
   }
@@ -1218,7 +1224,14 @@ export class SyncManager implements InboundHost {
     // Otherwise a healthy channel means the app IS connected, whatever this one
     // note's socket is doing. Only when the channel itself is unhealthy does the
     // note's view of the world add anything.
-    return vault === "synced" ? "synced" : doc;
+    //
+    // A view-only grant outlives one socket. Every re-mint (the token refresh
+    // ~9 min, any `reauth` in the vault, a network blip) drops the doc to
+    // "connecting" until the new token lands, and reporting the channel's
+    // "synced" for that window told the editor the note was editable: the
+    // view-only banner vanished and keystrokes were accepted for up to ~2 s.
+    if (vault === "synced") return this.current.readOnly ? "read-only" : "synced";
+    return doc;
   }
 
   /** Record the open note's provider status and re-emit the effective status.

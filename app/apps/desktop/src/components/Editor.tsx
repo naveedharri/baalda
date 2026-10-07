@@ -770,8 +770,10 @@ export function Editor() {
         const um = bridgeRef.current?.undoManager;
         if (um) while (um.undoStack.length > 0) um.undo();
       }
-    } else if (syncStatus === "synced") {
-      // Unlocked / edit grant restored — become editable again.
+    } else if (syncStatus === "synced" && !syncManager.openDocReadOnly) {
+      // Unlocked / edit grant restored — become editable again. The open
+      // note's own grant must agree: "synced" is the APP's status, and a
+      // view-only note's reconnect must never read as an edit grant.
       hadEditAccessRef.current = true;
       setReadOnly(false);
     }
