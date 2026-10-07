@@ -541,9 +541,6 @@ interface AppStore {
   vaultAppearance: Record<string, AppearanceSettings>;
   /** The effective theme mode currently painted. */
   themeMode: ThemeMode;
-  /** The sidebar's automatic colour per path (folders only), published by
-   *  FileTree so Vault Settings shows exactly the dot the sidebar paints. */
-  automaticItemColorMap: Record<string, string>;
   /** How the sidebar arranges everything the user hasn't arranged by hand.
    *  Layered UNDER `itemOrder`, never replacing it — see `lib/tree/sort`. */
   treeSort: TreeSort;
@@ -1919,7 +1916,6 @@ export const useStore = create<AppStore>((set, get) => ({
   appearanceOverrides: readAppearanceOverrides(null),
   vaultAppearance: {},
   themeMode: "system",
-  automaticItemColorMap: {},
   pendingTitleFocus: null,
   treeSort: readTreeSort(),
   folderSorts: {},

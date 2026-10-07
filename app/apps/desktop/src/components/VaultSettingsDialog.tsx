@@ -43,7 +43,6 @@ import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
 import { ThemeToggle } from "./ThemeToggle";
 import { AppearanceRows } from "./AppearanceRows";
-import { VaultItemColorsSection } from "./VaultItemColorsSection";
 import {
   APPEARANCE_DEFAULTS,
   vaultAppearanceValues,
@@ -180,7 +179,7 @@ const BILLING_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
  * Vault settings — a centered modal over the app (sharing its shell with
  * Account settings via {@link SettingsModal}): everything about the vault lives
  * here. Members (roster + join code + invites), Permissions (RBAC locks), and
- * Appearance (theme + item colors).
+ * Appearance (the vault's appearance defaults).
  */
 export function VaultSettingsDialog({
   onClose,
@@ -2360,8 +2359,6 @@ function AppearanceTab({ canManage, isSynced }: { canManage: boolean; isSynced: 
           <ThemeToggle />
         </div>
       )}
-
-      <VaultItemColorsSection />
     </>
   );
 }

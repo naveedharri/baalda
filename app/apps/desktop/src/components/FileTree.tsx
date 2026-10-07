@@ -559,9 +559,6 @@ export function FileTree() {
     session?.user.id,
     vault?.path,
   ]);
-  useEffect(() => {
-    useStore.setState({ automaticItemColorMap: automaticColors });
-  }, [automaticColors]);
 
   // Flatten the (arranged) tree so bulk actions can resolve any path — even a
   // collapsed one — to its node, and so "Select all" knows every path.
