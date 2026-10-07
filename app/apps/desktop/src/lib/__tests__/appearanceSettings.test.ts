@@ -5,6 +5,7 @@ import {
   effectiveAppearance,
   migrateStoredAppearance,
   parseAppearanceSettings,
+  vaultAppearanceValues,
   withAppearance,
 } from "../appearanceSettings";
 import { readAppearanceOverrides, writeAppearanceOverrides } from "../prefs";
@@ -44,7 +45,21 @@ describe("effectiveAppearance", () => {
   it("reports where each value comes from", () => {
     expect(appearanceSource("theme", {}, { theme: "dark" })).toBe("vault");
     expect(appearanceSource("theme", { theme: "light" }, { theme: "dark" })).toBe("personal");
-    expect(appearanceSource("theme", {}, {})).toBe("default");
+    // A synced vault always has a value: a missing key is the app default.
+    expect(appearanceSource("theme", {}, {})).toBe("vault");
+    expect(appearanceSource("theme", {}, null)).toBe("default");
+  });
+});
+
+describe("vaultAppearanceValues", () => {
+  it("fills keys an older vault row never saved with the app default", () => {
+    expect(vaultAppearanceValues({})).toEqual(APPEARANCE_DEFAULTS);
+    expect(vaultAppearanceValues(null)).toEqual(APPEARANCE_DEFAULTS);
+    expect(vaultAppearanceValues({ theme: "dark", textSize: 18 })).toEqual({
+      ...APPEARANCE_DEFAULTS,
+      theme: "dark",
+      textSize: 18,
+    });
   });
 });
 

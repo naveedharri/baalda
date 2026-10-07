@@ -534,7 +534,9 @@ function AppearanceTab() {
       properties: s.propertiesMode,
     })),
   );
-  const vault = orgId ? vaultAppearance[orgId] : null;
+  // A synced vault always has a value for every row (a key it never saved is
+  // the app default), so treat it as present even before its row has loaded.
+  const vault = orgId ? (vaultAppearance[orgId] ?? {}) : null;
   const set = <K extends AppearanceKey>(key: K, value: AppearanceSettings[K] | undefined) => {
     const st = useStore.getState();
     // The legacy setters also keep the old per-key storage current.
@@ -553,7 +555,7 @@ function AppearanceTab() {
       trailing={(key) => {
         const source = appearanceSource(key, overrides, vault);
         if (source === "vault") return <span className="appearance-tag">Vault default</span>;
-        if (source === "personal" && vault?.[key] !== undefined) {
+        if (source === "personal" && vault) {
           return (
             <button
               type="button"

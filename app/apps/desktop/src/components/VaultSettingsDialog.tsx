@@ -42,13 +42,14 @@ import { SettingsModal } from "./SettingsModal";
 import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
 import { ThemeToggle } from "./ThemeToggle";
-import { AppearanceRows, vaultDisplayValues } from "./AppearanceRows";
+import { AppearanceRows } from "./AppearanceRows";
 import { VaultItemColorsSection } from "./VaultItemColorsSection";
 import {
-  hasAnyAppearance,
-  withAppearance,
+  APPEARANCE_DEFAULTS,
+  vaultAppearanceValues,
   type AppearanceKey,
   type AppearanceSettings,
+  type ResolvedAppearance,
 } from "../lib/appearanceSettings";
 import { formatPrice, perLabel, UpgradeDialog } from "./UpgradeDialog";
 import { useLocalFolderClasses, useLocalVaults } from "./useVaultLists";
@@ -2309,10 +2310,15 @@ function AppearanceTab({ canManage, isSynced }: { canManage: boolean; isSynced: 
     pending.current = null;
     save(p.settings);
   }
-  const change = <K extends AppearanceKey>(key: K, value: AppearanceSettings[K] | undefined) => {
+  // Every save is the whole, concrete object: a key an older row never saved
+  // is written as the app default it was already showing.
+  const change = <K extends AppearanceKey>(key: K, value: ResolvedAppearance[K]) => {
     if (!orgId) return;
-    const next = withAppearance(useStore.getState().vaultAppearance[orgId] ?? {}, key, value);
-    if ((key === "contentWidth" || key === "textSize") && value !== undefined) {
+    const next: AppearanceSettings = {
+      ...vaultAppearanceValues(useStore.getState().vaultAppearance[orgId]),
+      [key]: value,
+    };
+    if (key === "contentWidth" || key === "textSize") {
       useStore.getState().receiveVaultAppearance(orgId, next); // optimistic
       if (pending.current) window.clearTimeout(pending.current.timer);
       pending.current = { settings: next, timer: window.setTimeout(flush, 300) };
@@ -2321,6 +2327,11 @@ function AppearanceTab({ canManage, isSynced }: { canManage: boolean; isSynced: 
     if (pending.current) window.clearTimeout(pending.current.timer);
     pending.current = null;
     save(next);
+  };
+  const resetToDefaults = () => {
+    if (pending.current) window.clearTimeout(pending.current.timer);
+    pending.current = null;
+    save({ ...APPEARANCE_DEFAULTS });
   };
 
   return (
@@ -2336,8 +2347,7 @@ function AppearanceTab({ canManage, isSynced }: { canManage: boolean; isSynced: 
           </div>
           <AppearanceRows
             mode="vault"
-            values={vaultDisplayValues(settings)}
-            settings={settings}
+            values={vaultAppearanceValues(settings)}
             onChange={change}
             readOnly={!canManage}
             trailing={(key) =>
@@ -2345,20 +2355,20 @@ function AppearanceTab({ canManage, isSynced }: { canManage: boolean; isSynced: 
                 <button
                   type="button"
                   className="link-btn appearance-clear"
-                  title="Your own Appearance setting wins over the vault's on this device."
+                  title="Your own Appearance setting is used instead of the vault's on this device."
                   onClick={(e) => {
                     e.preventDefault();
                     useStore.getState().setAppearanceOverride(key, undefined);
                   }}
                 >
-                  Your setting wins · Use vault's
+                  You've overridden this for yourself · Use the vault setting
                 </button>
               ) : null
             }
           />
-          {canManage && hasAnyAppearance(settings) && (
-            <button className="link-btn" onClick={() => save({})}>
-              Reset all
+          {canManage && (
+            <button className="link-btn" onClick={resetToDefaults}>
+              Reset to defaults
             </button>
           )}
         </>

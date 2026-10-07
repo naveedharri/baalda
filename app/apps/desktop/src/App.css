@@ -10365,8 +10365,8 @@ body.access-board-grabbing * {
   cursor: help;
 }
 
-/* Vault appearance defaults: the "Vault default" / "Not set" / "Set by the
-   vault owner" pill, the Clear / Reset link and a slider's Not set checkbox. */
+/* Vault appearance defaults: the "Vault default" / "Set by the vault owner"
+   pill and the "Reset to vault default" / "Use the vault setting" links. */
 .appearance-tag {
   font-size: var(--fs-xs, 11px);
   color: var(--text-tertiary);
@@ -10383,15 +10383,6 @@ body.access-board-grabbing * {
   margin-right: 8px;
   white-space: nowrap;
   align-self: center;
-}
-.appearance-notset {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--fs-sm, 12px);
-  color: var(--text-tertiary);
-  margin-right: 8px;
-  white-space: nowrap;
 }
 .appearance-defaults-head {
   display: flex;

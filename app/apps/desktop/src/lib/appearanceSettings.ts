@@ -15,7 +15,8 @@ import type { ThemeMode } from "./theme";
 
 export type ContentWidth = number | "full";
 
-/** The six settings a vault can default. Every key optional: absent = Not set. */
+/** The six settings a vault can default. A key may be absent on a vault row
+ *  saved before every row became concrete; it then means the app default. */
 export interface AppearanceSettings {
   theme?: ThemeMode;
   autoColors?: boolean;
@@ -54,7 +55,7 @@ const CONTENT_WIDTH_MAX = 120;
 const TEXT_SIZE_MIN = 12;
 const TEXT_SIZE_MAX = 24;
 
-/** Validate one value for one key; anything unrecognised is `undefined` (Not set). */
+/** Validate one value for one key; anything unrecognised is `undefined`. */
 export function validAppearanceValue<K extends AppearanceKey>(
   key: K,
   v: unknown,
@@ -107,15 +108,25 @@ export function effectiveAppearance(
   return out as unknown as ResolvedAppearance;
 }
 
-/** Where the painted value comes from — drives the personal page's tags. */
+/** Where the painted value comes from — drives the personal page's tags.
+ *  A synced vault always has a value for every key (a missing key is the app
+ *  default), so with a vault open a row either inherits it or overrides it. */
 export function appearanceSource(
   key: AppearanceKey,
   personal: AppearanceSettings,
   vault: AppearanceSettings | null | undefined,
 ): "personal" | "vault" | "default" {
   if (personal[key] !== undefined) return "personal";
-  if (vault?.[key] !== undefined) return "vault";
+  if (vault) return "vault";
   return "default";
+}
+
+/** The concrete value of every key for a vault: its saved value, else the app default. */
+export function vaultAppearanceValues(
+  vault: AppearanceSettings | null | undefined,
+  defaults: ResolvedAppearance = APPEARANCE_DEFAULTS,
+): ResolvedAppearance {
+  return effectiveAppearance({}, vault, defaults);
 }
 
 /**
@@ -135,11 +146,6 @@ export function migrateStoredAppearance(
     (out as Record<string, unknown>)[key] = v;
   }
   return out;
-}
-
-/** True when the vault sets anything at all (drives "Reset all"). */
-export function hasAnyAppearance(s: AppearanceSettings | null | undefined): boolean {
-  return !!s && APPEARANCE_KEYS.some((k) => s[k] !== undefined);
 }
 
 /** Return `s` with `key` set to `value`, or removed when `value` is undefined. */
