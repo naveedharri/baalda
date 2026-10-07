@@ -13,8 +13,9 @@ describe("parseBillingLink", () => {
     });
   });
 
-  it("accepts the Staging app's scheme too", () => {
+  it("accepts the Staging and dev builds' schemes too", () => {
     expect(parseBillingLink("baalda-staging://billing/upgraded?org=x")).toEqual({ orgId: "x" });
+    expect(parseBillingLink("baalda-dev://billing/upgraded?org=x")).toEqual({ orgId: "x" });
   });
 
   it("treats an empty org as absent", () => {

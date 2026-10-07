@@ -6,10 +6,12 @@ import type {
   InvitationOverview,
   MemberOverview,
   MembersOverview,
+  MyBillingAccount,
   TeamAccess,
   TeamAccessMode,
 } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
+import { membersSeatLine } from "../lib/billing";
 import { rosterCache, type RosterSnapshot } from "../lib/membersAccessCaches";
 import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
 import {
@@ -42,6 +44,7 @@ import { useStore } from "../store";
 import { Avatar } from "./Avatar";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { InvitePeopleDialog } from "./InvitePeopleDialog";
+import { PeopleLimitNotice, inviteLimitError, peopleLimitKind } from "./PeopleLimitNotice";
 import { MemberProfilePage, type ProfileTab } from "./MemberProfilePage";
 import { ProfileSkeleton } from "./MemberProfileSkeletons";
 import { canActOnMember, canSetMemberAccess } from "./memberRoles";
@@ -126,6 +129,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   const [accessDefault, setAccessDefault] = useState<AccessDefault | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [limitCause, setLimitCause] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -133,6 +137,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   const loadGen = useRef(0);
 
   const manage = canManage && (overview?.canManage ?? canManage);
+  const seatAccount = useSeatAccount(orgId, manage);
 
   const reload = useCallback(async () => {
     const mine = ++loadGen.current;
@@ -243,9 +248,11 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     if (busy) return;
     setBusy(true);
     setError(null);
+    setLimitCause(null);
     try {
       await work();
     } catch (cause) {
+      if (peopleLimitKind(cause)) { setLimitCause(cause); return; }
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
@@ -379,7 +386,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       access: inv.access,
     });
     await reload();
-    if (result?.error) setError(result.error);
+    const limit = result?.error ? inviteLimitError(result.error) : null;
+    if (limit) setLimitCause(limit);
+    else if (result?.error) setError(result.error);
     else toast(result?.emailed ? `Invitation emailed to ${inv.email}` : `Invitation renewed — copy its link for ${inv.email}`);
   });
 
@@ -466,6 +475,27 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       <h2 className="settings-section-title">Members and access</h2>
       <p className="members-access-intro">Owners and admins can always manage access.</p>
       {error && <div className="auth-error">{error}</div>}
+      {limitCause != null && <PeopleLimitNotice error={limitCause} canManageBilling={myRole === "owner"} />}
+
+      {manage && seatAccount && (
+        <p className="members-access-mcp-hint members-access-seat-line">
+          <span>
+            {membersSeatLine(seatAccount, ownerName(members), myRole === "owner")}
+            {seatAccount.plan === "team" && seatAccount.seats.purchased != null && myRole === "owner" && (
+              <>
+                {" "}
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => useStore.getState().requestAccountSettings("plan")}
+                >
+                  Add seats
+                </button>
+              </>
+            )}
+          </span>
+        </p>
+      )}
 
       {manage && (
         <div className="members-access-rows">
@@ -691,8 +721,11 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       {inviteOpen && orgId && (
         <InvitePeopleDialog
           orgId={orgId}
+          canManageBilling={myRole === "owner"}
           onClose={() => setInviteOpen(false)}
           onInvited={(results, sent) => {
+            const limit = results.map((r) => (r.error ? inviteLimitError(r.error) : null)).find((x) => x != null);
+            if (limit) setLimitCause(limit);
             patchRoster((r) => ({
               ...r,
               overview: r.overview ? withNewInvitations(r.overview, results, sent, new Date().toISOString()) : r.overview,
@@ -713,6 +746,40 @@ const ROW_CONTROLS = 'button, [role="button"], [role="menu"], [role="menuitem"],
  * and confirms are portalled to <body>, and React still bubbles their clicks
  * up to this row — so anything outside the row's own DOM is ignored too.
  */
+/**
+ * The vault's billing account for the quiet seat line above the roster
+ * (owner/admin only). Silent on any failure or when billing is off or not
+ * on the Team model: the line simply does not show.
+ */
+function useSeatAccount(orgId: string | null, enabled: boolean): MyBillingAccount | null {
+  const [account, setAccount] = useState<MyBillingAccount | null>(null);
+  useEffect(() => {
+    setAccount(null);
+    if (!orgId || !enabled) return;
+    let live = true;
+    void (async () => {
+      try {
+        const config = await authManager.api.getBillingConfig();
+        if (!config.enabled || config.model !== "team") return;
+        const acct = await authManager.api.getBillingAccount({ orgId });
+        if (live) setAccount(acct);
+      } catch {
+        // Fail silently: the seat line is informational.
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [orgId, enabled]);
+  return account;
+}
+
+/** The vault owner's display name for the seat line, or null. */
+function ownerName(members: MemberOverview[]): string | null {
+  const owner = members.find((m) => m.role === "owner");
+  return owner ? owner.name || owner.email || null : null;
+}
+
 export function isRowOwnClick(e: { target: EventTarget | null; currentTarget: EventTarget & Element }): boolean {
   const target = e.target;
   if (!(target instanceof Element) || !e.currentTarget.contains(target)) return false;

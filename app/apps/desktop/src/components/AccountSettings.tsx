@@ -36,6 +36,8 @@ import {
   PROFILE_IMAGE_PX,
 } from "../lib/profileAvatar";
 import { imageFileToSquareDataUrl } from "../lib/squareImage";
+import { AccountPlanTab } from "./AccountPlanTab";
+import { AccountVaultsTab } from "./AccountVaultsTab";
 import { Avatar } from "./Avatar";
 import { ContentWidthPreview } from "./ContentWidthPreview";
 import { MenuSelect } from "./MenuSelect";
@@ -75,6 +77,28 @@ const ACCOUNT_TABS: Array<{ id: AccountTab; label: string; icon: React.ReactNode
       <Icon>
         <circle cx="12" cy="12" r="9" />
         <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" />
+      </Icon>
+    ),
+  },
+  {
+    id: "plan",
+    label: "Plan & Billing",
+    icon: (
+      <Icon>
+        <rect x="2" y="5" width="20" height="14" rx="2" />
+        <path d="M2 10h20" />
+      </Icon>
+    ),
+  },
+  {
+    id: "vaults",
+    label: "Vaults",
+    icon: (
+      <Icon>
+        <rect x="3" y="3" width="7" height="7" rx="1.5" />
+        <rect x="14" y="3" width="7" height="7" rx="1.5" />
+        <rect x="3" y="14" width="7" height="7" rx="1.5" />
+        <rect x="14" y="14" width="7" height="7" rx="1.5" />
       </Icon>
     ),
   },
@@ -179,6 +203,10 @@ export function AccountSettings({
             <ProfileTab />
           ) : tab === "status" ? (
             <StatusTab />
+          ) : tab === "plan" ? (
+            <AccountPlanTab />
+          ) : tab === "vaults" ? (
+            <AccountVaultsTab />
           ) : tab === "appearance" ? (
             <AppearanceTab />
           ) : tab === "notifications" ? (

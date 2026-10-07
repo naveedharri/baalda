@@ -18,8 +18,10 @@ import {
   readLocalVaultIcon,
   resolveVaultIcon,
 } from "../lib/vaultIcon";
-import { useLocalVaults, useRecentVaults } from "./useVaultLists";
+import { useLocalFolderClasses, useLocalVaults, useRecentVaults } from "./useVaultLists";
+import { visibleFolders } from "../lib/vault/vaultList";
 import { MenuIcon } from "./MenuIcon";
+import { PeopleLimitNotice, peopleLimitKind } from "./PeopleLimitNotice";
 
 // DiceBear is heavy; the tile paints its initial until the glyph chunk lands.
 const VaultIconSvg = lazy(() => import("./VaultIconSvg"));
@@ -38,7 +40,21 @@ export function useSwitcherRows(): VaultRow[] {
   const organizations = useStore((s) => s.organizations);
   const openPath = useStore((s) => s.vault?.path) ?? null;
   const recents = useRecentVaults();
-  const locals = useLocalVaults();
+  const allLocals = useLocalVaults();
+  // Owner rule 2026-10-07: only folders never synced to Baalda join the
+  // account's own vaults here. A folder stamped for a vault this account is
+  // not in (signed out: ANY stamped folder) is hidden, and a folder whose
+  // stamp has not settled waits, so no row appears and then vanishes. The
+  // open vault always stays, so the user is never stranded. Filtering BEFORE
+  // `recentVaultRows` makes the budget and ⌘1…⌘N count visible rows only.
+  const { classes } = useLocalFolderClasses(
+    allLocals,
+    signedIn ? organizations.map((o) => o.id) : [],
+  );
+  const locals = useMemo(
+    () => visibleFolders(allLocals, classes, openPath),
+    [allLocals, classes, openPath],
+  );
   return useMemo(
     () =>
       recentVaultRows({
@@ -176,7 +192,6 @@ export function VaultSwitcherPopover({
   const members = useStore((s) => s.members);
   const pendingInvitations = useStore((s) => s.pendingInvitations);
   const vault = useStore((s) => s.vault);
-
   return (
     <div className="vault-popover vault-switcher" role="menu"
       onPointerEnter={onPointerEnter}
@@ -211,6 +226,27 @@ export function VaultSwitcherPopover({
       <div className="menu-sep" />
       <NewVaultItem onDone={onClose} />
       {signedIn && <JoinVaultItem onDone={onClose} />}
+      {/* The vault list lives in Account Settings → Vaults. Signed out there is
+          no account page; Vault Settings keeps the list for local folders. */}
+      {(signedIn || rows.some((r) => r.kind === "local")) && (
+        <ActionRow
+          icon={
+            <>
+              <rect x="3" y="3" width="7" height="7" rx="1.5" />
+              <rect x="14" y="3" width="7" height="7" rx="1.5" />
+              <rect x="3" y="14" width="7" height="7" rx="1.5" />
+              <rect x="14" y="14" width="7" height="7" rx="1.5" />
+            </>
+          }
+          label="Manage vaults"
+          onClick={() => {
+            onClose();
+            const st = useStore.getState();
+            if (st.session) st.requestAccountSettings("vaults");
+            else st.requestSettings("vaults");
+          }}
+        />
+      )}
 
       {vault && (
         <>
@@ -358,19 +394,22 @@ function JoinVaultItem({ onDone }: { onDone: () => void }) {
   const [joining, setJoining] = useState(false);
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [limitCause, setLimitCause] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
   const join = async () => {
     if (!code.trim()) return;
     setBusy(true);
     setError(null);
+    setLimitCause(null);
     try {
       await useStore.getState().joinVault(code);
       setCode("");
       setJoining(false);
       onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (peopleLimitKind(e)) setLimitCause(e);
+      else setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -406,6 +445,7 @@ function JoinVaultItem({ onDone }: { onDone: () => void }) {
         </button>
       </div>
       {error && <div className="auth-error">{error}</div>}
+      {limitCause != null && <PeopleLimitNotice error={limitCause} canManageBilling={false} />}
     </>
   );
 }

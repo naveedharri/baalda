@@ -1347,7 +1347,7 @@ export class SyncManager implements InboundHost {
 
   /** Ask the server again without clearing an existing refusal. Billing
    * refreshes use this to learn a policy change in a running client; a blocked
-   * mirror remains blocked until a confirmed Pro transition resets it. */
+   * mirror remains blocked until a confirmed Team transition resets it. */
   checkAttachmentEntitlement(): void {
     this.attachments?.scheduleReconcile();
   }

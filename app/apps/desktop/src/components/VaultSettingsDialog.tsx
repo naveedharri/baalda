@@ -5,10 +5,10 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
   ApiError,
+  type BillingUsage,
   type McpToolInfo,
   type McpTokenRow,
   type MyBillingVault,
-  type OrgBilling,
   type UnsyncPreview,
   type VaultCheckpoint,
 } from "../lib/api";
@@ -19,21 +19,21 @@ import { authManager } from "../lib/auth/authManager";
 import {
   classifyLimitError,
   FREE_PLAN_EXPLANATION,
+  formatBytes,
   type LimitKind,
   limitFromError,
   planPillLabel,
   PRO_BENEFITS,
   subscriptionStatusLine,
   transferTargets,
+  vaultLimitReason,
 } from "../lib/billing";
 import * as ipc from "../lib/ipc";
-import { readOrgVaults, useStore } from "../store";
+import { useStore } from "../store";
 import { MembersAccessTab, prefetchRoster } from "./MembersAccessTab";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
 import { useResetLocalCopy } from "./useResetLocalCopy";
-import { RowActionsMenu } from "./RowActionsMenu";
 import { AiSettingsTab } from "./AiSettingsTab";
 // Static, not via ./Face: this module is itself a lazy chunk, so it pays for
 // the avatar chunk it is already loading.
@@ -44,8 +44,10 @@ import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
 import { ThemeToggle } from "./ThemeToggle";
 import { formatPrice, perLabel, UpgradeDialog } from "./UpgradeDialog";
-import { useKnownOrgIds, useLocalVaults } from "./useVaultLists";
+import { useLocalFolderClasses, useLocalVaults } from "./useVaultLists";
+import { visibleFolders } from "../lib/vault/vaultList";
 import { VaultIconSettings } from "./VaultIconSettings";
+import { AccountVaultsTab } from "./AccountVaultsTab";
 
 // Defined in `lib/settingsTabs.ts` so the store can name a tab without importing
 // this component; re-exported here so every existing importer is unchanged.
@@ -189,7 +191,8 @@ export function VaultSettingsDialog({
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locals = useLocalVaults();
 
-  const visibleTab = (t: SettingsTab): SettingsTab => (!SHOW_AI_TAB && t === "ai" ? "general" : t);
+  const visibleTab = (t: SettingsTab): SettingsTab =>
+    (!SHOW_AI_TAB && t === "ai") || (t === "vaults" && session) ? "general" : t;
   const [tab, setTabRaw] = useState<SettingsTab>(visibleTab(initialTab ?? "general"));
   /** Bumped when the active nav item is clicked again, so a tab can return to its first page. */
   const [tabReset, setTabReset] = useState(0);
@@ -203,20 +206,34 @@ export function VaultSettingsDialog({
   // with the team sections locked behind "Turn on sync".
   const isSynced = syncEnabled && !!activeOrg;
   const billingEnabled = billingConfig?.enabled === true;
+  // Team model: the plan lives on the account (Account Settings → Plan &
+  // Billing), so this vault's page shows its usage. Same tab id, so a
+  // `requestSettings("billing")` deep link still lands here.
+  const teamBilling = billingConfig?.model === "team";
 
-  // "Vaults" (switch/create/manage) is shown for an account OR when there
-  // are local folders to list — that's what "View all" opens into.
-  const showVaults = !!session || locals.length > 0;
+  // The vault list lives in Account Settings → Vaults (2026-10-07). Only a
+  // signed-out app with local folders keeps it here: it has no account page.
+  // Signed out every stamped folder is hidden there (`visibleFolders`), so the
+  // tab appears only when an unstamped local folder remains to list.
+  const localClasses = useLocalFolderClasses(session ? [] : locals, []);
+  const showVaults =
+    !session &&
+    localClasses.resolved &&
+    visibleFolders(locals, localClasses.classes).length > 0;
   const tabs = useMemo(() => {
     const out = SHOW_AI_TAB ? [GENERAL_TAB, AI_TAB] : [GENERAL_TAB];
     if (showVaults) out.push(...SETTINGS_TABS);
     else out.push(...SETTINGS_TABS.filter((t) => t.id !== "vaults"));
     if (billingEnabled) {
       const idx = out.findIndex((t) => t.id === "members");
-      out.splice(idx >= 0 ? idx + 1 : out.length, 0, BILLING_TAB);
+      out.splice(
+        idx >= 0 ? idx + 1 : out.length,
+        0,
+        teamBilling ? { ...BILLING_TAB, label: "Usage" } : BILLING_TAB,
+      );
     }
     return out;
-  }, [showVaults, billingEnabled]);
+  }, [showVaults, billingEnabled, teamBilling]);
 
   // Warm the Members tab's roster as the dialog opens (#307); paint only.
   useEffect(() => {
@@ -235,6 +252,9 @@ export function VaultSettingsDialog({
   const isOwner = myMember?.role === "owner";
   const activeTab = tabs.find((t) => t.id === tab) ?? tabs[0];
   const lockedTab = TEAM_TABS.has(activeTab.id) && !isSynced;
+  // Render what the nav shows: a requested tab that is not offered yet (the
+  // signed-out Vaults list before the recents load) paints the first tab.
+  const shown = activeTab.id;
 
   return (
     <SettingsModal
@@ -305,8 +325,8 @@ export function VaultSettingsDialog({
         <section className="settings-content" aria-label={activeTab.label}>
           {/* Members and access swaps its title for a back link while a profile
               is open. */}
-          {!(tab === "members" && !lockedTab) && <h2 className="settings-section-title">{activeTab.label}</h2>}
-          {tab === "general" ? (
+          {!(shown === "members" && !lockedTab) && <h2 className="settings-section-title">{activeTab.label}</h2>}
+          {shown === "general" ? (
             <GeneralTab
               isSynced={isSynced}
               canManage={canManage}
@@ -314,26 +334,26 @@ export function VaultSettingsDialog({
               activeOrgName={activeOrg?.name ?? null}
               onRequestSignIn={onRequestSignIn}
             />
-          ) : tab === "ai" ? (
+          ) : shown === "ai" ? (
             <AiSettingsTab onClose={onClose} onGoToGeneral={() => setTab("general")} />
           ) : lockedTab ? (
             <SyncGate label={activeTab.label} onGoToSync={() => setTab("general")} />
-          ) : tab === "vaults" ? (
-            <VaultsTab />
-          ) : tab === "members" ? (
+          ) : shown === "vaults" ? (
+            <AccountVaultsTab />
+          ) : shown === "members" ? (
             <MembersAccessTab
               canManage={canManage}
               onOpenTab={setTab}
               onCloseSettings={onClose}
               resetToken={tabReset}
             />
-          ) : tab === "billing" ? (
+          ) : shown === "billing" ? (
             <BillingTab canManage={canManage} isSynced={isSynced} />
-          ) : tab === "mcp" ? (
+          ) : shown === "mcp" ? (
             <McpTab />
-          ) : tab === "versioning" ? (
+          ) : shown === "versioning" ? (
             <VersioningTab canManage={canManage} />
-          ) : tab === "import-export" ? (
+          ) : shown === "import-export" ? (
             <ImportExportTab />
           ) : (
             <AppearanceTab />
@@ -396,8 +416,18 @@ function GeneralTab({
       await useStore.getState().turnOnSyncForCurrentVault(name.trim() || undefined);
     } catch (e) {
       const kind = classifyLimitError(e);
-      if (kind) setLimitNudge({ kind, limit: limitFromError(e) });
-      else {
+      if (kind) {
+        const limit = limitFromError(e);
+        setLimitNudge({ kind, limit });
+        // Team model: the refusal IS the upgrade moment, so the plan comparison
+        // opens at once; the nudge stays behind it for after a close.
+        const st = useStore.getState();
+        if (kind === "vault_limit" && st.billingConfig?.model === "team") {
+          st.requestUpgradeDialog({
+            reason: vaultLimitReason(limit ?? st.billingConfig.freeLimits?.vaultsPerUser ?? 1),
+          });
+        }
+      } else {
         const message = e instanceof Error ? e.message : String(e);
         setError(message);
         // The inline line can be scrolled out of view, and the button simply
@@ -641,7 +671,7 @@ function serverHost(serverUrl: string): string {
  * must never look like a success (#85). Nothing was destroyed in that case: the
  * store only touches this device once the server has answered.
  */
-function UnsyncConfirmDialog({
+export function UnsyncConfirmDialog({
   orgId,
   orgName,
   folderName,
@@ -695,7 +725,10 @@ function UnsyncConfirmDialog({
     }
   };
 
-  const sub = preview?.subscription ?? null;
+  const teamBilling = useStore((s) => s.billingConfig?.model === "team");
+  // On Team-model servers billing belongs to the owner's account, not the
+  // vault, so removing a vault never ends a subscription.
+  const sub = teamBilling ? null : (preview?.subscription ?? null);
 
   return (
     <ConfirmDialog
@@ -862,789 +895,273 @@ function SyncGate({ label, onGoToSync }: { label: string; onGoToSync: () => void
   );
 }
 
-/**
- * Vaults: switch between vaults, create/join, and manage where their
- * local folders live. Each vault owns one folder under the managed root;
- * switching swaps the sidebar to that vault's folder and repoints the
- * stable `current` symlink external tools point at.
- */
-function VaultsTab() {
-  const session = useStore((s) => s.session);
-  const reset = useResetLocalCopy();
-  const organizations = useStore((s) => s.organizations);
-  const members = useStore((s) => s.members);
-  const vault = useStore((s) => s.vault);
-  const syncEnabled = useStore((s) => s.syncEnabled);
-  // The open vault's folder is gone (#228): its row says so instead of
-  // "Current" and offers the banner's recovery actions.
-  const rootMissing = useStore((s) => s.structureNotice.rootMissing);
-  const billingEnabled = useStore((s) => s.billingConfig?.enabled === true);
-  // Bumped after a local remove/delete so the recents list re-fetches.
-  const [localsNonce, setLocalsNonce] = useState(0);
-  const locals = useLocalVaults(localsNonce);
-  const knownOrgIds = useKnownOrgIds();
+/** One stat tile on the team-mode Usage tab. */
+interface UsageTile {
+  key: string;
+  caption: string;
+  value: string;
+  sub: string;
+  meter?: { used: number; limit: number } | null;
+}
 
-  const [root, setRoot] = useState<string | null>(null);
-  const [bound, setBound] = useState<Record<string, string>>(() => readOrgVaults());
-  const [creating, setCreating] = useState(false);
-  const [orgName, setOrgName] = useState("");
-  const [joining, setJoining] = useState(false);
-  const [joinCode, setJoinCode] = useState("");
-  const [joinError, setJoinError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  // orgId whose permanent deletion is awaiting a second confirming click.
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  // A vault that is actually PAYING, whose deletion needs the full dialog
-  // instead: the two-click row has nowhere to say what happens to the money
-  // (#111). Its billing snapshot rides along so the copy can name the date.
-  const [subDelete, setSubDelete] = useState<
-    { orgId: string; name: string; billing: OrgBilling } | null
-  >(null);
-  // local-vault path whose file deletion is awaiting a second confirming click.
-  const [confirmDeleteLocal, setConfirmDeleteLocal] = useState<string | null>(null);
-  // A vault the user is about to leave (#121). Always the full dialog: it has
-  // to say that the folder on this device goes too, which a row can't.
-  const [confirmLeave, setConfirmLeave] = useState<{ orgId: string; name: string } | null>(
-    null,
-  );
-  // A vault the user is about to make LOCAL ONLY. Always the full dialog: the
-  // counts, the teammates who lose access and the type-the-name gate have
-  // nowhere to live in a two-click row.
-  const [confirmUnsync, setConfirmUnsync] = useState<{ orgId: string; name: string } | null>(
-    null,
-  );
-  const [actionError, setActionError] = useState<string | null>(null);
-  // Free-plan vault-cap hit while creating — shows an upgrade nudge instead.
+/** "1.2 MB" → { value: "1.2", unit: "MB" }; plain bytes read as "bytes". */
+function splitBytes(n: number): { value: string; unit: string } {
+  const [value, unit] = formatBytes(n).split(" ");
+  return { value, unit: unit === "B" ? "bytes" : unit };
+}
+
+/**
+ * Team model: the active vault's billing card. A user owns exactly one billing
+ * account (`billing/accounts.ts`), so the only destination a move can have is
+ * the caller's own account: an owner whose vault is billed on a co-owner's
+ * account gets "Move to my account". There is no picker because the server
+ * accepts no other destination (`POST /billing/orgs/:orgId/move` requires the
+ * caller to own both the vault and the destination account).
+ */
+function TeamVaultBillingCard({
+  orgId,
+  isSynced,
+  vaultName,
+  isOwner,
+  plan,
+  vaultAccountId,
+  onMoved,
+}: {
+  orgId: string | null;
+  isSynced: boolean;
+  vaultName: string | null;
+  isOwner: boolean;
+  plan: "free" | "pro" | "team";
+  vaultAccountId: string | null;
+  onMoved: () => Promise<unknown>;
+}) {
+  // Only an owner can move, so only an owner needs (or lazily creates) their account.
+  const [myAccountId, setMyAccountId] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [limitNudge, setLimitNudge] = useState<{ kind: LimitKind; limit: number | null } | null>(
     null,
   );
-  const [upgradeOpen, setUpgradeOpen] = useState(false);
+
+  // This vault's usage, read from the account it is billed on (any member may
+  // read it with `orgId`). `undefined` = loading, `null` = unavailable.
+  const [usage, setUsage] = useState<BillingUsage | null | undefined>(undefined);
 
   useEffect(() => {
-    let cancelled = false;
-    ipc
-      .getVaultsRoot()
-      .then((r) => {
-        if (!cancelled) setRoot(r);
-      })
+    if (!isOwner) return;
+    let live = true;
+    authManager.api
+      .getBillingAccount()
+      .then((a) => { if (live) setMyAccountId(a.id); })
       .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    return () => { live = false; };
+  }, [isOwner, orgId]);
 
-  const activeOrgId = session?.activeOrganizationId ?? null;
-  // We only know the caller's role for the ACTIVE vault (members are loaded
-  // for it alone). On the active row we can therefore hide Delete from
-  // non-owners; on other rows we can't tell, so we show it and let the server
-  // enforce owner-only (403, surfaced via actionError). `deleteRemoteVault` takes
-  // an explicit org id, so deleting a non-active vault works without first
-  // switching to it.
-  const isActiveOwner =
-    members.find((m) => m.userId === session?.user.id)?.role === "owner";
-  const canDelete = (orgId: string) =>
-    orgId === activeOrgId ? isActiveOwner : true;
-  // Same uncertainty, mirrored: on the active row Leave is for non-owners
-  // only; elsewhere both are offered and the server's 409 settles it.
-  const canLeave = (orgId: string) =>
-    orgId === activeOrgId ? !isActiveOwner : true;
-
-  const folderName = (orgId: string): string | null => {
-    const p = bound[orgId];
-    return p ? (p.split("/").pop() ?? p) : null;
-  };
-
-  // The org whose folder is actually open now — the true "Current", vs. merely
-  // the account's active org (you can be viewing a local folder with sync off).
-  const openPath = vault?.path ?? null;
-  const isOpenOrg = (orgId: string) => openPath != null && bound[orgId] === openPath;
-
-  const switchTo = async (orgId: string) => {
-    if (busy || isOpenOrg(orgId)) return;
-    setBusy(true);
-    try {
-      await useStore.getState().setActiveOrganization(orgId);
-      setBound(readOrgVaults());
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const switchToLocal = async (path: string) => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await useStore.getState().openLocalVault(path);
-      setBound(readOrgVaults());
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Detach a vault from this device only (server data untouched).
-  const removeLocal = async (orgId: string) => {
-    if (busy) return;
-    setBusy(true);
-    setActionError(null);
-    try {
-      await useStore.getState().removeVaultLocally(orgId);
-      setBound(readOrgVaults());
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /**
-   * Ask before deleting. A vault that is actually paying gets the full
-   * ConfirmDialog, because "Delete everything?" cannot say the one thing its
-   * owner needs to know: the subscription stops at the END of the current
-   * period, and until then it can be moved to another vault (#111). Every
-   * other vault keeps today's two-click row.
-   *
-   * A billing lookup that fails is treated as free — an unreachable billing
-   * endpoint must not block a delete the user is entitled to make.
-   */
-  const askDelete = async (orgId: string, name: string) => {
-    setActionError(null);
-    if (!billingEnabled) {
-      setConfirmDelete(orgId);
+  useEffect(() => {
+    if (!orgId) {
+      setUsage(null);
       return;
     }
-    let billing: OrgBilling | null = null;
-    try {
-      billing = await authManager.api.getOrgBilling(orgId);
-    } catch {
-      billing = null;
-    }
-    if (billing && (billing.status === "active" || billing.status === "past_due")) {
-      setSubDelete({ orgId, name, billing });
-    } else {
-      setConfirmDelete(orgId);
-    }
-  };
+    let live = true;
+    setUsage(undefined);
+    authManager.api
+      .getBillingUsage({ orgId })
+      .then((u) => { if (live) setUsage(u); })
+      .catch(() => { if (live) setUsage(null); });
+    return () => { live = false; };
+  }, [orgId, vaultAccountId]);
 
-  // Permanently delete a vault everywhere (owner only, confirmed above).
-  const deletePermanently = async (orgId: string) => {
-    if (busy) return;
-    setBusy(true);
-    setActionError(null);
-    try {
-      const result = await useStore.getState().deleteRemoteVault(orgId);
-      setBound(readOrgVaults());
-      setConfirmDelete(null);
-      setSubDelete(null);
-      if (result.subscription) {
-        // Neutral, not success: the vault is gone, but the user is still paying
-        // for the rest of the period and that time is recoverable.
-        const ends = result.subscription.currentPeriodEnd;
-        toast(
-          ends
-            ? `Vault deleted. Pro ends on ${formatDate(ends)} — move it from Billing if you want to keep it.`
-            : "Vault deleted. Pro ends when the current period does — move it from Billing if you want to keep it.",
-          "neutral",
-        );
-      }
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      // Covers the 502 `subscription_cancel_failed` case: the server's message
-      // rides `ApiError.message`, and NOTHING was deleted. The dialog stays
-      // open (only success clears it) so the error has somewhere to show.
-      setActionError(message);
-      // Destructive path: a failure here must never look like a success (#85).
-      // The cancel-failed message is already a full sentence (#300).
-      const cancelFailed =
-        e instanceof ApiError && (e.body as { error?: unknown } | undefined)?.error === "subscription_cancel_failed";
-      toast(cancelFailed ? message : `Couldn't delete the vault — ${message}`, "error");
-    } finally {
-      setBusy(false);
-    }
-  };
+  const usageRow = usage?.vaults.find((v) => v.orgId === orgId) ?? null;
+  const isFree = plan === "free";
 
-  // Leave a vault someone else owns (confirmed above). Server first, then the
-  // vault leaves this device entirely; the dialog stays open on failure so the
-  // server's reason (an owner's 409, offline) has somewhere to show.
-  const leaveVault = async (orgId: string, name: string) => {
-    if (busy) return;
-    setBusy(true);
-    setActionError(null);
-    try {
-      await useStore.getState().leaveVault(orgId);
-      setBound(readOrgVaults());
-      setConfirmLeave(null);
-      toast(`You left ${name}.`, "neutral");
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      setActionError(message);
-      toast(`Couldn't leave the vault — ${message}`, "error");
-    } finally {
-      setBusy(false);
-    }
-  };
+  const elsewhere = isOwner && !!myAccountId && !!vaultAccountId && vaultAccountId !== myAccountId;
+  const label = vaultName ?? "this vault";
 
-  // Forget a local vault from this device's list (files on disk are kept).
-  const removeLocalVaultRow = async (path: string) => {
-    if (busy) return;
-    setBusy(true);
-    setActionError(null);
-    try {
-      await useStore.getState().removeLocalVault(path);
-      setLocalsNonce((n) => n + 1);
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Move a local vault's folder to the OS trash (destructive, two-click confirm).
-  const deleteLocalFiles = async (path: string) => {
-    if (busy) return;
-    setBusy(true);
-    setActionError(null);
-    try {
-      await useStore.getState().deleteLocalVault(path);
-      setConfirmDeleteLocal(null);
-      setLocalsNonce((n) => n + 1);
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const createOrg = async () => {
-    if (!orgName.trim()) return;
-    setBusy(true);
-    setActionError(null);
+  const runMove = async () => {
+    if (!orgId || !myAccountId) return;
+    setError(null);
     setLimitNudge(null);
     try {
-      await useStore.getState().createOrganization(orgName.trim());
-      setOrgName("");
-      setCreating(false);
-      setBound(readOrgVaults());
+      await authManager.api.moveVault(orgId, myAccountId);
+      setConfirming(false);
+      await onMoved();
+      toast(`${vaultName ?? "The vault"} is now on your account.`);
     } catch (e) {
-      // A 402 vault-cap rejection becomes an upgrade nudge; anything else is
-      // a real error (previously swallowed silently — that was the create bug).
-      const kind = classifyLimitError(e);
-      if (kind) setLimitNudge({ kind, limit: limitFromError(e) });
-      else setActionError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
+      const body = e instanceof ApiError && e.body && typeof e.body === "object"
+        ? (e.body as Record<string, unknown>)
+        : null;
+      const code = body ? (body.code ?? body.error) : null;
+      if (e instanceof ApiError && e.status === 400 && code === "same_account") {
+        // Already there (another device moved it): just catch up.
+        setConfirming(false);
+        await onMoved();
+        return;
+      }
+      if (e instanceof ApiError && e.status === 409 && code === "vault_limit_reached") {
+        setConfirming(false);
+        setLimitNudge({
+          kind: "vault_limit",
+          limit: typeof body?.limit === "number" ? body.limit : null,
+        });
+        return;
+      }
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      toast(`Couldn't move the vault — ${message}`, "error");
     }
   };
 
-  const joinByCode = async () => {
-    if (!joinCode.trim()) return;
-    setBusy(true);
-    setJoinError(null);
-    try {
-      await useStore.getState().joinVault(joinCode);
-      setJoinCode("");
-      setJoining(false);
-      setBound(readOrgVaults());
-    } catch (e) {
-      setJoinError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const openExisting = async () => {
-    if (busy) return;
-    setBusy(true);
-    setActionError(null);
-    try {
-      // Pick only. `openLocalVault` retires the current sync scope before Rust
-      // swaps its one global vault slot; `pickVault` opens during the dialog and
-      // cannot provide that ordering guarantee.
-      const path = await ipc.pickFolder();
-      if (path) await useStore.getState().openLocalVault(path);
-      setBound(readOrgVaults());
-      setLocalsNonce((n) => n + 1);
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Restore here / Locate folder… for the open vault whose folder is missing —
-  // the same store actions as the banner and the Set-up prompt.
-  const recover = (fn: () => Promise<void>) => async () => {
-    if (busy) return;
-    setBusy(true);
-    setActionError(null);
-    try {
-      await fn();
-      setBound(readOrgVaults());
-      setLocalsNonce((n) => n + 1);
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const changeRoot = async () => {
-    try {
-      const picked = await ipc.pickVaultsRoot();
-      if (picked) setRoot(picked);
-    } catch {
-      /* picker cancelled/unavailable */
-    }
-  };
-
-  // Active vault pinned to the top.
-  const ordered = [
-    ...organizations.filter((o) => o.id === activeOrgId),
-    ...organizations.filter((o) => o.id !== activeOrgId),
+  // Tiles: the four counts always; on Free, People carries a meter against the
+  // account's ceiling and a Synced vaults tile joins only when a vault limit exists.
+  const loading = usage === undefined;
+  const syncedVaults = usage ? (usage.totals.vaults ?? usage.vaults.length) : 0;
+  const bytes = usageRow ? splitBytes(usageRow.storageBytes) : null;
+  const tiles: UsageTile[] = [
+    {
+      key: "people",
+      caption: "People",
+      value: loading ? "…" : String(usageRow?.people ?? 0),
+      sub:
+        isFree && usage?.limits.people != null
+          ? `of ${usage.limits.people} on this account`
+          : (usageRow?.people ?? 0) === 1 ? "person" : "people",
+      meter:
+        isFree && usage?.limits.people != null && usageRow
+          ? { used: usageRow.people, limit: usage.limits.people }
+          : null,
+    },
+    {
+      key: "notes",
+      caption: "Notes",
+      value: loading ? "…" : String(usageRow?.notes ?? 0),
+      sub: "in this vault",
+    },
+    {
+      key: "attachments",
+      caption: "Attachments",
+      value: loading ? "…" : (bytes?.value ?? "0"),
+      sub: bytes?.unit ?? "bytes",
+    },
+    {
+      key: "files",
+      caption: "Files",
+      value: loading ? "…" : String(usageRow?.files ?? 0),
+      sub: "in this vault",
+    },
   ];
-
-  // A folder still carrying a binding to a vault this account doesn't have:
-  // the vault was deleted, or belongs to another account, or the binding is
-  // just stale. It's listed here (not silently swallowed as "bound") so the
-  // user's notes are never on disk and absent from every list at once.
-  const orphanBinding = (path: string) =>
-    Object.entries(bound).some(([orgId, p]) => p === path && !knownOrgIds.has(orgId));
-
-  const localsOrdered = [
-    ...locals.filter((r) => !syncEnabled && vault?.path === r.path),
-    ...locals.filter((r) => !(!syncEnabled && vault?.path === r.path)),
-  ];
+  const freeBase = useStore.getState().billingConfig?.free?.syncedVaults ?? null;
+  if (isFree && usage?.limits.vaults != null) {
+    tiles.push({
+      key: "vaults",
+      caption: "Synced vaults",
+      value: String(syncedVaults),
+      sub:
+        freeBase != null && usage.limits.vaults > freeBase
+          ? `of ${usage.limits.vaults} on this account · includes vaults you had before`
+          : `of ${usage.limits.vaults} on this account`,
+      meter: { used: syncedVaults, limit: usage.limits.vaults },
+    });
+  }
+  const pill = planPillLabel({ plan, status: isFree ? "none" : "active" });
 
   return (
     <>
-      {session && (
-        <>
-      <div className="subhead">In this account ({organizations.length})</div>
-      <p className="muted">These are the vaults in your signed-in account. Other folders may still exist on disk, including vaults opened in another Baalda app. Use Open existing to reopen one. Removing a vault from the device list keeps its files.</p>
-      <ul className="member-list vault-list">
-        {ordered.map((o) => {
-          const isActive = isOpenOrg(o.id);
-          const fname = folderName(o.id);
-          return (
-            <li key={o.id}>
-              <span className="menu-swatch" aria-hidden="true">
-                {o.name[0]?.toUpperCase() ?? "?"}
-              </span>
-              <span className="member-name">
-                {o.name}
-                <span className="muted vault-folder">
-                  {" "}
-                  {fname ? `· ${fname}` : "· folder created on first open"}
-                </span>
-              </span>
-              {confirmDelete === o.id ? (
-                <span className="vault-row-actions">
-                  <span className="muted">Delete everything?</span>
-                  <button
-                    className="link-btn"
-                    disabled={busy}
-                    onClick={() => setConfirmDelete(null)}
-                  >
-                    Cancel
-                  </button>
-                  <AsyncButton
-                    className="link-btn danger"
-                    disabled={busy}
-                    onClick={() => deletePermanently(o.id)}
-                  >
-                    Delete
-                  </AsyncButton>
-                </span>
-              ) : (
-                <span className="vault-row-actions">
-                  {isActive && rootMissing ? (
-                    <VaultFolderMissingRowActions
-                      synced={syncEnabled}
-                      busy={busy}
-                      onRestore={recover(() => useStore.getState().restoreVaultFolder())}
-                      onLocate={recover(() => useStore.getState().locateVaultFolder())}
-                    />
-                  ) : isActive ? (
-                    <span className="member-role">Current</span>
-                  ) : (
-                    <AsyncButton
-                      className="link-btn"
-                      disabled={busy}
-                      onClick={() => switchTo(o.id)}
-                    >
-                      Switch
-                    </AsyncButton>
-                  )}
-                  <RowActionsMenu
-                    ariaLabel={`More actions for ${o.name}`}
-                    disabled={busy}
-                    actions={[
-                      {
-                        key: "remove",
-                        label: "Remove from device",
-                        title: "Stop syncing this vault here; server data is kept",
-                        onSelect: () => removeLocal(o.id),
-                      },
-                      // Only the open synced vault, and only while its folder is
-                      // there (a missing one has Restore here beside the menu).
-                      ...(isActive && reset.available
-                        ? [{
-                            key: "reset",
-                            label: "Reset local copy",
-                            title: "Delete this device's copy of the vault and download a fresh one",
-                            onSelect: reset.start,
-                          }]
-                        : []),
-                      ...(canLeave(o.id)
-                        ? [{
-                            key: "leave",
-                            label: "Leave vault",
-                            danger: true,
-                            separated: true,
-                            title: "Leave this vault — you lose access and it is removed from this device",
-                            onSelect: () => {
-                              setActionError(null);
-                              setConfirmLeave({ orgId: o.id, name: o.name });
-                            },
-                          }]
-                        : []),
-                      // Same owner heuristic as Delete: on the active row we know
-                      // the caller's role, elsewhere we don't, so we offer it and
-                      // let the server's 403 `owner_only` settle it.
-                      ...(canDelete(o.id)
-                        ? [
-                            {
-                              key: "unsync",
-                              label: "Make local only",
-                              danger: true,
-                              separated: !canLeave(o.id),
-                              title: "Delete this vault from the server and keep its files on this device",
-                              onSelect: () => {
-                                setActionError(null);
-                                setConfirmUnsync({ orgId: o.id, name: o.name });
-                              },
-                            },
-                            {
-                              key: "delete",
-                              label: "Delete vault",
-                              danger: true,
-                              title: "Permanently delete this vault and all its notes for everyone",
-                              onSelect: () => askDelete(o.id, o.name),
-                            },
-                          ]
-                        : []),
-                    ]}
-                  />
-                </span>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-      {reset.dialog}
-
-      <div className="vault-tab-actions">
-        {creating ? (
-          <form
-            className="vault-tab-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void createOrg();
-            }}
-          >
-            <input
-              autoFocus
-              placeholder="Vault name"
-              value={orgName}
-              onChange={(e) => setOrgName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") setCreating(false);
-              }}
-            />
-            <button
-              type="submit"
-              className="primary"
-              disabled={busy || !orgName.trim()}
-            >
-              Create
-            </button>
-            <button
-              type="button"
-              className="ghost-pill"
-              disabled={busy}
-              onClick={() => setCreating(false)}
-            >
-              Cancel
-            </button>
-          </form>
-        ) : joining ? (
-          <form
-            className="vault-tab-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void joinByCode();
-            }}
-          >
-            <input
-              autoFocus
-              className="vault-tab-code"
-              placeholder="Join code, e.g. K7MPX2RA"
-              value={joinCode}
-              spellCheck={false}
-              autoCapitalize="characters"
-              onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") setJoining(false);
-              }}
-            />
-            <button
-              type="submit"
-              className="primary"
-              disabled={busy || !joinCode.trim()}
-            >
-              Join
-            </button>
-            <button
-              type="button"
-              className="ghost-pill"
-              disabled={busy}
-              onClick={() => setJoining(false)}
-            >
-              Cancel
-            </button>
-          </form>
-        ) : (
-          <>
-            <button
-              type="button"
-              className="ghost-pill vault-tab-add"
-              onClick={() => setCreating(true)}
-            >
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-              <span>New vault</span>
-            </button>
-            <button
-              type="button"
-              className="ghost-pill vault-tab-add"
-              onClick={() => setJoining(true)}
-            >
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" />
-              </svg>
-              <span>Join with code</span>
-            </button>
-            <AsyncButton
-              className="ghost-pill vault-tab-add"
-              disabled={busy}
-              onClick={openExisting}
-            >
-              <span>Open existing</span>
-            </AsyncButton>
-          </>
-        )}
-      </div>
-      {joinError && <div className="auth-error">{joinError}</div>}
-      {actionError && <div className="auth-error">{actionError}</div>}
-      {limitNudge && (
-        <LimitNudge
-          kind={limitNudge.kind}
-          limit={limitNudge.limit}
-          onUpgrade={() => setUpgradeOpen(true)}
-        />
-      )}
-        </>
-      )}
-
-      {localsOrdered.length > 0 && (
-        <>
-          {session && <div className="menu-sep" />}
-          <div className="subhead">On this device ({localsOrdered.length})</div>
-          <div className="muted">
-            Local folders open on this computer. They aren't on your account —
-            turn on sync from a vault's settings to reach it elsewhere.
-          </div>
-          <ul className="member-list vault-list">
-            {localsOrdered.map((r) => {
-              const isCurrent = !syncEnabled && vault?.path === r.path;
+      <div className="billing-card vault-usage">
+        <div className="vault-usage-head">
+          <span className={`billing-status ${isSynced ? "active" : "none"}`}>
+            {isSynced ? "Synced" : "Not syncing on this computer"}
+          </span>
+        </div>
+        {loading || (usageRow && usage) ? (
+          <div className="vault-usage-tiles">
+            {tiles.map((t) => {
+              const full = !!t.meter && t.meter.limit > 0 && t.meter.used >= t.meter.limit;
+              const pct = t.meter && t.meter.limit > 0
+                ? Math.min(100, Math.round((t.meter.used / t.meter.limit) * 100))
+                : 0;
               return (
-                <li key={r.path}>
-                  <span className="menu-swatch" aria-hidden="true">
-                    {r.name[0]?.toUpperCase() ?? "?"}
-                  </span>
-                  <span className="member-name">
-                    {r.name}
-                    <span
-                      className="muted vault-folder"
-                      title={
-                        orphanBinding(r.path)
-                          ? `${r.path} — this folder was synced to a vault that isn't in this account`
-                          : r.path
-                      }
+                <div key={t.key} className="vault-usage-tile">
+                  <span className="vault-usage-caption">{t.caption}</span>
+                  <span className="vault-usage-value">{t.value}</span>
+                  <span className="vault-usage-sub">{t.sub}</span>
+                  {t.meter && !loading && (
+                    <div
+                      className={`vault-usage-meter${full ? " is-full" : ""}`}
+                      role="meter"
+                      aria-label={t.caption}
+                      aria-valuemin={0}
+                      aria-valuemax={t.meter.limit}
+                      aria-valuenow={t.meter.used}
                     >
-                      {orphanBinding(r.path) ? " · Local · was synced elsewhere" : " · Local"}
-                    </span>
-                  </span>
-                  {confirmDeleteLocal === r.path ? (
-                    <span className="vault-row-actions">
-                      <span className="muted">Delete this vault?</span>
-                      <button
-                        className="link-btn"
-                        disabled={busy}
-                        onClick={() => setConfirmDeleteLocal(null)}
-                      >
-                        Cancel
-                      </button>
-                      <AsyncButton
-                        className="link-btn danger"
-                        disabled={busy}
-                        onClick={() => deleteLocalFiles(r.path)}
-                      >
-                        Delete
-                      </AsyncButton>
-                    </span>
-                  ) : (
-                    <span className="vault-row-actions">
-                      {isCurrent && rootMissing ? (
-                        <VaultFolderMissingRowActions
-                          synced={false}
-                          busy={busy}
-                          onRestore={() => undefined}
-                          onLocate={recover(() => useStore.getState().locateVaultFolder())}
-                        />
-                      ) : isCurrent ? (
-                        <span className="member-role">Current</span>
-                      ) : (
-                        <AsyncButton
-                          className="link-btn"
-                          disabled={busy}
-                          onClick={() => switchToLocal(r.path)}
-                        >
-                          Switch
-                        </AsyncButton>
-                      )}
-                      <RowActionsMenu
-                        ariaLabel={`More actions for ${r.name ?? r.path}`}
-                        disabled={busy}
-                        actions={[
-                          {
-                            key: "remove",
-                            label: "Remove from list",
-                            title: "Remove this folder from the list. Files stay on disk.",
-                            onSelect: () => removeLocalVaultRow(r.path),
-                          },
-                          {
-                            key: "delete",
-                            label: "Delete vault",
-                            danger: true,
-                            separated: true,
-                            title: "Delete this vault — moves its folder and all its notes to the Trash",
-                            onSelect: () => {
-                              setActionError(null);
-                              setConfirmDeleteLocal(r.path);
-                            },
-                          },
-                        ]}
-                      />
-                    </span>
+                      <span style={{ width: `${pct}%` }} />
+                    </div>
                   )}
-                </li>
+                </div>
               );
             })}
-          </ul>
-        </>
-      )}
-
-      {session && (
-        <>
-          <div className="menu-sep" />
-          <div className="subhead">Vault folder location</div>
-          <div className="muted">
-            New vaults get their own folder here. The active vault is also
-            linked at <code>current</code> so tools like Claude Desktop can point at
-            one fixed path.
           </div>
-          <div className="join-code-row">
-            <code className="vault-root-path" title={root ?? ""}>
-              {root ?? "…"}
-            </code>
-            <button className="link-btn" onClick={() => void changeRoot()}>
-              Change…
+        ) : (
+          <div className="muted">Usage isn't available for this vault right now.</div>
+        )}
+        <div className="vault-usage-footer">
+          <div className="vault-usage-footer-label">
+            <span>
+              {!isOwner
+                ? "This vault is on its owner's account"
+                : elsewhere
+                  ? "This vault is billed on another account"
+                  : "This vault is on your account"}
+            </span>
+            <span className={`billing-status ${isFree ? "none" : "active"}`}>{pill}</span>
+          </div>
+          <button
+            className="secondary billing-action"
+            onClick={() => useStore.getState().requestAccountSettings("plan")}
+          >
+            Open Plan &amp; Billing
+          </button>
+        </div>
+        {elsewhere && (
+          <div className="vault-usage-footer">
+            <span className="vault-usage-footer-label">
+              Bill it on your own account instead.
+            </span>
+            <button
+              className="secondary billing-action"
+              onClick={() => {
+                setError(null);
+                setLimitNudge(null);
+                setConfirming(true);
+              }}
+            >
+              Move to my account
             </button>
           </div>
-        </>
-      )}
-
-      {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
-
-      {confirmLeave && (
-        <ConfirmDialog
-          title={`Leave ${confirmLeave.name}?`}
-          confirmLabel="Leave vault"
-          onCancel={() => setConfirmLeave(null)}
-          onConfirm={() => leaveVault(confirmLeave.orgId, confirmLeave.name)}
-        >
-          <p>
-            You lose access to this vault on all your devices right away, and the
-            owner is told that you left.
-          </p>
-          <p>
-            {bound[confirmLeave.orgId] ? (
-              <>
-                Its folder on this device, <strong>{folderName(confirmLeave.orgId)}</strong>,
-                moves to the Trash.
-              </>
-            ) : (
-              "Nothing from it is stored on this device."
-            )}{" "}
-            The vault itself and everyone else's access are unchanged.
-          </p>
-          <p>To come back later, you'll need a new invitation or join code.</p>
-          {actionError && <div className="auth-error">{actionError}</div>}
-        </ConfirmDialog>
-      )}
-
-      {confirmUnsync && (
-        <UnsyncConfirmDialog
-          orgId={confirmUnsync.orgId}
-          orgName={confirmUnsync.name}
-          folderName={folderName(confirmUnsync.orgId)}
-          onCancel={() => setConfirmUnsync(null)}
-          onDone={() => {
-            setConfirmUnsync(null);
-            setBound(readOrgVaults());
-          }}
-        />
-      )}
-
-      {subDelete && (
-        <ConfirmDialog
-          title={`Delete ${subDelete.name}?`}
-          confirmLabel="Delete vault"
-          onCancel={() => setSubDelete(null)}
-          onConfirm={() => deletePermanently(subDelete.orgId)}
-        >
-          <p>
-            This vault is on <strong>Pro</strong>
-            {subDelete.billing.currentPeriodEnd
-              ? subDelete.billing.cancelAtPeriodEnd
-                ? `, ending ${formatDate(subDelete.billing.currentPeriodEnd)}`
-                : `, renewing ${formatDate(subDelete.billing.currentPeriodEnd)}`
-              : ""}
-            .
-          </p>
-          <p>
-            Deleting it stops the subscription at the end of the current period.
-            You won't be charged again, and until then you can move the
-            subscription to another vault from <strong>Billing</strong>.
-          </p>
-          <p>
-            Every note, folder and attachment in this vault is deleted for
-            everyone. That part can't be undone.
-          </p>
-          {actionError && <div className="auth-error">{actionError}</div>}
-        </ConfirmDialog>
-      )}
+        )}
+        {error && <div className="auth-error">{error}</div>}
+        {limitNudge && (
+          <LimitNudge
+            kind={limitNudge.kind}
+            limit={limitNudge.limit}
+            onUpgrade={() => useStore.getState().requestAccountSettings("plan")}
+          />
+        )}
+        {confirming && (
+          <ConfirmDialog
+            tone="accent"
+            title={`Move ${label} to your account?`}
+            confirmLabel="Move to my account"
+            onCancel={() => setConfirming(false)}
+            onConfirm={runMove}
+          >
+            <p>
+              Its people and limits will count on your account from now on, and it
+              stops counting on the account it is on today. Notes, members and access
+              stay exactly as they are.
+            </p>
+          </ConfirmDialog>
+        )}
+      </div>
     </>
   );
 }
@@ -1756,6 +1273,24 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
   if (!billingConfig?.enabled) {
     return (
       <div className="muted perm-empty">Billing isn't enabled on this server.</div>
+    );
+  }
+
+  // Team model: billing lives on the owner's account (Account Settings → Plan &
+  // Billing); this tab (labelled Usage) shows the vault's own usage. No per-vault subscription list and no transfer here.
+  if (billingConfig.model === "team") {
+    const row = myBilling?.vaults.find((v) => v.orgId === orgId) ?? null;
+    const src = orgBilling ?? row;
+    return (
+      <TeamVaultBillingCard
+        orgId={orgId}
+        isSynced={isSynced}
+        vaultName={row?.name ?? null}
+        isOwner={row?.role === "owner"}
+        plan={src?.accountPlan ?? src?.plan ?? "free"}
+        vaultAccountId={src?.accountId ?? null}
+        onMoved={refreshAll}
+      />
     );
   }
 
@@ -2138,7 +1673,7 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
 }
 
 /** Compact absolute date for renewal/period-end lines. */
-function formatDate(iso: string): string {
+export function formatDate(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });

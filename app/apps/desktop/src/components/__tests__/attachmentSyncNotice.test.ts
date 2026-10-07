@@ -23,11 +23,11 @@ describe("AttachmentLocalOnlyNoticeView", () => {
       }),
     );
 
-    expect(html).toContain("Standalone files require Pro to sync");
+    expect(html).toContain("Standalone files require Team to sync");
     expect(html).toContain("Notes and their embedded attachments still sync");
     expect(html).toContain("embedded attachments");
     expect(html).toContain("remain available to preview locally");
-    expect(html).toContain("Upgrade to Pro");
+    expect(html).toContain("Upgrade to Team");
     expect(html).not.toContain("Health");
   });
 
@@ -40,7 +40,7 @@ describe("AttachmentLocalOnlyNoticeView", () => {
       }),
     );
 
-    expect(html).toContain("Standalone files require Pro to sync");
+    expect(html).toContain("Standalone files require Team to sync");
     expect(html).not.toContain("Upgrade");
   });
 

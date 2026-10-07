@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev:desktop": "pnpm --filter desktop tauri dev",
+    "dev:desktop": "pnpm --filter desktop tauri dev --config src-tauri/tauri.dev.conf.json",
     "dev:server": "turbo run dev --filter=server",
     "build": "turbo run build",
     "build:desktop": "pnpm --filter desktop tauri build",

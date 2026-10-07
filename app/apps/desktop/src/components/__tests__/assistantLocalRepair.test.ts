@@ -39,7 +39,7 @@ it("never exports another vault if the user switches while the picker is open", 
   await render(); env.pick.mockImplementation(async () => { env.state.vault = { path: "/other", epoch: 2 }; return "/backup"; });
   await apply(); expect(env.copy).not.toHaveBeenCalled();
 });
-it("rechecks Pro before executing a prepared action", async () => {
+it("rechecks Team before executing a prepared action", async () => {
   await render(); env.status.mockResolvedValue({ available: false }); await apply();
   expect(env.copy).not.toHaveBeenCalled(); expect(env.pick).not.toHaveBeenCalled();
 });

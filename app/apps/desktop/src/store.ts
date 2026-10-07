@@ -610,6 +610,13 @@ interface AppStore {
   accountSettingsRequest: { tab: AccountSettingsTab; token: number } | null;
   requestAccountSettings: (tab: AccountSettingsTab) => void;
   /**
+   * Open the Upgrade (plan comparison) dialog from any screen. `reason` is one
+   * muted line under its heading. Consumed by `UpgradeDialogHost` (main.tsx).
+   */
+  upgradeDialogRequest: { reason?: string; orgId?: string; token: number } | null;
+  requestUpgradeDialog: (opts?: { reason?: string; orgId?: string }) => void;
+  clearUpgradeDialogRequest: () => void;
+  /**
    * Whether the connected server lacks features this app needs (UI mirror
    * only; `lib/serverFeatures.ts`). Null = unknown or not checked yet, which
    * shows nothing. Written by `BackendBehindNotice`'s health poll.
@@ -768,7 +775,7 @@ interface AppStore {
   leaveVault: (organizationId: string) => Promise<void>;
   /** Permanently delete a vault everywhere (owner only), then detach it.
    *  Hands back the server's report so the caller can say what became of the
-   *  vault's subscription — deleting a Pro vault stops it at the END of the
+   *  vault's subscription — deleting a Team vault stops it at the END of the
    *  period rather than instantly, and that date is the whole message (#111). */
   deleteRemoteVault: (organizationId: string) => Promise<VaultDeleteResult>;
   /**
@@ -1825,6 +1832,7 @@ export const useStore = create<AppStore>((set, get) => ({
   settingsDismissToken: 0,
   dismissSettings: () => set((s) => ({ settingsDismissToken: s.settingsDismissToken + 1 })),
   accountSettingsRequest: null,
+  upgradeDialogRequest: null,
   backendStatus: null,
   setBackendStatus: (backendStatus) => set({ backendStatus }),
   revealedPath: null,
@@ -2328,6 +2336,12 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   requestSettings: (tab) => {
+    // The vault list lives in Account Settings → Vaults (2026-10-07). Signed
+    // out there is no account page, so Vault Settings keeps it for local folders.
+    if (tab === "vaults" && get().session) {
+      get().requestAccountSettings("vaults");
+      return;
+    }
     set((s) => ({
       settingsRequest: { tab, token: (s.settingsRequest?.token ?? 0) + 1 },
     }));
@@ -2341,6 +2355,18 @@ export const useStore = create<AppStore>((set, get) => ({
       },
     }));
   },
+
+  requestUpgradeDialog: (opts) => {
+    set((s) => ({
+      upgradeDialogRequest: {
+        reason: opts?.reason,
+        orgId: opts?.orgId,
+        token: (s.upgradeDialogRequest?.token ?? 0) + 1,
+      },
+    }));
+  },
+
+  clearUpgradeDialogRequest: () => set({ upgradeDialogRequest: null }),
 
   setRevealedPath: (path) => set({ revealedPath: path }),
 
@@ -3674,7 +3700,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
   handleBillingLink: async (orgId) => {
     if (get().authStatus !== "signed-in") {
-      toast("Payment received. Sign in to see your Pro vault.", "neutral");
+      toast("Payment received. Sign in to see your Team plan.", "neutral");
       return;
     }
     // Both readers of the fact: the active vault's badge/limits and the
@@ -3690,7 +3716,7 @@ export const useStore = create<AppStore>((set, get) => ({
     if (isPro) {
       const name = row?.name;
       toast(
-        name ? `${name} is now on Pro — unlimited team members.` : "You're on Pro — this vault is now unlimited.",
+        name ? `${name} is now on Team.` : "You are now on Team.",
         "success",
       );
       return;
@@ -3836,7 +3862,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
   deleteRemoteVault: async (organizationId) => {
     // Permanent, server-side, owner-only. 403s here if the caller isn't owner.
-    // A vault on Pro is cancelled at the provider FIRST, so a 502 here means
+    // A vault on Team is cancelled at the provider FIRST, so a 502 here means
     // nothing was deleted — which is also why the result is handed back rather
     // than swallowed: only the caller can tell the user when the paid period
     // ends and that it can still be moved to another vault until then (#111).
@@ -4433,7 +4459,7 @@ export const useStore = create<AppStore>((set, get) => ({
         (vault) => vault.orgId === activeOrgId && vault.plan === "pro",
       );
       // An attachment-plan refusal is memoised after the first 402 so watcher
-      // retries cannot loop. Only a confirmed Free -> Pro transition clears
+      // retries cannot loop. Only a confirmed Free -> Team transition clears
       // that refusal and schedules a fresh attachment comparison.
       if (!wasPro && isPro) syncManager.recheckAttachmentEntitlement();
       else syncManager.checkAttachmentEntitlement?.();

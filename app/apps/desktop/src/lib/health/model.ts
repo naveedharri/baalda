@@ -572,7 +572,7 @@ function limitIssue(f: HealthRegistryFailure): HealthIssue {
     kind: "limit",
     severity: "error",
     title: "Plan limit reached",
-    why: notes ? "This Free vault has reached 20,000 synced notes. Upgrade to Pro to sync more. Existing notes keep syncing; additional notes stay on this device." : member
+    why: notes ? "This vault reached its sync limit for notes. Upgrade to Team to sync more. Existing notes keep syncing; additional notes stay on this device." : member
       ? "This vault has as many members as the free plan allows, so the Remote Vault " +
         "refused. Upgrade to add more."
       : "This account has as many vaults as the free plan allows, so the Remote Vault " +
@@ -580,7 +580,7 @@ function limitIssue(f: HealthRegistryFailure): HealthIssue {
     remedies: ["upgrade", "copy-details"],
     code: f.code,
     explanation: {
-      meaning: notes ? "Free vaults can sync up to 20,000 notes. Your additional notes remain safely on this device." : member
+      meaning: notes ? "This vault reached its sync limit for notes. Your additional notes remain safely on this device." : member
         ? "The free plan allows a limited number of people in one vault. This vault " +
           "is at that number, so the Remote Vault turned this request down. Nothing was " +
           "lost — the work simply stopped at the gate."
@@ -589,7 +589,7 @@ function limitIssue(f: HealthRegistryFailure): HealthIssue {
           "was lost — the work simply stopped at the gate.",
       next: "Nothing — the Remote Vault will refuse this the same way every time until the limit lifts.",
       fixes: [
-        notes ? "Upgrade this vault to Pro to sync more than 20,000 notes." : member
+        notes ? "Upgrade this vault to Team to sync more notes." : member
           ? "Upgrade this vault to add more people."
           : "Upgrade to create more vaults.",
         member

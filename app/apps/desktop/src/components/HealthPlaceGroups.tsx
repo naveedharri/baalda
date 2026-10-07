@@ -42,9 +42,9 @@ function RowLabel({ row }: { row: PlaceRow }) {
   );
 }
 
-/** One line in whichever group holds Pro-blocked files. */
+/** One line in whichever group holds Team-blocked files. */
 export const PRO_FILES_LINE =
-  "PDFs, images and other files need Pro to sync. Notes and folders sync on every plan.";
+  "PDFs, images and other files need Team to sync. Notes and folders sync on every plan.";
 
 /** "2 notes, 1 folder, 3 files" — the confirm names exactly what goes. */
 export function describeSelection(rows: PlaceRow[]): string {
@@ -118,7 +118,7 @@ export function LocalOnlyGroup({
 }: {
   inventory: HealthInventory;
   actions: HealthActions;
-  /** Syncing standalone files needs Pro here. */
+  /** Syncing standalone files needs Team here. */
   filesBlocked: boolean;
   onOpen: (path: string) => void;
   onShow: (path: string) => void;
@@ -183,7 +183,7 @@ export function LocalOnlyGroup({
               onToggle={() => sel.toggle(row)}
             />
             <span className="health-missing-actions">
-              {row.kind === "file" && filesBlocked && <span className="health-pro-tag">Pro</span>}
+              {row.kind === "file" && filesBlocked && <span className="health-pro-tag">Team</span>}
               <button
                 type="button"
                 className="ghost-pill sm"
@@ -245,7 +245,7 @@ export function RemoteOnlyGroup({
 }: {
   inventory: HealthInventory;
   actions: HealthActions;
-  /** Downloading standalone files needs Pro here. */
+  /** Downloading standalone files needs Team here. */
   downloadsBlocked: boolean;
   showCheckAgain: boolean;
   stale: boolean;
@@ -318,7 +318,7 @@ export function RemoteOnlyGroup({
             {row.kind === "file" && (
               <span className="health-missing-actions">
                 {downloadsBlocked ? (
-                  <span className="health-pro-tag">Pro</span>
+                  <span className="health-pro-tag">Team</span>
                 ) : (
                   <AsyncButton className="ghost-pill sm" onClick={() => download([row.path])}>
                     Download

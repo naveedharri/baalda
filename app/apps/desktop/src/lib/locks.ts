@@ -63,6 +63,11 @@ export function resourceIdsByPath(tree: TreeNode | null): Map<string, string> {
   return idToPath;
 }
 
+/** True when the vault is read-only because its Team subscription lapsed. */
+export function hasBillingLapsedLock(locks: readonly Share[]): boolean {
+  return locks.some((l) => shareResourceType(l) === "vault" && l.reason === "billing_lapsed");
+}
+
 /** True when the overlay carries the whole-vault Read-only posture. */
 export function hasVaultLock(locks: readonly Share[]): boolean {
   return locks.some((l) => shareResourceType(l) === "vault");
