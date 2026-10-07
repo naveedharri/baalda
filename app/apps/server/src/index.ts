@@ -12,7 +12,11 @@ import {
 import { attachSyncUpgrade } from "./sync/http-upgrade.js";
 import { createPubSub } from "./sync/pubsub.js";
 import { VaultChannel } from "./sync/vault-channel.js";
-import { setMemberJoinedPublisher, setOrgChangedPublisher } from "./sync/member-events.js";
+import {
+  setAppearanceChangedPublisher,
+  setMemberJoinedPublisher,
+  setOrgChangedPublisher,
+} from "./sync/member-events.js";
 import { backfillIndex } from "./index/indexer.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
@@ -109,6 +113,12 @@ async function main() {
   // A vault rename / icon change reaches teammates' switchers live (#306).
   setOrgChangedPublisher((vaultId, change) => {
     void vaultChannel.publishOrgChanged(vaultId, change).catch(broadcastFailed("org-changed"));
+  });
+  // A vault appearance change applies live on every member's app.
+  setAppearanceChangedPublisher((vaultId, change) => {
+    void vaultChannel
+      .publishAppearanceChanged(vaultId, change)
+      .catch(broadcastFailed("appearance-changed"));
   });
   // Soft delete / restore / purge → open Activity feeds refetch Trash (#260).
   setTrashActivityPublisher((vaultId) => {

@@ -1,5 +1,8 @@
-import { type ReactElement, useState } from "react";
-import { cycleThemeMode, getThemeMode, type ThemeMode } from "../lib/theme";
+import type { ReactElement } from "react";
+import type { ThemeMode } from "../lib/theme";
+import { useStore } from "../store";
+
+const CYCLE: ThemeMode[] = ["light", "dark", "system"];
 
 const ICONS: Record<ThemeMode, ReactElement> = {
   light: (
@@ -27,14 +30,16 @@ const LABELS: Record<ThemeMode, string> = {
   system: "System",
 };
 
-/** Small pill that cycles the theme (light → dark → system) and persists it. */
+/** Small pill that cycles the theme (light → dark → system). It shows the
+ *  EFFECTIVE mode and records a personal override (`appearanceOverrides`). */
 export function ThemeToggle() {
-  const [mode, setMode] = useState<ThemeMode>(() => getThemeMode());
+  const mode = useStore((s) => s.themeMode);
+  const setMode = (next: ThemeMode) => useStore.getState().setAppearanceOverride("theme", next);
   return (
     <button
       type="button"
       className="theme-toggle"
-      onClick={() => setMode(cycleThemeMode())}
+      onClick={() => setMode(CYCLE[(CYCLE.indexOf(mode) + 1) % CYCLE.length])}
       title={`Theme: ${LABELS[mode]} (click to change)`}
       aria-label={`Theme: ${LABELS[mode]}. Click to change.`}
     >

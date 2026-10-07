@@ -26,6 +26,7 @@ export function resolveTheme(mode: ThemeMode): "light" | "dark" {
 
 /** Stamp the resolved theme onto <html> so the token overrides apply. */
 function paint(mode: ThemeMode) {
+  if (typeof document === "undefined") return; // node tests import the store
   document.documentElement.setAttribute("data-theme", resolveTheme(mode));
 }
 
@@ -47,11 +48,23 @@ export function cycleThemeMode(): ThemeMode {
  * Call once at startup: paint the stored mode and keep "system" in sync with the
  * OS. Returns a disposer (unused in practice — app lifetime === process).
  */
+/** The EFFECTIVE mode (personal override ?? open vault default ?? system),
+ *  pushed by the store whenever any input changes (`lib/appearance.ts`).
+ *  Null until the store first applies, so startup paints the stored mode. */
+let effectiveMode: ThemeMode | null = null;
+
+/** Paint the effective mode. Does not persist: the personal override lives in
+ *  the store's appearance overrides, and a vault default is never stored here. */
+export function applyEffectiveTheme(mode: ThemeMode): void {
+  effectiveMode = mode;
+  paint(mode);
+}
+
 export function initTheme(): () => void {
-  paint(getThemeMode());
+  paint(effectiveMode ?? getThemeMode());
   const m = mql();
   const onChange = () => {
-    if (getThemeMode() === "system") paint("system");
+    if ((effectiveMode ?? getThemeMode()) === "system") paint("system");
   };
   m?.addEventListener?.("change", onChange);
   return () => m?.removeEventListener?.("change", onChange);

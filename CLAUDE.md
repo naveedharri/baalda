@@ -543,7 +543,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   well as narrow), leaves `member_access_snapshots` alone, disconnects docs that left their readable
   set (before/after) and fires `onAclChanged` per vault; owner → anyone, admin → plain members or
   self, else 403 `access_manager_required`; 404 `not_member`;
-  `POST /orgs/:orgId/invitations` {emails, role, access}),
+  `POST /orgs/:orgId/invitations` {emails, role, access}), `appearance` (`GET|PUT
+  /api/orgs/:orgId/appearance`: any member reads, owner/admin replaces the vault-wide theme/autoColors/
+  contentWidth/textSize/lineNumbers/properties object validated by `appearance/schema.ts`, then the vault
+  channel fans out `{t: "appearance-changed", orgId, settings, updatedAt}` like the `org` icon frame),
   `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`, `billing`,
   `public-links` (`/api/notes/:docId/public-link` mint/inspect/revoke + public `GET /p/:token`
   read-only page — token is the capability; renders via the escape-first `render/note-html.ts`,
@@ -826,7 +829,8 @@ camelCase quoted, migration 001), app tables (all ids `TEXT`, migration 002+): `
 (id==doc_id, soft-delete via `deleted_at`), `files` (id==doc_id), `shares`, `doc_updates`, `doc_snapshots`,
 `blobs` (`doc_id` = the `files` row these bytes are, or NULL for an `attachments/` drop — m028),
 `blob_text` (a file's extracted text + vector; derived, purgeable, cascades with the blob and the
-vault — m028), `invitation_access` (access chosen at invite, applied then deleted on accept — m046;
+vault — m028), `vault_appearance` (per-org shared appearance JSON, one row per vault — m053),
+`invitation_access` (access chosen at invite, applied then deleted on accept — m046;
 the same migration adds `member.last_seen_at`, stamped at most every 10 min), `org_join_codes`, `note_index`, `note_links`, `mcp_tokens`, `public_links` (one
 plaintext token per note; revoke = DELETE), `vault_checkpoint_blobs` + `checkpoint_blob_bytes`
 (checkpoint binary pins and retired Postgres-store bytes — m047), `blobs.pending_register`

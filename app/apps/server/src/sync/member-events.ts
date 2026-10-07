@@ -68,3 +68,35 @@ export async function announceOrgChanged(
     console.error("announceOrgChanged failed:", err);
   }
 }
+
+/** The vault's shared appearance after an owner/admin saved it. */
+export type AppearanceChangedFields = {
+  orgId: string;
+  settings: Record<string, unknown>;
+  updatedAt: string;
+};
+type AppearanceChangedPublisher = (vaultId: string, change: AppearanceChangedFields) => void;
+
+let publishAppearance: AppearanceChangedPublisher | null = null;
+
+export function setAppearanceChangedPublisher(fn: AppearanceChangedPublisher | null): void {
+  publishAppearance = fn;
+}
+
+/**
+ * Tell everyone live in a vault that its appearance changed, carrying the whole
+ * settings object so clients apply it without a GET. Same fan-out and
+ * best-effort contract as {@link announceOrgChanged}.
+ */
+export async function announceAppearanceChanged(change: AppearanceChangedFields): Promise<void> {
+  if (!publishAppearance) return;
+  try {
+    const { rows } = await pool.query<{ id: string }>(
+      "SELECT id FROM vaults WHERE organization_id = $1",
+      [change.orgId],
+    );
+    for (const { id } of rows) publishAppearance(id, change);
+  } catch (err) {
+    console.error("announceAppearanceChanged failed:", err);
+  }
+}

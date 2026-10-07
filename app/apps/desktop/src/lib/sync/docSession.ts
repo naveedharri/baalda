@@ -10,6 +10,7 @@
 // When signed out / offline / unmapped, it falls back to a local Awareness and
 // the bridge's normal seed-from-file (pure local-first).
 
+import type { AppearanceSettings } from "../appearanceSettings";
 import { NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
@@ -472,6 +473,7 @@ export class SyncManager implements InboundHost {
   ) => void;
   private onMemberJoined?: (name: string) => void;
   private onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
+  private onAppearanceChanged?: (change: { orgId?: string; settings: AppearanceSettings }) => void;
   /** Mirrors the registry's {relPath → docId} map to the UI (coalesced). */
   private onRegistryMap?: (map: Record<string, string>) => void;
   /** Mirrors the registry's {docId → last-edit} stamps to the UI. */
@@ -1453,6 +1455,13 @@ export class SyncManager implements InboundHost {
   }
 
   /** UI subscribes here to patch the open vault's name/icon live (#306). */
+  /** UI subscribes here for live vault appearance defaults (same path as #306). */
+  setAppearanceChangedListener(
+    cb: ((change: { orgId?: string; settings: AppearanceSettings }) => void) | undefined,
+  ): void {
+    this.onAppearanceChanged = cb;
+  }
+
   setOrgChangedListener(
     cb: ((change: { name?: string; logo?: string | null }) => void) | undefined,
   ): void {
@@ -6520,6 +6529,8 @@ export class SyncManager implements InboundHost {
       onMemberJoined: (name) => this.onMemberJoined?.(name),
       // The vault was renamed or got a new icon (#306).
       onOrgChanged: (change) => this.onOrgChanged?.(change),
+      // The vault's appearance defaults changed — same live path as the icon.
+      onAppearanceChanged: (change) => this.onAppearanceChanged?.(change),
       // A teammate's viewing state changed — update the sidebar presence roster.
       onPresence: (peer) => this.handleVaultPresence(peer),
       // A teammate is talking. Play it as it lands; nothing is kept.

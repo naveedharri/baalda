@@ -38,6 +38,13 @@ import {
   vaultRootFrozen,
 } from "./lib/api";
 import { authManager } from "./lib/auth/authManager";
+import {
+  effectiveAppearance,
+  withAppearance,
+  type AppearanceKey,
+  type AppearanceSettings,
+} from "./lib/appearanceSettings";
+import { applyEffectiveTheme, type ThemeMode } from "./lib/theme";
 import { syncManager } from "./lib/sync/docSession";
 import { vaultScopes } from "./lib/sync/vaultScope";
 import { reconcileReport } from "./lib/sync/reconcileReport";
@@ -55,6 +62,8 @@ import {
   type ActivityStatus,
   type EditorMeasure,
   readActivityStatus,
+  readAppearanceOverrides,
+  writeAppearanceOverrides,
   readAutomaticItemColors,
   readMentionSound,
   readEditorMeasure,
@@ -522,6 +531,19 @@ interface AppStore {
   editorFontSize: number;
   /** Show the editor's line-number gutter. Off by default. */
   lineNumbers: boolean;
+  /** This device's personal appearance OVERRIDES (absent key = inherit the
+   *  open vault's default). The five editor/colour fields above and
+   *  `themeMode` are the EFFECTIVE values derived from these, the open
+   *  vault's `vaultAppearance` and the app defaults (`lib/appearance.ts`). */
+  appearanceOverrides: AppearanceSettings;
+  /** Vault appearance defaults by org id, fetched on vault open and patched
+   *  live by the vault channel's `appearance-changed` frame. */
+  vaultAppearance: Record<string, AppearanceSettings>;
+  /** The effective theme mode currently painted. */
+  themeMode: ThemeMode;
+  /** The sidebar's automatic colour per path (folders only), published by
+   *  FileTree so Vault Settings shows exactly the dot the sidebar paints. */
+  automaticItemColorMap: Record<string, string>;
   /** How the sidebar arranges everything the user hasn't arranged by hand.
    *  Layered UNDER `itemOrder`, never replacing it — see `lib/tree/sort`. */
   treeSort: TreeSort;
@@ -705,6 +727,17 @@ interface AppStore {
   setEditorMeasure: (measure: EditorMeasure) => void;
   setEditorFontSize: (px: number) => void;
   setLineNumbers: (on: boolean) => void;
+  /** Set (value) or clear back to "inherit" (undefined) one personal override. */
+  setAppearanceOverride: <K extends AppearanceKey>(key: K, value: AppearanceSettings[K] | undefined) => void;
+  /** Recompute the effective appearance and paint it (theme, editor font token). */
+  applyAppearance: () => void;
+  /** Fetch an org's appearance defaults into `vaultAppearance`. Never throws. */
+  loadVaultAppearance: (orgId: string) => Promise<void>;
+  /** Owner/admin: replace an org's defaults — applied optimistically, then PUT.
+   *  Rolls back to the previous object if the server refuses. */
+  saveVaultAppearance: (orgId: string, settings: AppearanceSettings) => Promise<void>;
+  /** A live `appearance-changed` frame (or any server answer) for an org. */
+  receiveVaultAppearance: (orgId: string, settings: AppearanceSettings) => void;
   /** Open the mic and start broadcasting to the vault (button pressed). */
   startBroadcast: () => Promise<void>;
   /** Stop broadcasting and release the mic (button released). */
@@ -1883,6 +1916,10 @@ export const useStore = create<AppStore>((set, get) => ({
   editorMeasure: readEditorMeasure(),
   editorFontSize: readEditorFontSize(),
   lineNumbers: readLineNumbers(),
+  appearanceOverrides: readAppearanceOverrides(null),
+  vaultAppearance: {},
+  themeMode: "system",
+  automaticItemColorMap: {},
   pendingTitleFocus: null,
   treeSort: readTreeSort(),
   folderSorts: {},
@@ -1980,7 +2017,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
   setAutomaticItemColors: (enabled) => {
     writeAutomaticItemColors(get().session?.user.id, enabled);
-    set({ automaticItemColors: enabled });
+    get().setAppearanceOverride("autoColors", enabled);
   },
 
   refreshTree: async (folders) => {
@@ -2789,6 +2826,12 @@ export const useStore = create<AppStore>((set, get) => ({
     });
     // The open vault was renamed or got a new icon on another device (#306):
     // patch it in place; with nothing usable in the frame, re-list.
+    // Vault appearance defaults changed on another device: same live path as
+    // the vault's name/icon (#306), keyed by the frame's org.
+    syncManager.setAppearanceChangedListener((change) => {
+      const orgId = change.orgId ?? get().session?.activeOrganizationId ?? null;
+      if (orgId) get().receiveVaultAppearance(orgId, change.settings);
+    });
     syncManager.setOrgChangedListener((change) => {
       const orgId = get().session?.activeOrganizationId ?? null;
       const hasFields = change.name !== undefined || change.logo !== undefined;
@@ -3151,24 +3194,86 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ mentionSound: enabled });
   },
 
+  // The personal setters now record an OVERRIDE; the effective field follows
+  // through applyAppearance. The legacy per-key writes stay so an older build
+  // opened on this device still sees the choice.
   setPropertiesMode: (mode) => {
     writePropertiesMode(mode);
-    set({ propertiesMode: mode });
+    get().setAppearanceOverride("properties", mode);
   },
 
   setEditorMeasure: (measure) => {
     writeEditorMeasure(measure);
-    set({ editorMeasure: measure });
+    get().setAppearanceOverride("contentWidth", measure);
   },
   setEditorFontSize: (px) => {
     writeEditorFontSize(px);
-    applyEditorFontSize(px);
-    set({ editorFontSize: px });
+    get().setAppearanceOverride("textSize", px);
   },
 
   setLineNumbers: (on) => {
     writeLineNumbers(on);
-    set({ lineNumbers: on });
+    get().setAppearanceOverride("lineNumbers", on);
+  },
+
+  setAppearanceOverride: (key, value) => {
+    const next = withAppearance(get().appearanceOverrides, key, value);
+    writeAppearanceOverrides(next);
+    set({ appearanceOverrides: next });
+    get().applyAppearance();
+  },
+
+  applyAppearance: () => {
+    const st = get();
+    // Only the OPEN vault's defaults apply: a theme set by a vault you left
+    // must not follow you into a local vault or a different team.
+    const orgId = st.vault && st.syncEnabled ? (st.session?.activeOrganizationId ?? null) : null;
+    const eff = effectiveAppearance(st.appearanceOverrides, orgId ? st.vaultAppearance[orgId] : null);
+    applyEditorFontSize(eff.textSize);
+    applyEffectiveTheme(eff.theme);
+    const patch = {
+      themeMode: eff.theme,
+      automaticItemColors: eff.autoColors,
+      editorMeasure: eff.contentWidth,
+      editorFontSize: eff.textSize,
+      lineNumbers: eff.lineNumbers,
+      propertiesMode: eff.properties,
+    };
+    if (
+      (Object.keys(patch) as Array<keyof typeof patch>).some((k) => st[k] !== patch[k])
+    ) {
+      set(patch);
+    }
+  },
+
+  loadVaultAppearance: async (orgId) => {
+    try {
+      const res = await authManager.api.getVaultAppearance(orgId);
+      get().receiveVaultAppearance(orgId, res.settings);
+    } catch {
+      // Older server (404) or offline: the vault simply sets nothing we know of.
+    }
+  },
+
+  saveVaultAppearance: async (orgId, settings) => {
+    const prev = get().vaultAppearance[orgId] ?? {};
+    get().receiveVaultAppearance(orgId, settings);
+    try {
+      const res = await authManager.api.putVaultAppearance(orgId, settings);
+      // A later local save may have landed meanwhile; only adopt the answer
+      // if nothing newer replaced what we sent.
+      if (get().vaultAppearance[orgId] === settings || shallowSameAppearance(get().vaultAppearance[orgId], settings)) {
+        get().receiveVaultAppearance(orgId, res.settings);
+      }
+    } catch (e) {
+      get().receiveVaultAppearance(orgId, prev);
+      throw e;
+    }
+  },
+
+  receiveVaultAppearance: (orgId, settings) => {
+    set({ vaultAppearance: { ...get().vaultAppearance, [orgId]: settings } });
+    get().applyAppearance();
   },
 
   startBroadcast: async () => {
@@ -4712,6 +4817,44 @@ if (import.meta.hot) {
 // The editor text size is a CSS token on :root, so it must be published once at
 // startup (after restart) as well as on every change.
 applyEditorFontSize(useStore.getState().editorFontSize);
+
+function shallowSameAppearance(a: AppearanceSettings | undefined, b: AppearanceSettings): boolean {
+  return JSON.stringify(a ?? {}) === JSON.stringify(b);
+}
+
+// Vault appearance: recompute the effective look whenever the open vault (or
+// its org) changes, and fetch that org's defaults once per open. A switch to a
+// local vault or another team drops the previous vault's theme immediately.
+useStore.getState().applyAppearance();
+useStore.subscribe((state, prev) => {
+  const org = (st: typeof state) =>
+    st.vault && st.syncEnabled ? (st.session?.activeOrganizationId ?? null) : null;
+  const now = org(state);
+  const before = org(prev);
+  if (now !== before || state.vault !== prev.vault) {
+    state.applyAppearance();
+    if (now && (now !== before || state.vault?.path !== prev.vault?.path)) {
+      void state.loadVaultAppearance(now);
+    }
+  } else if (
+    now &&
+    state.vaultSyncStatus === "synced" &&
+    prev.vaultSyncStatus !== "synced"
+  ) {
+    // Appearance is not in the channel's `ready`: refetch on every (re)connect
+    // so a frame missed while disconnected cannot leave a stale look.
+    void state.loadVaultAppearance(now);
+  }
+  // The account-scoped legacy auto-colour key needs the user id: migrate with
+  // it the first time a session appears on a device that never migrated.
+  if (state.session?.user.id !== prev.session?.user.id && state.session?.user.id) {
+    const overrides = readAppearanceOverrides(state.session.user.id);
+    if (JSON.stringify(overrides) !== JSON.stringify(state.appearanceOverrides)) {
+      useStore.setState({ appearanceOverrides: overrides });
+      state.applyAppearance();
+    }
+  }
+});
 
 // The Members and access caches are paint-only but keyed per server, not per
 // account: sign-out, a different account or a different server forgets them

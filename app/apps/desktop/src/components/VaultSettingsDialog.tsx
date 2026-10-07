@@ -2,7 +2,7 @@
    the app, split out of `AccountMenu.tsx` so it can load on demand. Nothing
    here is on the first screen: the sidebar footer (identity bar + popovers)
    stays eager, and this chunk lands when someone actually opens settings. */
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   type BillingUsage,
@@ -14,16 +14,15 @@ import {
 } from "../lib/api";
 import { toast } from "../lib/toast";
 import { agoFromIso, checkpointTitle, noteCountLabel } from "./versionFormat";
-import { ITEM_COLORS, itemColorFill, itemColorValue } from "../lib/appearance";
 import { authManager } from "../lib/auth/authManager";
 import {
   classifyLimitError,
-  FREE_PLAN_EXPLANATION,
   formatBytes,
+  LEGACY_PRO_BENEFITS,
+  legacyFreePlanExplanation,
   type LimitKind,
   limitFromError,
   planPillLabel,
-  PRO_BENEFITS,
   subscriptionStatusLine,
   transferTargets,
   vaultLimitReason,
@@ -43,6 +42,14 @@ import { SettingsModal } from "./SettingsModal";
 import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
 import { ThemeToggle } from "./ThemeToggle";
+import { AppearanceRows, vaultDisplayValues } from "./AppearanceRows";
+import { VaultItemColorsSection } from "./VaultItemColorsSection";
+import {
+  hasAnyAppearance,
+  withAppearance,
+  type AppearanceKey,
+  type AppearanceSettings,
+} from "../lib/appearanceSettings";
 import { formatPrice, perLabel, UpgradeDialog } from "./UpgradeDialog";
 import { useLocalFolderClasses, useLocalVaults } from "./useVaultLists";
 import { visibleFolders } from "../lib/vault/vaultList";
@@ -356,7 +363,7 @@ export function VaultSettingsDialog({
           ) : shown === "import-export" ? (
             <ImportExportTab />
           ) : (
-            <AppearanceTab />
+            <AppearanceTab canManage={canManage} isSynced={isSynced} />
           )}
         </section>
       </div>
@@ -1486,9 +1493,9 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
         )}
 
         <div className="subhead">Upgrade to Pro unlocks</div>
-        <div className="muted">{FREE_PLAN_EXPLANATION}</div>
+        <div className="muted">{legacyFreePlanExplanation(billingConfig.freeLimits)}</div>
         <ul className="upgrade-features">
-          {PRO_BENEFITS.map((benefit) => (
+          {LEGACY_PRO_BENEFITS.map((benefit) => (
             <li key={benefit}>{benefit}</li>
           ))}
         </ul>
@@ -2151,19 +2158,6 @@ function clientLabel(ua: string | null): string {
   return ua.split(/[\s/]/)[0].slice(0, 40) || "Unknown client";
 }
 
-const APPEARANCE_ICON = {
-  folder: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-    </svg>
-  ),
-  note: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" />
-      <path d="M14 3v5h5" />
-    </svg>
-  ),
-};
 
 function importSummaryText(s: ipc.ImportSummary): string {
   const parts = [`Imported ${s.files} file${s.files === 1 ? "" : "s"}`];
@@ -2278,103 +2272,106 @@ function ImportExportTab() {
   );
 }
 
-function AppearanceTab() {
-  const itemColors = useStore((s) => s.itemColors);
-  const tree = useStore((s) => s.tree);
+function AppearanceTab({ canManage, isSynced }: { canManage: boolean; isSynced: boolean }) {
+  const orgId = useStore((s) => s.session?.activeOrganizationId ?? null);
+  const settings = useStore((s) => (orgId ? s.vaultAppearance[orgId] : undefined)) ?? EMPTY_APPEARANCE;
+  // The viewer's own overrides: a vault change to one of these keys is real
+  // for everyone else but invisible here, which read as "the toggle does nothing".
+  const overrides = useStore((s) => s.appearanceOverrides);
+  // Sliders fire on every pixel of a drag: apply locally at once, PUT once
+  // the thumb rests for 300 ms. Everything else saves on change.
+  const pending = useRef<{ timer: number; settings: AppearanceSettings } | null>(null);
 
-  // Flatten the vault into indented rows, same order as the sidebar.
-  const items = useMemo(() => {
-    const out: Array<{ path: string; name: string; depth: number; isDir: boolean }> = [];
-    const walk = (n: ipc.TreeNode, depth: number) => {
-      out.push({
-        path: n.path,
-        name: n.isDir ? n.name : n.name.replace(/\.(md|html?)$/i, ""),
-        depth,
-        isDir: n.isDir,
-      });
-      n.children?.forEach((c) => walk(c, depth + 1));
-    };
-    tree?.children?.forEach((c) => walk(c, 0));
-    return out;
-  }, [tree]);
+  useEffect(() => {
+    if (orgId && isSynced) void useStore.getState().loadVaultAppearance(orgId);
+  }, [orgId, isSynced]);
+  useEffect(() => () => flush(), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const coloredCount = items.filter((i) => itemColors[i.path]).length;
+  function save(next: AppearanceSettings) {
+    if (!orgId) return;
+    useStore.getState().saveVaultAppearance(orgId, next).catch((e: unknown) => {
+      // The change was applied optimistically and has just been rolled back:
+      // say so, with the server's reason, so a refused save is never silent.
+      const body = e instanceof ApiError ? (e.body as { error?: string; key?: string } | undefined) : undefined;
+      const reason =
+        body?.error === "invalid_appearance"
+          ? `the server refused ${body.key ? `"${body.key}"` : "a value"}`
+          : e instanceof Error
+            ? e.message
+            : String(e);
+      toast(`Couldn't save the vault's appearance, so it was put back: ${reason}.`, "error");
+    });
+  }
+  function flush() {
+    const p = pending.current;
+    if (!p) return;
+    window.clearTimeout(p.timer);
+    pending.current = null;
+    save(p.settings);
+  }
+  const change = <K extends AppearanceKey>(key: K, value: AppearanceSettings[K] | undefined) => {
+    if (!orgId) return;
+    const next = withAppearance(useStore.getState().vaultAppearance[orgId] ?? {}, key, value);
+    if ((key === "contentWidth" || key === "textSize") && value !== undefined) {
+      useStore.getState().receiveVaultAppearance(orgId, next); // optimistic
+      if (pending.current) window.clearTimeout(pending.current.timer);
+      pending.current = { settings: next, timer: window.setTimeout(flush, 300) };
+      return;
+    }
+    if (pending.current) window.clearTimeout(pending.current.timer);
+    pending.current = null;
+    save(next);
+  };
 
   return (
     <>
-      <div className="menu-row">
-        <span className="menu-row-label">Theme</span>
-        <ThemeToggle />
-      </div>
-
-      <div className="subhead">Folder &amp; note colors</div>
-      <div className="muted">
-        Color-code your sidebar: click a swatch to tint that folder or note. Colors are saved
-        with this device's vault settings.
-      </div>
-
-      {items.length === 0 ? (
-        <div className="muted perm-empty">Open a vault to color its folders and notes.</div>
-      ) : (
+      {isSynced && orgId ? (
         <>
-          <ul className="appearance-list">
-            {items.map((item) => {
-              const active = itemColors[item.path];
-              return (
-                <li
-                  key={item.path}
-                  className="appearance-row"
-                  style={{ paddingLeft: `${12 + item.depth * 16}px` }}
+          <div className="subhead appearance-defaults-head">
+            Defaults for everyone in this vault
+            {!canManage && <span className="appearance-tag">Set by the vault owner</span>}
+          </div>
+          <div className="muted">
+            People can still override these in their own Appearance settings.
+          </div>
+          <AppearanceRows
+            mode="vault"
+            values={vaultDisplayValues(settings)}
+            settings={settings}
+            onChange={change}
+            readOnly={!canManage}
+            trailing={(key) =>
+              overrides[key] !== undefined ? (
+                <button
+                  type="button"
+                  className="link-btn appearance-clear"
+                  title="Your own Appearance setting wins over the vault's on this device."
+                  onClick={(e) => {
+                    e.preventDefault();
+                    useStore.getState().setAppearanceOverride(key, undefined);
+                  }}
                 >
-                  <span
-                    className="appearance-glyph"
-                    style={
-                      { color: itemColorValue(active), "--glyph-fill": itemColorFill(active) } as CSSProperties
-                    }
-                    aria-hidden="true"
-                  >
-                    {item.isDir ? APPEARANCE_ICON.folder : APPEARANCE_ICON.note}
-                  </span>
-                  <span className="appearance-name" title={item.path}>
-                    {item.name}
-                  </span>
-                  <span className="appearance-swatches" role="radiogroup" aria-label={`Color for ${item.name}`}>
-                    <button
-                      type="button"
-                      className={`swatch clear${!active ? " on" : ""}`}
-                      title="Default"
-                      aria-label="Default color"
-                      onClick={() => useStore.getState().setItemColor(item.path, null)}
-                    />
-                    {ITEM_COLORS.map((c) => (
-                      <button
-                        key={c.id}
-                        type="button"
-                        className={`swatch${active === c.id ? " on" : ""}`}
-                        style={{ backgroundColor: c.fill, boxShadow: `inset 0 0 0 1.5px ${c.value}` }}
-                        title={c.label}
-                        aria-label={c.label}
-                        onClick={() => useStore.getState().setItemColor(item.path, c.id)}
-                      />
-                    ))}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-          {coloredCount > 0 && (
-            <button
-              className="link-btn"
-              onClick={() => {
-                const { itemColors: colors, setItemColor } = useStore.getState();
-                Object.keys(colors).forEach((path) => setItemColor(path, null));
-              }}
-            >
-              Clear all colors ({coloredCount})
+                  Your setting wins · Use vault's
+                </button>
+              ) : null
+            }
+          />
+          {canManage && hasAnyAppearance(settings) && (
+            <button className="link-btn" onClick={() => save({})}>
+              Reset all
             </button>
           )}
         </>
+      ) : (
+        <div className="menu-row">
+          <span className="menu-row-label">Theme</span>
+          <ThemeToggle />
+        </div>
       )}
+
+      <VaultItemColorsSection />
     </>
   );
 }
+
+const EMPTY_APPEARANCE: AppearanceSettings = {};

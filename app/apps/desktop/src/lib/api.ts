@@ -1,3 +1,4 @@
+import { parseAppearanceSettings, type AppearanceSettings } from "./appearanceSettings";
 import type { SeedResultFields } from "./sync/seedRegister";
 import { rememberAvatarImage } from "./avatarIdentity";
 import { parseHealth, type ServerHealth } from "./serverFeatures";
@@ -2158,19 +2159,30 @@ export class ApiClient {
    */
   async getBillingConfig(): Promise<BillingConfig> {
     try {
-      const { data } = await this.request<BillingConfig>("GET", "/api/billing/config");
-      if (!data || data.enabled !== true) return { enabled: false };
-      return {
-        enabled: true,
-        model: data.model ?? "vault",
-        free: data.free,
-        team: data.team,
-        plans: data.plans,
-        freeLimits: data.freeLimits,
-      };
+      return await this.probeBillingConfig();
     } catch {
       return { enabled: false };
     }
+  }
+
+  /**
+   * The same request as {@link getBillingConfig}, but a failure THROWS instead
+   * of reading as "disabled". For screens that state a verdict about billing
+   * (Account Settings → Plan & Billing): a network error, a restarting server
+   * or a 5xx is not an answer, so `classifyBillingConfigResult` in
+   * `lib/billing.ts` decides what the caught error means (404 ⇒ disabled).
+   */
+  async probeBillingConfig(): Promise<BillingConfig> {
+    const { data } = await this.request<BillingConfig>("GET", "/api/billing/config");
+    if (!data || data.enabled !== true) return { enabled: false };
+    return {
+      enabled: true,
+      model: data.model ?? "vault",
+      free: data.free,
+      team: data.team,
+      plans: data.plans,
+      freeLimits: data.freeLimits,
+    };
   }
 
   /** A vault's subscription state + seat usage (any member of the org). */
@@ -3134,6 +3146,33 @@ export class ApiClient {
     };
   }
 
+  /** The vault's appearance defaults for everyone (`settings` keys optional). */
+  async getVaultAppearance(orgId: string): Promise<VaultAppearanceResponse> {
+    const { data } = await this.request<VaultAppearanceResponse>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/appearance`,
+    );
+    return {
+      settings: parseAppearanceSettings(data?.settings),
+      updatedAt: data?.updatedAt ?? null,
+      updatedBy: data?.updatedBy ?? null,
+    };
+  }
+
+  /** Replace the vault's appearance defaults (owner/admin). */
+  async putVaultAppearance(orgId: string, settings: AppearanceSettings): Promise<VaultAppearanceResponse> {
+    const { data } = await this.request<VaultAppearanceResponse>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/appearance`,
+      { body: { settings } },
+    );
+    return {
+      settings: parseAppearanceSettings(data?.settings ?? settings),
+      updatedAt: data?.updatedAt ?? null,
+      updatedBy: data?.updatedBy ?? null,
+    };
+  }
+
   /** Members, pending invitations and (for owners/admins) each person's
    * vault-wide access level, in one request. */
   async getMembersOverview(orgId: string): Promise<MembersOverview> {
@@ -3739,4 +3778,10 @@ export function shareResourceType(s: Share): "folder" | "file" | "vault" {
 }
 export function shareResourceId(s: Share): string {
   return s.resourceId ?? s.resource_id ?? "";
+}
+
+export interface VaultAppearanceResponse {
+  settings: AppearanceSettings;
+  updatedAt: string | null;
+  updatedBy: string | null;
 }

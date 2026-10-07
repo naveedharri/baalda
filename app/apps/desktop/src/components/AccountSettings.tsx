@@ -6,21 +6,8 @@ import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
 import {
   ACTIVITY_STATUSES,
   type ActivityStatus,
-  EDITOR_FONT_SIZE_MAX,
-  EDITOR_FONT_SIZE_MIN,
-  EDITOR_FONT_SIZE_STEP,
-  PROPERTIES_MODES,
-  readAutomaticItemColors,
   writeServerChoice,
 } from "../lib/prefs";
-import {
-  EDITOR_MEASURE_SLIDER_MAX,
-  EDITOR_MEASURE_SLIDER_MIN,
-  EDITOR_MEASURE_STEP,
-  measureLabel,
-  measureToSlider,
-  sliderToMeasure,
-} from "../lib/editorMeasure";
 import type { PropertiesMode } from "../lib/editor/frontmatter";
 import {
   checkAndAutoInstall,
@@ -39,13 +26,18 @@ import { imageFileToSquareDataUrl } from "../lib/squareImage";
 import { AccountPlanTab } from "./AccountPlanTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
 import { Avatar } from "./Avatar";
-import { ContentWidthPreview } from "./ContentWidthPreview";
-import { MenuSelect } from "./MenuSelect";
 import { serverFailureMessage } from "./serverFailureMessage";
 import { SettingsModal } from "./SettingsModal";
 import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
-import { ThemeToggle } from "./ThemeToggle";
+import { AppearanceRows } from "./AppearanceRows";
+import { useShallow } from "zustand/react/shallow";
+import {
+  appearanceSource,
+  type AppearanceKey,
+  type AppearanceSettings,
+} from "../lib/appearanceSettings";
+import type { EditorMeasure } from "../lib/prefs";
 
 /**
  * Account settings — a centered modal over the app (sibling to Vault settings,
@@ -527,121 +519,57 @@ function StatusTab() {
 }
 
 function AppearanceTab() {
-  const session = useStore((s) => s.session);
-  const automaticItemColors = useStore((s) => s.automaticItemColors);
-  const propertiesMode = useStore((s) => s.propertiesMode);
-  const editorMeasure = useStore((s) => s.editorMeasure);
-  const editorFontSize = useStore((s) => s.editorFontSize);
-  const lineNumbers = useStore((s) => s.lineNumbers);
-  useEffect(() => {
-    useStore.setState({ automaticItemColors: readAutomaticItemColors(session?.user.id) });
-  }, [session?.user.id]);
+  const overrides = useStore((s) => s.appearanceOverrides);
+  const vaultAppearance = useStore((s) => s.vaultAppearance);
+  const orgId = useStore((s) =>
+    s.vault && s.syncEnabled ? (s.session?.activeOrganizationId ?? null) : null,
+  );
+  const values = useStore(
+    useShallow((s) => ({
+      theme: s.themeMode,
+      autoColors: s.automaticItemColors,
+      contentWidth: s.editorMeasure,
+      textSize: s.editorFontSize,
+      lineNumbers: s.lineNumbers,
+      properties: s.propertiesMode,
+    })),
+  );
+  const vault = orgId ? vaultAppearance[orgId] : null;
+  const set = <K extends AppearanceKey>(key: K, value: AppearanceSettings[K] | undefined) => {
+    const st = useStore.getState();
+    // The legacy setters also keep the old per-key storage current.
+    if (key === "autoColors") st.setAutomaticItemColors(value as boolean);
+    else if (key === "contentWidth") st.setEditorMeasure(value as EditorMeasure);
+    else if (key === "textSize") st.setEditorFontSize(value as number);
+    else if (key === "lineNumbers") st.setLineNumbers(value as boolean);
+    else if (key === "properties") st.setPropertiesMode(value as PropertiesMode);
+    else st.setAppearanceOverride(key, value);
+  };
   return (
-    <>
-      <div className="menu-row">
-        <span className="menu-row-label">Theme</span>
-        <ThemeToggle />
-      </div>
-      <label className="menu-row toggle-row">
-        <span className="menu-row-label">
-          Automatic file colors
-          <span className="field-hint">
-            Give every uncoloured file and folder a personal, stable colour.
-          </span>
-        </span>
-        <Switch
-          checked={automaticItemColors}
-          ariaLabel="Automatic file colors"
-          onChange={(next) => useStore.getState().setAutomaticItemColors(next)}
-        />
-      </label>
-      {/* The slider applies on every change rather than on release: the
-          preview under it — and the note behind the card — are the answer to
-          "how wide is that?", and they have to move with the thumb. */}
-      <div className="menu-row measure-row">
-        {/* A real <label>, not the row: wrapping a range in one would hijack
-            the drag. The row's text is still a click target for the slider. */}
-        <label className="menu-row-label" htmlFor="content-width">
-          Content width
-          <span className="field-hint">
-            How wide the text runs before it wraps. Drag to the end for the full window.
-          </span>
-        </label>
-        <span className="range-field">
-          <input
-            id="content-width"
-            className="range-input"
-            type="range"
-            min={EDITOR_MEASURE_SLIDER_MIN}
-            max={EDITOR_MEASURE_SLIDER_MAX}
-            step={EDITOR_MEASURE_STEP}
-            value={measureToSlider(editorMeasure)}
-            // The <label> also carries the hint line; name the control with the
-            // row's title alone rather than reading the whole paragraph out.
-            aria-label="Content width"
-            aria-valuetext={measureLabel(editorMeasure)}
-            onChange={(e) =>
-              useStore.getState().setEditorMeasure(sliderToMeasure(Number(e.target.value)))
-            }
-          />
-          <span className="range-value">{measureLabel(editorMeasure)}</span>
-        </span>
-        <ContentWidthPreview measure={editorMeasure} />
-      </div>
-      <div className="menu-row measure-row">
-        <label className="menu-row-label" htmlFor="editor-text-size">
-          Text size
-          <span className="field-hint">The size of note text in the editor.</span>
-        </label>
-        <span className="range-field">
-          <input
-            id="editor-text-size"
-            className="range-input"
-            type="range"
-            min={EDITOR_FONT_SIZE_MIN}
-            max={EDITOR_FONT_SIZE_MAX}
-            step={EDITOR_FONT_SIZE_STEP}
-            value={editorFontSize}
-            aria-label="Text size"
-            aria-valuetext={`${editorFontSize} pixels`}
-            onChange={(e) => useStore.getState().setEditorFontSize(Number(e.target.value))}
-          />
-          <span className="range-value">{editorFontSize}px</span>
-        </span>
-      </div>
-      <label className="menu-row toggle-row">
-        <span className="menu-row-label">
-          Line numbers
-          <span className="field-hint">Show a line-number gutter in the editor.</span>
-        </span>
-        <Switch
-          checked={lineNumbers}
-          ariaLabel="Line numbers"
-          onChange={(next) => useStore.getState().setLineNumbers(next)}
-        />
-      </label>
-      {/* Appearance, not Vault settings: this describes how the editor draws,
-          not what a vault contains, so it must not flip as you switch vaults. */}
-      <div className="menu-row">
-        <span className="menu-row-label">
-          Properties in document
-          <span className="field-hint">
-            How a note's YAML frontmatter is shown at the top of the note.
-          </span>
-        </span>
-        <MenuSelect<PropertiesMode>
-          value={propertiesMode}
-          options={PROPERTIES_MODES.map((m) => ({
-            value: m.id,
-            label: m.label,
-            hint: m.hint,
-          }))}
-          onSelect={(mode) => useStore.getState().setPropertiesMode(mode)}
-          ariaLabel="Properties in document"
-          triggerClassName="role-field-trigger"
-        />
-      </div>
-    </>
+    <AppearanceRows
+      mode="personal"
+      values={values}
+      onChange={set}
+      trailing={(key) => {
+        const source = appearanceSource(key, overrides, vault);
+        if (source === "vault") return <span className="appearance-tag">Vault default</span>;
+        if (source === "personal" && vault?.[key] !== undefined) {
+          return (
+            <button
+              type="button"
+              className="link-btn appearance-clear"
+              onClick={(e) => {
+                e.preventDefault();
+                useStore.getState().setAppearanceOverride(key, undefined);
+              }}
+            >
+              Reset to vault default
+            </button>
+          );
+        }
+        return null;
+      }}
+    />
   );
 }
 
