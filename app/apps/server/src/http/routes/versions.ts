@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
-import { canEditDoc } from "../../permissions/http-gates.js";
+import { ACCOUNT_READ_ONLY_BODY, canEditDoc, refusedForBilling } from "../../permissions/http-gates.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { effectivePermission } from "../../permissions/resolver.js";
 import { vaultAccess } from "../../permissions/vault-docs.js";
@@ -202,6 +202,7 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
       return c.json({ error: "Unknown note" }, 404);
     }
     if (!(await canEditDoc(session.userId, docId))) {
+      if (await refusedForBilling(await vaultOrg(vaultId))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json({ error: "You cannot edit this note" }, 403);
     }
 
@@ -286,6 +287,8 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     if (role !== "owner" && role !== "admin") {
       return c.json({ error: "Only a vault owner/admin can apply recovery" }, 403);
     }
+    // A forward write to every listed note: refused while the account is lapsed.
+    if (await refusedForBilling(await vaultOrg(vaultId))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
     const body = (await c.req.json().catch(() => null)) as { items?: unknown } | null;
     const raw = Array.isArray(body?.items) ? body.items : null;
     const items: RecoveryItem[] = [];
@@ -464,6 +467,8 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     if (role !== "owner" && role !== "admin") {
       return c.json({ error: "Only a vault owner or admin can revert a vault" }, 403);
     }
+    // Rewrites every note in the vault: refused while the account is lapsed.
+    if (await refusedForBilling(await vaultOrg(vaultId))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
     // …and only someone the whole vault is actually readable to. This rewrites
     // every note at once, so it cannot be done from a seat that can only see
     // some of them: the role stopped implying vault-wide read when the Private

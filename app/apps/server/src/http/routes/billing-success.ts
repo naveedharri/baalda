@@ -32,12 +32,77 @@ const jsString = (v: string): string => JSON.stringify(v).replace(/</g, "\\u003c
 const attr = (v: string): string =>
   v.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-export function successPageHtml({ deepLink }: { deepLink: string }): string {
+/** HTML text escape for a value interpolated into element content. */
+const text = (v: string): string =>
+  v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/**
+ * The plan-specific copy. `vault` is the per-vault Pro page, unchanged. `team`
+ * is the account-wide Team plan; `seats` comes from the confirmed subscription
+ * and is null when the provider could not be read (or the checkout had not
+ * produced a subscription yet), which falls back to a line without a count.
+ */
+export type SuccessPlan = { kind: "vault" } | { kind: "team"; seats: number | null };
+
+function planCopy(plan: SuccessPlan): { title: string; heading: string; sub: string; foot: string } {
+  if (plan.kind === "team") {
+    const seats = plan.seats;
+    const sub =
+      seats !== null && Number.isInteger(seats) && seats > 0
+        ? `Your team has ${text(String(seats))} ${seats === 1 ? "seat" : "seats"}. Every vault on your account now syncs without limits.`
+        : "Your vaults now sync without limits.";
+    return {
+      title: "You're on Team — Baalda",
+      heading: "You&rsquo;re on Team",
+      sub,
+      foot: "your Team plan is already active",
+    };
+  }
+  return {
+    title: "You're on Pro — Baalda",
+    heading: "You&rsquo;re on Pro",
+    sub: "Your vault is now unlimited.",
+    foot: "your subscription is already there",
+  };
+}
+
+/**
+ * `deepLink` null means "do not hand back": a local `tauri dev` build
+ * (`baalda-dev://`) cannot receive a deep link on macOS, so the page neither
+ * redirects nor offers the button there, and just says to switch back.
+ */
+export function successPageHtml({
+  deepLink,
+  plan = { kind: "vault" },
+}: {
+  deepLink: string | null;
+  plan?: SuccessPlan;
+}): string {
+  const copy = planCopy(plan);
+  const handBack =
+    deepLink === null
+      ? `<p class="sub reveal d5">${copy.sub}</p>
+    <div class="foot reveal d6">
+      Switch back to Baalda &mdash; your plan is already active. You can close this tab.
+    </div>
+  </main>`
+      : `<p class="sub reveal d5">${copy.sub} Taking you back to Baalda&hellip;</p>
+    <a class="cta reveal d5" href="${attr(deepLink)}">Open Baalda</a>
+    <div class="foot reveal d6">
+      Didn&rsquo;t open? Use the button above, or switch to Baalda &mdash; ${copy.foot}.
+      You can safely close this tab.
+    </div>
+  </main>
+  <script>
+    // Same hand-off as the account pages: hop into the app on load. The button
+    // stays for browsers that only follow a custom scheme from a click.
+    setTimeout(function () { location.href = ${jsString(deepLink)}; }, 600);
+  </script>`;
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>You're on Pro — Baalda</title>
+<title>${copy.title}</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -225,18 +290,7 @@ export function successPageHtml({ deepLink }: { deepLink: string }): string {
       <img class="wm-silver" src="${WORDMARK_SILVER_URI}" alt="" width="180" height="32">
     </span>
     <p class="eyebrow reveal d3">Payment confirmed</p>
-    <h1 class="reveal d4">You&rsquo;re on Pro</h1>
-    <p class="sub reveal d5">Your vault is now unlimited. Taking you back to Baalda&hellip;</p>
-    <a class="cta reveal d5" href="${attr(deepLink)}">Open Baalda</a>
-    <div class="foot reveal d6">
-      Didn&rsquo;t open? Use the button above, or switch to Baalda &mdash; your subscription is already there.
-      You can safely close this tab.
-    </div>
-  </main>
-  <script>
-    // Same hand-off as the account pages: hop into the app on load. The button
-    // stays for browsers that only follow a custom scheme from a click.
-    setTimeout(function () { location.href = ${jsString(deepLink)}; }, 600);
-  </script>
+    <h1 class="reveal d4">${copy.heading}</h1>
+    ${handBack}
 </body></html>`;
 }

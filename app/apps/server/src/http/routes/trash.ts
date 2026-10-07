@@ -4,6 +4,7 @@ import { scheduleIndex } from "../../index/indexer.js";
 import { listTrash, restoreNote, trashContent, TrashError } from "../../trash/service.js";
 import { trashChanged } from "../../trash/activity.js";
 import { getSession } from "../session.js";
+import { ACCOUNT_READ_ONLY_BODY } from "../../permissions/http-gates.js";
 
 import { ORIGIN_HEADER } from "./registry.js";
 
@@ -51,6 +52,7 @@ export function createTrashRoutes(deps: TrashRouteDeps): Hono {
       trashChanged(out.vaultId);
       return c.json({ docId: out.docId, relPath: out.relPath, renamed: out.renamed }, 200);
     } catch (err) {
+      if (err instanceof TrashError && err.status === 402) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       if (err instanceof TrashError) return c.json({ error: err.message, code: err.code }, err.status);
       throw err;
     }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Agent engine host: included for self-hosting, Pro-gated on Baalda Cloud.
+import { resolveAccountPlan, teamModel } from "../../billing/plan.js";
 import { requiresCloudPlan } from "../../deployment-policy.js";
 import { OpenRouter } from "@openrouter/sdk";
 import { Hono } from "hono";
@@ -42,6 +43,12 @@ export async function requireHousekeeperPro(orgId: string): Promise<void> {
       const database = new URL(process.env.DATABASE_URL ?? "");
       if (["localhost", "127.0.0.1", "[::1]"].includes(database.hostname)) return;
     } catch { /* Missing/malformed configuration keeps the Pro gate closed. */ }
+  }
+  if (teamModel()) {
+    // Team model: `limits.assistant` (self-host / billing off ⇒ true).
+    const plan = await resolveAccountPlan(pool, { orgId });
+    if (!plan.limits.assistant) throw new HousekeeperError(402, "Baalda Assistant requires the Team plan.");
+    return;
   }
   const { rows } = await pool.query<{ allowed: boolean }>(
     `SELECT (plan = 'pro' AND status IN ('active', 'past_due') AND deleted_at IS NULL) AS allowed
@@ -150,7 +157,11 @@ export function createHousekeeperRoutes(docWriter: DocWriter): Hono {
       const allowed = [400, 401, 402, 403, 404, 409, 429, 503] as const;
       const code = allowed.includes(status as typeof allowed[number]) ? status as typeof allowed[number] : 503;
       return c.json({ error: code === 503 ? "Housekeeper is unavailable. Check the server's provider configuration and retry." : (error as Error).message,
-        code: code === 402 ? "housekeeper_requires_pro" : "housekeeper_unavailable" }, code);
+        // Team model names the plan; `legacyCode` keeps the token older builds knew
+        // (desktops gate on the 402 status itself, never on the code).
+        ...(code === 402 && teamModel()
+          ? { code: "housekeeper_requires_team", legacyCode: "housekeeper_requires_pro", requiredPlan: "team" }
+          : { code: code === 402 ? "housekeeper_requires_pro" : "housekeeper_unavailable" }) }, code);
     }
   });
   return routes;

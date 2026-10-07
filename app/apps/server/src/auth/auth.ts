@@ -6,6 +6,9 @@ import pg from "pg";
 import { config } from "../config.js";
 import { BRAND_NAME } from "../brand.js";
 import { canAddMember, canCreateOrganization } from "../billing/entitlements.js";
+import { checkInviteSeat, checkJoinSeat, seatRefusalBody, teamModel, type SeatRefusal } from "../billing/plan.js";
+import { ensureAccountForOrg } from "../billing/accounts.js";
+import { onMembershipTrimmed } from "../billing/lapse.js";
 import { announceMemberJoined, announceOrgChanged } from "../sync/member-events.js";
 import { dispatchMail, emailEnabled } from "../email/mailer.js";
 import { verifyEmailEmail } from "../email/templates.js";
@@ -283,11 +286,32 @@ export const auth = betterAuth({
             });
           }
         },
+        // Attach the new vault to its owner's billing account (migration 051),
+        // so seats and free limits count it from the start. Billing also
+        // attaches lazily, so a failure here only logs.
+        afterCreateOrganization: async ({ organization }) => {
+          if (!organization) return;
+          try {
+            await ensureAccountForOrg(authPool, organization.id);
+          } catch (err) {
+            console.error(
+              `billing: could not attach vault ${organization.id} to an account:`,
+              (err as Error).message,
+            );
+          }
+        },
         beforeCreateInvitation: async (data) => {
           // A re-invite replaces a pending row rather than adding a seat, so it
           // must pass even at the cap — otherwise a full free vault could never
           // re-send a lost invitation.
           if (await hasPendingInvitation(data.organization.id, data.invitation.email)) return;
+          if (teamModel()) {
+            // Soft gate: people + reserved seats + this address must fit the
+            // account's limit (Free people cap, or Team purchased seats).
+            const refused = await checkInviteSeat(authPool, data.organization.id, data.invitation.email);
+            if (refused) throw seatError(refused);
+            return;
+          }
           const { allowed, limit } = await canAddMember(data.organization.id);
           if (!allowed) {
             throw new APIError("PAYMENT_REQUIRED", {
@@ -296,6 +320,16 @@ export const auth = betterAuth({
               limit,
             });
           }
+        },
+        // Hard gate at acceptance (team model only; vault mode never gated it):
+        // members + 1 must fit, and someone already on the account takes no seat.
+        beforeAcceptInvitation: async (data) => {
+          if (!teamModel()) return;
+          const refused = await checkJoinSeat(authPool, data.organization.id, {
+            userId: data.user.id,
+            email: data.user.email,
+          });
+          if (refused) throw seatError(refused);
         },
         // A re-invite (Resend) answers an "expired unaccepted" Activity notice
         // for that address (#268): tell open feeds so it drops without a poll.
@@ -314,6 +348,18 @@ export const auth = betterAuth({
         // (The join-code path bypasses Better Auth and announces itself; org
         // creation adds the owner via `afterAddMember`, which we deliberately
         // don't hook — no one should be "welcomed" to their own new vault.)
+        // Seats/vaults shrank: a lapsed account trimmed back under the Free
+        // limits is lifted (billing/lapse.ts). Runs after Better Auth's write;
+        // `onMembershipTrimmed` never throws.
+        afterRemoveMember: async ({ organization }) => {
+          await onMembershipTrimmed(authPool, organization.id);
+        },
+        afterCancelInvitation: async ({ organization }) => {
+          await onMembershipTrimmed(authPool, organization.id);
+        },
+        afterRejectInvitation: async ({ organization }) => {
+          await onMembershipTrimmed(authPool, organization.id);
+        },
         afterAcceptInvitation: async (data) => {
           // Apply the access the inviter chose (invitation_access, m046). The
           // member row exists by now; best-effort, never fails the accept.
@@ -363,3 +409,10 @@ export const auth = betterAuth({
 });
 
 export type Auth = typeof auth;
+
+/** 402 for a refused seat, in Better Auth's error envelope. `message` stays the
+ *  bare token for member_limit_reached (old desktops match it) and is a full
+ *  sentence for seat_limit_reached. */
+function seatError(refused: SeatRefusal): APIError {
+  return new APIError("PAYMENT_REQUIRED", seatRefusalBody(refused) as { message: string });
+}

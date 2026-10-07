@@ -23,6 +23,7 @@ import {
   type DocApplyItem,
 } from "../../sync/doc-batch.js";
 import { getSession } from "../session.js";
+import { ACCOUNT_READ_ONLY_BODY, ACCOUNT_READ_ONLY_MESSAGE, refusedForBilling } from "../../permissions/http-gates.js";
 import { ORIGIN_HEADER } from "./registry.js";
 import type {
   BatchStatus,
@@ -491,6 +492,14 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
     // AFTER the state apply, so a receiver's pull finds the content and does not
     // materialise a 0-byte placeholder for a note whose text is milliseconds away.
     if (wrote) changed(c, auth.vaultId);
+    // A billing lapse refuses every create with `no_write_access`; name the
+    // real reason per item, and answer 402 when nothing in the batch went in.
+    if (results.some((r) => r?.code === "no_write_access") && (await refusedForBilling(auth.orgId))) {
+      for (const r of results) {
+        if (r?.code === "no_write_access") Object.assign(r, { code: "account_read_only", error: ACCOUNT_READ_ONLY_MESSAGE });
+      }
+      if (results.every((r) => r?.code === "account_read_only")) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+    }
     return c.json({ results });
   });
 
