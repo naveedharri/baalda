@@ -11,7 +11,7 @@ export function attachmentNoticeVisible(blocked: boolean, detected: boolean): bo
 }
 
 /**
- * Persistent explanation for the attachment mirror's explicit Pro refusal.
+ * Persistent explanation for the attachment mirror's explicit Team refusal.
  * The file remains fully usable from disk; only its cross-device copy is
  * withheld. `showUpgrade` is capability-gated by the server so self-hosts do
  * not get a checkout action they cannot complete.
@@ -39,7 +39,7 @@ export function AttachmentLocalOnlyNoticeView({
       </span>
       <span className="attachment-sync-copy">
         <strong className="attachment-sync-title">
-          Standalone files require Pro to sync
+          Standalone files require Team to sync
         </strong>
         <span className="attachment-sync-body">
           Notes and their embedded attachments still sync. Standalone files stay on
@@ -49,7 +49,7 @@ export function AttachmentLocalOnlyNoticeView({
       {showUpgrade && onUpgrade && (
         <div className="banner-actions">
           <button className="primary sm attachment-sync-cta" onClick={onUpgrade}>
-            Upgrade to Pro
+            Upgrade to Team
           </button>
         </div>
       )}

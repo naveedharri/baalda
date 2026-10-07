@@ -74,6 +74,7 @@ import { editorMeasureStyle } from "./lib/editorMeasure";
 import { noteLabel } from "./lib/notePath";
 import { ShareNoteButton } from "./components/ShareNoteButton";
 import { AttachmentSyncNotice } from "./components/AttachmentSyncNotice";
+import { AccountLapsedNotice } from "./components/AccountLapsedNotice";
 import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { readSidebarHidden, writeSidebarHidden } from "./lib/prefs";
@@ -343,7 +344,11 @@ function VaultRootMissingBanner() {
       busy={busy}
       onRestore={run(() => useStore.getState().restoreVaultFolder())}
       onLocate={run(() => useStore.getState().locateVaultFolder())}
-      onSwitch={() => useStore.getState().requestSettings("vaults")}
+      onSwitch={() => {
+        const st = useStore.getState();
+        if (st.session) st.requestAccountSettings("vaults");
+        else st.requestSettings("vaults");
+      }}
     />
   );
 }
@@ -1574,6 +1579,7 @@ export default function App() {
           <NoteRemovedNotice />
           <VaultUnsyncedBanner />
           <VaultRootMissingBanner />
+          <AccountLapsedNotice />
           <ClosedAppChangesBanner />
           <NotSyncingBanner />
           <SyncPausedBanner />

@@ -539,6 +539,12 @@ function errStatus(e: unknown): number | null {
  * (`code`, or `error`/`code` inside `body`) is what both the real
  * `BlobTransportError` and a test's plain object have in common.
  */
+/** The plan a 402 names (`requiredPlan`); a server without the field is a per-vault (Pro) one. */
+function requiresTeam(e: unknown): boolean {
+  const body = e && typeof e === "object" ? (e as { body?: unknown }).body : null;
+  return !!body && typeof body === "object" && (body as { requiredPlan?: unknown }).requiredPlan === "team";
+}
+
 function errCode(e: unknown): string | null {
   if (!e || typeof e !== "object") return null;
   const direct = (e as { code?: unknown }).code;
@@ -1262,7 +1268,11 @@ export class AttachmentSync {
       if (failures.length) throw new Error(failures.join("\n"));
     } catch (e) {
       if (this.handleAttachmentSyncRequired(e, false)) {
-        throw new Error("This server requires Pro to download files in this vault, including files uploaded before the restriction. Upgrade this vault or contact its owner.");
+        throw new Error(
+          requiresTeam(e)
+            ? "Standalone file sync needs the Team plan, including files uploaded before the restriction. The account owner can upgrade in Account Settings → Plan & Billing."
+            : "This server requires Pro to download files in this vault, including files uploaded before the restriction. Upgrade this vault or contact its owner.",
+        );
       }
       throw e;
     } finally {
@@ -1497,6 +1507,12 @@ export class AttachmentSync {
           }
           if (this.handleAttachmentSyncRequired(e)) return;
           if (e instanceof AbortPass && e.reason === "attachment_sync_requires_pro") return;
+          // A lapsed Team account is read-only, not a broken file: no error row.
+          if (e instanceof AbortPass && e.reason === "account_read_only") {
+            this.setFileState(a.relPath, "queued");
+            aborted = e.reason;
+            return;
+          }
           if (e instanceof AbortPass) {
             // Nothing else in this pass can succeed either. Downloads are skipped
             // too: the vault is full, and the next pass will find the same state.
@@ -2140,7 +2156,9 @@ export class AttachmentSync {
       this.deps.onEntitlementBlocked?.(true);
       if (announce) {
         this.deps.notify?.(
-          "Upgrade to Pro to sync standalone files. Embedded attachments sync with notes on supported servers.",
+          requiresTeam(e)
+            ? "Standalone files sync on the Team plan. Embedded attachments still sync with notes."
+            : "Upgrade to Pro to sync standalone files. Embedded attachments sync with notes on supported servers.",
           "neutral",
         );
       }

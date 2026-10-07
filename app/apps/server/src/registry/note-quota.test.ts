@@ -4,7 +4,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { registerCtx, registerNotes } from "./batch-ops.js";
 const state = vi.hoisted(() => ({ remaining: 1 as number | null, existing: false, query: vi.fn() }));
 vi.mock("../db/pool.js", () => ({ pool: { query: state.query } }));
-vi.mock("../billing/note-quota.js", () => ({ NOTE_LIMIT_MESSAGE: "Upgrade to sync more notes", withNoteQuota: async (_v: unknown, db: unknown, work: Function) => work(db, state.remaining) }));
+vi.mock("../billing/note-quota.js", () => ({ NOTE_LIMIT_MESSAGE: "Upgrade to sync more notes", noteLimitMessage: () => "Upgrade to sync more notes", withNoteQuota: async (_v: unknown, db: unknown, work: Function) => work(db, state.remaining) }));
 vi.mock("../permissions/http-gates.js", () => ({ canCreateIn: async () => true, canEditDoc: async () => true }));
 vi.mock("../permissions/resolver.js", () => ({ createResolverCache: () => ({}) }));
 beforeEach(() => {

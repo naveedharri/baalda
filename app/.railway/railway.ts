@@ -107,6 +107,14 @@ const SERVER_ENV = [
   "POLAR_SERVER",
   "POLAR_PRODUCT_MONTHLY_ID",
   "POLAR_PRODUCT_YEARLY_ID",
+  "POLAR_PRODUCT_TEAM_MONTHLY_ID",
+  "POLAR_PRODUCT_TEAM_YEARLY_ID",
+  "TEAM_PRICE_MONTHLY_CENTS",
+  "TEAM_PRICE_YEARLY_CENTS",
+  "TEAM_MIN_SEATS",
+  "ABUSE_MAX_NOTES",
+  "ABUSE_MAX_STORAGE_MB",
+  "BILLING_MODEL",
   "POLAR_WEBHOOK_SECRET",
   // Outbound email (issue #99): EMAIL_FROM + one of SMTP_URL / RESEND_API_KEY
   // turns on password reset, sign-up verification and invitation emails.

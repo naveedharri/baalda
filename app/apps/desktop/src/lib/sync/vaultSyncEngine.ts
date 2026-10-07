@@ -10,6 +10,7 @@
 // current on disk regardless of the UI. The engine itself never touches disk or
 // CodeMirror — it moves opaque Yjs updates to the sink.
 
+import type { AppearanceSettings } from "../appearanceSettings";
 import { ApiClient, ApiError } from "../api";
 import { markOnce } from "../perf";
 import type { ActivityStatus } from "../prefs";
@@ -126,6 +127,8 @@ export interface VaultSyncEngineOptions {
   /** Fired when the vault's name or icon changed (`org`, #306); only the
    *  fields present in the frame are set. */
   onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
+  /** Fired when the vault's appearance defaults changed (`appearance-changed`). */
+  onAppearanceChanged?: (change: { orgId?: string; settings: AppearanceSettings }) => void;
   /** Fired for each teammate presence update (`presence`): who is now viewing
    *  which note (docId null = they left / closed the note). The sink aggregates
    *  these into the sidebar roster. */
@@ -340,6 +343,7 @@ export class VaultSyncEngine {
   private readonly onActivityChanged?: () => void;
   private readonly onMemberJoined?: (name: string) => void;
   private readonly onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
+  private readonly onAppearanceChanged?: (change: { orgId?: string; settings: AppearanceSettings }) => void;
   private readonly onPresence?: (peer: VaultPeer) => void;
   private readonly onVoice?: (frame: VoiceFrame) => void;
   private readonly onInboundProgress?: (done: number, total: number) => void;
@@ -446,6 +450,7 @@ export class VaultSyncEngine {
     this.onActivityChanged = opts.onActivityChanged;
     this.onMemberJoined = opts.onMemberJoined;
     this.onOrgChanged = opts.onOrgChanged;
+    this.onAppearanceChanged = opts.onAppearanceChanged;
     this.onPresence = opts.onPresence;
     this.onVoice = opts.onVoice;
     this.onInboundProgress = opts.onInboundProgress;
@@ -896,6 +901,8 @@ export class VaultSyncEngine {
       } else if (control.t === "org") {
         const { t: _t, ...change } = control;
         this.onOrgChanged?.(change);
+      } else if (control.t === "appearance-changed") {
+        this.onAppearanceChanged?.({ orgId: control.orgId, settings: control.settings });
       } else if (control.t === "presence") {
         // A teammate's viewing state changed — feed the sidebar roster.
         this.onPresence?.({

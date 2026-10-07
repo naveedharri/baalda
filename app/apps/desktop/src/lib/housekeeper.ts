@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Public wire contract for the optional Housekeeper service; no model logic.
-export interface HousekeeperStatus { requiresPro?: boolean; available: boolean; provider: string; model: string }
+export interface HousekeeperStatus { requiresPro?: boolean; requiresTeam?: boolean; available: boolean; provider: string; model: string }
 export interface HousekeeperSuggestion {
   id: string;
   label?: string;

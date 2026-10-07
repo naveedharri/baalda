@@ -146,5 +146,5 @@ See [[STATUS]] for the live build checklist.
 ## Baalda Assistant
 
 - [Agent diagnostics and repairs](HOUSEKEEPER.md): included for billing-disabled
-  self-hosters; Pro on billing-enabled servers. BYOK model setup, reviewed actions
+  self-hosters; Pro (Team under `BILLING_MODEL=team`) on billing-enabled servers. BYOK model setup, reviewed actions
   and verification.

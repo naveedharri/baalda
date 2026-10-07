@@ -369,6 +369,7 @@ function inviteErrorCode(err: unknown): { code: string; status: number } {
       .filter((v): v is string => typeof v === "string")
       .join(" ");
     const status = typeof err.statusCode === "number" ? err.statusCode : 400;
+    if (text.includes("seat_limit_reached")) return { code: "seat_limit_reached", status: 402 };
     if (text.includes("member_limit_reached")) return { code: "member_limit_reached", status: 402 };
     if (/already a member/i.test(text)) return { code: "already_member", status };
     return { code: (typeof body.code === "string" && body.code) || "invite_failed", status };
@@ -430,7 +431,7 @@ memberRoutes.post("/orgs/:orgId/invitations", async (c) => {
 
   const canEmail = emailEnabled();
   const results: InviteResult[] = [];
-  let limitError: { limit?: unknown } | null = null;
+  let limitError: Record<string, unknown> | null = null;
   // Serial on purpose: the seat-cap hook counts pending invitations, so
   // parallel creates could all pass the same last free seat.
   for (const email of emails) {
@@ -454,8 +455,8 @@ memberRoutes.post("/orgs/:orgId/invitations", async (c) => {
       results.push({ email, invitationId: inv.id, emailed });
     } catch (err) {
       const { code } = inviteErrorCode(err);
-      if (code === "member_limit_reached" && err instanceof APIError) {
-        limitError = (err.body ?? {}) as { limit?: unknown };
+      if ((code === "member_limit_reached" || code === "seat_limit_reached") && err instanceof APIError) {
+        limitError = (err.body ?? {}) as Record<string, unknown>;
       }
       if (code === "invite_failed") console.error("[invitations] create failed:", (err as Error).message);
       results.push({ email, emailed: false, error: code });
@@ -468,6 +469,22 @@ memberRoutes.post("/orgs/:orgId/invitations", async (c) => {
         error: "member_limit_reached",
         message: "member_limit_reached",
         ...(typeof limitError?.limit === "number" ? { limit: limitError.limit } : {}),
+        ...(limitError?.scope === "account" ? { scope: "account" } : {}),
+        results,
+      },
+      402,
+    );
+  }
+  if (results.length && results.every((r) => r.error === "seat_limit_reached")) {
+    const n = (k: string) => (typeof limitError?.[k] === "number" ? { [k]: limitError[k] } : {});
+    return c.json(
+      {
+        error: "seat_limit_reached",
+        code: "seat_limit_reached",
+        message: typeof limitError?.message === "string" ? limitError.message : "seat_limit_reached",
+        ...n("seats"),
+        ...n("used"),
+        ...n("pending"),
         results,
       },
       402,

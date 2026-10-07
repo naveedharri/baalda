@@ -1,11 +1,32 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./api";
 import {
+  membersSeatLine,
+  seatBreakdown,
+  formatBytes,
+  planPriceLine,
+  seatChangeSummary,
+  seatUsageLines,
+  usageAgainstLimit,
   classifyLimitError,
   FREE_PLAN_EXPLANATION,
   limitFromError,
   planPillLabel,
   PRO_BENEFITS,
+  TEAM_BENEFITS,
+  FREE_PLAN_LACKS,
+  FREE_PLAN_INCLUDES,
+  LIMIT_CODES,
+  seatLimitFromError,
+  seatBounds,
+  defaultSeats,
+  seatTotalCents,
+  seatTotalLine,
+  yearlySavingsLabel,
+  discountLine,
+  savingsLine,
+  formatMoney,
+  seatsFullCopy,
   subscriptionStatusLine,
   transferTargets,
   type SubscriptionFacts,
@@ -13,10 +34,10 @@ import {
 } from "./billing";
 
 describe("plan benefits copy", () => {
-  it("explains the Free note allowance and Pro benefits", () => {
-    expect(PRO_BENEFITS).toContain("Sync standalone files across devices and with your team");
+  it("explains the Free note allowance and Team benefits", () => {
+    expect(PRO_BENEFITS).toContain("Standalone file sync");
     expect(PRO_BENEFITS.join(" ")).not.toMatch(/unlimited notes|AI edits/i);
-    expect(FREE_PLAN_EXPLANATION).toMatch(/note sync and embedded attachments/i);
+    expect(FREE_PLAN_EXPLANATION).toMatch(/note sync, embedded attachments/i);
     expect(FREE_PLAN_EXPLANATION).toMatch(/embedded attachments/i);
     expect(FREE_PLAN_EXPLANATION).toMatch(/standalone file sync/i);
   });
@@ -171,8 +192,9 @@ describe("planPillLabel", () => {
     expect(planPillLabel({ plan: "free", status: "canceled" })).toBe("Free");
   });
 
-  it("labels a healthy Pro just Pro", () => {
-    expect(planPillLabel({ plan: "pro", status: "active" })).toBe("Pro");
+  it("labels a healthy paid plan just Team", () => {
+    expect(planPillLabel({ plan: "pro", status: "active" })).toBe("Team");
+    expect(planPillLabel({ plan: "team", status: "active" })).toBe("Team");
   });
 
   it("surfaces the states worth interrupting for", () => {
@@ -231,4 +253,321 @@ describe("transferTargets", () => {
 
 it("recognizes the note sync quota upgrade error", () => {
   expect(classifyLimitError(new ApiError(402, "Upgrade", { code: "note_limit_reached", limit: 20000 }))).toBe("note_limit");
+});
+
+describe("Team plan copy", () => {
+  it("drops the stray line and keeps the old export as an alias", () => {
+    expect(TEAM_BENEFITS.join(" ")).not.toMatch(/TypeSafe/);
+    expect(PRO_BENEFITS).toBe(TEAM_BENEFITS);
+    expect(FREE_PLAN_LACKS).toContain("Standalone file sync");
+    expect(TEAM_BENEFITS).toEqual([
+      "Unlimited people, one seat each",
+      "Unlimited synced vaults",
+      "Standalone file sync",
+      "Baalda Assistant",
+      "Priority support",
+    ]);
+    expect(FREE_PLAN_INCLUDES).toEqual([
+      "2 people",
+      "1 synced vault",
+      "Unlimited notes and attachments",
+      "MCP for your AI tools",
+      "Real-time collaboration",
+    ]);
+    expect(FREE_PLAN_EXPLANATION).toMatch(/2 people/);
+    expect(seatsFullCopy(5)).toBe("All 5 seats are in use.");
+    expect(seatsFullCopy(null)).toBe("All seats are in use.");
+  });
+});
+
+describe("seat helpers", () => {
+  it("floors the stepper at max(minSeats, used) with no ceiling", () => {
+    expect(seatBounds(1, 3)).toEqual({ min: 3, max: null });
+    expect(seatBounds(3, 3)).toEqual({ min: 3, max: null });
+    expect(seatBounds(7, 3)).toEqual({ min: 7, max: null });
+    expect(defaultSeats(1, 3)).toBe(3);
+    expect(defaultSeats(7, 3)).toBe(7);
+  });
+
+  it("totals monthly and yearly prices", () => {
+    expect(seatTotalCents(5, 1000)).toBe(5000);
+    expect(seatTotalCents(5, 11000)).toBe(55000);
+    expect(seatTotalLine(5, 1000, "usd", "month")).toBe("5 seats × $10 = $50/mo");
+    expect(seatTotalLine(3, 11000, "usd", "year")).toBe("3 seats × $110 = $330/yr");
+    expect(formatMoney(1050, "usd")).toBe("$10.50");
+  });
+
+  it("computes the yearly saving from the configured prices", () => {
+    const team = (prices: { interval: "month" | "year"; perSeat: number }[]) => ({
+      team: { minSeats: 3, currency: "usd", prices },
+    });
+    expect(
+      yearlySavingsLabel(team([{ interval: "month", perSeat: 1000 }, { interval: "year", perSeat: 11000 }])),
+    ).toBe("Save 8%");
+    expect(
+      yearlySavingsLabel(team([{ interval: "month", perSeat: 1000 }, { interval: "year", perSeat: 9600 }])),
+    ).toBe("Save 20%");
+    expect(yearlySavingsLabel(team([{ interval: "month", perSeat: 1000 }]))).toBeNull();
+    expect(yearlySavingsLabel({})).toBeNull();
+    expect(yearlySavingsLabel(null)).toBeNull();
+  });
+
+  it("writes the legacy price line only when charged is below list", () => {
+    expect(
+      discountLine({ interval: "month", price: { list: 1000, charged: 500, discountName: "legacy" } }),
+    ).toBe("Legacy price: you keep paying $5/mo");
+    expect(
+      discountLine({ interval: "month", price: { list: 1000, charged: 1000, discountName: null } }),
+    ).toBeNull();
+    expect(discountLine({ interval: null, price: null })).toBeNull();
+  });
+
+  it("writes the savings line as list minus charged per interval", () => {
+    expect(
+      savingsLine({ interval: "month", price: { list: 3000, charged: 1000, discountName: "legacy" } }),
+    ).toBe("You're saving $20/mo compared with the regular Team price.");
+    expect(
+      savingsLine({ interval: "year", price: { list: 28800, charged: 9600, discountName: "legacy" } }),
+    ).toBe("You're saving $192/yr compared with the regular Team price.");
+  });
+
+  it("omits the savings line when nothing is saved", () => {
+    expect(
+      savingsLine({ interval: "month", price: { list: 1000, charged: 1000, discountName: null } }),
+    ).toBeNull();
+    expect(
+      savingsLine({ interval: "month", price: { list: 1000, charged: 1200, discountName: null } }),
+    ).toBeNull();
+    expect(savingsLine({ interval: null, price: null })).toBeNull();
+  });
+});
+
+describe("Team limit codes", () => {
+  const err = (body: unknown, status = 402) => new ApiError(status, "rejected", body);
+
+  it("classifies every 402 code", () => {
+    expect(classifyLimitError(err({ error: "seat_limit_reached", seats: 5, used: 5, pending: 1 }))).toBe("seat_limit");
+    expect(classifyLimitError(err({ error: "account_read_only" }))).toBe("read_only");
+    expect(classifyLimitError(err({ error: "housekeeper_requires_team" }))).toBe("housekeeper");
+    expect(classifyLimitError(err({ error: "housekeeper_requires_pro" }))).toBe("housekeeper");
+    expect(classifyLimitError(err({ error: "attachment_sync_requires_pro", requiredPlan: "team" }))).toBe("attachment");
+    expect(classifyLimitError(err({ error: "storage_limit_reached" }))).toBe("storage_limit");
+    expect(classifyLimitError(err({ error: "member_limit_reached", limit: 2, scope: "account" }))).toBe("member_limit");
+    expect(classifyLimitError(err({ error: "seat_limit_reached" }, 403))).toBeNull();
+    for (const [code, kind] of LIMIT_CODES) expect(classifyLimitError(err({ error: code }))).toBe(kind);
+  });
+
+  it("reads seat counts off a seat_limit_reached error", () => {
+    expect(seatLimitFromError(err({ error: "seat_limit_reached", seats: 5, used: 5, pending: 1 }))).toEqual({
+      seats: 5,
+      used: 5,
+      pending: 1,
+    });
+    expect(seatLimitFromError(err({ error: "seat_limit_reached" }))).toEqual({
+      seats: null,
+      used: null,
+      pending: null,
+    });
+    expect(seatLimitFromError(err({ error: "member_limit_reached" }))).toBeNull();
+  });
+
+  it("labels the pill variants", () => {
+    expect(planPillLabel({ plan: "team", status: "active", complimentary: true })).toBe("Team (complimentary)");
+    expect(planPillLabel({ plan: "team", status: "canceled", lapsed: true })).toBe("Read-only");
+    expect(planPillLabel({ plan: "team", status: "active", readOnly: true })).toBe("Read-only");
+    expect(planPillLabel({ plan: "team", status: "past_due" })).toBe("Past due");
+  });
+});
+
+describe("Plan & Billing helpers", () => {
+  const fmt = (iso: string) => iso.slice(0, 10);
+  const base = {
+    current: 5,
+    floor: 4,
+    used: 4,
+    minSeats: 3,
+    currency: "usd",
+    interval: "month" as const,
+    formatDate: fmt,
+  };
+  const preview = { prorationCents: 1250, nextAmountCents: 6000, effectiveAt: "2026-11-01T00:00:00Z" };
+
+  it("seatChangeSummary: increase says 'about' and the next amount", () => {
+    expect(seatChangeSummary({ ...base, seats: 6, preview })).toEqual({
+      text: "You'll be charged about $12.50 today (prorated); then $60 per month.",
+      canConfirm: true,
+    });
+  });
+
+  it("seatChangeSummary: decrease names the effective date", () => {
+    expect(seatChangeSummary({ ...base, seats: 4, preview })).toEqual({
+      text: "Goes down to 4 seats on 2026-11-01.",
+      canConfirm: true,
+    });
+  });
+
+  it("seatChangeSummary: below the floor is refused with the reason", () => {
+    const r = seatChangeSummary({ ...base, seats: 3, preview });
+    expect(r.canConfirm).toBe(false);
+    expect(r.text).toBe(
+      "You can't go below the people already on your account (4) or the 3-seat minimum.",
+    );
+  });
+
+  it("seatChangeSummary: unchanged or still loading cannot confirm", () => {
+    expect(seatChangeSummary({ ...base, seats: 5, preview })).toEqual({ text: null, canConfirm: false });
+    expect(seatChangeSummary({ ...base, seats: 6, preview: null })).toEqual({ text: null, canConfirm: false });
+  });
+
+  it("formatBytes uses human units", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(1536)).toBe("1.5 KB");
+    expect(formatBytes(50 * 1024 * 1024)).toBe("50 MB");
+  });
+
+  it("usageAgainstLimit shows the ceiling only when one applies", () => {
+    expect(usageAgainstLimit(2, 2, "person", "people")).toBe("2 of 2 people");
+    expect(usageAgainstLimit(1, 1, "synced vault", "synced vaults")).toBe("1 of 1 synced vault");
+    expect(usageAgainstLimit(7, null, "person", "people")).toBe("7 people");
+  });
+
+  it("planPriceLine prices Team per seat by interval", () => {
+    const team = { currency: "usd", prices: [{ interval: "month" as const, perSeat: 1000 }, { interval: "year" as const, perSeat: 11000 }] };
+    expect(planPriceLine("free", null, team)).toBe("Free");
+    expect(planPriceLine("team", "month", team)).toBe("$10 per seat / month");
+    expect(planPriceLine("team", "year", team)).toBe("$110 per seat / year");
+  });
+
+  it("seatUsageLines adds reserved and pending-decrease lines", () => {
+    expect(
+      seatUsageLines(
+        { purchased: 5, used: 4, reserved: 1, pendingDecrease: { to: 4, effectiveAt: "2026-11-01T00:00:00Z" } },
+        fmt,
+      ),
+    ).toEqual(["4 of 5 seats used", "1 reserved by pending invites", "Goes down to 4 on 2026-11-01"]);
+    expect(seatUsageLines({ purchased: null, used: 2, reserved: 0, pendingDecrease: null }, fmt)).toEqual([
+      "2 people",
+    ]);
+  });
+});
+
+describe("seatBreakdown", () => {
+  it("counts claimed and reserved against purchased", () => {
+    expect(seatBreakdown({ purchased: 10, used: 4, reserved: 2 })).toEqual({
+      purchased: 10,
+      claimed: 4,
+      reserved: 2,
+      available: 4,
+    });
+  });
+  it("never reports negative availability", () => {
+    expect(seatBreakdown({ purchased: 3, used: 3, reserved: 2 }).available).toBe(0);
+    expect(seatBreakdown({ purchased: 3, used: 5, reserved: 0 }).available).toBe(0);
+  });
+  it("ignores a pending decrease until it takes effect", () => {
+    const seats = { purchased: 8, used: 3, reserved: 1, pendingDecrease: { to: 4, effectiveAt: "2026-11-01" } };
+    expect(seatBreakdown(seats)).toEqual({ purchased: 8, claimed: 3, reserved: 1, available: 4 });
+  });
+  it("treats no purchased seats (Free) as 0", () => {
+    expect(seatBreakdown({ purchased: null, used: 1, reserved: 0 })).toEqual({
+      purchased: 0,
+      claimed: 1,
+      reserved: 0,
+      available: 0,
+    });
+  });
+});
+
+describe("membersSeatLine", () => {
+  const team = { plan: "team" as const, seats: { purchased: 5, used: 3, reserved: 1 } };
+  it("names the owner's account on Team", () => {
+    expect(membersSeatLine(team, "Sara")).toBe("Uses 3 of 5 seats on Sara's account · 1 reserved");
+    expect(membersSeatLine(team, null)).toBe("Uses 3 of 5 seats on the owner's account · 1 reserved");
+    expect(membersSeatLine(team, "Sara", true)).toBe("Uses 3 of 5 seats on your account · 1 reserved");
+  });
+  it("uses the Free wording without purchased seats", () => {
+    expect(membersSeatLine({ plan: "free", seats: { purchased: null, used: 1, reserved: 0 } }, "Sara")).toBe(
+      "Free includes 2 people on this account (1 of 2 used)",
+    );
+  });
+});
+
+describe("team-model vault limit copy", () => {
+  it("names the account's synced-vault allowance and the Team upgrade", async () => {
+    const { teamVaultLimitCopy, vaultLimitReason, PEOPLE_LIMIT_REASON } = await import("./billing");
+    expect(teamVaultLimitCopy(1)).toBe(
+      "Free includes 1 synced vault on your account. Upgrade to Team for unlimited synced vaults.",
+    );
+    // A grandfathered account's server limit is above the default.
+    expect(teamVaultLimitCopy(3)).toBe(
+      "Free includes 3 synced vaults on your account. Upgrade to Team for unlimited synced vaults.",
+    );
+    expect(vaultLimitReason(1)).toBe("Free includes 1 synced vault. Team has no limit.");
+    expect(PEOPLE_LIMIT_REASON).toBe("Free includes 2 people. Team has no limit.");
+  });
+});
+
+describe("classifyBillingConfigResult", () => {
+  it("reads a 404 from the billing routes as disabled", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(classifyBillingConfigResult(new ApiError(404, "Not found"))).toBe("disabled");
+  });
+  it("reads a 200 with enabled:false as disabled", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(classifyBillingConfigResult({ enabled: false })).toBe("disabled");
+  });
+  it("never reads a network failure as disabled", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(classifyBillingConfigResult(new TypeError("Failed to fetch"))).toBe("error");
+  });
+  it("never reads a 5xx or an auth failure as disabled", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(classifyBillingConfigResult(new ApiError(500, "HTTP 500"))).toBe("error");
+    expect(classifyBillingConfigResult(new ApiError(502, "HTTP 502"))).toBe("error");
+    expect(classifyBillingConfigResult(new ApiError(401, "HTTP 401"))).toBe("error");
+  });
+  it("treats an unparseable answer as an error", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(classifyBillingConfigResult(null)).toBe("error");
+    expect(classifyBillingConfigResult("<html>")).toBe("error");
+    expect(classifyBillingConfigResult({})).toBe("error");
+  });
+  it("routes a good config by its model", async () => {
+    const { classifyBillingConfigResult } = await import("./billing");
+    expect(
+      classifyBillingConfigResult({
+        enabled: true,
+        model: "team",
+        team: { currency: "usd" },
+      }),
+    ).toBe("team");
+    expect(classifyBillingConfigResult({ enabled: true, model: "vault" })).toBe("vault");
+    expect(classifyBillingConfigResult({ enabled: true })).toBe("vault");
+  });
+});
+
+describe("legacy (per-vault) plan copy", () => {
+  it("keeps the old Pro promise apart from Team's", async () => {
+    const { LEGACY_PRO_BENEFITS, TEAM_BENEFITS } = await import("./billing");
+    expect(LEGACY_PRO_BENEFITS).toEqual([
+      "Unlimited team members",
+      "Standalone file sync",
+      "Baalda Assistant",
+      "Doesn't count toward your free vaults",
+    ]);
+    expect(LEGACY_PRO_BENEFITS).not.toEqual(TEAM_BENEFITS);
+  });
+  it("defaults to 3 members per vault and 2 free vaults", async () => {
+    const { LEGACY_FREE_PLAN_EXPLANATION } = await import("./billing");
+    expect(LEGACY_FREE_PLAN_EXPLANATION).toBe(
+      "Free includes 3 members per vault, 2 free vaults, note sync, embedded attachments and MCP. Pro adds unlimited members, standalone file sync and Baalda Assistant.",
+    );
+  });
+  it("reads the numbers from the server's freeLimits", async () => {
+    const { legacyFreePlanExplanation } = await import("./billing");
+    const line = legacyFreePlanExplanation({ vaultsPerUser: 1, membersPerVault: 5 });
+    expect(line).toMatch(/^Free includes 5 members per vault, 1 free vault, /);
+    expect(line).not.toMatch(/Team/);
+  });
 });

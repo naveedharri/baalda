@@ -22,6 +22,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (#228).
 
 ### Fixed
+- **A view-only note stays view-only while it reconnects (desktop).** Each time the open note's
+  connection renewed (its token refresh, any access change in the vault, a network blip), the app
+  briefly reported the vault's "Synced" in place of the note's view-only grant. For up to about
+  two seconds the View-only banner disappeared, the note flickered and could be typed into, even
+  though the sidebar still showed the padlock. The server already refused those edits; the app now
+  keeps the note read-only for the whole reconnect, and a note this session already knows is
+  view-only opens read-only from its first frame.
 - **A missing vault folder can be recovered in place (desktop).** When the open vault's folder is
   moved, renamed or deleted, the banner now says "This vault's folder is missing. It was moved,
   renamed or deleted." and offers **Restore here** (recreate it at the same path and sync

@@ -71,6 +71,9 @@ function req(
   );
 }
 
+// Real provider ids are unique (migration 052 indexes them), so the default is too.
+let seededSubs = 0;
+
 /** Directly seed a subscription row (as the webhook would). */
 async function seedSubscription(
   orgId: string,
@@ -85,7 +88,7 @@ async function seedSubscription(
     [
       orgId,
       extra.customerId ?? "cus_test",
-      extra.subId ?? "sub_test",
+      extra.subId ?? `sub_${orgId}_${++seededSubs}`,
       status,
       extra.periodEnd ?? new Date(Date.now() + 30 * 86400_000),
     ],
@@ -330,6 +333,33 @@ describe("billing", () => {
       );
     });
 
+    it("an allow-listed client scheme rides on the success URL and the checkout metadata", async () => {
+      const owner = await signUp("co-scheme@billing.com");
+      const org = await createOrg(owner, "CoScheme", "co-scheme-org");
+      const res = await req(app, "POST", `/api/billing/orgs/${org.id}/checkout`, {
+        token: owner.token,
+        body: { interval: "month", client: { channel: "staging", scheme: "baalda-staging" } },
+      });
+      expect(res.status).toBe(200);
+      expect(fakeProvider.lastCheckout).toMatchObject({
+        successUrl: `${config.betterAuthUrl}/api/billing/success?checkout_id={CHECKOUT_ID}&app=baalda-staging`,
+        clientScheme: "baalda-staging",
+      });
+    });
+
+    it("an unknown client scheme is ignored", async () => {
+      const owner = await signUp("co-evil@billing.com");
+      const org = await createOrg(owner, "CoEvil", "co-evil-org");
+      const res = await req(app, "POST", `/api/billing/orgs/${org.id}/checkout`, {
+        token: owner.token,
+        body: { interval: "month", client: { channel: "dev", scheme: "javascript" } },
+      });
+      expect(res.status).toBe(200);
+      const last = fakeProvider.lastCheckout as { successUrl: string; clientScheme?: string };
+      expect(last.successUrl).toBe(`${config.betterAuthUrl}/api/billing/success?checkout_id={CHECKOUT_ID}`);
+      expect(last.clientScheme).toBeUndefined();
+    });
+
     it("a plain member cannot start checkout (403)", async () => {
       const owner = await signUp("co-owner@billing.com");
       const org = await createOrg(owner, "Co2", "co-org2");
@@ -413,6 +443,9 @@ describe("billing", () => {
       const html = await res.text();
       // The hand-off names the vault so the app can refresh the right one.
       expect(html).toContain(`baalda://billing/upgraded?org=${encodeURIComponent(org.id)}`);
+      // Vault mode keeps the per-vault Pro copy.
+      expect(html).toContain("You&rsquo;re on Pro");
+      expect(html).toContain("Your vault is now unlimited.");
       expect(fakeProvider.checkoutsFetched).toEqual(["co_paid"]);
       expect(fakeProvider.fetched).toEqual(["sub_paid"]);
       // The row exists and is active — this is what the app's polling sees.
@@ -426,6 +459,59 @@ describe("billing", () => {
       );
       expect(rows[0].provider_subscription_id).toBe("sub_paid");
       expect(rows[0].provider_customer_id).toBe("cus_paid");
+    });
+
+    it("a checkout on a Team seat product says Team and names the seats", async () => {
+      const mutable = config as { polarProductTeamMonthlyId?: string };
+      const original = mutable.polarProductTeamMonthlyId;
+      mutable.polarProductTeamMonthlyId = "prod_team_monthly_test";
+      try {
+        const owner = await signUp("succteam@billing.com");
+        const org = await createOrg(owner, "SuccTeam", "succ-team-org");
+        fakeProvider.checkouts.set("co_team", {
+          status: "succeeded",
+          orgId: org.id,
+          userId: owner.userId,
+          providerSubscriptionId: "sub_team",
+          providerCustomerId: "cus_team",
+        });
+        fakeProvider.getResults.set(
+          "sub_team",
+          makeSnapshot({
+            providerSubscriptionId: "sub_team",
+            providerCustomerId: "cus_team",
+            seats: 5,
+            productId: "prod_team_monthly_test",
+          }),
+        );
+        const res = await req(app, "GET", "/api/billing/success?checkout_id=co_team");
+        expect(res.status).toBe(200);
+        const html = await res.text();
+        expect(html).toContain("You&rsquo;re on Team");
+        expect(html).toContain(
+          "Your team has 5 seats. Every vault on your account now syncs without limits.",
+        );
+        expect(html).toContain("your Team plan is already active");
+        expect(html).not.toMatch(/\bPro\b/);
+      } finally {
+        mutable.polarProductTeamMonthlyId = original;
+      }
+    });
+
+    it("team mode without a confirmed subscription falls back to a line without a count", async () => {
+      const mutable = config as { billingModel: "vault" | "team" };
+      const original = mutable.billingModel;
+      mutable.billingModel = "team";
+      try {
+        const res = await req(app, "GET", "/api/billing/success?checkout_id=co_unknown");
+        expect(res.status).toBe(200);
+        const html = await res.text();
+        expect(html).toContain("You&rsquo;re on Team");
+        expect(html).toContain("Your vaults now sync without limits.");
+        expect(html).not.toMatch(/\bPro\b/);
+      } finally {
+        mutable.billingModel = original;
+      }
     });
 
     it("writes nothing for a checkout that has not succeeded", async () => {
@@ -464,6 +550,30 @@ describe("billing", () => {
       }
       // The malformed id was never sent to the provider.
       expect(fakeProvider.checkoutsFetched).toEqual(["co_nobody_knows"]);
+    });
+
+    it("hands back to the allow-listed app scheme, and to this deployment's otherwise", async () => {
+      for (const scheme of ["baalda", "baalda-staging"]) {
+        const html = await (await req(app, "GET", `/api/billing/success?app=${scheme}`)).text();
+        expect(html).toContain(`href="${scheme}://billing/upgraded"`);
+        expect(html).toContain(`location.href = "${scheme}://billing/upgraded"`);
+      }
+      for (const bad of ["javascript", "https", "baalda-evil", "%22%3E%3Cscript%3E"]) {
+        const html = await (await req(app, "GET", `/api/billing/success?app=${bad}`)).text();
+        expect(html).toContain(`href="${config.deepLinkScheme}://billing/upgraded"`);
+        expect(html).not.toContain("javascript://");
+        expect(html).not.toContain("<script>alert");
+      }
+    });
+
+    it("a dev build gets no redirect and no button, only a switch-back line", async () => {
+      const html = await (await req(app, "GET", "/api/billing/success?app=baalda-dev")).text();
+      expect(html).toContain("You&rsquo;re on");
+      expect(html).toContain("Switch back to Baalda &mdash; your plan is already active. You can close this tab.");
+      expect(html).not.toContain("://billing/upgraded");
+      expect(html).not.toContain("Open Baalda");
+      expect(html).not.toContain("location.href");
+      expect(html).not.toContain("Taking you back");
     });
 
     it("still renders when the provider is down", async () => {

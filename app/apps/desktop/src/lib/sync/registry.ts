@@ -1042,6 +1042,8 @@ export class VaultRegistry {
   /** Set when the server refused on a plan limit: the rest of the run is
    *  pointless (every further create would 402 too), so it stops. */
   private limitReached: string | null = null;
+  /** Set by a 402 `account_read_only` (lapsed Team account) this run. */
+  private accountReadOnly = false;
 
   /**
    * The scope this registry's *contents* belong to: `serverVaultId` and the path
@@ -1299,6 +1301,7 @@ export class VaultRegistry {
     this.baselineVaultId = null;
     this.failed = [];
     this.limitReached = null;
+    this.accountReadOnly = false;
     // Paths, so they belong to the vault we are leaving — and a stale entry would
     // suppress the next vault's first watcher event for the same relative path.
     this.materialized.clear();
@@ -1948,6 +1951,11 @@ export class VaultRegistry {
     }
   }
 
+  /** True once this run saw a 402 `account_read_only` (the Team account lapsed). */
+  isAccountReadOnly(): boolean {
+    return this.accountReadOnly;
+  }
+
   /** The plan-limit code that stopped the run, if one did. */
   limitCode(): string | null {
     return this.limitReached ?? this.failed.find(f => f.code === "note_limit_reached")?.code ?? null;
@@ -1973,6 +1981,13 @@ export class VaultRegistry {
     // The id names a note deleted on the server. Reported ONCE (the path is
     // skipped from now on — see `deletedPaths`), with a reason that says the
     // file is safe and why it no longer syncs.
+    // The billing account lapsed: sync is read-only for the whole account.
+    // That is a state, not a broken item, so it never becomes a failure row;
+    // the run stops because every further write would get the same answer.
+    if (f.code === "account_read_only") {
+      this.accountReadOnly = true;
+      return "failed";
+    }
     if (f.code === "note_deleted" && f.kind === "note") {
       const firstTime = !this.deletedPaths.has(pathKey(f.path));
       this.deletedPaths.add(pathKey(f.path));
@@ -2023,7 +2038,7 @@ export class VaultRegistry {
   /** Stop the current bulk run? Either the vault moved on, or the server told us
    *  we've hit a plan limit and every further create would 402 as well. */
   private stopRun(): boolean {
-    return this.stale() || this.limitReached != null;
+    return this.stale() || this.limitReached != null || this.accountReadOnly;
   }
 
   // ---- config.json -------------------------------------------------------
@@ -3362,6 +3377,7 @@ export class VaultRegistry {
     this.organizationId = input.organizationId;
     this.failed = [];
     this.limitReached = null;
+    this.accountReadOnly = false;
     // NOT unconditional: `newCheckpointer` disposes the previous one, and after
     // a prime that one may hold a `markPushed` for a note the user opened during
     // the window — dropping it loses a real fact about the server.
@@ -3649,6 +3665,7 @@ export class VaultRegistry {
     // back from "N not synced" even after the underlying cause was gone.
     this.failed = [];
     this.limitReached = null;
+    this.accountReadOnly = false;
     const [folderRegistry, noteRegistry] = await this.takeListings(vaultId);
     if (this.stale()) return false;
     const serverFolders = folderRegistry.folders;

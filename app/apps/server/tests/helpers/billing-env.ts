@@ -13,3 +13,12 @@ process.env.POLAR_ACCESS_TOKEN = "";
 process.env.POLAR_WEBHOOK_SECRET ||= "test-polar-webhook-secret";
 process.env.POLAR_PRODUCT_MONTHLY_ID ||= "prod_monthly_test";
 process.env.POLAR_PRODUCT_YEARLY_ID ||= "prod_yearly_test";
+
+// Pins the billing model to the legacy per-vault Pro default. `config.ts`
+// reads BILLING_MODEL once at import, and a developer's `.env` may set
+// `team`, which would silently turn every vault-model assertion into a
+// team-mode run. Suites that exercise Team billing flip `config.billingModel`
+// explicitly in their own setup and restore it after, so they never depend on
+// `.env` either. Set unconditionally (not `||=`) so a shell export cannot
+// change the suite's meaning.
+process.env.BILLING_MODEL = "vault";

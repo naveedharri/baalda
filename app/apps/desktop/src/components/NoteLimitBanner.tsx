@@ -32,7 +32,7 @@ export function noteLimitBanner(args: {
 }
 
 /**
- * A full-width strip offering the upgrade past the Free 20,000-note sync cap.
+ * A full-width strip offering the upgrade past the Free sync cap.
  * Presentational on purpose (the store wiring lives in `App.tsx` alongside the
  * other banners), reusing the shared `Banner` shape and the flush strip
  * geometry of `.not-syncing-banner`.
@@ -49,12 +49,11 @@ export function NoteLimitBannerView({
   return (
     <Banner show={show} className="note-limit-banner" role="alert">
       <span>
-        <strong>20,000-note Free sync limit reached.</strong> Additional notes stay on this
-        device. Upgrade to Pro to sync more notes and use Baalda Assistant.
+        <strong>This vault reached its sync limit.</strong> Upgrade to Team to keep syncing new notes. Additional notes stay on this device.
       </span>
       <div className="banner-actions">
         <button className="primary" onClick={onUpgrade}>
-          Upgrade to Pro
+          Upgrade to Team
         </button>
         <button onClick={onDismiss}>Dismiss</button>
       </div>

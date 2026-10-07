@@ -1,3 +1,5 @@
+import { parseAppearanceSettings, type AppearanceSettings } from "../appearanceSettings";
+
 // Client half of the vault replication channel framing (spec 05 §3.1). Mirrors
 // the server's `sync/vault-protocol.ts`: JSON text control frames + binary data
 // frames [docIdLen u16 BE][docId utf8][update bytes]. Kept tiny and pure so the
@@ -153,6 +155,8 @@ export type ServerControl =
   | { t: "member"; name: string }
   /** The vault's name or icon changed (#306): patch the vault list in place. */
   | { t: "org"; name?: string; logo?: string | null }
+  /** The vault's appearance defaults changed: the WHOLE settings object. */
+  | { t: "appearance-changed"; orgId?: string; settings: AppearanceSettings; updatedAt?: string }
   | ({ t: "presence" } & PresenceState)
   /** A new release exists (#269): a hint to run the normal update check now. */
   | { t: "version-available"; version: string }
@@ -235,6 +239,16 @@ export function parseServerControl(text: string): ServerControl | null {
     if (typeof o.name === "string") frame.name = o.name;
     if (typeof o.logo === "string" || o.logo === null) frame.logo = o.logo;
     return frame;
+  }
+  // Accept the contract's `type` spelling as well as this protocol's `t`.
+  if (t === "appearance-changed" || (v as { type?: unknown }).type === "appearance-changed") {
+    const o = v as { orgId?: unknown; settings?: unknown; updatedAt?: unknown };
+    return {
+      t: "appearance-changed",
+      ...(typeof o.orgId === "string" ? { orgId: o.orgId } : {}),
+      settings: parseAppearanceSettings(o.settings),
+      ...(typeof o.updatedAt === "string" ? { updatedAt: o.updatedAt } : {}),
+    };
   }
   if (t === "presence") {
     const o = v as Record<string, unknown>;

@@ -205,6 +205,12 @@ export type ServerControl =
    * client patches its vault list in place; old clients ignore an unknown `t`.
    */
   | { t: "org"; name?: string; logo?: string | null }
+  /**
+   * The vault's shared appearance changed (owner/admin `PUT
+   * /api/orgs/:orgId/appearance`). Carries the whole settings object so the
+   * client applies it without a GET; old clients ignore an unknown `t`.
+   */
+  | { t: "appearance-changed"; orgId: string; settings: Record<string, unknown>; updatedAt: string }
   | ({ t: "presence" } & PresenceState) // a teammate's live viewing state changed
   /**
    * A new desktop release exists (`sync/release-watch.ts`, #269). A HINT to run
@@ -441,6 +447,23 @@ export const PS_ORG_CHANGED = 0x0c;
 
 export type OrgChange = { name?: string; logo?: string | null };
 
+/** The vault's shared appearance changed — see the `appearance-changed` frame. */
+export const PS_APPEARANCE_CHANGED = 0x0d;
+
+export type AppearanceChange = {
+  orgId: string;
+  settings: Record<string, unknown>;
+  updatedAt: string;
+};
+
+export function encodePubsubAppearanceChanged(change: AppearanceChange): Uint8Array {
+  const body = enc.encode(JSON.stringify(change));
+  const out = new Uint8Array(1 + body.length);
+  out[0] = PS_APPEARANCE_CHANGED;
+  out.set(body, 1);
+  return out;
+}
+
 /** JSON body after the type: only the fields that are present. */
 export function encodePubsubOrgChanged(change: OrgChange): Uint8Array {
   const body = enc.encode(JSON.stringify(change));
@@ -567,6 +590,7 @@ export type PubsubMessage =
   | { type: "activity-changed" }
   | { type: "member-joined"; name: string }
   | { type: "org-changed"; change: OrgChange }
+  | { type: "appearance-changed"; change: AppearanceChange }
   | { type: "presence"; presence: PresenceState }
   | { type: "presence-query" }
   | { type: "voice"; frame: Uint8Array; speakerId: string }
@@ -610,6 +634,26 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
         return { type: "org-changed", change };
       } catch {
         return { type: "org-changed", change: {} };
+      }
+    }
+    case PS_APPEARANCE_CHANGED: {
+      try {
+        const p = JSON.parse(dec.decode(bytes.subarray(1))) as Partial<AppearanceChange>;
+        if (
+          typeof p.orgId !== "string" ||
+          typeof p.updatedAt !== "string" ||
+          !p.settings ||
+          typeof p.settings !== "object" ||
+          Array.isArray(p.settings)
+        ) {
+          return null;
+        }
+        return {
+          type: "appearance-changed",
+          change: { orgId: p.orgId, settings: p.settings, updatedAt: p.updatedAt },
+        };
+      } catch {
+        return null;
       }
     }
     case PS_PRESENCE: {

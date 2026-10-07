@@ -17,6 +17,7 @@ import { oauthConnectRoutes } from "./routes/oauth-connect.js";
 import { accountPageRoutes } from "./routes/account-pages.js";
 import { invitationRoutes } from "./routes/invitations.js";
 import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
+import { appearanceRoutes } from "./routes/appearance.js";
 import { passwordResetRoutes } from "./routes/password-reset.js";
 import { openLinkRoutes } from "./routes/open-link.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
@@ -302,6 +303,7 @@ export function createApp(deps: AppDeps): Hono {
   // sidesteps Better Auth's verified-email gate on list-user-invitations.
   app.route("/api", invitationRoutes);
   app.route("/api", memberRoutes);
+  app.route("/api", appearanceRoutes);
   app.route(
     "/api",
     createMemberShareRoutes({ disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged }),

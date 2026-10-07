@@ -27,7 +27,6 @@ import {
   itemColorFill,
   itemColorValue,
 } from "../lib/appearance";
-import { readAutomaticItemColors } from "../lib/prefs";
 import {
   applyOrder,
   childrenAt,
@@ -252,9 +251,9 @@ export function FileTree() {
   const docIdByPath = useStore((s) => s.docIdByPath);
   const titles = useStore((s) => s.titles);
   const [containerRef, dim] = useDimensions();
-  useEffect(() => {
-    useStore.setState({ automaticItemColors: readAutomaticItemColors(session?.user.id) });
-  }, [session?.user.id]);
+  // `automaticItemColors` is the EFFECTIVE value (personal ?? vault ?? default,
+  // store.applyAppearance). This used to re-read the legacy per-account key on
+  // mount, which overwrote the effective value and ignored vault defaults.
   const treeRef = useRef<TreeApi<TreeNode> | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   // The ⋯ menu's "Sort by" and "Color" rows are one line each; their options

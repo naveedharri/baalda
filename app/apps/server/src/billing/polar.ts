@@ -1,12 +1,15 @@
 import { Polar } from "@polar-sh/sdk";
 import { Webhook, WebhookVerificationError } from "standardwebhooks";
-import { config } from "../config.js";
+import { config, teamMinSeats, teamPricePerSeatCents, teamProductId } from "../config.js";
 import {
   WebhookSignatureError,
   type BillingInterval,
   type BillingProvider,
   type CheckoutSnapshot,
   type CreateCheckoutArgs,
+  type CreateDiscountArgs,
+  type ProrationBehavior,
+  type SeatChangePreview,
   type NormalizedBillingEvent,
   type SubscriptionSnapshot,
 } from "./provider.js";
@@ -56,6 +59,8 @@ import {
 /** Metadata keys we stamp on checkout so the subscription webhooks self-identify. */
 const META_ORG = "organization_id";
 const META_USER = "user_id";
+const META_ACCOUNT = "billing_account_id";
+const META_CLIENT_SCHEME = "client_scheme";
 
 /**
  * Polar answered 404 for the id we asked about. Its own class so
@@ -158,6 +163,62 @@ async function polarCall<T>(op: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Domain labels Polar (email-validator) refuses as special-use or reserved
+ * (RFC 2606 / 6761 / 6762 / 7686, plus `internal`).
+ */
+export const RESERVED_EMAIL_TLDS: readonly string[] = [
+  "local",
+  "localhost",
+  "test",
+  "invalid",
+  "example",
+  "internal",
+  "onion",
+  "arpa",
+];
+
+/**
+ * The address to prefill on a Polar checkout, or undefined when Polar would
+ * reject it (dev accounts like `test@context.local`). Omitting it is safe:
+ * Polar then asks for the email on the checkout page.
+ */
+export function checkoutEmailFor(email: string | null | undefined): string | undefined {
+  const trimmed = (email ?? "").trim();
+  const at = trimmed.lastIndexOf("@");
+  if (at <= 0 || at === trimmed.length - 1) return undefined;
+  const domain = trimmed.slice(at + 1).toLowerCase().replace(/\.$/, "");
+  if (!domain.includes(".")) return undefined;
+  const tld = domain.slice(domain.lastIndexOf(".") + 1);
+  if (!tld || RESERVED_EMAIL_TLDS.includes(tld)) return undefined;
+  return trimmed;
+}
+
+/** True when a Polar error is a 422 whose `detail` names `customer_email`. */
+export function isCustomerEmailRejection(err: unknown): boolean {
+  const e = err as { statusCode?: number; detail?: unknown; rawValue?: unknown; body?: unknown } | null;
+  if (!e || typeof e !== "object" || e.statusCode !== 422) return false;
+  const candidates: unknown[] = [e.detail];
+  const raw = e.rawValue as { detail?: unknown } | null | undefined;
+  if (raw && typeof raw === "object") candidates.push(raw.detail);
+  if (typeof e.body === "string") {
+    try {
+      const parsed = JSON.parse(e.body) as { detail?: unknown } | null;
+      if (parsed && typeof parsed === "object") candidates.push(parsed.detail);
+    } catch {
+      /* not JSON */
+    }
+  }
+  return candidates.some(
+    (d) =>
+      Array.isArray(d) &&
+      d.some((item) => {
+        const loc = (item as { loc?: unknown } | null)?.loc;
+        return Array.isArray(loc) && loc.includes("customer_email");
+      }),
+  );
+}
+
 function client(): Polar {
   if (!config.polarAccessToken) {
     throw new Error("Polar access token not configured");
@@ -220,6 +281,58 @@ function toSnapshot(raw: unknown): SubscriptionSnapshot {
     amount: normalizeAmount(pick("amount", "amount")),
     currency: pick("currency", "currency") ? String(pick("currency", "currency")) : null,
     modifiedAt: Number.isNaN(modifiedAt.getTime()) ? new Date() : modifiedAt,
+    ...seatFields(sub),
+  };
+}
+
+type SeatFields = Pick<
+  SubscriptionSnapshot,
+  "seats" | "listAmount" | "discountId" | "discountName" | "pendingSeats" | "accountId" | "productId"
+>;
+
+/**
+ * The seat/discount/product fields shared by a snapshot and a webhook event.
+ * Read defensively from either casing (webhook JSON is snake_case, SDK
+ * objects camelCase). `listAmount` is derived: Polar reports only the charged
+ * `amount`, so list = our configured per-seat price x seats on a Team product,
+ * else (legacy product, or no seats) the charged amount plus a fixed discount
+ * when one is attached, else null.
+ */
+function seatFields(sub: Record<string, unknown>): SeatFields {
+  const pick = (snake: string, camel: string): unknown => sub[snake] ?? sub[camel];
+  const int = (v: unknown): number | null => {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const str = (v: unknown): string | null => (v ? String(v) : null);
+  const metadata = (pick("metadata", "metadata") ?? null) as Record<string, unknown> | null;
+  const discount = (pick("discount", "discount") ?? null) as Record<string, unknown> | null;
+  const pending = (pick("pending_update", "pendingUpdate") ?? null) as Record<string, unknown> | null;
+  const seats = int(pick("seats", "seats"));
+  const productId = str(pick("product_id", "productId"));
+  const interval = normalizeInterval(pick("recurring_interval", "recurringInterval"));
+  const amount = normalizeAmount(pick("amount", "amount"));
+  let listAmount: number | null = null;
+  const isTeam =
+    productId !== null &&
+    (productId === config.polarProductTeamMonthlyId || productId === config.polarProductTeamYearlyId);
+  if (isTeam && seats !== null && interval) {
+    listAmount = teamPricePerSeatCents(interval) * seats;
+  } else if (amount !== null && discount && String(discount.type ?? "") === "fixed") {
+    const off = int(discount.amount);
+    listAmount = off !== null ? amount + off : null;
+  } else if (amount !== null && !discount) {
+    listAmount = amount;
+  }
+  return {
+    seats,
+    listAmount,
+    discountId: str(pick("discount_id", "discountId")) ?? str(discount?.id),
+    discountName: str(discount?.name),
+    pendingSeats: pending ? int(pending.seats) : null,
+    accountId: str(metadata?.[META_ACCOUNT]),
+    productId,
   };
 }
 
@@ -237,6 +350,11 @@ function normalizeType(polarType: string): NormalizedBillingEvent["type"] | null
       return "subscription_canceled";
     case "subscription.revoked":
       return "subscription_revoked";
+    // Polar has NO `subscription.seats_updated` payload: a seat change arrives
+    // as `subscription.updated` carrying `seats` (mapped above). The
+    // `customer_seat.*` family (assigned / claimed / revoked) is about who
+    // holds a seat, which we track ourselves, so it is acknowledged and
+    // dropped (null ⇒ the webhook route answers 202).
     default:
       return null;
   }
@@ -244,27 +362,162 @@ function normalizeType(polarType: string): NormalizedBillingEvent["type"] | null
 
 export class PolarBillingProvider implements BillingProvider {
   async createCheckout(args: CreateCheckoutArgs): Promise<{ url: string }> {
-    const productId =
-      args.interval === "year"
-        ? config.polarProductYearlyId
-        : config.polarProductMonthlyId;
+    // Team seat products only. The legacy per-vault product ids are kept in
+    // config purely to classify subscriptions bought before the switch.
+    const productId = teamProductId(args.interval);
     if (!productId) {
-      throw new Error(
-        `No Polar product configured for interval "${args.interval}"`,
-      );
+      throw new Error(`No Polar Team product configured for interval "${args.interval}"`);
     }
-    const checkout = await polarCall("checkouts.create", () =>
+    const minSeats = Math.max(args.minSeats, teamMinSeats());
+    const seats = Math.max(args.seats, minSeats);
+    const metadata: Record<string, string> = {
+      [META_ACCOUNT]: args.accountId,
+      [META_USER]: args.userId,
+    };
+    if (args.orgId) metadata[META_ORG] = args.orgId;
+    if (args.clientScheme) metadata[META_CLIENT_SCHEME] = args.clientScheme;
+    const create = (customerEmail: string | undefined) =>
       client().checkouts.create({
         products: [productId],
         successUrl: args.successUrl,
-        customerEmail: args.email,
-        metadata: {
-          [META_ORG]: args.orgId,
-          [META_USER]: args.userId,
+        ...(customerEmail ? { customerEmail } : {}),
+        seats,
+        minSeats,
+        metadata,
+      });
+    const email = checkoutEmailFor(args.email);
+    const checkout = await polarCall("checkouts.create", async () => {
+      try {
+        return await create(email);
+      } catch (err) {
+        // Polar validates the address more strictly than we can predict; the
+        // field is optional (the checkout page asks for it), so drop it once.
+        if (email && isCustomerEmailRejection(err)) {
+          console.warn("[billing] Polar refused the checkout customer email; retrying without it");
+          return await create(undefined);
+        }
+        throw err;
+      }
+    });
+    return { url: checkout.url };
+  }
+
+  async updateSeats(
+    providerSubscriptionId: string,
+    seats: number,
+    proration: ProrationBehavior,
+  ): Promise<SubscriptionSnapshot> {
+    const sub = await polarCall("subscriptions.update(seats)", () =>
+      client().subscriptions.update({
+        id: providerSubscriptionId,
+        subscriptionUpdate: { seats, prorationBehavior: proration },
+      }),
+    );
+    return toSnapshot(sub);
+  }
+
+  async changeProduct(
+    providerSubscriptionId: string,
+    productId: string,
+    proration: ProrationBehavior,
+    discountId?: string,
+  ): Promise<SubscriptionSnapshot> {
+    // `SubscriptionUpdateBase` carries productId + discountId + prorationBehavior
+    // together, so a product move and its legacy discount land in ONE PATCH.
+    const sub = await polarCall("subscriptions.update(product)", () =>
+      client().subscriptions.update({
+        id: providerSubscriptionId,
+        subscriptionUpdate: {
+          productId,
+          prorationBehavior: proration,
+          ...(discountId ? { discountId } : {}),
         },
       }),
     );
-    return { url: checkout.url };
+    return toSnapshot(sub);
+  }
+
+  async applyDiscount(
+    providerSubscriptionId: string,
+    discountId: string,
+  ): Promise<SubscriptionSnapshot> {
+    const sub = await polarCall("subscriptions.update(discount)", () =>
+      client().subscriptions.update({
+        id: providerSubscriptionId,
+        subscriptionUpdate: { discountId },
+      }),
+    );
+    return toSnapshot(sub);
+  }
+
+  async createDiscount(args: CreateDiscountArgs): Promise<{ id: string; name: string }> {
+    const common = {
+      name: args.name,
+      duration: "forever" as const,
+      products: args.productIds,
+      metadata: { source: "baalda-legacy-price" },
+    };
+    const body =
+      args.type === "fixed"
+        ? (() => {
+            if (!Number.isInteger(args.amountCents) || (args.amountCents ?? 0) <= 0) {
+              throw new Error("createDiscount: fixed discount needs a positive amountCents");
+            }
+            return {
+              ...common,
+              type: "fixed" as const,
+              amount: args.amountCents,
+              currency: args.currency.toLowerCase() as never,
+            };
+          })()
+        : (() => {
+            const bp = args.basisPoints ?? 0;
+            if (!Number.isInteger(bp) || bp <= 0 || bp > 10000) {
+              throw new Error("createDiscount: percentage discount needs basisPoints in 1..10000");
+            }
+            return { ...common, type: "percentage" as const, basisPoints: bp };
+          })();
+    const d = (await polarCall("discounts.create", () => client().discounts.create(body))) as {
+      id: string;
+      name: string;
+    };
+    return { id: d.id, name: d.name };
+  }
+
+  async previewSeatChange(providerSubscriptionId: string, seats: number): Promise<SeatChangePreview> {
+    // Polar 0.48.1 has no preview/quote endpoint for subscription updates, so
+    // this is DERIVED: per-seat = our configured Team price for the interval
+    // (Polar's `amount` is post-discount, so it cannot give the list price);
+    // the fixed discount carries over unchanged; the prorated "now" charge is
+    // the seat delta x per-seat x the fraction of the period left.
+    const snap = await this.getSubscription(providerSubscriptionId);
+    if (!snap) throw new PolarNotFoundError(`Polar subscriptions.get: not found (HTTP 404)`);
+    const perSeat = snap.interval ? teamPricePerSeatCents(snap.interval) : null;
+    let newAmount: number | null = null;
+    let proratedNow: number | null = null;
+    if (perSeat !== null) {
+      const newList = perSeat * seats;
+      const discount =
+        snap.amount !== null && snap.listAmount !== null ? Math.max(0, snap.listAmount - snap.amount) : 0;
+      newAmount = Math.max(0, newList - discount);
+      const delta = seats - (snap.seats ?? 0);
+      if (snap.currentPeriodEnd && snap.interval) {
+        const periodMs = (snap.interval === "year" ? 365 : 30) * 86400_000;
+        const left = Math.min(1, Math.max(0, (snap.currentPeriodEnd.getTime() - Date.now()) / periodMs));
+        proratedNow = delta > 0 ? Math.round(delta * perSeat * left) : 0;
+      }
+    }
+    return {
+      currentSeats: snap.seats,
+      newSeats: seats,
+      newAmount,
+      perSeat,
+      currency: snap.currency,
+      interval: snap.interval,
+      proratedNow,
+      currentPeriodEnd: snap.currentPeriodEnd,
+      estimated: true,
+    };
   }
 
   async getPortalUrl(args: { customerId: string }): Promise<{ url: string }> {
@@ -367,16 +620,42 @@ export class PolarBillingProvider implements BillingProvider {
         ? (status as CheckoutSnapshot["status"])
         : "open",
       orgId: str(metadata?.[META_ORG]),
+      accountId: str(metadata?.[META_ACCOUNT]),
       userId: str(metadata?.[META_USER]),
       providerSubscriptionId: str(pick("subscription_id", "subscriptionId")),
       providerCustomerId: str(pick("customer_id", "customerId")),
     };
   }
 
+  /** @deprecated Use {@link setSubscriptionAccount}. */
   async setSubscriptionOrg(
     providerSubscriptionId: string,
     orgId: string,
     userId: string,
+  ): Promise<void> {
+    await this.patchMetadata(providerSubscriptionId, { [META_ORG]: orgId, [META_USER]: userId });
+  }
+
+  async setSubscriptionAccount(
+    providerSubscriptionId: string,
+    accountId: string,
+    userId?: string,
+  ): Promise<void> {
+    // Read-merge-write: Polar replaces the metadata object on PATCH, and the
+    // legacy `organization_id` must survive for old-route webhooks.
+    const current = (await polarCall("subscriptions.get", () =>
+      client().subscriptions.get({ id: providerSubscriptionId }),
+    )) as { metadata?: Record<string, unknown> };
+    const merged: Record<string, string> = {};
+    for (const [k, v] of Object.entries(current.metadata ?? {})) merged[k] = String(v);
+    merged[META_ACCOUNT] = accountId;
+    if (userId) merged[META_USER] = userId;
+    await this.patchMetadata(providerSubscriptionId, merged);
+  }
+
+  private async patchMetadata(
+    providerSubscriptionId: string,
+    metadata: Record<string, string>,
   ): Promise<void> {
     // Raw PATCH, not the SDK: `SubscriptionUpdate` in 0.48.1 is a six-way union
     // (seats / billing period / cancel / revoke / clear-pending / base) and not
@@ -400,9 +679,7 @@ export class PolarBillingProvider implements BillingProvider {
           authorization: `Bearer ${config.polarAccessToken}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({
-          metadata: { [META_ORG]: orgId, [META_USER]: userId },
-        }),
+        body: JSON.stringify({ metadata }),
       },
     );
     if (!res.ok) {
@@ -440,9 +717,12 @@ export class PolarBillingProvider implements BillingProvider {
     const pick = (snake: string, camel: string): unknown => sub[snake] ?? sub[camel];
     const metadata = (pick("metadata", "metadata") ?? null) as Record<string, unknown> | null;
 
+    // Legacy per-vault subscriptions carry `organization_id`; Team ones carry
+    // `billing_account_id` (and `organization_id` only when started from the
+    // old alias route). Neither ⇒ not ours to act on.
     const orgId = String(metadata?.[META_ORG] ?? "");
-    if (!orgId) {
-      // A subscription with no vault (org) metadata isn't ours to act on.
+    const accountIdRaw = String(metadata?.[META_ACCOUNT] ?? "");
+    if (!orgId && !accountIdRaw) {
       return null;
     }
 
@@ -478,6 +758,7 @@ export class PolarBillingProvider implements BillingProvider {
       interval: normalizeInterval(pick("recurring_interval", "recurringInterval")),
       amount: normalizeAmount(pick("amount", "amount")),
       currency: currency ? String(currency) : null,
+      ...seatFields(sub),
     };
   }
 

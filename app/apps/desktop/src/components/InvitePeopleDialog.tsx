@@ -8,6 +8,7 @@ import { isValidEmail, splitEmails } from "../lib/membersAccess";
 import { useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
 import { LimitNudge } from "./LimitNudge";
+import { PeopleLimitNotice, inviteLimitError, peopleLimitKind } from "./PeopleLimitNotice";
 import { MenuSelect } from "./MenuSelect";
 import { UpgradeDialog } from "./UpgradeDialog";
 
@@ -38,8 +39,10 @@ export function addChips(chips: readonly string[], text: string): string[] {
  * messages the old Members tab showed (emailed / no email server / email
  * failed, with the link to share).
  */
-export function InvitePeopleDialog({ orgId, onClose, onInvited }: {
+export function InvitePeopleDialog({ orgId, canManageBilling = false, onClose, onInvited }: {
   orgId: string;
+  /** The owner can add seats from the notice. */
+  canManageBilling?: boolean;
   onClose: () => void;
   /** Called with the per-address results so the roster can add rows at once. */
   onInvited: (results: InviteManyResult[], sent: { role: string; access: TeamAccessMode | null }) => void;
@@ -54,6 +57,7 @@ export function InvitePeopleDialog({ orgId, onClose, onInvited }: {
   const [error, setError] = useState<string | null>(null);
   const [limit, setLimit] = useState<{ kind: LimitKind; limit: number | null } | null>(null);
   const [upgradeOpen, setUpgradeOpen] = useState(false);
+  const [peopleErr, setPeopleErr] = useState<unknown>(null);
 
   useEffect(() => {
     let live = true;
@@ -79,6 +83,7 @@ export function InvitePeopleDialog({ orgId, onClose, onInvited }: {
   const send = async () => {
     setError(null);
     setLimit(null);
+    setPeopleErr(null);
     if (all.length === 0 || invalid.length > 0) return;
     setChips(all);
     setDraft("");
@@ -94,10 +99,16 @@ export function InvitePeopleDialog({ orgId, onClose, onInvited }: {
       void useStore.getState().refreshVault();
     } catch (e) {
       const kind = classifyLimitError(e);
-      if (kind) setLimit({ kind, limit: limitFromError(e) });
+      if (peopleLimitKind(e)) setPeopleErr(e);
+      else if (kind) setLimit({ kind, limit: limitFromError(e) });
       else setError(e instanceof Error ? e.message : String(e));
     }
   };
+
+  // A people limit is ONE notice, whether the whole call was refused or some
+  // addresses were: the per-address rows below drop the raw code for it.
+  const peopleNotice =
+    peopleErr ?? results?.map((r) => (r.error ? inviteLimitError(r.error) : null)).find((x) => x != null) ?? null;
 
   const copy = async (text: string) => {
     try { await navigator.clipboard.writeText(text); } catch { /* clipboard unavailable */ }
@@ -175,6 +186,7 @@ export function InvitePeopleDialog({ orgId, onClose, onInvited }: {
           </div>
         )}
         {error && <div className="auth-error">{error}</div>}
+        {peopleNotice != null && <PeopleLimitNotice error={peopleNotice} canManageBilling={canManageBilling} />}
         {limit && <LimitNudge kind={limit.kind} limit={limit.limit} onUpgrade={() => setUpgradeOpen(true)} />}
         {results?.map((r) => {
           const link = r.invitationId ? buildInviteLink(serverUrl, r.invitationId) : null;
@@ -183,7 +195,7 @@ export function InvitePeopleDialog({ orgId, onClose, onInvited }: {
               {r.emailed ? (
                 <span>Invitation emailed to {r.email}.</span>
               ) : !r.invitationId ? (
-                <span>Couldn't invite {r.email}{r.error ? ` (${r.error})` : ""}.</span>
+                <span>Couldn't invite {r.email}{r.error && !inviteLimitError(r.error) ? ` (${r.error})` : ""}.</span>
               ) : (
                 <>
                   <span>

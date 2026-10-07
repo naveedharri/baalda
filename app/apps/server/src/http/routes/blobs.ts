@@ -11,6 +11,7 @@ import {
   canWriteBlob,
   filterReadableBlobs,
 } from "../../permissions/http-gates.js";
+import { ACCOUNT_READ_ONLY_BODY, refusedForBilling } from "../../permissions/http-gates.js";
 import { getSession } from "../session.js";
 import { relAssetPath } from "../../render/note-html.js";
 import { config } from "../../config.js";
@@ -25,6 +26,7 @@ import {
 import { objectKey } from "../../blobs/keys.js";
 import { docsReferencing } from "../../blobs/refs.js";
 import { canSyncAttachments, storageLimitBytes } from "../../billing/entitlements.js";
+import { teamModel } from "../../billing/plan.js";
 import { verifyUploadToken } from "../../blobs/upload-token.js";
 import {
   registerCtx,
@@ -157,13 +159,17 @@ function storedRegister(raw: unknown): PendingRegister | null {
  * same codes, so the desktop explains a one-step refusal exactly like a
  * two-step one.
  */
-function registerRefusal(
+async function registerRefusal(
   c: Context,
   out: Extract<StructResult<FileRow>, { status: "error" }>,
-): Response {
+  vaultId?: string | null,
+): Promise<Response> {
+  if (out.code === "no_write_access" && vaultId && (await refusedForBilling(await vaultOrg(vaultId)))) {
+    return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+  }
   switch (out.code) {
     case "note_limit_reached":
-      return c.json({ error: out.message, code: out.code, limit: 20000 }, 402);
+      return c.json({ error: out.message, code: out.code, limit: out.limit || 20000 }, 402);
     case "path_folder_mismatch":
     case "transient_file":
       return c.json({ error: out.message, code: out.code }, 400);
@@ -261,8 +267,12 @@ async function unlocatedUpload(c: Context, orgId: string): Promise<Response> {
 function attachmentSyncRequired(c: Context): Response {
   return c.json(
     {
-      error: "Standalone file sync requires a Pro vault",
+      error: teamModel()
+        ? "Standalone file sync requires the Team plan"
+        : "Standalone file sync requires a Pro vault",
+      // Wire code kept: desktops match it exactly.
       code: "attachment_sync_requires_pro",
+      requiredPlan: teamModel() ? "team" : "pro",
     },
     402,
   );
@@ -443,6 +453,7 @@ blobRoutes.post(
     // "read-only" would let anyone keep adding bytes to the vault's blob store;
     // for a tree file the gate is its own folder's (see `canWriteBlob`).
     if (!(await canWriteBlob(session.userId, { vault_id: vaultId, rel_path: relPath, doc_id: docId }))) {
+      if (await refusedForBilling(org)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json({ error: "This vault is read-only for you" }, 403);
     }
 
@@ -980,7 +991,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
     } else {
       if (!(await canSyncAttachments(org))) return attachmentSyncRequired(c);
       const dry = await withRegistration(vaultId, session.userId, register, false, async (out) => out);
-      if (dry.status === "error") return registerRefusal(c, dry);
+      if (dry.status === "error") return registerRefusal(c, dry, vaultId);
       // `adopted` ⇒ a file already lives at this path (under another id):
       // the bytes are that file's, the ordinary flow, and the response names
       // the canonical id. `created` ⇒ the registration waits on the bytes.
@@ -1010,6 +1021,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
     !pending &&
     !(await canWriteBlob(session.userId, { vault_id: vaultId, rel_path: relPath, doc_id: docId }))
   ) {
+    if (await refusedForBilling(org)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
     return c.json({ error: "This vault is read-only for you" }, 403);
   }
 
@@ -1049,7 +1061,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
     }
     const reg = pending;
     const out = await withRegistration(vaultId, session.userId, reg, true, async (o) => o);
-    if (out.status === "error") return registerRefusal(c, out);
+    if (out.status === "error") return registerRefusal(c, out, vaultId);
     if (out.wrote) registryChanged(c, vaultId);
     const blob = toMeta(await claimDoc(hit, out.row.id));
     return c.json(
@@ -1526,7 +1538,7 @@ async function completeWithRegistration(
 
   if (done.kind === "refused") {
     await pool.query("DELETE FROM blobs WHERE id = $1 AND status = 'pending'", [row.id]);
-    return registerRefusal(c, done.out);
+    return registerRefusal(c, done.out, vaultId);
   }
   const { out, blob } = done;
   if (out.wrote) registryChanged(c, vaultId);
@@ -1564,6 +1576,7 @@ blobRoutes.post("/blobs/:id/complete", async (c) => {
     row.status === "pending" && row.vault_id ? storedRegister(row.pending_register) : null;
   if (await attachmentSyncDenied(org, row.rel_path, row.doc_id)) return attachmentSyncRequired(c);
   if (row.vault_id && !pendingReg && !(await canWriteBlob(session.userId, row))) {
+    if (await refusedForBilling(org)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
     return c.json({ error: "This vault is read-only for you" }, 403);
   }
 
@@ -1771,9 +1784,11 @@ blobRoutes.put("/vaults/:vaultId/blobs/:blobId/text", async (c) => {
   // what the vault's search says the file contains, so writing it is a write to
   // that doc, not merely to the vault's blob store.
   if (!(await canWriteBlob(session.userId, row))) {
+    if (await refusedForBilling(org)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
     return c.json({ error: "This vault is read-only for you" }, 403);
   }
   if (row.doc_id && !(await canEditDoc(session.userId, row.doc_id))) {
+    if (await refusedForBilling(org)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
     return c.json({ error: "This file is read-only for you" }, 403);
   }
 

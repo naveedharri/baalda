@@ -194,6 +194,21 @@ export const config = {
    *  dashboard). Checkout picks one based on the requested interval. */
   polarProductMonthlyId: optional("POLAR_PRODUCT_MONTHLY_ID"),
   polarProductYearlyId: optional("POLAR_PRODUCT_YEARLY_ID"),
+  /** Polar seat-based Team products (one per interval). Checkout in `team`
+   *  mode uses these; the legacy ids above only CLASSIFY old subscriptions. */
+  polarProductTeamMonthlyId: optional("POLAR_PRODUCT_TEAM_MONTHLY_ID"),
+  polarProductTeamYearlyId: optional("POLAR_PRODUCT_TEAM_YEARLY_ID"),
+  /** Team list price per seat, minor units (display + preview math only:
+   *  Polar's product price is what is actually charged). */
+  teamPriceMonthlyCents: int("TEAM_PRICE_MONTHLY_CENTS", 1000),
+  teamPriceYearlyCents: int("TEAM_PRICE_YEARLY_CENTS", 11000),
+  /** Fewest seats a Team subscription may hold. */
+  teamMinSeats: int("TEAM_MIN_SEATS", 3),
+  /** Abuse ceilings that apply even to paid Team accounts. */
+  abuseMaxNotes: int("ABUSE_MAX_NOTES", 100000),
+  abuseMaxStorageMb: int("ABUSE_MAX_STORAGE_MB", 10240),
+  /** 'vault' (default: per-vault Pro, FREE_MAX_* caps) or 'team' (per-seat). */
+  billingModel: (optional("BILLING_MODEL") === "team" ? "team" : "vault") as "vault" | "team",
   /** Free-tier caps (only enforced when billing is enabled). A user may OWN up
    *  to this many UNSUBSCRIBED vaults; each unsubscribed vault may hold
    *  up to this many members (incl. pending invitations).
@@ -277,3 +292,17 @@ export function billingEnabled(): boolean {
 }
 
 export type AppConfig = typeof config;
+
+// ---- Typed billing getters (Team seat billing) ----
+export type BillingModel = "vault" | "team";
+export const billingModel = (): BillingModel => config.billingModel;
+export const teamProductId = (interval: "month" | "year"): string | undefined =>
+  interval === "year" ? config.polarProductTeamYearlyId : config.polarProductTeamMonthlyId;
+export const teamPricePerSeatCents = (interval: "month" | "year"): number =>
+  interval === "year" ? config.teamPriceYearlyCents : config.teamPriceMonthlyCents;
+export const teamMinSeats = (): number => config.teamMinSeats;
+export const abuseMaxNotes = (): number => config.abuseMaxNotes;
+export const abuseMaxStorageBytes = (): number => config.abuseMaxStorageMb * 1024 * 1024;
+/** Legacy per-vault product ids, used only to classify existing subscriptions. */
+export const legacyProductIds = (): string[] =>
+  [config.polarProductMonthlyId, config.polarProductYearlyId].filter((x): x is string => !!x);

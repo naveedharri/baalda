@@ -11,6 +11,8 @@
 export type SettingsTab =
   | "general"
   | "ai"
+  // Signed-out only: the vault list moved to Account Settings → Vaults, and a
+  // signed-out app has no account page to show its local folders on.
   | "vaults"
   | "members"
   | "billing"
@@ -27,4 +29,6 @@ export type AccountSettingsTab =
   | "appearance"
   | "notifications"
   | "connection"
+  | "plan"
+  | "vaults"
   | "about";

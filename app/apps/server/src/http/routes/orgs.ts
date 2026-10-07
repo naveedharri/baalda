@@ -4,6 +4,7 @@ import { pool } from "../../db/pool.js";
 import { orgRole } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
 import { canAddMember } from "../../billing/entitlements.js";
+import { checkJoinSeat, seatRefusalBody, teamModel } from "../../billing/plan.js";
 import {
   applySubscriptionState,
   findByOrg,
@@ -15,6 +16,8 @@ import { billingEnabled } from "../../config.js";
 import { dispatchMail, emailEnabled } from "../../email/mailer.js";
 import { memberLeftEmail, youLeftVaultEmail } from "../../email/templates.js";
 import type { BillingProvider } from "../../billing/provider.js";
+import { onMembershipTrimmed } from "../../billing/lapse.js";
+import { accountIdForOrg } from "../../billing/accounts.js";
 
 /**
  * Vault (org) routes (session-authenticated).
@@ -324,10 +327,15 @@ async function deleteVaultEverywhere(
   // records (#109/#111). This deliberately runs ahead of the socket teardown
   // and the purge, so a 502 here costs nothing.
   let subscription: SubscriptionEcho | null = null;
+  // Team model: the subscription belongs to the ACCOUNT, not this vault. It
+  // must survive the delete (never cancelled, never tombstoned); the account
+  // keeps its plan and its seats recompute from the vaults left.
+  const teamAccountId = teamModel() ? await accountIdForOrg(pool, orgId) : null;
   if (billingEnabled() && deps.billingProvider) {
     const row = await findByOrg(pool, orgId);
     const subId = row?.provider_subscription_id;
-    if (row && subId && isActiveStatus(row.status)) {
+    const accountOwned = teamModel() && !!row?.billing_account_id;
+    if (row && subId && isActiveStatus(row.status) && !accountOwned) {
       // Always ask, even when our row already says "ending": the flag is
       // idempotent at the provider, and our copy can be stale — an owner who
       // un-cancelled in Polar's portal while that webhook went missing would
@@ -426,8 +434,8 @@ async function deleteVaultEverywhere(
     await client.query(
       `UPDATE subscriptions
           SET deleted_at = now(), org_name = $2, owner_user_id = $3, updated_at = now()
-        WHERE organization_id = $1`,
-      [orgId, orgName, actorUserId],
+        WHERE organization_id = $1 AND NOT ($4::boolean AND billing_account_id IS NOT NULL)`,
+      [orgId, orgName, actorUserId, teamModel()],
     );
     // Cascades: member, invitation, vaults→(folders, notes, files), shares,
     // org_join_codes, mcp_tokens, public_links.
@@ -445,6 +453,8 @@ async function deleteVaultEverywhere(
   // vault-channel sockets survive `disconnectDoc` and would otherwise keep
   // streaming content from a deleted vault until their tokens expired.
   for (const vaultId of vaultIds) deps.onAclChanged(vaultId);
+  // Detaching a vault can bring the account back under Free limits.
+  if (teamAccountId) await onMembershipTrimmed(pool, orgId, teamAccountId);
 
   return { ok: true, orgName, vaultIds, docIds, counts, subscription };
 }
@@ -536,7 +546,12 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     const liveInvite = invited.rows.find((r) => r.live);
     const role = liveInvite?.role === "admin" ? "admin" : "member";
 
-    if (!liveInvite) {
+    if (teamModel()) {
+      // Team model: redemption is a HARD gate even with a live invitation
+      // (members + 1 must fit; someone already on the account takes no seat).
+      const refused = await checkJoinSeat(pool, organizationId, { userId: session.userId });
+      if (refused) return c.json(seatRefusalBody(refused), 402);
+    } else if (!liveInvite) {
       // Free-tier seat cap. This path bypasses Better Auth entirely, so the same
       // limit the invite hook enforces must be checked here before the INSERT.
       // No-op when billing is off (canAddMember returns allowed).
@@ -604,8 +619,12 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       return c.json({ error: "Only the vault owner can delete it" }, 403);
     }
 
+    // Read the account BEFORE the teardown: once the org is gone it no longer
+    // resolves, and the recheck needs it to lift a lapse.
+    const accountId = await accountIdForOrg(pool, orgId).catch(() => null);
     const out = await deleteVaultEverywhere(deps, orgId, session.userId);
     if (!out.ok) return c.json({ error: out.error, message: out.message, detail: out.detail }, 502);
+    await onMembershipTrimmed(pool, orgId, accountId);
 
     return c.json({
       deleted: true,
@@ -684,8 +703,12 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       return c.json({ error: "name_mismatch" }, 409);
     }
 
+    // Read the account BEFORE the teardown: once the org is gone it no longer
+    // resolves, and the recheck needs it to lift a lapse.
+    const accountId = await accountIdForOrg(pool, orgId).catch(() => null);
     const out = await deleteVaultEverywhere(deps, orgId, session.userId);
     if (!out.ok) return c.json({ error: out.error, message: out.message, detail: out.detail }, 502);
+    await onMembershipTrimmed(pool, orgId, accountId);
 
     return c.json({
       unsynced: true,
@@ -763,6 +786,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     }
 
     await revokeMembership(deps, orgId, targetUserId);
+    await onMembershipTrimmed(pool, orgId);
     return c.json({ removed: true });
   });
 
@@ -811,6 +835,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     const orgName = people[0]?.org_name ?? "your vault";
 
     await revokeMembership(deps, orgId, session.userId);
+    await onMembershipTrimmed(pool, orgId);
 
     // Fire-and-forget, after the commit: a mail failure must never undo or
     // block a leave, and nothing here is a link the reader has to follow.

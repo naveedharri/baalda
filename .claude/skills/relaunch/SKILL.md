@@ -10,7 +10,7 @@ starts fresh instances of both. Postgres (Docker) is **left running** — restar
 the server process does not touch the DB, so no re-seed is needed.
 
 Project: `/Users/macbook/Documents/OpenSource/Baalda/app`
-- Desktop launch: `pnpm run dev:desktop` (= `pnpm --filter desktop tauri dev`; Vite on :1420) from the app root.
+- Desktop launch: `pnpm run dev:desktop` (= `pnpm --filter desktop tauri dev --config src-tauri/tauri.dev.conf.json`; Vite on :1420) from the app root. The dev config registers the `baalda-dev://` scheme; launch through the script, not a bare `tauri dev`, or the build registers production's `baalda://`.
 - Server launch: `pnpm run dev` from `app/apps/server/` (tsx watch; HTTP :3010, Hocuspocus WS :3011, GET /health).
 
 ## Steps

@@ -646,11 +646,11 @@ function InventoryComparison({
               ? comparisonPending
                 ? "The comparison will appear when the supported vault file list is ready."
                 : standaloneFileSyncBlocked && inventory.serverOnlyFiles.length > 0
-                ? "This server requires Pro to download files, including previously uploaded files. Review differences for available actions."
+                ? "This server requires Team to download files, including previously uploaded files. Review differences for available actions."
                 : localOnlyFormatNotes > 0
                 ? comparisonStale
-                  ? "Syncing these file types requires Pro. The Remote Vault view is last known and may be out of date."
-                  : "Syncing these file types requires Pro. They remain available to preview locally."
+                  ? "Syncing these file types requires Team. The Remote Vault view is last known and may be out of date."
+                  : "Syncing these file types requires Team. They remain available to preview locally."
                 : comparisonStale
                   ? "The Remote Vault is unavailable, so this last-known comparison may be out of date."
                 : restrictedNotes > 0

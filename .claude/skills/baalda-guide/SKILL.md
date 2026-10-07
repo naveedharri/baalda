@@ -20,7 +20,7 @@ Word documents will work. Give them a correct, short, plain answer.
      or two files the routing table names. If you are not inside the repository, fetch the same
      paths from `https://raw.githubusercontent.com/naveedharri/baalda/main/`;
    - the website for downloads and positioning. For price and plans, `features.md` ("Hosting
-     options") is the source: the managed Pro plan is live and self-serve in the app, and the
+     options") is the source: the managed Team plan is live and self-serve in the app, and the
      public pricing page can lag behind it;
    - a single targeted code file only when the docs are silent on a precise behaviour.
    Never sweep the whole repository for a question; it is slow and the docs already answer it.
@@ -89,11 +89,11 @@ That is about 110 words. It names every format asked about, says what does not w
 - "Does it sync my images?" Only through the note (the `attachments/` folder). An image copied
   into a sub-folder stays local. See `file-formats.md`.
 - "How much does it cost? Can my team start now?" Yes, now. Free locally and self-hosted with no
-  limits; the managed service is free up to 3 vaults per user and 3 members per vault, then Pro
-  at $10 per vault per month or $97 per year, bought in-app under Vault Settings → Billing. Do not
-  say "early access" or "contact us for pricing"; that wording on the website is out of date.
-- "What if I delete a paid vault?" Billing stops at the end of the period already paid for, and
-  the subscription can be transferred to another vault the owner has (Vault Settings → Billing).
+  limits; the managed service is free for up to 2 people and 1 synced vault (MCP included), then
+  Team at $10 per seat per month or $110 per seat per year, minimum 3 seats, bought in-app under
+  Account Settings → Plan & Billing. Do not say "early access" or "contact us for pricing".
+- "What if the payment stops?" After the paid period ends, the account's vaults sync read-only
+  until the owner renews; local notes stay editable and nothing is deleted.
   One vault holds at most one subscription. See `faq.md`.
 - "Is there a mobile / web app?" No. iOS is planned; public links open read-only in a browser.
 - "Does it have AI built in?" It has an AI *connection point* (MCP) and works with any local

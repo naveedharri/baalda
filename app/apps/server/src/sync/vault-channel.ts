@@ -19,6 +19,8 @@ import {
   encodePubsubActivityChanged,
   encodePubsubMemberJoined,
   encodePubsubOrgChanged,
+  encodePubsubAppearanceChanged,
+  type AppearanceChange,
   type OrgChange,
   encodePubsubRejected,
   encodePubsubBrake,
@@ -329,6 +331,12 @@ export class VaultChannel {
    *  new icon (#306); subscribers patch their vault list without a re-list. */
   async publishOrgChanged(vaultId: string, change: OrgChange): Promise<void> {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubOrgChanged(change));
+  }
+
+  /** The vault's shared appearance changed; every subscriber applies the
+   *  settings carried inline (same org-wide fan-out as {@link publishOrgChanged}). */
+  async publishAppearanceChanged(vaultId: string, change: AppearanceChange): Promise<void> {
+    await this.pubsub.publish(vaultTopic(vaultId), encodePubsubAppearanceChanged(change));
   }
 
   /** A read-only connection's edit was dropped (`ready`-independent; see the
@@ -1083,6 +1091,11 @@ class VaultConnection {
     if (msg.type === "org-changed") {
       // Org-wide like a join: every subscriber patches the vault's name/icon.
       this.send({ t: "org", ...msg.change });
+      return;
+    }
+    if (msg.type === "appearance-changed") {
+      // Org-wide like `org`: every member applies the vault's appearance.
+      this.send({ t: "appearance-changed", ...msg.change });
       return;
     }
     if (msg.type === "presence") {

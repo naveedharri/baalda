@@ -2,7 +2,7 @@
 // success page bounces into (routes/billing.ts). By the time it fires the
 // server has already confirmed the payment with the provider and written the
 // subscription, so the link carries no proof of anything — it only says "come
-// back and look": the app re-reads billing for that vault so Pro shows up
+// back and look": the app re-reads billing for the account so Team shows up
 // without the person hunting for it. Whoever can send the app a URL could send
 // this one, which is why it is a refresh trigger and never a grant.
 //

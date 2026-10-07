@@ -2404,64 +2404,6 @@ body:has(.sidebar-resizer.dragging) {
   background: var(--border-strong);
   transform: rotate(-45deg);
 }
-/* Appearance tab — per-item color picker over the whole vault */
-.appearance-list {
-  list-style: none;
-  margin: var(--sp-2) 0 var(--sp-3);
-  padding: 0;
-  max-height: 480px;
-  overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-}
-.appearance-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: 5px var(--sp-3);
-  min-height: 32px;
-}
-.appearance-row + .appearance-row {
-  border-top: 1px solid var(--border);
-}
-.appearance-row:hover {
-  background: var(--bg-hover);
-}
-.appearance-glyph {
-  flex-shrink: 0;
-  width: 16px;
-  height: 16px;
-  color: var(--text-secondary);
-}
-.appearance-glyph svg {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-/* Same pastel-inside / deeper-outline look as the sidebar glyph. */
-.appearance-glyph[style*="--glyph-fill"] svg {
-  fill: var(--glyph-fill);
-}
-.appearance-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-}
-.appearance-swatches {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  flex-shrink: 0;
-}
-.appearance-swatches .swatch {
-  padding: 0;
-  appearance: none;
-  background-clip: padding-box;
-}
-
 /* ============================================================
    Main pane — floating white sheet
    ============================================================ */
@@ -6516,6 +6458,89 @@ button.secondary:disabled {
   margin-top: var(--sp-1);
 }
 
+/* ---- Team Usage tab (Vault Settings → Usage) ----
+   A small dashboard inside one .billing-card: sync pill, stat tiles, footer.
+   Tokens only, so dark mode follows tokens.css. */
+.vault-usage-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.vault-usage-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--sp-3);
+}
+.vault-usage-tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+.vault-usage-caption {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+.vault-usage-value {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.vault-usage-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vault-usage-meter {
+  height: 4px;
+  margin-top: var(--sp-1);
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+.vault-usage-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+.vault-usage-meter.is-full > span {
+  background: var(--access-view-fg);
+}
+.vault-usage-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+.vault-usage-footer + .vault-usage-footer {
+  border-top: none;
+  padding-top: 0;
+}
+.vault-usage-footer-label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.vault-usage-footer .billing-action {
+  align-self: center;
+  margin-top: 0;
+}
+
 /* ---- Subscriptions list (#109) ----
    A `.member-list` row that has to carry a second line (renewal, price, seats)
    under the vault name, so its name cell stops being one ellipsised span.
@@ -6821,7 +6846,16 @@ button.secondary:disabled {
 .upgrade-waiting .muted {
   max-width: 36ch;
 }
-.upgrade-waiting .primary.sm {
+.upgrade-waiting > .primary.sm {
+  margin-top: var(--sp-2);
+}
+/* Waiting: Open checkout again + Cancel; timeout: Check again + Back. */
+.upgrade-waiting-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: var(--sp-2);
   margin-top: var(--sp-2);
 }
 
@@ -9794,4 +9828,487 @@ body.access-board-grabbing * {
   flex: none;
   font-size: 0.85em;
   color: var(--text-tertiary);
+}
+
+/* Account Settings → Plan & Billing seat breakdown (SeatUsageBreakdown). */
+.seat-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.seat-breakdown .limit-nudge {
+  margin-top: 0;
+}
+.seat-breakdown-table td {
+  font-variant-numeric: tabular-nums;
+}
+/* The informational sibling of .limit-nudge: same shape, accent tint. */
+.limit-nudge.is-info {
+  background: var(--accent-soft);
+}
+.limit-nudge.is-info .link-btn {
+  color: var(--accent);
+}
+.limit-nudge.is-info .link-btn:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.members-access-seat-line {
+  margin: 0 0 var(--sp-2);
+}
+
+/* ============================================================
+   Upgrade dialog, team mode: Free | Team plan comparison
+   ============================================================ */
+/* ---- Large modal (opt-in): `.modal-backdrop.is-page` + `.modal.is-page`,
+   with the body wrapped in `.modal-page-body > .modal-page-content`. A big
+   centred panel over the SAME translucent dimming backdrop as every other
+   modal, so the app (and Settings, when opened from there) stays visible,
+   dimmed, around it; it shrinks with small windows. Same z-index layer as
+   every `.modal-backdrop` (300, above `.settings-backdrop`'s 200). The header
+   stays on the panel surface; the body sits on the app tint so white cards
+   read as raised. Outside `.is-page` the wrapper divs are plain blocks. */
+.modal.is-page {
+  width: min(1240px, calc(100vw - 2 * 96px));
+  max-width: none;
+  height: min(960px, calc(100vh - 2 * 56px));
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  /* No larger token exists: the two largest stacked give the deep elevation. */
+  box-shadow: var(--shadow-lg), var(--shadow-md);
+  overflow: hidden;
+  /* Opacity only: a transform would make this a containing block for any
+     fixed-position child (see `.settings-page.settings-modal`). */
+  animation: fade-in var(--t-med) var(--ease) both;
+}
+.modal.is-page > .modal-header {
+  flex: none;
+  align-items: center;
+  margin: 0;
+  padding: var(--sp-4) var(--sp-6);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+}
+.modal.is-page .modal-page-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-8) var(--sp-6);
+  background: var(--bg-app);
+}
+/* `margin: auto` centres vertically when there is room and collapses to 0
+   when the content overflows, so the top never scrolls out of reach (which
+   `justify-content: center` would do). */
+.modal.is-page .modal-page-content {
+  width: 100%;
+  max-width: 1040px;
+  margin: auto;
+}
+/* The Upgrade modal is top-aligned (not centred like a generic page): the
+   heading sits a fixed distance under the header and any spare height
+   stays below the cards. */
+.modal.upgrade-dialog.is-page .modal-page-body {
+  padding: var(--sp-10) var(--sp-6) var(--sp-8);
+}
+.modal.upgrade-dialog.is-page .modal-page-content {
+  max-width: 960px;
+  margin: 0 auto;
+}
+/* Team mode, after plan selection (waiting / timeout / success): the panel
+   drops `.is-page` for `.is-compact` and takes vault mode's size — the
+   `.upgrade-dialog` width, content height, centred by the backdrop. Same
+   animation as `.is-page`, so swapping the class does not replay the
+   entrance (`.modal`'s rise-in would). */
+.modal.upgrade-dialog.is-compact {
+  animation: fade-in var(--t-med) var(--ease) both;
+}
+.upgrade-tiers-heading:has(+ .upgrade-reason) {
+  margin-bottom: 8px;
+}
+.upgrade-reason {
+  margin: 0 0 12px;
+}
+.upgrade-tiers-heading + .upgrade-reason {
+  margin-bottom: 24px;
+  text-align: center;
+}
+.upgrade-tiers-heading {
+  margin: 0 0 28px;
+  text-align: center;
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+/* Two equal columns sharing eight row tracks: icon, head, tagline, price,
+   controls, action, list head, list. Each card spans all eight and adopts
+   them through `subgrid`, so every row starts at the same y in both cards
+   and both cards end at the same bottom edge. Row spacing comes from each
+   row's own margin (row-gap 0), so a placeholder row costs only its own
+   height. */
+.upgrade-tiers {
+  --tier-pad: var(--sp-6);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 455px));
+  grid-template-rows: repeat(7, auto) 1fr;
+  justify-content: center;
+  column-gap: var(--sp-6);
+  row-gap: 0;
+  align-items: stretch;
+}
+.upgrade-tier {
+  display: grid;
+  grid-row: span 8;
+  grid-template-rows: subgrid;
+  row-gap: 0;
+  align-content: start;
+  padding: var(--tier-pad);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  /* Raised off the body's app tint: a contact shadow plus a soft spread. */
+  box-shadow: var(--shadow-sm), var(--shadow-md);
+}
+/* 2px accent border; one less pixel of padding keeps both cards' rows on
+   the same x and y. A deeper spread marks it as the featured plan. */
+.upgrade-tier.is-featured {
+  padding: calc(var(--tier-pad) - 1px);
+  border: 2px solid var(--accent);
+  box-shadow: var(--shadow-sm), var(--shadow-lg);
+}
+.upgrade-tier-icon {
+  display: flex;
+  height: 40px;
+  margin-bottom: var(--sp-4);
+  color: var(--text-secondary);
+}
+.upgrade-tier-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  min-height: 30px;
+}
+.upgrade-tier-name {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.upgrade-tier-toggle {
+  flex: none;
+}
+.upgrade-tier-toggle button {
+  flex: none;
+  white-space: nowrap;
+  padding: var(--sp-1) var(--sp-3);
+}
+.upgrade-tier-save {
+  color: var(--accent);
+  font-weight: 600;
+}
+.upgrade-tier-tagline {
+  margin-top: var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.upgrade-tier-price {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 0;
+  margin-top: var(--sp-3);
+}
+.upgrade-tier-unit {
+  display: flex;
+  flex-direction: column;
+  font-size: var(--fs-xs);
+  line-height: 1.3;
+  color: var(--text-secondary);
+}
+.upgrade-tier-controls {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--sp-1);
+  min-height: 0;
+  margin-top: var(--sp-4);
+  font-size: var(--fs-sm);
+}
+.upgrade-tier-muted {
+  color: var(--text-secondary);
+}
+.upgrade-tier-stepper {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-md);
+  color: var(--text-primary);
+}
+.upgrade-tier-stepper-label {
+  margin-right: var(--sp-1);
+  font-weight: 500;
+}
+.upgrade-tier-stepper strong {
+  min-width: 2ch;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.upgrade-tier-stepper .icon-btn {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+.upgrade-tier-stepper .icon-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.upgrade-tier-stepper .icon-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.upgrade-tier-math {
+  margin-left: auto;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.upgrade-tier-footnote {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.upgrade-tier-centered {
+  text-align: center;
+}
+.upgrade-tier-action {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+}
+.upgrade-tier-cta {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+}
+.upgrade-tier-cta.ghost-pill:disabled {
+  opacity: 1;
+  color: var(--text-tertiary);
+  box-shadow: none;
+}
+/* The divider runs edge to edge: negative side margins cancel the card's
+   padding and the padding puts the text back on the content edge. */
+.upgrade-tier-list-head {
+  margin: var(--sp-5) calc(-1 * var(--tier-pad)) 0;
+  padding: 18px var(--tier-pad) 0;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.upgrade-tier.is-featured .upgrade-tier-list-head {
+  margin-inline: calc(-1 * (var(--tier-pad) - 1px));
+  padding-inline: calc(var(--tier-pad) - 1px);
+}
+.upgrade-tier .upgrade-features {
+  margin: var(--sp-3) 0 0;
+  gap: var(--sp-2);
+}
+.upgrade-tier .upgrade-features li {
+  padding-left: 26px;
+  font-size: var(--fs-md);
+}
+.upgrade-tier .upgrade-features li::before {
+  top: 1px;
+  width: 18px;
+  height: 18px;
+  font-size: 10px;
+}
+.upgrade-tier:not(.is-featured) .upgrade-features li::before {
+  background: var(--bg-subtle);
+  color: var(--text-tertiary);
+}
+/* Narrow page: the cards stack and leave the shared row tracks. */
+@media (max-width: 820px) {
+  .upgrade-tiers {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    row-gap: var(--sp-4);
+  }
+  .upgrade-tier {
+    grid-row: auto;
+    grid-template-rows: none;
+  }
+  .upgrade-tier-list-head.is-placeholder {
+    padding-bottom: 0;
+    font-size: 0;
+    line-height: 0;
+  }
+}
+
+/* ---- Account Settings → Plan & Billing ----
+   One plan card: summary (name, pill, price line) left, the primary action and
+   the link-style secondary actions right. Usage tiles reuse .vault-usage-*;
+   the people list reuses .members-table. */
+/* Two columns, both vertically centred: the summary block (name + pill, then
+   the price line) on the left, the action block on the right as ONE unit.
+   Neither column carries padding or margins, so the button's right edge sits
+   on the card's content edge, the same inset as the plan name on the left. */
+.plan-page-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--sp-4);
+  row-gap: var(--sp-3);
+  margin: 0;
+  padding: 0;
+}
+.plan-page-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+}
+.plan-page-summary .billing-plan-name {
+  font-size: var(--fs-xl);
+}
+.plan-page-actions {
+  justify-self: end;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0;
+}
+.plan-page-actions .billing-action {
+  align-self: flex-end;
+  margin: 0;
+}
+/* Link buttons carry their own side padding for the hover pill; pull the row
+   out by that much so the last link's TEXT lines up with the button's edge. */
+.plan-page-links {
+  display: flex;
+  gap: var(--sp-1);
+  margin-right: calc(-1 * var(--sp-2));
+}
+/* Narrow panels: the action block drops under the summary, left-aligned. */
+@media (max-width: 520px) {
+  .plan-page-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .plan-page-actions {
+    justify-self: start;
+    align-items: flex-start;
+  }
+  .plan-page-actions .billing-action {
+    align-self: flex-start;
+  }
+  .plan-page-links {
+    margin-right: 0;
+    margin-left: calc(-1 * var(--sp-2));
+  }
+}
+.plan-page-people .members-table-names {
+  font-size: var(--fs-xs);
+}
+/* Vaults column: one chip per vault, wrapping onto more lines rather than
+   truncating, so the row grows instead of hiding names behind a tooltip. */
+.plan-page-vault-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 2px 0;
+}
+.plan-page-vault-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+/* The vault switcher's own icon, shrunk to a 12px glyph. */
+.plan-page-vault-chip .vault-tile {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  font-size: 8px;
+}
+.plan-page-seat-col {
+  width: 72px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Account Settings → Vaults: a section label that carries its own actions on
+   the right (New vault / Join with code, Open existing). The label keeps its
+   small caps; the buttons inside it must not inherit them. */
+.settings-page .subhead.account-vaults-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+.account-vaults-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  text-transform: none;
+  letter-spacing: normal;
+}
+.account-vaults-footnote {
+  margin-top: var(--sp-2);
+}
+.account-vaults-info {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-secondary);
+  cursor: help;
+}
+
+/* Vault appearance defaults: the "Vault default" / "Set by the vault owner"
+   pill and the personal page's "Reset to vault default" link. */
+.appearance-tag {
+  font-size: var(--fs-xs, 11px);
+  color: var(--text-tertiary);
+  background: var(--bg-hover);
+  border-radius: 999px;
+  padding: 1px 8px;
+  margin-left: auto;
+  margin-right: 8px;
+  white-space: nowrap;
+  align-self: center;
+}
+.appearance-clear {
+  margin-left: auto;
+  margin-right: 8px;
+  white-space: nowrap;
+  align-self: center;
+}
+.appearance-defaults-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.appearance-defaults-head .appearance-tag {
+  margin-left: 0;
 }

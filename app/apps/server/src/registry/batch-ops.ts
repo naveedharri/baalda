@@ -1,4 +1,4 @@
-import { withNoteQuota, NOTE_LIMIT_MESSAGE } from "../billing/note-quota.js";
+import { withNoteQuota, noteLimitMessage } from "../billing/note-quota.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
@@ -124,7 +124,7 @@ export type RegisterResult<Row> =
   | { status: "created"; row: Row; wrote: true }
   | { status: "adopted"; row: Row; wrote: boolean }
   | { status: "conflict"; code: "doc_id_conflict" | "note_deleted"; message: string; id: string }
-  | { status: "error"; code: Exclude<RegisterCode, "doc_id_conflict" | "note_deleted">; message: string };
+  | { status: "error"; code: Exclude<RegisterCode, "doc_id_conflict" | "note_deleted">; message: string; limit?: number };
 
 /** A registration that cannot collide on id across vaults. Folders have no
  *  doc_id namespace at all, and a `files` id that turns up elsewhere in THIS
@@ -596,17 +596,17 @@ export async function registerNotes(
   ctx: RegisterCtx,
   inputs: NoteInput[],
 ): Promise<Array<RegisterResult<NoteRow>>> {
-  return withNoteQuota(ctx.vaultId, ctx.db, (db, remaining) => {
+  return withNoteQuota(ctx.vaultId, ctx.db, (db, remaining, cap) => {
     // Permission reads must use the pinned session too; otherwise requests
     // waiting on this lock could exhaust the pool while its holder needs a slot.
     const locked = registerCtx(ctx.vaultId, ctx.userId, db, {
       resolverCache: ctx.resolverCache,
       cache: { ...ctx.cache, notes: new Map() },
     });
-    return registerNotesWithinQuota(locked, inputs, remaining);
+    return registerNotesWithinQuota(locked, inputs, remaining, cap);
   });
 }
-async function registerNotesWithinQuota(ctx: RegisterCtx, inputs: NoteInput[], remaining: number | null): Promise<Array<RegisterResult<NoteRow>>> {
+async function registerNotesWithinQuota(ctx: RegisterCtx, inputs: NoteInput[], remaining: number | null, cap?: number): Promise<Array<RegisterResult<NoteRow>>> {
   const results = new Array<RegisterResult<NoteRow> | undefined>(inputs.length);
   const plans: NoteInsertPlan[] = [];
   // Ids this batch has already claimed. Seeds the frozen-root latch's existence
@@ -708,7 +708,7 @@ async function registerNotesWithinQuota(ctx: RegisterCtx, inputs: NoteInput[], r
 
     if (remaining !== null && !alreadyRegistered.has(id) && !known.has(id)) {
       if (remaining <= 0) {
-        results[index] = { status: "error", code: "note_limit_reached", message: NOTE_LIMIT_MESSAGE };
+        results[index] = { status: "error", code: "note_limit_reached", message: noteLimitMessage(cap), limit: cap };
         continue;
       }
       remaining--;

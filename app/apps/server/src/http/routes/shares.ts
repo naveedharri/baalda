@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isAccountReadOnly } from "../../billing/lapse.js";
 import { Hono } from "hono";
 import type pg from "pg";
 import { pool } from "../../db/pool.js";
@@ -685,6 +686,23 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           )`,
       [vaultId],
     );
+
+    // Billing lapse (account read-only): padlock the whole vault for everyone
+    // with NO lifts — no grant frees anyone from it. Non-routable id, as below.
+    if (await isAccountReadOnly(pool, org)) {
+      rows.push({
+        id: `billing:${org}`,
+        resource_type: "vault",
+        resource_id: org,
+        principal_type: "org",
+        principal_id: org,
+        permission: "locked",
+        reason: "billing_lapsed",
+        created_by: null,
+        created_at: null,
+      });
+      return c.json({ locks: rows });
+    }
 
     const posture = await vaultPostureRow(pool, org);
     // The caller's OWN vault level replaces the posture for them (resolver
