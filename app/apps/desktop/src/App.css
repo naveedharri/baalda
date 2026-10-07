@@ -10366,7 +10366,7 @@ body.access-board-grabbing * {
 }
 
 /* Vault appearance defaults: the "Vault default" / "Set by the vault owner"
-   pill and the "Reset to vault default" / "Use the vault setting" links. */
+   pill and the personal page's "Reset to vault default" link. */
 .appearance-tag {
   font-size: var(--fs-xs, 11px);
   color: var(--text-tertiary);

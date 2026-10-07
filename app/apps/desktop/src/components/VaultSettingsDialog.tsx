@@ -2276,9 +2276,6 @@ function ImportExportTab() {
 function AppearanceTab({ canManage, isSynced }: { canManage: boolean; isSynced: boolean }) {
   const orgId = useStore((s) => s.session?.activeOrganizationId ?? null);
   const settings = useStore((s) => (orgId ? s.vaultAppearance[orgId] : undefined)) ?? EMPTY_APPEARANCE;
-  // The viewer's own overrides: a vault change to one of these keys is real
-  // for everyone else but invisible here, which read as "the toggle does nothing".
-  const overrides = useStore((s) => s.appearanceOverrides);
   // Sliders fire on every pixel of a drag: apply locally at once, PUT once
   // the thumb rests for 300 ms. Everything else saves on change.
   const pending = useRef<{ timer: number; settings: AppearanceSettings } | null>(null);
@@ -2350,21 +2347,6 @@ function AppearanceTab({ canManage, isSynced }: { canManage: boolean; isSynced: 
             values={vaultAppearanceValues(settings)}
             onChange={change}
             readOnly={!canManage}
-            trailing={(key) =>
-              overrides[key] !== undefined ? (
-                <button
-                  type="button"
-                  className="link-btn appearance-clear"
-                  title="Your own Appearance setting is used instead of the vault's on this device."
-                  onClick={(e) => {
-                    e.preventDefault();
-                    useStore.getState().setAppearanceOverride(key, undefined);
-                  }}
-                >
-                  You've overridden this for yourself · Use the vault setting
-                </button>
-              ) : null
-            }
           />
           {canManage && (
             <button className="link-btn" onClick={resetToDefaults}>
