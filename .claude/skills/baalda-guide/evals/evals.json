@@ -18,13 +18,13 @@
     {
       "id": 1,
       "prompt": "My team of 6 uses Obsidian with a shared Dropbox folder and it keeps making conflicted copies. Would Baalda fix that? Do we all need to pay, and can we keep our existing vault?",
-      "expected_output": "Yes: live merge, no conflicted copies; existing Obsidian vault opens as-is (plugins don't carry over); free locally/self-hosted; managed service free up to 3 vaults/3 members, then Pro $10/vault/month or $97/year bought in-app; team can start today.",
+      "expected_output": "Yes: live merge, no conflicted copies; existing Obsidian vault opens as-is (plugins don't carry over); free locally/self-hosted; managed Free covers 2 people and 1 synced vault, so a team of 6 needs Team at $10 per seat per month or $110 per seat per year (minimum 3 seats, 6 seats = $60/month), bought in-app; team can start today.",
       "files": [],
       "assertions": [
         "Says conflicted copies do not happen because edits merge automatically",
         "Says the existing Obsidian vault folder can be opened directly without conversion",
         "Mentions that Obsidian plugins do not carry over",
-        "States the managed plan is live and self-serve now (upgrade in-app), with Pro at $10 per vault per month or $97 per year; does not say 'early access' or 'contact us for pricing'",
+        "States the managed plan is live and self-serve now (upgrade in-app under Account Settings → Plan & Billing), with Team at $10 per seat per month or $110 per seat per year, minimum 3 seats; does not say 'early access' or 'contact us for pricing'",
         "Distinguishes free (local/self-host) from the paid managed Team plan",
         "Does not use the words CRDT, Yjs, or Hocuspocus"
       ]
@@ -45,28 +45,27 @@
     },
     {
       "id": 3,
-      "prompt": "I deleted my paid Baalda vault last week and started a fresh one. Am I still being charged, and can I just move the subscription over instead of paying again?",
-      "expected_output": "Billing was set to stop at the end of the already-paid period when the vault was deleted, so no new charge; the subscription is kept under Vault Settings → Billing → \"From deleted vaults\" and Transfer moves it to another vault the person owns that is not already on Pro, at the same price and period, and it starts renewing again.",
+      "prompt": "Our Team plan payment failed and the period ended. Can we still edit our notes, and did we lose anything?",
+      "expected_output": "Nothing is deleted. Every vault on the account keeps syncing read-only for everyone until the owner renews in Account Settings → Plan & Billing or gets back under the Free limits; notes stay editable on each computer.",
       "files": [],
       "assertions": [
-        "Says deleting the vault stopped the billing at the end of the period already paid for, not immediately",
-        "Says the subscription can be transferred to the new vault instead of buying again",
-        "Names the in-app location: Vault Settings → Billing, under \"From deleted vaults\", Transfer",
-        "States that the target vault must be one they own and not already on Pro",
-        "Does not claim a refund is issued",
-        "Under 250 words"
+        "Says nothing is deleted",
+        "Says the account's vaults sync read-only until the owner renews or drops under the Free limits",
+        "Says local notes on each computer stay editable",
+        "Names Account Settings → Plan & Billing",
+        "Under 200 words"
       ]
     },
     {
       "id": 4,
-      "prompt": "Two admins on my vault both clicked Upgrade to Pro. Are we paying twice, and what happens if the payment provider is down when I try to delete a vault?",
-      "expected_output": "No double charge: a vault can hold only one subscription and a second checkout is refused. If the payment provider cannot be reached to stop billing, the vault is not deleted at all and the app shows the error.",
+      "prompt": "We're on Free with two people. I want to invite a third teammate and connect Claude to our notes. What do I need to pay for?",
+      "expected_output": "Connecting Claude through MCP is free. A third person needs Team: Free allows 2 people on the account, and Team is $10 per seat per month or $110 per seat per year with a minimum of 3 seats, bought by the owner in Account Settings → Plan & Billing.",
       "files": [],
       "assertions": [
-        "Says a vault can have only one subscription and the second purchase is refused",
-        "Says deleting a Pro vault cancels the subscription at the end of the current period first",
-        "Says that if the provider cannot be reached the vault is not deleted and an error is shown",
-        "Points at Vault Settings → Billing for checking the current plan",
+        "Says MCP / connecting an AI client is included on Free",
+        "Says Free allows up to 2 people on the account, the owner included",
+        "States Team pricing per seat with a minimum of 3 seats",
+        "Names Account Settings → Plan & Billing",
         "Does not use the words CRDT, Yjs, or Hocuspocus"
       ]
     }

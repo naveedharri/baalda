@@ -101,7 +101,8 @@ pnpm run migrate          # apply migrations/*.sql in order
 pnpm run dev              # tsx watch; HTTP :3010, Hocuspocus WS :3011, GET /health
 ```
 
-**Desktop** (from `app/`): `pnpm run dev:desktop` (= `pnpm --filter desktop tauri dev`; Vite on :1420).
+**Desktop** (from `app/`): `pnpm run dev:desktop` (= `pnpm --filter desktop tauri dev --config src-tauri/tauri.dev.conf.json`; Vite on :1420).
+The dev config registers the `baalda-dev://` scheme, so a dev build never claims production's `baalda://`; macOS cannot route deep links to `tauri dev`, so the checkout success page skips the hand-back for it.
 Build: `pnpm run build:desktop`.
 
 ## Test
@@ -388,7 +389,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 The top banners above the editor share ONE notice slot (`lib/noticeSlot.ts`, hook
 `components/useNoticeSlot.ts`): each claims it and only the highest-priority claim shows, in the
 order held bulk delete > reconcile summary > open note deleted/access removed > vault made local
-only > vault folder missing > closed-app changes > not syncing > sync paused > note limit > create
+only > vault folder missing > Team subscription lapsed (read-only sync) > closed-app changes > not syncing > sync paused > note limit > create
 refusal > open note's file gone on disk > attachments local only. Informational notices fade after
 `NOTICE_FADE_MS` (20 s) through their own Dismiss; notices with a pending choice (sign in, locate,
 upgrade, close note, keep local) stay until answered. A faded notice loses nothing: Activity keeps
@@ -488,7 +489,8 @@ An attachment-local-only notice is driven only by the server's explicit
 `attachment_sync_requires_pro` refusal. Do not infer it from a Free plan label:
 the vault may be Pro, and billing-disabled self-hosts may still sync attachments.
 The notice shows in file previews while notes continue to report their own sync state.
-The vault Settings list shows account memberships and this app profile's recent
+The vault list lives in Account Settings → Vaults (Vault Settings keeps it only
+when signed out) and shows account memberships and this app profile's recent
 local folders, not a scan of the managed root. Production and staging have
 separate recents even when they share a root; Open existing reopens a folder.
 
@@ -548,16 +550,42 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   no renderer deps).
 - `billing/` — Polar behind `provider.ts`; `store.ts` is the ONLY writer of a `subscriptions` row and
   always persists the provider's returned state. One vault = one subscription (409 `already_subscribed`).
-  Managed billing gives new accounts two free unsubscribed vaults and reserves standalone-file sync for
-  Pro vaults. Migration 031 snapshots the prior benefits per user: existing accounts keep three free
-  vaults, but standalone-file sync still requires Pro. An active or past-due Pro vault unlocks standalone-file
-  sync for all its members; billing-disabled self-hosts remain unlimited.
+  `BILLING_MODEL=vault|team` (default `vault` until the production flip) picks the model. **`team`
+  (the shipped model):** Free = 2 people per account (owner counts), 1 synced vault, MCP included,
+  no Assistant, no standalone-file sync (embeds under `attachments/` still sync), "unlimited"
+  notes/storage under hidden per-vault ceilings `ABUSE_MAX_NOTES` (100000) / `ABUSE_MAX_STORAGE_MB`
+  (10240). Team = $10/seat/month or $110/seat/year, `TEAM_MIN_SEATS` 3, owner buys N seats upfront
+  (402 `seat_limit_reached {seats, used, pending, message}` when full; pending unexpired invites
+  reserve a seat), unlimited vaults on one account, Assistant + file sync included; managed in
+  Account Settings → Plan & Billing (per-vault usage: Vault Settings → Usage), plan named "Team" in-app (was "Pro"). Existing subscribers keep
+  their price via a Polar discount on the Team seat product (ops scripts
+  `scripts/billing/move-legacy-subs.ts`, `polar-spike.ts`). Old 402 codes stay emitted for old
+  desktops (`attachment_sync_requires_pro`, `housekeeper_requires_pro`, `vault_limit_reached`,
+  `member_limit_reached` now `{limit: 2, scope: 'account'}`); new: `housekeeper_requires_team`,
+  `account_read_only`, `upgrade_in_new_app`, `transfer_retired`. **`vault` (legacy):** per-vault
+  Pro; new accounts get `FREE_MAX_VAULTS` (2) unsubscribed vaults, migration 031 keeps three for
+  older accounts, and an active or past-due Pro vault unlocks standalone-file sync for its members.
+  Billing-disabled self-hosts remain unlimited under both.
   Deleting a vault cancels **at period end first** and aborts the delete if the provider refuses (502
   `subscription_cancel_failed`; Better Auth's own org-delete is off via `disableOrganizationDeletion`).
   The row then outlives the org as a **tombstone** — migration 024 dropped the cascade and added
   `deleted_at`/`org_name`/`owner_user_id` — so a late webhook is stored, not FK-failed and retried
   forever. Webhooks resolve by `provider_subscription_id` first, then metadata, which is what lets
   `POST /api/billing/orgs/:orgId/transfer` (owner; un-cancels at Polar) move one; `/mine` reconciles.
+  Under `team`, `/mine` adds `accountPlan`/`accountId` per vault and transfer answers `transfer_retired`.
+- `billing/plan.ts` — the SINGLE plan resolver (`resolveAccountPlan` by org, account or user → plan,
+  limits, `lapsed`); `planEnforced()` = Cloud deployment AND billing configured, else unlimited.
+  `billing/accounts.ts` — `billing_accounts` (one per owner) + `billing_account_orgs` join, created
+  lazily (`ensureAccountForUser`/`ensureAccountForOrg`). `billing/lapse.ts` — lapse (period ended or
+  failed payment past grace, over Free limits) makes every attached vault sync read-only for
+  everyone: 402 `account_read_only`, a synthetic `billing:<orgId>` lock row with
+  `reason: 'billing_lapsed'`, sockets reconnected read-only; reads untouched, local files stay
+  editable. `billing/usage.ts` — per-vault counts for the account (people, live notes, ready blob
+  bytes, `files` rows). Account routes (`routes/billing.ts`): `GET /api/billing/account`,
+  `…/account/usage`, `…/account/seats/preview?seats=n`, `POST …/account/checkout {seats, interval,
+  successUrl}`, `PATCH …/account/seats`, `POST …/account/cancel|resume|portal`,
+  `POST /api/billing/orgs/:orgId/move {toAccountId}`; the old per-org checkout answers 409
+  `upgrade_in_new_app`.
 - `sync/hocuspocus.ts` — `onAuthenticate` verifies the per-doc JWT & sets `readOnly` for view grants;
   `onChange` appends the binary update + schedules re-index. `disconnectDoc` force-closes sockets on revoke.
 - `yjs/persistence.ts` — binary-only store: `doc_updates` append log + `doc_snapshots` (compact past
@@ -810,7 +838,14 @@ change in prod) · `BETTER_AUTH_URL` · `PORT` (3010) · `HOCUSPOCUS_PORT` (3011
 (600) · `COMPACTION_THRESHOLD` (50) · `TRASH_RETENTION_DAYS` (30) · `CORS_ORIGINS` (optional) · `OPENAI_API_KEY` (optional) ·
 `EMAIL_FROM` + `SMTP_URL` | `RESEND_API_KEY` (optional; turns on password reset, sign-up verification
 and invitation emails — `src/email/mailer.ts`; unset ⇒ none offered, like Google OAuth) · `BUG_REPORT_EMAIL` (optional; with email on, the desktop's sidebar bug icon emails reports
-there, Reply-To = reporter — `http/routes/bug-reports.ts`; unset ⇒ the icon is hidden).
+there, Reply-To = reporter — `http/routes/bug-reports.ts`; unset ⇒ the icon is hidden) ·
+billing (managed/Polar only; self-hosters leave all unset ⇒ unlimited): `POLAR_ACCESS_TOKEN` +
+`POLAR_WEBHOOK_SECRET` + `POLAR_SERVER` · `BILLING_MODEL` (`vault`|`team`, default `vault`) ·
+`POLAR_PRODUCT_MONTHLY_ID`/`POLAR_PRODUCT_YEARLY_ID` (per-vault) ·
+`POLAR_PRODUCT_TEAM_MONTHLY_ID`/`POLAR_PRODUCT_TEAM_YEARLY_ID` · `TEAM_PRICE_MONTHLY_CENTS` (1000) ·
+`TEAM_PRICE_YEARLY_CENTS` (11000) · `TEAM_MIN_SEATS` (3) · `ABUSE_MAX_NOTES` (100000) ·
+`ABUSE_MAX_STORAGE_MB` (10240) · `FREE_MAX_VAULTS`/`FREE_MAX_MEMBERS`/`FREE_MAX_STORAGE_MB`
+(per-vault model only).
 
 ## Conventions & gotchas
 
@@ -890,7 +925,9 @@ Finding cards are data-driven; models choose allowlisted capabilities, while
 existing permission-checked tools own changes. Link and filename changes require
 concrete previews. Never interpret generated text as executable tool authority.
 
-On Cloud servers Free vaults can register 20,000 live notes. New note
+On Cloud servers with billing on, Free vaults can register up to `ABUSE_MAX_NOTES` (100000) live
+notes under `BILLING_MODEL=team` (a hidden abuse ceiling; Free is marketed unlimited) and 20,000
+under the legacy `vault` model. New note
 registration and MCP creation serialize quota checks with the same per-vault
 session advisory lock (`billing/note-quota.ts`). Existing notes remain adoptable
 at/above the cap; no data is deleted. `note_limit_reached` prompts an upgrade but

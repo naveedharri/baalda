@@ -36,8 +36,8 @@ Otherwise fetch the same paths from GitHub:
 ## 3. The website (pricing, downloads, positioning)
 
 For price and plans, trust `references/features.md` ("Hosting options"), which mirrors the
-server's billing code and the app's Upgrade to Pro dialog. The public pricing page may still say
-the Team plan is in early access; the in-app purchase is live.
+server's billing code and the app's Plan & Billing tab. The public pricing page may lag behind;
+the in-app purchase is live.
 
 | Page | URL |
 |---|---|
@@ -78,9 +78,10 @@ Do a targeted read of one file, never a sweep. Good entry points:
 - `docs/specs/REQUIREMENTS.md` lists graph view, semantic search and version history as
   deferred. All three shipped.
 - `CHANGELOG.md` at the repo root is abandoned; use `docs/RELEASE_NOTES.md`.
-- baalda.com/pricing describes the Team plan as "early access, talk to us". The managed Pro plan is
-  live and self-serve in the app (Vault Settings → Billing); see `features.md`. Code:
-  `app/apps/server/src/http/routes/billing.ts` (plans) and `config.ts` (free caps).
+- baalda.com/pricing may lag behind the app. The managed Team plan is live and self-serve in the
+  app (Account Settings → Plan & Billing); see `features.md`. Code:
+  `app/apps/server/src/billing/plan.ts` (limits), `http/routes/billing.ts` (routes) and
+  `config.ts` (prices and ceilings).
 
 ## Recency check
 

@@ -378,20 +378,26 @@ confirm `/health` and a real sync round-trip, then promote.
 | `BOOTSTRAP_MAX_PAGE_DOCS` | no | `256` | Doc budget for one bootstrap page, for a vault of many tiny notes. |
 | `BOOTSTRAP_CONCURRENCY` | no | `4` | Bootstrap pages built at once across this instance. Past it a page request answers 503 + `Retry-After` (`bootstrap_busy`). Raise only alongside the container's memory: a page is merged and gzipped in heap before a byte is sent. |
 | `BOOTSTRAP_TTL_HOURS` | no | `24` | How long a bootstrap session's materialised doc list stays valid. Past it a page request answers 410 `session_expired` and the client re-POSTs with a fresh `have`. |
-| `POLAR_ACCESS_TOKEN` | no | unset | **Billing (optional).** Unset ⇒ billing fully disabled: no upgrade UI in clients, no free-tier limits — every self-hosted vault is unlimited. Set (with the vars below) ⇒ per-vault Pro subscriptions via [Polar](https://polar.sh). |
+| `POLAR_ACCESS_TOKEN` | no | unset | **Billing (optional).** Unset ⇒ billing fully disabled: no upgrade UI in clients, no free-tier limits — every self-hosted vault is unlimited. Set (with the vars below) ⇒ subscriptions via [Polar](https://polar.sh): per-vault Pro, or per-seat Team with `BILLING_MODEL=team`. Self-hosters leave every billing variable below unset. |
 | `POLAR_WEBHOOK_SECRET` | with billing | unset | Signing secret of a Polar webhook endpoint pointed at `https://<your-domain>/api/billing/webhook` (raw format, `subscription.*` events). |
-| `POLAR_PRODUCT_MONTHLY_ID` | with billing | unset | Polar product id for the monthly plan. |
-| `POLAR_PRODUCT_YEARLY_ID` | with billing | unset | Polar product id for the yearly plan. |
+| `POLAR_PRODUCT_MONTHLY_ID` | with billing | unset | Polar product id for the per-vault monthly plan. Kept set under the Team model so subscriptions bought earlier are still classified. |
+| `POLAR_PRODUCT_YEARLY_ID` | with billing | unset | Polar product id for the per-vault yearly plan. Same as above. |
+| `BILLING_MODEL` | no | `vault` | `vault` = per-vault Pro with the `FREE_MAX_*` caps; `team` = one Team account per owner, sold per seat, with Free at 2 people and 1 synced vault. Only meaningful with billing on. |
+| `POLAR_PRODUCT_TEAM_MONTHLY_ID` | with `team` | unset | Polar seat-based product, per seat per month. |
+| `POLAR_PRODUCT_TEAM_YEARLY_ID` | with `team` | unset | Polar seat-based product, per seat per year. |
+| `TEAM_PRICE_MONTHLY_CENTS` / `TEAM_PRICE_YEARLY_CENTS` | no | `1000` / `11000` | Per-seat prices shown in the app and seat previews. Polar's product price is what is charged. |
+| `TEAM_MIN_SEATS` | no | `3` | Smallest seat count a Team checkout accepts. |
+| `ABUSE_MAX_NOTES` / `ABUSE_MAX_STORAGE_MB` | no | `100000` / `10240` | Team model: per-vault ceilings on live notes and attachment storage for Free accounts (402 `note_limit_reached` / `storage_limit_reached`). Never applied with billing off. |
 | `POLAR_SERVER` | no | `sandbox` | `sandbox` or `production` Polar environment. |
-| `FREE_MAX_VAULTS` | no | `2` | Free-tier cap on unsubscribed vaults for new accounts (only enforced when billing is enabled). Migration 031 records the previous three-vault allowance for accounts that already exist. |
-| `FREE_MAX_MEMBERS` | no | `3` | Free-tier cap on members + pending invitations per unsubscribed vault (only enforced when billing is enabled). Gates new invitations and join-code redemptions only; lowering it never removes existing members. |
+| `FREE_MAX_VAULTS` | no | `2` | Per-vault model only. Free-tier cap on unsubscribed vaults for new accounts (only enforced when billing is enabled). Migration 031 records the previous three-vault allowance for accounts that already exist. |
+| `FREE_MAX_MEMBERS` | no | `3` | Per-vault model only. Free-tier cap on members + pending invitations per unsubscribed vault (only enforced when billing is enabled). Gates new invitations and join-code redemptions only; lowering it never removes existing members. |
 | `BLOB_STORAGE` | no | `postgres` | Where attachment BYTES live: `postgres` (zero config) or `s3`. See [Attachments storage](#attachments-storage). An unrecognised value, or `s3` with an incomplete bucket config, is a fatal startup error. |
 | `MAX_BLOB_BYTES` | no | `26214400` | Hard ceiling for one attachment on the Postgres provider, in bytes (25 MB). A heap bound, not a taste one — that provider buffers the whole value, ~3.7x, in a 512 MB heap. Raise it only alongside the container's memory. |
 | `MAX_INFLIGHT_UPLOAD_BYTES` | no | `2 × MAX_BLOB_BYTES` | Total upload-body bytes admitted at once. Beyond it uploads queue, then shed with 503. Never lower than `MAX_BLOB_BYTES`. |
 | `MAX_BLOB_BYTES_DIRECT` | no | `524288000` | Ceiling for one attachment on S3 (500 MB). A product decision, not a heap bound: the bytes never enter this process. Per-category caps still apply. |
 | `BLOB_MIME_ENFORCE` | no | `reject` | `reject` answers 415 for a Content-Type Baalda does not know; `warn` logs and stores it. Use `warn` first on an existing server to see what enforcement would refuse. |
 | `BLOB_PENDING_TTL_MINUTES` | no | `60` | How long an abandoned upload holds its content's dedupe slot before the sweep removes it. Always on, every 15 minutes, serialized across instances by an advisory lock. |
-| `FREE_MAX_STORAGE_MB` | no | `1024` | Free-tier attachment storage per unsubscribed vault (only enforced when billing is enabled; a vault with an active subscription is unlimited). Over it, `intent` answers 402 `storage_limit_reached`. Lowering it never deletes anything. |
+| `FREE_MAX_STORAGE_MB` | no | `1024` | Per-vault model only (the Team model uses `ABUSE_MAX_STORAGE_MB`). Free-tier attachment storage per unsubscribed vault (only enforced when billing is enabled; a vault with an active subscription is unlimited). Over it, `intent` answers 402 `storage_limit_reached`. Lowering it never deletes anything. |
 
 | `BLOB_GC_ENABLED` | no | `false` | Delete stored attachments no note references any more. **Off by default** — see [Attachment garbage collection](#attachment-garbage-collection). The deletion *queue* (objects whose row a vault or org delete already removed) is always on and is not affected by this. |
 | `BLOB_GC_ORPHAN_DAYS` | no | `30` | How long an unreferenced attachment must have existed before it is collectable. An attachment is uploaded before the note embedding it is written, and that note may arrive days later from a device that was offline. |
@@ -411,8 +417,9 @@ confirm `/health` and a real sync round-trip, then promote.
 Notes and embedded attachments sync on Free, within the configured storage limit.
 Attachment bytes use the configured blob provider (Postgres or S3-compatible storage,
 including R2); Markdown retains portable attachment links rather than inline binary data.
-When billing is enabled, standalone file sync requires an active Pro subscription on
-the vault (including the `past_due` grace period). Migration 031 preserves only
+When billing is enabled, standalone file sync requires an active paid plan: Pro on the
+vault under `BILLING_MODEL=vault`, or a Team account under `BILLING_MODEL=team`
+(including the `past_due` grace period). Migration 031 preserves only
 the previous three-vault allowance for accounts that already exist when it runs;
 its legacy `attachment_sync` column does not grant blob transfer. Existing blobs
 are not deleted, and blob deletion remains available after a downgrade so stored
@@ -794,4 +801,6 @@ unset and the server behaves exactly as before (Postgres only).
 Set `BAALDA_DEPLOYMENT=self-hosted` (as in `.env.example`) to enable the Assistant with
 users’ own model keys, independently of optional billing setup. You can configure
 billing later without changing AI access. The setting defaults to `cloud` when
-omitted: AI requires Pro and Free vaults have a 20,000-note sync cap.
+omitted: AI requires a paid plan (Pro, or Team under `BILLING_MODEL=team`). Free vaults
+have a 20,000-note sync cap on the per-vault model and the `ABUSE_MAX_NOTES` ceiling on
+the Team model.

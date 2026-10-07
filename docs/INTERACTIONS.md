@@ -109,7 +109,8 @@ n/a = synchronous or sub-100ms by construction.
 | Remove member | server write + ACL broadcast | 0.3–1s | ✅ spinner, behind a confirm |
 | Copy join code | clipboard | instant | ✅ existing "Copied" |
 | Manage subscription | billing portal + browser handoff | 1–4s | ✅ spinner |
-| Transfer subscription | server write + provider round trip (re-target, un-cancel) | 1–4s | ✅ spinner, behind a confirm |
+| Transfer subscription (per-vault model only; retired under the Team model) | server write + provider round trip (re-target, un-cancel) | 1–4s | ✅ spinner, behind a confirm |
+| Buy or change Team seats | seat preview + checkout or provider seat update + browser handoff | 1–4s | ✅ spinner |
 | Cancel subscription now | server write + provider round trip | 1–4s | ✅ spinner, behind a confirm |
 | Create / revoke MCP token | server write | 0.3–1s | ✅ spinner |
 | Import files / folder / Export vault | disk walk + registry | 1s–minutes | ✅ existing busy + counts |

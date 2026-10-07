@@ -68,7 +68,11 @@ sync and Rust persistence own the resulting write.
 
 The engine lives under `app/apps/server/housekeeper/` under Apache-2.0 and ships
 with the standard server. Every request requires vault membership. Cloud
-instances also require a non-deleted Pro subscription in `active` or `past_due`.
+instances also require a non-deleted Pro subscription in `active` or `past_due`
+(under `BILLING_MODEL=team`, since 2026-10-07: the owner's Team plan).
+Under `BILLING_MODEL=team` the requirement is a Team account in `active` or
+`past_due` instead (402 `housekeeper_requires_team`; old desktops still receive
+`housekeeper_requires_pro`).
 Self-hosters have access without Pro. Users supply their own
 OpenRouter key. Local-only vaults still need a registered vault for server AI.
 
@@ -78,7 +82,7 @@ Remove the flag to restore the local Pro gate. Membership, personal-key and note
 permissions still apply during preview.
 
 The Apache-2.0 engine ships in the standard server package and Docker image at
-`housekeeper/`. `HOUSEKEEPER_MODULE` can override the module location. Self-hosters can use it without Pro; Cloud instances require Pro.
+`housekeeper/`. `HOUSEKEEPER_MODULE` can override the module location. Self-hosters can use it without Pro; Cloud instances require Pro (Team under `BILLING_MODEL=team`).
 Limits: 2,000 readable notes, 100,000 characters per source/candidate, six inference
 runs per user/vault/minute and one concurrent operation per user/vault. Previews
 and limits are process-local; deployments need a single process or sticky routing.
@@ -137,5 +141,5 @@ Set `BAALDA_DEPLOYMENT=self-hosted` for self-hosted installations (included in
 `.env.example`). The Assistant remains available whether billing is absent, configured
 at installation, or added later. Operator billing configuration is independent.
 `BAALDA_DEPLOYMENT=cloud` requires Pro for AI and limits Free vaults to 20,000 synced
-notes. Omission defaults to `cloud` so existing Cloud deployments remain guarded,
+notes (under `BILLING_MODEL=team`: Team for AI, and the `ABUSE_MAX_NOTES` ceiling). Omission defaults to `cloud` so existing Cloud deployments remain guarded,
 even if payment credentials are missing. Self-hosters bypass this Cloud note cap.

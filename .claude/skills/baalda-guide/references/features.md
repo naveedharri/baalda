@@ -39,9 +39,8 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   the top level once the structure is settled.
 - **Deleting a vault** is the owner's call and it is permanent on the server: the notes, the
   history and everyone's access go. Your own `.md` files stay on your disk unless you also
-  choose to move the folder to the Trash. If the vault is on Pro, deleting it also stops the
-  subscription (see "Hosting options"); if that step fails, nothing is deleted and Baalda shows
-  the error.
+  choose to move the folder to the Trash. Deleting a vault never ends a Team subscription: the
+  plan belongs to the owner's account, not to one vault.
 
 ## Writing
 
@@ -160,7 +159,7 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   pending invitation to paste into chat. Someone invited by email who uses the join code instead
   ends up in exactly the same place, with the invited role.
 - **Roles**: owner, admin, member.
-- **Leaving a vault** (members and admins): Vault Settings → Vaults → **Leave** on the vault, then
+- **Leaving a vault** (members and admins): Account Settings → Vaults → **Leave** on the vault, then
   confirm. Access ends on all your devices at once, the vault disappears from your switcher and
   recents, and its folder on that device moves to the Trash (it is not kept as a local copy). The
   owner gets an email that you left and you get a receipt, on servers that send email. To come
@@ -282,35 +281,29 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   No plan limits, and Google sign-in / billing are optional switches.
 - **Managed server** at `https://api.baalda.com` (the default in the app). Same code as the
   self-hosted server. It is live and self-serve today: a team can sign up, sync and collaborate
-  right away on the free tier, and upgrade from inside the app when they hit a cap.
-  - **Free tier**: up to 3 vaults per user and 3 members per vault (members plus pending invites). A vault that already has more members than that keeps them all; it just cannot add another until it upgrades.
-  - **Pro**: $10 per vault per month, or $97 per vault per year. Priced per vault, not per
-    person. Unlocks unlimited members, notes, devices and AI edits; a Pro vault does not count
-    toward the owner's free vaults. Two subscriptions exist today: monthly and yearly.
-  - **How to buy**: Vault Settings → Billing → Upgrade to Pro (owners and admins). Checkout opens
-    in the browser; the app flips to Pro as soon as payment lands. "Manage subscription" opens the
-    billing portal for invoices, plan changes and cancellation.
-  - **One subscription per vault.** A vault that is already on Pro cannot be bought a second
-    time; the app refuses the checkout instead of charging twice.
-  - **Your subscriptions in one place**: Vault Settings → Billing lists every vault you are in —
-    plan, status, renewal date and price, how many people are in it, and who looks after billing.
-    It also says how many of your 3 free vaults are in use. The tab opens even when the vault you
-    have open is a local one.
-  - **Deleting a Pro vault stops the billing**, at the end of the period you already paid for:
-    no further charges, and the paid time is not cut short. If the payment provider cannot be
-    reached, the vault is *not* deleted and the app tells you why. The subscription itself is
-    kept in a "From deleted vaults" list so you can still move it, cancel it outright, or open
-    the billing portal for it.
-  - **Move a subscription to another vault** (owners only): Vault Settings → Billing → Transfer,
-    from a live vault or from one in "From deleted vaults". Transfer opens a dialog that lists
-    every vault it can move to — each with its member count and Free plan — and explains what
-    happens to the vault it leaves; pick one and confirm. Only vaults you own that are not already
-    on Pro are offered (Transfer is greyed out with a reason when there are none). Same price, same
-    billing period; if the subscription had been set to end because its vault was deleted,
-    transferring makes it renew again. The vault it came from drops to Free.
-  - The public pricing page (baalda.com/pricing) may still describe the Team plan as early access
-    or "talk to us". The app is ahead of the page: tell people they can upgrade in-app now, and
-    to use the pricing page as the contact route if they want to talk first.
+  right away on Free, and upgrade to Team from inside the app when they need more people.
+  - **Free**: $0, forever. Up to 2 people on the account (the owner counts) and 1 synced vault.
+    Notes and storage are unlimited for normal use. The AI connection point (MCP) is included.
+    Images and files embedded in notes (the `attachments/` folder) sync; standalone files in the
+    sidebar and the Baalda Assistant need Team. Accounts that already had more vaults or members
+    keep what they have; they just cannot add more without Team.
+  - **Team**: $10 per seat per month, or $110 per seat per year, with a minimum of 3 seats.
+    Every person is a seat, the owner included. One Team account covers every vault the owner
+    has, with unlimited vaults and unlimited people within the seats bought. Adds the Baalda
+    Assistant and standalone file sync.
+  - **How to buy**: Account Settings → Plan & Billing (the owner). Pick the number of seats and
+    monthly or yearly; checkout opens in the browser. Seats can be added later from the same
+    tab. When every seat is taken, new invitations are refused until the owner adds a seat;
+    pending invitations hold a seat until they are accepted, expire or are cancelled.
+  - **Usage**: each vault's Vault Settings → Usage shows its people, notes, attachments and files; Plan & Billing shows one totals line for the account.
+  - **If payment stops**: once the paid period ends (or a failed payment runs out of grace),
+    every vault on the account syncs read-only for everyone until the owner renews or gets back
+    under the Free limits. Notes stay editable on each computer and nothing is deleted.
+  - **Existing subscribers** keep the price they pay today, shown in the app as a legacy
+    discount; seats added later cost the regular price.
+  - **Cancel or change the plan** from Plan & Billing (the owner).
+  - The public pricing page (baalda.com/pricing) may lag behind the app. The app is the source:
+    tell people they can upgrade in-app now, and use the pricing page to talk to the team first.
 
 ## Licensing
 
