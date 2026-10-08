@@ -51,6 +51,8 @@ export interface SubscriptionRow {
   list_amount: number | null;
   discount_id: string | null;
   discount_name: string | null;
+  /** A percentage discount's size (10000 = 100% off); null for fixed or none (m054). */
+  discount_basis_points: number | null;
   provider: string;
   provider_customer_id: string | null;
   provider_subscription_id: string | null;
@@ -72,7 +74,8 @@ export interface SubscriptionRow {
 
 /** Every column of `subscriptions`, for SELECTs that hand back a whole row. */
 export const SUBSCRIPTION_COLUMNS = `id, organization_id, billing_account_id,
-       seats, list_amount, discount_id, discount_name, provider, provider_customer_id,
+       seats, list_amount, discount_id, discount_name, discount_basis_points,
+       provider, provider_customer_id,
        provider_subscription_id, plan, status, current_period_end,
        cancel_at_period_end, event_ts, deleted_at, org_name, owner_user_id,
        interval, amount, currency, created_at, updated_at`;
@@ -116,6 +119,11 @@ export interface SubscriptionState {
    */
   discountId?: string | null;
   discountName?: string | null;
+  /**
+   * A percentage discount's basis points. Written with `discountId`; a null
+   * for the SAME discount id keeps the stored value (a payload that omitted it).
+   */
+  discountBasisPoints?: number | null;
   /** Billing account, when the caller already knows it; else resolved from the org. */
   accountId?: string | null;
 }
@@ -184,9 +192,9 @@ export async function applySubscriptionState(
        id, organization_id, provider, provider_customer_id, provider_subscription_id,
        plan, status, current_period_end, cancel_at_period_end, event_ts,
        interval, amount, currency, seats, list_amount, discount_id, discount_name,
-       updated_at
+       discount_basis_points, updated_at
      ) VALUES ($1, $2, 'polar', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-               $13, $14, $15, $16, now())
+               $13, $14, $15, $16, $18, now())
      ON CONFLICT (id) DO UPDATE SET
        -- COALESCE, not a bare overwrite: a snapshot that didn't carry the
        -- customer id must not erase the one the portal needs to open.
@@ -205,6 +213,13 @@ export async function applySubscriptionState(
        -- A discount can be removed, so null clears it; only an absent field keeps it.
        discount_id              = CASE WHEN $17 THEN EXCLUDED.discount_id ELSE subscriptions.discount_id END,
        discount_name            = CASE WHEN $17 THEN EXCLUDED.discount_name ELSE subscriptions.discount_name END,
+       discount_basis_points    = CASE
+                                    WHEN NOT $17 THEN subscriptions.discount_basis_points
+                                    WHEN EXCLUDED.discount_basis_points IS NULL
+                                     AND EXCLUDED.discount_id IS NOT DISTINCT FROM subscriptions.discount_id
+                                      THEN subscriptions.discount_basis_points
+                                    ELSE EXCLUDED.discount_basis_points
+                                  END,
        updated_at               = now()
      WHERE subscriptions.event_ts IS NULL
         OR EXCLUDED.event_ts >= subscriptions.event_ts`,
@@ -226,6 +241,7 @@ export async function applySubscriptionState(
       state.discountId ?? null,
       state.discountName ?? null,
       state.discountId !== undefined,
+      state.discountId ? (state.discountBasisPoints ?? null) : null,
     ],
   );
 

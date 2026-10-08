@@ -332,7 +332,12 @@ export interface BillingProvider {
   /** Create a discount at the provider; returns its id. */
   createDiscount(args: CreateDiscountArgs): Promise<{ id: string; name: string }>;
   /** Estimate a seat change without making it (see {@link SeatChangePreview.estimated}). */
-  previewSeatChange(providerSubscriptionId: string, seats: number): Promise<SeatChangePreview>;
+  previewSeatChange(
+    providerSubscriptionId: string,
+    seats: number,
+    /** The stored discount: its basis points stand in when the live read omits them. */
+    stored?: { discountId: string | null; discountBasisPoints: number | null },
+  ): Promise<SeatChangePreview>;
   /**
    * Verify a raw webhook body + headers and normalize it. Returns `null` for a
    * valid signature carrying an event we don't act on (caller answers 202).

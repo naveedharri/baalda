@@ -159,6 +159,7 @@ function stateFromSnapshot(
     // Null when Polar reports none, so a removed discount clears.
     discountId: snap.discountId ?? null,
     discountName: snap.discountName ?? null,
+    discountBasisPoints: snap.discountBasisPoints ?? null,
     accountId: snap.accountId,
     organizationId: orgId,
     providerCustomerId: snap.providerCustomerId || null,
@@ -523,6 +524,7 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
         listAmount: event.listAmount,
         discountId: event.discountId ?? null,
         discountName: event.discountName ?? null,
+        discountBasisPoints: event.discountBasisPoints ?? null,
         accountId,
       });
       // Only a real tombstone: an account-level event with no vault is stored
@@ -1171,7 +1173,10 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     }
     if (row && isActiveStatus(row.status) && row.provider_subscription_id) {
       try {
-        const preview = await deps.provider.previewSeatChange(row.provider_subscription_id, seats);
+        const preview = await deps.provider.previewSeatChange(row.provider_subscription_id, seats, {
+          discountId: row.discount_id,
+          discountBasisPoints: row.discount_basis_points,
+        });
         return c.json({ ...preview, floor });
       } catch (err) {
         return c.json({ error: (err as Error).message || "preview failed" }, 502);
@@ -1584,6 +1589,7 @@ async function readAccountBody(accountId: string, canManage: boolean) {
             list: row.list_amount === null ? null : Number(row.list_amount),
             charged: row.amount === null ? null : Number(row.amount),
             discountName: row.discount_name,
+            discountBasisPoints: row.discount_basis_points,
           }
         : null,
     people,

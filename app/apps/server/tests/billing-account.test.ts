@@ -488,11 +488,18 @@ describe("account billing routes (team model)", () => {
     const body = await fresh.json();
     expect(body.cancelAtPeriodEnd).toBe(true);
     expect(body.seats.purchased).toBe(5);
+    expect(body.price.discountBasisPoints).toBe(10000);
     const row = await pool.query(
-      `SELECT seats, discount_id, cancel_at_period_end FROM subscriptions WHERE provider_subscription_id = $1`,
+      `SELECT seats, discount_id, discount_basis_points, cancel_at_period_end
+         FROM subscriptions WHERE provider_subscription_id = $1`,
       [subId],
     );
-    expect(row.rows[0]).toMatchObject({ seats: 5, discount_id: "disc_legacy", cancel_at_period_end: true });
+    expect(row.rows[0]).toMatchObject({
+      seats: 5,
+      discount_id: "disc_legacy",
+      discount_basis_points: 10000,
+      cancel_at_period_end: true,
+    });
 
     // Within 30 s a second refresh makes no provider call and still answers.
     fakeProvider.failGet = new Error("polar down");

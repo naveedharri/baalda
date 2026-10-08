@@ -525,7 +525,11 @@ export class PolarBillingProvider implements BillingProvider {
     return { id: d.id, name: d.name };
   }
 
-  async previewSeatChange(providerSubscriptionId: string, seats: number): Promise<SeatChangePreview> {
+  async previewSeatChange(
+    providerSubscriptionId: string,
+    seats: number,
+    stored?: { discountId: string | null; discountBasisPoints: number | null },
+  ): Promise<SeatChangePreview> {
     // Polar 0.48.1 has no preview/quote endpoint for subscription updates, so
     // this is DERIVED: per-seat = our configured Team price for the interval
     // (Polar's `amount` is post-discount, so it cannot give the list price);
@@ -539,7 +543,14 @@ export class PolarBillingProvider implements BillingProvider {
     if (perSeat !== null) {
       // What Polar will actually charge: a percentage discount scales with the
       // seats (100% off stays $0), a fixed one carries over as the same amount.
-      const bp = snap.discountBasisPoints ?? null;
+      // The live read wins; the stored percentage stands in only for the SAME
+      // discount when the live payload omitted it.
+      const bp =
+        snap.discountBasisPoints ??
+        (stored && snap.discountId && stored.discountId === snap.discountId
+          ? stored.discountBasisPoints
+          : null) ??
+        null;
       const fixedOff =
         bp === null && snap.amount !== null && snap.listAmount !== null
           ? Math.max(0, snap.listAmount - snap.amount)

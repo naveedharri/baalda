@@ -57,6 +57,34 @@ describe("PolarBillingProvider.previewSeatChange", () => {
     expect(p.proratedNow).toBe(0);
   });
 
+  it("uses the stored percentage when the live read omits it for the same discount", async () => {
+    vi.spyOn(provider, "getSubscription").mockResolvedValue(
+      snap({ amount: 0, discountId: "d_1", discountName: "TEST100" }),
+    );
+    const free = await provider.previewSeatChange("sub_1", 8, {
+      discountId: "d_1",
+      discountBasisPoints: 10000,
+    });
+    expect(free.newAmount).toBe(0);
+    expect(free.proratedNow).toBe(0);
+
+    vi.spyOn(provider, "getSubscription").mockResolvedValue(
+      snap({ amount: 26400, discountId: "d_20", discountName: "TWENTY" }),
+    );
+    const twenty = await provider.previewSeatChange("sub_1", 8, {
+      discountId: "d_20",
+      discountBasisPoints: 2000,
+    });
+    expect(twenty.newAmount).toBe(8 * 11000 * 0.8);
+
+    // A stored percentage for a DIFFERENT discount is ignored (fixed math).
+    const other = await provider.previewSeatChange("sub_1", 8, {
+      discountId: "d_old",
+      discountBasisPoints: 10000,
+    });
+    expect(other.newAmount).toBe(88000 - (33000 - 26400));
+  });
+
   it("carries a fixed discount over as the same amount", async () => {
     vi.spyOn(provider, "getSubscription").mockResolvedValue(
       snap({ amount: 30000, discountId: "d_2", discountName: "legacy-acc_1" }),
