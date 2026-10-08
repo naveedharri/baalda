@@ -9,6 +9,7 @@ import {
   seatChangeSummary,
 } from "../lib/billing";
 import { toast } from "../lib/toast";
+import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 
 const PREVIEW_DEBOUNCE_MS = 300;
@@ -19,7 +20,8 @@ const PREVIEW_DEBOUNCE_MS = 300;
  * server), a decrease takes effect at the period end. The floor is the people
  * already counted or the plan minimum, whichever is higher. While the plan is
  * set to cancel at the period end there is no seat change to make: the dialog
- * offers Resume plan instead.
+ * offers Resume plan instead. A scheduled decrease shows under the stepper
+ * with Keep N seats, which cancels it; a new count replaces it.
  */
 export function ManageSeatsDialog({
   account,
@@ -28,6 +30,7 @@ export function ManageSeatsDialog({
   onClose,
   onChanged,
   onResume,
+  onKeepSeats,
 }: {
   account: MyBillingAccount;
   config: BillingConfig;
@@ -36,6 +39,8 @@ export function ManageSeatsDialog({
   onChanged: () => void;
   /** The plan tab's resume call; resolves true when the plan resumed. */
   onResume: () => Promise<boolean>;
+  /** Cancels the scheduled decrease (seats back to `purchased`); resolves true on success. */
+  onKeepSeats: () => Promise<boolean>;
 }) {
   const canceling = seatChangeLocked(account);
   const minSeats = config.team?.minSeats ?? 3;
@@ -44,6 +49,7 @@ export function ManageSeatsDialog({
   const [seats, setSeats] = useState<number>(current ?? floor);
   const [preview, setPreview] = useState<SeatPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const pending = account.seats.pendingDecrease;
 
   useEffect(() => {
     setPreview(null);
@@ -137,6 +143,22 @@ export function ManageSeatsDialog({
           </button>
         </span>
       </div>
+      {pending && current != null && (
+        <div className="menu-row">
+          <span className="muted">
+            {pending.to} {pending.to === 1 ? "seat" : "seats"} from {formatDate(pending.effectiveAt)} (scheduled).
+          </span>
+          <AsyncButton
+            type="button"
+            className="secondary"
+            onClick={async () => {
+              if (await onKeepSeats()) onClose();
+            }}
+          >
+            Keep {current} {current === 1 ? "seat" : "seats"}
+          </AsyncButton>
+        </div>
+      )}
       <p className="muted">
         {account.seats.used} {account.seats.used === 1 ? "person" : "people"} on your account.
       </p>

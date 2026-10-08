@@ -325,14 +325,7 @@ export function AccountPlanTab() {
               seats={account.seats}
               canManage={account.canManage}
               showManage={false}
-              formatDate={formatDate}
               onManage={() => setManagingSeats(true)}
-              onKeepSeats={() =>
-                run(
-                  () => authManager.api.setSeats(account.seats.purchased ?? 0),
-                  "Seat change cancelled.",
-                )
-              }
             />
           ) : (
             seatUsageLines(account.seats, formatDate).map((line) => (
@@ -456,6 +449,12 @@ export function AccountPlanTab() {
             refreshShared();
           }}
           onResume={() => run(() => authManager.api.accountResume(), "Plan resumed.")}
+          onKeepSeats={() =>
+            run(
+              () => authManager.api.setSeats(account.seats.purchased ?? 0),
+              "Seat change cancelled.",
+            )
+          }
         />
       )}
       {confirmCancel && (

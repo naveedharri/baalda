@@ -5,7 +5,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { SeatUsageBreakdown } from "../SeatUsageBreakdown";
 
-const fmt = (iso: string) => `D(${iso})`;
 const cells = (html: string) => [...html.matchAll(/<td>(\d+)<\/td>/g)].map((m) => Number(m[1]));
 
 function render(overrides: Partial<Parameters<typeof SeatUsageBreakdown>[0]> = {}) {
@@ -13,9 +12,7 @@ function render(overrides: Partial<Parameters<typeof SeatUsageBreakdown>[0]> = {
     createElement(SeatUsageBreakdown, {
       seats: { purchased: 10, used: 4, reserved: 2, pendingDecrease: null },
       canManage: true,
-      formatDate: fmt,
       onManage: vi.fn(),
-      onKeepSeats: vi.fn(async () => undefined),
       ...overrides,
     }),
   );
@@ -35,22 +32,17 @@ describe("SeatUsageBreakdown", () => {
     expect(cells(render({ seats: { purchased: 3, used: 3, reserved: 2, pendingDecrease: null } }))).toEqual([3, 3, 2, 0]);
   });
 
-  it("shows a planned decrease above the table with Keep for the owner", () => {
+  it("never shows a planned decrease on the card (it lives in Manage seats)", () => {
     const html = render({
       seats: { purchased: 8, used: 3, reserved: 0, pendingDecrease: { to: 5, effectiveAt: "2026-11-01" } },
     });
-    expect(html).toContain("Planned seat change: 5 seats from D(2026-11-01). Changes to seats take effect next billing cycle.");
-    expect(html).toContain("Keep 8 seats");
-    expect(html.indexOf("Planned seat change")).toBeLessThan(html.indexOf("<table"));
+    expect(html).not.toContain("Planned seat change");
+    expect(html).not.toContain("Keep 8 seats");
+    expect(cells(html)).toEqual([8, 3, 0, 5]);
   });
 
   it("is read-only for non-owners", () => {
-    const html = render({
-      canManage: false,
-      seats: { purchased: 8, used: 3, reserved: 0, pendingDecrease: { to: 5, effectiveAt: "2026-11-01" } },
-    });
-    expect(html).toContain("Planned seat change");
-    expect(html).not.toContain("Keep 8 seats");
+    const html = render({ canManage: false });
     expect(html).not.toContain("Add or change seats");
   });
 });
