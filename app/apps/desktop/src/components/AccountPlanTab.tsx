@@ -267,7 +267,7 @@ export function AccountPlanTab() {
   return (
     <>
       {/* ---- Plan: one card, summary left, actions right ---- */}
-      <div className={`billing-card${isTeam ? " is-team" : ""}`}>
+      <div className={`billing-card${isTeam ? " plan-pro" : ""}`}>
         <div className="plan-page-head">
           <div className="plan-page-summary">
             <div className="subhead">Current plan</div>

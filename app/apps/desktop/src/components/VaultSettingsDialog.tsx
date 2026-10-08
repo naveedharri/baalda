@@ -993,7 +993,6 @@ function TeamVaultBillingCard({
     ownerName,
     fmtDate: formatDate,
   });
-  const planIsTeam = planLine.plan.endsWith("Team");
 
   const elsewhere = isOwner && !!myAccountId && !!vaultAccountId && vaultAccountId !== myAccountId;
   const label = vaultName ?? "this vault";
@@ -1086,18 +1085,9 @@ function TeamVaultBillingCard({
 
   return (
     <>
-      <div className={`billing-card vault-usage${planIsTeam ? " is-team" : ""}`}>
+      <div className="billing-card vault-usage">
         <div className="vault-usage-head">
-          <span className="vault-usage-plan">
-            {planIsTeam ? (
-              <>
-                {planLine.plan.slice(0, -"Team".length)}
-                <span className="billing-plan-team">Team</span>
-              </>
-            ) : (
-              planLine.plan
-            )}
-          </span>
+          <span className="vault-usage-plan">{planLine.plan}</span>
           {planLine.status && (
             <span className={`billing-status ${planLine.status.tone}`}>{planLine.status.label}</span>
           )}
