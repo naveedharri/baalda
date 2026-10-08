@@ -10046,40 +10046,6 @@ body.access-board-grabbing * {
 .upgrade-tier-muted {
   color: var(--text-secondary);
 }
-.upgrade-tier-stepper {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  font-size: var(--fs-md);
-  color: var(--text-primary);
-}
-.upgrade-tier-stepper-label {
-  margin-right: var(--sp-1);
-  font-weight: 500;
-}
-.upgrade-tier-stepper strong {
-  min-width: 2ch;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-.upgrade-tier-stepper .icon-btn {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-}
-.upgrade-tier-stepper .icon-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-.upgrade-tier-stepper .icon-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-.upgrade-tier-math {
-  margin-left: auto;
-  font-size: var(--fs-sm);
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
 .upgrade-tier-footnote {
   font-size: var(--fs-xs);
   color: var(--text-tertiary);

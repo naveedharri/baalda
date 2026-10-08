@@ -11,8 +11,6 @@ import {
   TEAM_BENEFITS,
   defaultSeats,
   formatMoney,
-  seatBounds,
-  seatTotalCents,
   yearlySavingsLabel,
 } from "../lib/billing";
 
@@ -94,8 +92,9 @@ export function UpgradeDialog({
 
   const [account, setAccount] = useState<MyBillingAccount | null>(null);
   const used = account?.seats.used ?? 0;
-  const [seats, setSeats] = useState(() => defaultSeats(0, minSeats));
-  const floor = seatBounds(used, minSeats).min;
+  // No seat picker here: the checkout page lets the buyer change the count.
+  // We send the default (plan minimum, or everyone already counted).
+  const seats = defaultSeats(used, minSeats);
   useEffect(() => {
     if (!teamMode) return;
     let live = true;
@@ -104,10 +103,9 @@ export function UpgradeDialog({
       .then((a) => {
         if (!live) return;
         setAccount(a);
-        setSeats((n) => Math.max(n, defaultSeats(a.seats.used, minSeats)));
       })
       .catch(() => {
-        /* the stepper still works from the plan minimum */
+        /* checkout falls back to the plan minimum */
       });
     return () => {
       live = false;
@@ -204,7 +202,7 @@ export function UpgradeDialog({
     setError(null);
     try {
       const { url } = teamMode
-        ? await authManager.api.teamCheckout({ seats: Math.max(seats, floor), interval })
+        ? await authManager.api.teamCheckout({ seats, interval })
         : await authManager.api.createBillingCheckout(orgId!, interval);
       setCheckoutUrl(url);
       await ipc.openExternal(url);
@@ -364,39 +362,10 @@ export function UpgradeDialog({
                   )}
                 </div>
 
-                <div className="upgrade-tier-controls">
-                  <div className="upgrade-tier-stepper">
-                    <span className="upgrade-tier-stepper-label">Seats</span>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      aria-label={seats <= floor ? `Fewer seats (minimum ${floor})` : "Fewer seats"}
-                      title={seats <= floor ? `Minimum ${floor} seats` : undefined}
-                      disabled={seats <= floor}
-                      onClick={() => setSeats((n) => Math.max(floor, n - 1))}
-                    >
-                      −
-                    </button>
-                    <strong aria-live="polite">{Math.max(seats, floor)}</strong>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      aria-label="More seats"
-                      onClick={() => setSeats((n) => Math.max(floor, n) + 1)}
-                    >
-                      +
-                    </button>
-                    {selected && (
-                      <span className="upgrade-tier-math">
-                        {Math.max(seats, floor)} × {formatMoney(selected.amount, currency)} ={" "}
-                        {formatMoney(seatTotalCents(Math.max(seats, floor), selected.amount), currency)}
-                        {perLabel(selected.interval)}
-                      </span>
-                    )}
-                  </div>
-                  {seats <= floor && floor === minSeats && (
-                    <div className="upgrade-tier-footnote">Minimum {minSeats} seats</div>
-                  )}
+                {/* The seat count is picked on the checkout page, which also
+                    shows the total; this row only keeps the subgrid aligned. */}
+                <div className="upgrade-tier-controls upgrade-tier-muted">
+                  Choose the number of seats at checkout
                 </div>
 
                 <div className="upgrade-tier-action">
@@ -409,9 +378,6 @@ export function UpgradeDialog({
                     {busy && <span className="btn-spinner" aria-hidden="true" />}
                     <span>
                       Get Team
-                      {selected
-                        ? ` — ${formatMoney(seatTotalCents(Math.max(seats, floor), selected.amount), currency)}${perLabel(selected.interval)}`
-                        : ""}
                     </span>
                   </button>
                   <div className="upgrade-tier-footnote upgrade-tier-centered">
