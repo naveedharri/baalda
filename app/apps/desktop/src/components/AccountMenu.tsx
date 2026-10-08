@@ -6,6 +6,11 @@ import { statusTone } from "../lib/presence/color";
 import { AsyncButton } from "./AsyncButton";
 import { toast } from "../lib/toast";
 import { acceptInviteFailureMessage } from "../lib/inviteFlow";
+import {
+  loadSeenInvitations,
+  saveSeenInvitations,
+  unseenInvitations,
+} from "../lib/inviteSeen";
 import { LazyAvatar } from "./Face";
 import { MenuIcon } from "./MenuIcon";
 import { BugReportDialog } from "./BugReportDialog";
@@ -95,6 +100,9 @@ export function AccountMenu() {
   const accountSettingsRequest = useStore((s) => s.accountSettingsRequest);
 
   const [open, setOpen] = useState(false);
+  // Invitation ids this device has already shown in the menu; anything else
+  // pulses here and on the identity-bar dot until the menu is opened.
+  const [seenInvites, setSeenInvites] = useState(loadSeenInvitations);
   const [authOpen, setAuthOpen] = useState(false);
   // Which full-screen settings dialog shows lives in the store, so opening one
   // closes the other in the same update (`requestSettings` /
@@ -312,6 +320,7 @@ export function AccountMenu() {
     organizations.find((o) => o.id === session.activeOrganizationId) ?? null;
   const userLabel = session.user.name || session.user.email;
   const hasInvites = userInvitations.length > 0;
+  const hasNewInvites = unseenInvitations(userInvitations, seenInvites).length > 0;
   // Presence light on the avatar. Connectivity gates it first — no-access is
   // blocked, an in-flight socket is idle. Once we're actually live (synced or
   // read-only), the user's *chosen* availability takes over: online → green,
@@ -370,7 +379,12 @@ export function AccountMenu() {
               {session.user.name ? session.user.email : presenceLabel}
             </span>
           </span>
-          {hasInvites && <span className="identity-alert" aria-label="Pending invitation" />}
+          {hasInvites && (
+            <span
+              className={`identity-alert${hasNewInvites ? " is-new" : ""}`}
+              aria-label={hasNewInvites ? "New invitation" : "Pending invitation"}
+            />
+          )}
         </button>
         {bugReport && (
           <button
@@ -405,6 +419,8 @@ export function AccountMenu() {
       {open && (
         <AccountPopover
           onClose={() => setOpen(false)}
+          seenInvites={seenInvites}
+          onInvitesSeen={setSeenInvites}
           onOpenAccount={() => {
             useStore.getState().requestAccountSettings("profile");
           }}
@@ -435,12 +451,24 @@ export function AccountMenu() {
 function AccountPopover({
   onClose,
   onOpenAccount,
+  seenInvites,
+  onInvitesSeen,
 }: {
   onClose: () => void;
   onOpenAccount: () => void;
+  seenInvites: Set<string>;
+  onInvitesSeen: (ids: Set<string>) => void;
 }) {
   const session = useStore((s) => s.session);
   const userInvitations = useStore((s) => s.userInvitations);
+  // What was new when the menu opened keeps its glow for this opening; the
+  // seen set is written now (so the identity dot settles) and again whenever
+  // the list changes while open (so an arrival during it counts as seen, and
+  // answered invitations are pruned).
+  const [freshIds] = useState(() => new Set(unseenInvitations(userInvitations, seenInvites)));
+  useEffect(() => {
+    onInvitesSeen(saveSeenInvitations(userInvitations));
+  }, [userInvitations, onInvitesSeen]);
 
   if (!session) return null;
 
@@ -463,22 +491,31 @@ function AccountPopover({
       <div className="menu-sep" />
       {userInvitations.length > 0 && (
         <div className="invite-inbox">
-          <div className="subhead">You're invited</div>
+          <div className="subhead">
+            Invitations
+            {userInvitations.length > 1 && (
+              <span className="invite-count"> · {userInvitations.length}</span>
+            )}
+          </div>
           {userInvitations.map((inv) => (
-            <div key={inv.id} className="invite-row">
+            <div
+              key={inv.id}
+              className={`invite-row${freshIds.has(inv.id) ? " is-new" : ""}`}
+            >
               {/* The vault's NAME and the inviter's, not "Vault invitation" with
                   an org id hidden in a title attribute — nobody recognises a
                   vault by its id, and this row is the whole basis for deciding
                   whether to accept. Both fields come from our own
                   /api/invitations/mine; Better Auth's fallback route has
-                  neither, hence the plain-language defaults. */}
+                  neither, hence the plain-language defaults. Accept already
+                  says what happens, so the title is just the vault. */}
               <span className="invite-row-meta">
                 <span className="invite-row-title">
-                  Join {inv.organizationName ?? "a vault"}
+                  {inv.organizationName ?? "A vault"}
                 </span>
                 <span className="muted">
-                  {inv.inviterName ? `invited by ${inv.inviterName} · ` : ""}
-                  {inv.role}
+                  {inv.inviterName ? `Invited by ${inv.inviterName} · ` : ""}
+                  <span className="invite-row-role">{inv.role}</span>
                 </span>
               </span>
               {/* Accepting is: accept → re-read session → roster → switch into
@@ -508,7 +545,7 @@ function AccountPopover({
               {/* Declining is a real answer, and without it the only way to
                   clear the row is to join a vault you were never joining. */}
               <AsyncButton
-                className="link-btn"
+                className="ghost-pill sm"
                 onClick={async () => {
                   try {
                     await authManager.api.rejectInvitation(inv.id);

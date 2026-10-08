@@ -5268,18 +5268,36 @@ button.secondary.about-update-btn:disabled {
 .invite-inbox {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
   background: var(--accent-soft);
   border-radius: var(--radius-md);
-  padding: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3) var(--sp-1);
 }
+.invite-inbox > .subhead {
+  margin: 0 0 var(--sp-1);
+}
+.invite-count {
+  color: var(--text-secondary);
+}
+/* One row per invitation: name + who asked on the left, Accept and Decline
+   right-aligned. Both buttons carry fixed labels, so they line up across rows. */
 .invite-row {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-1);
+  border-radius: var(--radius-sm);
 }
-/* Two lines: what you'd be joining, and who asked. Takes the row's spare width
-   so the Accept/Decline buttons keep their intrinsic size. */
+.invite-row + .invite-row {
+  border-top: 1px solid var(--border);
+}
+.invite-row .primary.sm,
+.invite-row .ghost-pill.sm {
+  flex-shrink: 0;
+  line-height: var(--lh-body);
+  box-shadow: none;
+}
+/* Two lines: the vault, and who asked. Takes the row's spare width so the
+   buttons keep their intrinsic size. */
 .invite-row-meta {
   flex: 1;
   min-width: 0;
@@ -5296,15 +5314,59 @@ button.secondary.about-update-btn:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* The old rule this replaces stretched a direct `.muted` child of the row.
-   The row's text now lives in `.invite-row-meta`, a COLUMN — `flex: 1` there
-   would grow the caption vertically instead of taking the row's width. */
+/* `.invite-row-meta` is a COLUMN, so `flex: 1` on the caption would grow it
+   vertically; it only ellipsises. Only the role is capitalised ("Member"),
+   never the whole line ("Invited By"). */
 .invite-row-meta .muted {
   font-size: var(--fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.invite-row-role {
   text-transform: capitalize;
+}
+/* An invitation that arrived since the menu was last opened: a soft accent
+   pulse three times, then a steady faint ring. Same accent as the identity dot. */
+@keyframes invite-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px var(--accent),
+      0 0 12px 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+}
+.invite-row.is-new {
+  background: var(--bg-surface);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+  animation: invite-pulse 2s ease-in-out 3;
+}
+.invite-row.is-new + .invite-row,
+.invite-row + .invite-row.is-new {
+  border-top-color: transparent;
+}
+@keyframes identity-alert-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  50% {
+    box-shadow:
+      0 0 0 3px var(--accent-soft),
+      0 0 8px 3px color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+}
+.identity-alert.is-new {
+  animation: identity-alert-pulse 2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .invite-row.is-new,
+  .identity-alert.is-new {
+    animation: none;
+  }
 }
 
 /* Confirmation after an invite is created (Members tab). Neutral, not an
