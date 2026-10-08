@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import type { BillingConfig, MyBillingAccount, SeatPreview } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
-import { billingErrorMessage, RESUME_TO_CHANGE_SEATS, seatBounds, seatChangeSummary } from "../lib/billing";
+import {
+  billingErrorMessage,
+  RESUME_TO_CHANGE_SEATS,
+  seatBounds,
+  seatChangeLocked,
+  seatChangeSummary,
+} from "../lib/billing";
 import { toast } from "../lib/toast";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -31,7 +37,7 @@ export function ManageSeatsDialog({
   /** The plan tab's resume call; resolves true when the plan resumed. */
   onResume: () => Promise<boolean>;
 }) {
-  const canceling = account.cancelAtPeriodEnd;
+  const canceling = seatChangeLocked(account);
   const minSeats = config.team?.minSeats ?? 3;
   const floor = seatBounds(account.seats.used, minSeats).min;
   const current = account.seats.purchased;

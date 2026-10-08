@@ -26,6 +26,7 @@ import {
   billingErrorMessage,
   discountLine,
   RESUME_TO_CHANGE_SEATS,
+  seatChangeLocked,
   vaultAccountPill,
   formatMoney,
   seatsFullCopy,
@@ -666,5 +667,25 @@ describe("billingErrorMessage", () => {
       "Seats must be at least 3.",
     );
     expect(billingErrorMessage(new Error("Network is offline"))).toBe("Network is offline");
+  });
+});
+
+describe("seatChangeLocked", () => {
+  it("locks seat changes only while the plan is set to cancel", () => {
+    expect(seatChangeLocked({ cancelAtPeriodEnd: true })).toBe(true);
+    expect(seatChangeLocked({ cancelAtPeriodEnd: false })).toBe(false);
+  });
+
+  it("maps the server's subscription_canceling refusal to its message", () => {
+    expect(
+      billingErrorMessage(
+        new ApiError(409, "x", { error: "subscription_canceling", message: "Resume your plan before changing seats." }),
+      ),
+    ).toBe("Resume your plan before changing seats.");
+    expect(
+      billingErrorMessage(
+        new ApiError(403, "Polar subscriptions.update(seats): subscription already canceled (HTTP 403)"),
+      ),
+    ).not.toMatch(/Polar|HTTP/);
   });
 });

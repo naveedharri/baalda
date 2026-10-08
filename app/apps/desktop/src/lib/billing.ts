@@ -238,6 +238,12 @@ export function discountLine(
   return `${name ? `Discount ${name}` : "Discounted"} · ${saving}`;
 }
 
+/** Manage seats is locked while the subscription is set to cancel at the
+ *  period end: the only change on offer is Resume plan. */
+export function seatChangeLocked(account: Pick<MyBillingAccount, "cancelAtPeriodEnd">): boolean {
+  return account.cancelAtPeriodEnd === true;
+}
+
 export const RESUME_TO_CHANGE_SEATS = "Resume your plan to change seats.";
 const BILLING_FALLBACK =
   "Billing couldn't make that change right now. Try again, or open Manage billing.";
