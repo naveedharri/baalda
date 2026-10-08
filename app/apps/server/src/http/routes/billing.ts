@@ -1120,6 +1120,29 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const who = await accountForRead(c, session.userId);
     if (who instanceof Response) return who;
+    // `?refresh=1` (the account's owner only): re-read the live subscription
+    // from the provider once before answering. Webhooks never reach a local
+    // dev server, and a row written by an older build can lag the provider.
+    // Best-effort: a provider failure still answers the stored summary.
+    if (c.req.query("refresh") === "1" && who.canManage) {
+      const row = await accountSubscription(who.accountId);
+      if (row?.provider_subscription_id) {
+        try {
+          const snap = await deps.provider.getSubscription(row.provider_subscription_id);
+          if (snap) {
+            await applySubscriptionState(
+              pool,
+              stateFromSnapshot(row.organization_id, snap, { accountId: who.accountId }),
+            );
+          }
+        } catch (err) {
+          console.warn(
+            `[billing] account refresh for ${who.accountId} failed:`,
+            (err as Error).message,
+          );
+        }
+      }
+    }
     return c.json(await readAccountBody(who.accountId, who.canManage));
   });
 

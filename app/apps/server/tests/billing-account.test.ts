@@ -459,6 +459,44 @@ describe("account billing routes (team model)", () => {
     expect(subId).toBeTruthy();
   });
 
+  it("GET account ?refresh=1 re-reads the live subscription from the provider; plain GET does not", async () => {
+    const a = await signUp("refresh-a@b.com");
+    const org = await vault(a);
+    const account = (await ensureAccountForUser(pool, a.userId))!;
+    const subId = await subscribe(account, org, 3);
+    fakeProvider.getResults.set(subId, {
+      ...makeSnapshot(),
+      providerSubscriptionId: subId,
+      providerCustomerId: "cus_acct",
+      status: "active",
+      seats: 3,
+      discountId: "disc_legacy",
+      discountName: "Legacy price",
+      discountBasisPoints: 10000,
+      cancelAtPeriodEnd: true,
+      modifiedAt: new Date(Date.now() + 60_000),
+    });
+
+    const plain = await req("GET", "/api/billing/account", { token: a.token });
+    expect(plain.status).toBe(200);
+    expect(fakeProvider.fetched).not.toContain(subId);
+    expect((await plain.json()).cancelAtPeriodEnd).toBe(false);
+
+    const fresh = await req("GET", "/api/billing/account?refresh=1", { token: a.token });
+    expect(fresh.status).toBe(200);
+    expect(fakeProvider.fetched).toContain(subId);
+    expect((await fresh.json()).cancelAtPeriodEnd).toBe(true);
+    const row = await pool.query(
+      `SELECT discount_id, cancel_at_period_end FROM subscriptions WHERE provider_subscription_id = $1`,
+      [subId],
+    );
+    expect(row.rows[0]).toMatchObject({ discount_id: "disc_legacy", cancel_at_period_end: true });
+
+    // A provider failure still answers the stored summary.
+    fakeProvider.failGet = new Error("polar down");
+    expect((await req("GET", "/api/billing/account?refresh=1", { token: a.token })).status).toBe(200);
+  });
+
   it("portal answers the provider URL for the account's customer", async () => {
     const a = await signUp("portal-a@b.com");
     const org = await vault(a);
