@@ -1124,7 +1124,9 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     // from the provider once before answering. Webhooks never reach a local
     // dev server, and a row written by an older build can lag the provider.
     // Best-effort: a provider failure still answers the stored summary.
-    if (c.req.query("refresh") === "1" && who.canManage) {
+    // At most one provider call per account per ACCOUNT_REFRESH_MS, so a
+    // desktop polling with refresh cannot hammer the provider.
+    if (c.req.query("refresh") === "1" && who.canManage && takeAccountRefresh(who.accountId)) {
       const row = await accountSubscription(who.accountId);
       if (row?.provider_subscription_id) {
         try {
@@ -1454,6 +1456,24 @@ async function ownsAccount(accountId: string, userId: string): Promise<boolean> 
 }
 
 /** The account's subscription row: a live one first, else the latest. */
+/** Minimum gap between provider reads for one account's `?refresh=1`. */
+const ACCOUNT_REFRESH_MS = 30_000;
+const lastAccountRefresh = new Map<string, number>();
+
+/** True (and records the attempt) when this account may refresh now. */
+function takeAccountRefresh(accountId: string, now = Date.now()): boolean {
+  const last = lastAccountRefresh.get(accountId);
+  if (last !== undefined && now - last < ACCOUNT_REFRESH_MS) return false;
+  lastAccountRefresh.set(accountId, now);
+  // Keep the map bounded: drop entries past the window once it grows.
+  if (lastAccountRefresh.size > 10_000) {
+    for (const [id, at] of lastAccountRefresh) {
+      if (now - at >= ACCOUNT_REFRESH_MS) lastAccountRefresh.delete(id);
+    }
+  }
+  return true;
+}
+
 /** A seat change on a subscription scheduled to cancel at period end. */
 const SUBSCRIPTION_CANCELING_BODY = {
   error: "subscription_canceling",

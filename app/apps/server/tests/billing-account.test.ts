@@ -469,7 +469,7 @@ describe("account billing routes (team model)", () => {
       providerSubscriptionId: subId,
       providerCustomerId: "cus_acct",
       status: "active",
-      seats: 3,
+      seats: 5,
       discountId: "disc_legacy",
       discountName: "Legacy price",
       discountBasisPoints: 10000,
@@ -484,17 +484,32 @@ describe("account billing routes (team model)", () => {
 
     const fresh = await req("GET", "/api/billing/account?refresh=1", { token: a.token });
     expect(fresh.status).toBe(200);
-    expect(fakeProvider.fetched).toContain(subId);
-    expect((await fresh.json()).cancelAtPeriodEnd).toBe(true);
+    expect(fakeProvider.fetched.filter((id) => id === subId)).toHaveLength(1);
+    const body = await fresh.json();
+    expect(body.cancelAtPeriodEnd).toBe(true);
+    expect(body.seats.purchased).toBe(5);
     const row = await pool.query(
-      `SELECT discount_id, cancel_at_period_end FROM subscriptions WHERE provider_subscription_id = $1`,
+      `SELECT seats, discount_id, cancel_at_period_end FROM subscriptions WHERE provider_subscription_id = $1`,
       [subId],
     );
-    expect(row.rows[0]).toMatchObject({ discount_id: "disc_legacy", cancel_at_period_end: true });
+    expect(row.rows[0]).toMatchObject({ seats: 5, discount_id: "disc_legacy", cancel_at_period_end: true });
 
-    // A provider failure still answers the stored summary.
+    // Within 30 s a second refresh makes no provider call and still answers.
     fakeProvider.failGet = new Error("polar down");
-    expect((await req("GET", "/api/billing/account?refresh=1", { token: a.token })).status).toBe(200);
+    const again = await req("GET", "/api/billing/account?refresh=1", { token: a.token });
+    expect(again.status).toBe(200);
+    expect(fakeProvider.fetched.filter((id) => id === subId)).toHaveLength(1);
+  });
+
+  it("GET account ?refresh=1 answers the stored summary when the provider fails", async () => {
+    const a = await signUp("refresh-fail@b.com");
+    const org = await vault(a);
+    const account = (await ensureAccountForUser(pool, a.userId))!;
+    await subscribe(account, org, 3);
+    fakeProvider.failGet = new Error("polar down");
+    const res = await req("GET", "/api/billing/account?refresh=1", { token: a.token });
+    expect(res.status).toBe(200);
+    expect((await res.json()).seats.purchased).toBe(3);
   });
 
   it("portal answers the provider URL for the account's customer", async () => {
