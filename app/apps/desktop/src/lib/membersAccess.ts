@@ -305,3 +305,23 @@ export function withNewInvitations(
   const emails = new Set(added.map((i) => i.email.toLowerCase()));
   return { ...ov, invitations: [...added, ...ov.invitations.filter((i) => !emails.has(i.email.toLowerCase()))] };
 }
+
+/**
+ * May a viewer with `viewerRole` change the ACCESS of a member with
+ * `targetRole`? The one rule the UI asks, mirrored by the server's
+ * `permissions/access-management.ts canManageMemberAccess`:
+ *
+ *   - owner: anyone, themselves included (their own row is the way back in
+ *     after narrowing the whole vault);
+ *   - admin: plain members and themselves, never the owner or another admin;
+ *   - member: nobody.
+ */
+export function canManageMemberAccess(
+  viewerRole: string | null | undefined,
+  targetRole: string | null | undefined,
+  isSelf: boolean,
+): boolean {
+  if (viewerRole === "owner") return true;
+  if (viewerRole === "admin") return isSelf || targetRole === "member";
+  return false;
+}

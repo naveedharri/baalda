@@ -9,7 +9,7 @@ import { invitationEmail } from "../../email/templates.js";
 import { orgRole } from "../../permissions/lookup.js";
 import { createResolverCache, loadAccessIndex } from "../../permissions/resolver.js";
 import { listReadableDocsInVault, listVisibleFolders } from "../../permissions/vault-docs.js";
-import type { AccessChangeDeps } from "../../permissions/access-management.js";
+import { canManageMemberAccess, type AccessChangeDeps } from "../../permissions/access-management.js";
 import { summarizeAccess, type SummaryMode } from "../../permissions/access-summary.js";
 import { invitationState, loadInvitation } from "../../registry/invitations.js";
 import { redactAddresses } from "../../invitations/sweep.js";
@@ -519,7 +519,7 @@ export function createMemberShareRoutes(deps: AccessChangeDeps = {}) {
     }
     const targetRole = await orgRole(orgId, targetId);
     if (!targetRole) return c.json({ error: "not_member", message: "That person is not a member of this vault" }, 404);
-    if (callerRole === "admin" && targetRole !== "member" && targetId !== session.userId) {
+    if (!canManageMemberAccess(callerRole, targetRole, targetId === session.userId)) {
       return c.json({ error: "access_manager_required", message: "An admin can only reset members or themselves" }, 403);
     }
 

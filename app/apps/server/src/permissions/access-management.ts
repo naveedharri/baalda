@@ -43,6 +43,26 @@ export async function requireAccessManager(
   }
 }
 
+/**
+ * May a caller with `viewerRole` change the access of a member with
+ * `targetRole`? The one rule for every per-person access write (bulk access,
+ * per-user `POST /shares`, the member share reset), mirrored by the desktop's
+ * `lib/membersAccess.ts canManageMemberAccess`:
+ *
+ *   - owner: anyone, themselves included (their own row is the way back in);
+ *   - admin: plain members and themselves, never the owner or another admin;
+ *   - member: nobody.
+ */
+export function canManageMemberAccess(
+  viewerRole: string | null | undefined,
+  targetRole: string | null | undefined,
+  isSelf: boolean,
+): boolean {
+  if (viewerRole === "owner") return true;
+  if (viewerRole === "admin") return isSelf || targetRole === "member";
+  return false;
+}
+
 async function ensureSettings(db: Queryable, organizationId: string): Promise<void> {
   await db.query(
     `INSERT INTO organization_access_settings (organization_id)
@@ -136,6 +156,7 @@ async function validateAudience(
   db: Queryable,
   organizationId: string,
   audience: AccessAudience,
+  actorUserId: string,
 ): Promise<string[]> {
   if (audience.type === "org") return [];
   const ids = [...new Set(audience.userIds.filter(Boolean))];
@@ -146,8 +167,8 @@ async function validateAudience(
       "invalid_audience",
     );
   }
-  const { rows } = await db.query<{ user_id: string }>(
-    `SELECT "userId" AS user_id FROM member
+  const { rows } = await db.query<{ user_id: string; role: string }>(
+    `SELECT "userId" AS user_id, role FROM member
       WHERE "organizationId" = $1 AND "userId" = ANY($2::text[])`,
     [organizationId, ids],
   );
@@ -157,6 +178,16 @@ async function validateAudience(
       404,
       "member_not_found",
     );
+  }
+  const actorRole = await orgRole(organizationId, actorUserId, db);
+  for (const row of rows) {
+    if (!canManageMemberAccess(actorRole, row.role, row.user_id === actorUserId)) {
+      throw new AccessManagementError(
+        "An admin can only change the access of members or themselves",
+        403,
+        "access_manager_required",
+      );
+    }
   }
   return ids;
 }
@@ -250,7 +281,7 @@ export async function applyBulkAccess(
   ];
   await requireAccessManager(input.organizationId, input.actorUserId, db);
   await validateResources(db, input.organizationId, resources);
-  const selectedUsers = await validateAudience(db, input.organizationId, input.audience);
+  const selectedUsers = await validateAudience(db, input.organizationId, input.audience, input.actorUserId);
   const currentMembers = await db.query<{ user_id: string }>(
     `SELECT "userId" AS user_id FROM member WHERE "organizationId" = $1`,
     [input.organizationId],

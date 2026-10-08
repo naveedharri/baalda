@@ -439,7 +439,10 @@ Access / Activity), `InvitePeopleDialog.tsx`, pure logic in `lib/membersAccess.t
 **New members** row ("For notes made before they joined": Can edit / Can view / No access
 = `join_default`), and a per-person Access cell (Can edit everything / Can view everything /
 No access / Custom) plus a ⋯ menu (View profile, Manage access, Make admin/member, Remove). Plain
-members get a read-only roster from `GET /orgs/:orgId/members/overview`. "Owners and admins can always
+members get a read-only roster from `GET /orgs/:orgId/members/overview`. Who may change one person's access is one rule,
+`lib/membersAccess.ts canManageMemberAccess` mirrored by the server's `access-management.ts` helper
+(bulk access, per-user `POST /shares`, the share reset): an owner manages anyone, themselves included;
+an admin manages plain members and themselves, never the owner or another admin (403 `access_manager_required`). "Owners and admins can always
 manage access" means *manage*, never an exemption from the caps they set. No UI shows or creates
 per-folder Everyone overrides; changing the Everyone row (`PUT team-access`) clears any that exist. One person's per-folder checkboxes live in
 their profile's Access tab and apply immediately through the atomic bulk-access API (users

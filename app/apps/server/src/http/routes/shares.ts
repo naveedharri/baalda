@@ -26,6 +26,7 @@ import { getSession } from "../session.js";
 import {
   AccessManagementError,
   applyBulkAccess,
+  canManageMemberAccess,
   getJoinDefault,
   nextAccessRevision,
   setJoinDefault,
@@ -524,6 +525,18 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       principalType === "org" ? gate.organizationId : body.principalId;
     if (typeof principalId !== "string" || !principalId) {
       return c.json({ error: "principalId required for user shares" }, 400);
+    }
+    if (principalType === "user") {
+      // A per-person row is that person's access: an admin may set it for plain
+      // members and themselves only (`canManageMemberAccess`). Creators sharing
+      // their own item keep the older rule.
+      const actorRole = await orgRole(gate.organizationId!, session.userId);
+      if (actorRole === "admin") {
+        const targetRole = await orgRole(gate.organizationId!, principalId);
+        if (targetRole && !canManageMemberAccess(actorRole, targetRole, principalId === session.userId)) {
+          return c.json({ error: "access_manager_required", message: "An admin can only change the access of members or themselves" }, 403);
+        }
+      }
     }
 
     // Locks are subsumption-aware: an Everyone/org lock on a resource makes any

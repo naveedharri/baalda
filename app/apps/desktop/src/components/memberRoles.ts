@@ -13,6 +13,8 @@
  * operation the product doesn't support yet.
  */
 
+import { canManageMemberAccess } from "../lib/membersAccess";
+
 export const ASSIGNABLE_ROLES = ["member", "admin"] as const;
 export type AssignableRole = (typeof ASSIGNABLE_ROLES)[number];
 
@@ -49,8 +51,5 @@ export function assignableRoles(args: MemberRoleArgs): AssignableRole[] {
  *   - member: nobody.
  */
 export function canSetMemberAccess({ canManage, myUserId, myRole, target }: MemberRoleArgs): boolean {
-  if (!canManage) return false;
-  if (myRole === "owner") return true;
-  if (myRole === "admin") return target.role === "member" || target.userId === myUserId;
-  return false;
+  return canManage && canManageMemberAccess(myRole, target.role, target.userId === myUserId);
 }
