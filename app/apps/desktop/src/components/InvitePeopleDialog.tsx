@@ -2,7 +2,7 @@ import { createPortal } from "react-dom";
 import { useEffect, useState } from "react";
 import type { InviteManyResult, TeamAccessMode } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
-import { PEOPLE_LIMIT_REASON, classifyLimitError, invitePrewarning, limitFromError, type LimitKind } from "../lib/billing";
+import { classifyLimitError, freeLimitOf, invitePrewarning, limitFromError, peopleLimitReason, type LimitKind } from "../lib/billing";
 import { buildInviteLink } from "../lib/inviteLink";
 import { isValidEmail, splitEmails } from "../lib/membersAccess";
 import { useStore } from "../store";
@@ -204,14 +204,14 @@ export function InvitePeopleDialog({ orgId, canManageBilling = false, seatAccoun
               <button
                 type="button"
                 className="link-btn"
-                onClick={() => useStore.getState().requestUpgradeDialog({ reason: PEOPLE_LIMIT_REASON })}
+                onClick={() => useStore.getState().requestUpgradeDialog({ reason: peopleLimitReason(seatAccount ? freeLimitOf(seatAccount) : null) })}
               >
                 Upgrade →
               </button>
             )}
           </div>
         )}
-        {peopleNotice != null && <PeopleLimitNotice error={peopleNotice} canManageBilling={canManageBilling} />}
+        {peopleNotice != null && <PeopleLimitNotice error={peopleNotice} canManageBilling={canManageBilling} ownerName={ownerName} freeLimit={seatAccount ? freeLimitOf(seatAccount) : null} />}
         {limit && <LimitNudge kind={limit.kind} limit={limit.limit} onUpgrade={() => setUpgradeOpen(true)} />}
         {results?.map((r) => {
           const link = r.invitationId ? buildInviteLink(serverUrl, r.invitationId) : null;

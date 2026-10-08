@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { ApiError } from "../api";
 import {
   acceptInviteFailureMessage,
   clearPendingInvite,
@@ -92,5 +93,25 @@ describe("acceptInviteFailureMessage", () => {
     expect(
       acceptInviteFailureMessage(undefined, { inviteEmail: null, sessionEmail: null }),
     ).toBe(INVITE_GONE_MESSAGE);
+  });
+});
+
+describe("acceptInviteFailureMessage: people limits at acceptance", () => {
+  const ctx = { inviteEmail: "a@x.com", sessionEmail: "a@x.com" };
+  it("a full Team vault tells the invitee whom to ask", () => {
+    const e = new ApiError(402, "All 5 seats are in use.", { error: "seat_limit_reached", seats: 5, used: 5, pending: 0 });
+    expect(acceptInviteFailureMessage(e, ctx)).toBe(
+      "All 5 seats are in use. Ask the person who invited you to add a seat, then accept again.",
+    );
+  });
+  it("a full Free vault uses the account's own limit", () => {
+    const e = new ApiError(402, "member_limit_reached", { error: "member_limit_reached", limit: 3, scope: "account" });
+    expect(acceptInviteFailureMessage(e, ctx)).toBe(
+      "Free includes 3 people. This vault is full. Ask the person who invited you to upgrade to Team, then accept again.",
+    );
+  });
+  it("a lapsed account says it cannot take new people", () => {
+    const e = new ApiError(402, "x", { error: "account_read_only" });
+    expect(acceptInviteFailureMessage(e, ctx)).toMatch(/can't take new people/);
   });
 });

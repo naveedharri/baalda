@@ -11,7 +11,7 @@ import type {
   TeamAccessMode,
 } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
-import { membersSeatLine } from "../lib/billing";
+import { freeLimitOf, membersSeatLine } from "../lib/billing";
 import { rosterCache, type RosterSnapshot } from "../lib/membersAccessCaches";
 import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
 import {
@@ -475,7 +475,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       <h2 className="settings-section-title">Members and access</h2>
       <p className="members-access-intro">Owners and admins can always manage access.</p>
       {error && <div className="auth-error">{error}</div>}
-      {limitCause != null && <PeopleLimitNotice error={limitCause} canManageBilling={myRole === "owner"} />}
+      {limitCause != null && <PeopleLimitNotice error={limitCause} canManageBilling={myRole === "owner"} ownerName={ownerName(members)} freeLimit={seatAccount ? freeLimitOf(seatAccount) : null} />}
 
       {manage && seatAccount && (
         <p className="members-access-mcp-hint members-access-seat-line">

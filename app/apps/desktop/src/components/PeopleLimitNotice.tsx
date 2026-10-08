@@ -1,8 +1,10 @@
 import {
-  ASK_OWNER_SEATS_COPY,
-  FREE_PEOPLE_COPY,
-  PEOPLE_LIMIT_REASON,
+  askOwnerTo,
   classifyLimitError,
+  freePeopleCopy,
+  freePeopleIncluded,
+  limitFromError,
+  peopleLimitReason,
   seatLimitFromError,
   seatsFullCopy,
 } from "../lib/billing";
@@ -30,17 +32,27 @@ export function peopleLimitKind(e: unknown): "member_limit" | "seat_limit" | nul
  * Inline notice for a refused invite or join. Free accounts hold two people;
  * Team vaults are capped by seats. Only the owner can add seats.
  */
-export function PeopleLimitNotice({ error, canManageBilling }: { error: unknown; canManageBilling: boolean }) {
+export function PeopleLimitNotice({ error, canManageBilling, ownerName = null, freeLimit = null }: {
+  error: unknown;
+  canManageBilling: boolean;
+  /** The vault owner's name, so an admin's line says whom to ask. */
+  ownerName?: string | null;
+  /** The account's Free people limit, when the error itself carries none. */
+  freeLimit?: number | null;
+}) {
   const kind = peopleLimitKind(error);
   if (!kind) return null;
   if (kind === "member_limit") {
+    const cap = limitFromError(error) ?? freeLimit ?? 2;
     return (
       <div className="limit-nudge">
-        <span>{FREE_PEOPLE_COPY}</span>
+        <span>
+          {canManageBilling ? freePeopleCopy(cap) : `${freePeopleIncluded(cap)} ${askOwnerTo(ownerName, "upgrade to Team")}`}
+        </span>
         {canManageBilling && (
           <button
             className="link-btn"
-            onClick={() => useStore.getState().requestUpgradeDialog({ reason: PEOPLE_LIMIT_REASON })}
+            onClick={() => useStore.getState().requestUpgradeDialog({ reason: peopleLimitReason(cap) })}
           >
             Upgrade →
           </button>
@@ -51,7 +63,7 @@ export function PeopleLimitNotice({ error, canManageBilling }: { error: unknown;
   const message = seatsFullCopy(seatLimitFromError(error)?.seats ?? null);
   return (
     <div className="limit-nudge">
-      <span>{canManageBilling ? message : `${message} ${ASK_OWNER_SEATS_COPY}`}</span>
+      <span>{canManageBilling ? message : `${message} ${askOwnerTo(ownerName, "add seats")}`}</span>
       {canManageBilling && (
         <button className="link-btn" onClick={() => useStore.getState().requestAccountSettings("plan")}>
           Add seats

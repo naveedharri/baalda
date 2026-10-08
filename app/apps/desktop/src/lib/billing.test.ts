@@ -3,6 +3,7 @@ import { ApiError } from "./api";
 import {
   membersSeatLine,
   invitePrewarning,
+  freePeopleCopy,
   seatBreakdown,
   formatBytes,
   planPriceLine,
@@ -765,5 +766,20 @@ describe("invitePrewarning", () => {
     expect(invitePrewarning(free, "Sara", true)?.action).toBe("upgrade");
     expect(invitePrewarning(free, null, false)?.text).toBe("Free includes 2 people. Ask the vault owner to upgrade to Team.");
     expect(invitePrewarning({ ...free, seats: { purchased: null, used: 1, reserved: 0 } }, "Sara", true)).toBeNull();
+  });
+});
+
+describe("grandfathered Free limit in the copy", () => {
+  const free3 = { plan: "free" as const, seats: { purchased: null, used: 3, reserved: 0 }, limits: { people: 3 } };
+  it("reads the account's own limit", () => {
+    expect(membersSeatLine(free3, "Sara")).toBe("Free includes 3 people on this account (3 of 3 used)");
+    expect(invitePrewarning(free3, "Sara", true)).toEqual({ text: "Free includes 3 people. Upgrade to Team to add more.", action: "upgrade" });
+    expect(invitePrewarning({ ...free3, seats: { purchased: null, used: 2, reserved: 0 } }, "Sara", true)).toBeNull();
+    expect(freePeopleCopy(3)).toBe("Free includes 3 people. Upgrade to Team to add more.");
+  });
+  it("keeps 2 when the account carries no limit", () => {
+    expect(membersSeatLine({ plan: "free", seats: { purchased: null, used: 1, reserved: 0 } }, null)).toBe(
+      "Free includes 2 people on this account (1 of 2 used)",
+    );
   });
 });

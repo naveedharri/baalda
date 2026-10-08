@@ -95,9 +95,22 @@ export const FREE_PLAN_LACKS = [
 export const FREE_PLAN_EXPLANATION =
   "Free includes 2 people, 1 synced vault, note sync, embedded attachments and MCP. Team adds more people, unlimited vaults, standalone file sync and Baalda Assistant.";
 
-export const FREE_PEOPLE_COPY = "Free includes 2 people. Upgrade to Team to add more.";
+/** "Free includes N people": N is the account's own Free limit (grandfathered
+ *  accounts hold more than the default 2). */
+export const freePeopleIncluded = (n: number): string => `Free includes ${n} ${n === 1 ? "person" : "people"}.`;
+export function freePeopleCopy(n: number | null = null): string {
+  return `${freePeopleIncluded(n ?? 2)} Upgrade to Team to add more.`;
+}
+export const FREE_PEOPLE_COPY = freePeopleCopy(2);
 /** The Upgrade dialog's reason line when a people limit sent the user there. */
-export const PEOPLE_LIMIT_REASON = "Free includes 2 people. Team has no limit.";
+export function peopleLimitReason(n: number | null = null): string {
+  return `${freePeopleIncluded(n ?? 2)} Team has no limit.`;
+}
+export const PEOPLE_LIMIT_REASON = peopleLimitReason(2);
+/** An admin's line: whom to ask to add seats (or upgrade). */
+export function askOwnerTo(ownerName: string | null | undefined, what: string): string {
+  return `${ownerName ? `Ask ${ownerName}` : "Ask the vault owner"} to ${what}.`;
+}
 
 const syncedVaults = (n: number) => `${n} synced vault${n === 1 ? "" : "s"}`;
 
@@ -610,13 +623,26 @@ export function seatBreakdown(seats: {
   return { purchased, claimed, reserved, available: Math.max(0, purchased - claimed - reserved) };
 }
 
+/** The slice of `MyBillingAccount` the seat line and invite warning read. */
+export type SeatAccountLike = {
+  plan: "free" | "team";
+  seats: { purchased: number | null; used: number; reserved: number };
+  limits?: { people: number | null } | null;
+};
+
+/** The account's own Free people limit (2 unless grandfathered higher). */
+export function freeLimitOf(account: SeatAccountLike): number {
+  const n = account.limits?.people;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 2;
+}
+
 /**
  * The quiet line above the Members and access roster. Team: seats on the
  * owner's account; Free: the 2 included people. The account
  * owner reads "your account".
  */
 export function membersSeatLine(
-  account: { plan: "free" | "team"; seats: { purchased: number | null; used: number; reserved: number } },
+  account: SeatAccountLike,
   ownerName: string | null,
   viewerIsOwner = false,
 ): string {
@@ -625,7 +651,8 @@ export function membersSeatLine(
     const owner = viewerIsOwner ? "your" : ownerName ? `${ownerName}'s` : "the owner's";
     return `Uses ${b.claimed} of ${b.purchased} seats on ${owner} account · ${b.reserved} reserved`;
   }
-  return `Free includes 2 people on this account (${account.seats.used} of 2 used)`;
+  const cap = freeLimitOf(account);
+  return `Free includes ${cap} ${cap === 1 ? "person" : "people"} on this account (${account.seats.used} of ${cap} used)`;
 }
 
 /**
@@ -635,11 +662,10 @@ export function membersSeatLine(
  * gets an action; an admin is told whom to ask.
  */
 export function invitePrewarning(
-  account: { plan: "free" | "team"; seats: { purchased: number | null; used: number; reserved: number } },
+  account: SeatAccountLike,
   ownerName: string | null,
   viewerIsOwner: boolean,
 ): { text: string; action: "add-seats" | "upgrade" | null } | null {
-  const ask = ownerName ? `Ask ${ownerName} to` : "Ask the vault owner to";
   if (account.plan === "team" && account.seats.purchased != null) {
     const b = seatBreakdown(account.seats);
     if (b.available > 0) return null;
@@ -647,12 +673,13 @@ export function invitePrewarning(
     const tail = b.reserved > 0 ? ` ${b.reserved} reserved by pending invitations.` : "";
     return viewerIsOwner
       ? { text: `${full}${tail} New people need a seat; people already on your account don't.`, action: "add-seats" }
-      : { text: `${full}${tail} ${ask} add seats.`, action: null };
+      : { text: `${full}${tail} ${askOwnerTo(ownerName, "add seats")}`, action: null };
   }
-  if (account.plan === "free" && account.seats.used + account.seats.reserved >= 2) {
+  const cap = freeLimitOf(account);
+  if (account.plan === "free" && account.seats.used + account.seats.reserved >= cap) {
     return viewerIsOwner
-      ? { text: FREE_PEOPLE_COPY, action: "upgrade" }
-      : { text: `Free includes 2 people. ${ask} upgrade to Team.`, action: null };
+      ? { text: freePeopleCopy(cap), action: "upgrade" }
+      : { text: `${freePeopleIncluded(cap)} ${askOwnerTo(ownerName, "upgrade to Team")}`, action: null };
   }
   return null;
 }

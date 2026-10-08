@@ -4,6 +4,8 @@ import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
 import { statusTone } from "../lib/presence/color";
 import { AsyncButton } from "./AsyncButton";
+import { toast } from "../lib/toast";
+import { acceptInviteFailureMessage } from "../lib/inviteFlow";
 import { LazyAvatar } from "./Face";
 import { MenuIcon } from "./MenuIcon";
 import { BugReportDialog } from "./BugReportDialog";
@@ -485,7 +487,21 @@ function AccountPopover({
                   of any kind. */}
               <AsyncButton
                 className="primary sm"
-                onClick={() => useStore.getState().acceptInvitation(inv.id)}
+                onClick={async () => {
+                  // AsyncButton swallows a rejection, so a refused accept (a
+                  // full vault, wrong account) used to do nothing visible.
+                  try {
+                    await useStore.getState().acceptInvitation(inv.id);
+                  } catch (e) {
+                    toast(
+                      acceptInviteFailureMessage(e, {
+                        inviteEmail: inv.email ?? null,
+                        sessionEmail: useStore.getState().session?.user.email ?? null,
+                      }),
+                      "error",
+                    );
+                  }
+                }}
               >
                 Accept
               </AsyncButton>
