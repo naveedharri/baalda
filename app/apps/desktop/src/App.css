@@ -7839,75 +7839,131 @@ button.secondary:active:not(:disabled),
 .activity-row:last-child {
   border-bottom: none;
 }
+/* Collapsed: chip | message + time on line 1, the path on line 2. The head
+   spans both grid columns as a subgrid, so chips and text align across rows.
+   Expanded: the full path, the explanation, facts, exact time and actions. */
+.activity-row-head {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: start;
+  column-gap: var(--sp-3);
+  margin: calc(-1 * var(--sp-1)) calc(-1 * var(--sp-2));
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.activity-row-head:hover {
+  background: var(--bg-hover);
+}
+.activity-row-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 .activity-row-chip {
   justify-self: start;
   margin-top: 1px;
 }
-/* One line per row: path + time take the room left of the actions and
-   ellipsize (the full text is the row's tooltip); the actions keep their
-   natural width, right-aligned, and never drop under the text. */
 .activity-row-body {
   display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: var(--sp-2);
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
 }
-.activity-row-main {
+.activity-row-line {
   display: flex;
-  flex: 1 1 0;
-  flex-direction: row;
   align-items: baseline;
   gap: var(--sp-2);
   min-width: 0;
-  overflow: hidden;
 }
-.activity-row-path {
-  display: flex;
-  flex: 0 1 auto;
-  align-items: center;
-  gap: var(--sp-1);
+.activity-row-message {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-primary);
 }
-.activity-row-path > * {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.activity-row-meta {
-  display: flex;
-  flex: 0 1 auto;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: var(--sp-1) var(--sp-2);
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+.activity-row-time {
+  flex: 0 0 auto;
+  margin-left: auto;
   font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.activity-row-meta-text {
+.activity-row-chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-self: center;
+  transition: transform var(--t-fast) var(--ease);
+}
+.activity-row[data-open] .activity-row-chevron {
+  transform: rotate(180deg);
+}
+/* The folder part gives way first; the filename only shrinks once the folder
+   is gone, so the name that identifies the row stays readable. */
+.activity-row-path {
+  display: flex;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.activity-row-dir {
+  flex: 0 1000 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--text-tertiary);
+}
+.activity-row-file {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.activity-row-detail {
+  display: flex;
+  grid-column: 2;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  padding-top: var(--sp-1);
+}
+.activity-row-paths {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.activity-row-explain,
+.activity-row-fact {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.activity-row-explain {
+  color: var(--text-secondary);
+}
+.activity-row-fact {
+  font-size: var(--fs-xs);
 }
 .activity-row-actions {
   display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  align-items: flex-end;
+  flex-wrap: wrap;
+  align-items: center;
   gap: var(--sp-1);
-  margin-left: auto;
+  padding-top: var(--sp-1);
 }
 .activity-row-actions:empty {
   display: none;
 }
 .activity-row-actions .health-missing-actions {
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--sp-1);
 }

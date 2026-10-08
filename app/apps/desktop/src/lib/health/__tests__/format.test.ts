@@ -8,6 +8,7 @@ import {
   formatBytes,
   kindLabel,
   middleTruncate,
+  splitPath,
   relativeTime,
   verdictLabel,
   verdictTone,
@@ -103,6 +104,17 @@ describe("middleTruncate", () => {
   it("degrades to an ellipsis at an unusable budget", () => {
     expect(middleTruncate("a/b/c.md", 1)).toBe("…");
     expect(middleTruncate("a/b/c.md", 0)).toBe("…");
+  });
+});
+
+describe("splitPath", () => {
+  it("separates the folder part from the filename", () => {
+    expect(splitPath("Concepts/Daily notes.md")).toEqual({ dir: "Concepts/", name: "Daily notes.md" });
+    expect(splitPath("a/b/c.md")).toEqual({ dir: "a/b/", name: "c.md" });
+  });
+
+  it("keeps a root note whole", () => {
+    expect(splitPath("todo.md")).toEqual({ dir: "", name: "todo.md" });
   });
 });
 

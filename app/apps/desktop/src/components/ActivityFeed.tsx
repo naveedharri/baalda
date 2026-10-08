@@ -14,31 +14,20 @@ import { buildInviteLink } from "../lib/inviteLink";
 import { toast } from "../lib/toast";
 import { syncManager } from "../lib/sync/docSession";
 import type { ReconcileItem } from "../lib/sync/reconcileReport";
-import { clockTime, formatBytes, relativeTime } from "../lib/health/format";
+import { splitPath } from "../lib/health/format";
 import { AsyncButton } from "./AsyncButton";
-import { PathText } from "./HealthShared";
 import { RecoveryCopyActions, TrashPreviewActions, useNoteExists } from "./RecoveryCopyActions";
 import { reconcileCopyRef } from "./recoveryCopies";
 import { openReviewTab, openTrashPreview } from "./recoveryActions";
 import { usePendingReviewCount } from "./ReviewTab";
-import {
-  ACTIVITY_HINT,
-  type ActivityRow,
-  type FailedEntry,
-  retryAction,
-} from "./activityRows";
+import { type ActivityRow, type FailedEntry, retryAction } from "./activityRows";
+import { activityRowText } from "./activityRowText";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { trashErrorMessage, useActivitySnapshot } from "./activitySource";
 import { noteLabel } from "../lib/notePath";
 
 /** Rows shown before "Show more", like the Health lists. */
 const PAGE = 20;
-
-function formatDate(iso: string): string {
-  const ms = Date.parse(iso);
-  if (!Number.isFinite(ms)) return "—";
-  return new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
 
 function useNow(): number {
   const [now, setNow] = useState(() => Date.now());
@@ -362,48 +351,36 @@ function InvitationRowActions({
   );
 }
 
-function rowMeta(row: ActivityRow, now: number): string {
-  const when = relativeTime(row.at, now);
-  if (row.type === "trash") {
-    const by = row.item.deletedBy ? `by ${row.item.deletedBy.name} ` : "";
-    return `${by}${when} · purges on ${formatDate(row.item.purgeAfter)}`;
-  }
-  if (row.type === "copy") return `${when} · ${formatBytes(row.copy.bytes)}`;
-  if (row.type === "held") return "Restoring on this device";
-  if (row.type === "invitation") {
-    const by = row.invitation.inviterName ? `sent by ${row.invitation.inviterName} · ` : "";
-    return `${by}${when}`;
-  }
-
-  if (row.type === "paused") {
-    if (row.event.held) return `${when} · until ${clockTime(Date.parse(row.event.heldUntil))}`;
-    return row.event.releasedAt ? `${when} · released early` : `${when} · ended`;
-  }
-  if (row.type === "shrunk" || row.type === "access" || row.type === "failed") {
-    return row.path ? `${row.text} · ${when}` : when;
-  }
-  return when;
+/** A path on one line: the folder part ellipsizes first, so the filename
+ *  stays whole at any panel width (the CSS form of `middleTruncate`). */
+function RowPath({ path }: { path: string }) {
+  const { dir, name } = splitPath(path);
+  return (
+    <span className="activity-row-path" title={path}>
+      {dir && <span className="activity-row-dir">{dir}</span>}
+      <span className="activity-row-file">{name}</span>
+    </span>
+  );
 }
 
-function rowTitle(row: ActivityRow): string {
-  if (row.type === "reconcile") return `${ACTIVITY_HINT.reconcile}\n${row.item.detail ?? row.path}`;
-  if (row.type === "trash") return `${ACTIVITY_HINT.trash}\n${row.path}`;
-  if (row.type === "held") return ACTIVITY_HINT.held;
-  if (row.type === "paused") return `${ACTIVITY_HINT.paused}\n${row.text}`;
-  if (row.type === "shrunk") {
-    return `${ACTIVITY_HINT.shrunk}${row.event.deleted ? "\nThe note is deleted now." : ""}\n${row.path}`;
-  }
-  if (row.type === "access") {
-    if (row.event.kind === "granted") {
-      const paths = row.event.paths ?? [];
-      const more = row.event.count - paths.length;
-      return [ACTIVITY_HINT.access, ...paths, ...(more > 0 ? [`and ${more.toLocaleString()} more`] : [])].join("\n");
-    }
-    return `${ACTIVITY_HINT.access}\n${row.path}`;
-  }
-  if (row.type === "failed") return `${ACTIVITY_HINT.failed}\n${row.text}`;
-  if (row.type === "invitation") return `${ACTIVITY_HINT.invitation}\n${row.invitation.email}`;
-  return `${ACTIVITY_HINT.copy}\n.context/trash/${row.copy.stamp}/${row.copy.relPath}`;
+function rowTone(row: ActivityRow): "warn" | undefined {
+  return (row.type === "trash" && row.item.hasUnsyncedContributions) ||
+    row.type === "held" ||
+    (row.type === "paused" && row.event.held) ||
+    row.type === "shrunk" ||
+    row.type === "failed" ||
+    row.type === "invitation"
+    ? "warn"
+    : undefined;
+}
+
+function ChevronIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
 }
 
 /** The empty state's muted glyph: the same activity-log mark as the tab. */
@@ -436,6 +413,8 @@ export function ActivityFeed() {
   const pending = usePendingReviewCount();
   const trash = { online: snap.trashOnline };
   const [confirmClear, setConfirmClear] = useState(false);
+  // One row open at a time; a second click (or Enter/Space) closes it.
+  const [openKey, setOpenKey] = useState<string | null>(null);
 
   // Opening the panel on Activity refreshes (the host also schedules on the
   // tab switch; the debounce makes the two one fetch).
@@ -505,84 +484,94 @@ export function ActivityFeed() {
       ) : (
         <>
           <ul className="activity-list">
-            {rows.slice(0, limit).map((row) => (
-              <li key={row.key} className="activity-row">
-                <span
-                  className="health-pill activity-row-chip"
-                  data-tone={
-                    (row.type === "trash" && row.item.hasUnsyncedContributions) ||
-                    row.type === "held" ||
-                    (row.type === "paused" && row.event.held) ||
-                    row.type === "shrunk" ||
-                    row.type === "failed" ||
-                    row.type === "invitation"
-                      ? "warn"
-                      : undefined
-                  }
-                >
-                  {row.label}
-                </span>
-                {/* Text and actions share one line: path and time ellipsize
-                    (the full text and clock time are the row's one tooltip),
-                    the actions stay right-aligned at their natural width. */}
-                <div className="activity-row-body">
-                  <span className="activity-row-main" title={`${rowTitle(row)}\n${clockTime(row.at)}`}>
-                    <span className="activity-row-path">
-                      {row.path ? <PathText path={row.path} /> : "text" in row ? <span>{row.text}</span> : null}
-                      {row.type === "reconcile" && row.item.newPath && (
-                        <>
-                          <span className="muted" aria-label="renamed to">
-                            →
-                          </span>
-                          <PathText path={row.item.newPath} />
-                        </>
-                      )}
+            {rows.slice(0, limit).map((row, i) => {
+              const t = activityRowText(row, now);
+              const open = openKey === row.key;
+              const detailId = `activity-row-detail-${i}`;
+              const toggle = () => setOpenKey(open ? null : row.key);
+              return (
+                <li key={row.key} className="activity-row" data-open={open || undefined}>
+                  <div
+                    className="activity-row-head"
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={open}
+                    aria-controls={detailId}
+                    onClick={toggle}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        toggle();
+                      }
+                    }}
+                  >
+                    <span className="health-pill activity-row-chip" data-tone={rowTone(row)}>
+                      {t.label}
                     </span>
-                    <span className="activity-row-meta muted">
-                      {/* Its own element: a bare text node in the flex row is an
-                          anonymous item that clips without an ellipsis (#293). */}
-                      <span className="activity-row-meta-text">{rowMeta(row, now)}</span>
-                      {row.type === "trash" && row.item.hasUnsyncedContributions && (
-                        <span
-                          className="health-pill"
-                          data-tone="warn"
-                          title="Someone's edits arrived after it was deleted. Review before it is purged."
-                        >
-                          Has unseen edits
+                    <span className="activity-row-body">
+                      <span className="activity-row-line">
+                        <span className="activity-row-message">{t.message}</span>
+                        <span className="activity-row-time muted">{t.when}</span>
+                        <span className="activity-row-chevron muted">
+                          <ChevronIcon />
                         </span>
-                      )}
+                      </span>
+                      {t.path && <RowPath path={t.path} />}
                     </span>
-                  </span>
-                  <div className="activity-row-actions">
-                    {row.type === "reconcile" ? (
-                      <ReconcileRowActions item={row.item} onChanged={schedule} />
-                    ) : row.type === "held" ? (
-                      <HeldRowActions onDone={schedule} />
-                    ) : row.type === "paused" ? (
-                      row.canRelease ? (
-                        <PausedRowActions event={row.event} online={trash.online} onDone={schedule} />
-                      ) : null
-                    ) : row.type === "shrunk" ? (
-                      <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
-                    ) : row.type === "failed" ? (
-                      activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} onDismiss={dismissFailure} /> : null
-                    ) : row.type === "access" ? (
-                      row.event.kind === "granted" ? <GrantRowActions paths={row.event.paths ?? []} /> : null
-                    ) : row.type === "invitation" ? (
-                      <InvitationRowActions invitation={row.invitation} online={trash.online} onDone={schedule} />
-                    ) : row.type === "trash" ? (
-                      <TrashRowActions item={row.item} online={trash.online} onRestored={schedule} />
-                    ) : (
-                      <RecoveryCopyActions
-                        copy={{ stamp: row.copy.stamp, relPath: row.copy.relPath }}
-                        modified={row.copy.modified}
-                        onChanged={schedule}
-                      />
-                    )}
                   </div>
-                </div>
-              </li>
-            ))}
+                  {open && (
+                    <div id={detailId} className="activity-row-detail">
+                      {(t.paths.length > 0 || t.newPath) && (
+                        <ul className="activity-row-paths">
+                          {t.paths.map((p) => (
+                            <li key={p}>{p}</li>
+                          ))}
+                          {t.newPath && <li>{`Renamed to ${t.newPath}`}</li>}
+                          {t.morePaths > 0 && (
+                            <li className="muted">{`and ${t.morePaths.toLocaleString()} more`}</li>
+                          )}
+                        </ul>
+                      )}
+                      <p className="activity-row-explain">{t.detail}</p>
+                      {t.facts.map((f) => (
+                        <p key={f} className="activity-row-fact muted">
+                          {f}
+                        </p>
+                      ))}
+                      <p className="activity-row-fact muted">{t.absoluteTime}</p>
+                      <div className="activity-row-actions">
+                        {row.type === "reconcile" ? (
+                          <ReconcileRowActions item={row.item} onChanged={schedule} />
+                        ) : row.type === "held" ? (
+                          <HeldRowActions onDone={schedule} />
+                        ) : row.type === "paused" ? (
+                          row.canRelease ? (
+                            <PausedRowActions event={row.event} online={trash.online} onDone={schedule} />
+                          ) : null
+                        ) : row.type === "shrunk" ? (
+                          <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
+                        ) : row.type === "failed" ? (
+                          activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} onDismiss={dismissFailure} /> : null
+                        ) : row.type === "access" ? (
+                          row.event.kind === "granted" ? <GrantRowActions paths={row.event.paths ?? []} /> : null
+                        ) : row.type === "invitation" ? (
+                          <InvitationRowActions invitation={row.invitation} online={trash.online} onDone={schedule} />
+                        ) : row.type === "trash" ? (
+                          <TrashRowActions item={row.item} online={trash.online} onRestored={schedule} />
+                        ) : (
+                          <RecoveryCopyActions
+                            copy={{ stamp: row.copy.stamp, relPath: row.copy.relPath }}
+                            modified={row.copy.modified}
+                            onChanged={schedule}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
           {rows.length > limit && (
             <button type="button" className="link-btn activity-more" onClick={() => setLimit(limit + PAGE)}>
