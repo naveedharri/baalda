@@ -12,10 +12,11 @@ import {
   defaultSeats,
   formatMoney,
   yearlySavingsLabel,
+  checkoutPollDelay,
+  teamCheckoutPaid,
 } from "../lib/billing";
 
-/** Poll cadence + budget while waiting for the checkout webhook to land. */
-const POLL_INTERVAL_MS = 3_000;
+/** Poll budget while waiting for the checkout to be paid (cadence: `checkoutPollDelay`). */
 const POLL_BUDGET_MS = 10 * 60 * 1000;
 
 /**
@@ -73,6 +74,9 @@ export function UpgradeDialog({
   // dialog should not keep a spinner up over a fact the rest of the app shows.
   const storeSaysPro = useStore((s) => {
     if (!orgId) return false;
+    // Team model: the vault's billing account turned Team (the deep-link
+    // hand-back refreshes this list).
+    if (s.myBilling?.vaults.some((v) => v.orgId === orgId && v.accountPlan === "team")) return true;
     if (s.myBilling?.vaults.some((v) => v.orgId === orgId && v.plan === "pro")) return true;
     return orgId === activeOrgId && s.orgBilling?.status === "active";
   });
@@ -119,6 +123,9 @@ export function UpgradeDialog({
   const [error, setError] = useState<string | null>(null);
   // The checkout URL the waiting screen's "Open checkout again" reopens.
   const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null);
+  // The provider's checkout id: the poll asks the server to reconcile it, so
+  // unlocking never waits on a webhook.
+  const checkoutIdRef = useRef<string | null>(null);
 
   const timerRef = useRef<number | null>(null);
   const cancelledRef = useRef(false);
@@ -162,10 +169,25 @@ export function UpgradeDialog({
   const checkActive = async (): Promise<boolean> => {
     if (!teamMode && !orgId) return false;
     try {
-      const status = teamMode
-        ? (await authManager.api.getBillingAccount()).status
-        : (await authManager.api.getOrgBilling(orgId!)).status;
-      if (status === "active") {
+      let paid: boolean;
+      if (teamMode) {
+        const checkoutId = checkoutIdRef.current;
+        let acct: MyBillingAccount | null = null;
+        if (checkoutId) {
+          try {
+            acct = await authManager.api.reconcileTeamCheckout(checkoutId);
+          } catch {
+            // An older server without the route, or a provider hiccup: read
+            // the stored account instead (a webhook may still land).
+            acct = null;
+          }
+        }
+        acct ??= await authManager.api.getBillingAccount();
+        paid = teamCheckoutPaid(acct);
+      } else {
+        paid = (await authManager.api.getOrgBilling(orgId!)).status === "active";
+      }
+      if (paid) {
         setPhase("success");
         await useStore.getState().refreshOrgBilling();
         // The Subscriptions list this may have been opened from is a second
@@ -182,7 +204,9 @@ export function UpgradeDialog({
 
   const startPolling = () => {
     cancelledRef.current = false;
-    const deadline = Date.now() + POLL_BUDGET_MS;
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    const started = Date.now();
+    const deadline = started + POLL_BUDGET_MS;
     const tick = async () => {
       if (cancelledRef.current) return;
       const done = await checkActive();
@@ -191,9 +215,12 @@ export function UpgradeDialog({
         setPhase("timeout");
         return;
       }
-      timerRef.current = window.setTimeout(() => void tick(), POLL_INTERVAL_MS);
+      timerRef.current = window.setTimeout(
+        () => void tick(),
+        checkoutPollDelay(Date.now() - started),
+      );
     };
-    timerRef.current = window.setTimeout(() => void tick(), POLL_INTERVAL_MS);
+    timerRef.current = window.setTimeout(() => void tick(), checkoutPollDelay(0));
   };
 
   const startCheckout = async () => {
@@ -201,9 +228,11 @@ export function UpgradeDialog({
     setBusy(true);
     setError(null);
     try {
-      const { url } = teamMode
+      const res: { url: string; checkoutId?: string } = teamMode
         ? await authManager.api.teamCheckout({ seats, interval })
         : await authManager.api.createBillingCheckout(orgId!, interval);
+      const { url } = res;
+      checkoutIdRef.current = res.checkoutId ?? null;
       setCheckoutUrl(url);
       await ipc.openExternal(url);
       setPhase("waiting");

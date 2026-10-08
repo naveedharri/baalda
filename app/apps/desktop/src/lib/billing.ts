@@ -526,3 +526,21 @@ export const PLAN_LOAD_ERROR_COPY = "Couldn't load your plan. Check your connect
 
 /** The plan line on a server with billing off (self-hosted without a provider). */
 export const SELF_HOSTED_PLAN_COPY = "Everything is included on this server. There are no plan limits.";
+
+/**
+ * Has a Team checkout we are waiting on been paid? True once the account is
+ * on the Team plan or its subscription is active / past due (past due is
+ * still a paid plan in its grace window).
+ */
+export function teamCheckoutPaid(
+  account: { plan?: string | null; status?: string | null } | null | undefined,
+): boolean {
+  if (!account) return false;
+  return account.plan === "team" || account.status === "active" || account.status === "past_due";
+}
+
+/** Poll delay while waiting for a checkout: every 3 s for the first minute,
+ *  then every 10 s. */
+export function checkoutPollDelay(elapsedMs: number): number {
+  return elapsedMs < 60_000 ? 3_000 : 10_000;
+}

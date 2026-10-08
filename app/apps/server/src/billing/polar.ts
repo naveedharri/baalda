@@ -361,7 +361,7 @@ function normalizeType(polarType: string): NormalizedBillingEvent["type"] | null
 }
 
 export class PolarBillingProvider implements BillingProvider {
-  async createCheckout(args: CreateCheckoutArgs): Promise<{ url: string }> {
+  async createCheckout(args: CreateCheckoutArgs): Promise<{ url: string; id?: string }> {
     // Team seat products only. The legacy per-vault product ids are kept in
     // config purely to classify subscriptions bought before the switch.
     const productId = teamProductId(args.interval);
@@ -399,7 +399,7 @@ export class PolarBillingProvider implements BillingProvider {
         throw err;
       }
     });
-    return { url: checkout.url };
+    return { url: checkout.url, id: checkout.id };
   }
 
   async updateSeats(

@@ -239,7 +239,9 @@ export interface CreateCheckoutArgs {
 
 export interface BillingProvider {
   /** Create a hosted checkout session and return its URL. */
-  createCheckout(args: CreateCheckoutArgs): Promise<{ url: string }>;
+  /** `id` is the provider's checkout id, so a client can ask the server to
+   *  reconcile this checkout while it waits (no webhook needed). */
+  createCheckout(args: CreateCheckoutArgs): Promise<{ url: string; id?: string }>;
   /** Create a customer-portal session (manage / cancel) and return its URL. */
   getPortalUrl(args: { customerId: string }): Promise<{ url: string }>;
   /**

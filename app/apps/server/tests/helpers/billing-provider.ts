@@ -155,7 +155,7 @@ export function makeFakeProvider(): FakeProvider {
 
     async createCheckout(args) {
       this.lastCheckout = args;
-      return { url: `https://polar.test/checkout/${args.interval}` };
+      return { url: `https://polar.test/checkout/${args.interval}`, id: `chk_${args.interval}` };
     },
 
     async getPortalUrl(args) {

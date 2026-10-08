@@ -23,6 +23,7 @@ import {
   WebhookSignatureError,
   type BillingInterval,
   type BillingProvider,
+  type CheckoutSnapshot,
   type NormalizedBillingEvent,
   type SubscriptionSnapshot,
 } from "../../billing/provider.js";
@@ -360,9 +361,12 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
    * vault, the user, the subscription and its state all come from the
    * provider's authenticated answer, exactly as they would off a webhook.
    */
-  async function confirmCheckout(checkoutId: string): Promise<ConfirmedCheckout> {
+  async function confirmCheckout(
+    checkoutId: string,
+    prefetched?: CheckoutSnapshot,
+  ): Promise<ConfirmedCheckout> {
     const none = { seats: null, productId: null };
-    const checkout = await deps.provider.getCheckout(checkoutId);
+    const checkout = prefetched ?? (await deps.provider.getCheckout(checkoutId));
     if (!checkout) return { orgId: null, ...none };
     if (checkout.status !== "succeeded" || !checkout.providerSubscriptionId) {
       return { orgId: checkout.orgId, ...none };
@@ -1216,7 +1220,7 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     const successUrl = checkoutSuccessUrl(clientScheme);
     const orgId = (await orgIdsForAccount(pool, ctx.accountId))[0];
     try {
-      const { url } = await deps.provider.createCheckout({
+      const { url, id } = await deps.provider.createCheckout({
         accountId: ctx.accountId,
         ...(orgId ? { orgId } : {}),
         userId: ctx.session.userId,
@@ -1227,10 +1231,45 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
         successUrl,
         ...(clientScheme ? { clientScheme } : {}),
       });
-      return c.json({ url, seats });
+      return c.json({ url, seats, ...(id ? { checkoutId: id } : {}) });
     } catch (err) {
       return c.json({ error: (err as Error).message || "checkout failed" }, 502);
     }
+  });
+
+  // The desktop's "Waiting for payment…" screen polls this with the checkout
+  // id it got from the checkout route. It reads the checkout back from the
+  // provider and, once it has succeeded, writes the subscription through the
+  // same confirm path as the success page, so the wait never depends on a
+  // webhook (staging has none, and production's can lag). The success page's
+  // single confirm is not enough on its own: Polar can redirect while the
+  // checkout is still `confirmed`, before the subscription exists.
+  billing.post("/billing/account/reconcile", async (c) => {
+    const ctx = await sessionAccount(c);
+    if (ctx instanceof Response) return ctx;
+    const body = (await c.req.json().catch(() => ({}))) as { checkoutId?: unknown };
+    const checkoutId = typeof body.checkoutId === "string" ? body.checkoutId : "";
+    if (!CHECKOUT_ID_RE.test(checkoutId)) return c.json({ error: "invalid_checkout_id" }, 400);
+    let checkout: CheckoutSnapshot | null;
+    try {
+      checkout = await deps.provider.getCheckout(checkoutId);
+    } catch (err) {
+      return c.json({ error: (err as Error).message || "provider unavailable" }, 502);
+    }
+    // Only the account the checkout was started for may reconcile it; anyone
+    // else learns nothing about whether the id exists.
+    if (!checkout || checkout.accountId !== ctx.accountId) {
+      return c.json({ error: "checkout_not_found" }, 404);
+    }
+    try {
+      await confirmCheckout(checkoutId, checkout);
+    } catch (err) {
+      console.warn(
+        `billing reconcile: could not confirm checkout ${checkoutId}:`,
+        (err as Error).message,
+      );
+    }
+    return c.json({ ...(await readAccountBody(ctx.accountId, true)), checkoutStatus: checkout.status });
   });
 
   billing.post("/billing/account/cancel", async (c) => {

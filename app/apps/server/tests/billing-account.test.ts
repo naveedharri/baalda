@@ -212,6 +212,80 @@ describe("account billing routes (team model)", () => {
     expect(again.status).toBe(409);
   });
 
+  it("reconcile: a paid checkout upgrades the account without any webhook", async () => {
+    const owner = await signUp("rec@b.com");
+    const org = await vault(owner);
+    const accountId = (await ensureAccountForUser(pool, owner.userId))!;
+
+    const co = await req("POST", "/api/billing/account/checkout", {
+      token: owner.token,
+      body: { seats: 3, interval: "month" },
+    });
+    expect(co.status).toBe(200);
+    const { checkoutId } = (await co.json()) as { checkoutId: string };
+    expect(checkoutId).toBe("chk_month");
+
+    // Polar redirected before the payment settled: nothing to write yet.
+    fakeProvider.checkouts.set(checkoutId, {
+      status: "confirmed",
+      orgId: org,
+      accountId,
+      userId: owner.userId,
+      providerSubscriptionId: null,
+      providerCustomerId: "cus_rec",
+    });
+    const pending = await req("POST", "/api/billing/account/reconcile", {
+      token: owner.token,
+      body: { checkoutId },
+    });
+    expect(pending.status).toBe(200);
+    const pendingBody = await pending.json();
+    expect(pendingBody.plan).toBe("free");
+    expect(pendingBody.checkoutStatus).toBe("confirmed");
+
+    // The payment lands; the next poll writes the subscription itself.
+    fakeProvider.checkouts.set(checkoutId, {
+      status: "succeeded",
+      orgId: org,
+      accountId,
+      userId: owner.userId,
+      providerSubscriptionId: "sub_rec",
+      providerCustomerId: "cus_rec",
+    });
+    fakeProvider.snapshot = makeSnapshot({ seats: 3, listAmount: 3000, accountId });
+    const paid = await req("POST", "/api/billing/account/reconcile", {
+      token: owner.token,
+      body: { checkoutId },
+    });
+    expect(paid.status).toBe(200);
+    const paidBody = await paid.json();
+    expect(paidBody.status).toBe("active");
+    expect(paidBody.plan).toBe("team");
+    const { rows } = await pool.query(
+      `SELECT billing_account_id, seats FROM subscriptions WHERE provider_subscription_id = 'sub_rec'`,
+    );
+    expect(rows).toEqual([{ billing_account_id: accountId, seats: 3 }]);
+
+    // Someone else's checkout id answers 404 and writes nothing.
+    const other = await signUp("rec-other@b.com");
+    await vault(other);
+    const stranger = await req("POST", "/api/billing/account/reconcile", {
+      token: other.token,
+      body: { checkoutId },
+    });
+    expect(stranger.status).toBe(404);
+    const unknown = await req("POST", "/api/billing/account/reconcile", {
+      token: owner.token,
+      body: { checkoutId: "chk_missing" },
+    });
+    expect(unknown.status).toBe(404);
+    const bad = await req("POST", "/api/billing/account/reconcile", {
+      token: owner.token,
+      body: { checkoutId: "../x" },
+    });
+    expect(bad.status).toBe(400);
+  });
+
   it("old per-vault checkout and transfer answer 409 in team mode", async () => {
     const owner = await signUp("old@b.com");
     const org = await vault(owner);

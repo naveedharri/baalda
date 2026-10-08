@@ -2284,10 +2284,25 @@ export class ApiClient {
     seats: number;
     interval: "month" | "year";
     successUrl?: string;
-  }): Promise<{ url: string }> {
-    const { data } = await this.request<{ url: string }>("POST", "/api/billing/account/checkout", {
-      body: { ...input, client: CHECKOUT_CLIENT },
-    });
+  }): Promise<{ url: string; checkoutId?: string }> {
+    const { data } = await this.request<{ url: string; checkoutId?: string }>(
+      "POST",
+      "/api/billing/account/checkout",
+      { body: { ...input, client: CHECKOUT_CLIENT } },
+    );
+    return data;
+  }
+
+  /** Ask the server to read a Team checkout back from the payment provider
+   *  and record its subscription if it has been paid, so the wait never
+   *  depends on a webhook. Answers the account. 404 on an older server
+   *  (no route) or a checkout that is not this account's. */
+  async reconcileTeamCheckout(checkoutId: string): Promise<MyBillingAccount> {
+    const { data } = await this.request<MyBillingAccount>(
+      "POST",
+      "/api/billing/account/reconcile",
+      { body: { checkoutId } },
+    );
     return data;
   }
 
