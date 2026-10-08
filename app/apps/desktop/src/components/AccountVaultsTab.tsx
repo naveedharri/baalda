@@ -2,13 +2,15 @@
    2026-10-07), so the one list of them lives here rather than in Vault
    Settings: the synced vaults this account is a member of, the local folders
    this app profile has opened, and where new vault folders go. Moved verbatim
-   from the old Vault Settings → Vaults tab; the plan pill and the people/notes
-   counts come from the account's billing usage when the server bills per seat. */
+   from the old Vault Settings → Vaults tab; the people/notes counts come from
+   the account's billing usage when the server bills per seat. Rows carry no
+   plan pill (the plan is the account's, said in Plan & Billing); only a
+   lapsed account's vaults get a "Read-only" pill, since that changes the row. */
 import { useEffect, useState } from "react";
 import { ApiError, type BillingUsage, type MyBillingAccount, type OrgBilling } from "../lib/api";
 import { toast } from "../lib/toast";
 import { authManager } from "../lib/auth/authManager";
-import { classifyLimitError, type LimitKind, limitFromError, planPillLabel } from "../lib/billing";
+import { classifyLimitError, type LimitKind, limitFromError } from "../lib/billing";
 import * as ipc from "../lib/ipc";
 import { readOrgVaults, useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
@@ -90,7 +92,7 @@ export function AccountVaultsTab() {
     null,
   );
   const [upgradeOpen, setUpgradeOpen] = useState(false);
-  // Team-model billing: the plan pill and per-vault counts. Loaded once; a
+  // Team-model billing: the read-only pill and per-vault counts. Loaded once; a
   // failure (or billing off) just renders the rows without them.
   const billingConfig = useStore((s) => s.billingConfig);
   const [billing, setBilling] = useState<
@@ -109,14 +111,9 @@ export function AccountVaultsTab() {
   }, [session, billingConfig?.enabled, billingConfig?.model]);
   const usageFor = (orgId: string) =>
     billing?.usage.vaults.find((v) => v.orgId === orgId) ?? null;
-  const accountPill = billing
-    ? planPillLabel({
-        plan: billing.account.plan,
-        status: billing.account.status,
-        lapsed: billing.account.lapsed,
-        complimentary: !!billing.account.complimentaryUntil,
-      })
-    : null;
+  // The account's plan applies to every row, so it is not repeated per row;
+  // only a lapsed account (sync read-only for its vaults) earns a pill.
+  const accountLapsed = !!billing?.account.lapsed;
   const freeVaultLimit =
     billing && billing.account.plan === "free"
       ? (billing.usage.limits.vaults ?? billing.account.limits.vaults)
@@ -488,12 +485,8 @@ export function AccountVaultsTab() {
                   </span>
                 )}
               </span>
-              {usageFor(o.id) && accountPill && (
-                <span
-                  className={`billing-status ${billing!.account.plan === "free" ? "none" : billing!.account.status}`}
-                >
-                  {accountPill}
-                </span>
+              {usageFor(o.id) && accountLapsed && (
+                <span className="billing-status canceled">Read-only</span>
               )}
               {confirmDelete === o.id ? (
                 <span className="vault-row-actions">
