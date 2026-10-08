@@ -27,7 +27,8 @@ import {
   discountLine,
   RESUME_TO_CHANGE_SEATS,
   seatChangeLocked,
-  vaultAccountPill,
+  vaultPlanLine,
+  planStatusPill,
   formatMoney,
   seatsFullCopy,
   subscriptionStatusLine,
@@ -601,44 +602,80 @@ describe("legacy (per-vault) plan copy", () => {
   });
 });
 
-describe("vaultAccountPill", () => {
+describe("planStatusPill", () => {
+  const fmt = (iso: string) => `D(${iso})`;
+  const team = {
+    plan: "team" as const,
+    status: "active" as const,
+    cancelAtPeriodEnd: false,
+    currentPeriodEnd: "2027-10-08",
+    lapsed: false,
+  };
+
+  it("says Active for a healthy Team plan and nothing for Free", () => {
+    expect(planStatusPill(team, fmt)).toEqual({ label: "Active", tone: "active" });
+    expect(planStatusPill({ ...team, plan: "free", status: "none" }, fmt)).toBeNull();
+  });
+
+  it("says when a cancelling plan ends, in amber", () => {
+    expect(planStatusPill({ ...team, cancelAtPeriodEnd: true }, fmt)).toEqual({
+      label: "Cancels on D(2027-10-08)",
+      tone: "past_due",
+    });
+  });
+
+  it("says Past due in amber", () => {
+    expect(planStatusPill({ ...team, status: "past_due" }, fmt)).toEqual({ label: "Past due", tone: "past_due" });
+  });
+
+  it("says Read-only for a lapsed account, Free included", () => {
+    expect(planStatusPill({ ...team, lapsed: true }, fmt)).toEqual({ label: "Read-only", tone: "canceled" });
+    expect(planStatusPill({ ...team, plan: "free", status: "none", lapsed: true }, fmt)?.label).toBe("Read-only");
+  });
+});
+
+describe("vaultPlanLine", () => {
+  const fmt = (iso: string) => `D(${iso})`;
   const account = {
     id: "acc_me",
     plan: "team" as const,
     status: "active" as const,
+    cancelAtPeriodEnd: false,
+    currentPeriodEnd: "2027-10-08",
     lapsed: false,
-    complimentaryUntil: null,
   };
 
-  it("reads the caller's billing account when the vault is on it", () => {
-    expect(vaultAccountPill({ account, vaultAccountId: "acc_me", fallbackPlan: "free" })).toEqual({
-      label: "Team",
-      tone: "active",
-      free: false,
-    });
-    expect(vaultAccountPill({ account, vaultAccountId: null, fallbackPlan: "free" }).label).toBe("Team");
+  it("names the plan plainly on the owner's own account, with no pill when Active", () => {
+    expect(
+      vaultPlanLine({ account, vaultAccountId: "acc_me", fallbackPlan: "free", isOwner: true, fmtDate: fmt }),
+    ).toEqual({ plan: "Current plan: Team", status: null, billedOn: null });
+    expect(
+      vaultPlanLine({ account: { ...account, plan: "free", status: "none" }, vaultAccountId: null, fallbackPlan: "team", isOwner: true, fmtDate: fmt }).plan,
+    ).toBe("Current plan: Free");
   });
 
-  it("says Read-only for a lapsed account and Free for a free one", () => {
+  it("shows the status pill when there is something to say", () => {
     expect(
-      vaultAccountPill({ account: { ...account, lapsed: true }, vaultAccountId: null, fallbackPlan: "team" }),
-    ).toMatchObject({ label: "Read-only", tone: "canceled" });
+      vaultPlanLine({ account: { ...account, cancelAtPeriodEnd: true }, vaultAccountId: null, fallbackPlan: "free", isOwner: true, fmtDate: fmt }).status,
+    ).toEqual({ label: "Cancels on D(2027-10-08)", tone: "past_due" });
     expect(
-      vaultAccountPill({ account: { ...account, plan: "free", status: "none" }, vaultAccountId: null, fallbackPlan: "team" }),
-    ).toEqual({ label: "Free", tone: "none", free: true });
+      vaultPlanLine({ account: { ...account, lapsed: true }, vaultAccountId: null, fallbackPlan: "team", isOwner: true, fmtDate: fmt }).status,
+    ).toEqual({ label: "Read-only", tone: "canceled" });
   });
 
-  it("uses the vault's resolved account plan when it is billed elsewhere or unknown", () => {
-    expect(vaultAccountPill({ account, vaultAccountId: "acc_other", fallbackPlan: "free" })).toEqual({
-      label: "Free",
-      tone: "none",
-      free: true,
-    });
-    expect(vaultAccountPill({ account: null, vaultAccountId: null, fallbackPlan: "team" })).toEqual({
-      label: "Team",
-      tone: "active",
-      free: false,
-    });
+  it("names the owner's account for a member", () => {
+    expect(
+      vaultPlanLine({ account: null, vaultAccountId: "acc_o", fallbackPlan: "team", isOwner: false, ownerName: "Sara", fmtDate: fmt }),
+    ).toEqual({ plan: "Current plan: Team", status: null, billedOn: "Billed on Sara's account" });
+    expect(
+      vaultPlanLine({ account: null, vaultAccountId: null, fallbackPlan: "free", isOwner: false, fmtDate: fmt }).billedOn,
+    ).toBe("Billed on the owner's account");
+  });
+
+  it("uses the vault's resolved plan when an owner's vault is billed on another account", () => {
+    expect(
+      vaultPlanLine({ account, vaultAccountId: "acc_other", fallbackPlan: "free", isOwner: true, fmtDate: fmt }),
+    ).toEqual({ plan: "Current plan: Free", status: null, billedOn: "Billed on another account" });
   });
 });
 

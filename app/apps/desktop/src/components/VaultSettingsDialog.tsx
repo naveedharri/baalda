@@ -26,7 +26,7 @@ import {
   planPillLabel,
   subscriptionStatusLine,
   transferTargets,
-  vaultAccountPill,
+  vaultPlanLine,
   vaultLimitReason,
 } from "../lib/billing";
 import * as ipc from "../lib/ipc";
@@ -983,7 +983,18 @@ function TeamVaultBillingCard({
   }, [orgId, vaultAccountId]);
 
   const usageRow = usage?.vaults.find((v) => v.orgId === orgId) ?? null;
-  const accountPill = vaultAccountPill({ account: myAccount, vaultAccountId, fallbackPlan: plan });
+  const ownerName = useStore((s) => {
+    const owner = s.members.find((m) => m.organizationId === orgId && m.role === "owner");
+    return owner?.user?.name || owner?.user?.email || null;
+  });
+  const planLine = vaultPlanLine({
+    account: myAccount,
+    vaultAccountId,
+    fallbackPlan: plan,
+    isOwner,
+    ownerName,
+    fmtDate: formatDate,
+  });
 
   const elsewhere = isOwner && !!myAccountId && !!vaultAccountId && vaultAccountId !== myAccountId;
   const label = vaultName ?? "this vault";
@@ -1115,14 +1126,11 @@ function TeamVaultBillingCard({
         )}
         <div className="vault-usage-footer">
           <div className="vault-usage-footer-label">
-            <span>
-              {!isOwner
-                ? "This vault is on its owner's account"
-                : elsewhere
-                  ? "This vault is billed on another account"
-                  : "This vault is on your account"}
-            </span>
-            <span className={`billing-status ${accountPill.tone}`}>{accountPill.label}</span>
+            <span>{planLine.plan}</span>
+            {planLine.status && (
+              <span className={`billing-status ${planLine.status.tone}`}>{planLine.status.label}</span>
+            )}
+            {planLine.billedOn && <span>· {planLine.billedOn}</span>}
           </div>
           <button
             className="secondary billing-action"

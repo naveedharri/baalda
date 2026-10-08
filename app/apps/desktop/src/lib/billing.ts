@@ -363,37 +363,69 @@ export function planPillLabel(row: {
   return "Team";
 }
 
+/** A plan header's status pill. `tone` is the `billing-status` modifier class. */
+export interface PlanStatusPill {
+  label: string;
+  tone: "active" | "past_due" | "canceled";
+}
+
 /**
- * Vault Settings → Usage plan pill. When the vault is billed on the caller's
- * own account (no other account id, or the same one), it reads that billing
- * account exactly like Plan & Billing does; otherwise it falls back to the
- * vault's resolved account plan from `/mine` (`accountPlan`). `tone` is the
- * `billing-status` modifier class.
+ * The status pill beside the current plan's name in Plan & Billing: the
+ * subscription's STATE, never the plan name again. Free has no status (null).
+ * Read-only outranks everything, then past due (the money is the problem),
+ * then a scheduled cancellation, which must never read as Active.
  */
-export function vaultAccountPill(input: {
-  account: Pick<MyBillingAccount, "id" | "plan" | "status" | "lapsed" | "complimentaryUntil"> | null;
-  vaultAccountId: string | null;
-  fallbackPlan: "free" | "pro" | "team";
-}): { label: string; tone: string; free: boolean } {
-  const a = input.account;
-  if (a && (!input.vaultAccountId || input.vaultAccountId === a.id)) {
+export function planStatusPill(
+  account: Pick<MyBillingAccount, "plan" | "status" | "cancelAtPeriodEnd" | "currentPeriodEnd" | "lapsed">,
+  fmtDate: (iso: string) => string,
+): PlanStatusPill | null {
+  if (account.lapsed) return { label: "Read-only", tone: "canceled" };
+  if (account.plan === "free") return null;
+  if (account.status === "past_due") return { label: "Past due", tone: "past_due" };
+  if (account.cancelAtPeriodEnd) {
     return {
-      label: planPillLabel({
-        plan: a.plan,
-        status: a.status,
-        lapsed: a.lapsed,
-        complimentary: !!a.complimentaryUntil,
-      }),
-      tone: a.lapsed ? "canceled" : a.plan === "free" ? "none" : a.status,
-      free: a.plan === "free",
+      label: account.currentPeriodEnd ? `Cancels on ${fmtDate(account.currentPeriodEnd)}` : "Cancels at period end",
+      tone: "past_due",
     };
   }
-  const free = input.fallbackPlan === "free";
-  return {
-    label: planPillLabel({ plan: input.fallbackPlan, status: free ? "none" : "active" }),
-    tone: free ? "none" : "active",
-    free,
-  };
+  if (account.status === "canceled") return { label: "Canceled", tone: "canceled" };
+  return { label: "Active", tone: "active" };
+}
+
+/**
+ * Vault Settings → Usage footer: "Current plan: Team", the status pill only
+ * when it says something other than Active, and whose account pays when it is
+ * not the caller's. When the vault is billed on the caller's own account (no
+ * other account id, or the same one) it reads that account exactly like Plan &
+ * Billing; otherwise the vault's resolved plan from `/mine` (`accountPlan`).
+ */
+export function vaultPlanLine(input: {
+  account: Pick<
+    MyBillingAccount,
+    "id" | "plan" | "status" | "cancelAtPeriodEnd" | "currentPeriodEnd" | "lapsed"
+  > | null;
+  vaultAccountId: string | null;
+  fallbackPlan: "free" | "pro" | "team";
+  isOwner: boolean;
+  /** The vault owner's display name, for a member's "Billed on X's account". */
+  ownerName?: string | null;
+  fmtDate: (iso: string) => string;
+}): { plan: string; status: PlanStatusPill | null; billedOn: string | null } {
+  const a = input.account;
+  if (input.isOwner && a && (!input.vaultAccountId || input.vaultAccountId === a.id)) {
+    const pill = planStatusPill(a, input.fmtDate);
+    return {
+      plan: `Current plan: ${a.plan === "free" ? "Free" : "Team"}`,
+      status: pill && pill.tone !== "active" ? pill : null,
+      billedOn: null,
+    };
+  }
+  const plan = `Current plan: ${input.fallbackPlan === "free" ? "Free" : "Team"}`;
+  if (!input.isOwner) {
+    const name = input.ownerName?.trim();
+    return { plan, status: null, billedOn: name ? `Billed on ${name}'s account` : "Billed on the owner's account" };
+  }
+  return { plan, status: null, billedOn: input.vaultAccountId && a ? "Billed on another account" : null };
 }
 
 /** The shape {@link transferTargets} filters on — a `MyBillingVault`, loosened

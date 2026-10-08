@@ -9,7 +9,7 @@ import {
   formatBytes,
   LAPSED_COPY,
   PLAN_LOAD_ERROR_COPY,
-  planPillLabel,
+  planStatusPill,
   planPriceLine,
   seatUsageLines,
   SELF_HOSTED_PLAN_COPY,
@@ -58,7 +58,7 @@ async function orNull<T>(p: Promise<T>): Promise<T | null> {
 /**
  * Account Settings → Plan & Billing (Team model). One billing account per owner:
  * one plan card (name, pill, price line, actions; seat breakdown on Team), the
- * account's usage as tiles, and the people who count as a table. Usage is per vault and lives in Vault Settings → Usage. Old
+ * account's usage as tiles, and the people on the account as a table. Usage is per vault and lives in Vault Settings → Usage. Old
  * servers (`model !== "team"`) bill per vault, so this tab only points at each
  * vault's own Billing tab there.
  */
@@ -160,12 +160,7 @@ export function AccountPlanTab() {
 
   const ownsVaults = account.vaults.length > 0;
   const isTeam = account.plan === "team";
-  const pill = planPillLabel({
-    plan: account.plan,
-    status: account.status,
-    lapsed: account.lapsed,
-    complimentary: !!account.complimentaryUntil,
-  });
+  const statusPill = planStatusPill(account, formatDate);
   const discount = discountLine({ ...account, currency: config.team?.currency ?? "usd" });
 
   // The store's billing mirror and locks feed Vault Settings and the lapse
@@ -276,11 +271,14 @@ export function AccountPlanTab() {
       <div className={`billing-card${isTeam ? " plan-pro" : ""}`}>
         <div className="plan-page-head">
           <div className="plan-page-summary">
+            <div className="subhead">Current plan</div>
             <div className="billing-plan-head">
               <span className="billing-plan-name">{isTeam ? "Team" : "Free"}</span>
-              <span className={`billing-status ${account.lapsed ? "canceled" : account.status}`}>
-                {pill}
-              </span>
+              {statusPill ? (
+                <span className={`billing-status ${statusPill.tone}`}>{statusPill.label}</span>
+              ) : (
+                <span className="muted">Free forever</span>
+              )}
             </div>
             <div className="billing-section-note">{summary}</div>
             {discount && <div className="billing-section-note muted">{discount}</div>}
@@ -399,10 +397,15 @@ export function AccountPlanTab() {
         </>
       )}
 
-      {/* ---- People who count (owners only) ---- */}
+      {/* ---- People on this account (owners only) ---- */}
       {account.canManage && account.people.length > 0 && (
         <>
-          <div className="subhead">People who count</div>
+          <div className="subhead">People on this account</div>
+          {isTeam && (
+            <div className="billing-section-note muted">
+              Each person uses one seat, whichever vaults they're in.
+            </div>
+          )}
           <table className="members-table plan-page-people">
             <thead>
               <tr>
@@ -556,7 +559,7 @@ function SelfHostedPlan({
 
       {account && people.length > 0 && (
         <>
-          <div className="subhead">People who count</div>
+          <div className="subhead">People on this account</div>
           <table className="members-table plan-page-people">
             <thead>
               <tr>

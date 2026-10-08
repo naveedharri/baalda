@@ -138,8 +138,7 @@ export function ManageSeatsDialog({
         </span>
       </div>
       <p className="muted">
-        {account.seats.used} {account.seats.used === 1 ? "person counts" : "people count"} on
-        your account.
+        {account.seats.used} {account.seats.used === 1 ? "person" : "people"} on your account.
       </p>
       {summary.text && <p>{summary.text}</p>}
       {error && <div className="auth-error">{error}</div>}
