@@ -231,6 +231,20 @@ export function discountLine(
   const per = account.interval === "year" ? "/yr" : "/mo";
   const currency = account.currency ?? "usd";
   const saving = `saving ${formatMoney(p.list - p.charged, currency)}${per}`;
+  const label = p.discountName?.trim() && !isLegacyDiscount(p.discountName)
+    ? `Discount ${p.discountName.trim()}`
+    : "Discount";
+  const renews = `${formatMoney(p.renewalAmount ?? p.list, currency)}${per}`;
+  // A promo code often lasts one payment or a few months: say when it ends
+  // instead of promising the saving every renewal. Forever and an unknown
+  // duration (an older server) keep the saving wording.
+  if (p.discountDuration === "once") {
+    return `${label} applied to your first payment · renews at ${renews}`;
+  }
+  if (p.discountDuration === "repeating" && p.discountDurationMonths) {
+    const months = p.discountDurationMonths === 1 ? "1 month" : `${p.discountDurationMonths} months`;
+    return `${label} for ${months} · then ${renews}`;
+  }
   if (isLegacyDiscount(p.discountName)) {
     return `Legacy price ${formatMoney(p.charged, currency)}${per} · ${saving}`;
   }

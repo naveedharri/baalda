@@ -340,6 +340,24 @@ describe("seat helpers", () => {
     ).toBeNull();
     expect(discountLine({ interval: null, price: null })).toBeNull();
   });
+
+  it("says when a discount ends: once, repeating, forever", () => {
+    const price = { list: 209000, charged: 0, discountName: "Team Ben" };
+    expect(
+      discountLine({ interval: "year", price: { ...price, discountDuration: "once", renewalAmount: 209000 } }),
+    ).toBe("Discount Team Ben applied to your first payment · renews at $2,090/yr");
+    expect(
+      discountLine({
+        interval: "month",
+        price: { list: 3000, charged: 1500, discountName: "HALF", discountDuration: "repeating", discountDurationMonths: 3, renewalAmount: 1500 },
+      }),
+    ).toBe("Discount HALF for 3 months · then $15/mo");
+    expect(
+      discountLine({ interval: "year", price: { ...price, discountDuration: "forever", renewalAmount: 0 } }),
+    ).toBe("Discount Team Ben · saving $2,090/yr");
+    // An older server sends no duration: today's wording.
+    expect(discountLine({ interval: "year", price })).toBe("Discount Team Ben · saving $2,090/yr");
+  });
 });
 
 describe("Team limit codes", () => {

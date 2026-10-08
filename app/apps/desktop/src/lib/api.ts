@@ -856,7 +856,16 @@ export interface MyBillingAccount {
     pendingDecrease: { to: number; effectiveAt: string } | null;
   };
   /** Minor units; `charged < list` is a legacy (grandfathered) price. */
-  price: { list: number; charged: number; discountName: string | null } | null;
+  price: {
+    list: number;
+    charged: number;
+    discountName: string | null;
+    /** How long the discount lasts; absent on servers before migration 055. */
+    discountDuration?: "once" | "repeating" | "forever" | null;
+    discountDurationMonths?: number | null;
+    /** What the next renewal costs (list once a one-time discount is spent). */
+    renewalAmount?: number | null;
+  } | null;
   people: { userId: string; name: string; email: string; vaults: string[] }[];
   vaults: { orgId: string; name: string }[];
   limits: { people: number | null; vaults: number | null; assistant: boolean; fileSync: boolean };
