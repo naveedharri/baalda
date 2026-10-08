@@ -9,6 +9,7 @@ import {
   normalizeServerUrl,
   serverHost,
 } from "../lib/auth/serverChoice";
+import { isInvalidCredentials, signInErrorCopy } from "../lib/auth/signInErrorCopy";
 import { readServerChoice, writeServerChoice } from "../lib/prefs";
 import {
   initialEmail,
@@ -186,6 +187,9 @@ export function AuthDialog({
   }, [lockedUntil]);
   const lockSeconds = lockedUntil != null ? Math.max(0, Math.ceil((lockedUntil - now) / 1000)) : 0;
   const signInLocked = mode === "sign-in" && lockSeconds > 0;
+  // Consecutive "Invalid email or password" answers per email, which is the
+  // only signal for when the Google hint can be the real cause.
+  const [failedSignIns, setFailedSignIns] = useState<Record<string, number>>({});
   // Revealed by the "Your own server" card rather than shown alongside it: an
   // input sitting under two options reads as belonging to both.
   const [ownOpen, setOwnOpen] = useState(false);
@@ -354,6 +358,11 @@ export function AuthDialog({
       setPassword("");
     } catch {
       /* error surfaced via authError */
+      const failed = useStore.getState().authError;
+      if (mode === "sign-in" && failed && isInvalidCredentials(failed)) {
+        const key = email.trim().toLowerCase();
+        setFailedSignIns((m) => ({ ...m, [key]: (m[key] ?? 0) + 1 }));
+      }
     } finally {
       setBusy(false);
     }
@@ -748,36 +757,6 @@ export function AuthDialog({
                 </p>
               )}
 
-            {/* Which server this form is about to post to. An account is
-                per-server, so on a team that self-hosts this line is the
-                difference between joining your team and starting a private
-                vault on someone else's instance. */}
-            <p className="auth-server-note">
-              <span>
-                {mode === "reset"
-                  ? "Resetting your password on "
-                  : mode === "sign-in"
-                    ? "Signing in to "
-                    : "Creating your account on "}
-                <strong>{serverHost(serverUrl)}</strong>
-              </span>
-              <button
-                type="button"
-                className="linkish"
-                onClick={() => {
-                  setUrlDraft("");
-                  setOwnOpen(false);
-                  setServerError(null);
-                  setStep("choose-server");
-                }}
-              >
-                {/* On the build's default (managed) server, name the escape
-                    hatch outright: a fresh install no longer asks first (#305). */}
-                {normalizeServerUrl(serverUrl) === normalizeServerUrl(DEFAULT_SERVER_URL)
-                  ? "Use a self-hosted server"
-                  : "Change"}
-              </button>
-            </p>
 
             {/* Gated on the mode: a sign-in failure still sitting in the store
                 would otherwise render under the reset form as if the reset had
@@ -792,12 +771,20 @@ export function AuthDialog({
                 )}
               </div>
             )}
-            {mode !== "reset" && authError && !signInLocked && <div className="auth-error">{authError}</div>}
-            {/* The one trap this form can't detect: an account created THROUGH
-                Google has no password at all, so email sign-in answers "Invalid
-                email or password" and sign-up answers "already exists" — a dead end
-                unless someone says the words. Shown only on that failure, and only
-                when Google is actually offered. */}
+            {mode !== "reset" && authError && !signInLocked && (() => {
+              const copy = mode === "sign-in"
+                ? signInErrorCopy(authError, {
+                    googleEnabled: googleAvailable,
+                    attempts: failedSignIns[email.trim().toLowerCase()] ?? 0,
+                  })
+                : { message: authError, hint: null };
+              return (
+                <div className="auth-error" role="alert">
+                  {copy.message}
+                  {copy.hint && <span className="auth-error-hint">{copy.hint}</span>}
+                </div>
+              );
+            })()}
             {/* Sign-up for an address that already has an account: the server
                 refuses (and sends nothing), but "User already exists" alone
                 leaves the person retyping. Offer the two exits. */}
@@ -835,18 +822,36 @@ export function AuthDialog({
                 .
               </p>
             )}
-            {authError != null &&
-              googleAvailable &&
-              mode === "sign-in" &&
-              /invalid email or password/i.test(authError) && (
-                <p className="auth-hint">
-                  First joined with Google? That account has no password — use
-                  “Continue with Google” above
-                  {resetAvailable
-                    ? ", or use “Forgot password?” to set one."
-                    : "."}
-                </p>
-              )}
+            {/* Which server this form is about to post to. An account is
+                per-server, so on a team that self-hosts this line is the
+                difference between joining your team and starting a private
+                vault on someone else's instance. */}
+            <p className="auth-server-note">
+              <span>
+                {mode === "reset"
+                  ? "Resetting your password on "
+                  : mode === "sign-in"
+                    ? "Signing in to "
+                    : "Creating your account on "}
+                <strong>{serverHost(serverUrl)}</strong>
+              </span>
+              <button
+                type="button"
+                className="linkish"
+                onClick={() => {
+                  setUrlDraft("");
+                  setOwnOpen(false);
+                  setServerError(null);
+                  setStep("choose-server");
+                }}
+              >
+                {/* On the build's default (managed) server, name the escape
+                    hatch outright: a fresh install no longer asks first (#305). */}
+                {normalizeServerUrl(serverUrl) === normalizeServerUrl(DEFAULT_SERVER_URL)
+                  ? "Use a self-hosted server"
+                  : "Change"}
+              </button>
+            </p>
           </>
         )}
       </div>

@@ -4320,6 +4320,13 @@ button.secondary.about-update-btn:disabled {
 .auth-dialog .auth-error {
   margin-top: var(--sp-3);
 }
+/* The sign-in error's optional second line, inside the same box. */
+.auth-error-hint {
+  display: block;
+  margin-top: var(--sp-1);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+}
 /* ---- Account & vault settings — a centered modal over the app ----
    Both surfaces render through `components/SettingsModal.tsx`: a dimmed
    `.settings-backdrop` with this card inside it. `.settings-page` stays the
@@ -5128,7 +5135,7 @@ button.secondary.about-update-btn:disabled {
   justify-content: space-between;
   gap: var(--sp-2);
   flex-wrap: wrap;
-  margin: var(--sp-5) 0 0;
+  margin: var(--sp-3) 0 0;
   color: var(--text-secondary);
   font-size: var(--fs-sm);
   line-height: var(--lh-body);
