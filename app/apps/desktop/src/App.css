@@ -10125,23 +10125,25 @@ body.access-board-grabbing * {
 }
 
 /* ---- Account Settings → Plan & Billing ----
-   One plan card: summary (name, pill, price line) left, the primary action and
-   the link-style secondary actions right. Usage tiles reuse .vault-usage-*;
+   One plan card: summary (name, pill, price line) left, ONE row of actions
+   top-right (secondaries, then the primary). Usage tiles reuse .vault-usage-*;
    the people list reuses .members-table. */
-/* Two columns, both vertically centred: the summary block (name + pill, then
-   the price line) on the left, the action block on the right as ONE unit.
-   Neither column carries padding or margins, so the button's right edge sits
-   on the card's content edge, the same inset as the plan name on the left. */
+/* A wrapping row rather than a grid: when the actions do not fit beside the
+   summary they drop below it as a whole instead of squeezing it. Neither side
+   carries padding or margins, so the last button's right edge sits on the
+   card's content edge. */
 .plan-page-head {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
   column-gap: var(--sp-4);
   row-gap: var(--sp-3);
   margin: 0;
   padding: 0;
 }
 .plan-page-summary {
+  flex: 1 1 240px;
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
@@ -10153,45 +10155,19 @@ body.access-board-grabbing * {
   font-size: var(--fs-xl);
 }
 .plan-page-actions {
-  justify-self: end;
+  flex: 0 0 auto;
+  margin-left: auto;
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: var(--sp-1);
-  margin: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  /* stretch: the bordered secondaries and the borderless primary share one
+     height, whatever their padding and border. */
+  align-items: stretch;
+  gap: var(--sp-2);
   padding: 0;
 }
-.plan-page-actions .billing-action {
-  align-self: flex-end;
+.plan-page-actions > button {
   margin: 0;
-}
-/* Cancel/Resume plan and Manage billing: one row of identical link buttons
-   whose right edge (hover pill included) sits flush with the primary button. */
-.plan-page-links {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: var(--sp-2);
-  margin: 0;
-}
-.plan-page-links > button {
-  margin: 0;
-}
-/* Narrow panels: the action block drops under the summary, left-aligned. */
-@media (max-width: 520px) {
-  .plan-page-head {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .plan-page-actions {
-    justify-self: start;
-    align-items: flex-start;
-  }
-  .plan-page-actions .billing-action {
-    align-self: flex-start;
-  }
-  .plan-page-links {
-    justify-content: flex-start;
-  }
 }
 .plan-page-people .members-table-names {
   font-size: var(--fs-xs);

@@ -291,38 +291,36 @@ export function AccountPlanTab() {
           {account.canManage && (
             <div className="plan-page-actions">
               {!isTeam ? (
-                <button className="primary billing-action" onClick={() => setUpgrading(true)}>
+                <button className="primary" onClick={() => setUpgrading(true)}>
                   Upgrade to Team
                 </button>
               ) : (
                 <>
-                  <button className="primary billing-action" onClick={() => setManagingSeats(true)}>
-                    Add or change seats
-                  </button>
-                  <div className="plan-page-links">
-                    {account.cancelAtPeriodEnd || account.lapsed ? (
-                      <AsyncButton
-                        className="link-btn"
-                        onClick={() => run(() => authManager.api.accountResume(), "Plan resumed.")}
-                      >
-                        Resume plan
-                      </AsyncButton>
-                    ) : (
-                      <AsyncButton
-                        type="button"
-                        className="link-btn"
-                        onClick={() => {
-                          setActionError(null);
-                          setConfirmCancel(true);
-                        }}
-                      >
-                        Cancel plan
-                      </AsyncButton>
-                    )}
-                    <AsyncButton className="link-btn" onClick={openPortal}>
-                      Manage billing
+                  <AsyncButton className="secondary" onClick={openPortal}>
+                    Manage billing
+                  </AsyncButton>
+                  {account.cancelAtPeriodEnd || account.lapsed ? (
+                    <AsyncButton
+                      className="secondary"
+                      onClick={() => run(() => authManager.api.accountResume(), "Plan resumed.")}
+                    >
+                      Resume plan
                     </AsyncButton>
-                  </div>
+                  ) : (
+                    <AsyncButton
+                      type="button"
+                      className="secondary"
+                      onClick={() => {
+                        setActionError(null);
+                        setConfirmCancel(true);
+                      }}
+                    >
+                      Cancel plan
+                    </AsyncButton>
+                  )}
+                  <AsyncButton className="primary" onClick={() => setManagingSeats(true)}>
+                    Add or change seats
+                  </AsyncButton>
                 </>
               )}
             </div>
