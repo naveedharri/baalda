@@ -4,6 +4,7 @@ import { authManager } from "../lib/auth/authManager";
 import {
   classifyBillingConfigResult,
   type BillingConfigState,
+  billingErrorMessage,
   discountLine,
   formatBytes,
   LAPSED_COPY,
@@ -183,7 +184,7 @@ export function AccountPlanTab() {
       refreshShared();
       return true;
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = billingErrorMessage(e);
       setActionError(message);
       toast(message, "error");
       return false;
@@ -196,7 +197,7 @@ export function AccountPlanTab() {
       const { url } = await authManager.api.accountPortalUrl();
       await ipc.openExternal(url);
     } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
+      setActionError(billingErrorMessage(e));
     }
   };
 
@@ -460,6 +461,7 @@ export function AccountPlanTab() {
             void load();
             refreshShared();
           }}
+          onResume={() => run(() => authManager.api.accountResume(), "Plan resumed.")}
         />
       )}
       {confirmCancel && (

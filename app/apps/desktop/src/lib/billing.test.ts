@@ -23,7 +23,9 @@ import {
   seatTotalCents,
   seatTotalLine,
   yearlySavingsLabel,
+  billingErrorMessage,
   discountLine,
+  RESUME_TO_CHANGE_SEATS,
   vaultAccountPill,
   formatMoney,
   seatsFullCopy,
@@ -636,5 +638,33 @@ describe("vaultAccountPill", () => {
       tone: "active",
       free: false,
     });
+  });
+});
+
+describe("billingErrorMessage", () => {
+  it("maps a canceling subscription to the resume sentence or the server's message", () => {
+    expect(billingErrorMessage(new ApiError(409, "subscription_canceling", { error: "subscription_canceling" }))).toBe(
+      RESUME_TO_CHANGE_SEATS,
+    );
+    expect(
+      billingErrorMessage(
+        new ApiError(409, "x", { code: "subscription_canceling", message: "Your plan ends on 8 Oct. Resume it first." }),
+      ),
+    ).toBe("Your plan ends on 8 Oct. Resume it first.");
+  });
+
+  it("never shows a raw provider string", () => {
+    const raw = "Polar subscriptions.update(seats): Forbidden (HTTP 403)";
+    const out = billingErrorMessage(new ApiError(502, raw, { error: "provider_error", message: raw }));
+    expect(out).not.toMatch(/Polar|HTTP/);
+    expect(billingErrorMessage(new ApiError(403, raw, { error: raw }))).not.toMatch(/Polar|HTTP/);
+    expect(billingErrorMessage(new ApiError(500, "HTTP 500"))).not.toMatch(/HTTP/);
+  });
+
+  it("keeps a plain server message and plain non-API errors", () => {
+    expect(billingErrorMessage(new ApiError(400, "x", { message: "Seats must be at least 3." }))).toBe(
+      "Seats must be at least 3.",
+    );
+    expect(billingErrorMessage(new Error("Network is offline"))).toBe("Network is offline");
   });
 });

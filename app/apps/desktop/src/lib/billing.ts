@@ -238,6 +238,28 @@ export function discountLine(
   return `${name ? `Discount ${name}` : "Discounted"} · ${saving}`;
 }
 
+export const RESUME_TO_CHANGE_SEATS = "Resume your plan to change seats.";
+const BILLING_FALLBACK =
+  "Billing couldn't make that change right now. Try again, or open Manage billing.";
+
+/**
+ * A billing error as a sentence for people: the server's own `message` for
+ * coded refusals (`subscription_canceling` maps to {@link RESUME_TO_CHANGE_SEATS}
+ * when it carries none), and a plain fallback instead of a raw provider string
+ * such as "Polar subscriptions.update(seats): … (HTTP 403)" or a bare 5xx.
+ */
+export function billingErrorMessage(e: unknown): string {
+  if (!(e instanceof ApiError)) return e instanceof Error ? e.message : String(e);
+  const body = e.body && typeof e.body === "object" ? (e.body as Record<string, unknown>) : null;
+  const code = typeof body?.code === "string" ? body.code : typeof body?.error === "string" ? body.error : null;
+  const message = typeof body?.message === "string" ? body.message.trim() : "";
+  const raw = (m: string) => /\bpolar\b|\(HTTP \d{3}\)|^HTTP \d{3}$|subscriptions\.\w+\(/i.test(m);
+  if (code === "subscription_canceling") return message && !raw(message) ? message : RESUME_TO_CHANGE_SEATS;
+  if (message && !raw(message)) return message;
+  if (e.status >= 500 || e.status === 0) return BILLING_FALLBACK;
+  return e.message && !raw(e.message) && !/^[a-z_]+$/.test(e.message) ? e.message : BILLING_FALLBACK;
+}
+
 /**
  * The `limit` number the server reported on a limit error, if present in the
  * body. Callers fall back to `billingConfig.freeLimits` when this is null (the

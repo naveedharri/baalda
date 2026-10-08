@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { BillingConfig, MyBillingAccount, SeatPreview } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
-import { seatBounds, seatChangeSummary } from "../lib/billing";
+import { billingErrorMessage, RESUME_TO_CHANGE_SEATS, seatBounds, seatChangeSummary } from "../lib/billing";
 import { toast } from "../lib/toast";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -11,7 +11,9 @@ const PREVIEW_DEBOUNCE_MS = 300;
  * Account Settings → Plan & Billing → Manage seats. A stepper over the purchased
  * seat count: an increase is charged now (prorated, an estimate from the
  * server), a decrease takes effect at the period end. The floor is the people
- * already counted or the plan minimum, whichever is higher.
+ * already counted or the plan minimum, whichever is higher. While the plan is
+ * set to cancel at the period end there is no seat change to make: the dialog
+ * offers Resume plan instead.
  */
 export function ManageSeatsDialog({
   account,
@@ -19,13 +21,17 @@ export function ManageSeatsDialog({
   formatDate,
   onClose,
   onChanged,
+  onResume,
 }: {
   account: MyBillingAccount;
   config: BillingConfig;
   formatDate: (iso: string) => string;
   onClose: () => void;
   onChanged: () => void;
+  /** The plan tab's resume call; resolves true when the plan resumed. */
+  onResume: () => Promise<boolean>;
 }) {
+  const canceling = account.cancelAtPeriodEnd;
   const minSeats = config.team?.minSeats ?? 3;
   const floor = seatBounds(account.seats.used, minSeats).min;
   const current = account.seats.purchased;
@@ -35,7 +41,7 @@ export function ManageSeatsDialog({
 
   useEffect(() => {
     setPreview(null);
-    if (seats < floor || seats === current) return;
+    if (canceling || seats < floor || seats === current) return;
     let cancelled = false;
     const t = setTimeout(() => {
       authManager.api
@@ -44,14 +50,14 @@ export function ManageSeatsDialog({
           if (!cancelled) setPreview(p);
         })
         .catch((e) => {
-          if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+          if (!cancelled) setError(billingErrorMessage(e));
         });
     }, PREVIEW_DEBOUNCE_MS);
     return () => {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [seats, floor, current]);
+  }, [seats, floor, current, canceling]);
 
   const summary = seatChangeSummary({
     seats,
@@ -73,9 +79,25 @@ export function ManageSeatsDialog({
       onChanged();
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(billingErrorMessage(e));
     }
   };
+
+  if (canceling) {
+    return (
+      <ConfirmDialog
+        tone="accent"
+        title="Manage seats"
+        confirmLabel="Resume plan"
+        onCancel={onClose}
+        onConfirm={async () => {
+          if (await onResume()) onClose();
+        }}
+      >
+        <p>{RESUME_TO_CHANGE_SEATS}</p>
+      </ConfirmDialog>
+    );
+  }
 
   return (
     <ConfirmDialog
