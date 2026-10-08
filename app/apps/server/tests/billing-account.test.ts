@@ -286,6 +286,58 @@ describe("account billing routes (team model)", () => {
     expect(bad.status).toBe(400);
   });
 
+  it("reconcile: a `confirmed` checkout with a subscription id is payable; open/expired/failed never write", async () => {
+    const owner = await signUp("rec-conf@b.com");
+    const org = await vault(owner);
+    const accountId = (await ensureAccountForUser(pool, owner.userId))!;
+    const base = {
+      orgId: org,
+      accountId,
+      userId: owner.userId,
+      providerSubscriptionId: "sub_conf",
+      providerCustomerId: "cus_conf",
+    };
+    fakeProvider.snapshot = makeSnapshot({ seats: 3, listAmount: 3000, accountId });
+    for (const status of ["open", "expired", "failed"] as const) {
+      fakeProvider.checkouts.set("chk_conf", { ...base, status });
+      const r = await req("POST", "/api/billing/account/reconcile", {
+        token: owner.token,
+        body: { checkoutId: "chk_conf" },
+      });
+      expect(r.status).toBe(200);
+      expect((await r.json()).plan).toBe("free");
+    }
+    expect(fakeProvider.fetched).toEqual([]);
+
+    // A canceled subscription behind a confirmed checkout is not written.
+    fakeProvider.checkouts.set("chk_conf", { ...base, status: "confirmed" });
+    fakeProvider.getResults.set("sub_conf", makeSnapshot({ status: "canceled", accountId }));
+    const canceled = await req("POST", "/api/billing/account/reconcile", {
+      token: owner.token,
+      body: { checkoutId: "chk_conf" },
+    });
+    expect((await canceled.json()).plan).toBe("free");
+
+    fakeProvider.getResults.delete("sub_conf");
+    const res = await req("POST", "/api/billing/account/reconcile", {
+      token: owner.token,
+      body: { checkoutId: "chk_conf" },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.plan).toBe("team");
+    expect(body.checkoutStatus).toBe("confirmed");
+
+    // The success page's confirm takes the same path.
+    await pool.query(`DELETE FROM subscriptions WHERE provider_subscription_id = 'sub_conf'`);
+    const page = await req("GET", "/api/billing/success?checkout_id=chk_conf");
+    expect(page.status).toBe(200);
+    const { rows } = await pool.query(
+      `SELECT status FROM subscriptions WHERE provider_subscription_id = 'sub_conf'`,
+    );
+    expect(rows).toEqual([{ status: "active" }]);
+  });
+
   it("old per-vault checkout and transfer answer 409 in team mode", async () => {
     const owner = await signUp("old@b.com");
     const org = await vault(owner);

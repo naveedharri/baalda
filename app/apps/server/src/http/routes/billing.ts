@@ -368,11 +368,19 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     const none = { seats: null, productId: null };
     const checkout = prefetched ?? (await deps.provider.getCheckout(checkoutId));
     if (!checkout) return { orgId: null, ...none };
-    if (checkout.status !== "succeeded" || !checkout.providerSubscriptionId) {
+    // Polar can redirect while the checkout still reads `confirmed`; once it
+    // carries a subscription id that subscription is real, so ask for it.
+    // `open`, `expired` and `failed` never write.
+    const payable = checkout.status === "succeeded" || checkout.status === "confirmed";
+    if (!payable || !checkout.providerSubscriptionId) {
       return { orgId: checkout.orgId, ...none };
     }
     const snap = await deps.provider.getSubscription(checkout.providerSubscriptionId);
     if (!snap) return { orgId: checkout.orgId, ...none };
+    // Only a paid subscription is persisted from this path.
+    if (snap.status !== "active" && snap.status !== "past_due") {
+      return { orgId: checkout.orgId, ...none };
+    }
     const plan = { seats: snap.seats, productId: snap.productId };
 
     // Same resolution as the webhook: a row that already holds this provider
