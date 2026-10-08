@@ -20,6 +20,7 @@ import { useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ManageSeatsDialog } from "./ManageSeatsDialog";
+import { PlanHeader } from "./PlanHeader";
 import { SeatUsageBreakdown } from "./SeatUsageBreakdown";
 import { UpgradeDialog } from "./UpgradeDialog";
 
@@ -270,15 +271,7 @@ export function AccountPlanTab() {
       <div className={`billing-card${isTeam ? " plan-pro" : ""}`}>
         <div className="plan-page-head">
           <div className="plan-page-summary">
-            <div className="subhead">Current plan</div>
-            <div className="billing-plan-head">
-              <span className="billing-plan-name">{isTeam ? "Team" : "Free"}</span>
-              {statusPill ? (
-                <span className={`billing-status ${statusPill.tone}`}>{statusPill.label}</span>
-              ) : (
-                <span className="muted">Free forever</span>
-              )}
-            </div>
+            <PlanHeader name={isTeam ? "Team" : "Free"} pill={statusPill} />
             <div className="billing-section-note">{summary}</div>
             {discount && <div className="billing-section-note muted">{discount}</div>}
             {account.complimentaryUntil && (

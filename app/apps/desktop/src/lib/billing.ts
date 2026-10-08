@@ -407,11 +407,14 @@ export function planStatusPill(
 }
 
 /**
- * Vault Settings → Usage footer: "Current plan: Team", the status pill only
- * when it says something other than Active, and whose account pays when it is
- * not the caller's. When the vault is billed on the caller's own account (no
- * other account id, or the same one) it reads that account exactly like Plan &
- * Billing; otherwise the vault's resolved plan from `/mine` (`accountPlan`).
+ * Vault Settings → Usage header, drawn by `PlanHeader` exactly like Plan &
+ * Billing: the plan name ("Team" / "Free"), the same status pill (Active
+ * included; null on Free, which reads "Free forever"), and whose account pays
+ * when it is not the caller's. When the vault is billed on the caller's own
+ * account (no other account id, or the same one) it reads that account exactly
+ * like Plan & Billing; otherwise the vault's resolved plan from `/mine`
+ * (`accountPlan`), whose subscription state this caller cannot see, so a Team
+ * vault there reads Active.
  */
 export function vaultPlanLine(input: {
   account: Pick<
@@ -424,22 +427,19 @@ export function vaultPlanLine(input: {
   /** The vault owner's display name, for a member's "Billed on X's account". */
   ownerName?: string | null;
   fmtDate: (iso: string) => string;
-}): { plan: string; status: PlanStatusPill | null; billedOn: string | null } {
+}): { plan: "Team" | "Free"; status: PlanStatusPill | null; billedOn: string | null } {
   const a = input.account;
   if (input.isOwner && a && (!input.vaultAccountId || input.vaultAccountId === a.id)) {
-    const pill = planStatusPill(a, input.fmtDate);
-    return {
-      plan: `Current plan: ${a.plan === "free" ? "Free" : "Team"}`,
-      status: pill && pill.tone !== "active" ? pill : null,
-      billedOn: null,
-    };
+    return { plan: a.plan === "free" ? "Free" : "Team", status: planStatusPill(a, input.fmtDate), billedOn: null };
   }
-  const plan = `Current plan: ${input.fallbackPlan === "free" ? "Free" : "Team"}`;
+  const isFree = input.fallbackPlan === "free";
+  const plan = isFree ? "Free" : "Team";
+  const status: PlanStatusPill | null = isFree ? null : { label: "Active", tone: "active" };
   if (!input.isOwner) {
     const name = input.ownerName?.trim();
-    return { plan, status: null, billedOn: name ? `Billed on ${name}'s account` : "Billed on the owner's account" };
+    return { plan, status, billedOn: name ? `Billed on ${name}'s account` : "Billed on the owner's account" };
   }
-  return { plan, status: null, billedOn: input.vaultAccountId && a ? "Billed on another account" : null };
+  return { plan, status, billedOn: input.vaultAccountId && a ? "Billed on another account" : null };
 }
 
 /** The shape {@link transferTargets} filters on — a `MyBillingVault`, loosened

@@ -6461,21 +6461,6 @@ button.secondary:disabled {
 /* ---- Team Usage tab (Vault Settings → Usage) ----
    A small dashboard inside one .billing-card: sync pill, stat tiles, footer.
    Tokens only, so dark mode follows tokens.css. */
-.vault-usage-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-}
-.vault-usage-plan {
-  font-size: var(--fs-md);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.vault-usage-billed {
-  font-size: var(--fs-sm);
-  color: var(--text-secondary);
-}
 .vault-usage-tiles {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));

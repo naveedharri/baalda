@@ -663,13 +663,13 @@ describe("vaultPlanLine", () => {
     lapsed: false,
   };
 
-  it("names the plan plainly on the owner's own account, with no pill when Active", () => {
+  it("names the plan like Plan & Billing on the owner's own account, Active pill included", () => {
     expect(
       vaultPlanLine({ account, vaultAccountId: "acc_me", fallbackPlan: "free", isOwner: true, fmtDate: fmt }),
-    ).toEqual({ plan: "Current plan: Team", status: null, billedOn: null });
+    ).toEqual({ plan: "Team", status: { label: "Active", tone: "active" }, billedOn: null });
     expect(
-      vaultPlanLine({ account: { ...account, plan: "free", status: "none" }, vaultAccountId: null, fallbackPlan: "team", isOwner: true, fmtDate: fmt }).plan,
-    ).toBe("Current plan: Free");
+      vaultPlanLine({ account: { ...account, plan: "free", status: "none" }, vaultAccountId: null, fallbackPlan: "team", isOwner: true, fmtDate: fmt }),
+    ).toEqual({ plan: "Free", status: null, billedOn: null });
   });
 
   it("shows the status pill when there is something to say", () => {
@@ -684,7 +684,7 @@ describe("vaultPlanLine", () => {
   it("names the owner's account for a member", () => {
     expect(
       vaultPlanLine({ account: null, vaultAccountId: "acc_o", fallbackPlan: "team", isOwner: false, ownerName: "Sara", fmtDate: fmt }),
-    ).toEqual({ plan: "Current plan: Team", status: null, billedOn: "Billed on Sara's account" });
+    ).toEqual({ plan: "Team", status: { label: "Active", tone: "active" }, billedOn: "Billed on Sara's account" });
     expect(
       vaultPlanLine({ account: null, vaultAccountId: null, fallbackPlan: "free", isOwner: false, fmtDate: fmt }).billedOn,
     ).toBe("Billed on the owner's account");
@@ -693,7 +693,7 @@ describe("vaultPlanLine", () => {
   it("uses the vault's resolved plan when an owner's vault is billed on another account", () => {
     expect(
       vaultPlanLine({ account, vaultAccountId: "acc_other", fallbackPlan: "free", isOwner: true, fmtDate: fmt }),
-    ).toEqual({ plan: "Current plan: Free", status: null, billedOn: "Billed on another account" });
+    ).toEqual({ plan: "Free", status: null, billedOn: "Billed on another account" });
   });
 });
 

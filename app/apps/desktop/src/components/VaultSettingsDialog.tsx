@@ -62,6 +62,7 @@ import { AccountVaultsTab } from "./AccountVaultsTab";
 // this component; re-exported here so every existing importer is unchanged.
 export type { SettingsTab } from "../lib/settingsTabs";
 import type { SettingsTab } from "../lib/settingsTabs";
+import { PlanHeader } from "./PlanHeader";
 
 // Sections that only make sense once the vault is synced to an org. On a
 // local vault they're shown but locked, with a "Turn on sync" gate.
@@ -1086,12 +1087,9 @@ function TeamVaultBillingCard({
   return (
     <>
       <div className="billing-card vault-usage">
-        <div className="vault-usage-head">
-          <span className="vault-usage-plan">{planLine.plan}</span>
-          {planLine.status && (
-            <span className={`billing-status ${planLine.status.tone}`}>{planLine.status.label}</span>
-          )}
-          {planLine.billedOn && <span className="vault-usage-billed">· {planLine.billedOn}</span>}
+        <div className={`plan-page-summary${planLine.plan === "Team" ? " plan-pro" : ""}`}>
+          <PlanHeader name={planLine.plan} pill={planLine.status} />
+          {planLine.billedOn && <div className="billing-section-note muted">{planLine.billedOn}</div>}
         </div>
         {loading || (usageRow && usage) ? (
           <div className="vault-usage-tiles">
