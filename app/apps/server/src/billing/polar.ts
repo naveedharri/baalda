@@ -600,6 +600,11 @@ export class PolarBillingProvider implements BillingProvider {
       if (err instanceof PolarNotFoundError) return null;
       throw err;
     }
+    return this.checkoutSnapshot(checkoutId, raw);
+  }
+
+  /** Map a checkout read from Polar onto our snapshot (see {@link getCheckout}). */
+  async checkoutSnapshot(checkoutId: string, raw: unknown): Promise<CheckoutSnapshot> {
     // Same defensive read as `toSnapshot`: the SDK's declared type is not
     // trusted over what actually arrived (see the 2026-09-08 note above).
     const co = (raw ?? {}) as Record<string, unknown>;
@@ -614,6 +619,29 @@ export class PolarBillingProvider implements BillingProvider {
       "failed",
     ];
     const str = (v: unknown): string | null => (v ? String(v) : null);
+    const providerCustomerId = str(pick("customer_id", "customerId"));
+    let providerSubscriptionId = str(pick("subscription_id", "subscriptionId"));
+    // A fully discounted checkout (total 0) reads `succeeded` with
+    // `subscription_id: null` for good, although Polar did create the
+    // subscription — which records the checkout it came from. Without this
+    // lookup the reconcile poll and the success page never write anything and
+    // the app waits for payment forever (2026-10-08).
+    if (
+      !providerSubscriptionId &&
+      providerCustomerId &&
+      (status === "succeeded" || status === "confirmed")
+    ) {
+      providerSubscriptionId = await this.subscriptionIdForCheckout(
+        providerCustomerId,
+        checkoutId,
+      ).catch((err: unknown) => {
+        console.warn(
+          `[billing] Polar subscription lookup for checkout ${checkoutId} failed:`,
+          (err as Error).message,
+        );
+        return null;
+      });
+    }
     return {
       // An unknown status is never read as paid.
       status: (known as string[]).includes(status)
@@ -622,9 +650,40 @@ export class PolarBillingProvider implements BillingProvider {
       orgId: str(metadata?.[META_ORG]),
       accountId: str(metadata?.[META_ACCOUNT]),
       userId: str(metadata?.[META_USER]),
-      providerSubscriptionId: str(pick("subscription_id", "subscriptionId")),
-      providerCustomerId: str(pick("customer_id", "customerId")),
+      providerSubscriptionId,
+      providerCustomerId,
     };
+  }
+
+  /**
+   * The id of the customer's subscription that `checkoutId` created, or null.
+   * Raw GET like {@link patchMetadata}: the match is on the subscription's
+   * `checkout_id`, read defensively rather than through the SDK's strict parse.
+   */
+  async subscriptionIdForCheckout(
+    providerCustomerId: string,
+    checkoutId: string,
+  ): Promise<string | null> {
+    if (!config.polarAccessToken) {
+      throw new Error("Polar access token not configured");
+    }
+    const base =
+      config.polarServer === "production"
+        ? "https://api.polar.sh"
+        : "https://sandbox-api.polar.sh";
+    const res = await fetch(
+      `${base}/v1/subscriptions/?customer_id=${encodeURIComponent(providerCustomerId)}&limit=100`,
+      { headers: { authorization: `Bearer ${config.polarAccessToken}` } },
+    );
+    if (!res.ok) {
+      throw new Error(`Polar GET /v1/subscriptions failed (HTTP ${res.status})`);
+    }
+    const body = (await res.json().catch(() => null)) as { items?: unknown[] } | null;
+    for (const item of body?.items ?? []) {
+      const sub = (item ?? {}) as Record<string, unknown>;
+      if ((sub.checkout_id ?? sub.checkoutId) === checkoutId && sub.id) return String(sub.id);
+    }
+    return null;
   }
 
   /** @deprecated Use {@link setSubscriptionAccount}. */
