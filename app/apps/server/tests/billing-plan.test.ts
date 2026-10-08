@@ -7,6 +7,7 @@ import {
   planEnforced,
   resolveAccountPlan,
   seatLimitMessage,
+  seatRefusalBody,
 } from "../src/billing/plan.js";
 import { canAddMember, canCreateOrganization, canSyncAttachments, storageLimitBytes } from "../src/billing/entitlements.js";
 import { createResolverCache } from "../src/permissions/resolver.js";
@@ -224,6 +225,19 @@ describe("team model, enforced", () => {
     const live = await resolveAccountPlan(pool, { orgId: org });
     expect(live.plan).toBe("team");
     expect(live.lapsed).toBe(false);
+  });
+
+  it("a lapsed account refuses invites and joins as read-only, not as a people limit", async () => {
+    const owner = await seedUser("lapse-inv@x.com");
+    const acct = await account(owner);
+    const org = await vaultOn(acct, owner);
+    await vaultOn(acct, owner);
+    await subscribe(org, acct, "canceled", 3, "2000-01-01");
+    expect(await checkInviteSeat(pool, org, "new@x.com")).toEqual({ code: "account_read_only" });
+    const stranger = await seedUser("lapse-s@x.com");
+    const refused = await checkJoinSeat(pool, org, { userId: stranger });
+    expect(refused).toEqual({ code: "account_read_only" });
+    expect(seatRefusalBody(refused!)).toMatchObject({ error: "account_read_only", code: "account_read_only" });
   });
 
   it("memoises per request through ResolverCache.planFor", async () => {

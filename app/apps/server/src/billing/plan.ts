@@ -8,6 +8,7 @@ import {
   abuseMaxStorageBytes,
 } from "../config.js";
 import { requiresCloudPlan } from "../deployment-policy.js";
+import { ACCOUNT_READ_ONLY_BODY } from "../permissions/http-gates.js";
 import {
   orgHasActiveSubscription,
   legacyStorageLimitBytes,
@@ -282,6 +283,7 @@ export async function resolveAccountPlan(
 // ---------------------------------------------------------------------------
 
 export type SeatRefusal =
+  | { code: "account_read_only" }
   | { code: "member_limit_reached"; limit: number; scope: "account" }
   | { code: "seat_limit_reached"; seats: number; used: number; pending: number; message: string };
 
@@ -343,6 +345,8 @@ export async function checkInviteSeat(
   plan?: AccountPlan,
 ): Promise<SeatRefusal | null> {
   const p = plan ?? (await resolveAccountPlan(db, { orgId }));
+  // A lapsed account is read-only: say that, not "upgrade to add people".
+  if (p.lapsed) return { code: "account_read_only" };
   const cap = p.limits.people;
   if (cap === null) return null;
   if (email && ((await alreadyOnAccount(db, orgId, { email })) || (await alreadyReserved(db, orgId, email)))) {
@@ -363,6 +367,7 @@ export async function checkJoinSeat(
   plan?: AccountPlan,
 ): Promise<SeatRefusal | null> {
   const p = plan ?? (await resolveAccountPlan(db, { orgId }));
+  if (p.lapsed) return { code: "account_read_only" };
   const cap = p.limits.people;
   if (cap === null) return null;
   if (await alreadyOnAccount(db, orgId, who)) return null;
@@ -371,6 +376,7 @@ export async function checkJoinSeat(
 
 /** JSON body for a seat refusal (402). */
 export function seatRefusalBody(r: SeatRefusal): Record<string, unknown> {
+  if (r.code === "account_read_only") return { ...ACCOUNT_READ_ONLY_BODY };
   return r.code === "seat_limit_reached"
     ? { error: "seat_limit_reached", code: "seat_limit_reached", message: r.message, seats: r.seats, used: r.used, pending: r.pending }
     : { error: "member_limit_reached", code: "member_limit_reached", message: "member_limit_reached", limit: r.limit, scope: r.scope };

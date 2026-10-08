@@ -14,6 +14,7 @@ import { summarizeAccess, type SummaryMode } from "../../permissions/access-summ
 import { invitationState, loadInvitation } from "../../registry/invitations.js";
 import { redactAddresses } from "../../invitations/sweep.js";
 import { getSession } from "../session.js";
+import { ACCOUNT_READ_ONLY_BODY } from "../../permissions/http-gates.js";
 
 /**
  * The Members & access page.
@@ -371,6 +372,7 @@ function inviteErrorCode(err: unknown): { code: string; status: number } {
     const status = typeof err.statusCode === "number" ? err.statusCode : 400;
     if (text.includes("seat_limit_reached")) return { code: "seat_limit_reached", status: 402 };
     if (text.includes("member_limit_reached")) return { code: "member_limit_reached", status: 402 };
+    if (text.includes("account_read_only")) return { code: "account_read_only", status: 402 };
     if (/already a member/i.test(text)) return { code: "already_member", status };
     return { code: (typeof body.code === "string" && body.code) || "invite_failed", status };
   }
@@ -463,6 +465,9 @@ memberRoutes.post("/orgs/:orgId/invitations", async (c) => {
     }
   }
 
+  if (results.length && results.every((r) => r.error === "account_read_only")) {
+    return c.json({ ...ACCOUNT_READ_ONLY_BODY, results }, 402);
+  }
   if (results.length && results.every((r) => r.error === "member_limit_reached")) {
     return c.json(
       {

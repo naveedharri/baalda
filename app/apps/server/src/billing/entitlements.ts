@@ -281,7 +281,13 @@ export async function canAddMember(
     // directly so they can say which limit (people vs seats) was hit.
     const refused = await checkInviteSeat(db, orgId, null);
     if (!refused) return { allowed: true, limit: config.freeMaxMembers };
-    return { allowed: false, limit: refused.code === "seat_limit_reached" ? refused.seats : refused.limit };
+    return {
+      allowed: false,
+      limit:
+        refused.code === "seat_limit_reached" ? refused.seats
+        : refused.code === "member_limit_reached" ? refused.limit
+        : config.freeMaxMembers,
+    };
   }
   const limit = config.freeMaxMembers;
   if (!billingEnabled()) return { allowed: true, limit };
