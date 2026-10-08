@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { testAppDeps } from "./helpers/app.js";
 import { makeFakeProvider, makeSnapshot } from "./helpers/billing-provider.js";
+import { SubscriptionCancelingError } from "../src/billing/provider.js";
 import { config } from "../src/config.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
@@ -426,6 +427,36 @@ describe("account billing routes (team model)", () => {
     const failed = await req("POST", "/api/billing/account/resume", { token: a.token });
     expect(failed.status).toBe(502);
     expect((await failed.json()).error).toBe("subscription_resume_failed");
+  });
+
+  it("seats: a plan scheduled to cancel answers 409 subscription_canceling, before and after the provider", async () => {
+    const a = await signUp("canceling-a@b.com");
+    const org = await vault(a);
+    const account = (await ensureAccountForUser(pool, a.userId))!;
+    const subId = await subscribe(account, org, 3);
+
+    // A cancel the provider made that our row has not heard of yet.
+    fakeProvider.failSeats = new SubscriptionCancelingError();
+    const raced = await req("PATCH", "/api/billing/account/seats", { token: a.token, body: { seats: 4 } });
+    expect(raced.status).toBe(409);
+    expect(await raced.json()).toMatchObject({ error: "subscription_canceling" });
+    fakeProvider.failSeats = null;
+
+    expect((await req("POST", "/api/billing/account/cancel", { token: a.token, body: {} })).status).toBe(200);
+    const summary = await (await req("GET", "/api/billing/account", { token: a.token })).json();
+    expect(summary.cancelAtPeriodEnd).toBe(true);
+
+    const before = fakeProvider.seatUpdates.length;
+    const patch = await req("PATCH", "/api/billing/account/seats", { token: a.token, body: { seats: 4 } });
+    expect(patch.status).toBe(409);
+    expect(await patch.json()).toMatchObject({
+      error: "subscription_canceling",
+      message: "Resume your plan before changing seats.",
+    });
+    const preview = await req("GET", "/api/billing/account/seats/preview?seats=4", { token: a.token });
+    expect(preview.status).toBe(409);
+    expect(fakeProvider.seatUpdates.length).toBe(before);
+    expect(subId).toBeTruthy();
   });
 
   it("portal answers the provider URL for the account's customer", async () => {

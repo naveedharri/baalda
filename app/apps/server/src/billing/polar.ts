@@ -2,6 +2,7 @@ import { Polar } from "@polar-sh/sdk";
 import { Webhook, WebhookVerificationError } from "standardwebhooks";
 import { config, teamMinSeats, teamPricePerSeatCents, teamProductId } from "../config.js";
 import {
+  SubscriptionCancelingError,
   WebhookSignatureError,
   type BillingInterval,
   type BillingProvider,
@@ -439,12 +440,20 @@ export class PolarBillingProvider implements BillingProvider {
     seats: number,
     proration: ProrationBehavior,
   ): Promise<SubscriptionSnapshot> {
-    const sub = await polarCall("subscriptions.update(seats)", () =>
-      client().subscriptions.update({
-        id: providerSubscriptionId,
-        subscriptionUpdate: { seats, prorationBehavior: proration },
-      }),
-    );
+    let sub: unknown;
+    try {
+      sub = await polarCall("subscriptions.update(seats)", () =>
+        client().subscriptions.update({
+          id: providerSubscriptionId,
+          subscriptionUpdate: { seats, prorationBehavior: proration },
+        }),
+      );
+    } catch (err) {
+      // Polar refuses a seat change on a subscription set to cancel (403
+      // AlreadyCanceledSubscription); the route answers that as a clean 409.
+      if (err instanceof PolarAlreadyCanceledError) throw new SubscriptionCancelingError();
+      throw err;
+    }
     return toSnapshot(sub);
   }
 

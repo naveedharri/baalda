@@ -20,6 +20,7 @@ import { accountUsage } from "../../billing/usage.js";
 import { orgRole } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
 import {
+  SubscriptionCancelingError,
   WebhookSignatureError,
   type BillingInterval,
   type BillingProvider,
@@ -1140,6 +1141,9 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     const floor = Math.max(teamMinSeats(), plan.seatsUsed);
     if (seats < floor) return c.json({ error: "below_floor", code: "below_floor", floor }, 400);
     const row = await accountSubscription(ctx.accountId);
+    if (row && isActiveStatus(row.status) && row.cancel_at_period_end) {
+      return c.json(SUBSCRIPTION_CANCELING_BODY, 409);
+    }
     if (row && isActiveStatus(row.status) && row.provider_subscription_id) {
       try {
         const preview = await deps.provider.previewSeatChange(row.provider_subscription_id, seats);
@@ -1175,6 +1179,8 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     if (!row || !isActiveStatus(row.status) || !row.provider_subscription_id) {
       return c.json({ error: "no_subscription", code: "no_subscription" }, 409);
     }
+    // Scheduled to cancel: Polar refuses a seat change until it is resumed.
+    if (row.cancel_at_period_end) return c.json(SUBSCRIPTION_CANCELING_BODY, 409);
     const plan = await resolveAccountPlan(pool, { accountId: ctx.accountId });
     const floor = Math.max(teamMinSeats(), plan.seatsUsed);
     if (seats < floor) return c.json({ error: "below_floor", code: "below_floor", floor }, 400);
@@ -1189,6 +1195,8 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     try {
       snap = await deps.provider.updateSeats(row.provider_subscription_id, seats, proration);
     } catch (err) {
+      // A cancel that raced this request (or one our row has not heard of yet).
+      if (err instanceof SubscriptionCancelingError) return c.json(SUBSCRIPTION_CANCELING_BODY, 409);
       return c.json(
         { error: "seat_update_failed", message: (err as Error).message || "provider seat update failed" },
         502,
@@ -1423,6 +1431,13 @@ async function ownsAccount(accountId: string, userId: string): Promise<boolean> 
 }
 
 /** The account's subscription row: a live one first, else the latest. */
+/** A seat change on a subscription scheduled to cancel at period end. */
+const SUBSCRIPTION_CANCELING_BODY = {
+  error: "subscription_canceling",
+  code: "subscription_canceling",
+  message: "Resume your plan before changing seats.",
+} as const;
+
 async function accountSubscription(accountId: string): Promise<SubscriptionRow | null> {
   const { rows } = await pool.query<SubscriptionRow>(
     `SELECT ${SUBSCRIPTION_COLUMNS} FROM subscriptions

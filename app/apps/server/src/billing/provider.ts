@@ -16,6 +16,18 @@ export type BillingInterval = "month" | "year";
  * verification fails. Provider-neutral so the webhook route can answer 403
  * without importing any provider package.
  */
+/**
+ * The provider refused a subscription change because the subscription is
+ * cancelled or scheduled to cancel at period end. Provider-neutral so a route
+ * can answer 409 `subscription_canceling` instead of the provider's raw error.
+ */
+export class SubscriptionCancelingError extends Error {
+  constructor(message = "Resume your plan before changing seats.") {
+    super(message);
+    this.name = "SubscriptionCancelingError";
+  }
+}
+
 export class WebhookSignatureError extends Error {
   constructor(message = "Invalid webhook signature") {
     super(message);
