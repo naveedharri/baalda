@@ -8,6 +8,7 @@ import {
   type BillingUsage,
   type McpToolInfo,
   type McpTokenRow,
+  type MyBillingAccount,
   type MyBillingVault,
   type UnsyncPreview,
   type VaultCheckpoint,
@@ -25,6 +26,7 @@ import {
   planPillLabel,
   subscriptionStatusLine,
   transferTargets,
+  vaultAccountPill,
   vaultLimitReason,
 } from "../lib/billing";
 import * as ipc from "../lib/ipc";
@@ -943,7 +945,8 @@ function TeamVaultBillingCard({
   onMoved: () => Promise<unknown>;
 }) {
   // Only an owner can move, so only an owner needs (or lazily creates) their account.
-  const [myAccountId, setMyAccountId] = useState<string | null>(null);
+  const [myAccount, setMyAccount] = useState<MyBillingAccount | null>(null);
+  const myAccountId = myAccount?.id ?? null;
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [limitNudge, setLimitNudge] = useState<{ kind: LimitKind; limit: number | null } | null>(
@@ -954,12 +957,16 @@ function TeamVaultBillingCard({
   // read it with `orgId`). `undefined` = loading, `null` = unavailable.
   const [usage, setUsage] = useState<BillingUsage | null | undefined>(undefined);
 
+  // Fresh on every mount: the owner's billing account (the same source Plan &
+  // Billing reads, so the pill agrees with it) and the `/mine` mirror whose
+  // per-vault `accountPlan` covers vaults billed on someone else's account.
   useEffect(() => {
+    void useStore.getState().refreshMyBilling();
     if (!isOwner) return;
     let live = true;
     authManager.api
       .getBillingAccount()
-      .then((a) => { if (live) setMyAccountId(a.id); })
+      .then((a) => { if (live) setMyAccount(a); })
       .catch(() => {});
     return () => { live = false; };
   }, [isOwner, orgId]);
@@ -979,7 +986,7 @@ function TeamVaultBillingCard({
   }, [orgId, vaultAccountId]);
 
   const usageRow = usage?.vaults.find((v) => v.orgId === orgId) ?? null;
-  const isFree = plan === "free";
+  const accountPill = vaultAccountPill({ account: myAccount, vaultAccountId, fallbackPlan: plan });
 
   const elsewhere = isOwner && !!myAccountId && !!vaultAccountId && vaultAccountId !== myAccountId;
   const label = vaultName ?? "this vault";
@@ -1029,11 +1036,11 @@ function TeamVaultBillingCard({
       caption: "People",
       value: loading ? "…" : String(usageRow?.people ?? 0),
       sub:
-        isFree && usage?.limits.people != null
+        usage?.limits.people != null
           ? `of ${usage.limits.people} on this account`
           : (usageRow?.people ?? 0) === 1 ? "person" : "people",
       meter:
-        isFree && usage?.limits.people != null && usageRow
+        usage?.limits.people != null && usageRow
           ? { used: usageRow.people, limit: usage.limits.people }
           : null,
     },
@@ -1057,7 +1064,7 @@ function TeamVaultBillingCard({
     },
   ];
   const freeBase = useStore.getState().billingConfig?.free?.syncedVaults ?? null;
-  if (isFree && usage?.limits.vaults != null) {
+  if (usage?.limits.vaults != null) {
     tiles.push({
       key: "vaults",
       caption: "Synced vaults",
@@ -1069,7 +1076,6 @@ function TeamVaultBillingCard({
       meter: { used: syncedVaults, limit: usage.limits.vaults },
     });
   }
-  const pill = planPillLabel({ plan, status: isFree ? "none" : "active" });
 
   return (
     <>
@@ -1119,7 +1125,7 @@ function TeamVaultBillingCard({
                   ? "This vault is billed on another account"
                   : "This vault is on your account"}
             </span>
-            <span className={`billing-status ${isFree ? "none" : "active"}`}>{pill}</span>
+            <span className={`billing-status ${accountPill.tone}`}>{accountPill.label}</span>
           </div>
           <button
             className="secondary billing-action"
@@ -1287,15 +1293,14 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
   // Billing); this tab (labelled Usage) shows the vault's own usage. No per-vault subscription list and no transfer here.
   if (billingConfig.model === "team") {
     const row = myBilling?.vaults.find((v) => v.orgId === orgId) ?? null;
-    const src = orgBilling ?? row;
     return (
       <TeamVaultBillingCard
         orgId={orgId}
         isSynced={isSynced}
         vaultName={row?.name ?? null}
         isOwner={row?.role === "owner"}
-        plan={src?.accountPlan ?? src?.plan ?? "free"}
-        vaultAccountId={src?.accountId ?? null}
+        plan={row?.accountPlan ?? orgBilling?.accountPlan ?? "free"}
+        vaultAccountId={row?.accountId ?? orgBilling?.accountId ?? null}
         onMoved={refreshAll}
       />
     );

@@ -5,7 +5,6 @@ import {
   classifyBillingConfigResult,
   type BillingConfigState,
   discountLine,
-  savingsLine,
   formatBytes,
   LAPSED_COPY,
   PLAN_LOAD_ERROR_COPY,
@@ -165,7 +164,6 @@ export function AccountPlanTab() {
     complimentary: !!account.complimentaryUntil,
   });
   const discount = discountLine({ ...account, currency: config.team?.currency ?? "usd" });
-  const savings = savingsLine({ ...account, currency: config.team?.currency ?? "usd" });
 
   // The store's billing mirror and locks feed Vault Settings and the lapse
   // padlocks; a plan change here must reach them too, not only this tab.
@@ -282,8 +280,7 @@ export function AccountPlanTab() {
               </span>
             </div>
             <div className="billing-section-note">{summary}</div>
-            {discount && <div className="billing-section-note">{discount}</div>}
-            {savings && <div className="billing-section-note muted">{savings}</div>}
+            {discount && <div className="billing-section-note muted">{discount}</div>}
             {account.complimentaryUntil && (
               <div className="billing-section-note">
                 Complimentary Team until {formatDate(account.complimentaryUntil)}
@@ -310,7 +307,7 @@ export function AccountPlanTab() {
                         Resume plan
                       </AsyncButton>
                     ) : (
-                      <button
+                      <AsyncButton
                         type="button"
                         className="link-btn"
                         onClick={() => {
@@ -319,7 +316,7 @@ export function AccountPlanTab() {
                         }}
                       >
                         Cancel plan
-                      </button>
+                      </AsyncButton>
                     )}
                     <AsyncButton className="link-btn" onClick={openPortal}>
                       Manage billing

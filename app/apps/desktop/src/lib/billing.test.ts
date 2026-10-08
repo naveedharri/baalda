@@ -24,7 +24,7 @@ import {
   seatTotalLine,
   yearlySavingsLabel,
   discountLine,
-  savingsLine,
+  vaultAccountPill,
   formatMoney,
   seatsFullCopy,
   subscriptionStatusLine,
@@ -312,42 +312,29 @@ describe("seat helpers", () => {
     expect(yearlySavingsLabel(null)).toBeNull();
   });
 
-  it("writes the legacy price line only when charged is below list", () => {
+  it("writes one discount line with the saving only when charged is below list", () => {
     expect(
       discountLine({ interval: "month", price: { list: 1000, charged: 500, discountName: "legacy" } }),
-    ).toBe("Legacy price: you keep paying $5/mo");
+    ).toBe("Legacy price $5/mo · saving $5/mo");
     expect(
-      discountLine({ interval: "month", price: { list: 1000, charged: 500, discountName: "legacy-acc_1" } }),
-    ).toBe("Legacy price: you keep paying $5/mo");
+      discountLine({ interval: "year", price: { list: 33000, charged: 0, discountName: "legacy-acc_1" } }),
+    ).toBe("Legacy price $0/yr · saving $330/yr");
     expect(
       discountLine({ interval: "year", price: { list: 33000, charged: 0, discountName: "LAUNCH100" } }),
-    ).toBe("Discount LAUNCH100: you pay $0/yr");
+    ).toBe("Discount LAUNCH100 · saving $330/yr");
     expect(
-      discountLine({ interval: "year", price: { list: 33000, charged: 0, discountName: null } }),
-    ).toBe("Discount: you pay $0/yr");
+      discountLine({ interval: "month", price: { list: 3000, charged: 1000, discountName: null } }),
+    ).toBe("Discounted · saving $20/mo");
+  });
+
+  it("omits the discount line when nothing is saved", () => {
     expect(
       discountLine({ interval: "month", price: { list: 1000, charged: 1000, discountName: null } }),
     ).toBeNull();
+    expect(
+      discountLine({ interval: "month", price: { list: 1000, charged: 1200, discountName: "legacy" } }),
+    ).toBeNull();
     expect(discountLine({ interval: null, price: null })).toBeNull();
-  });
-
-  it("writes the savings line as list minus charged per interval", () => {
-    expect(
-      savingsLine({ interval: "month", price: { list: 3000, charged: 1000, discountName: "legacy" } }),
-    ).toBe("You're saving $20/mo compared with the regular Team price.");
-    expect(
-      savingsLine({ interval: "year", price: { list: 28800, charged: 9600, discountName: "legacy" } }),
-    ).toBe("You're saving $192/yr compared with the regular Team price.");
-  });
-
-  it("omits the savings line when nothing is saved", () => {
-    expect(
-      savingsLine({ interval: "month", price: { list: 1000, charged: 1000, discountName: null } }),
-    ).toBeNull();
-    expect(
-      savingsLine({ interval: "month", price: { list: 1000, charged: 1200, discountName: null } }),
-    ).toBeNull();
-    expect(savingsLine({ interval: null, price: null })).toBeNull();
   });
 });
 
@@ -608,5 +595,46 @@ describe("legacy (per-vault) plan copy", () => {
     const line = legacyFreePlanExplanation({ vaultsPerUser: 1, membersPerVault: 5 });
     expect(line).toMatch(/^Free includes 5 members per vault, 1 free vault, /);
     expect(line).not.toMatch(/Team/);
+  });
+});
+
+describe("vaultAccountPill", () => {
+  const account = {
+    id: "acc_me",
+    plan: "team" as const,
+    status: "active" as const,
+    lapsed: false,
+    complimentaryUntil: null,
+  };
+
+  it("reads the caller's billing account when the vault is on it", () => {
+    expect(vaultAccountPill({ account, vaultAccountId: "acc_me", fallbackPlan: "free" })).toEqual({
+      label: "Team",
+      tone: "active",
+      free: false,
+    });
+    expect(vaultAccountPill({ account, vaultAccountId: null, fallbackPlan: "free" }).label).toBe("Team");
+  });
+
+  it("says Read-only for a lapsed account and Free for a free one", () => {
+    expect(
+      vaultAccountPill({ account: { ...account, lapsed: true }, vaultAccountId: null, fallbackPlan: "team" }),
+    ).toMatchObject({ label: "Read-only", tone: "canceled" });
+    expect(
+      vaultAccountPill({ account: { ...account, plan: "free", status: "none" }, vaultAccountId: null, fallbackPlan: "team" }),
+    ).toEqual({ label: "Free", tone: "none", free: true });
+  });
+
+  it("uses the vault's resolved account plan when it is billed elsewhere or unknown", () => {
+    expect(vaultAccountPill({ account, vaultAccountId: "acc_other", fallbackPlan: "free" })).toEqual({
+      label: "Free",
+      tone: "none",
+      free: true,
+    });
+    expect(vaultAccountPill({ account: null, vaultAccountId: null, fallbackPlan: "team" })).toEqual({
+      label: "Team",
+      tone: "active",
+      free: false,
+    });
   });
 });

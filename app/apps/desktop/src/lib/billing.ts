@@ -219,33 +219,23 @@ export function isLegacyDiscount(name: string | null | undefined): boolean {
   return typeof name === "string" && /^legacy(-|$)/i.test(name.trim());
 }
 
-/** The charged-price line when the account pays less than the list price, else
- *  null: "Legacy price: you keep paying $5/mo" for a migrated legacy
- *  subscription, "Discount LAUNCH: you pay $0/yr" for any other named
- *  discount, "Discount: you pay …" when the name is unknown. */
+/** ONE short line under the plan summary when the account pays less than the
+ *  list price, else null: "Legacy price $5/mo · saving $5/mo" for a migrated
+ *  legacy subscription, "Discount LAUNCH100 · saving $330/yr" for any other
+ *  named discount, "Discounted · saving …" when the name is unknown. */
 export function discountLine(
   account: Pick<MyBillingAccount, "price" | "interval"> & { currency?: string | null },
 ): string | null {
   const p = account.price;
   if (!p || p.charged >= p.list) return null;
   const per = account.interval === "year" ? "/yr" : "/mo";
-  const money = `${formatMoney(p.charged, account.currency ?? "usd")}${per}`;
-  if (isLegacyDiscount(p.discountName)) return `Legacy price: you keep paying ${money}`;
+  const currency = account.currency ?? "usd";
+  const saving = `saving ${formatMoney(p.list - p.charged, currency)}${per}`;
+  if (isLegacyDiscount(p.discountName)) {
+    return `Legacy price ${formatMoney(p.charged, currency)}${per} · ${saving}`;
+  }
   const name = p.discountName?.trim();
-  return name ? `Discount ${name}: you pay ${money}` : `Discount: you pay ${money}`;
-}
-
-/** "You're saving $5/mo compared with the regular Team price." when the
- *  account is charged less than the list price, else null. */
-export function savingsLine(
-  account: Pick<MyBillingAccount, "price" | "interval"> & { currency?: string | null },
-): string | null {
-  const p = account.price;
-  if (!p) return null;
-  const saved = p.list - p.charged;
-  if (saved <= 0) return null;
-  const per = account.interval === "year" ? "/yr" : "/mo";
-  return `You're saving ${formatMoney(saved, account.currency ?? "usd")}${per} compared with the regular Team price.`;
+  return `${name ? `Discount ${name}` : "Discounted"} · ${saving}`;
 }
 
 /**
@@ -343,6 +333,39 @@ export function planPillLabel(row: {
   if (row.status === "canceled") return "Canceled";
   if (row.complimentary) return "Team (complimentary)";
   return "Team";
+}
+
+/**
+ * Vault Settings → Usage plan pill. When the vault is billed on the caller's
+ * own account (no other account id, or the same one), it reads that billing
+ * account exactly like Plan & Billing does; otherwise it falls back to the
+ * vault's resolved account plan from `/mine` (`accountPlan`). `tone` is the
+ * `billing-status` modifier class.
+ */
+export function vaultAccountPill(input: {
+  account: Pick<MyBillingAccount, "id" | "plan" | "status" | "lapsed" | "complimentaryUntil"> | null;
+  vaultAccountId: string | null;
+  fallbackPlan: "free" | "pro" | "team";
+}): { label: string; tone: string; free: boolean } {
+  const a = input.account;
+  if (a && (!input.vaultAccountId || input.vaultAccountId === a.id)) {
+    return {
+      label: planPillLabel({
+        plan: a.plan,
+        status: a.status,
+        lapsed: a.lapsed,
+        complimentary: !!a.complimentaryUntil,
+      }),
+      tone: a.lapsed ? "canceled" : a.plan === "free" ? "none" : a.status,
+      free: a.plan === "free",
+    };
+  }
+  const free = input.fallbackPlan === "free";
+  return {
+    label: planPillLabel({ plan: input.fallbackPlan, status: free ? "none" : "active" }),
+    tone: free ? "none" : "active",
+    free,
+  };
 }
 
 /** The shape {@link transferTargets} filters on — a `MyBillingVault`, loosened

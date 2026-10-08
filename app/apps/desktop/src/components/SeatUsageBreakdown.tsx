@@ -2,9 +2,6 @@ import { seatBreakdown } from "../lib/billing";
 import type { MyBillingAccount } from "../lib/api";
 import { AsyncButton } from "./AsyncButton";
 
-export const SEAT_EXPLAINER =
-  "Seats are what you pay for. Every person in your vaults uses one; pending invitations reserve one until they're accepted.";
-
 /**
  * Account Settings → Plan & Billing seat breakdown (Team accounts only):
  * Seats · Claimed · Reserved · Available in the members-table styling, a
@@ -64,7 +61,6 @@ export function SeatUsageBreakdown({
           </tr>
         </tbody>
       </table>
-      <div className="billing-section-note">{SEAT_EXPLAINER}</div>
       {canManage && showManage && (
         <div className="vault-row-actions">
           <button className="secondary billing-action" onClick={onManage}>

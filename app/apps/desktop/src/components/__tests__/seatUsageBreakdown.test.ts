@@ -3,7 +3,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { SEAT_EXPLAINER, SeatUsageBreakdown } from "../SeatUsageBreakdown";
+import { SeatUsageBreakdown } from "../SeatUsageBreakdown";
 
 const fmt = (iso: string) => `D(${iso})`;
 const cells = (html: string) => [...html.matchAll(/<td>(\d+)<\/td>/g)].map((m) => Number(m[1]));
@@ -22,11 +22,11 @@ function render(overrides: Partial<Parameters<typeof SeatUsageBreakdown>[0]> = {
 }
 
 describe("SeatUsageBreakdown", () => {
-  it("shows Seats, Claimed, Reserved and Available with the explainer", () => {
+  it("shows Seats, Claimed, Reserved and Available without a caption", () => {
     const html = render();
     for (const h of ["Seats", "Claimed", "Reserved", "Available"]) expect(html).toContain(`<th>${h}</th>`);
     expect(cells(html)).toEqual([10, 4, 2, 4]);
-    expect(html).toContain(SEAT_EXPLAINER.replace("'", "&#x27;"));
+    expect(html).not.toContain("Seats are what you pay for");
     expect(html).toContain("Add or change seats");
     expect(html).not.toContain("Planned seat change");
   });
