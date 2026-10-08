@@ -6404,6 +6404,17 @@ button.secondary:disabled {
   border: 1px solid transparent;
   box-shadow: var(--shadow-sm);
 }
+/* Team plan: a faint green wash and border so it reads differently from
+   Free at a glance without leaving the card family. Tokens only, so dark
+   mode follows tokens.css. */
+.billing-card.is-team {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+  background: color-mix(in srgb, var(--success-soft) 45%, var(--bg-card));
+}
+.billing-card.is-team .billing-plan-name,
+.billing-plan-team {
+  color: var(--access-edit-fg);
+}
 .billing-plan-head {
   display: flex;
   align-items: center;
