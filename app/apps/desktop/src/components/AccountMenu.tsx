@@ -3,14 +3,12 @@ import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
 import { statusTone } from "../lib/presence/color";
-import { AsyncButton } from "./AsyncButton";
-import { toast } from "../lib/toast";
-import { acceptInviteFailureMessage } from "../lib/inviteFlow";
 import {
   loadSeenInvitations,
-  saveSeenInvitations,
+  onSeenInvitationsChanged,
   unseenInvitations,
 } from "../lib/inviteSeen";
+import { InvitationRows, useFreshInvitations } from "./InvitationRows";
 import { LazyAvatar } from "./Face";
 import { MenuIcon } from "./MenuIcon";
 import { BugReportDialog } from "./BugReportDialog";
@@ -103,6 +101,9 @@ export function AccountMenu() {
   // Invitation ids this device has already shown in the menu; anything else
   // pulses here and on the identity-bar dot until the menu is opened.
   const [seenInvites, setSeenInvites] = useState(loadSeenInvitations);
+  // Any surface that shows the rows (this menu, Account Settings → Vaults)
+  // writes the seen set; follow it so the identity dot settles either way.
+  useEffect(() => onSeenInvitationsChanged(setSeenInvites), []);
   const [authOpen, setAuthOpen] = useState(false);
   // Which full-screen settings dialog shows lives in the store, so opening one
   // closes the other in the same update (`requestSettings` /
@@ -420,7 +421,6 @@ export function AccountMenu() {
         <AccountPopover
           onClose={() => setOpen(false)}
           seenInvites={seenInvites}
-          onInvitesSeen={setSeenInvites}
           onOpenAccount={() => {
             useStore.getState().requestAccountSettings("profile");
           }}
@@ -452,12 +452,10 @@ function AccountPopover({
   onClose,
   onOpenAccount,
   seenInvites,
-  onInvitesSeen,
 }: {
   onClose: () => void;
   onOpenAccount: () => void;
   seenInvites: Set<string>;
-  onInvitesSeen: (ids: Set<string>) => void;
 }) {
   const session = useStore((s) => s.session);
   const userInvitations = useStore((s) => s.userInvitations);
@@ -465,10 +463,7 @@ function AccountPopover({
   // seen set is written now (so the identity dot settles) and again whenever
   // the list changes while open (so an arrival during it counts as seen, and
   // answered invitations are pruned).
-  const [freshIds] = useState(() => new Set(unseenInvitations(userInvitations, seenInvites)));
-  useEffect(() => {
-    onInvitesSeen(saveSeenInvitations(userInvitations));
-  }, [userInvitations, onInvitesSeen]);
+  const freshIds = useFreshInvitations(userInvitations, seenInvites);
 
   if (!session) return null;
 
@@ -497,67 +492,7 @@ function AccountPopover({
               <span className="invite-count"> · {userInvitations.length}</span>
             )}
           </div>
-          {userInvitations.map((inv) => (
-            <div
-              key={inv.id}
-              className={`invite-row${freshIds.has(inv.id) ? " is-new" : ""}`}
-            >
-              {/* The vault's NAME and the inviter's, not "Vault invitation" with
-                  an org id hidden in a title attribute — nobody recognises a
-                  vault by its id, and this row is the whole basis for deciding
-                  whether to accept. Both fields come from our own
-                  /api/invitations/mine; Better Auth's fallback route has
-                  neither, hence the plain-language defaults. Accept already
-                  says what happens, so the title is just the vault. */}
-              <span className="invite-row-meta">
-                <span className="invite-row-title">
-                  {inv.organizationName ?? "A vault"}
-                </span>
-                <span className="muted">
-                  {inv.inviterName ? `Invited by ${inv.inviterName} · ` : ""}
-                  <span className="invite-row-role">{inv.role}</span>
-                </span>
-              </span>
-              {/* Accepting is: accept → re-read session → roster → switch into
-                  the vault → bind a folder → reconcile. Easily seconds, and it
-                  used to be a bare fire-and-forget click with no acknowledgement
-                  of any kind. */}
-              <AsyncButton
-                className="primary sm"
-                onClick={async () => {
-                  // AsyncButton swallows a rejection, so a refused accept (a
-                  // full vault, wrong account) used to do nothing visible.
-                  try {
-                    await useStore.getState().acceptInvitation(inv.id);
-                  } catch (e) {
-                    toast(
-                      acceptInviteFailureMessage(e, {
-                        inviteEmail: inv.email ?? null,
-                        sessionEmail: useStore.getState().session?.user.email ?? null,
-                      }),
-                      "error",
-                    );
-                  }
-                }}
-              >
-                Accept
-              </AsyncButton>
-              {/* Declining is a real answer, and without it the only way to
-                  clear the row is to join a vault you were never joining. */}
-              <AsyncButton
-                className="ghost-pill sm"
-                onClick={async () => {
-                  try {
-                    await authManager.api.rejectInvitation(inv.id);
-                  } finally {
-                    await useStore.getState().refreshVault();
-                  }
-                }}
-              >
-                Decline
-              </AsyncButton>
-            </div>
-          ))}
+          <InvitationRows invitations={userInvitations} freshIds={freshIds} />
         </div>
       )}
 

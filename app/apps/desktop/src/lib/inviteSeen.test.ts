@@ -24,3 +24,24 @@ describe("seenIdsToStore", () => {
     expect(unseenInvitations([{ id: "a" }, { id: "c" }], stored)).toEqual(["c"]);
   });
 });
+
+describe("onSeenInvitationsChanged", () => {
+  it("hears every seen-set write, so all surfaces settle together", async () => {
+    const { onSeenInvitationsChanged, saveSeenInvitations } = await import("./inviteSeen");
+    const g = globalThis as { window?: unknown };
+    const had = "window" in g;
+    const prev = g.window;
+    g.window = new EventTarget();
+    try {
+      const heard: string[][] = [];
+      const off = onSeenInvitationsChanged((ids) => heard.push([...ids]));
+      saveSeenInvitations([{ id: "a" }, { id: "b" }]);
+      off();
+      saveSeenInvitations([{ id: "c" }]);
+      expect(heard).toEqual([["a", "b"]]);
+    } finally {
+      if (had) g.window = prev;
+      else delete g.window;
+    }
+  });
+});

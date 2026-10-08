@@ -38,5 +38,28 @@ export function saveSeenInvitations(invites: ReadonlyArray<{ id: string }>): Set
   } catch {
     /* storage blocked: the dot just keeps pulsing on this device */
   }
+  try {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(SEEN_INVITES_EVENT, { detail: ids }));
+    }
+  } catch {
+    /* no event support (tests): callers still get the set back */
+  }
   return new Set(ids);
+}
+
+/** Fired on `window` whenever the seen set is written, so every surface that
+ *  shows the pulse (the account menu, the identity dot, Account Settings →
+ *  Vaults) settles together; `storage` events do not fire in the same window. */
+export const SEEN_INVITES_EVENT = "context:invites-seen";
+
+/** Subscribe to seen-set writes; returns the unsubscribe. */
+export function onSeenInvitationsChanged(cb: (ids: Set<string>) => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  const handler = (e: Event) => {
+    const ids = (e as CustomEvent<string[]>).detail;
+    cb(new Set(Array.isArray(ids) ? ids : []));
+  };
+  window.addEventListener(SEEN_INVITES_EVENT, handler);
+  return () => window.removeEventListener(SEEN_INVITES_EVENT, handler);
 }

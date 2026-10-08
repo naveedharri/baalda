@@ -14,6 +14,7 @@ import { classifyLimitError, type LimitKind, limitFromError } from "../lib/billi
 import * as ipc from "../lib/ipc";
 import { readOrgVaults, useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
+import { InvitationRows, useFreshInvitations } from "./InvitationRows";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
 import { useResetLocalCopy } from "./useResetLocalCopy";
@@ -39,6 +40,10 @@ function plural(n: number, one: string, many: string): string {
  */
 export function AccountVaultsTab() {
   const session = useStore((s) => s.session);
+  // Pending invitations get their own section above the synced list, with the
+  // account menu's rows; showing them here marks them seen, like the menu.
+  const userInvitations = useStore((s) => s.userInvitations);
+  const freshInviteIds = useFreshInvitations(userInvitations);
   const reset = useResetLocalCopy();
   const organizations = useStore((s) => s.organizations);
   const members = useStore((s) => s.members);
@@ -423,6 +428,15 @@ export function AccountVaultsTab() {
 
   return (
     <>
+      {session && userInvitations.length > 0 && (
+        <>
+          <div className="subhead">Invitations ({userInvitations.length})</div>
+          <div className="account-vaults-invites">
+            <InvitationRows invitations={userInvitations} freshIds={freshInviteIds} />
+          </div>
+          <div className="menu-sep" />
+        </>
+      )}
       {session && (
         <>
       <div className="subhead account-vaults-head">

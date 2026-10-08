@@ -5287,6 +5287,12 @@ button.secondary.about-update-btn:disabled {
   padding: var(--sp-2) var(--sp-1);
   border-radius: var(--radius-sm);
 }
+/* Account Settings → Vaults: the same rows, without the menu's tinted card. */
+.account-vaults-invites {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: var(--sp-2);
+}
 .invite-row + .invite-row {
   border-top: 1px solid var(--border);
 }
