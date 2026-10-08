@@ -6415,7 +6415,8 @@ button.secondary:disabled {
   font-weight: 700;
   color: var(--text-primary);
 }
-.plan-pro .billing-plan-name {
+.plan-pro .billing-plan-name,
+.plan-header.is-team .billing-plan-name {
   background: var(--accent-gradient);
   -webkit-background-clip: text;
   background-clip: text;
@@ -10206,6 +10207,17 @@ body.access-board-grabbing * {
   padding: 0;
 }
 .plan-page-summary .billing-plan-name {
+  font-size: var(--fs-xl);
+}
+/* Vault Settings → Usage: PlanHeader alone, no card-summary sizing (a
+   flex-basis here becomes HEIGHT inside the column .billing-card). */
+.plan-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.plan-header .billing-plan-name {
   font-size: var(--fs-xl);
 }
 .plan-page-actions {

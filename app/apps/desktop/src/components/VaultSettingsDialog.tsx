@@ -1087,7 +1087,7 @@ function TeamVaultBillingCard({
   return (
     <>
       <div className="billing-card vault-usage">
-        <div className={`plan-page-summary${planLine.plan === "Team" ? " plan-pro" : ""}`}>
+        <div className={`plan-header${planLine.plan === "Team" ? " is-team" : ""}`}>
           <PlanHeader name={planLine.plan} pill={planLine.status} />
           {planLine.billedOn && <div className="billing-section-note muted">{planLine.billedOn}</div>}
         </div>
