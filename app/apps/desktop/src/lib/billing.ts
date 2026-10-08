@@ -272,6 +272,13 @@ export function seatChangeLocked(account: Pick<MyBillingAccount, "cancelAtPeriod
 }
 
 export const RESUME_TO_CHANGE_SEATS = "Resume your plan to change seats.";
+
+/** The Manage seats dialog's subtitle: "19 seats · 1 person on your account".
+ *  `seats` is null before a first purchase and then reads as people only. */
+export function seatsDialogSubtitle(seats: number | null, people: number): string {
+  const who = `${people} ${people === 1 ? "person" : "people"} on your account`;
+  return seats == null ? who : `${seats} ${seats === 1 ? "seat" : "seats"} · ${who}`;
+}
 const BILLING_FALLBACK =
   "Billing couldn't make that change right now. Try again, or open Manage billing.";
 

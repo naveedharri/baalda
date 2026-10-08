@@ -37,6 +37,7 @@ import {
   transferTargets,
   type SubscriptionFacts,
   type SubscriptionLineFormat,
+  seatsDialogSubtitle,
 } from "./billing";
 
 describe("plan benefits copy", () => {
@@ -781,5 +782,15 @@ describe("grandfathered Free limit in the copy", () => {
     expect(membersSeatLine({ plan: "free", seats: { purchased: null, used: 1, reserved: 0 } }, null)).toBe(
       "Free includes 2 people on this account (1 of 2 used)",
     );
+  });
+});
+
+describe("seatsDialogSubtitle", () => {
+  it("names seats and people with singular forms", () => {
+    expect(seatsDialogSubtitle(19, 1)).toBe("19 seats · 1 person on your account");
+    expect(seatsDialogSubtitle(1, 3)).toBe("1 seat · 3 people on your account");
+  });
+  it("reads as people only before a first purchase", () => {
+    expect(seatsDialogSubtitle(null, 2)).toBe("2 people on your account");
   });
 });

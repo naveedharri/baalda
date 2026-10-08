@@ -9561,6 +9561,111 @@ button.member-access-twisty:hover {
   color: var(--accent);
 }
 
+/* ---- Manage seats (ManageSeatsDialog.tsx) --------------------------------
+   The Invite people shell at a small width: left-aligned title + subtitle,
+   one stepper row, an optional scheduled-change line, the price, a compact
+   right-aligned footer (it reuses .invite-people-actions). */
+.manage-seats {
+  width: 420px;
+  max-width: calc(100vw - 2 * var(--sp-4));
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  text-align: left;
+}
+.manage-seats .confirm-title {
+  margin: 0;
+  text-align: left;
+}
+.manage-seats-subtitle,
+.manage-seats-text {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.manage-seats-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-1);
+}
+.manage-seats-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.manage-seats-label {
+  color: var(--text-primary);
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+.manage-seats-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.manage-seats-stepper button {
+  width: 36px;
+  height: 36px;
+  min-width: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-md);
+  line-height: 1;
+}
+.manage-seats-count {
+  min-width: 3ch;
+  text-align: center;
+  color: var(--text-primary);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/* The informational tint .limit-nudge.is-info uses; the Keep action is a text link. */
+.manage-seats-scheduled {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--accent-soft);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.manage-seats-scheduled .link-btn {
+  flex: none;
+  white-space: nowrap;
+  padding: 0 var(--sp-1);
+  color: var(--accent);
+}
+.manage-seats-scheduled .link-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.manage-seats .auth-error {
+  margin: 0;
+  text-align: left;
+}
+.manage-seats .invite-people-actions {
+  justify-content: flex-end;
+  margin-top: var(--sp-1);
+}
+.manage-seats .invite-people-actions .primary,
+.manage-seats .invite-people-actions .ghost-pill {
+  min-width: 0;
+  height: 36px;
+  padding: 0 var(--sp-4);
+  font-size: var(--fs-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* ---- Member profile: Access board (MemberAccessBoard.tsx) ----------------
    Three columns (Can edit / Can view / No access); rows move by drag and drop
    or by their arrows. Grey rows are path-only ancestors. */
