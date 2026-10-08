@@ -317,6 +317,15 @@ describe("seat helpers", () => {
       discountLine({ interval: "month", price: { list: 1000, charged: 500, discountName: "legacy" } }),
     ).toBe("Legacy price: you keep paying $5/mo");
     expect(
+      discountLine({ interval: "month", price: { list: 1000, charged: 500, discountName: "legacy-acc_1" } }),
+    ).toBe("Legacy price: you keep paying $5/mo");
+    expect(
+      discountLine({ interval: "year", price: { list: 33000, charged: 0, discountName: "LAUNCH100" } }),
+    ).toBe("Discount LAUNCH100: you pay $0/yr");
+    expect(
+      discountLine({ interval: "year", price: { list: 33000, charged: 0, discountName: null } }),
+    ).toBe("Discount: you pay $0/yr");
+    expect(
       discountLine({ interval: "month", price: { list: 1000, charged: 1000, discountName: null } }),
     ).toBeNull();
     expect(discountLine({ interval: null, price: null })).toBeNull();
@@ -390,7 +399,37 @@ describe("Plan & Billing helpers", () => {
     interval: "month" as const,
     formatDate: fmt,
   };
-  const preview = { prorationCents: 1250, nextAmountCents: 6000, effectiveAt: "2026-11-01T00:00:00Z" };
+  const preview = { proratedNow: 1250, newAmount: 6000, currentPeriodEnd: "2026-11-01T00:00:00Z" };
+
+  it("seatChangeSummary: a zero charge today still reads as money, never NaN", () => {
+    expect(seatChangeSummary({ ...base, seats: 6, preview: { ...preview, proratedNow: 0, newAmount: 0 } })).toEqual({
+      text: "You'll be charged about $0 today (prorated); then $0 per month.",
+      canConfirm: true,
+    });
+  });
+
+  it("seatChangeSummary: next amount missing falls back to a plain sentence", () => {
+    const r = seatChangeSummary({ ...base, seats: 6, preview: { ...preview, newAmount: null } });
+    expect(r).toEqual({ text: "Your next invoice will show the exact amount.", canConfirm: true });
+  });
+
+  it("seatChangeSummary: both amounts missing or absent never render NaN", () => {
+    const nulls = { proratedNow: null, newAmount: null, currentPeriodEnd: null };
+    expect(seatChangeSummary({ ...base, seats: 6, preview: nulls }).text).toBe(
+      "Your next invoice will show the exact amount.",
+    );
+    // An older server that answers other field names.
+    const odd = {} as unknown as typeof nulls;
+    expect(seatChangeSummary({ ...base, seats: 6, preview: odd }).text).not.toMatch(/NaN/);
+    expect(seatChangeSummary({ ...base, seats: 4, preview: nulls }).text).toBe(
+      "Goes down to 4 seats at the end of this billing period.",
+    );
+  });
+
+  it("seatChangeSummary: charge-now unknown still shows the next amount", () => {
+    const r = seatChangeSummary({ ...base, seats: 6, preview: { ...preview, proratedNow: null } });
+    expect(r.text).toBe("Then $60 per month. Your next invoice will show the exact amount.");
+  });
 
   it("seatChangeSummary: increase says 'about' and the next amount", () => {
     expect(seatChangeSummary({ ...base, seats: 6, preview })).toEqual({

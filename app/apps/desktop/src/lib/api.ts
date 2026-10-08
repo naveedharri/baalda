@@ -881,12 +881,21 @@ export interface BillingUsage {
   limits: MyBillingAccount["limits"];
 }
 
-/** `GET /api/billing/account/seats/preview?seats=n`. Cents. */
+/** `GET /api/billing/account/seats/preview?seats=n`. Minor units (cents); any
+ *  amount the server cannot work out is null. */
 export interface SeatPreview {
-  seats: number;
-  prorationCents: number;
-  effectiveAt: string;
-  nextAmountCents: number;
+  currentSeats: number | null;
+  newSeats: number;
+  /** Charged per period after the change, discount kept. */
+  newAmount: number | null;
+  perSeat: number | null;
+  currency: string | null;
+  interval: "month" | "year" | null;
+  /** Estimated prorated charge today for an increase. */
+  proratedNow: number | null;
+  currentPeriodEnd: string | null;
+  estimated: boolean;
+  floor?: number;
 }
 
 /** A single vault's subscription state + seat usage. */

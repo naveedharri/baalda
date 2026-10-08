@@ -287,7 +287,14 @@ function toSnapshot(raw: unknown): SubscriptionSnapshot {
 
 type SeatFields = Pick<
   SubscriptionSnapshot,
-  "seats" | "listAmount" | "discountId" | "discountName" | "pendingSeats" | "accountId" | "productId"
+  | "seats"
+  | "listAmount"
+  | "discountId"
+  | "discountName"
+  | "discountBasisPoints"
+  | "pendingSeats"
+  | "accountId"
+  | "productId"
 >;
 
 /**
@@ -330,6 +337,10 @@ function seatFields(sub: Record<string, unknown>): SeatFields {
     listAmount,
     discountId: str(pick("discount_id", "discountId")) ?? str(discount?.id),
     discountName: str(discount?.name),
+    discountBasisPoints:
+      discount && String(discount.type ?? "") === "percentage"
+        ? int(discount.basis_points ?? discount.basisPoints)
+        : null,
     pendingSeats: pending ? int(pending.seats) : null,
     accountId: str(metadata?.[META_ACCOUNT]),
     productId,
@@ -496,16 +507,24 @@ export class PolarBillingProvider implements BillingProvider {
     let newAmount: number | null = null;
     let proratedNow: number | null = null;
     if (perSeat !== null) {
-      const newList = perSeat * seats;
-      const discount =
-        snap.amount !== null && snap.listAmount !== null ? Math.max(0, snap.listAmount - snap.amount) : 0;
-      newAmount = Math.max(0, newList - discount);
+      // What Polar will actually charge: a percentage discount scales with the
+      // seats (100% off stays $0), a fixed one carries over as the same amount.
+      const bp = snap.discountBasisPoints ?? null;
+      const fixedOff =
+        bp === null && snap.amount !== null && snap.listAmount !== null
+          ? Math.max(0, snap.listAmount - snap.amount)
+          : 0;
+      const afterPct = (cents: number): number =>
+        bp === null ? cents : Math.round((cents * (10000 - bp)) / 10000);
+      newAmount = Math.max(0, afterPct(perSeat * seats) - fixedOff);
       const delta = seats - (snap.seats ?? 0);
       if (snap.currentPeriodEnd && snap.interval) {
         const periodMs = (snap.interval === "year" ? 365 : 30) * 86400_000;
         const left = Math.min(1, Math.max(0, (snap.currentPeriodEnd.getTime() - Date.now()) / periodMs));
-        proratedNow = delta > 0 ? Math.round(delta * perSeat * left) : 0;
+        proratedNow = delta > 0 ? Math.max(0, Math.round(afterPct(delta * perSeat) * left)) : 0;
       }
+      if (!Number.isFinite(newAmount)) newAmount = null;
+      if (proratedNow !== null && !Number.isFinite(proratedNow)) proratedNow = null;
     }
     return {
       currentSeats: snap.seats,

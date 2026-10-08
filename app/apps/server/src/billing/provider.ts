@@ -92,6 +92,8 @@ export interface NormalizedBillingEvent {
   /** The discount applied to the subscription (legacy price is a forever discount). */
   discountId: string | null;
   discountName: string | null;
+  /** A percentage discount's size (10000 = 100% off); null/absent for a fixed or no discount. */
+  discountBasisPoints?: number | null;
   /** Seats scheduled by a `next_period` change, applied at the next renewal. */
   pendingSeats: number | null;
   /** `metadata.billing_account_id` (Team billing); null on legacy subscriptions. */
@@ -134,6 +136,8 @@ export interface SubscriptionSnapshot {
   /** The discount applied to the subscription (legacy price is a forever discount). */
   discountId: string | null;
   discountName: string | null;
+  /** A percentage discount's size (10000 = 100% off); null/absent for a fixed or no discount. */
+  discountBasisPoints?: number | null;
   /** Seats scheduled by a `next_period` change, applied at the next renewal. */
   pendingSeats: number | null;
   /** `metadata.billing_account_id` (Team billing); null on legacy subscriptions. */

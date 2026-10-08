@@ -214,15 +214,25 @@ export function seatTotalLine(
   return `${seats} ${seats === 1 ? "seat" : "seats"} × ${formatMoney(perSeat, currency)} = ${formatMoney(seatTotalCents(seats, perSeat), currency)}${per}`;
 }
 
-/** "Legacy price: you keep paying $5/mo" when the account is charged less than
- *  the list price, else null. */
+/** True for the forever discount `move-legacy-subs.ts` creates (`legacy-<accountId>`). */
+export function isLegacyDiscount(name: string | null | undefined): boolean {
+  return typeof name === "string" && /^legacy(-|$)/i.test(name.trim());
+}
+
+/** The charged-price line when the account pays less than the list price, else
+ *  null: "Legacy price: you keep paying $5/mo" for a migrated legacy
+ *  subscription, "Discount LAUNCH: you pay $0/yr" for any other named
+ *  discount, "Discount: you pay …" when the name is unknown. */
 export function discountLine(
   account: Pick<MyBillingAccount, "price" | "interval"> & { currency?: string | null },
 ): string | null {
   const p = account.price;
   if (!p || p.charged >= p.list) return null;
   const per = account.interval === "year" ? "/yr" : "/mo";
-  return `Legacy price: you keep paying ${formatMoney(p.charged, account.currency ?? "usd")}${per}`;
+  const money = `${formatMoney(p.charged, account.currency ?? "usd")}${per}`;
+  if (isLegacyDiscount(p.discountName)) return `Legacy price: you keep paying ${money}`;
+  const name = p.discountName?.trim();
+  return name ? `Discount ${name}: you pay ${money}` : `Discount: you pay ${money}`;
 }
 
 /** "You're saving $5/mo compared with the regular Team price." when the
@@ -375,7 +385,11 @@ export function seatChangeSummary(input: {
   floor: number;
   used: number;
   minSeats: number;
-  preview: { prorationCents: number; nextAmountCents: number; effectiveAt: string } | null;
+  preview: {
+    proratedNow: number | null;
+    newAmount: number | null;
+    currentPeriodEnd: string | null;
+  } | null;
   currency: string;
   interval: "month" | "year";
   formatDate: (iso: string) => string;
@@ -390,17 +404,32 @@ export function seatChangeSummary(input: {
   if (current != null && seats === current) return { text: null, canConfirm: false };
   if (!preview) return { text: null, canConfirm: false };
   const per = interval === "year" ? "year" : "month";
+  const money = (v: number | null | undefined): string | null =>
+    typeof v === "number" && Number.isFinite(v) ? formatMoney(v, currency) : null;
   if (current == null || seats > current) {
-    return {
-      text: `You'll be charged about ${formatMoney(preview.prorationCents, currency)} today (prorated); then ${formatMoney(preview.nextAmountCents, currency)} per ${per}.`,
-      canConfirm: true,
-    };
+    const now = money(preview.proratedNow);
+    const next = money(preview.newAmount);
+    let text: string;
+    if (now !== null && next !== null) {
+      text = `You'll be charged about ${now} today (prorated); then ${next} per ${per}.`;
+    } else if (next !== null) {
+      text = `Then ${next} per ${per}. Your next invoice will show the exact amount.`;
+    } else {
+      text = SEAT_PRICE_UNKNOWN;
+    }
+    return { text, canConfirm: true };
   }
+  const end = preview.currentPeriodEnd;
   return {
-    text: `Goes down to ${seats} ${seats === 1 ? "seat" : "seats"} on ${input.formatDate(preview.effectiveAt)}.`,
+    text: end
+      ? `Goes down to ${seats} ${seats === 1 ? "seat" : "seats"} on ${input.formatDate(end)}.`
+      : `Goes down to ${seats} ${seats === 1 ? "seat" : "seats"} at the end of this billing period.`,
     canConfirm: true,
   };
 }
+
+/** Shown when the seat preview has no usable prices. */
+export const SEAT_PRICE_UNKNOWN = "Your next invoice will show the exact amount.";
 
 /** "1.2 MB" style byte counts for the Usage table. */
 export function formatBytes(bytes: number): string {
