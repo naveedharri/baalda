@@ -2257,8 +2257,15 @@ export class ApiClient {
   // ---- Team account billing (servers with `model: "team"`) ----------------
 
   /** The caller's billing account: plan, seats, people who count, vaults. */
-  async getBillingAccount(opts: { orgId?: string } = {}): Promise<MyBillingAccount> {
-    const q = opts.orgId ? `?orgId=${encodeURIComponent(opts.orgId)}` : "";
+  /** `refresh` asks the server to re-read the live subscription from the
+   *  provider once (throttled server-side); older servers ignore it. Only the
+   *  Plan & Billing mount and the checkout hand-back pass it. */
+  async getBillingAccount(opts: { orgId?: string; refresh?: boolean } = {}): Promise<MyBillingAccount> {
+    const params = new URLSearchParams();
+    if (opts.orgId) params.set("orgId", opts.orgId);
+    if (opts.refresh) params.set("refresh", "1");
+    const qs = params.toString();
+    const q = qs ? `?${qs}` : "";
     const { data } = await this.request<MyBillingAccount>("GET", `/api/billing/account${q}`);
     return data;
   }

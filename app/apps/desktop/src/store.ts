@@ -3804,6 +3804,9 @@ export const useStore = create<AppStore>((set, get) => ({
       toast("Payment received. Sign in to see your Team plan.", "neutral");
       return;
     }
+    // Ask the server to re-read the live subscription from the provider once
+    // (a webhook may not have landed yet); a failure or an old server is fine.
+    await authManager.api.getBillingAccount({ refresh: true }).catch(() => undefined);
     // Both readers of the fact: the active vault's badge/limits and the
     // Subscriptions list. The Upgrade dialog, if it is still open, watches
     // these and flips to its success screen on its own.

@@ -79,7 +79,7 @@ export function AccountPlanTab() {
   }, []);
 
   /** One attempt. Throws on anything that is not a definitive answer. */
-  const fetchOnce = useCallback(async (): Promise<Loaded> => {
+  const fetchOnce = useCallback(async (refresh = false): Promise<Loaded> => {
     let config: BillingConfig;
     let state: BillingConfigState;
     try {
@@ -95,14 +95,14 @@ export function AccountPlanTab() {
       // Billing off (self-hosted without a provider): the account routes may
       // 404 too. Show whatever answers; never an error for this case.
       const [account, usage] = await Promise.all([
-        orNull(authManager.api.getBillingAccount()),
+        orNull(authManager.api.getBillingAccount({ refresh })),
         orNull(authManager.api.getBillingUsage()),
       ]);
       return { state, config, account, usage };
     }
     if (state === "vault") return { state, config, account: null, usage: null };
     const [account, usage] = await Promise.all([
-      authManager.api.getBillingAccount(),
+      authManager.api.getBillingAccount({ refresh }),
       authManager.api.getBillingUsage(),
     ]);
     return { state, config, account, usage };
@@ -110,11 +110,11 @@ export function AccountPlanTab() {
 
   /** A failed fetch is never a verdict: retry once after 2 s, then show the
    *  error with Try again. */
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts: { refresh?: boolean } = {}) => {
     setError(null);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const loaded = await fetchOnce();
+        const loaded = await fetchOnce(opts.refresh === true);
         if (mounted.current) setData(loaded);
         return;
       } catch {
@@ -126,8 +126,10 @@ export function AccountPlanTab() {
 
   const organizations = useStore((s) => s.organizations);
 
+  // The mount load asks the server to re-read the live subscription once;
+  // reloads after an action read the stored account.
   useEffect(() => {
-    void load();
+    void load({ refresh: true });
   }, [load]);
 
   if (error) {
