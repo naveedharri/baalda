@@ -60,7 +60,7 @@ export interface NormalizedBillingEvent {
    * `providerSubscriptionId`, then `accountId`, then this.
    */
   organizationId: string;
-  providerCustomerId: string;
+  providerCustomerId: string | null;
   providerSubscriptionId: string;
   /** Our internal plan id (currently always "pro"). */
   plan: string;
@@ -115,7 +115,7 @@ export interface NormalizedBillingEvent {
  */
 export interface SubscriptionSnapshot {
   providerSubscriptionId: string;
-  providerCustomerId: string;
+  providerCustomerId: string | null;
   /** Normalized the same way as the webhook: "active" | "past_due" | "canceled". */
   status: "active" | "past_due" | "canceled";
   currentPeriodEnd: Date | null;

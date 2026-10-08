@@ -196,6 +196,20 @@ export function checkoutEmailFor(email: string | null | undefined): string | und
 
 /** True when a Polar error is a 422 whose `detail` names `customer_email`. */
 export function isCustomerEmailRejection(err: unknown): boolean {
+  return isFieldRejection(err, "customer_email");
+}
+
+/**
+ * True when a Polar error is a 422 whose `detail` names `member_id`: a
+ * customer-session request for a TEAM customer (one created by a seat-based
+ * product) must name the member it is for (2026-10-08, "member_id is required
+ * for team customers").
+ */
+export function isMemberRequiredRejection(err: unknown): boolean {
+  return isFieldRejection(err, "member_id");
+}
+
+function isFieldRejection(err: unknown, field: string): boolean {
   const e = err as { statusCode?: number; detail?: unknown; rawValue?: unknown; body?: unknown } | null;
   if (!e || typeof e !== "object" || e.statusCode !== 422) return false;
   const candidates: unknown[] = [e.detail];
@@ -214,9 +228,16 @@ export function isCustomerEmailRejection(err: unknown): boolean {
       Array.isArray(d) &&
       d.some((item) => {
         const loc = (item as { loc?: unknown } | null)?.loc;
-        return Array.isArray(loc) && loc.includes("customer_email");
+        return Array.isArray(loc) && loc.includes(field);
       }),
   );
+}
+
+/** A provider id, or null for a missing/empty one ("" must never reach Polar). */
+export function nonEmpty(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s ? s : null;
 }
 
 function client(): Polar {
@@ -273,7 +294,7 @@ function toSnapshot(raw: unknown): SubscriptionSnapshot {
   const modifiedAt = modified ? new Date(modified) : new Date();
   return {
     providerSubscriptionId: String(sub.id ?? ""),
-    providerCustomerId: String(pick("customer_id", "customerId") ?? ""),
+    providerCustomerId: nonEmpty(pick("customer_id", "customerId")),
     status: normalizeStatus(String(pick("status", "status") ?? "")),
     currentPeriodEnd: periodEnd ? new Date(periodEnd) : null,
     cancelAtPeriodEnd: Boolean(pick("cancel_at_period_end", "cancelAtPeriodEnd")),
@@ -540,12 +561,49 @@ export class PolarBillingProvider implements BillingProvider {
   }
 
   async getPortalUrl(args: { customerId: string }): Promise<{ url: string }> {
-    const session = await polarCall("customerSessions.create", () =>
-      client().customerSessions.create({
-        customerId: args.customerId,
-      }),
-    );
+    const customerId = args.customerId.trim();
+    if (!customerId) throw new Error("No billing customer");
+    const create = (memberId?: string) =>
+      client().customerSessions.create({ customerId, ...(memberId ? { memberId } : {}) });
+    const session = await polarCall("customerSessions.create", async () => {
+      try {
+        return await create();
+      } catch (err) {
+        // A Team (seat-based) subscription makes its customer a team customer,
+        // and Polar refuses a session for one without a member. The portal is
+        // the billing owner's, so open it as the customer's owner member.
+        if (!isMemberRequiredRejection(err)) throw err;
+        const memberId = await this.ownerMemberId(customerId);
+        if (!memberId) throw err;
+        return await create(memberId);
+      }
+    });
     return { url: session.customerPortalUrl };
+  }
+
+  /**
+   * The customer's owner member id (else its first member), or null. Raw GET
+   * read defensively like {@link subscriptionIdForCheckout}.
+   */
+  async ownerMemberId(providerCustomerId: string): Promise<string | null> {
+    if (!config.polarAccessToken) {
+      throw new Error("Polar access token not configured");
+    }
+    const base =
+      config.polarServer === "production"
+        ? "https://api.polar.sh"
+        : "https://sandbox-api.polar.sh";
+    const res = await fetch(
+      `${base}/v1/members/?customer_id=${encodeURIComponent(providerCustomerId)}&limit=100`,
+      { headers: { authorization: `Bearer ${config.polarAccessToken}` } },
+    );
+    if (!res.ok) {
+      throw new Error(`Polar GET /v1/members failed (HTTP ${res.status})`);
+    }
+    const body = (await res.json().catch(() => null)) as { items?: unknown[] } | null;
+    const members = (body?.items ?? []) as Array<Record<string, unknown>>;
+    const owner = members.find((m) => m.role === "owner" && m.id) ?? members.find((m) => m.id);
+    return owner ? String(owner.id) : null;
   }
 
   async cancelSubscription(
@@ -827,7 +885,7 @@ export class PolarBillingProvider implements BillingProvider {
       type,
       organizationId: orgId,
       userId: userIdRaw || null,
-      providerCustomerId: String(pick("customer_id", "customerId") ?? ""),
+      providerCustomerId: nonEmpty(pick("customer_id", "customerId")),
       providerSubscriptionId: String(sub.id ?? ""),
       plan: "pro",
       status,
