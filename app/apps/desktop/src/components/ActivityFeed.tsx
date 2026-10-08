@@ -517,17 +517,16 @@ export function ActivityFeed() {
                           <ChevronIcon />
                         </span>
                       </span>
-                      {t.path && <RowPath path={t.path} />}
+                      {t.path && !open && <RowPath path={t.path} />}
                     </span>
                   </div>
                   {open && (
                     <div id={detailId} className="activity-row-detail">
-                      {(t.paths.length > 0 || t.newPath) && (
+                      {t.bodyPaths.length > 0 && (
                         <ul className="activity-row-paths">
-                          {t.paths.map((p) => (
+                          {t.bodyPaths.map((p) => (
                             <li key={p}>{p}</li>
                           ))}
-                          {t.newPath && <li>{`Renamed to ${t.newPath}`}</li>}
                           {t.morePaths > 0 && (
                             <li className="muted">{`and ${t.morePaths.toLocaleString()} more`}</li>
                           )}
