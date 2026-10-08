@@ -6464,7 +6464,17 @@ button.secondary:disabled {
 .vault-usage-head {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.vault-usage-plan {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.vault-usage-billed {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
 }
 .vault-usage-tiles {
   display: grid;
@@ -6537,6 +6547,9 @@ button.secondary:disabled {
   gap: var(--sp-2);
   font-size: var(--fs-sm);
   color: var(--text-secondary);
+}
+.vault-usage-footer.is-end {
+  justify-content: flex-end;
 }
 .vault-usage-footer .billing-action {
   align-self: center;

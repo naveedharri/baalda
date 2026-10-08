@@ -926,7 +926,6 @@ function splitBytes(n: number): { value: string; unit: string } {
  */
 function TeamVaultBillingCard({
   orgId,
-  isSynced,
   vaultName,
   isOwner,
   plan,
@@ -934,7 +933,6 @@ function TeamVaultBillingCard({
   onMoved,
 }: {
   orgId: string | null;
-  isSynced: boolean;
   vaultName: string | null;
   isOwner: boolean;
   plan: "free" | "pro" | "team";
@@ -1089,9 +1087,11 @@ function TeamVaultBillingCard({
     <>
       <div className="billing-card vault-usage">
         <div className="vault-usage-head">
-          <span className={`billing-status ${isSynced ? "active" : "none"}`}>
-            {isSynced ? "Synced" : "Not syncing on this computer"}
-          </span>
+          <span className="vault-usage-plan">{planLine.plan}</span>
+          {planLine.status && (
+            <span className={`billing-status ${planLine.status.tone}`}>{planLine.status.label}</span>
+          )}
+          {planLine.billedOn && <span className="vault-usage-billed">· {planLine.billedOn}</span>}
         </div>
         {loading || (usageRow && usage) ? (
           <div className="vault-usage-tiles">
@@ -1124,14 +1124,7 @@ function TeamVaultBillingCard({
         ) : (
           <div className="muted">Usage isn't available for this vault right now.</div>
         )}
-        <div className="vault-usage-footer">
-          <div className="vault-usage-footer-label">
-            <span>{planLine.plan}</span>
-            {planLine.status && (
-              <span className={`billing-status ${planLine.status.tone}`}>{planLine.status.label}</span>
-            )}
-            {planLine.billedOn && <span>· {planLine.billedOn}</span>}
-          </div>
+        <div className="vault-usage-footer is-end">
           <button
             className="secondary billing-action"
             onClick={() => useStore.getState().requestAccountSettings("plan")}
@@ -1301,7 +1294,6 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
     return (
       <TeamVaultBillingCard
         orgId={orgId}
-        isSynced={isSynced}
         vaultName={row?.name ?? null}
         isOwner={row?.role === "owner"}
         plan={row?.accountPlan ?? orgBilling?.accountPlan ?? "free"}
