@@ -90,18 +90,20 @@ export function AccountMenu() {
   // sync banner and the sync pill both point at Health). This component owns the
   // only settings dialog, so it is the only place that can answer.
   const settingsRequest = useStore((s) => s.settingsRequest);
-  const settingsDismissToken = useStore((s) => s.settingsDismissToken);
   const accountSettingsRequest = useStore((s) => s.accountSettingsRequest);
 
   const [open, setOpen] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
-  const [membersOpen, setMembersOpen] = useState(false);
-  // Which settings tab the vault page should open on (View all → Vaults).
-  const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>(undefined);
-  const [accountOpen, setAccountOpen] = useState(false);
-  const [accountSettingsTab, setAccountSettingsTab] = useState<
-    AccountSettingsTab | undefined
-  >(undefined);
+  // Which full-screen settings dialog shows lives in the store, so opening one
+  // closes the other in the same update (`requestSettings` /
+  // `requestAccountSettings`): every cross-link swaps instead of stacking. The
+  // page each one opens on is the tab its latest request named.
+  const settingsDialog = useStore((s) => s.settingsDialog);
+  const closeSettingsDialog = useStore((s) => s.closeSettingsDialog);
+  const membersOpen = settingsDialog === "vault";
+  const accountOpen = settingsDialog === "account";
+  const settingsTab: SettingsTab | undefined = settingsRequest?.tab;
+  const accountSettingsTab: AccountSettingsTab | undefined = accountSettingsRequest?.tab;
   // Signed out with a folder open: is that folder actually a SYNCED vault
   // (its `.context/config.json` is stamped with a vault id)? Labeling it
   // "Local · not synced" is factually wrong — the edits made here will merge
@@ -173,9 +175,7 @@ export function AccountMenu() {
   // showing — which is why the dialog below is keyed on it: `initialTab` is read
   // once, on mount, so a request that arrives while settings are already open
   // has to remount the dialog to land on its page.
-  useEffect(() => {
-    if (settingsDismissToken > 0) setMembersOpen(false);
-  }, [settingsDismissToken]);
+  // (`dismissSettings` clears the store's dialog flag itself.)
 
   // Sign-out closes every dialog this component owns (#302), for the case where
   // it stays mounted through sign-out → sign-in (see the tokens below for the
@@ -183,36 +183,25 @@ export function AccountMenu() {
   const hadSession = useRef(session != null);
   useEffect(() => {
     if (hadSession.current && session == null) {
-      setMembersOpen(false);
-      setAccountOpen(false);
+      closeSettingsDialog();
       setAuthOpen(false);
       setOpen(false);
     }
     hadSession.current = session != null;
   }, [session]);
 
-  // Requests are tokens kept in the store, so the last one outlives this
-  // component. Sign-out swaps the app for the sign-in screen and unmounts it;
-  // on sign-in it would mount, read that old request and reopen both settings
-  // dialogs (#302). Only a token newer than the one seen at mount opens a dialog.
-  const seenSettingsToken = useRef(settingsRequest?.token ?? 0);
-  const seenAccountSettingsToken = useRef(accountSettingsRequest?.token ?? 0);
-
+  // The open dialog is kept in the store, so it outlives this component.
+  // Sign-out swaps the app for the sign-in screen and unmounts it; on sign-in
+  // it would mount and reopen whichever settings dialog was showing (#302).
+  // Only a request made while this component is mounted opens a dialog.
   useEffect(() => {
-    if (!settingsRequest || settingsRequest.token <= seenSettingsToken.current) return;
-    seenSettingsToken.current = settingsRequest.token;
-    setOpen(false);
-    setSettingsTab(settingsRequest.tab);
-    setMembersOpen(true);
-  }, [settingsRequest]);
+    useStore.getState().closeSettingsDialog();
+  }, []);
 
+  // Opening either settings dialog closes the account popover.
   useEffect(() => {
-    if (!accountSettingsRequest || accountSettingsRequest.token <= seenAccountSettingsToken.current) return;
-    seenAccountSettingsToken.current = accountSettingsRequest.token;
-    setOpen(false);
-    setAccountSettingsTab(accountSettingsRequest.tab);
-    setAccountOpen(true);
-  }, [accountSettingsRequest]);
+    if (settingsDialog) setOpen(false);
+  }, [settingsDialog]);
 
   // Close the popover on outside click or Escape.
   useEffect(() => {
@@ -307,7 +296,7 @@ export function AccountMenu() {
           <Suspense fallback={null}>
             <VaultSettingsDialog
               key={settingsRequest?.token ?? 0}
-              onClose={() => setMembersOpen(false)}
+              onClose={() => closeSettingsDialog("vault")}
               onRequestSignIn={() => setAuthOpen(true)}
               initialTab={settingsTab}
             />
@@ -415,9 +404,7 @@ export function AccountMenu() {
         <AccountPopover
           onClose={() => setOpen(false)}
           onOpenAccount={() => {
-            setOpen(false);
-            setAccountSettingsTab(undefined);
-            setAccountOpen(true);
+            useStore.getState().requestAccountSettings("profile");
           }}
         />
       )}
@@ -425,7 +412,7 @@ export function AccountMenu() {
         <Suspense fallback={null}>
           <VaultSettingsDialog
             key={settingsRequest?.token ?? 0}
-            onClose={() => setMembersOpen(false)}
+            onClose={() => closeSettingsDialog("vault")}
             initialTab={settingsTab}
           />
         </Suspense>
@@ -434,7 +421,7 @@ export function AccountMenu() {
         <Suspense fallback={null}>
           <AccountSettings
             key={accountSettingsRequest?.token ?? 0}
-            onClose={() => setAccountOpen(false)}
+            onClose={() => closeSettingsDialog("account")}
             initialTab={accountSettingsTab}
           />
         </Suspense>

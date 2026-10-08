@@ -323,10 +323,7 @@ export function VaultSettingsDialog({
           {session && (
             <SettingsCrossLink
               label="Account settings"
-              onOpen={() => {
-                onClose();
-                useStore.getState().requestAccountSettings("profile");
-              }}
+              onOpen={() => useStore.getState().requestAccountSettings("profile")}
             />
           )}
         </nav>

@@ -629,6 +629,15 @@ interface AppStore {
   accountSettingsRequest: { tab: AccountSettingsTab; token: number } | null;
   requestAccountSettings: (tab: AccountSettingsTab) => void;
   /**
+   * Which full-screen settings dialog is showing. The two are mutually
+   * exclusive: `requestSettings` and `requestAccountSettings` set this in the
+   * same update as their request, so opening one always closes the other and
+   * every cross-link swaps instead of stacking. Rendered by `AccountMenu`.
+   */
+  settingsDialog: "vault" | "account" | null;
+  /** Close a settings dialog; with `which`, only if that one is showing. */
+  closeSettingsDialog: (which?: "vault" | "account") => void;
+  /**
    * Open the Upgrade (plan comparison) dialog from any screen. `reason` is one
    * muted line under its heading. Consumed by `UpgradeDialogHost` (main.tsx).
    */
@@ -1860,8 +1869,15 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ rightPanel: null, versionPanelDocId: null, noteVersions: null, versionPreview: null }),
   setRightPanelTab: (tab) => get().openRightPanel(tab),
   settingsDismissToken: 0,
-  dismissSettings: () => set((s) => ({ settingsDismissToken: s.settingsDismissToken + 1 })),
+  dismissSettings: () =>
+    set((s) => ({
+      settingsDismissToken: s.settingsDismissToken + 1,
+      settingsDialog: s.settingsDialog === "vault" ? null : s.settingsDialog,
+    })),
   accountSettingsRequest: null,
+  settingsDialog: null,
+  closeSettingsDialog: (which) =>
+    set((s) => (which && s.settingsDialog !== which ? {} : { settingsDialog: null })),
   upgradeDialogRequest: null,
   backendStatus: null,
   setBackendStatus: (backendStatus) => set({ backendStatus }),
@@ -2377,6 +2393,7 @@ export const useStore = create<AppStore>((set, get) => ({
     }
     set((s) => ({
       settingsRequest: { tab, token: (s.settingsRequest?.token ?? 0) + 1 },
+      settingsDialog: "vault",
     }));
   },
 
@@ -2386,6 +2403,7 @@ export const useStore = create<AppStore>((set, get) => ({
         tab,
         token: (s.accountSettingsRequest?.token ?? 0) + 1,
       },
+      settingsDialog: "account",
     }));
   },
 

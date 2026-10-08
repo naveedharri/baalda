@@ -181,10 +181,7 @@ export function AccountSettings({
           {vaultOpen && (
             <SettingsCrossLink
               label="Vault settings"
-              onOpen={() => {
-                onClose();
-                useStore.getState().requestSettings("general");
-              }}
+              onOpen={() => useStore.getState().requestSettings("general")}
             />
           )}
         </nav>
