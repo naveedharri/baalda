@@ -25,8 +25,10 @@ import {
   type BillingInterval,
   type BillingProvider,
   type CheckoutSnapshot,
+  type DiscountDuration,
   type NormalizedBillingEvent,
   type SubscriptionSnapshot,
+  repeatingCoversRenewal,
 } from "../../billing/provider.js";
 import {
   getEntitlement,
@@ -147,6 +149,34 @@ const RECONCILE_STALE_MINUTES = 10;
 /** Cap the provider calls one request may make, so the tab can't hang on Polar. */
 const RECONCILE_MAX_PER_REQUEST = 5;
 
+/** A stored `discount_duration`, or null when unknown. */
+function asDuration(v: string | null | undefined): DiscountDuration | null {
+  return v === "once" || v === "repeating" || v === "forever" ? v : null;
+}
+
+/**
+ * What the NEXT renewal will cost: `forever` (or no discount, or an unknown
+ * duration from a row written before m055) = what is charged now; `once` =
+ * list, the discount was spent on the first payment; `repeating` = charged
+ * while started_at + months runs past the current period end, else list.
+ * The repeating start is our row's created_at, so it is approximate.
+ */
+function renewalAmount(row: SubscriptionRow): number | null {
+  const list = row.list_amount === null ? null : Number(row.list_amount);
+  const charged = row.amount === null ? null : Number(row.amount);
+  const duration = row.discount_id ? asDuration(row.discount_duration) : null;
+  if (duration === "once") return list ?? charged;
+  if (duration === "repeating") {
+    const covers = repeatingCoversRenewal(
+      row.created_at ? new Date(row.created_at) : null,
+      row.discount_duration_months,
+      row.current_period_end ? new Date(row.current_period_end) : null,
+    );
+    return covers ? charged : (list ?? charged);
+  }
+  return charged;
+}
+
 /** Map a provider snapshot onto the shape `applySubscriptionState` persists. */
 function stateFromSnapshot(
   orgId: string | null,
@@ -160,6 +190,8 @@ function stateFromSnapshot(
     discountId: snap.discountId ?? null,
     discountName: snap.discountName ?? null,
     discountBasisPoints: snap.discountBasisPoints ?? null,
+    discountDuration: snap.discountDuration ?? null,
+    discountDurationMonths: snap.discountDurationMonths ?? null,
     accountId: snap.accountId,
     organizationId: orgId,
     providerCustomerId: snap.providerCustomerId || null,
@@ -525,6 +557,8 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
         discountId: event.discountId ?? null,
         discountName: event.discountName ?? null,
         discountBasisPoints: event.discountBasisPoints ?? null,
+        discountDuration: event.discountDuration ?? null,
+        discountDurationMonths: event.discountDurationMonths ?? null,
         accountId,
       });
       // Only a real tombstone: an account-level event with no vault is stored
@@ -1176,6 +1210,9 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
         const preview = await deps.provider.previewSeatChange(row.provider_subscription_id, seats, {
           discountId: row.discount_id,
           discountBasisPoints: row.discount_basis_points,
+          discountDuration: asDuration(row.discount_duration),
+          discountDurationMonths: row.discount_duration_months,
+          startedAt: row.created_at ? new Date(row.created_at) : null,
         });
         return c.json({ ...preview, floor });
       } catch (err) {
@@ -1590,6 +1627,9 @@ async function readAccountBody(accountId: string, canManage: boolean) {
             charged: row.amount === null ? null : Number(row.amount),
             discountName: row.discount_name,
             discountBasisPoints: row.discount_basis_points,
+            discountDuration: row.discount_id ? asDuration(row.discount_duration) : null,
+            discountDurationMonths: row.discount_id ? row.discount_duration_months : null,
+            renewalAmount: renewalAmount(row),
           }
         : null,
     people,

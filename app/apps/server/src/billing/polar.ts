@@ -9,7 +9,10 @@ import {
   type CheckoutSnapshot,
   type CreateCheckoutArgs,
   type CreateDiscountArgs,
+  type DiscountDuration,
   type ProrationBehavior,
+  type StoredDiscount,
+  repeatingCoversRenewal,
   type SeatChangePreview,
   type NormalizedBillingEvent,
   type SubscriptionSnapshot,
@@ -314,6 +317,8 @@ type SeatFields = Pick<
   | "discountId"
   | "discountName"
   | "discountBasisPoints"
+  | "discountDuration"
+  | "discountDurationMonths"
   | "pendingSeats"
   | "accountId"
   | "productId"
@@ -363,10 +368,19 @@ function seatFields(sub: Record<string, unknown>): SeatFields {
       discount && String(discount.type ?? "") === "percentage"
         ? int(discount.basis_points ?? discount.basisPoints)
         : null,
+    discountDuration: normalizeDuration(discount?.duration),
+    discountDurationMonths: discount
+      ? int(discount.duration_in_months ?? discount.durationInMonths)
+      : null,
     pendingSeats: pending ? int(pending.seats) : null,
     accountId: str(metadata?.[META_ACCOUNT]),
     productId,
   };
+}
+
+/** Polar's `discount.duration`, or null when absent or unrecognised. */
+function normalizeDuration(v: unknown): DiscountDuration | null {
+  return v === "once" || v === "repeating" || v === "forever" ? v : null;
 }
 
 /** Map a Polar webhook `type` to our normalized event type (or null to ignore). */
@@ -528,7 +542,7 @@ export class PolarBillingProvider implements BillingProvider {
   async previewSeatChange(
     providerSubscriptionId: string,
     seats: number,
-    stored?: { discountId: string | null; discountBasisPoints: number | null },
+    stored?: StoredDiscount,
   ): Promise<SeatChangePreview> {
     // Polar 0.48.1 has no preview/quote endpoint for subscription updates, so
     // this is DERIVED: per-seat = our configured Team price for the interval
@@ -557,12 +571,33 @@ export class PolarBillingProvider implements BillingProvider {
           : 0;
       const afterPct = (cents: number): number =>
         bp === null ? cents : Math.round((cents * (10000 - bp)) / 10000);
-      newAmount = Math.max(0, afterPct(perSeat * seats) - fixedOff);
+      const discounted = (cents: number): number => Math.max(0, afterPct(cents) - fixedOff);
+      // How long the discount lasts (live read first, the stored value for the
+      // SAME discount otherwise). A `once` discount was spent on the first
+      // invoice, so neither the proration nor the next period gets it; a
+      // `repeating` one covers the next period only while its months run past
+      // the current period end (start = our row's created_at, approximate);
+      // `forever` and unknown keep today's treatment.
+      const sameStored = stored && snap.discountId && stored.discountId === snap.discountId ? stored : null;
+      const duration = snap.discountId
+        ? (snap.discountDuration ?? sameStored?.discountDuration ?? null)
+        : null;
+      const months = snap.discountDurationMonths ?? sameStored?.discountDurationMonths ?? null;
+      const nowApplies = duration !== "once";
+      const nextApplies =
+        duration === "once"
+          ? false
+          : duration === "repeating"
+            ? repeatingCoversRenewal(sameStored?.startedAt ?? null, months, snap.currentPeriodEnd)
+            : true;
+      newAmount = nextApplies ? discounted(perSeat * seats) : perSeat * seats;
       const delta = seats - (snap.seats ?? 0);
       if (snap.currentPeriodEnd && snap.interval) {
         const periodMs = (snap.interval === "year" ? 365 : 30) * 86400_000;
         const left = Math.min(1, Math.max(0, (snap.currentPeriodEnd.getTime() - Date.now()) / periodMs));
-        proratedNow = delta > 0 ? Math.max(0, Math.round(afterPct(delta * perSeat) * left)) : 0;
+        const deltaCents = delta * perSeat;
+        proratedNow =
+          delta > 0 ? Math.max(0, Math.round((nowApplies ? afterPct(deltaCents) : deltaCents) * left)) : 0;
       }
       if (!Number.isFinite(newAmount)) newAmount = null;
       if (proratedNow !== null && !Number.isFinite(proratedNow)) proratedNow = null;

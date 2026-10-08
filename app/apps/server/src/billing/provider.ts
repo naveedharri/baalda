@@ -106,6 +106,13 @@ export interface NormalizedBillingEvent {
   discountName: string | null;
   /** A percentage discount's size (10000 = 100% off); null/absent for a fixed or no discount. */
   discountBasisPoints?: number | null;
+  /**
+   * How long the discount lasts: `once` covers the first payment only,
+   * `repeating` lasts `discountDurationMonths`, `forever` every renewal.
+   * Null/absent when unknown or no discount.
+   */
+  discountDuration?: DiscountDuration | null;
+  discountDurationMonths?: number | null;
   /** Seats scheduled by a `next_period` change, applied at the next renewal. */
   pendingSeats: number | null;
   /** `metadata.billing_account_id` (Team billing); null on legacy subscriptions. */
@@ -125,6 +132,37 @@ export interface NormalizedBillingEvent {
  * goes through the SAME upsert (and the same `event_ts` ordering guard) the
  * webhook uses, so a snapshot and a webhook racing each other still converge.
  */
+/** How long a provider discount lasts (Polar's `discount.duration`). */
+export type DiscountDuration = "once" | "repeating" | "forever";
+
+/** The discount as stored on our subscription row, for a seat preview. */
+export interface StoredDiscount {
+  discountId: string | null;
+  discountBasisPoints: number | null;
+  discountDuration?: DiscountDuration | null;
+  discountDurationMonths?: number | null;
+  /** When the subscription started (our row's created_at), for a repeating discount. */
+  startedAt?: Date | null;
+}
+
+/**
+ * Whether a `repeating` discount still covers the renewal at `periodEnd`:
+ * true when `startedAt` + `months` falls after it. Approximate (calendar
+ * months from our row's created_at, not Polar's own discount start); an
+ * unknown start, month count or period end counts as covered, matching the
+ * pre-duration behaviour.
+ */
+export function repeatingCoversRenewal(
+  startedAt: Date | null,
+  months: number | null,
+  periodEnd: Date | null,
+): boolean {
+  if (!startedAt || months === null || !periodEnd) return true;
+  const until = new Date(startedAt.getTime());
+  until.setUTCMonth(until.getUTCMonth() + months);
+  return until.getTime() > periodEnd.getTime();
+}
+
 export interface SubscriptionSnapshot {
   providerSubscriptionId: string;
   providerCustomerId: string | null;
@@ -150,6 +188,13 @@ export interface SubscriptionSnapshot {
   discountName: string | null;
   /** A percentage discount's size (10000 = 100% off); null/absent for a fixed or no discount. */
   discountBasisPoints?: number | null;
+  /**
+   * How long the discount lasts: `once` covers the first payment only,
+   * `repeating` lasts `discountDurationMonths`, `forever` every renewal.
+   * Null/absent when unknown or no discount.
+   */
+  discountDuration?: DiscountDuration | null;
+  discountDurationMonths?: number | null;
   /** Seats scheduled by a `next_period` change, applied at the next renewal. */
   pendingSeats: number | null;
   /** `metadata.billing_account_id` (Team billing); null on legacy subscriptions. */
@@ -336,7 +381,7 @@ export interface BillingProvider {
     providerSubscriptionId: string,
     seats: number,
     /** The stored discount: its basis points stand in when the live read omits them. */
-    stored?: { discountId: string | null; discountBasisPoints: number | null },
+    stored?: StoredDiscount,
   ): Promise<SeatChangePreview>;
   /**
    * Verify a raw webhook body + headers and normalize it. Returns `null` for a

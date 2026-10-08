@@ -508,6 +508,49 @@ describe("account billing routes (team model)", () => {
     expect(fakeProvider.fetched.filter((id) => id === subId)).toHaveLength(1);
   });
 
+  it("GET account ?refresh=1 stores a once discount and prices the renewal at list", async () => {
+    const a = await signUp("refresh-once@b.com");
+    const org = await vault(a);
+    const account = (await ensureAccountForUser(pool, a.userId))!;
+    const subId = await subscribe(account, org, 3);
+    fakeProvider.getResults.set(subId, {
+      ...makeSnapshot(),
+      providerSubscriptionId: subId,
+      providerCustomerId: "cus_acct",
+      status: "active",
+      seats: 3,
+      amount: 0,
+      listAmount: 3000,
+      discountId: "disc_ben",
+      discountName: "Team Ben",
+      discountBasisPoints: 10000,
+      discountDuration: "once",
+      modifiedAt: new Date(Date.now() + 60_000),
+    });
+    const body = await (await req("GET", "/api/billing/account?refresh=1", { token: a.token })).json();
+    expect(body.price).toMatchObject({
+      list: 3000,
+      charged: 0,
+      discountName: "Team Ben",
+      discountDuration: "once",
+      discountDurationMonths: null,
+      renewalAmount: 3000,
+    });
+    const row = await pool.query(
+      `SELECT discount_duration, discount_duration_months FROM subscriptions WHERE provider_subscription_id = $1`,
+      [subId],
+    );
+    expect(row.rows[0]).toEqual({ discount_duration: "once", discount_duration_months: null });
+
+    // A forever discount renews at the charged price.
+    await pool.query(
+      `UPDATE subscriptions SET discount_duration = 'forever' WHERE provider_subscription_id = $1`,
+      [subId],
+    );
+    const forever = await (await req("GET", "/api/billing/account", { token: a.token })).json();
+    expect(forever.price.renewalAmount).toBe(0);
+  });
+
   it("GET account ?refresh=1 answers the stored summary when the provider fails", async () => {
     const a = await signUp("refresh-fail@b.com");
     const org = await vault(a);

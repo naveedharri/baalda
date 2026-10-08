@@ -94,6 +94,66 @@ describe("PolarBillingProvider.previewSeatChange", () => {
     expect(Number.isFinite(p.proratedNow)).toBe(true);
   });
 
+  it("prices the next period at list for a once discount, discounted for a forever one", async () => {
+    vi.spyOn(provider, "getSubscription").mockResolvedValue(
+      snap({
+        amount: 0,
+        discountId: "d_once",
+        discountName: "Team Ben",
+        discountBasisPoints: 10000,
+        discountDuration: "once",
+      }),
+    );
+    const once = await provider.previewSeatChange("sub_1", 8);
+    expect(once.newAmount).toBe(88000);
+    // The one discounted payment is spent: the proration is at list too.
+    expect(once.proratedNow).toBeGreaterThan(54000);
+
+    vi.spyOn(provider, "getSubscription").mockResolvedValue(
+      snap({
+        amount: 0,
+        discountId: "d_forever",
+        discountName: "Legacy price",
+        discountBasisPoints: 10000,
+        discountDuration: "forever",
+      }),
+    );
+    const forever = await provider.previewSeatChange("sub_1", 8);
+    expect(forever.newAmount).toBe(0);
+    expect(forever.proratedNow).toBe(0);
+  });
+
+  it("uses the stored duration for the same discount and ends a repeating one on time", async () => {
+    vi.spyOn(provider, "getSubscription").mockResolvedValue(
+      snap({ amount: 0, discountId: "d_once", discountName: "Team Ben", discountBasisPoints: 10000 }),
+    );
+    const once = await provider.previewSeatChange("sub_1", 8, {
+      discountId: "d_once",
+      discountBasisPoints: 10000,
+      discountDuration: "once",
+    });
+    expect(once.newAmount).toBe(88000);
+
+    vi.spyOn(provider, "getSubscription").mockResolvedValue(
+      snap({
+        amount: 0,
+        discountId: "d_rep",
+        discountName: "Three months",
+        discountBasisPoints: 10000,
+        discountDuration: "repeating",
+        discountDurationMonths: 3,
+      }),
+    );
+    // Started a month ago, three months: ends before the yearly renewal.
+    const ended = await provider.previewSeatChange("sub_1", 8, {
+      discountId: "d_rep",
+      discountBasisPoints: 10000,
+      startedAt: new Date(Date.now() - 30 * 86400_000),
+    });
+    expect(ended.newAmount).toBe(88000);
+    expect(ended.proratedNow).toBe(0);
+  });
+
   it("answers null, never NaN, when the interval is unknown", async () => {
     vi.spyOn(provider, "getSubscription").mockResolvedValue(snap({ interval: null }));
     const p = await provider.previewSeatChange("sub_1", 8);
