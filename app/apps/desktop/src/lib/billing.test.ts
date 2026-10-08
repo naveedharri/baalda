@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "./api";
 import {
   membersSeatLine,
+  invitePrewarning,
   seatBreakdown,
   formatBytes,
   planPriceLine,
@@ -742,5 +743,27 @@ describe("seatChangeLocked", () => {
         new ApiError(403, "Polar subscriptions.update(seats): subscription already canceled (HTTP 403)"),
       ),
     ).not.toMatch(/Polar|HTTP/);
+  });
+});
+
+describe("invitePrewarning", () => {
+  const team = (purchased: number, used: number, reserved: number) => ({ plan: "team" as const, seats: { purchased, used, reserved } });
+  it("is silent while a seat is free", () => {
+    expect(invitePrewarning(team(5, 3, 1), "Sara", true)).toBeNull();
+  });
+  it("warns the owner with Add seats when every seat is taken", () => {
+    const w = invitePrewarning(team(19, 17, 2), "Sara", true);
+    expect(w?.action).toBe("add-seats");
+    expect(w?.text).toContain("All 19 seats are in use.");
+    expect(w?.text).toContain("2 reserved");
+  });
+  it("tells an admin whom to ask, with no action", () => {
+    expect(invitePrewarning(team(3, 3, 0), "Sara", false)).toEqual({ text: "All 3 seats are in use. Ask Sara to add seats.", action: null });
+  });
+  it("Free at 2 people: owner gets Upgrade, admin is told to ask", () => {
+    const free = { plan: "free" as const, seats: { purchased: null, used: 1, reserved: 1 } };
+    expect(invitePrewarning(free, "Sara", true)?.action).toBe("upgrade");
+    expect(invitePrewarning(free, null, false)?.text).toBe("Free includes 2 people. Ask the vault owner to upgrade to Team.");
+    expect(invitePrewarning({ ...free, seats: { purchased: null, used: 1, reserved: 0 } }, "Sara", true)).toBeNull();
   });
 });

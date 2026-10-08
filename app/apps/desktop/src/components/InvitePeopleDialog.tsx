@@ -2,7 +2,7 @@ import { createPortal } from "react-dom";
 import { useEffect, useState } from "react";
 import type { InviteManyResult, TeamAccessMode } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
-import { classifyLimitError, limitFromError, type LimitKind } from "../lib/billing";
+import { PEOPLE_LIMIT_REASON, classifyLimitError, invitePrewarning, limitFromError, type LimitKind } from "../lib/billing";
 import { buildInviteLink } from "../lib/inviteLink";
 import { isValidEmail, splitEmails } from "../lib/membersAccess";
 import { useStore } from "../store";
@@ -39,10 +39,14 @@ export function addChips(chips: readonly string[], text: string): string[] {
  * messages the old Members tab showed (emailed / no email server / email
  * failed, with the link to share).
  */
-export function InvitePeopleDialog({ orgId, canManageBilling = false, onClose, onInvited }: {
+export function InvitePeopleDialog({ orgId, canManageBilling = false, seatAccount = null, ownerName = null, onClose, onInvited }: {
   orgId: string;
   /** The owner can add seats from the notice. */
   canManageBilling?: boolean;
+  /** The account's seats, for the warning shown before anyone types (Team model only). */
+  seatAccount?: Parameters<typeof invitePrewarning>[0] | null;
+  /** The vault owner's name, so an admin knows whom to ask. */
+  ownerName?: string | null;
   onClose: () => void;
   /** Called with the per-address results so the roster can add rows at once. */
   onInvited: (results: InviteManyResult[], sent: { role: string; access: TeamAccessMode | null }) => void;
@@ -104,6 +108,8 @@ export function InvitePeopleDialog({ orgId, canManageBilling = false, onClose, o
       else setError(e instanceof Error ? e.message : String(e));
     }
   };
+
+  const prewarning = seatAccount ? invitePrewarning(seatAccount, ownerName, canManageBilling) : null;
 
   // A people limit is ONE notice, whether the whole call was refused or some
   // addresses were: the per-address rows below drop the raw code for it.
@@ -186,6 +192,25 @@ export function InvitePeopleDialog({ orgId, canManageBilling = false, onClose, o
           </div>
         )}
         {error && <div className="auth-error">{error}</div>}
+        {prewarning && !results && peopleNotice == null && (
+          <div className="limit-nudge">
+            <span>{prewarning.text}</span>
+            {prewarning.action === "add-seats" && (
+              <button type="button" className="link-btn" onClick={() => useStore.getState().requestAccountSettings("plan")}>
+                Add seats
+              </button>
+            )}
+            {prewarning.action === "upgrade" && (
+              <button
+                type="button"
+                className="link-btn"
+                onClick={() => useStore.getState().requestUpgradeDialog({ reason: PEOPLE_LIMIT_REASON })}
+              >
+                Upgrade →
+              </button>
+            )}
+          </div>
+        )}
         {peopleNotice != null && <PeopleLimitNotice error={peopleNotice} canManageBilling={canManageBilling} />}
         {limit && <LimitNudge kind={limit.kind} limit={limit.limit} onUpgrade={() => setUpgradeOpen(true)} />}
         {results?.map((r) => {

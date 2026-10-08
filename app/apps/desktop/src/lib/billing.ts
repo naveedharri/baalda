@@ -628,6 +628,35 @@ export function membersSeatLine(
   return `Free includes 2 people on this account (${account.seats.used} of 2 used)`;
 }
 
+/**
+ * The Invite people dialog's warning BEFORE anyone types, when the account has
+ * no seat left. Null while seats remain (or billing is off). It never blocks
+ * the send: someone already on the account takes no new seat. Only the owner
+ * gets an action; an admin is told whom to ask.
+ */
+export function invitePrewarning(
+  account: { plan: "free" | "team"; seats: { purchased: number | null; used: number; reserved: number } },
+  ownerName: string | null,
+  viewerIsOwner: boolean,
+): { text: string; action: "add-seats" | "upgrade" | null } | null {
+  const ask = ownerName ? `Ask ${ownerName} to` : "Ask the vault owner to";
+  if (account.plan === "team" && account.seats.purchased != null) {
+    const b = seatBreakdown(account.seats);
+    if (b.available > 0) return null;
+    const full = seatsFullCopy(b.purchased);
+    const tail = b.reserved > 0 ? ` ${b.reserved} reserved by pending invitations.` : "";
+    return viewerIsOwner
+      ? { text: `${full}${tail} New people need a seat; people already on your account don't.`, action: "add-seats" }
+      : { text: `${full}${tail} ${ask} add seats.`, action: null };
+  }
+  if (account.plan === "free" && account.seats.used + account.seats.reserved >= 2) {
+    return viewerIsOwner
+      ? { text: FREE_PEOPLE_COPY, action: "upgrade" }
+      : { text: `Free includes 2 people. ${ask} upgrade to Team.`, action: null };
+  }
+  return null;
+}
+
 /** What Account Settings → Plan & Billing should show for one config fetch. */
 export type BillingConfigState = "team" | "vault" | "disabled" | "error";
 

@@ -722,6 +722,8 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
         <InvitePeopleDialog
           orgId={orgId}
           canManageBilling={myRole === "owner"}
+          seatAccount={seatAccount}
+          ownerName={ownerName(members)}
           onClose={() => setInviteOpen(false)}
           onInvited={(results, sent) => {
             const limit = results.map((r) => (r.error ? inviteLimitError(r.error) : null)).find((x) => x != null);
