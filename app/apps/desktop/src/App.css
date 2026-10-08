@@ -10183,7 +10183,6 @@ body.access-board-grabbing * {
 .plan-page-vault-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
   max-width: 100%;
   padding: 2px 8px;
   border-radius: var(--radius-pill);
@@ -10194,15 +10193,12 @@ body.access-board-grabbing * {
   line-height: 16px;
   overflow-wrap: anywhere;
 }
-/* The vault switcher's own icon, shrunk to a 12px glyph. */
-.plan-page-vault-chip .vault-tile {
-  width: 12px;
-  height: 12px;
-  border-radius: 3px;
-  font-size: 8px;
-}
-.plan-page-seat-col {
+/* Seat column: header and cells share padding and right alignment. The
+   table prefix outranks `.members-table th { text-align: left }`. */
+.members-table.plan-page-people .plan-page-seat-col {
   width: 72px;
+  padding-left: var(--sp-3);
+  padding-right: var(--sp-3);
   text-align: right;
   white-space: nowrap;
 }

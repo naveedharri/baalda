@@ -22,7 +22,6 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { ManageSeatsDialog } from "./ManageSeatsDialog";
 import { SeatUsageBreakdown } from "./SeatUsageBreakdown";
 import { UpgradeDialog } from "./UpgradeDialog";
-import { VaultTile } from "./VaultSwitcher";
 
 /** Compact absolute date, same shape as the vault Billing tab's. */
 function formatDate(iso: string): string {
@@ -430,8 +429,7 @@ export function AccountPlanTab() {
                           const name = account.vaults.find((v) => v.orgId === id)?.name ?? id;
                           return (
                             <span key={id} className="plan-page-vault-chip">
-                              <VaultTile identity={`org:${id}`} name={name} />
-                              <span>{name}</span>
+                              {name}
                             </span>
                           );
                         })}
@@ -582,8 +580,7 @@ function SelfHostedPlan({
                         const name = account.vaults.find((v) => v.orgId === id)?.name ?? id;
                         return (
                           <span key={id} className="plan-page-vault-chip">
-                            <VaultTile identity={`org:${id}`} name={name} />
-                            <span>{name}</span>
+                            {name}
                           </span>
                         );
                       })}
