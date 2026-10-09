@@ -1208,6 +1208,26 @@ describe("whole-vault Private reaches the member's disk", () => {
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
   });
 
+  it("remembers the pending folders across a relaunch", async () => {
+    // The refused pass leaves the notes and so the folders; a relaunch reads the
+    // config back, and the authoritative pull there must still remove them.
+    const r = await afterPrivate(false, { nested: true });
+    expect(r.disk.folders.size).toBe(2);
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const saved = writes[writes.length - 1]?.[0] as unknown as string;
+    const cfg = JSON.parse(saved) as { revokedFolders?: Record<string, string> };
+    expect(cfg.revokedFolders).toEqual({ Docs: "f1", "Docs/Guides": "f2" });
+
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(saved as never);
+    const reg2 = new VaultRegistry(r.api);
+    const host2 = recordingHost(true);
+    reg2.setInboundHost(host2.host);
+    for (let i = 0; i < N; i++) reg2.markPushed(`d${i}`);
+    await reg2.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(r.disk.notes.size).toBe(0);
+    expect(r.disk.folders.size).toBe(0);
+  });
+
   it("removes the emptied folder subtree on the pass that FOLLOWS a refused one", async () => {
     // The refused pass tries the folders while their notes are still on disk,
     // so the empty-only removal keeps them. The authoritative pass that removes
@@ -2235,5 +2255,52 @@ describe("access grants", () => {
     // Nothing new: nothing fires.
     await reg.pull();
     expect(grants).toHaveLength(1);
+  });
+});
+
+describe("empty folders the server refuses to register", () => {
+  async function refusedPass(opts: { status: number; code?: string; withFile?: boolean; live?: boolean }) {
+    const disk = new FakeDisk();
+    disk.folders.add("A");
+    disk.folders.add("A/B");
+    if (opts.withFile) {
+      disk.notes.set("A/B/x.md", "dx");
+      disk.bodies.set("A/B/x.md", "kept");
+    }
+    install(disk);
+    const api = fakeApi({ notes: [], tombstones: [], folders: [], folderTombstones: [] });
+    const { ApiError } = await import("../../api");
+    vi.mocked(api.createFolder).mockImplementation(async () => {
+      throw new ApiError(opts.status, "refused", opts.code ? { code: opts.code } : {});
+    });
+    const reg = new VaultRegistry(api);
+    const host = recordingHost();
+    (host.host as { mayRemoveRefusedEmptyFolders?: () => boolean }).mayRemoveRefusedEmptyFolders = () =>
+      opts.live ?? true;
+    reg.setInboundHost(host.host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    return { disk, reg, api };
+  }
+
+  it("removes nested empty unmapped folders refused with no_write_access, bottom-up", async () => {
+    const r = await refusedPass({ status: 403, code: "no_write_access" });
+    expect(r.disk.folders.size).toBe(0);
+    expect(r.reg.hasFailures()).toBe(false);
+  });
+
+  it("keeps them when anything is inside", async () => {
+    const r = await refusedPass({ status: 403, code: "no_write_access", withFile: true });
+    expect([...r.disk.folders].sort()).toEqual(["A", "A/B"]);
+    expect(r.disk.notes.has("A/B/x.md")).toBe(true);
+  });
+
+  it("keeps them when the refusal is anything else (a 500)", async () => {
+    const r = await refusedPass({ status: 500 });
+    expect([...r.disk.folders].sort()).toEqual(["A", "A/B"]);
+  });
+
+  it("keeps them when the session is not live or the root is missing", async () => {
+    const r = await refusedPass({ status: 403, code: "no_write_access", live: false });
+    expect([...r.disk.folders].sort()).toEqual(["A", "A/B"]);
   });
 });

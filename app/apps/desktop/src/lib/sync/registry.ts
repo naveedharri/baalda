@@ -197,6 +197,12 @@ interface VaultSyncConfig {
    */
   fileBases?: Record<string, string>;
   /**
+   * Folders that left this user's visible set while still on disk, path → their
+   * last server id (`VaultRegistry.revokedFolders`): kept so the empty-only
+   * removal is retried after a relaunch. Absent means none pending.
+   */
+  revokedFolders?: Record<string, string>;
+  /**
    * docIds whose CONTENT this device has confirmed on the server (the bulk
    * upload's resume point — see `ContentUploader`).
    *
@@ -400,6 +406,12 @@ export interface InboundHost {
    * which keeps the conservative behaviour as the default.
    */
   revocationAuthority?(): boolean;
+  /**
+   * May this pass remove an EMPTY, unmapped folder whose registration the server
+   * just refused with `no_write_access`? True only while the session is live and
+   * the vault root is present. Optional: no host means never.
+   */
+  mayRemoveRefusedEmptyFolders?(): boolean;
   /**
    * WHICH docs the server has named as no longer readable in this vault session
    * — the union of every `ready.revoked` list and every live `drop` frame — or
@@ -772,6 +784,9 @@ export class VaultRegistry {
    * listed again, or is tombstoned. Session memory only.
    */
   private revokedFolders = new Map<string, string>();
+  /** Folder paths (pathKey) the server refused to register with
+   *  `no_write_access` during the current pass. */
+  private noWriteFolderRefusals = new Set<string>();
   /** Tree-binary relPath → server `files` id (see `VaultSyncConfig.files`).
    *  Deliberately NOT part of `byPath`/`byDocId`: those two are the CRDT note
    *  join, and a binary has no Y.Doc, no bridge and no content upload. */
@@ -1298,6 +1313,7 @@ export class VaultRegistry {
     this.heldRefused.clear();
     this.folderByPath.clear();
     this.revokedFolders.clear();
+    this.noWriteFolderRefusals.clear();
     // Server ids for vault A's binaries name nothing in vault B.
     this.fileByPath.clear();
     this.filesConfirmed.clear();
@@ -1983,6 +1999,9 @@ export class VaultRegistry {
    * protected the user's notes would be invisible to them.
    */
   recordFailure(f: RegistryFailure): "ok" | "failed" {
+    if (f.kind === "folder" && f.code === "no_write_access") {
+      this.noWriteFolderRefusals.add(pathKey(f.path));
+    }
     // Something already exists at this path that this user cannot see (an item
     // set to Private after it reached their disk). Not a failure and nothing to
     // fix: the file stays exactly where it is, local-only, and the path is left
@@ -2086,6 +2105,9 @@ export class VaultRegistry {
       // bytes it always did and the identical-config memo keeps working.
       ...(this.filesConfirmed.size > 0 ? { filesConfirmed: [...this.filesConfirmed] } : {}),
       ...(this.fileBases.size > 0 ? { fileBases: Object.fromEntries(this.fileBases) } : {}),
+      ...(this.revokedFolders.size > 0
+        ? { revokedFolders: Object.fromEntries(this.revokedFolders) }
+        : {}),
       pushed: [...this.pushed],
       ...(this.ackedSvs.size > 0 ? { ackedSv: Object.fromEntries(this.ackedSvs) } : {}),
       ...(this.unhydratedPlaceholders.size > 0
@@ -2765,9 +2787,12 @@ export class VaultRegistry {
           !listedFolderIds.has(folderId) &&
           !deadFolderIds.has(folderId)
         ) {
-          this.revokedFolders.set(path, folderId);
-        } else {
-          this.revokedFolders.delete(path);
+          if (this.revokedFolders.get(path) !== folderId) {
+            this.revokedFolders.set(path, folderId);
+            this.persist();
+          }
+        } else if (this.revokedFolders.delete(path)) {
+          this.persist();
         }
         this.sink.item("ok");
         if (removed) {
@@ -3371,6 +3396,7 @@ export class VaultRegistry {
     for (const [rp, id] of Object.entries(cfg.folders ?? {})) {
       if (typeof id === "string" && id) this.folderByPath.set(rp, id);
     }
+    this.adoptRevokedFolders(cfg.revokedFolders);
     this.adoptConfigFiles(cfg.files ?? {}, cfg.filesConfirmed ?? [], cfg.fileBases ?? {});
     this.pushed = new Set(cfg.pushed ?? []);
     this.ackedSvs = adoptAcked(cfg.ackedSv, null);
@@ -3536,6 +3562,7 @@ export class VaultRegistry {
         if (typeof id === "string" && id) this.folderByPath.set(rp, id);
       }
     }
+    if (cfg.serverVaultId === vaultId) this.adoptRevokedFolders(cfg.revokedFolders);
     // Same guard for the tree-binary map: an id minted against another
     // collection names nothing here.
     if (cfg.serverVaultId === vaultId && cfg.files) {
@@ -3861,8 +3888,14 @@ export class VaultRegistry {
         this.folderByPath.delete(rp);
         // Left the visible set (not moved, not deleted) and still on disk: keep
         // the id so the next inbound pass can remove it once it is empty.
-        if (!listedFolderIds.has(id) && !deadFolderIds.has(id) && onDiskFoldersCi.has(pathKey(rp))) {
+        if (
+          !listedFolderIds.has(id) &&
+          !deadFolderIds.has(id) &&
+          onDiskFoldersCi.has(pathKey(rp)) &&
+          this.revokedFolders.get(rp) !== id
+        ) {
           this.revokedFolders.set(rp, id);
+          this.persist();
         }
       }
     }
@@ -3871,6 +3904,7 @@ export class VaultRegistry {
     for (const [rp, id] of [...this.revokedFolders]) {
       if (listedFolderIds.has(id) || deadFolderIds.has(id) || !onDiskFoldersCi.has(pathKey(rp))) {
         this.revokedFolders.delete(rp);
+        this.persist();
       }
     }
     // The path we keep is the one on DISK: every other lookup in this class is
@@ -4063,6 +4097,7 @@ export class VaultRegistry {
     // At/above the threshold the whole set goes in batches instead: the server
     // sorts by depth and resolves parents IN-REQUEST, which is what removes the
     // level-by-level serialization (a deep tree paid one round trip per level).
+    this.noWriteFolderRefusals.clear();
     if (useBulkPath(missingFolders.length)) {
       if (await this.registerFoldersBatched(vaultId, missingFolders, checkpoint)) {
         mutated = true;
@@ -4102,6 +4137,12 @@ export class VaultRegistry {
       );
     }
     if (this.stale()) return mutated;
+    if (this.noWriteFolderRefusals.size > 0) {
+      const gone = await this.removeRefusedEmptyFolders(folders.map((f) => f.path));
+      this.noWriteFolderRefusals.clear();
+      if (this.stale()) return mutated;
+      if (gone.length > 0) mutated = true;
+    }
     // A folder refused just now holds its notes too (see `isHeldRefusal`):
     // without its id each would be refused on its own.
     if (this.heldRefused.size > 0) {
@@ -5517,6 +5558,63 @@ export class VaultRegistry {
 
   /** Queue a write of the current in-memory maps to `.context/config.json`.
    *  Batched by the checkpointer — never a synchronous read-modify-write. */
+  /** Restore `revokedFolders` from config; malformed entries are skipped. */
+  private adoptRevokedFolders(raw: Record<string, string> | undefined): void {
+    if (!raw || typeof raw !== "object") return;
+    for (const [rp, id] of Object.entries(raw)) {
+      if (typeof id === "string" && id && typeof rp === "string" && rp) this.revokedFolders.set(rp, id);
+    }
+  }
+
+  /**
+   * Remove EMPTY folders the server just refused to register with
+   * `no_write_access`: an account that cannot create there cannot sync them,
+   * and an empty directory loses nothing. This is what clears shells stranded
+   * before `revokedFolders` existed (their ids were already forgotten).
+   *
+   * Each refused folder's local subtree goes bottom-up through the empty-only,
+   * non-recursive `deleteFolderIfEmpty` (Rust refuses ignored paths first), so
+   * any file anywhere below keeps it and its ancestors. Mapped descendants are
+   * never touched. Runs only when the host says the session is live and the
+   * vault root is present. Returns the paths removed.
+   */
+  private async removeRefusedEmptyFolders(localFolders: readonly string[]): Promise<string[]> {
+    const removed: string[] = [];
+    if (this.noWriteFolderRefusals.size === 0) return removed;
+    if (this.host?.mayRemoveRefusedEmptyFolders?.() !== true) return removed;
+    const refused = this.noWriteFolderRefusals;
+    const targets = localFolders.filter((p) => {
+      if (this.folderByPath.has(p)) return false;
+      let key = pathKey(p);
+      for (;;) {
+        if (refused.has(key)) return true;
+        const cut = key.lastIndexOf("/");
+        if (cut < 0) return false;
+        key = key.slice(0, cut);
+      }
+    });
+    // Deepest first, so a parent is judged only after its children went.
+    targets.sort((a, b) => b.split("/").length - a.split("/").length);
+    for (const path of targets) {
+      if (this.stopRun()) break;
+      try {
+        if (await ipc.deleteFolderIfEmpty(path, this.epoch())) {
+          this.markMaterialized(path); // our removal; one watcher echo to swallow
+          removed.push(path);
+        }
+      } catch (e) {
+        if (ipc.isVaultMismatch(e)) break;
+        // Left in place; the refusal row already says why it does not sync.
+      }
+    }
+    if (removed.length > 0) {
+      const gone = new Set(removed.map((p) => pathKey(p)));
+      this.failed = this.failed.filter((f) => !(f.kind === "folder" && gone.has(pathKey(f.path))));
+      for (const key of gone) this.heldRefused.delete(key);
+    }
+    return removed;
+  }
+
   private persist(): void {
     if (this.stale()) return;
     if (!this.serverVaultId) return;

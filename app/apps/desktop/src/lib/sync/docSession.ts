@@ -1769,6 +1769,11 @@ export class SyncManager implements InboundHost {
    * member's local copies. A change nobody announced is not a revocation; it
    * stays under the ordinary 50% cap and is reported as a refusal instead.
    */
+  /** {@link InboundHost.mayRemoveRefusedEmptyFolders}: live, root present. */
+  mayRemoveRefusedEmptyFolders(): boolean {
+    return this.isLive() && !this.rootMissing;
+  }
+
   revocationAuthority(): boolean {
     return this.isLive() && aclSignalIsFresh(this.aclChangedAt, Date.now());
   }
