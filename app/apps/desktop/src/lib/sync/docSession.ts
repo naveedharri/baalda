@@ -11,6 +11,7 @@
 // the bridge's normal seed-from-file (pure local-first).
 
 import { markAccessTreeStale } from "../accessTreeStale";
+import { isAttachmentWanted, onAttachmentWanted } from "../attachmentArrivals";
 import type { AppearanceSettings } from "../appearanceSettings";
 import { NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { Awareness } from "y-protocols/awareness";
@@ -529,6 +530,8 @@ export class SyncManager implements InboundHost {
   private embedArrivals: EmbedArrivalFetcher | null = null;
   /** Detaches the open note's remote-change observer that feeds it. */
   private embedObserverOff: (() => void) | null = null;
+  /** Detaches the fetcher from image widgets asking for a missing file. */
+  private embedWantOff: (() => void) | null = null;
   /** Disk deletes for BINARIES — the blob mirror's own `drainDiskDeletes`
    *  (`binaryDeletes.ts`). Built and torn down beside the mirror it guards. */
   private binaryDeletes: BinaryDeleteQueue | null = null;
@@ -1498,6 +1501,9 @@ export class SyncManager implements InboundHost {
    * vault arrived"; the vault engine wires this one in `startVaultEngine`.
    */
   handleRegistryChanged(reason: RegistryPullReason): void {
+    // A reconnect, a registry frame or an ACL change may mean the server now
+    // holds an embed this device is still waiting for: ask for it now.
+    this.embedArrivals?.nudge();
     // Which trigger asked for this pull. A pull that keeps re-arming itself is
     // invisible without this line — the badge just blinks "Syncing" — and the
     // NAME is the whole value: `reauth` vs `registry-frame` is what separated
@@ -6140,8 +6146,7 @@ export class SyncManager implements InboundHost {
     this.binaryDownloadPhase = false;
     this.attachments?.stop();
     this.attachments = null;
-    this.embedArrivals?.stop();
-    this.embedArrivals = null;
+    this.stopEmbedArrivals();
     this.binaryDeletes?.stop();
     this.binaryDeletes = null;
     this.clearVaultPresence();
@@ -6737,8 +6742,7 @@ export class SyncManager implements InboundHost {
     if (!vaultId) {
       this.attachments?.stop();
       this.attachments = null;
-      this.embedArrivals?.stop();
-      this.embedArrivals = null;
+      this.stopEmbedArrivals();
       this.binaryDeletes?.stop();
       this.binaryDeletes = null;
       return;
@@ -6781,17 +6785,25 @@ export class SyncManager implements InboundHost {
       notify: (text, tone) => toast(text, tone ?? "error"),
       // A pass rebuilds the sidebar's file dots from both listings, so this is
       // also how a removed file's dot goes away.
-      onServerChanged: () => this.attachments?.scheduleReconcile(),
+      onServerChanged: () => {
+        this.attachments?.scheduleReconcile();
+        this.embedArrivals?.nudge();
+      },
     });
-    this.embedArrivals?.stop();
-    this.embedArrivals = new EmbedArrivalFetcher({
+    this.stopEmbedArrivals();
+    const embeds = new EmbedArrivalFetcher({
       exists: (relPath) => ipc.binaryExists(relPath, scope.vaultEpoch),
       download: async (relPaths) => {
         const mirror = this.attachments;
         if (!mirror || !scope.isCurrent()) throw new Error("vault changed");
         await mirror.downloadMissing(relPaths);
       },
+      isWanted: isAttachmentWanted,
     });
+    this.embedArrivals = embeds;
+    // An image that could not load asks for its file, whatever the fetcher's
+    // own scan decided earlier (scrolled back into view, note reopened).
+    this.embedWantOff = onAttachmentWanted((relPath) => void embeds.request([relPath]));
     this.attachments = new AttachmentSync({
       // A vanished vault root (#221) stops the binary mirror too: a download
       // would re-create the old folder, a missing file would read as a delete.
@@ -7198,6 +7210,13 @@ export class SyncManager implements InboundHost {
    * the editor's or the disk bridge's own writes), so a teammate's pasted image
    * is fetched within a second or two instead of on some later mirror pass.
    */
+  private stopEmbedArrivals(): void {
+    this.embedWantOff?.();
+    this.embedWantOff = null;
+    this.embedArrivals?.stop();
+    this.embedArrivals = null;
+  }
+
   private watchEmbeds(bridge: NoteBridge): void {
     this.embedObserverOff?.();
     const text = bridge.doc.getText("content");

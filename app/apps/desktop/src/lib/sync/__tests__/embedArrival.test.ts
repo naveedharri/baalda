@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   EMBED_RETRY_DELAYS_MS,
   EMBED_SCAN_DEBOUNCE_MS,
+  EMBED_SLOW_RETRY_MS,
   EmbedArrivalFetcher,
   attachmentRelFromSrc,
   embedAttachmentRefs,
@@ -38,7 +39,9 @@ describe("embedAttachmentRefs", () => {
   });
 });
 
-function harness(opts: { present?: Set<string>; failTimes?: number } = {}) {
+function harness(
+  opts: { present?: Set<string>; failTimes?: number; wanted?: Set<string> } = {},
+) {
   const present = opts.present ?? new Set<string>();
   let fails = opts.failTimes ?? 0;
   const timers: { fn: () => void; ms: number }[] = [];
@@ -53,6 +56,7 @@ function harness(opts: { present?: Set<string>; failTimes?: number } = {}) {
       }
       for (const p of paths) present.add(p);
     },
+    ...(opts.wanted ? { isWanted: (p: string) => opts.wanted!.has(p) } : {}),
     setTimeout: (fn, ms) => {
       const t = { fn, ms };
       timers.push(t);
@@ -127,5 +131,64 @@ describe("EmbedArrivalFetcher", () => {
     const spy = vi.fn();
     s.fetcher.noteRemoteChange(spy);
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("keeps asking every 30 s while an open image still waits, and stops once none does", async () => {
+    const wanted = new Set(["attachments/a.png"]);
+    const h = harness({ failTimes: 999, wanted });
+    h.fetcher.noteRemoteChange(() => "![a](/attachments/a.png)");
+    await h.fire();
+    for (let i = 0; i < EMBED_RETRY_DELAYS_MS.length; i++) await h.fire();
+    // Past the fixed schedule: the slow cadence, not silence.
+    expect(h.timers.map((t) => t.ms)).toEqual([EMBED_SLOW_RETRY_MS]);
+    expect(await h.fire()).toBe(EMBED_SLOW_RETRY_MS);
+    expect(h.timers.map((t) => t.ms)).toEqual([EMBED_SLOW_RETRY_MS]);
+    // The image loaded elsewhere or the note closed: the next miss ends it.
+    wanted.clear();
+    await h.fire();
+    expect(h.timers).toHaveLength(0);
+  });
+
+  it("lands on the slow cadence once the uploader finally finishes", async () => {
+    const h = harness({ failTimes: EMBED_RETRY_DELAYS_MS.length + 3, wanted: new Set(["attachments/a.png"]) });
+    h.fetcher.noteRemoteChange(() => "![a](/attachments/a.png)");
+    await h.fire();
+    while (h.timers.length) await h.fire();
+    expect(h.present.has("attachments/a.png")).toBe(true);
+  });
+
+  it("asks again at once on a nudge, with the schedule reset", async () => {
+    const h = harness({ failTimes: 3 });
+    h.fetcher.noteRemoteChange(() => "![a](/attachments/a.png)");
+    await h.fire();
+    await h.fire();
+    await h.fire();
+    expect(h.requests).toHaveLength(3);
+    expect(h.timers.map((t) => t.ms)).toEqual([EMBED_RETRY_DELAYS_MS[2]]);
+    h.fetcher.nudge();
+    await h.flush();
+    expect(h.requests).toHaveLength(4);
+    expect(h.present.has("attachments/a.png")).toBe(true);
+    expect(h.timers).toHaveLength(0);
+  });
+
+  it("a nudge with nothing pending asks for nothing", async () => {
+    const h = harness();
+    h.fetcher.nudge();
+    await h.flush();
+    expect(h.requests).toEqual([]);
+  });
+
+  it("starts afresh when an image asks for a path whose schedule already ran out", async () => {
+    const h = harness({ failTimes: EMBED_RETRY_DELAYS_MS.length + 1 });
+    h.fetcher.noteRemoteChange(() => "![a](/attachments/a.png)");
+    await h.fire();
+    while (h.timers.length) await h.fire();
+    expect(h.present.has("attachments/a.png")).toBe(false);
+    const before = h.requests.length;
+    await h.fetcher.request(["attachments/a.png"]);
+    await h.flush();
+    expect(h.requests.length).toBe(before + 1);
+    expect(h.present.has("attachments/a.png")).toBe(true);
   });
 });

@@ -32,7 +32,7 @@
 // table, because their widget is editable (./table/TableWidget). Clicking a
 // cell types into the cell, so there is no source to fall back to.
 
-import { onAttachmentArrived } from "../attachmentArrivals";
+import { onAttachmentArrived, wantAttachment } from "../attachmentArrivals";
 import { openImageLightbox } from "../imageLightbox";
 import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { type EditorState, StateField } from "@codemirror/state";
@@ -225,10 +225,13 @@ class ImageWidget extends WidgetType {
   private watchMissing(wrap: HTMLElement, img: HTMLImageElement): void {
     let placeholder: HTMLElement | null = null;
     let off: (() => void) | null = null;
+    let unwant: (() => void) | null = null;
     let giveUp: ReturnType<typeof setTimeout> | null = null;
     const cleanup = () => {
       off?.();
       off = null;
+      unwant?.();
+      unwant = null;
       if (giveUp) clearTimeout(giveUp);
       giveUp = null;
     };
@@ -259,6 +262,8 @@ class ImageWidget extends WidgetType {
         if (arrived !== rel) return;
         img.src = `${this.src}${this.src.includes("?") ? "&" : "?"}v=${Date.now()}`;
       });
+      // Keeps the embed fetcher asking for it while this placeholder shows.
+      unwant = wantAttachment(rel);
       giveUp = setTimeout(() => {
         if (placeholder) placeholder.textContent = "Image not on this device yet";
       }, IMAGE_DOWNLOAD_PATIENCE_MS);

@@ -13,13 +13,19 @@
  * the same create-only transport and listing a pass uses, so the Free-plan rule
  * is unchanged: embeds under `attachments/` download on every plan). The
  * uploader is usually still mid-upload when the text lands, so a miss retries
- * on a short backoff. Each path is queued at most once per session; whatever
- * gives up here is still caught by the mirror's next ordinary pass.
+ * on a short backoff, then every 30 s for as long as an open image still shows
+ * it as downloading (`attachmentArrivals.ts` wanted set). A vault-channel
+ * reconnect or a registry / file signal asks again at once (`nudge`). Whatever
+ * stops here is still caught by the mirror's next ordinary pass.
  */
 import { isSafeAttachmentRelPath } from "./attachments";
 
 /** Retry delays after a failed attempt (the upload may still be in flight). */
 export const EMBED_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
+/** After the schedule above: how often a file an open image still shows as
+ *  "Downloading" is asked for again. A slow uploader (a large image, a bad
+ *  network, an upload pass that was busy) must not strand the picture. */
+export const EMBED_SLOW_RETRY_MS = 30_000;
 /** Coalesces a burst of remote keystrokes into one scan. */
 export const EMBED_SCAN_DEBOUNCE_MS = 250;
 
@@ -62,16 +68,31 @@ export interface EmbedArrivalDeps {
   exists(relPath: string): Promise<boolean>;
   /** Ask the binary mirror for these paths; throws on any failure. */
   download(relPaths: readonly string[]): Promise<void>;
+  /** Does an open image still wait for this path? Past the fixed schedule a
+   *  path keeps retrying (every {@link EMBED_SLOW_RETRY_MS}) only while this
+   *  says yes. Absent ⇒ never: the schedule is the whole budget. */
+  isWanted?(relPath: string): boolean;
   setTimeout?: (fn: () => void, ms: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
 }
 
+/** One path being fetched: how many attempts failed, and its armed retry. */
+interface Pending {
+  tries: number;
+  timer: unknown;
+}
+
 export class EmbedArrivalFetcher {
-  /** Paths queued this session — each one at most once. */
-  private readonly seen = new Set<string>();
+  /** Paths still being fetched. A path leaves when it lands, or when it has
+   *  used its schedule and no image wants it; a later edit, reopen or image
+   *  that names it again starts it afresh. */
+  private readonly active = new Map<string, Pending>();
+  /** Paths whose next attempt is due, collected into one download call. */
+  private readonly due = new Set<string>();
+  private inFlight = false;
+  private flushAgain = false;
   private pendingText: (() => string) | null = null;
   private scanTimer: unknown = null;
-  private readonly retryTimers = new Set<unknown>();
   private stopped = false;
   private readonly setT: (fn: () => void, ms: number) => unknown;
   private readonly clearT: (h: unknown) => void;
@@ -90,8 +111,53 @@ export class EmbedArrivalFetcher {
       this.scanTimer = null;
       const r = this.pendingText;
       this.pendingText = null;
-      if (r) void this.scan(r());
+      if (r) void this.request(embedAttachmentRefs(r()));
     }, EMBED_SCAN_DEBOUNCE_MS);
+  }
+
+  /**
+   * Fetch these `attachments/` paths if this disk lacks them (an image widget
+   * that could not load, or a scan). A path already being fetched is left to
+   * its own schedule.
+   */
+  async request(paths: readonly string[]): Promise<void> {
+    if (this.stopped) return;
+    const fresh = [...new Set(paths)].filter((p) => !this.active.has(p));
+    if (!fresh.length) return;
+    // Claimed before the disk is asked, so a second scan cannot queue it twice.
+    for (const p of fresh) this.active.set(p, { tries: 0, timer: null });
+    const missing: string[] = [];
+    await Promise.all(
+      fresh.map(async (p) => {
+        let here: boolean | null = null;
+        try {
+          here = await this.deps.exists(p);
+        } catch {
+          // Unknown: leave it to the mirror's ordinary pass.
+        }
+        if (here === false) missing.push(p);
+        else this.active.delete(p);
+      }),
+    );
+    if (this.stopped || !missing.length) return;
+    for (const p of missing) this.due.add(p);
+    await this.flush();
+  }
+
+  /**
+   * Something suggests the server may hold new bytes now — the vault channel
+   * (re)connected, a registry or file change arrived. Every path still being
+   * fetched is asked for at once, with its schedule reset.
+   */
+  nudge(): void {
+    if (this.stopped || this.active.size === 0) return;
+    for (const [p, st] of this.active) {
+      if (st.timer != null) this.clearT(st.timer);
+      st.timer = null;
+      st.tries = 0;
+      this.due.add(p);
+    }
+    void this.flush();
   }
 
   /** Stop every timer (vault switch / teardown). */
@@ -99,52 +165,76 @@ export class EmbedArrivalFetcher {
     this.stopped = true;
     if (this.scanTimer != null) this.clearT(this.scanTimer);
     this.scanTimer = null;
-    for (const t of this.retryTimers) this.clearT(t);
-    this.retryTimers.clear();
+    for (const st of this.active.values()) if (st.timer != null) this.clearT(st.timer);
+    this.active.clear();
+    this.due.clear();
   }
 
-  private async scan(text: string): Promise<void> {
-    const fresh = embedAttachmentRefs(text).filter((p) => !this.seen.has(p));
-    if (!fresh.length) return;
-    for (const p of fresh) this.seen.add(p);
-    const missing: string[] = [];
-    await Promise.all(
-      fresh.map(async (p) => {
-        try {
-          if (!(await this.deps.exists(p))) missing.push(p);
-        } catch {
-          // Unknown: leave it to the mirror's ordinary pass.
-        }
-      }),
-    );
-    if (missing.length) await this.attempt(missing.sort(), 0);
-  }
-
-  private async attempt(paths: string[], tries: number): Promise<void> {
+  private async flush(): Promise<void> {
     if (this.stopped) return;
-    try {
-      await this.deps.download(paths);
+    if (this.inFlight) {
+      // One download at a time: the mirror refuses a second while one runs.
+      this.flushAgain = true;
       return;
-    } catch {
-      // Not uploaded yet, a pass already running, a network blip: retry.
     }
-    if (this.stopped || tries >= EMBED_RETRY_DELAYS_MS.length) return;
-    // Only what is still missing goes again; the rest landed in the meantime.
-    const still: string[] = [];
-    await Promise.all(
-      paths.map(async (p) => {
-        try {
-          if (!(await this.deps.exists(p))) still.push(p);
-        } catch {
-          still.push(p);
-        }
-      }),
-    );
-    if (!still.length) return;
-    const t = this.setT(() => {
-      this.retryTimers.delete(t);
-      void this.attempt(still.sort(), tries + 1);
-    }, EMBED_RETRY_DELAYS_MS[tries]);
-    this.retryTimers.add(t);
+    const paths = [...this.due].filter((p) => this.active.has(p)).sort();
+    this.due.clear();
+    if (!paths.length) return;
+    this.inFlight = true;
+    try {
+      let ok = false;
+      try {
+        await this.deps.download(paths);
+        ok = true;
+      } catch {
+        // Not uploaded yet, a pass already running, a network blip: retry.
+      }
+      if (this.stopped) return;
+      await Promise.all(
+        paths.map(async (p) => {
+          let here = ok;
+          if (!ok) {
+            try {
+              here = await this.deps.exists(p);
+            } catch {
+              here = false;
+            }
+          }
+          if (here) this.active.delete(p);
+          else this.retryLater(p);
+        }),
+      );
+    } finally {
+      this.inFlight = false;
+    }
+    if (this.flushAgain && !this.stopped) {
+      this.flushAgain = false;
+      await this.flush();
+    }
+  }
+
+  private retryLater(p: string): void {
+    const st = this.active.get(p);
+    if (!st || this.stopped) return;
+    const delay =
+      st.tries < EMBED_RETRY_DELAYS_MS.length
+        ? EMBED_RETRY_DELAYS_MS[st.tries]
+        : this.deps.isWanted?.(p)
+          ? EMBED_SLOW_RETRY_MS
+          : null;
+    if (delay == null) {
+      // Schedule spent and nothing on screen waits for it: the mirror's
+      // ordinary pass still catches it, and a widget that shows it again
+      // starts it afresh.
+      this.active.delete(p);
+      return;
+    }
+    st.tries++;
+    if (st.timer != null) this.clearT(st.timer);
+    st.timer = this.setT(() => {
+      st.timer = null;
+      this.due.add(p);
+      void this.flush();
+    }, delay);
   }
 }
