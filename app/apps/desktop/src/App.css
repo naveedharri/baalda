@@ -10482,7 +10482,8 @@ button.plan-page-vault-chip:hover {
 }
 /* Account Settings → Vaults, grid view: one card per synced vault, the same
    border, radius and hover tint as the app's other cards. The ⋯ menu sits in
-   the top-right corner; the card body switches to the vault. */
+   the top-right corner; the card body opens the vault's page, and the
+   "Switch here" chip switches to it. */
 .vault-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -10509,10 +10510,6 @@ button.plan-page-vault-chip:hover {
 .vault-grid-card:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
-}
-.vault-grid-card.current,
-.vault-grid-card[aria-disabled="true"] {
-  cursor: default;
 }
 .vault-grid-card .vault-tile {
   width: 40px;
@@ -10548,6 +10545,89 @@ button.plan-page-vault-chip:hover {
   gap: var(--sp-2);
   margin-top: var(--sp-2);
   cursor: default;
+}
+/* "Switch here": the "Current" pill's shape, made actionable with the vault
+   chips' accent text and hover tint. */
+.vault-switch-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--sp-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.vault-switch-chip:hover:not(:disabled) {
+  background: var(--bg-active);
+}
+.vault-switch-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+/* Account Settings → Vaults → one vault: the member profile's page shell
+   (.member-profile*) with stat tiles, detail rows and an actions list. */
+.account-vault-page .member-profile-head .vault-tile {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  font-size: var(--fs-lg);
+}
+.account-vault-page-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+.account-vault-page > .subhead {
+  margin-top: var(--sp-5);
+}
+.account-vault-page-skel {
+  display: block;
+  width: 48px;
+  height: 22px;
+}
+.account-vault-page-note {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+}
+.account-vault-actions {
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+}
+.account-vault-action {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 48px;
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+.account-vault-action-copy {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.account-vault-action-title {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.account-vault-action.danger .account-vault-action-title {
+  color: var(--danger);
+}
+.account-vault-action-control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
 }
 .account-vaults-info {
   display: inline-flex;

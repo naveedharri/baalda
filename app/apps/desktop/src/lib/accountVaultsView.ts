@@ -4,12 +4,12 @@
 export type AccountVaultsView = "list" | "grid";
 export const ACCOUNT_VAULTS_VIEW_KEY = "context.accountVaults.view";
 
-/** The stored view; anything unreadable or unknown is the list. */
+/** The stored view. Grid is the default; only an explicit stored "list" is the list. */
 export function readAccountVaultsView(): AccountVaultsView {
   try {
-    return localStorage.getItem(ACCOUNT_VAULTS_VIEW_KEY) === "grid" ? "grid" : "list";
+    return localStorage.getItem(ACCOUNT_VAULTS_VIEW_KEY) === "list" ? "list" : "grid";
   } catch {
-    return "list";
+    return "grid";
   }
 }
 

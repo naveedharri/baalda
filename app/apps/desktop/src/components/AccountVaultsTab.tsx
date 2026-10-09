@@ -31,6 +31,13 @@ import { UpgradeDialog } from "./UpgradeDialog";
 import { useLocalFolderClasses, useLocalVaults } from "./useVaultLists";
 import { hiddenForeignFootnote, visibleFolders } from "../lib/vault/vaultList";
 import { formatDate, UnsyncConfirmDialog } from "./VaultSettingsDialog";
+import { AccountVaultPage } from "./AccountVaultPage";
+import {
+  vaultPageDetails,
+  vaultPagePlanLine,
+  vaultPageRole,
+  vaultSettingsAction,
+} from "../lib/accountVaultPage";
 
 const CURRENT_LINK_TIP =
   'The active vault is also linked at "current", so tools like Claude Desktop can point at one fixed path.';
@@ -101,6 +108,8 @@ export function AccountVaultsTab() {
   const [actionError, setActionError] = useState<string | null>(null);
   // List rows or cards for the synced vaults; remembered on this device.
   const [view, setView] = useState<AccountVaultsView>(readAccountVaultsView);
+  // The vault whose page is open (a card was clicked); null = the list.
+  const [pageOrgId, setPageOrgId] = useState<string | null>(null);
   // Free-plan vault-cap hit while creating — shows an upgrade nudge instead.
   const [limitNudge, setLimitNudge] = useState<{ kind: LimitKind; limit: number | null } | null>(
     null,
@@ -112,15 +121,21 @@ export function AccountVaultsTab() {
   const [billing, setBilling] = useState<
     { account: MyBillingAccount; usage: BillingUsage } | null
   >(null);
+  // True until the usage answers (or fails): the vault page shows skeletons.
+  const [billingLoading, setBillingLoading] = useState(false);
+  const usageShown = !!session && billingConfig?.enabled === true && billingConfig.model === "team";
   useEffect(() => {
     if (!session || !billingConfig?.enabled || billingConfig.model !== "team") {
       setBilling(null);
+      setBillingLoading(false);
       return;
     }
     let live = true;
+    setBillingLoading(true);
     Promise.all([authManager.api.getBillingAccount(), authManager.api.getBillingUsage()])
       .then(([account, usage]) => { if (live) setBilling({ account, usage }); })
-      .catch(() => { if (live) setBilling(null); });
+      .catch(() => { if (live) setBilling(null); })
+      .finally(() => { if (live) setBillingLoading(false); });
     return () => { live = false; };
   }, [session, billingConfig?.enabled, billingConfig?.model]);
   const usageFor = (orgId: string) =>
@@ -528,8 +543,79 @@ export function AccountVaultsTab() {
     ...localsShown.filter((r) => !(!syncEnabled && vault?.path === r.path)),
   ];
 
+  // The open vault page, when a card was clicked and the vault still exists.
+  const pageOrg = session && pageOrgId ? organizations.find((o) => o.id === pageOrgId) ?? null : null;
+  const renderPage = (o: (typeof organizations)[number]) => {
+    const isActive = isOpenOrg(o.id);
+    const usage = usageFor(o.id);
+    const onMyAccount = !!usage;
+    const activeMembers = o.id === activeOrgId ? members : [];
+    const role = vaultPageRole({
+      activeRole: activeMembers.find((m) => m.userId === session?.user.id)?.role ?? null,
+      onMyAccount,
+    });
+    const ownerName = activeMembers.find((m) => m.role === "owner")?.user?.name || null;
+    const planLine = usageShown
+      ? vaultPagePlanLine({ onMyAccount, accountPlan: billing?.account.plan ?? null, ownerName })
+      : null;
+    const settingsAction = vaultSettingsAction({ isOpen: isActive, boundPath: bound[o.id] ?? null });
+    return (
+      <AccountVaultPage
+        orgId={o.id}
+        name={o.name}
+        slug={vaultCardLabels(o, null).slug}
+        isCurrent={isActive}
+        lapsed={!!usage && accountLapsed}
+        busy={busy}
+        showStats={usageShown}
+        usage={usage}
+        usageLoading={billingLoading}
+        details={vaultPageDetails({
+          role,
+          planLine,
+          folderPath: bound[o.id] ?? null,
+          createdAt: o.createdAt,
+          formatDate,
+        })}
+        actions={syncedActions(o, isActive)}
+        folderMissing={
+          isActive && rootMissing ? (
+            <VaultFolderMissingRowActions
+              synced={syncEnabled}
+              busy={busy}
+              onRestore={recover(() => useStore.getState().restoreVaultFolder())}
+              onLocate={recover(() => useStore.getState().locateVaultFolder())}
+            />
+          ) : null
+        }
+        confirmingDelete={confirmDelete === o.id}
+        confirmDelete={confirmDeleteActions(o.id)}
+        settingsAction={settingsAction}
+        onSwitch={() => switchTo(o.id)}
+        onOpenSettings={async () => {
+          // The Plan tab's invited-chip rule: switch first when needed, then
+          // Vault Settings → Members and access.
+          if (settingsAction === "unavailable") return;
+          if (settingsAction === "switch-then-open") {
+            await switchTo(o.id);
+            if (useStore.getState().session?.activeOrganizationId !== o.id) return;
+          }
+          useStore.getState().requestSettings("members");
+        }}
+        onBack={() => setPageOrgId(null)}
+      />
+    );
+  };
+
   return (
     <>
+      {pageOrg ? (
+        <>
+          {renderPage(pageOrg)}
+          {actionError && <div className="auth-error">{actionError}</div>}
+        </>
+      ) : (
+        <>
       {session && userInvitations.length > 0 && (
         <>
           <div className="subhead">Invitations ({userInvitations.length})</div>
@@ -576,21 +662,19 @@ export function AccountVaultsTab() {
           {ordered.map((o) => {
             const isActive = isOpenOrg(o.id);
             const labels = vaultCardLabels(o, usageFor(o.id));
-            const canSwitch = !isActive && !busy;
             return (
               <div
                 key={o.id}
                 className={`vault-grid-card${isActive ? " current" : ""}`}
                 role="button"
                 tabIndex={0}
-                aria-label={isActive ? `${o.name}, current vault` : `Switch to ${o.name}`}
-                aria-disabled={!canSwitch || undefined}
-                onClick={() => { if (canSwitch) void switchTo(o.id); }}
+                aria-label={isActive ? `${o.name}, current vault` : `Open ${o.name}`}
+                onClick={() => setPageOrgId(o.id)}
                 onKeyDown={(e) => {
                   if (e.target !== e.currentTarget) return;
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    if (canSwitch) void switchTo(o.id);
+                    setPageOrgId(o.id);
                   }
                 }}
               >
@@ -609,20 +693,28 @@ export function AccountVaultsTab() {
                 <span className="vault-grid-name">{labels.name}</span>
                 {labels.slug && <span className="muted vault-grid-meta">{labels.slug}</span>}
                 {labels.counts && <span className="muted vault-grid-meta">{labels.counts}</span>}
-                {(isActive || confirmDelete === o.id || (usageFor(o.id) && accountLapsed)) && (
-                  <span
-                    className="vault-grid-foot"
-                    onClick={(e) => e.stopPropagation()}
-                    onKeyDown={(e) => e.stopPropagation()}
-                  >
-                    {usageFor(o.id) && accountLapsed && (
-                      <span className="billing-status canceled">Read-only</span>
-                    )}
-                    {confirmDelete === o.id
-                      ? confirmDeleteActions(o.id)
-                      : isActive && syncedStatus(o, isActive)}
-                  </span>
-                )}
+                <span
+                  className="vault-grid-foot"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  {usageFor(o.id) && accountLapsed && (
+                    <span className="billing-status canceled">Read-only</span>
+                  )}
+                  {confirmDelete === o.id ? (
+                    confirmDeleteActions(o.id)
+                  ) : isActive ? (
+                    syncedStatus(o, isActive)
+                  ) : (
+                    <AsyncButton
+                      className="vault-switch-chip"
+                      disabled={busy}
+                      onClick={() => switchTo(o.id)}
+                    >
+                      Switch here
+                    </AsyncButton>
+                  )}
+                </span>
               </div>
             );
           })}
@@ -690,8 +782,6 @@ export function AccountVaultsTab() {
           .
         </p>
       )}
-      {reset.dialog}
-
       {(creating || joining) && (
         <div className="vault-tab-actions">
           {creating ? (
@@ -908,6 +998,10 @@ export function AccountVaultsTab() {
           </div>
         </>
       )}
+
+        </>
+      )}
+      {reset.dialog}
 
       {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
 

@@ -17,9 +17,11 @@ describe("account vaults view pref", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("defaults to list", () => {
-    expect(readAccountVaultsView()).toBe("list");
+  it("defaults to grid, and honours a stored list", () => {
+    expect(readAccountVaultsView()).toBe("grid");
     store[ACCOUNT_VAULTS_VIEW_KEY] = "board";
+    expect(readAccountVaultsView()).toBe("grid");
+    store[ACCOUNT_VAULTS_VIEW_KEY] = "list";
     expect(readAccountVaultsView()).toBe("list");
   });
 
@@ -36,7 +38,7 @@ describe("account vaults view pref", () => {
       getItem: () => { throw new Error("blocked"); },
       setItem: () => { throw new Error("blocked"); },
     });
-    expect(readAccountVaultsView()).toBe("list");
+    expect(readAccountVaultsView()).toBe("grid");
     expect(() => writeAccountVaultsView("grid")).not.toThrow();
   });
 });
