@@ -39,6 +39,7 @@ export function SidebarHeader() {
     hoverEnter,
     hoverLeave: scheduleHoverClose,
     cancelHoverClose,
+    dismissPreview,
   } = useHoverMenu();
   const rootRef = useRef<HTMLDivElement>(null);
   const rows = useSwitcherRows();
@@ -220,10 +221,15 @@ export function SidebarHeader() {
               title={`Copy ${vault.path}`}
               aria-label="Copy vault folder path"
               onMouseDown={(event) => event.stopPropagation()}
-              onClick={() => void copyPath()}
+              onClick={() => {
+                // A hover preview would cover the copied check; a pinned menu stays.
+                dismissPreview();
+                void copyPath();
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
+                  dismissPreview();
                   void copyPath();
                 }
               }}

@@ -31,6 +31,7 @@ export function useHoverMenu() {
   const close = useCallback(() => send("close"), [send]);
   const toggle = useCallback(() => send("toggle"), [send]);
   const pin = useCallback(() => send("pin"), [send]);
+  const dismissPreview = useCallback(() => send("dismiss-preview"), [send]);
   /** Mouse only: a touch or pen press is a click, never a hover preview. */
   const hoverEnter = useCallback(
     (event: ReactPointerEvent) => {
@@ -49,5 +50,15 @@ export function useHoverMenu() {
   }, [cancelHoverClose]);
   useEffect(() => cancelHoverClose, [cancelHoverClose]);
 
-  return { mode, open: mode !== "closed", close, toggle, pin, hoverEnter, hoverLeave, cancelHoverClose };
+  return {
+    mode,
+    open: mode !== "closed",
+    close,
+    toggle,
+    pin,
+    dismissPreview,
+    hoverEnter,
+    hoverLeave,
+    cancelHoverClose,
+  };
 }

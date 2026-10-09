@@ -15,7 +15,9 @@ export type HoverMenuEvent =
   /** A press or focus inside the open menu. */
   | "pin"
   /** Escape, an outside press, or a row that closes the menu. */
-  | "close";
+  | "close"
+  /** A click on a neighbouring control: closes a hover preview, leaves a pinned menu. */
+  | "dismiss-preview";
 
 /** Grace for gliding from the trigger into the menu without it closing. */
 export const HOVER_MENU_CLOSE_MS = 220;
@@ -33,5 +35,7 @@ export function nextHoverMenuMode(mode: HoverMenuMode, event: HoverMenuEvent): H
       return mode === "closed" ? mode : "pinned";
     case "close":
       return "closed";
+    case "dismiss-preview":
+      return mode === "hover" ? "closed" : mode;
   }
 }

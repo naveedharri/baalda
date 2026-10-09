@@ -140,7 +140,7 @@ describe("vault switcher hover and click", () => {
     expect(menu()).toBeNull();
   });
 
-  it("keeps a hover preview up while passing from the name over the path", async () => {
+  it("keeps a hover preview up from the name, over the path, into the menu", () => {
     const name = () => host.querySelector<HTMLDivElement>(".sidebar-header-main")!;
     const line = () => host.querySelector<HTMLDivElement>(".vault-line")!;
     point(name(), "pointerover");
@@ -149,11 +149,33 @@ describe("vault switcher hover and click", () => {
     point(line(), "pointerover", "mouse", name());
     advance(300);
     expect(menu()).not.toBeNull();
-    // A click there copies and leaves the preview a preview: leaving closes it.
-    await act(async () => line().querySelector<HTMLSpanElement>(".vault-path-copy")!.click());
-    point(line(), "pointerout");
+    point(line(), "pointerout", "mouse", menu()!);
+    point(menu()!, "pointerover", "mouse", line());
+    advance(300);
+    expect(menu()).not.toBeNull();
+    point(menu()!, "pointerout");
     advance(220);
     expect(menu()).toBeNull();
+  });
+
+  it("closes a hover preview at once on a path click, so the copied check shows", async () => {
+    const name = () => host.querySelector<HTMLDivElement>(".sidebar-header-main")!;
+    const line = () => host.querySelector<HTMLDivElement>(".vault-line")!;
+    point(name(), "pointerover");
+    point(name(), "pointerout", "mouse", line());
+    point(line(), "pointerover", "mouse", name());
+    expect(menu()).not.toBeNull();
+    await act(async () => line().querySelector<HTMLSpanElement>(".vault-path-copy")!.click());
+    expect(menu()).toBeNull();
+    expect(host.querySelector(".vault-path-copied")).not.toBeNull();
+  });
+
+  it("leaves a click-pinned switcher open on a path click", async () => {
+    act(() => tile().click());
+    expect(menu()).not.toBeNull();
+    await act(async () => host.querySelector<HTMLSpanElement>(".vault-path-copy")!.click());
+    expect(menu()).not.toBeNull();
+    expect(copyText).toHaveBeenCalledWith("/vault");
   });
 
   it("does not interpret a touch pointer as hover", () => {

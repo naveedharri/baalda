@@ -26,6 +26,12 @@ describe("nextHoverMenuMode", () => {
     expect(run(["toggle", "enter"])).toBe("pinned");
   });
 
+  it("dismisses a hover preview but never a pinned menu", () => {
+    expect(run(["enter", "dismiss-preview"])).toBe("closed");
+    expect(run(["toggle", "dismiss-preview"])).toBe("pinned");
+    expect(run(["dismiss-preview"])).toBe("closed");
+  });
+
   it("closes from any state on Escape or an outside press", () => {
     expect(run(["enter", "close"])).toBe("closed");
     expect(run(["toggle", "close"])).toBe("closed");
