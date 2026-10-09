@@ -1,5 +1,6 @@
 import { pool } from "../../src/db/pool.js";
 import { runMigrations } from "../../src/db/migrate.js";
+import { flushIndexQueue } from "../../src/index/indexer.js";
 
 let migrated = false;
 
@@ -52,6 +53,10 @@ const TABLES = [
 
 export async function resetDb(): Promise<void> {
   await ensureMigrated();
+  // A previous test's background re-index (e.g. the 0 ms one a Trash restore
+  // schedules) reads and writes several of these tables; truncating under it
+  // deadlocks. Let it finish first.
+  await flushIndexQueue();
   await pool.query(`TRUNCATE ${TABLES.join(", ")} RESTART IDENTITY CASCADE`);
 }
 
