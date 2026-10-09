@@ -746,7 +746,7 @@ export function AccountVaultsTab() {
                     ariaLabel={`More actions for ${o.name}`}
                     disabled={busy}
                     actions={syncedCardActions(o, isActive)}
-                    menuClassName="vault-menu--compact"
+                    align="start"
                   />
                 </span>
                 <VaultTile identity={`org:${o.id}`} name={o.name} />
@@ -986,7 +986,7 @@ export function AccountVaultsTab() {
                         ariaLabel={`More actions for ${r.name ?? r.path}`}
                         disabled={busy}
                         actions={localActions(r.path, r.name ?? r.path)}
-                        menuClassName="vault-menu--compact"
+                        align="start"
                       />
                     </span>
                     <span className="menu-swatch vault-grid-letter" aria-hidden="true">

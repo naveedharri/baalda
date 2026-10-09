@@ -10685,15 +10685,6 @@ body.access-board-grabbing * {
   font-size: var(--fs-sm);
   margin-bottom: 6px;
 }
-/* The cards' ⋯ menu: the row menu's items, dividers and danger colour at a
-   card's scale. */
-.context-menu.vault-menu--compact {
-  min-width: 168px;
-}
-.context-menu.vault-menu--compact li {
-  padding: 6px 10px;
-  font-size: 13px;
-}
 /* Account Settings → Vaults → one vault: the member profile's page shell
    (.member-profile*) with stat tiles, detail rows and an actions list. */
 .account-vault-page .member-profile-head .vault-tile {
