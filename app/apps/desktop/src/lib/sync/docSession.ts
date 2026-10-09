@@ -1504,6 +1504,11 @@ export class SyncManager implements InboundHost {
     // A reconnect, a registry frame or an ACL change may mean the server now
     // holds an embed this device is still waiting for: ask for it now.
     this.embedArrivals?.nudge();
+    // An access change or a reconnect may have lifted a refusal of this
+    // device's own pasted images: ask for them again too.
+    if (reason === "reauth" || reason === "acl-revoked" || reason === "channel-synced") {
+      this.attachments?.recheckEmbedUploads();
+    }
     // Which trigger asked for this pull. A pull that keeps re-arming itself is
     // invisible without this line — the badge just blinks "Syncing" — and the
     // NAME is the whole value: `reauth` vs `registry-frame` is what separated

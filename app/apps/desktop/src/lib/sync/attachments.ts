@@ -681,6 +681,10 @@ async function runProbeFirst<T>(
   await runPool(items.slice(1), (item, i) => worker(item, i + 1), opts);
 }
 
+/** How long an `attachments/` drop refused for access (403) waits before the
+ *  mirror asks again on its own. */
+export const EMBED_REFUSAL_RETRY_MS = 60_000;
+
 /** How long a `files-indexed` burst collects before the text pass runs. */
 const TEXT_DEBOUNCE_MS = 800;
 
@@ -1039,6 +1043,17 @@ export class AttachmentSync {
    * than path so a rename does not resurrect the attempt.
    */
   private readonly permanentSkips = new Set<string>();
+  /**
+   * `attachments/` drops the server refused with a 403 (no write access here),
+   * by sha → when to ask again. NOT a permanent skip: access is a setting an
+   * owner changes, and an image pasted into a note someone can edit must reach
+   * the team once they may write. Re-asked after {@link EMBED_REFUSAL_RETRY_MS}
+   * and at once on {@link recheckEmbedUploads} (an access change, a reconnect).
+   */
+  private readonly embedRefusedUntil = new Map<string, number>();
+  private embedRefusalTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The "your image could not be shared" toast, once per sync instance. */
+  private embedRefusalNotified = false;
   /** The storage-full toast is raised at most once per sync instance. */
   private storageLimitNotified = false;
   /** relPath → the state the sidebar draws for it (see `deps.onFileStates`). */
@@ -1282,6 +1297,37 @@ export class AttachmentSync {
     }
   }
 
+  /**
+   * Access may have changed (a reauth, an ACL frame, a reconnect): every
+   * `attachments/` drop refused for access is asked for again on the next pass.
+   */
+  recheckEmbedUploads(): void {
+    if (this.embedRefusedUntil.size === 0) return;
+    this.embedRefusedUntil.clear();
+    if (this.embedRefusalTimer) this.clearTimeoutImpl(this.embedRefusalTimer);
+    this.embedRefusalTimer = null;
+    this.scheduleReconcile();
+  }
+
+  private refuseEmbedForNow(a: LocalAttachment): void {
+    this.embedRefusedUntil.set(a.sha256, Date.now() + EMBED_REFUSAL_RETRY_MS);
+    console.warn(
+      `[attachments] ${a.relPath} refused (403) — no write access here; asking again in ${EMBED_REFUSAL_RETRY_MS / 1000} s`,
+    );
+    if (!this.embedRefusalNotified) {
+      this.embedRefusalNotified = true;
+      this.deps.notify?.(
+        "An image you added is only on this device: you don't have permission to add files to this vault. It will sync once an owner or admin gives you edit access.",
+        "error",
+      );
+    }
+    if (this.embedRefusalTimer) return;
+    this.embedRefusalTimer = this.setTimeoutImpl(() => {
+      this.embedRefusalTimer = null;
+      if (this.current()) this.scheduleReconcile();
+    }, EMBED_REFUSAL_RETRY_MS);
+  }
+
   /** Clear a plan refusal after billing refresh has confirmed an upgrade. */
   resetEntitlement(): void {
     this.legacyListingBlocked = false;
@@ -1464,6 +1510,11 @@ export class AttachmentSync {
         // is skipped without a round trip — see `permanentSkips`.
         if (this.attachmentSyncBlocked && !isUnderAttachments(a.relPath)) return;
         if (this.permanentSkips.has(a.sha256)) return;
+        const refusedUntil = this.embedRefusedUntil.get(a.sha256);
+        if (refusedUntil !== undefined) {
+          if (Date.now() < refusedUntil) return;
+          this.embedRefusedUntil.delete(a.sha256);
+        }
         if (this.unreadable.has(pathKey(a.relPath))) return;
         // An unregistered path while the delete queue is still trying to settle a
         // window is very likely the arrival half of a rename it is about to pair.
@@ -1881,6 +1932,12 @@ export class AttachmentSync {
         // badged as syncing. Forget it and register the file afresh, once.
         this.forgetDeadFileId(a.relPath, docId);
         return this.uploadOneClaimed(a, true);
+      }
+      if (status === 403 && isUnderAttachments(a.relPath)) {
+        // An image pasted into a note: the refusal is about this person's
+        // access, which can change, never about these bytes. Ask again later.
+        this.refuseEmbedForNow(a);
+        return false;
       }
       if (status === 413 || status === 415 || status === 400 || status === 403) {
         // Permanent for these bytes: the file is over the cap or of a type the
@@ -2723,6 +2780,10 @@ export class AttachmentSync {
     if (this.timer) {
       this.clearTimeoutImpl(this.timer);
       this.timer = null;
+    }
+    if (this.embedRefusalTimer) {
+      this.clearTimeoutImpl(this.embedRefusalTimer);
+      this.embedRefusalTimer = null;
     }
     // The text pass holds the same captured vaultId and must die with it.
     if (this.textTimer) {
