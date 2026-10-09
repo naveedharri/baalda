@@ -114,8 +114,10 @@ export interface Organization {
 
 /**
  * Two facts the notes listing's last page states about the caller (server
- * 2026-10-09). `null` = the server did not say (an older server), which every
- * reader treats as "unknown", never as false.
+ * 2026-10-09). Absent = the server did not say (an older server), which every
+ * reader treats as "unknown" (`?? null`), never as false. A field is present
+ * only when the server sent a boolean, so an old server's listing keeps
+ * exactly its old shape.
  */
 export interface ListingVisibility {
   /** The vault holds live notes or files this user cannot read. */
@@ -124,11 +126,14 @@ export interface ListingVisibility {
   canCreateRoot: boolean | null;
 }
 
-function listingVisibility(data: { hiddenContent?: unknown; canCreateRoot?: unknown }): ListingVisibility {
-  return {
-    hiddenContent: typeof data.hiddenContent === "boolean" ? data.hiddenContent : null,
-    canCreateRoot: typeof data.canCreateRoot === "boolean" ? data.canCreateRoot : null,
-  };
+function listingVisibility(data: {
+  hiddenContent?: unknown;
+  canCreateRoot?: unknown;
+}): Partial<ListingVisibility> {
+  const out: Partial<ListingVisibility> = {};
+  if (typeof data.hiddenContent === "boolean") out.hiddenContent = data.hiddenContent;
+  if (typeof data.canCreateRoot === "boolean") out.canCreateRoot = data.canCreateRoot;
+  return out;
 }
 
 export interface Member {
@@ -2617,7 +2622,7 @@ export class ApiClient {
    */
   async listNoteRegistry(
     vaultId: string,
-  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null } & ListingVisibility> {
+  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null } & Partial<ListingVisibility>> {
     const { data } = await this.request<{
       notes: RegisteredNote[];
       tombstones?: string[];
@@ -2971,11 +2976,11 @@ export class ApiClient {
   async listNoteRegistryPaged(
     vaultId: string,
     opts: { limit?: number } = {},
-  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null } & ListingVisibility> {
+  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null } & Partial<ListingVisibility>> {
     const limit = opts.limit ?? REGISTRY_PAGE_LIMIT;
     const notes: RegisteredNote[] = [];
     let tombstones: string[] | null = null;
-    let visibility: ListingVisibility = { hiddenContent: null, canCreateRoot: null };
+    let visibility: Partial<ListingVisibility> = {};
     let after: string | undefined;
     // Bounded so a server that keeps answering the same `nextAfter` cannot spin
     // this loop forever; 1000 pages is 1,000,000 notes at the default limit.
