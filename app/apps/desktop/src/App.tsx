@@ -44,6 +44,7 @@ import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
 import { FILES_AND_FOLDERS_SETTINGS_URL, folderErrorText } from "./lib/vault/folderErrors";
+import { LOCATE_ORIGINAL, autoRestoredNoticeText } from "./lib/vault/missingFolder";
 import * as perf from "./lib/perf";
 import { implicatedFolders, refreshWorthy } from "./lib/tree/lazyTree";
 import { DISK_DELETE_GRACE_MS, syncManager } from "./lib/sync/docSession";
@@ -390,6 +391,37 @@ function VaultRootMissingBanner() {
         else st.requestSettings("vaults");
       }}
     />
+  );
+}
+
+/**
+ * A missing vault folder inside the vaults root was recreated and is syncing
+ * down (2026-10-09): say so, and offer the original folder instead. Fades
+ * after NOTICE_FADE_MS like every informational notice.
+ */
+function VaultRootRestoredBanner() {
+  const restored = useStore((s) => s.folderAutoRestored);
+  const activeOrg = useStore((s) => s.session?.activeOrganizationId ?? null);
+  const show = !!restored && restored.orgId === activeOrg;
+  const dismiss = () => useStore.getState().dismissFolderAutoRestored();
+  const visible = useNoticeSlot("root-restored", show, { onFade: dismiss });
+  const locate = async () => {
+    try {
+      await useStore.getState().locateOriginalVaultFolder();
+    } catch (e) {
+      toast(folderErrorText(e), "error");
+    }
+  };
+  return (
+    <Banner show={visible} role="status">
+      <span>{restored ? autoRestoredNoticeText(restored.name) : ""}</span>
+      <div className="banner-actions">
+        <button className="secondary" onClick={locate}>
+          {LOCATE_ORIGINAL}
+        </button>
+        <button onClick={dismiss}>Dismiss</button>
+      </div>
+    </Banner>
   );
 }
 
@@ -1660,6 +1692,7 @@ export default function App() {
           <VaultUnsyncedBanner />
           <MembershipLostBanner />
           <VaultRootMissingBanner />
+          <VaultRootRestoredBanner />
           <AccountLapsedNotice />
           <ClosedAppChangesBanner />
           <NotSyncingBanner />

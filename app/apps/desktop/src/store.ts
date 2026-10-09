@@ -111,6 +111,11 @@ import { forgetTeamAccessCache } from "./lib/teamAccessCache";
 import { planOpen } from "./lib/sync/openGate";
 import { IPC_CONCURRENCY, runPool } from "./lib/sync/pool";
 import { rediscoverVaultFolder } from "./lib/vault/rediscover";
+import {
+  MISSING_FOLDER_SETTLE_MS,
+  planMissingFolder,
+  reboundToastText,
+} from "./lib/vault/missingFolder";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { dismissToast, toast } from "./lib/toast";
 import { isEditorNote } from "./lib/notePath";
@@ -262,6 +267,15 @@ interface AppStore {
    * while the app was closed. Mirrored for the banners; the sync layer owns it.
    */
   structureNotice: StructureNotice;
+  /**
+   * A missing vault folder inside the vaults root was recreated automatically
+   * (2026-10-09) — drives the informational "restored it" notice, whose one
+   * action locates the original folder instead.
+   */
+  folderAutoRestored: { orgId: string; name: string; path: string } | null;
+  dismissFolderAutoRestored: () => void;
+  /** The notice's "Locate the original instead…": bind a folder the user picks. */
+  locateOriginalVaultFolder: () => Promise<void>;
   /**
    * Mirror the sync layer's notice. The moment the vault folder goes missing
    * (#228) the open tabs close: every one of them names a file that is gone.
@@ -941,6 +955,12 @@ interface AppStore {
   restoreVaultFolder: () => Promise<void>;
   locateVaultFolder: () => Promise<void>;
   /**
+   * The live "root vanished" path: when the open synced vault's folder sat
+   * inside the vaults root, rebind a renamed copy or recreate it without
+   * asking (`lib/vault/missingFolder.ts`). Leaves the banner up otherwise.
+   */
+  autoRecoverMissingRoot: () => Promise<void>;
+  /**
    * Reset local copy (#228): permanently delete this device's folder of the
    * open synced vault, then run Restore here. Sync stops first; the deliberate
    * absence never raises the folder-missing banner.
@@ -1363,6 +1383,37 @@ interface FolderRecoveryTarget {
   path: string | null;
   seedIfEmpty?: boolean;
   stillCurrent: () => boolean;
+}
+
+/**
+ * Decide, after a short settle, what a missing vault folder needs
+ * (`planMissingFolder`). The wait lets a Finder rename land so its new folder
+ * shows up in the stamp scan; the existence re-check catches a rename-back.
+ * Answers `present` when the folder came back by itself.
+ */
+async function planForMissingFolder(
+  orgId: string | null,
+  path: string,
+): Promise<ReturnType<typeof planMissingFolder> | { kind: "present" }> {
+  await new Promise((r) => setTimeout(r, MISSING_FOLDER_SETTLE_MS));
+  if (await ipc.folderExists(path).catch(() => false)) return { kind: "present" };
+  let root: string | null = null;
+  try {
+    root = await ipc.getVaultsRoot();
+    // A missing (or unreadable) root is not ours to recreate into: ask.
+    if (!(await ipc.folderExists(root).catch(() => false))) root = null;
+  } catch {
+    root = null;
+  }
+  let found: string | null = null;
+  if (orgId) {
+    try {
+      found = await findExistingVaultFolder(orgId);
+    } catch (e) {
+      console.warn("[vault] folder rediscovery failed", e);
+    }
+  }
+  return planMissingFolder({ path, root, stampMatches: found, canSync: !!orgId });
 }
 
 function folderRecoveryTarget(get: () => AppStore): FolderRecoveryTarget | null {
@@ -1893,7 +1944,26 @@ export const useStore = create<AppStore>((set, get) => ({
   applyStructureNotice: (notice) => {
     const wasMissing = get().structureNotice.rootMissing;
     set({ structureNotice: notice });
-    if (notice.rootMissing && !wasMissing) get().closeAllTabs();
+    if (notice.rootMissing && !wasMissing) {
+      get().closeAllTabs();
+      void get()
+        .autoRecoverMissingRoot()
+        .catch((e) => console.warn("[vault] auto-recovery of the missing folder failed", e));
+    }
+  },
+  folderAutoRestored: null,
+  dismissFolderAutoRestored: () => set({ folderAutoRestored: null }),
+  locateOriginalVaultFolder: async () => {
+    const restored = get().folderAutoRestored;
+    if (!restored) return;
+    const picked = await ipc.pickFolder();
+    if (!picked) return; // cancelled: keep the notice and the restored folder
+    // A switch while the picker was open: this vault is no longer the open one.
+    if (get().folderAutoRestored?.orgId !== restored.orgId) return;
+    // The same bind "Locate folder…" makes, through the same folder refusals.
+    // The recreated folder stays on disk: it already holds a synced copy.
+    await get().applyVaultFolder(restored.orgId, picked);
+    set({ folderAutoRestored: null });
   },
 
   releaseBulkDelete: async (how) => {
@@ -3774,6 +3844,38 @@ export const useStore = create<AppStore>((set, get) => ({
       // vault while the user's real notes sit in the moved folder — the exact
       // surprise-duplicate this flow used to produce. Ask for the new location.
       if (bound) {
+        // Inside the vaults root the folder is ours to manage: rebind a renamed
+        // copy or recreate it and sync down, and say so (2026-10-09). Outside
+        // the root (an unmounted drive looks exactly like a delete) we ask.
+        const plan = await planForMissingFolder(organizationId, bound);
+        if (superseded()) return;
+        if (plan.kind === "present" || plan.kind === "rebind") {
+          const target = plan.kind === "rebind" ? plan.path : bound;
+          try {
+            await get().applyVaultFolder(organizationId, target);
+            if (plan.kind === "rebind") toast(reboundToastText(orgName, target));
+            return;
+          } catch (e) {
+            console.warn("[vault] rebinding the vault folder failed", e);
+            if (superseded()) return;
+          }
+        } else if (plan.kind === "recreate") {
+          try {
+            await get().applyVaultFolder(organizationId, bound, {
+              create: true,
+              seedIfEmpty: opts.seedIfEmpty,
+            });
+            set({ folderAutoRestored: { orgId: organizationId, name: orgName, path: bound } });
+            return;
+          } catch (e) {
+            console.warn("[vault] auto-restoring the vault folder failed; asking", e);
+            if (superseded()) return;
+            if (isDocumentsDenied(e)) {
+              askForFolder({ text: DOCUMENTS_BLOCKED_TEXT, path: null, documentsDenied: true });
+              return;
+            }
+          }
+        }
         askForFolder({
           text: "This vault's folder is missing. It was moved, renamed or deleted.",
           path: bound,
@@ -4469,6 +4571,31 @@ export const useStore = create<AppStore>((set, get) => ({
     // it is (same rule as "Open existing") — even for a just-created vault.
     if (target.orgId) await get().applyVaultFolder(target.orgId, picked);
     else await get().openLocalVault(picked);
+  },
+
+  autoRecoverMissingRoot: async () => {
+    const v = get().vault;
+    const orgId = get().syncEnabled ? (get().session?.activeOrganizationId ?? null) : null;
+    // A local-only vault has nothing to sync down: the banner stays.
+    if (!v || !orgId) return;
+    const still = () =>
+      get().vault?.epoch === v.epoch && get().structureNotice.rootMissing && !get().pendingVaultFolder;
+    const plan = await planForMissingFolder(orgId, v.path);
+    if (!still()) return;
+    if (plan.kind === "rebind") {
+      await get().applyVaultFolder(orgId, plan.path);
+      toast(reboundToastText(v.name, plan.path));
+      return;
+    }
+    if (plan.kind !== "recreate") return; // ask: the banner's choice stands
+    try {
+      await get().restoreVaultFolder();
+    } catch (e) {
+      // The banner is still up with its two choices; nothing else to do.
+      console.warn("[vault] auto-restore failed; leaving the banner", e);
+      return;
+    }
+    set({ folderAutoRestored: { orgId, name: v.name, path: v.path } });
   },
 
   resetLocalVaultCopy: async () => {

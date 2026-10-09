@@ -226,7 +226,11 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   ⇒ ONE server folder move, every id kept; below that, per-note pairing then the drain). A vanished vault
   root pauses every materialize/register/delete step, closes the tabs and offers Restore here (recreate
   it at the old path and sync down — the Set-up prompt's empty-folder path) or Locate folder… (its
-  open-folder path) from the banner, Settings → Vaults and the launch prompt (#228). The ingest side is
+  open-folder path) from the banner, Settings → Vaults and the launch prompt (#228). A folder that lived INSIDE the vaults root is not asked about
+  (`lib/vault/missingFolder.ts planMissingFolder`, 2026-10-09): after a 2 s settle a renamed copy carrying
+  the vault's stamp is rebound (toast "<Vault> moved to <folder>."), else a synced vault is recreated
+  and synced down with an informational notice whose one action is "Locate the original instead…";
+  outside the root, a local-only vault, or a missing root keep the prompt. The ingest side is
   guarded too: a 0-byte file never clears a populated doc (`allowTruncateFromDisk`, default false). A disk delete the server refuses on the creator rule (403
   `delete_not_creator` / `folder_has_others_items`, per item in a batch) is put back, never retried:
   `registry.restoreRefusedDelete` re-creates the file create-only, fills it from the local CRDT, owes
@@ -389,7 +393,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 The top banners above the editor share ONE notice slot (`lib/noticeSlot.ts`, hook
 `components/useNoticeSlot.ts`): each claims it and only the highest-priority claim shows, in the
 order held bulk delete > reconcile summary > open note deleted/access removed > vault made local
-only > membership ended (folder deleted) > vault folder missing > Team subscription lapsed (read-only sync) > closed-app changes > not syncing > sync paused > note limit > create
+only > membership ended (folder deleted) > vault folder missing > vault folder restored > Team subscription lapsed (read-only sync) > closed-app changes > not syncing > sync paused > note limit > create
 refusal > open note's file gone on disk > attachments local only. Informational notices fade after
 `NOTICE_FADE_MS` (20 s) through their own Dismiss; notices with a pending choice (sign in, locate,
 upgrade, close note, keep local) stay until answered. A faded notice loses nothing: Activity keeps

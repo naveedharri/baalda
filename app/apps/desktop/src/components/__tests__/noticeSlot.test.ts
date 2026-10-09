@@ -120,7 +120,8 @@ describe("pickNotice", () => {
 
   it("puts a lapsed Team subscription after the missing folder and before closed-app changes", () => {
     const at = (id: string) => NOTICE_PRIORITY.indexOf(id as never);
-    expect(at("account-lapsed")).toBe(at("root-missing") + 1);
+    expect(at("root-restored")).toBe(at("root-missing") + 1);
+    expect(at("account-lapsed")).toBe(at("root-restored") + 1);
     expect(at("closed-app-changes")).toBe(at("account-lapsed") + 1);
     expect(pickNotice(new Set(["closed-app-changes", "account-lapsed"]))).toBe("account-lapsed");
     expect(pickNotice(new Set(["account-lapsed", "root-missing"]))).toBe("root-missing");
