@@ -3,6 +3,7 @@ import {
   executeAccount,
   isRefusal,
   planAccount,
+  runAccount,
   seatPriceOf,
   toRawSubView,
   type AccountPlan,
@@ -10,6 +11,7 @@ import {
   type LegacySub,
   type PlanInput,
   type RawSubView,
+  type RunDeps,
 } from "../scripts/billing/legacy-move-core.js";
 
 const TEAM = { month: "team-month", year: "team-year" } as const;
@@ -17,6 +19,7 @@ const TEAM = { month: "team-month", year: "team-year" } as const;
 function sub(over: Partial<LegacySub> & { id: string }): LegacySub {
   return {
     interval: "month",
+    customerId: "cus",
     amount: 1000,
     currency: "usd",
     accountId: "acct",
@@ -207,7 +210,7 @@ describe("executeAccount", () => {
       pendingSeats: 3,
       discount: { id: "d0", name: "legacy-acct", type: "fixed", amount: 2000, basisPoints: null },
     });
-    expect(await executeAccount(p, deps, { proration: "next_period" })).toBe("already");
+    expect(await executeAccount(p, deps, { proration: "next_period" })).toBe("scheduled");
     expect(deps.createDiscount).not.toHaveBeenCalled();
     expect(deps.changeProduct).not.toHaveBeenCalled();
     expect(deps.updateSeats).not.toHaveBeenCalled();
@@ -223,7 +226,7 @@ describe("executeAccount", () => {
       seats: 3,
       discount: { id: "d0", name: "legacy-acct", type: "fixed", amount: 2000, basisPoints: null },
     });
-    expect(await executeAccount(p, deps, { proration: "invoice" })).toBe("already");
+    expect(await executeAccount(p, deps, { proration: "invoice" })).toBe("scheduled");
     expect(deps.updateSeats).toHaveBeenCalledWith("s1", 4, "invoice");
     expect(deps.changeProduct).not.toHaveBeenCalled();
   });
@@ -254,6 +257,97 @@ describe("executeAccount", () => {
     expect(deps.changeProduct).not.toHaveBeenCalled();
     expect(deps.updateSeats).not.toHaveBeenCalled();
     expect(deps.cancelSubscription).not.toHaveBeenCalled();
+  });
+});
+
+describe("price above Team list", () => {
+  it("refuses a charge above list without --allow-lower", () => {
+    const r = planAccount(input({ subs: [sub({ id: "big", amount: 5000 })] }));
+    expect(isRefusal(r) && r.refusal).toBe(
+      "SKIP account acct: today's charge $50.00 exceeds Team list $30.00 for 3 seats; pass --allow-lower to move it with no discount",
+    );
+    expect(isRefusal(r) && r.kind).toBe("refused");
+  });
+
+  it("--allow-lower moves with no discount and verifies the list charge", async () => {
+    const p = plan({ subs: [sub({ id: "big", amount: 5000 })], allowLower: true });
+    expect(p.lower).toBe(true);
+    expect(p.discount).toBeNull();
+    expect(p.expected).toBe(3000);
+    const { deps } = fakePolar(legacyRaw());
+    expect(await executeAccount(p, deps, { proration: "next_period" })).toBe("moved");
+    expect(deps.createDiscount).not.toHaveBeenCalled();
+    expect(deps.changeProduct).toHaveBeenCalledWith("big", "team-month", "next_period", undefined);
+  });
+});
+
+describe("pending Team product with no visible legacy discount", () => {
+  it("changes nothing, creates no discount, cancels nothing and counts as scheduled", async () => {
+    const p = plan({ subs: [sub({ id: "k" }), sub({ id: "o", currentPeriodEnd: "2026-10-01T00:00:00Z" })] });
+    const { deps, lines } = fakePolar({
+      ...legacyRaw(),
+      pendingProductId: "team-month",
+      pendingSeats: 3,
+      discount: { id: "old", name: "Launch 50", type: "percentage", amount: null, basisPoints: 5000 },
+    });
+    expect(await executeAccount(p, deps, { proration: "next_period" })).toBe("scheduled");
+    expect(deps.createDiscount).not.toHaveBeenCalled();
+    expect(deps.changeProduct).not.toHaveBeenCalled();
+    expect(deps.updateSeats).not.toHaveBeenCalled();
+    expect(deps.cancelSubscription).not.toHaveBeenCalled();
+    expect(lines.join("\n")).toContain("product change pending; discount not visible yet, re-run after renewal to verify");
+  });
+});
+
+describe("runAccount: an account that already holds a Team subscription", () => {
+  function runDeps(over: Partial<RunDeps>) {
+    const { deps, lines } = fakePolar(legacyRaw());
+    const all: RunDeps = {
+      ...deps,
+      listCustomerSubs: vi.fn(async () => []),
+      dbTeamRows: vi.fn(async () => []),
+      ...over,
+    };
+    return { deps: all, lines };
+  }
+  const leftover = () => [sub({ id: "leftover", currentPeriodEnd: "2026-10-18T00:00:00Z" })];
+
+  it("refuses when Polar lists an active Team sub for the customer, and calls nothing", async () => {
+    const { deps, lines } = runDeps({
+      listCustomerSubs: vi.fn(async () => [
+        { id: "leftover", productId: "legacy-month-product", pendingProductId: null },
+        { id: "moved", productId: "team-month", pendingProductId: null },
+      ]),
+    });
+    expect(await runAccount(input({ subs: leftover() }), deps, { proration: "invoice" })).toBe("refused");
+    expect(deps.listCustomerSubs).toHaveBeenCalledWith(["cus"], "acct");
+    expect(lines.join("\n")).toContain("REFUSED account acct: already holds Team subscription moved; finish by hand");
+    expect(deps.getRaw).not.toHaveBeenCalled();
+    expect(deps.createDiscount).not.toHaveBeenCalled();
+    expect(deps.changeProduct).not.toHaveBeenCalled();
+    expect(deps.updateSeats).not.toHaveBeenCalled();
+    expect(deps.cancelSubscription).not.toHaveBeenCalled();
+  });
+
+  it("refuses when our DB has a Team row for the account", async () => {
+    const { deps } = runDeps({ dbTeamRows: vi.fn(async () => ["moved"]) });
+    expect(await runAccount(input({ subs: leftover() }), deps, { proration: "invoice" })).toBe("refused");
+    expect(deps.getRaw).not.toHaveBeenCalled();
+    expect(deps.changeProduct).not.toHaveBeenCalled();
+  });
+
+  it("a legacy sub whose own pending product is Team is left to the scheduled guard", async () => {
+    const { deps } = runDeps({
+      listCustomerSubs: vi.fn(async () => [{ id: "s1", productId: "legacy-month-product", pendingProductId: "team-month" }]),
+      dbTeamRows: vi.fn(async () => ["s1"]),
+    });
+    expect(await runAccount(input({}), deps, { proration: "next_period", dryRun: true })).toBe("planned");
+  });
+
+  it("a leaving account is skipped-leaving, not refused", async () => {
+    const { deps } = runDeps({});
+    const subs = [sub({ id: "x", cancelAtPeriodEnd: true })];
+    expect(await runAccount(input({ subs }), deps, { proration: "next_period" })).toBe("skipped-leaving");
   });
 });
 

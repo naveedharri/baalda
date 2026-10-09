@@ -11,6 +11,8 @@ export type ProrationMode = "invoice" | "next_period";
 export interface LegacySub {
   id: string;
   interval: Interval;
+  /** Polar customer id; used to find a Team subscription the account already holds. */
+  customerId: string | null;
   /** Charged amount per period, minor units. */
   amount: number;
   currency: string;
@@ -56,13 +58,20 @@ export interface AccountPlan {
   discount: PlannedDiscount | null;
   /** list - discount: what the owner is charged after the move. */
   expected: number;
+  mode: "fixed" | "percentage";
+  /** --allow-lower: today's charge is above Team list, moved with no discount. */
+  lower: boolean;
   teamProduct: string;
+  /** Every configured Team product id, both intervals. */
+  teamProductIds: string[];
   currency: string;
 }
 
 export interface PlanRefusal {
   accountId: string;
   refusal: string;
+  /** `leaving`: every sub already ends at period end; nothing to move, not an error. */
+  kind: "refused" | "leaving";
 }
 
 export type PlanResult = AccountPlan | PlanRefusal;
@@ -82,7 +91,11 @@ export interface PlanInput {
   sumMode: "sum" | "larger";
   /** `--only <providerSubId>`: plan that sub's interval group of this account. */
   only?: string;
+  /** `--allow-lower`: move an account whose charge is above Team list with no discount. */
+  allowLower?: boolean;
 }
+
+export const dollars = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 
 const periodEndMs = (s: LegacySub): number =>
   s.currentPeriodEnd ? Date.parse(s.currentPeriodEnd) || 0 : 0;
@@ -98,7 +111,11 @@ export const percentOff = (list: number, bp: number): number => Math.round((list
 
 export function planAccount(input: PlanInput): PlanResult {
   const { accountId, subs } = input;
-  const refuse = (refusal: string): PlanRefusal => ({ accountId, refusal });
+  const refuse = (refusal: string, kind: PlanRefusal["kind"] = "refused"): PlanRefusal => ({
+    accountId,
+    refusal,
+    kind,
+  });
   const live = subs.filter((s) => !s.cancelAtPeriodEnd);
 
   let interval: Interval;
@@ -116,7 +133,7 @@ export function planAccount(input: PlanInput): PlanResult {
       );
     }
     if (!live.length) {
-      return refuse(`SKIP account ${accountId}: every legacy sub ends at period end (leaving); nothing to move`);
+      return refuse(`SKIP account ${accountId}: every legacy sub ends at period end (leaving); nothing to move`, "leaving");
     }
     interval = live[0].interval;
   }
@@ -124,7 +141,7 @@ export function planAccount(input: PlanInput): PlanResult {
   const group = subs.filter((s) => s.interval === interval);
   const liveGroup = group.filter((s) => !s.cancelAtPeriodEnd);
   if (!liveGroup.length) {
-    return refuse(`SKIP account ${accountId}: every ${interval}ly legacy sub ends at period end (leaving)`);
+    return refuse(`SKIP account ${accountId}: every ${interval}ly legacy sub ends at period end (leaving)`, "leaving");
   }
   const currencies = new Set(liveGroup.map((s) => s.currency.toLowerCase()));
   if (currencies.size > 1) {
@@ -142,6 +159,13 @@ export function planAccount(input: PlanInput): PlanResult {
   const seats = Math.max(input.minSeats, input.people + input.pending);
   const perSeat = input.perSeatCents[interval];
   const list = seats * perSeat;
+  const lower = target > list;
+  if (lower && !input.allowLower) {
+    return refuse(
+      `SKIP account ${accountId}: today's charge ${dollars(target)} exceeds Team list ${dollars(list)} for ` +
+        `${seats} seats; pass --allow-lower to move it with no discount`,
+    );
+  }
   const off = Math.max(0, list - target);
 
   let discount: PlannedDiscount | null = null;
@@ -168,7 +192,10 @@ export function planAccount(input: PlanInput): PlanResult {
     target,
     discount,
     expected,
+    mode: input.mode,
+    lower,
     teamProduct,
+    teamProductIds: [input.teamProducts.month, input.teamProducts.year].filter((x): x is string => !!x),
     currency: keep.currency,
   };
 }
@@ -183,6 +210,7 @@ export function describePlan(p: AccountPlan): string {
     `account=${p.accountId} interval=${p.interval} subs=${p.others.length + 1} keep=${p.keep.id}` +
     ` people=${p.people} pending=${p.pending} seats=${p.seats} list=${p.list} target=${p.target}` +
     ` discount=${d} expected=${p.expected}` +
+    (p.lower ? ` LOWER: --allow-lower, owner pays ${dollars(p.list)} instead of ${dollars(p.target)}` : "") +
     (p.keep.discountId ? ` (replaces existing discount ${p.keep.discountId})` : "")
   );
 }
@@ -209,7 +237,7 @@ export interface ExecuteOptions {
   dryRun?: boolean;
 }
 
-export type ExecuteStatus = "moved" | "already" | "planned" | "refused" | "failed";
+export type ExecuteStatus = "moved" | "scheduled" | "planned" | "refused" | "failed";
 
 const effProduct = (r: RawSubView): string | null => r.pendingProductId ?? r.productId;
 const effSeats = (r: RawSubView): number | null => r.pendingSeats ?? r.seats;
@@ -259,7 +287,10 @@ export function verifyProblems(plan: AccountPlan, raw: RawSubView, scheduledBefo
     else if (d.basisPoints !== pd.bp) out.push(`discount ${d.basisPoints}bp != planned ${pd.bp}bp`);
   }
   if (charge !== plan.expected) out.push(`expected charge ${charge} != planned ${plan.expected}`);
-  if (pd?.type === "fixed" && charge !== plan.target) out.push(`expected charge ${charge} != target ${plan.target}`);
+  // A fixed plan keeps today's price exactly; only --allow-lower may charge less.
+  if (plan.mode === "fixed" && !plan.lower && charge !== plan.target) {
+    out.push(`expected charge ${charge} != target ${plan.target}`);
+  }
   return out;
 }
 
@@ -278,6 +309,17 @@ export async function executeAccount(
       return "refused";
     }
     const scheduled = isScheduled(plan, before);
+    const eff = effProduct(before);
+    if (!scheduled && eff !== null && eff !== plan.teamProduct && plan.teamProductIds.includes(eff)) {
+      log(`  REFUSED: ${keepId} is already moving to Team product ${eff} of the other interval; finish by hand`);
+      return "refused";
+    }
+    if (!scheduled && eff === plan.teamProduct) {
+      // Polar may hold the discount in the pending update, which the SDK does not
+      // expose: never change the product again and never create a second discount.
+      log("  product change pending; discount not visible yet, re-run after renewal to verify (nothing changed, nothing cancelled)");
+      return "scheduled";
+    }
     if (opts.dryRun) {
       if (scheduled) log(`  already scheduled: product + discount skipped (target not recomputed)`);
       else log(`  would ${plan.discount ? "create discount, " : ""}change product (${opts.proration})`);
@@ -335,7 +377,7 @@ export async function executeAccount(
     for (const o of plan.others.filter((x) => x.cancelAtPeriodEnd)) {
       log(`  ${o.id} already ends at period end`);
     }
-    return scheduled ? "already" : "moved";
+    return scheduled ? "scheduled" : "moved";
   } catch (e) {
     log(`  FAILED: ${(e as Error).message}`);
     return "failed";
@@ -382,4 +424,84 @@ export function seatPriceOf(product: unknown): { cents: number } | { error: stri
   const cents = [...amounts][0];
   if (typeof cents !== "number") return { error: "seat tier has no pricePerSeat" };
   return { cents };
+}
+
+/** A subscription of the account's Polar customer(s), as the guard reads it. */
+export interface CustomerSubView {
+  id: string;
+  productId: string | null;
+  pendingProductId: string | null;
+}
+
+export interface RunDeps extends ExecuteDeps {
+  /** Active subs of these Polar customers, plus any Team sub tagged with this account. Read only. */
+  listCustomerSubs(customerIds: string[], accountId: string): Promise<CustomerSubView[]>;
+  /** Our `subscriptions` rows of this account a Team move wrote (seats set or a `legacy-` discount). */
+  dbTeamRows(accountId: string): Promise<string[]>;
+}
+
+export type RunStatus = ExecuteStatus | "skipped-leaving";
+
+/**
+ * Why this account must not be planned: it already holds a Team subscription
+ * that is not one of its legacy subs (an earlier run moved the keeper with
+ * immediate proration). Planning it again would pick a leftover as the keeper,
+ * sum only the leftovers and create a SECOND Team subscription.
+ */
+export async function existingTeamRefusal(
+  accountId: string,
+  subs: LegacySub[],
+  teamProductIds: string[],
+  deps: Pick<RunDeps, "listCustomerSubs" | "dbTeamRows">,
+): Promise<string | null> {
+  const legacyIds = new Set(subs.map((s) => s.id));
+  const customers = [...new Set(subs.map((s) => s.customerId).filter((c): c is string => !!c))];
+  const listed = await deps.listCustomerSubs(customers, accountId);
+  const team = listed.find(
+    (s) =>
+      !legacyIds.has(s.id) &&
+      ((s.productId !== null && teamProductIds.includes(s.productId)) ||
+        (s.pendingProductId !== null && teamProductIds.includes(s.pendingProductId))),
+  );
+  if (team) return `REFUSED account ${accountId}: already holds Team subscription ${team.id}; finish by hand`;
+  // Rows of the legacy subs listed now are the keeper's own pending change: the
+  // executor's scheduled guard owns those.
+  const rows = (await deps.dbTeamRows(accountId)).filter((id) => !legacyIds.has(id));
+  if (rows.length) {
+    return `REFUSED account ${accountId}: already holds Team subscription ${rows[0]} (our DB); finish by hand`;
+  }
+  return null;
+}
+
+/** Guard, plan and execute one account; every line goes through `deps.log`. */
+export async function runAccount(
+  input: PlanInput,
+  deps: RunDeps,
+  opts: ExecuteOptions,
+): Promise<RunStatus> {
+  const teamProductIds = [input.teamProducts.month, input.teamProducts.year].filter((x): x is string => !!x);
+  const guard = await existingTeamRefusal(input.accountId, input.subs, teamProductIds, deps);
+  if (guard) {
+    deps.log(`\n${guard}`);
+    return "refused";
+  }
+  const plan = planAccount(input);
+  if (isRefusal(plan)) {
+    deps.log(`\n${plan.refusal}`);
+    return plan.kind === "leaving" ? "skipped-leaving" : "refused";
+  }
+  deps.log(`\n${describePlan(plan)}`);
+  if (plan.lower) {
+    deps.log(
+      `  WARNING --allow-lower: today's charge ${dollars(plan.target)} is ABOVE Team list ${dollars(plan.list)};` +
+        " moving with NO discount, the owner pays less",
+    );
+  }
+  for (const o of plan.others) {
+    deps.log(
+      `  other legacy sub ${o.id} amount=${o.amount} ends=${o.currentPeriodEnd ?? "?"}` +
+        (o.cancelAtPeriodEnd ? " (already cancelling)" : " (cancel at period end after verify)"),
+    );
+  }
+  return executeAccount(plan, deps, opts);
 }
