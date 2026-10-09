@@ -142,14 +142,22 @@ export function SidebarHeader() {
         >
           <VaultTile identity={tileIdentity} name={name} />
         </button>
-        <div className="sidebar-header-text">
+        {/* The name, chevron and path hover-open the switcher too, so sweeping
+            across the header never flickers it. Not the wrapper above: the
+            popover lives inside it, and a move from the menu back up to the
+            name would then never count as re-entering. */}
+        <div
+          className="sidebar-header-text"
+          onPointerEnter={hoverEnter}
+          onPointerLeave={scheduleHoverClose}
+        >
           <div className="sidebar-header-main" ref={mainRef}>
             <button
               type="button"
               className={`vault-switch-btn${menuOpen ? " open" : ""}`}
               aria-haspopup="menu"
               aria-expanded={menuOpen}
-              title="Switch vault"
+              title={menuOpen ? undefined : "Switch vault"}
               onClick={togglePinnedMenu}
             >
               {/* Keyed on the name so a switch cross-fades between the two vaults
@@ -164,7 +172,8 @@ export function SidebarHeader() {
                     if (el) measureName();
                   }}
                   className="vault-name"
-                  title={name}
+                  // No tooltip while the switcher shows: it would sit on its rows.
+                  title={menuOpen ? undefined : name}
                   initial={reduceMotion ? false : { opacity: 0, y: -4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={reduceMotion ? undefined : { opacity: 0, y: 4 }}

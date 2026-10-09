@@ -99,6 +99,35 @@ describe("vault switcher hover and click", () => {
     expect(menu()).toBeNull();
   });
 
+  it("opens from the name and path too, without flickering across the header", () => {
+    const text = () => host.querySelector<HTMLDivElement>(".sidebar-header-text")!;
+    point(text(), "pointerover");
+    expect(menu()).not.toBeNull();
+    // Tile to name: leaving one and entering the other keeps it open.
+    point(text(), "pointerout", "mouse", tile());
+    point(tile(), "pointerover", "mouse", text());
+    advance(300);
+    expect(menu()).not.toBeNull();
+    // Menu back up to the name counts as re-entering the header.
+    point(tile(), "pointerout", "mouse", menu()!);
+    point(menu()!, "pointerover", "mouse", tile());
+    point(menu()!, "pointerout", "mouse", text());
+    point(text(), "pointerover", "mouse", menu()!);
+    advance(300);
+    expect(menu()).not.toBeNull();
+    point(text(), "pointerout");
+    advance(220);
+    expect(menu()).toBeNull();
+  });
+
+  it("drops the name tooltip while the switcher is open", () => {
+    const vaultName = () => host.querySelector<HTMLSpanElement>(".vault-name")!;
+    expect(vaultName().title).toBe("Product");
+    point(tile(), "pointerover");
+    expect(vaultName().hasAttribute("title")).toBe(false);
+    expect(host.querySelector(".vault-switch-btn")!.hasAttribute("title")).toBe(false);
+  });
+
   it("does not interpret a touch pointer as hover", () => {
     point(tile(), "pointerover", "touch");
     expect(menu()).toBeNull();
