@@ -10480,6 +10480,75 @@ button.plan-page-vault-chip:hover {
 .account-vaults-footnote {
   margin-top: var(--sp-2);
 }
+/* Account Settings → Vaults, grid view: one card per synced vault, the same
+   border, radius and hover tint as the app's other cards. The ⋯ menu sits in
+   the top-right corner; the card body switches to the vault. */
+.vault-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--sp-3);
+  margin: var(--sp-2) 0;
+}
+.vault-grid-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.vault-grid-card:hover {
+  background: var(--bg-hover);
+}
+.vault-grid-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.vault-grid-card.current,
+.vault-grid-card[aria-disabled="true"] {
+  cursor: default;
+}
+.vault-grid-card .vault-tile {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  font-size: var(--fs-md);
+  margin-bottom: var(--sp-2);
+}
+.vault-grid-menu {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+}
+.vault-grid-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.vault-grid-meta {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.vault-grid-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  cursor: default;
+}
 .account-vaults-info {
   display: inline-flex;
   flex: none;

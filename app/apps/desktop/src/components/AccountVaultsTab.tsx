@@ -6,7 +6,7 @@
    the account's billing usage when the server bills per seat. Rows carry no
    plan pill (the plan is the account's, said in Plan & Billing); only a
    lapsed account's vaults get a "Read-only" pill, since that changes the row. */
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { ApiError, type BillingUsage, type MyBillingAccount, type OrgBilling } from "../lib/api";
 import { toast } from "../lib/toast";
 import { authManager } from "../lib/auth/authManager";
@@ -18,7 +18,14 @@ import { InvitationRows, useFreshInvitations } from "./InvitationRows";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
 import { useResetLocalCopy } from "./useResetLocalCopy";
-import { RowActionsMenu } from "./RowActionsMenu";
+import { type RowAction, RowActionsMenu } from "./RowActionsMenu";
+import { VaultTile } from "./VaultSwitcher";
+import {
+  type AccountVaultsView,
+  readAccountVaultsView,
+  vaultCardLabels,
+  writeAccountVaultsView,
+} from "../lib/accountVaultsView";
 import { LimitNudge } from "./LimitNudge";
 import { UpgradeDialog } from "./UpgradeDialog";
 import { useLocalFolderClasses, useLocalVaults } from "./useVaultLists";
@@ -92,6 +99,8 @@ export function AccountVaultsTab() {
     null,
   );
   const [actionError, setActionError] = useState<string | null>(null);
+  // List rows or cards for the synced vaults; remembered on this device.
+  const [view, setView] = useState<AccountVaultsView>(readAccountVaultsView);
   // Free-plan vault-cap hit while creating — shows an upgrade nudge instead.
   const [limitNudge, setLimitNudge] = useState<{ kind: LimitKind; limit: number | null } | null>(
     null,
@@ -403,6 +412,99 @@ export function AccountVaultsTab() {
     }
   };
 
+  // The ⋯ menu of a synced vault, shared by its row and its card.
+  const syncedActions = (o: { id: string; name: string }, isActive: boolean): RowAction[] => [
+    {
+      key: "remove",
+      label: "Remove from device",
+      title: "Stop syncing this vault here; server data is kept",
+      onSelect: () => removeLocal(o.id),
+    },
+    // Only the open synced vault, and only while its folder is
+    // there (a missing one has Restore here beside the menu).
+    ...(isActive && reset.available
+      ? [{
+          key: "reset",
+          label: "Reset local copy",
+          title: "Delete this device's copy of the vault and download a fresh one",
+          onSelect: reset.start,
+        }]
+      : []),
+    ...(canLeave(o.id)
+      ? [{
+          key: "leave",
+          label: "Leave vault",
+          danger: true,
+          separated: true,
+          title: "Leave this vault — you lose access and it is removed from this device",
+          onSelect: () => {
+            setActionError(null);
+            setConfirmLeave({ orgId: o.id, name: o.name });
+          },
+        }]
+      : []),
+    // Same owner heuristic as Delete: on the active row we know
+    // the caller's role, elsewhere we don't, so we offer it and
+    // let the server's 403 `owner_only` settle it.
+    ...(canDelete(o.id)
+      ? [
+          {
+            key: "unsync",
+            label: "Make local only",
+            danger: true,
+            separated: !canLeave(o.id),
+            title: "Delete this vault from the server and keep its files on this device",
+            onSelect: () => {
+              setActionError(null);
+              setConfirmUnsync({ orgId: o.id, name: o.name });
+            },
+          },
+          {
+            key: "delete",
+            label: "Delete vault",
+            danger: true,
+            title: "Permanently delete this vault and all its notes for everyone",
+            onSelect: () => askDelete(o.id, o.name),
+          },
+        ]
+      : []),
+  ];
+
+  // Current / Switch / the missing-folder recovery, shared by row and card.
+  const syncedStatus = (o: { id: string }, isActive: boolean) =>
+    isActive && rootMissing ? (
+      <VaultFolderMissingRowActions
+        synced={syncEnabled}
+        busy={busy}
+        onRestore={recover(() => useStore.getState().restoreVaultFolder())}
+        onLocate={recover(() => useStore.getState().locateVaultFolder())}
+      />
+    ) : isActive ? (
+      <span className="member-role">Current</span>
+    ) : (
+      <AsyncButton className="link-btn" disabled={busy} onClick={() => switchTo(o.id)}>
+        Switch
+      </AsyncButton>
+    );
+
+  // Two-click delete confirm, shared by row and card.
+  const confirmDeleteActions = (orgId: string) => (
+    <span className="vault-row-actions">
+      <span className="muted">Delete everything?</span>
+      <button className="link-btn" disabled={busy} onClick={() => setConfirmDelete(null)}>
+        Cancel
+      </button>
+      <AsyncButton className="link-btn danger" disabled={busy} onClick={() => deletePermanently(orgId)}>
+        Delete
+      </AsyncButton>
+    </span>
+  );
+
+  const chooseView = (next: AccountVaultsView) => {
+    setView(next);
+    writeAccountVaultsView(next);
+  };
+
   // Active vault pinned to the top.
   const ordered = [
     ...organizations.filter((o) => o.id === activeOrgId),
@@ -441,8 +543,10 @@ export function AccountVaultsTab() {
         <>
       <div className="subhead account-vaults-head">
         <span>Synced vaults ({organizations.length})</span>
-        {!creating && !joining && (
-          <span className="account-vaults-head-actions">
+        <span className="account-vaults-head-actions">
+          {organizations.length > 0 && <VaultsViewToggle value={view} onChange={chooseView} />}
+          {!creating && !joining && (
+          <>
             <button
               type="button"
               className="ghost-pill sm vault-tab-add"
@@ -463,9 +567,67 @@ export function AccountVaultsTab() {
               </svg>
               <span>Join with code</span>
             </button>
-          </span>
-        )}
+          </>
+          )}
+        </span>
       </div>
+      {view === "grid" ? (
+        <div className="vault-grid">
+          {ordered.map((o) => {
+            const isActive = isOpenOrg(o.id);
+            const labels = vaultCardLabels(o, usageFor(o.id));
+            const canSwitch = !isActive && !busy;
+            return (
+              <div
+                key={o.id}
+                className={`vault-grid-card${isActive ? " current" : ""}`}
+                role="button"
+                tabIndex={0}
+                aria-label={isActive ? `${o.name}, current vault` : `Switch to ${o.name}`}
+                aria-disabled={!canSwitch || undefined}
+                onClick={() => { if (canSwitch) void switchTo(o.id); }}
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    if (canSwitch) void switchTo(o.id);
+                  }
+                }}
+              >
+                <span
+                  className="vault-grid-menu"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  <RowActionsMenu
+                    ariaLabel={`More actions for ${o.name}`}
+                    disabled={busy}
+                    actions={syncedActions(o, isActive)}
+                  />
+                </span>
+                <VaultTile identity={`org:${o.id}`} name={o.name} />
+                <span className="vault-grid-name">{labels.name}</span>
+                {labels.slug && <span className="muted vault-grid-meta">{labels.slug}</span>}
+                {labels.counts && <span className="muted vault-grid-meta">{labels.counts}</span>}
+                {(isActive || confirmDelete === o.id || (usageFor(o.id) && accountLapsed)) && (
+                  <span
+                    className="vault-grid-foot"
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => e.stopPropagation()}
+                  >
+                    {usageFor(o.id) && accountLapsed && (
+                      <span className="billing-status canceled">Read-only</span>
+                    )}
+                    {confirmDelete === o.id
+                      ? confirmDeleteActions(o.id)
+                      : isActive && syncedStatus(o, isActive)}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
       <ul className="member-list vault-list">
         {ordered.map((o) => {
           const isActive = isOpenOrg(o.id);
@@ -503,102 +665,14 @@ export function AccountVaultsTab() {
                 <span className="billing-status canceled">Read-only</span>
               )}
               {confirmDelete === o.id ? (
-                <span className="vault-row-actions">
-                  <span className="muted">Delete everything?</span>
-                  <button
-                    className="link-btn"
-                    disabled={busy}
-                    onClick={() => setConfirmDelete(null)}
-                  >
-                    Cancel
-                  </button>
-                  <AsyncButton
-                    className="link-btn danger"
-                    disabled={busy}
-                    onClick={() => deletePermanently(o.id)}
-                  >
-                    Delete
-                  </AsyncButton>
-                </span>
+                confirmDeleteActions(o.id)
               ) : (
                 <span className="vault-row-actions">
-                  {isActive && rootMissing ? (
-                    <VaultFolderMissingRowActions
-                      synced={syncEnabled}
-                      busy={busy}
-                      onRestore={recover(() => useStore.getState().restoreVaultFolder())}
-                      onLocate={recover(() => useStore.getState().locateVaultFolder())}
-                    />
-                  ) : isActive ? (
-                    <span className="member-role">Current</span>
-                  ) : (
-                    <AsyncButton
-                      className="link-btn"
-                      disabled={busy}
-                      onClick={() => switchTo(o.id)}
-                    >
-                      Switch
-                    </AsyncButton>
-                  )}
+                  {syncedStatus(o, isActive)}
                   <RowActionsMenu
                     ariaLabel={`More actions for ${o.name}`}
                     disabled={busy}
-                    actions={[
-                      {
-                        key: "remove",
-                        label: "Remove from device",
-                        title: "Stop syncing this vault here; server data is kept",
-                        onSelect: () => removeLocal(o.id),
-                      },
-                      // Only the open synced vault, and only while its folder is
-                      // there (a missing one has Restore here beside the menu).
-                      ...(isActive && reset.available
-                        ? [{
-                            key: "reset",
-                            label: "Reset local copy",
-                            title: "Delete this device's copy of the vault and download a fresh one",
-                            onSelect: reset.start,
-                          }]
-                        : []),
-                      ...(canLeave(o.id)
-                        ? [{
-                            key: "leave",
-                            label: "Leave vault",
-                            danger: true,
-                            separated: true,
-                            title: "Leave this vault — you lose access and it is removed from this device",
-                            onSelect: () => {
-                              setActionError(null);
-                              setConfirmLeave({ orgId: o.id, name: o.name });
-                            },
-                          }]
-                        : []),
-                      // Same owner heuristic as Delete: on the active row we know
-                      // the caller's role, elsewhere we don't, so we offer it and
-                      // let the server's 403 `owner_only` settle it.
-                      ...(canDelete(o.id)
-                        ? [
-                            {
-                              key: "unsync",
-                              label: "Make local only",
-                              danger: true,
-                              separated: !canLeave(o.id),
-                              title: "Delete this vault from the server and keep its files on this device",
-                              onSelect: () => {
-                                setActionError(null);
-                                setConfirmUnsync({ orgId: o.id, name: o.name });
-                              },
-                            },
-                            {
-                              key: "delete",
-                              label: "Delete vault",
-                              danger: true,
-                              title: "Permanently delete this vault and all its notes for everyone",
-                              onSelect: () => askDelete(o.id, o.name),
-                            },
-                          ]
-                        : []),
-                    ]}
+                    actions={syncedActions(o, isActive)}
                   />
                 </span>
               )}
@@ -606,6 +680,7 @@ export function AccountVaultsTab() {
           );
         })}
       </ul>
+      )}
       {freeVaultLimit != null && (
         <p className="muted">
           Free includes {plural(freeVaultLimit, "synced vault", "synced vaults")} on this account
@@ -905,5 +980,36 @@ export function AccountVaultsTab() {
         </ConfirmDialog>
       )}
     </>
+  );
+}
+
+/** List rows or cards: the Access tab's segmented icon toggle (same classes). */
+function VaultsViewToggle({
+  value,
+  onChange,
+}: {
+  value: AccountVaultsView;
+  onChange: (view: AccountVaultsView) => void;
+}) {
+  const option = (view: AccountVaultsView, label: string, glyph: ReactNode) => (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={value === view}
+      aria-label={label}
+      title={label}
+      className={`member-access-view-btn${value === view ? " is-active" : ""}`}
+      onClick={() => { if (value !== view) onChange(view); }}
+    >
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {glyph}
+      </svg>
+    </button>
+  );
+  return (
+    <div className="member-access-view" role="radiogroup" aria-label="Vaults view">
+      {option("list", "List view", <><path d="M8 6h12M8 12h12M8 18h12" /><path d="M4 6h.01M4 12h.01M4 18h.01" /></>)}
+      {option("grid", "Grid view", <><rect x="4" y="4" width="7" height="7" rx="1" /><rect x="13" y="4" width="7" height="7" rx="1" /><rect x="4" y="13" width="7" height="7" rx="1" /><rect x="13" y="13" width="7" height="7" rx="1" /></>)}
+    </div>
   );
 }
