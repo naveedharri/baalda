@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ACCOUNT_VAULTS_VIEW_KEY,
+  localCardLabels,
   readAccountVaultsView,
   vaultCardLabels,
   writeAccountVaultsView,
@@ -59,5 +60,28 @@ describe("vaultCardLabels", () => {
   it("drops a slug that only repeats the name, and unknown counts", () => {
     expect(vaultCardLabels({ name: "Notes", slug: "notes" }, null)).toEqual({ name: "Notes", slug: null, counts: null });
     expect(vaultCardLabels({ name: "Notes", slug: "" }, null).slug).toBeNull();
+  });
+});
+
+describe("localCardLabels", () => {
+  it("says Local alone when the folder is named like the vault", () => {
+    expect(localCardLabels({ name: "Notes", path: "/Users/a/Baalda/notes" })).toEqual({
+      name: "Notes",
+      meta: "Local",
+      letter: "N",
+    });
+  });
+
+  it("adds the folder's last segment when it differs", () => {
+    expect(localCardLabels({ name: "Work", path: "/Users/a/Documents/work-vault/" }).meta).toBe(
+      "Local · work-vault",
+    );
+    expect(localCardLabels({ name: "Work", path: "C:\\Users\\a\\Vaults\\Jobs" }).meta).toBe(
+      "Local · Jobs",
+    );
+  });
+
+  it("falls back to a question mark for an empty name", () => {
+    expect(localCardLabels({ name: "  ", path: "/x/y" }).letter).toBe("?");
   });
 });

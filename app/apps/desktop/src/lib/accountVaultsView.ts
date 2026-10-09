@@ -47,3 +47,22 @@ export function vaultCardLabels(
       : null,
   };
 }
+
+export interface LocalCardLabels {
+  name: string;
+  /** "Local", or "Local · <folder>" when the folder's name differs from the vault's. */
+  meta: string;
+  /** The letter the row's swatch shows. */
+  letter: string;
+}
+
+/** The lines of a local-folder card in grid view. */
+export function localCardLabels(row: { name: string; path: string }): LocalCardLabels {
+  const segment = row.path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? "";
+  const differs = segment !== "" && segment.toLowerCase() !== row.name.trim().toLowerCase();
+  return {
+    name: row.name,
+    meta: differs ? `Local · ${segment}` : "Local",
+    letter: Array.from(row.name.trim())[0]?.toUpperCase() ?? "?",
+  };
+}

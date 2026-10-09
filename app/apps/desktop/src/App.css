@@ -10586,6 +10586,24 @@ button.plan-page-vault-chip:hover {
   opacity: 0.6;
   cursor: default;
 }
+/* A local folder's card: the row's letter swatch at the vault tile's size
+   (local folders have no vault icon). */
+.vault-grid-card .vault-grid-letter {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  font-size: var(--fs-md);
+  margin-bottom: var(--sp-2);
+}
+/* The cards' ⋯ menu: the row menu's items, dividers and danger colour at a
+   card's scale. */
+.context-menu.vault-menu--compact {
+  min-width: 168px;
+}
+.context-menu.vault-menu--compact li {
+  padding: 6px 10px;
+  font-size: 13px;
+}
 /* Account Settings → Vaults → one vault: the member profile's page shell
    (.member-profile*) with stat tiles, detail rows and an actions list. */
 .account-vault-page .member-profile-head .vault-tile {

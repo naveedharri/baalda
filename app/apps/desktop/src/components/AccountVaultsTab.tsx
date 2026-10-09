@@ -22,6 +22,7 @@ import { type RowAction, RowActionsMenu } from "./RowActionsMenu";
 import { VaultTile } from "./VaultSwitcher";
 import {
   type AccountVaultsView,
+  localCardLabels,
   readAccountVaultsView,
   vaultCardLabels,
   writeAccountVaultsView,
@@ -328,6 +329,27 @@ export function AccountVaultsTab() {
       setBusy(false);
     }
   };
+
+  // A local folder's ⋯ actions, shared by its list row and its grid card.
+  const localActions = (path: string): RowAction[] => [
+    {
+      key: "remove",
+      label: "Remove from list",
+      title: "Remove this folder from the list. Files stay on disk.",
+      onSelect: () => removeLocalVaultRow(path),
+    },
+    {
+      key: "delete",
+      label: "Delete vault",
+      danger: true,
+      separated: true,
+      title: "Delete this vault — moves its folder and all its notes to the Trash",
+      onSelect: () => {
+        setActionError(null);
+        setConfirmDeleteLocal(path);
+      },
+    },
+  ];
 
   // Move a local vault's folder to the OS trash (destructive, two-click confirm).
   const deleteLocalFiles = async (path: string) => {
@@ -687,6 +709,7 @@ export function AccountVaultsTab() {
                     ariaLabel={`More actions for ${o.name}`}
                     disabled={busy}
                     actions={syncedActions(o, isActive)}
+                    menuClassName="vault-menu--compact"
                   />
                 </span>
                 <VaultTile identity={`org:${o.id}`} name={o.name} />
@@ -885,7 +908,96 @@ export function AccountVaultsTab() {
               </span>
             )}
           </div>
-          {localsOrdered.length > 0 && (
+          {localsOrdered.length > 0 && view === "grid" && (
+            <div className="vault-grid">
+              {localsOrdered.map((r) => {
+                const isCurrent = !syncEnabled && vault?.path === r.path;
+                const labels = localCardLabels(r);
+                const open = () => {
+                  if (!isCurrent && !busy) void switchToLocal(r.path);
+                };
+                return (
+                  <div
+                    key={r.path}
+                    className={`vault-grid-card${isCurrent ? " current" : ""}`}
+                    role="button"
+                    tabIndex={0}
+                    title={r.path}
+                    aria-label={isCurrent ? `${r.name}, current folder` : `Open ${r.name}`}
+                    onClick={open}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        open();
+                      }
+                    }}
+                  >
+                    <span
+                      className="vault-grid-menu"
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    >
+                      <RowActionsMenu
+                        ariaLabel={`More actions for ${r.name ?? r.path}`}
+                        disabled={busy}
+                        actions={localActions(r.path)}
+                        menuClassName="vault-menu--compact"
+                      />
+                    </span>
+                    <span className="menu-swatch vault-grid-letter" aria-hidden="true">
+                      {labels.letter}
+                    </span>
+                    <span className="vault-grid-name">{labels.name}</span>
+                    <span className="muted vault-grid-meta">{labels.meta}</span>
+                    <span
+                      className="vault-grid-foot"
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    >
+                      {confirmDeleteLocal === r.path ? (
+                        <>
+                          <span className="muted">Delete this vault?</span>
+                          <button
+                            className="link-btn"
+                            disabled={busy}
+                            onClick={() => setConfirmDeleteLocal(null)}
+                          >
+                            Cancel
+                          </button>
+                          <AsyncButton
+                            className="link-btn danger"
+                            disabled={busy}
+                            onClick={() => deleteLocalFiles(r.path)}
+                          >
+                            Delete
+                          </AsyncButton>
+                        </>
+                      ) : isCurrent && rootMissing ? (
+                        <VaultFolderMissingRowActions
+                          synced={false}
+                          busy={busy}
+                          onRestore={() => undefined}
+                          onLocate={recover(() => useStore.getState().locateVaultFolder())}
+                        />
+                      ) : isCurrent ? (
+                        <span className="member-role">Current</span>
+                      ) : (
+                        <AsyncButton
+                          className="vault-switch-chip"
+                          disabled={busy}
+                          onClick={() => switchToLocal(r.path)}
+                        >
+                          Open here
+                        </AsyncButton>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {localsOrdered.length > 0 && view !== "grid" && (
           <ul className="member-list vault-list">
             {localsOrdered.map((r) => {
               const isCurrent = !syncEnabled && vault?.path === r.path;
@@ -941,25 +1053,7 @@ export function AccountVaultsTab() {
                       <RowActionsMenu
                         ariaLabel={`More actions for ${r.name ?? r.path}`}
                         disabled={busy}
-                        actions={[
-                          {
-                            key: "remove",
-                            label: "Remove from list",
-                            title: "Remove this folder from the list. Files stay on disk.",
-                            onSelect: () => removeLocalVaultRow(r.path),
-                          },
-                          {
-                            key: "delete",
-                            label: "Delete vault",
-                            danger: true,
-                            separated: true,
-                            title: "Delete this vault — moves its folder and all its notes to the Trash",
-                            onSelect: () => {
-                              setActionError(null);
-                              setConfirmDeleteLocal(r.path);
-                            },
-                          },
-                        ]}
+                        actions={localActions(r.path)}
                       />
                     </span>
                   )}

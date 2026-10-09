@@ -26,10 +26,13 @@ export function RowActionsMenu({
   actions,
   ariaLabel,
   disabled,
+  menuClassName,
 }: {
   actions: ReadonlyArray<RowAction>;
   ariaLabel: string;
   disabled?: boolean;
+  /** A modifier on the portalled menu, e.g. `vault-menu--compact`. */
+  menuClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<Placement | null>(null);
@@ -103,7 +106,7 @@ export function RowActionsMenu({
         createPortal(
           <ul
             ref={menuRef}
-            className="context-menu menu-portal row-more-menu"
+            className={`context-menu menu-portal row-more-menu${menuClassName ? ` ${menuClassName}` : ""}`}
             role="menu"
             aria-label={ariaLabel}
             onClick={(e) => e.stopPropagation()}

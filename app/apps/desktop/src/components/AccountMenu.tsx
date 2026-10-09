@@ -209,6 +209,12 @@ export function AccountMenu() {
     useStore.getState().closeSettingsDialog();
   }, []);
 
+  // Opening the menu re-reads pending invitations, so one sent while no live
+  // frame reached us shows the moment the user clicks their name.
+  useEffect(() => {
+    if (open) void useStore.getState().refreshUserInvitations();
+  }, [open]);
+
   // Opening either settings dialog closes the account popover.
   useEffect(() => {
     if (settingsDialog) setOpen(false);
