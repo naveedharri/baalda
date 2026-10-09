@@ -868,6 +868,9 @@ export interface MyBillingAccount {
   } | null;
   people: { userId: string; name: string; email: string; vaults: string[] }[];
   vaults: { orgId: string; name: string }[];
+  /** Vaults with pending invitations that hold seats; counts sum to
+   *  `seats.reserved`. Absent on older servers. */
+  invitedByVault?: { orgId: string; name: string; count: number }[];
   limits: { people: number | null; vaults: number | null; assistant: boolean; fileSync: boolean };
   lapsed: boolean;
   canManage: boolean;

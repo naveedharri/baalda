@@ -1578,7 +1578,7 @@ async function seatsUsedForOrg(orgId: string): Promise<{ seats: number }> {
 
 /** The `GET /api/billing/account` body. People and price only for a manager. */
 async function readAccountBody(accountId: string, canManage: boolean) {
-  const [plan, row, acct, vaultRows] = await Promise.all([
+  const [plan, row, acct, vaultRows, invitedRows] = await Promise.all([
     resolveAccountPlan(pool, { accountId }),
     accountSubscription(accountId),
     pool.query<{ seats_pending: number | null; complimentary_until: Date | null }>(
@@ -1590,6 +1590,31 @@ async function readAccountBody(accountId: string, canManage: boolean) {
          JOIN organization o ON o.id = bao.organization_id
         WHERE bao.billing_account_id = $1
         ORDER BY bao.attached_at, o.id`,
+      [accountId],
+    ),
+    // Same predicate as `plan.ts loadAccount`'s `reserved`: pending, unexpired,
+    // email not already a member of the account. An email invited to two vaults
+    // counts once there, so it is attributed to ONE vault (first by name) and
+    // the counts sum to `seats.reserved`.
+    pool.query<{ org_id: string; name: string; count: number }>(
+      `WITH orgs AS (
+         SELECT organization_id FROM billing_account_orgs WHERE billing_account_id = $1
+       ), people AS (
+         SELECT DISTINCT lower(u.email) AS email
+           FROM member m JOIN orgs o ON o.organization_id = m."organizationId"
+           JOIN "user" u ON u.id = m."userId"
+       ), invited AS (
+         SELECT DISTINCT ON (lower(i.email)) lower(i.email) AS email, org.id AS org_id, org.name
+           FROM invitation i
+           JOIN orgs o ON o.organization_id = i."organizationId"
+           JOIN organization org ON org.id = i."organizationId"
+          WHERE i.status = 'pending' AND i."expiresAt" > now()
+            AND lower(i.email) NOT IN (SELECT email FROM people)
+          ORDER BY lower(i.email), org.name, org.id
+       )
+       SELECT org_id, name, count(*)::int AS count FROM invited
+        GROUP BY org_id, name
+        ORDER BY name, org_id`,
       [accountId],
     ),
   ]);
@@ -1646,6 +1671,7 @@ async function readAccountBody(accountId: string, canManage: boolean) {
         : null,
     people,
     vaults: vaultRows.rows.map((v) => ({ orgId: v.org_id, name: v.name })),
+    invitedByVault: invitedRows.rows.map((v) => ({ orgId: v.org_id, name: v.name, count: Number(v.count) })),
     limits: {
       people: plan.limits.people,
       vaults: plan.limits.vaults,

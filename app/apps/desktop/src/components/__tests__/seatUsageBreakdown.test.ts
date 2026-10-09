@@ -45,4 +45,22 @@ describe("SeatUsageBreakdown", () => {
     const html = render({ canManage: false });
     expect(html).not.toContain("Add or change seats");
   });
+
+  it("shows no vault chips when the list is empty or missing", () => {
+    expect(render()).not.toContain("plan-page-vault-chip");
+    expect(render({ invitedByVault: [] })).not.toContain("plan-page-vault-chip");
+  });
+
+  it("lists one chip per vault under the Invited number", () => {
+    const html = render({
+      invitedByVault: [
+        { orgId: "a", name: "Design", count: 1 },
+        { orgId: "b", name: "Sales", count: 1 },
+      ],
+    });
+    expect(html.match(/class="plan-page-vault-chip"/g)).toHaveLength(2);
+    expect(html).toContain("Design · 1");
+    expect(html).toContain("Sales · 1");
+    expect(cells(html)).toEqual([10, 4, 4]);
+  });
 });

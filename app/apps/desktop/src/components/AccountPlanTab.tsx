@@ -7,6 +7,9 @@ import {
   billingErrorMessage,
   discountLine,
   formatBytes,
+  invitedChipAction,
+  invitedChipFallbackToast,
+  type InvitedVault,
   LAPSED_COPY,
   PLAN_LOAD_ERROR_COPY,
   planStatusPill,
@@ -16,7 +19,7 @@ import {
 } from "../lib/billing";
 import * as ipc from "../lib/ipc";
 import { toast } from "../lib/toast";
-import { useStore } from "../store";
+import { readOrgVaults, useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ManageSeatsDialog } from "./ManageSeatsDialog";
@@ -170,6 +173,34 @@ export function AccountPlanTab() {
     void st.refreshMyBilling();
     void st.refreshOrgBilling();
     void st.refreshLocks();
+  };
+
+  // An invited-seat chip opens that vault's Vault Settings → Members and
+  // access (the two settings dialogs are exclusive, so this closes Account
+  // Settings). Another vault is switched to first; one with no folder on this
+  // device cannot be, so the Vaults tab is the way in.
+  const openInvitedVault = async (v: InvitedVault) => {
+    const st = useStore.getState();
+    const action = invitedChipAction({
+      orgId: v.orgId,
+      activeOrgId: st.session?.activeOrganizationId ?? null,
+      openPath: st.vault?.path ?? null,
+      boundPath: readOrgVaults()[v.orgId] ?? null,
+    });
+    if (action === "vaults-tab") {
+      st.requestAccountSettings("vaults");
+      toast(invitedChipFallbackToast(v.name), "neutral");
+      return;
+    }
+    if (action === "switch-then-members") {
+      try {
+        await st.setActiveOrganization(v.orgId);
+      } catch {
+        // The switch reports its own failure; stay where we are.
+      }
+      if (useStore.getState().session?.activeOrganizationId !== v.orgId) return;
+    }
+    useStore.getState().requestSettings("members");
   };
 
   const run = async (fn: () => Promise<unknown>, done: string): Promise<boolean> => {
@@ -326,6 +357,8 @@ export function AccountPlanTab() {
               canManage={account.canManage}
               showManage={false}
               onManage={() => setManagingSeats(true)}
+              invitedByVault={account.invitedByVault}
+              onOpenInvitedVault={(v) => void openInvitedVault(v)}
             />
           ) : (
             seatUsageLines(account.seats, formatDate).map((line) => (

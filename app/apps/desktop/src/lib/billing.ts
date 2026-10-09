@@ -606,7 +606,7 @@ export function planPriceLine(
   return `${formatMoney(price.perSeat, team.currency)} per seat / ${iv}`;
 }
 
-/** "N of M seats used" plus reserved and pending-decrease lines. */
+/** "N of M seats used" plus invited and pending-decrease lines. */
 export function seatUsageLines(
   seats: { purchased: number | null; used: number; reserved: number; pendingDecrease: { to: number; effectiveAt: string } | null },
   formatDate: (iso: string) => string,
@@ -614,7 +614,7 @@ export function seatUsageLines(
   const lines: string[] = [];
   if (seats.purchased != null) lines.push(`${seats.used} of ${seats.purchased} seats used`);
   else lines.push(`${seats.used} ${seats.used === 1 ? "person" : "people"}`);
-  if (seats.reserved > 0) lines.push(`${seats.reserved} reserved by pending invites`);
+  if (seats.reserved > 0) lines.push(`${seats.reserved} invited`);
   if (seats.pendingDecrease) {
     lines.push(`Goes down to ${seats.pendingDecrease.to} on ${formatDate(seats.pendingDecrease.effectiveAt)}`);
   }
@@ -675,7 +675,7 @@ export function membersSeatLine(
   if (account.plan === "team" && account.seats.purchased != null) {
     const b = seatBreakdown(account.seats);
     const owner = viewerIsOwner ? "your" : ownerName ? `${ownerName}'s` : "the owner's";
-    return `Uses ${b.claimed} of ${b.purchased} seats on ${owner} account · ${b.reserved} reserved`;
+    return `Uses ${b.claimed} of ${b.purchased} seats on ${owner} account · ${b.reserved} invited`;
   }
   const cap = freeLimitOf(account);
   return `Free includes ${cap} ${cap === 1 ? "person" : "people"} on this account (${account.seats.used} of ${cap} used)`;
@@ -751,4 +751,46 @@ export function teamCheckoutPaid(
  *  then every 10 s. */
 export function checkoutPollDelay(elapsedMs: number): number {
   return elapsedMs < 60_000 ? 3_000 : 10_000;
+}
+
+/** One vault holding invited seats (`GET /api/billing/account` `invitedByVault`). */
+export interface InvitedVault {
+  orgId: string;
+  name: string;
+  count: number;
+}
+
+/** The chip under the Invited number: "<vault> · <count>", always with the count. */
+export function invitedChipLabel(v: InvitedVault): string {
+  return `${v.name} · ${v.count}`;
+}
+
+/** Only vaults that actually hold an invitation, in the server's order. */
+export function invitedChips(list: InvitedVault[] | null | undefined): InvitedVault[] {
+  return (list ?? []).filter((v) => v.count > 0);
+}
+
+/**
+ * What clicking an invited-seat chip does. The vault already open goes
+ * straight to Vault Settings → Members and access; a vault with a folder on
+ * this device is switched to first; one never opened here cannot be switched
+ * to without choosing a folder, so it falls back to Account Settings → Vaults.
+ */
+export function invitedChipAction(input: {
+  orgId: string;
+  activeOrgId: string | null;
+  openPath: string | null;
+  boundPath: string | null;
+}): "open-members" | "switch-then-members" | "vaults-tab" {
+  const { orgId, activeOrgId, openPath, boundPath } = input;
+  if (orgId === activeOrgId && openPath != null && (boundPath == null || boundPath === openPath)) {
+    return "open-members";
+  }
+  if (boundPath) return "switch-then-members";
+  return "vaults-tab";
+}
+
+/** The toast for the Vaults-tab fallback. */
+export function invitedChipFallbackToast(name: string): string {
+  return `Open ${name} to manage its invitations.`;
 }

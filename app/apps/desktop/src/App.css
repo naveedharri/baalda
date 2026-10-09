@@ -10439,6 +10439,18 @@ body.access-board-grabbing * {
   line-height: 16px;
   overflow-wrap: anywhere;
 }
+/* The Plan card's Invited cell reuses the vault chip as a button. */
+.seat-breakdown-invited {
+  margin-top: 4px;
+}
+button.plan-page-vault-chip {
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+button.plan-page-vault-chip:hover {
+  background: var(--bg-active);
+}
 /* Seat column: header and cells share padding and right alignment. The
    table prefix outranks `.members-table th { text-align: left }`. */
 .members-table.plan-page-people .plan-page-seat-col {

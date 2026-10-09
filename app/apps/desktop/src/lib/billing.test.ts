@@ -39,6 +39,10 @@ import {
   type SubscriptionFacts,
   type SubscriptionLineFormat,
   seatsDialogSubtitle,
+  invitedChipAction,
+  invitedChipFallbackToast,
+  invitedChipLabel,
+  invitedChips,
 } from "./billing";
 
 describe("plan benefits copy", () => {
@@ -516,7 +520,7 @@ describe("Plan & Billing helpers", () => {
         { purchased: 5, used: 4, reserved: 1, pendingDecrease: { to: 4, effectiveAt: "2026-11-01T00:00:00Z" } },
         fmt,
       ),
-    ).toEqual(["4 of 5 seats used", "1 reserved by pending invites", "Goes down to 4 on 2026-11-01"]);
+    ).toEqual(["4 of 5 seats used", "1 invited", "Goes down to 4 on 2026-11-01"]);
     expect(seatUsageLines({ purchased: null, used: 2, reserved: 0, pendingDecrease: null }, fmt)).toEqual([
       "2 people",
     ]);
@@ -553,9 +557,9 @@ describe("seatBreakdown", () => {
 describe("membersSeatLine", () => {
   const team = { plan: "team" as const, seats: { purchased: 5, used: 3, reserved: 1 } };
   it("names the owner's account on Team", () => {
-    expect(membersSeatLine(team, "Sara")).toBe("Uses 3 of 5 seats on Sara's account · 1 reserved");
-    expect(membersSeatLine(team, null)).toBe("Uses 3 of 5 seats on the owner's account · 1 reserved");
-    expect(membersSeatLine(team, "Sara", true)).toBe("Uses 3 of 5 seats on your account · 1 reserved");
+    expect(membersSeatLine(team, "Sara")).toBe("Uses 3 of 5 seats on Sara's account · 1 invited");
+    expect(membersSeatLine(team, null)).toBe("Uses 3 of 5 seats on the owner's account · 1 invited");
+    expect(membersSeatLine(team, "Sara", true)).toBe("Uses 3 of 5 seats on your account · 1 invited");
   });
   it("uses the Free wording without purchased seats", () => {
     expect(membersSeatLine({ plan: "free", seats: { purchased: null, used: 1, reserved: 0 } }, "Sara")).toBe(
@@ -812,5 +816,36 @@ describe("seatsDialogSubtitle", () => {
   });
   it("reads as people only before a first purchase", () => {
     expect(seatsDialogSubtitle(null, 2)).toBe("2 people on your account");
+  });
+});
+
+describe("invited-seat vault chips", () => {
+  it("labels each chip with the vault and its count", () => {
+    expect(invitedChipLabel({ orgId: "o1", name: "Design", count: 2 })).toBe("Design · 2");
+    expect(invitedChipLabel({ orgId: "o1", name: "Design", count: 1 })).toBe("Design · 1");
+  });
+
+  it("drops empty or missing lists and zero counts", () => {
+    expect(invitedChips(undefined)).toEqual([]);
+    expect(invitedChips(null)).toEqual([]);
+    expect(invitedChips([{ orgId: "a", name: "A", count: 0 }, { orgId: "b", name: "B", count: 3 }])).toEqual([
+      { orgId: "b", name: "B", count: 3 },
+    ]);
+  });
+
+  it("opens Members and access for the open vault, switches to a bound one, else the Vaults tab", () => {
+    const base = { activeOrgId: "a", openPath: "/v/a" };
+    expect(invitedChipAction({ ...base, orgId: "a", boundPath: "/v/a" })).toBe("open-members");
+    expect(invitedChipAction({ ...base, orgId: "a", boundPath: null })).toBe("open-members");
+    expect(invitedChipAction({ ...base, orgId: "b", boundPath: "/v/b" })).toBe("switch-then-members");
+    expect(invitedChipAction({ ...base, orgId: "b", boundPath: null })).toBe("vaults-tab");
+    // Active org but another folder on screen: switch to its own folder first.
+    expect(invitedChipAction({ ...base, orgId: "a", boundPath: "/v/other" })).toBe("switch-then-members");
+    // Nothing open at all and no folder here.
+    expect(invitedChipAction({ orgId: "a", activeOrgId: "a", openPath: null, boundPath: null })).toBe("vaults-tab");
+  });
+
+  it("tells the user to open the vault when it is not on this device", () => {
+    expect(invitedChipFallbackToast("Design")).toBe("Open Design to manage its invitations.");
   });
 });

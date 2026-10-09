@@ -1,11 +1,12 @@
-import { seatBreakdown } from "../lib/billing";
+import { invitedChipLabel, invitedChips, seatBreakdown, type InvitedVault } from "../lib/billing";
 import type { MyBillingAccount } from "../lib/api";
 
 /**
  * Account Settings → Plan & Billing seat breakdown (Team accounts only):
  * Seats · Claimed · Invited · Available in the members-table styling and
  * the owner's Add or change seats. A planned decrease shows only in the
- * Manage seats dialog.
+ * Manage seats dialog. Under the Invited number, one chip per vault holding
+ * pending invitations; a chip opens that vault's member list.
  * Pure props so it renders statically in tests.
  */
 export function SeatUsageBreakdown({
@@ -13,6 +14,8 @@ export function SeatUsageBreakdown({
   canManage,
   onManage,
   showManage = true,
+  invitedByVault,
+  onOpenInvitedVault,
 }: {
   seats: MyBillingAccount["seats"];
   canManage: boolean;
@@ -20,8 +23,12 @@ export function SeatUsageBreakdown({
   /** False when the host already offers Add or change seats elsewhere (the
    *  Plan & Billing header), so the button is not shown twice. */
   showManage?: boolean;
+  /** Which vaults the Invited seats belong to; absent on older servers. */
+  invitedByVault?: InvitedVault[] | null;
+  onOpenInvitedVault?: (vault: InvitedVault) => void;
 }) {
   const b = seatBreakdown(seats);
+  const chips = invitedChips(invitedByVault);
   return (
     <div className="seat-breakdown">
       <table className="members-table seat-breakdown-table">
@@ -37,7 +44,26 @@ export function SeatUsageBreakdown({
           <tr>
             <td>{b.purchased}</td>
             <td>{b.claimed}</td>
-            <td>{b.reserved}</td>
+            {chips.length === 0 ? (
+              <td>{b.reserved}</td>
+            ) : (
+              <td>
+                {b.reserved}
+                <div className="plan-page-vault-chips seat-breakdown-invited">
+                  {chips.map((v) => (
+                    <button
+                      key={v.orgId}
+                      type="button"
+                      className="plan-page-vault-chip"
+                      title={`Open ${v.name}'s members and invitations`}
+                      onClick={() => onOpenInvitedVault?.(v)}
+                    >
+                      {invitedChipLabel(v)}
+                    </button>
+                  ))}
+                </div>
+              </td>
+            )}
             <td>{b.available}</td>
           </tr>
         </tbody>

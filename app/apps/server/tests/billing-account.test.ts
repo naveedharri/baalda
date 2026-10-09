@@ -129,6 +129,31 @@ describe("account billing routes (team model)", () => {
     expect(res.status).toBe(403);
   });
 
+  it("account read lists invited seats per vault, summing to reserved", async () => {
+    const owner = await signUp("inv-owner@b.com");
+    const member = await signUp("inv-member@b.com");
+    const a = await vault(owner);
+    const b = await vault(owner);
+    await addMember(a, member);
+    const invite = (orgId: string, email: string, expires = "now() + interval '1 day'", status = "pending") =>
+      pool.query(
+        `INSERT INTO invitation (id, "organizationId", email, role, status, "expiresAt", "inviterId")
+         VALUES ($1, $2, $3, 'member', $4, ${expires}, $5)`,
+        [`inv_${++n}`, orgId, email, status, owner.userId],
+      );
+    await invite(b, "new-1@b.com");
+    await invite(b, "NEW-2@b.com");
+    await invite(a, "inv-member@b.com"); // already a member: not a seat
+    await invite(a, "gone@b.com", "now() - interval '1 day'"); // expired
+    await invite(a, "done@b.com", "now() + interval '1 day'", "accepted");
+
+    const body = await (await req("GET", "/api/billing/account", { token: owner.token })).json();
+    expect(body.seats.reserved).toBe(2);
+    expect(body.invitedByVault).toEqual([{ orgId: b, name: expect.any(String), count: 2 }]);
+    const sum = body.invitedByVault.reduce((t: number, v: { count: number }) => t + v.count, 0);
+    expect(sum).toBe(body.seats.reserved);
+  });
+
   it("usage totals count distinct people across vaults", async () => {
     const owner = await signUp("usage-owner@b.com");
     const member = await signUp("usage-member@b.com");
