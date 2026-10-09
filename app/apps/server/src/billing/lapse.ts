@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
-import { resolveAccountPlan } from "./plan.js";
+import { lapseEnforced, resolveAccountPlan } from "./plan.js";
 import { accountIdForOrg, orgIdsForAccount } from "./accounts.js";
 import type { ResolverCache } from "../permissions/resolver.js";
 
@@ -33,6 +33,7 @@ export async function isAccountReadOnly(
   orgId: string,
   cache?: ResolverCache,
 ): Promise<boolean> {
+  if (!lapseEnforced()) return false;
   if (cache) return cache.billingReadOnly(db, orgId);
   return (await resolveAccountPlan(db, { orgId })).lapsed;
 }

@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { resolveAccountPlan, type AccountPlan } from "../billing/plan.js";
+import { lapseEnforced, resolveAccountPlan, type AccountPlan } from "../billing/plan.js";
 import { pool as defaultPool } from "../db/pool.js";
 
 /**
@@ -182,6 +182,7 @@ export function createResolverCache(): ResolverCache {
     planFor: (db, organizationId) =>
       memo(plans, organizationId, () => resolveAccountPlan(db, { orgId: organizationId })),
     billingReadOnly: async (db, organizationId) =>
+      lapseEnforced() &&
       (await memo(plans, organizationId, () => resolveAccountPlan(db, { orgId: organizationId }))).lapsed,
     ancestors: (db, folderId) =>
       folderId === null

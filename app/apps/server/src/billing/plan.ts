@@ -78,6 +78,13 @@ export function teamModel(): boolean {
   return billingModel() === "team";
 }
 
+/** Can any account be lapsed (read-only) here at all? Only the enforced team
+ *  model ever answers `lapsed: true`, so every other deployment can skip the
+ *  plan reads the write gates would otherwise make per request. */
+export function lapseEnforced(): boolean {
+  return teamModel() && planEnforced();
+}
+
 const UNLIMITED: PlanLimits = {
   people: null,
   vaults: null,
