@@ -166,26 +166,40 @@ function asDuration(v: string | null | undefined): DiscountDuration | null {
  * drop to 3 renews at $330/yr.
  */
 function renewalAmount(row: SubscriptionRow, renewalSeats: number | null = null): number | null {
-  const amount = renewalAmountAtCurrentSeats(row);
+  const { amount, discounted } = renewalAtCurrentSeats(row);
   const seats = row.seats === null ? null : Number(row.seats);
   if (amount === null || renewalSeats === null || !seats || renewalSeats === seats) return amount;
+  // A FIXED discount (an amount off, no basis points) does not shrink with the
+  // seats: 5 seats at $50 with $20 off dropping to 3 renews at $30 − $20 = $10,
+  // not $30 × 3/5 = $18. A percentage (or no discount) scales proportionally.
+  const list = row.list_amount === null ? null : Number(row.list_amount);
+  const interval = row.interval === "month" || row.interval === "year" ? row.interval : null;
+  if (discounted && row.discount_basis_points === null && list !== null && interval) {
+    const fixedOff = Math.max(0, list - amount);
+    return Math.max(0, teamPricePerSeatCents(interval) * renewalSeats - fixedOff);
+  }
   return Math.round((amount * renewalSeats) / seats);
 }
 
-function renewalAmountAtCurrentSeats(row: SubscriptionRow): number | null {
+/**
+ * The next renewal at today's seat count, and whether the discount still
+ * applies to it (`once` spent, `repeating` run out ⇒ list, undiscounted).
+ */
+function renewalAtCurrentSeats(row: SubscriptionRow): { amount: number | null; discounted: boolean } {
   const list = row.list_amount === null ? null : Number(row.list_amount);
   const charged = row.amount === null ? null : Number(row.amount);
-  const duration = row.discount_id ? asDuration(row.discount_duration) : null;
-  if (duration === "once") return list ?? charged;
+  if (!row.discount_id) return { amount: charged, discounted: false };
+  const duration = asDuration(row.discount_duration);
+  if (duration === "once") return list === null ? { amount: charged, discounted: true } : { amount: list, discounted: false };
   if (duration === "repeating") {
     const covers = repeatingCoversRenewal(
       row.created_at ? new Date(row.created_at) : null,
       row.discount_duration_months,
       row.current_period_end ? new Date(row.current_period_end) : null,
     );
-    return covers ? charged : (list ?? charged);
+    if (!covers && list !== null) return { amount: list, discounted: false };
   }
-  return charged;
+  return { amount: charged, discounted: true };
 }
 
 /** Map a provider snapshot onto the shape `applySubscriptionState` persists. */
@@ -1445,7 +1459,17 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
         [orgId, toAccountId, session.userId],
       );
       const sub = await findByOrg(client, orgId);
-      if (sub) {
+      if (sub && billingModel() === "team" && sub.billing_account_id) {
+        // Team model: the subscription belongs to the ACCOUNT, not this vault
+        // (a migrated one still names its original vault). Only the vault
+        // moves; the subscription, its seats and any discount stay with the
+        // source account as an account-only row (organization_id NULL), the
+        // same rule vault delete follows (`orgs.ts`).
+        await client.query(
+          `UPDATE subscriptions SET organization_id = NULL, updated_at = now() WHERE id = $1`,
+          [sub.id],
+        );
+      } else if (sub) {
         await setSubscriptionAccount(client, sub.id, toAccountId);
         movedSub = sub;
       }

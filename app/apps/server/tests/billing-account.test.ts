@@ -386,7 +386,7 @@ describe("account billing routes (team model)", () => {
     expect(fakeProvider.lastCheckout).toMatchObject({ orgId: org, interval: "year" });
   });
 
-  it("move: re-attaches a vault and its subscription; Free destination over its limit is 409", async () => {
+  it("move: re-attaches a vault; the account's subscription stays with the source account; Free destination over its limit is 409", async () => {
     const a = await signUp("move-a@b.com");
     const b = await signUp("move-b@b.com");
     const org = await vault(a);
@@ -419,9 +419,14 @@ describe("account billing routes (team model)", () => {
       [org],
     );
     expect(rows[0].billing_account_id).toBe(accountB);
-    const sub = await pool.query(`SELECT billing_account_id FROM subscriptions WHERE id = $1`, [subId]);
-    expect(sub.rows[0].billing_account_id).toBe(accountB);
-    expect(fakeProvider.accountMetadataWrites.at(-1)).toMatchObject({ id: subId, accountId: accountB });
+    // The subscription (seats, discount) belongs to account A, not to the vault
+    // it was first bought from: it stays, detached from the moved vault.
+    const sub = await pool.query(
+      `SELECT billing_account_id, organization_id FROM subscriptions WHERE provider_subscription_id = $1`,
+      [subId],
+    );
+    expect(sub.rows[0]).toEqual({ billing_account_id: accountA, organization_id: null });
+    expect(fakeProvider.accountMetadataWrites).toHaveLength(0);
 
     // Destination must be the caller's own account.
     const notMine = await req("POST", `/api/billing/orgs/${org}/move`, {
@@ -600,6 +605,38 @@ describe("account billing routes (team model)", () => {
     const once = await (await req("GET", "/api/billing/account", { token: a.token })).json();
     expect(once.price.charged).toBe(0);
     expect(once.price.renewalAmount).toBe(33000);
+  });
+
+  it("a scheduled seat decrease keeps a FIXED discount whole; a percentage scales", async () => {
+    const a = await signUp("renew-fixed@b.com");
+    const org = await vault(a);
+    const account = (await ensureAccountForUser(pool, a.userId))!;
+    const subId = await subscribe(account, org, 5);
+    // 5 seats at $10 = $50 list, $20 off ⇒ charged $30.
+    await pool.query(
+      `UPDATE subscriptions SET amount = 3000, list_amount = 5000, discount_id = 'disc_fixed',
+         discount_name = 'Legacy price', discount_basis_points = NULL, discount_duration = 'forever'
+        WHERE provider_subscription_id = $1`,
+      [subId],
+    );
+    await pool.query(`UPDATE billing_accounts SET seats_pending = 3 WHERE id = $1`, [account]);
+    const fixed = await (await req("GET", "/api/billing/account", { token: a.token })).json();
+    expect(fixed.seats.pendingDecrease.to).toBe(3);
+    // 3 × $10 − $20 = $10, not $30 × 3/5 = $18.
+    expect(fixed.price.renewalAmount).toBe(1000);
+
+    // The fixed amount never takes the renewal below zero.
+    await pool.query(`UPDATE subscriptions SET amount = 1000 WHERE provider_subscription_id = $1`, [subId]);
+    const floor = await (await req("GET", "/api/billing/account", { token: a.token })).json();
+    expect(floor.price.renewalAmount).toBe(0);
+
+    // A 40% discount on the same row still scales proportionally: $30 × 3/5.
+    await pool.query(
+      `UPDATE subscriptions SET amount = 3000, discount_basis_points = 4000 WHERE provider_subscription_id = $1`,
+      [subId],
+    );
+    const pct = await (await req("GET", "/api/billing/account", { token: a.token })).json();
+    expect(pct.price.renewalAmount).toBe(1800);
   });
 
   it("GET account ?refresh=1 answers the stored summary when the provider fails", async () => {
