@@ -1098,12 +1098,13 @@ describe("inbound folder deletion", () => {
 describe("whole-vault Private reaches the member's disk", () => {
   const N = 40;
 
-  function memberVault(): { disk: FakeDisk; state: ServerState } {
+  function memberVault(nested = false): { disk: FakeDisk; state: ServerState } {
     const disk = new FakeDisk();
     disk.folders.add("Docs");
+    if (nested) disk.folders.add("Docs/Guides");
     const notes: Array<{ id: string; rel_path: string }> = [];
     for (let i = 0; i < N; i++) {
-      const path = `Docs/n${i}.md`;
+      const path = nested && i % 2 === 1 ? `Docs/Guides/n${i}.md` : `Docs/n${i}.md`;
       disk.notes.set(path, `d${i}`);
       // Real content, and confirmed upstream below: the trash executor refuses
       // any doc whose bytes this device never sent, so an empty-file vault
@@ -1111,7 +1112,9 @@ describe("whole-vault Private reaches the member's disk", () => {
       disk.bodies.set(path, `note ${i}`);
       notes.push({ id: `d${i}`, rel_path: path });
     }
-    return { disk, state: { notes, folders: [{ id: "f1", path: "Docs" }] } };
+    const folders = [{ id: "f1", path: "Docs" }];
+    if (nested) folders.push({ id: "f2", path: "Docs/Guides" });
+    return { disk, state: { notes, folders } };
   }
 
   /** Reconcile once (the shared state), carry the config, then reconcile against
@@ -1126,9 +1129,11 @@ describe("whole-vault Private reaches the member's disk", () => {
       /** Run a SECOND pull after the first, the way a launch does: the reconcile
        *  is not authoritative, the channel's pull that follows is. */
       thenAuthoritative?: boolean;
+      /** Half the notes in a nested `Docs/Guides` subfolder. */
+      nested?: boolean;
     } = {},
   ) {
-    const { disk, state } = memberVault();
+    const { disk, state } = memberVault(opts.nested);
     install(disk);
     const reg1 = new VaultRegistry(fakeApi(state));
     reg1.setInboundHost(recordingHost().host);
@@ -1145,6 +1150,14 @@ describe("whole-vault Private reaches the member's disk", () => {
       folderTombstones: [],
       accessCheck: opts.accessCheck,
     });
+    if (opts.nested) {
+      // A member with No access may not create anything, so the server refuses
+      // to re-register a leftover folder rather than handing it a fresh id.
+      const { ApiError } = await import("../../api");
+      vi.mocked(api.createFolder).mockImplementation(async () => {
+        throw new ApiError(403, "no write access", { code: "no_write_access" });
+      });
+    }
     let live = authority;
     const reg = new VaultRegistry(api);
     const host = recordingHost(false);
@@ -1193,6 +1206,17 @@ describe("whole-vault Private reaches the member's disk", () => {
     expect(r.disk.notes.size).toBe(0);
     expect(r.disk.deleted).toHaveLength(N);
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
+  });
+
+  it("removes the emptied folder subtree on the pass that FOLLOWS a refused one", async () => {
+    // The refused pass tries the folders while their notes are still on disk,
+    // so the empty-only removal keeps them. The authoritative pass that removes
+    // the notes must still remove the folders, children before parents, rather
+    // than leave empty shells in the sidebar (re-invited with No access).
+    const r = await afterPrivate(false, { thenAuthoritative: true, nested: true });
+
+    expect(r.disk.notes.size).toBe(0);
+    expect(r.disk.folders.size).toBe(0);
   });
 
   it("refuses every removal the resolver will not confirm", async () => {

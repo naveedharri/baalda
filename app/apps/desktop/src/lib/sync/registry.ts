@@ -760,6 +760,18 @@ export class VaultRegistry {
    *  Null = not built / invalidated; see `canonicalNotePath`. */
   private byPathCi: Map<string, string> | null = null;
   private folderByPath = new Map<string, string>();
+  /**
+   * Folders that LEFT this user's visible set (access revoked: not listed, not
+   * tombstoned, not moved) while still on disk, path → their last server id.
+   * `folderByPath` is re-derived from the listing every pass, so without this a
+   * folder whose notes were still on disk when its removal was first tried (the
+   * note revocation held for its ACL signal or access check, or refused by the
+   * cap) lost its id for good and stayed as an empty shell once the notes went
+   * on a later pass. Fed back into `planInbound` as a recorded id so the same
+   * gated, empty-only removal is retried; dropped once the folder is gone, is
+   * listed again, or is tombstoned. Session memory only.
+   */
+  private revokedFolders = new Map<string, string>();
   /** Tree-binary relPath → server `files` id (see `VaultSyncConfig.files`).
    *  Deliberately NOT part of `byPath`/`byDocId`: those two are the CRDT note
    *  join, and a binary has no Y.Doc, no bridge and no content upload. */
@@ -1285,6 +1297,7 @@ export class VaultRegistry {
     this.deletedDocIds.clear();
     this.heldRefused.clear();
     this.folderByPath.clear();
+    this.revokedFolders.clear();
     // Server ids for vault A's binaries name nothing in vault B.
     this.fileByPath.clear();
     this.filesConfirmed.clear();
@@ -2407,7 +2420,9 @@ export class VaultRegistry {
       folderTombstones: args.folderTombstones ? new Set(args.folderTombstones) : null,
       // The persisted path → server-folder-id join: an id match against a
       // tombstone is proof the local folder IS the deleted one.
-      localFolderIds: new Map(this.folderByPath),
+      // Plus the ids of folders that left the visible set on an earlier pass
+      // but could not be removed yet (`revokedFolders`).
+      localFolderIds: new Map([...this.revokedFolders, ...this.folderByPath]),
       // Both listings came back 200 (a failure throws out of `syncStructure`
       // before this runs), the session is live, and the server itself announced
       // an access change moments ago — so a doc absent from these listings has
@@ -2735,10 +2750,25 @@ export class VaultRegistry {
       const dead = new Set(args.folderTombstones);
       for (const [rp, id] of this.folderByPath) if (dead.has(id)) tombstonedFolders.add(rp);
     }
+    const listedFolderIds = new Set(args.serverFolders.map((f) => f.id));
+    const deadFolderIds = new Set(args.folderTombstones ?? []);
     for (const path of plan.removeFolders) {
       if (this.stopRun()) break;
+      const folderId = this.folderByPath.get(path) ?? this.revokedFolders.get(path);
       try {
         const removed = await ipc.deleteFolderIfEmpty(path, this.epoch());
+        // A folder that left the visible set and is still on disk (its notes
+        // not removed yet) keeps its id so a later pass can retry the removal.
+        if (
+          !removed &&
+          folderId !== undefined &&
+          !listedFolderIds.has(folderId) &&
+          !deadFolderIds.has(folderId)
+        ) {
+          this.revokedFolders.set(path, folderId);
+        } else {
+          this.revokedFolders.delete(path);
+        }
         this.sink.item("ok");
         if (removed) {
           changedDisk = true;
@@ -3823,8 +3853,25 @@ export class VaultRegistry {
     const serverFolderByPathCi = new Map(
       serverFolders.map((f) => [pathKey(f.path), f.id] as const),
     );
+    const listedFolderIds = new Set(serverFolders.map((f) => f.id));
+    const deadFolderIds = new Set(folderRegistry.tombstones ?? []);
+    const onDiskFoldersCi = new Set(folders.map((f) => pathKey(f.path)));
     for (const [rp, id] of [...this.folderByPath]) {
-      if (serverFolderByPathCi.get(pathKey(rp)) !== id) this.folderByPath.delete(rp);
+      if (serverFolderByPathCi.get(pathKey(rp)) !== id) {
+        this.folderByPath.delete(rp);
+        // Left the visible set (not moved, not deleted) and still on disk: keep
+        // the id so the next inbound pass can remove it once it is empty.
+        if (!listedFolderIds.has(id) && !deadFolderIds.has(id) && onDiskFoldersCi.has(pathKey(rp))) {
+          this.revokedFolders.set(rp, id);
+        }
+      }
+    }
+    // A revoked folder that is listed again, was deleted, or left the disk is
+    // no longer pending removal.
+    for (const [rp, id] of [...this.revokedFolders]) {
+      if (listedFolderIds.has(id) || deadFolderIds.has(id) || !onDiskFoldersCi.has(pathKey(rp))) {
+        this.revokedFolders.delete(rp);
+      }
     }
     // The path we keep is the one on DISK: every other lookup in this class is
     // made with a local path, so mapping the server's spelling instead would
