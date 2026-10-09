@@ -25,6 +25,7 @@ import {
   localCardLabels,
   readAccountVaultsView,
   vaultCardLabels,
+  vaultSlugLabel,
   writeAccountVaultsView,
 } from "../lib/accountVaultsView";
 import { LimitNudge } from "./LimitNudge";
@@ -585,7 +586,7 @@ export function AccountVaultsTab() {
       <AccountVaultPage
         orgId={o.id}
         name={o.name}
-        slug={vaultCardLabels(o, null).slug}
+        slug={vaultSlugLabel(o)}
         isCurrent={isActive}
         lapsed={!!usage && accountLapsed}
         busy={busy}
@@ -713,9 +714,12 @@ export function AccountVaultsTab() {
                   />
                 </span>
                 <VaultTile identity={`org:${o.id}`} name={o.name} />
-                <span className="vault-grid-name">{labels.name}</span>
-                {labels.slug && <span className="muted vault-grid-meta">{labels.slug}</span>}
-                {labels.counts && <span className="muted vault-grid-meta">{labels.counts}</span>}
+                <span className="vault-grid-name" title={labels.name}>{labels.name}</span>
+                {/* Always rendered, empty when the counts are unknown, so every
+                    card keeps the same shape. */}
+                <span className="muted vault-grid-meta" title={labels.counts ?? undefined}>
+                  {labels.counts}
+                </span>
                 <span
                   className="vault-grid-foot"
                   onClick={(e) => e.stopPropagation()}
@@ -948,8 +952,8 @@ export function AccountVaultsTab() {
                     <span className="menu-swatch vault-grid-letter" aria-hidden="true">
                       {labels.letter}
                     </span>
-                    <span className="vault-grid-name">{labels.name}</span>
-                    <span className="muted vault-grid-meta">{labels.meta}</span>
+                    <span className="vault-grid-name" title={labels.name}>{labels.name}</span>
+                    <span className="muted vault-grid-meta" title={labels.meta}>{labels.meta}</span>
                     <span
                       className="vault-grid-foot"
                       onClick={(e) => e.stopPropagation()}

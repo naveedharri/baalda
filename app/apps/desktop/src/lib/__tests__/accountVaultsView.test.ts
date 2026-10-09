@@ -4,6 +4,7 @@ import {
   localCardLabels,
   readAccountVaultsView,
   vaultCardLabels,
+  vaultSlugLabel,
   writeAccountVaultsView,
 } from "../accountVaultsView";
 
@@ -45,21 +46,31 @@ describe("account vaults view pref", () => {
 });
 
 describe("vaultCardLabels", () => {
-  it("builds name, slug and counts", () => {
-    expect(vaultCardLabels({ name: "Acme Team", slug: "acme-team" }, { people: 1, notes: 21 })).toEqual({
+  it("builds name and counts, never a slug line", () => {
+    expect(vaultCardLabels({ name: "Acme Team" }, { people: 1, notes: 21 })).toEqual({
       name: "Acme Team",
-      slug: "acme-team",
       counts: "1 person · 21 notes",
     });
   });
 
   it("pluralises and handles one note", () => {
-    expect(vaultCardLabels({ name: "X", slug: "x-1" }, { people: 3, notes: 1 }).counts).toBe("3 people · 1 note");
+    expect(vaultCardLabels({ name: "X" }, { people: 3, notes: 1 }).counts).toBe("3 people · 1 note");
   });
 
-  it("drops a slug that only repeats the name, and unknown counts", () => {
-    expect(vaultCardLabels({ name: "Notes", slug: "notes" }, null)).toEqual({ name: "Notes", slug: null, counts: null });
-    expect(vaultCardLabels({ name: "Notes", slug: "" }, null).slug).toBeNull();
+  it("leaves unknown counts empty", () => {
+    expect(vaultCardLabels({ name: "Notes" }, null)).toEqual({ name: "Notes", counts: null });
+  });
+});
+
+describe("vaultSlugLabel", () => {
+  it("shows a slug that differs from the name", () => {
+    expect(vaultSlugLabel({ name: "Hello 4", slug: "hello-4" })).toBe("hello-4");
+  });
+
+  it("drops a slug that only repeats the name, or is empty", () => {
+    expect(vaultSlugLabel({ name: "Notes", slug: "notes" })).toBeNull();
+    expect(vaultSlugLabel({ name: "Notes", slug: "" })).toBeNull();
+    expect(vaultSlugLabel({ name: "Notes" })).toBeNull();
   });
 });
 

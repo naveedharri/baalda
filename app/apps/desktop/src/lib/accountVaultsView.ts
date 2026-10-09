@@ -27,25 +27,28 @@ function plural(n: number, one: string, many: string): string {
 
 export interface VaultCardLabels {
   name: string;
-  /** The vault's slug, or null when it has none or it only repeats the name. */
-  slug: string | null;
   /** "1 person · 21 notes", or null when the counts are not known. */
   counts: string | null;
 }
 
-/** The three lines of a vault card. */
+/** The two text lines of a vault card. Every card has the same shape, so
+    there is no optional slug line: the slug lives on the vault's page. */
 export function vaultCardLabels(
-  org: { name: string; slug?: string | null },
+  org: { name: string },
   usage: { people: number; notes: number } | null,
 ): VaultCardLabels {
-  const slug = org.slug?.trim() || null;
   return {
     name: org.name,
-    slug: slug && slug.toLowerCase() !== org.name.trim().toLowerCase() ? slug : null,
     counts: usage
       ? `${plural(usage.people, "person", "people")} · ${plural(usage.notes, "note", "notes")}`
       : null,
   };
+}
+
+/** The slug the vault page shows, or null when it has none or it only repeats the name. */
+export function vaultSlugLabel(org: { name: string; slug?: string | null }): string | null {
+  const slug = org.slug?.trim() || null;
+  return slug && slug.toLowerCase() !== org.name.trim().toLowerCase() ? slug : null;
 }
 
 export interface LocalCardLabels {
