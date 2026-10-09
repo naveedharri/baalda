@@ -10620,11 +10620,20 @@ body.access-board-grabbing * {
   font-size: 11.5px;
   line-height: 1.3;
 }
+/* A card whose folder is gone and whose counts are unknown says so on its
+   details line, in the folder-missing badge's colour. */
+.vault-grid-meta.is-danger {
+  color: var(--danger);
+}
 /* Pinned to the card's bottom; its height is reserved even before a chip
-   renders, and the padding keeps the old 6px gap above it. */
+   renders, and the padding keeps the old 6px gap above it. One line only:
+   every action that does not fit as a chip lives in the card's ⋯ menu, and
+   confirms open the standard dialog, so the row never wraps the card taller. */
 .vault-grid-foot {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  max-width: 100%;
+  overflow: hidden;
   align-items: center;
   gap: 6px;
   min-height: 26px;
@@ -10633,23 +10642,11 @@ body.access-board-grabbing * {
   font-size: 11.5px;
   cursor: default;
 }
-/* The footer's pills (Current, Read-only) and inline confirm/recovery buttons
-   at the card's compact scale. */
+/* The footer's pills (Current, Read-only) at the card's compact scale. */
 .vault-grid-foot .member-role,
 .vault-grid-foot .billing-status {
   font-size: 10px;
   padding: 1px 6px;
-}
-.vault-grid-foot .link-btn {
-  padding: 1px 5px;
-  font-size: 11.5px;
-}
-/* The synced card's delete confirm reuses the row's nowrap action group; on a
-   narrow card it wraps instead of overflowing the border. */
-.vault-grid-foot .vault-row-actions {
-  flex-wrap: wrap;
-  gap: 4px;
-  white-space: normal;
 }
 /* "Switch here": the "Current" pill's shape, made actionable with the vault
    chips' accent text and hover tint. */

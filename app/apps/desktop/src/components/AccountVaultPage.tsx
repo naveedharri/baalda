@@ -28,8 +28,6 @@ export function AccountVaultPage({
   details,
   actions,
   folderMissing,
-  confirmingDelete,
-  confirmDelete,
   settingsAction,
   onSwitch,
   onOpenSettings,
@@ -50,9 +48,6 @@ export function AccountVaultPage({
   actions: RowAction[];
   /** Restore here / Locate folder… when the open vault's folder is gone. */
   folderMissing: ReactNode | null;
-  confirmingDelete: boolean;
-  /** The shared two-click "Delete everything?" confirm. */
-  confirmDelete: ReactNode;
   settingsAction: "open" | "switch-then-open" | "unavailable";
   onSwitch: () => Promise<void>;
   onOpenSettings: () => Promise<void>;
@@ -142,17 +137,13 @@ export function AccountVaultPage({
         </ActionRow>
         {ordered.map((a) => (
           <ActionRow key={a.key} title={a.label} description={a.title ?? ""} danger={a.danger}>
-            {a.key === "delete" && confirmingDelete ? (
-              confirmDelete
-            ) : (
-              <AsyncButton
-                className={a.danger ? "link-btn danger" : "ghost-pill sm"}
-                disabled={busy}
-                onClick={async () => { await a.onSelect(); }}
-              >
-                {a.label}
-              </AsyncButton>
-            )}
+            <AsyncButton
+              className={a.danger ? "link-btn danger" : "ghost-pill sm"}
+              disabled={busy}
+              onClick={async () => { await a.onSelect(); }}
+            >
+              {a.label}
+            </AsyncButton>
           </ActionRow>
         ))}
       </ul>

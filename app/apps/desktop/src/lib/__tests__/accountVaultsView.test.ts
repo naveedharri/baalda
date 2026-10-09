@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ACCOUNT_VAULTS_VIEW_KEY,
+  folderMissingCardActions,
   localCardLabels,
   readAccountVaultsView,
   vaultCardLabels,
@@ -50,6 +51,8 @@ describe("vaultCardLabels", () => {
     expect(vaultCardLabels({ name: "Acme Team" }, { people: 1, notes: 21 })).toEqual({
       name: "Acme Team",
       counts: "1 person · 21 notes",
+      meta: "1 person · 21 notes",
+      metaDanger: false,
     });
   });
 
@@ -58,7 +61,12 @@ describe("vaultCardLabels", () => {
   });
 
   it("leaves unknown counts empty", () => {
-    expect(vaultCardLabels({ name: "Notes" }, null)).toEqual({ name: "Notes", counts: null });
+    expect(vaultCardLabels({ name: "Notes" }, null)).toEqual({
+      name: "Notes",
+      counts: null,
+      meta: null,
+      metaDanger: false,
+    });
   });
 });
 
@@ -94,5 +102,30 @@ describe("localCardLabels", () => {
 
   it("falls back to a question mark for an empty name", () => {
     expect(localCardLabels({ name: "  ", path: "/x/y" }).letter).toBe("?");
+  });
+});
+
+describe("folder-missing card", () => {
+  it("keeps the counts as the details line when they are known", () => {
+    const labels = vaultCardLabels({ name: "X" }, { people: 2, notes: 5 }, { folderMissing: true });
+    expect(labels.meta).toBe("2 people · 5 notes");
+    expect(labels.metaDanger).toBe(false);
+  });
+
+  it("says Folder missing in the danger colour when the counts are unknown", () => {
+    const labels = vaultCardLabels({ name: "X" }, null, { folderMissing: true });
+    expect(labels.meta).toBe("Folder missing");
+    expect(labels.metaDanger).toBe(true);
+  });
+
+  it("leaves the details line empty for a healthy card with no counts", () => {
+    const labels = vaultCardLabels({ name: "X" }, null);
+    expect(labels.meta).toBeNull();
+    expect(labels.metaDanger).toBe(false);
+  });
+
+  it("shows one chip and moves Locate folder… into the menu for a synced vault", () => {
+    expect(folderMissingCardActions(true)).toEqual({ chip: "restore", menu: ["locate"] });
+    expect(folderMissingCardActions(false)).toEqual({ chip: "locate", menu: [] });
   });
 });

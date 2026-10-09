@@ -17,7 +17,11 @@ import { readOrgVaults, useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
 import { InvitationRows, useFreshInvitations } from "./InvitationRows";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
+import {
+  LOCATE_FOLDER,
+  RESTORE_HERE,
+  VaultFolderMissingRowActions,
+} from "./VaultFolderMissing";
 import { useResetLocalCopy } from "./useResetLocalCopy";
 import { type RowAction, RowActionsMenu } from "./RowActionsMenu";
 import { VaultTile } from "./VaultSwitcher";
@@ -26,6 +30,7 @@ import {
   localCardLabels,
   readAccountVaultsView,
   vaultCardLabels,
+  folderMissingCardActions,
   vaultSlugLabel,
   writeAccountVaultsView,
 } from "../lib/accountVaultsView";
@@ -88,16 +93,20 @@ export function AccountVaultsTab() {
   const [joinCode, setJoinCode] = useState("");
   const [joinError, setJoinError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // orgId whose permanent deletion is awaiting a second confirming click.
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // The vault whose permanent deletion is awaiting the standard confirm dialog.
+  const [confirmDelete, setConfirmDelete] = useState<{ orgId: string; name: string } | null>(
+    null,
+  );
   // A vault that is actually PAYING, whose deletion needs the full dialog
   // instead: the two-click row has nowhere to say what happens to the money
   // (#111). Its billing snapshot rides along so the copy can name the date.
   const [subDelete, setSubDelete] = useState<
     { orgId: string; name: string; billing: OrgBilling } | null
   >(null);
-  // local-vault path whose file deletion is awaiting a second confirming click.
-  const [confirmDeleteLocal, setConfirmDeleteLocal] = useState<string | null>(null);
+  // The local vault whose folder deletion is awaiting the standard confirm dialog.
+  const [confirmDeleteLocal, setConfirmDeleteLocal] = useState<
+    { path: string; name: string } | null
+  >(null);
   // A vault the user is about to leave (#121). Always the full dialog: it has
   // to say that the folder on this device goes too, which a row can't.
   const [confirmLeave, setConfirmLeave] = useState<{ orgId: string; name: string } | null>(
@@ -237,7 +246,8 @@ export function AccountVaultsTab() {
    * ConfirmDialog, because "Delete everything?" cannot say the one thing its
    * owner needs to know: the subscription stops at the END of the current
    * period, and until then it can be moved to another vault (#111). Every
-   * other vault keeps today's two-click row.
+   * other vault gets the plain ConfirmDialog below; nothing confirms inline,
+   * so a card never changes shape while a confirm is pending.
    *
    * A billing lookup that fails is treated as free — an unreachable billing
    * endpoint must not block a delete the user is entitled to make.
@@ -247,7 +257,7 @@ export function AccountVaultsTab() {
     // Team model: the subscription is the owner's account, and deleting a
     // vault does not touch it, so there is no subscription to warn about.
     if (!billingEnabled || teamBilling) {
-      setConfirmDelete(orgId);
+      setConfirmDelete({ orgId, name });
       return;
     }
     let billing: OrgBilling | null = null;
@@ -259,7 +269,7 @@ export function AccountVaultsTab() {
     if (billing && (billing.status === "active" || billing.status === "past_due")) {
       setSubDelete({ orgId, name, billing });
     } else {
-      setConfirmDelete(orgId);
+      setConfirmDelete({ orgId, name });
     }
   };
 
@@ -337,7 +347,7 @@ export function AccountVaultsTab() {
   };
 
   // A local folder's ⋯ actions, shared by its list row and its grid card.
-  const localActions = (path: string): RowAction[] => [
+  const localActions = (path: string, name: string): RowAction[] => [
     {
       key: "remove",
       label: "Remove from list",
@@ -352,12 +362,12 @@ export function AccountVaultsTab() {
       title: "Delete this vault — moves its folder and all its notes to the Trash",
       onSelect: () => {
         setActionError(null);
-        setConfirmDeleteLocal(path);
+        setConfirmDeleteLocal({ path, name });
       },
     },
   ];
 
-  // Move a local vault's folder to the OS trash (destructive, two-click confirm).
+  // Move a local vault's folder to the OS trash (destructive, confirmed in a dialog).
   const deleteLocalFiles = async (path: string) => {
     if (busy) return;
     setBusy(true);
@@ -528,6 +538,21 @@ export function AccountVaultsTab() {
       : []),
   ];
 
+  // The card's ⋯ menu: the row's, plus the folder-missing action that has no
+  // room beside the card's single recovery chip (Locate folder…).
+  const syncedCardActions = (o: { id: string; name: string }, isActive: boolean): RowAction[] => {
+    const extra =
+      isActive && rootMissing && folderMissingCardActions(syncEnabled).menu.includes("locate")
+        ? [{
+            key: "locate",
+            label: LOCATE_FOLDER,
+            title: "Point Baalda at this vault's folder where it is now",
+            onSelect: recover(() => useStore.getState().locateVaultFolder()),
+          }]
+        : [];
+    return [...extra, ...syncedActions(o, isActive)];
+  };
+
   // Current / Switch / the missing-folder recovery, shared by row and card.
   const syncedStatus = (o: { id: string }, isActive: boolean) =>
     isActive && rootMissing ? (
@@ -544,19 +569,6 @@ export function AccountVaultsTab() {
         Switch
       </AsyncButton>
     );
-
-  // Two-click delete confirm, shared by row and card.
-  const confirmDeleteActions = (orgId: string) => (
-    <span className="vault-row-actions">
-      <span className="muted">Delete everything?</span>
-      <button className="link-btn" disabled={busy} onClick={() => setConfirmDelete(null)}>
-        Cancel
-      </button>
-      <AsyncButton className="link-btn danger" disabled={busy} onClick={() => deletePermanently(orgId)}>
-        Delete
-      </AsyncButton>
-    </span>
-  );
 
   const chooseView = (next: AccountVaultsView) => {
     setView(next);
@@ -631,8 +643,6 @@ export function AccountVaultsTab() {
             />
           ) : null
         }
-        confirmingDelete={confirmDelete === o.id}
-        confirmDelete={confirmDeleteActions(o.id)}
         settingsAction={settingsAction}
         onSwitch={() => switchTo(o.id)}
         onOpenSettings={async () => {
@@ -704,7 +714,9 @@ export function AccountVaultsTab() {
         <div className="vault-grid">
           {ordered.map((o) => {
             const isActive = isOpenOrg(o.id);
-            const labels = vaultCardLabels(o, usageFor(o.id));
+            const labels = vaultCardLabels(o, usageFor(o.id), {
+              folderMissing: isActive && rootMissing,
+            });
             return (
               <div
                 key={o.id}
@@ -729,7 +741,7 @@ export function AccountVaultsTab() {
                   <RowActionsMenu
                     ariaLabel={`More actions for ${o.name}`}
                     disabled={busy}
-                    actions={syncedActions(o, isActive)}
+                    actions={syncedCardActions(o, isActive)}
                     menuClassName="vault-menu--compact"
                   />
                 </span>
@@ -737,8 +749,11 @@ export function AccountVaultsTab() {
                 <span className="vault-grid-name" title={labels.name}>{labels.name}</span>
                 {/* Always rendered, empty when the counts are unknown, so every
                     card keeps the same shape. */}
-                <span className="muted vault-grid-meta" title={labels.counts ?? undefined}>
-                  {labels.counts}
+                <span
+                  className={`muted vault-grid-meta${labels.metaDanger ? " is-danger" : ""}`}
+                  title={labels.meta ?? undefined}
+                >
+                  {labels.meta}
                 </span>
                 <span
                   className="vault-grid-foot"
@@ -748,8 +763,13 @@ export function AccountVaultsTab() {
                   {usageFor(o.id) && accountLapsed && (
                     <span className="billing-status canceled">Read-only</span>
                   )}
-                  {confirmDelete === o.id ? (
-                    confirmDeleteActions(o.id)
+                  {isActive && rootMissing ? (
+                    <CardFolderMissingChip
+                      synced={syncEnabled}
+                      busy={busy}
+                      onRestore={recover(() => useStore.getState().restoreVaultFolder())}
+                      onLocate={recover(() => useStore.getState().locateVaultFolder())}
+                    />
                   ) : isActive ? (
                     syncedStatus(o, isActive)
                   ) : (
@@ -803,18 +823,14 @@ export function AccountVaultsTab() {
               {usageFor(o.id) && accountLapsed && (
                 <span className="billing-status canceled">Read-only</span>
               )}
-              {confirmDelete === o.id ? (
-                confirmDeleteActions(o.id)
-              ) : (
-                <span className="vault-row-actions">
-                  {syncedStatus(o, isActive)}
-                  <RowActionsMenu
-                    ariaLabel={`More actions for ${o.name}`}
-                    disabled={busy}
-                    actions={syncedActions(o, isActive)}
-                  />
-                </span>
-              )}
+              <span className="vault-row-actions">
+                {syncedStatus(o, isActive)}
+                <RowActionsMenu
+                  ariaLabel={`More actions for ${o.name}`}
+                  disabled={busy}
+                  actions={syncedActions(o, isActive)}
+                />
+              </span>
             </li>
           );
         })}
@@ -965,7 +981,7 @@ export function AccountVaultsTab() {
                       <RowActionsMenu
                         ariaLabel={`More actions for ${r.name ?? r.path}`}
                         disabled={busy}
-                        actions={localActions(r.path)}
+                        actions={localActions(r.path, r.name ?? r.path)}
                         menuClassName="vault-menu--compact"
                       />
                     </span>
@@ -979,26 +995,8 @@ export function AccountVaultsTab() {
                       onClick={(e) => e.stopPropagation()}
                       onKeyDown={(e) => e.stopPropagation()}
                     >
-                      {confirmDeleteLocal === r.path ? (
-                        <>
-                          <span className="muted">Delete this vault?</span>
-                          <button
-                            className="link-btn"
-                            disabled={busy}
-                            onClick={() => setConfirmDeleteLocal(null)}
-                          >
-                            Cancel
-                          </button>
-                          <AsyncButton
-                            className="link-btn danger"
-                            disabled={busy}
-                            onClick={() => deleteLocalFiles(r.path)}
-                          >
-                            Delete
-                          </AsyncButton>
-                        </>
-                      ) : isCurrent && rootMissing ? (
-                        <VaultFolderMissingRowActions
+                      {isCurrent && rootMissing ? (
+                        <CardFolderMissingChip
                           synced={false}
                           busy={busy}
                           onRestore={() => undefined}
@@ -1036,51 +1034,31 @@ export function AccountVaultsTab() {
                       {" · Local"}
                     </span>
                   </span>
-                  {confirmDeleteLocal === r.path ? (
-                    <span className="vault-row-actions">
-                      <span className="muted">Delete this vault?</span>
-                      <button
+                  <span className="vault-row-actions">
+                    {isCurrent && rootMissing ? (
+                      <VaultFolderMissingRowActions
+                        synced={false}
+                        busy={busy}
+                        onRestore={() => undefined}
+                        onLocate={recover(() => useStore.getState().locateVaultFolder())}
+                      />
+                    ) : isCurrent ? (
+                      <span className="member-role">Current</span>
+                    ) : (
+                      <AsyncButton
                         className="link-btn"
                         disabled={busy}
-                        onClick={() => setConfirmDeleteLocal(null)}
+                        onClick={() => switchToLocal(r.path)}
                       >
-                        Cancel
-                      </button>
-                      <AsyncButton
-                        className="link-btn danger"
-                        disabled={busy}
-                        onClick={() => deleteLocalFiles(r.path)}
-                      >
-                        Delete
+                        Switch
                       </AsyncButton>
-                    </span>
-                  ) : (
-                    <span className="vault-row-actions">
-                      {isCurrent && rootMissing ? (
-                        <VaultFolderMissingRowActions
-                          synced={false}
-                          busy={busy}
-                          onRestore={() => undefined}
-                          onLocate={recover(() => useStore.getState().locateVaultFolder())}
-                        />
-                      ) : isCurrent ? (
-                        <span className="member-role">Current</span>
-                      ) : (
-                        <AsyncButton
-                          className="link-btn"
-                          disabled={busy}
-                          onClick={() => switchToLocal(r.path)}
-                        >
-                          Switch
-                        </AsyncButton>
-                      )}
-                      <RowActionsMenu
-                        ariaLabel={`More actions for ${r.name ?? r.path}`}
-                        disabled={busy}
-                        actions={localActions(r.path)}
-                      />
-                    </span>
-                  )}
+                    )}
+                    <RowActionsMenu
+                      ariaLabel={`More actions for ${r.name ?? r.path}`}
+                      disabled={busy}
+                      actions={localActions(r.path, r.name ?? r.path)}
+                    />
+                  </span>
                 </li>
               );
             })}
@@ -1168,6 +1146,33 @@ export function AccountVaultsTab() {
         />
       )}
 
+      {confirmDelete && (
+        <ConfirmDialog
+          title={`Delete ${confirmDelete.name}?`}
+          confirmLabel="Delete vault"
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={() => deletePermanently(confirmDelete.orgId)}
+        >
+          <p>
+            Every note, folder and attachment in this vault is deleted for
+            everyone. This can't be undone.
+          </p>
+          {actionError && <div className="auth-error">{actionError}</div>}
+        </ConfirmDialog>
+      )}
+
+      {confirmDeleteLocal && (
+        <ConfirmDialog
+          title={`Delete ${confirmDeleteLocal.name}?`}
+          confirmLabel="Delete vault"
+          onCancel={() => setConfirmDeleteLocal(null)}
+          onConfirm={() => deleteLocalFiles(confirmDeleteLocal.path)}
+        >
+          <p>This vault's folder and all its notes move to the Trash.</p>
+          {actionError && <div className="auth-error">{actionError}</div>}
+        </ConfirmDialog>
+      )}
+
       {subDelete && (
         <ConfirmDialog
           title={`Delete ${subDelete.name}?`}
@@ -1228,5 +1233,34 @@ function VaultsViewToggle({
       {option("list", "List view", <><path d="M8 6h12M8 12h12M8 18h12" /><path d="M4 6h.01M4 12h.01M4 18h.01" /></>)}
       {option("grid", "Grid view", <><rect x="4" y="4" width="7" height="7" rx="1" /><rect x="13" y="4" width="7" height="7" rx="1" /><rect x="4" y="13" width="7" height="7" rx="1" /><rect x="13" y="13" width="7" height="7" rx="1" /></>)}
     </div>
+  );
+}
+
+/**
+ * A card's folder-missing recovery as ONE foot-row chip, the "Switch here"
+ * chip's style, so the card keeps its neighbours' shape. Any other action
+ * lives in the card's ⋯ menu (`folderMissingCardActions`).
+ */
+function CardFolderMissingChip({
+  synced,
+  busy,
+  onRestore,
+  onLocate,
+}: {
+  synced: boolean;
+  busy: boolean;
+  onRestore: () => Promise<unknown> | unknown;
+  onLocate: () => Promise<unknown> | unknown;
+}) {
+  const { chip } = folderMissingCardActions(synced);
+  return (
+    <AsyncButton
+      className="vault-switch-chip"
+      disabled={busy}
+      title="This vault's folder is gone from this device."
+      onClick={chip === "restore" ? onRestore : onLocate}
+    >
+      {chip === "restore" ? RESTORE_HERE : LOCATE_FOLDER}
+    </AsyncButton>
   );
 }
