@@ -19,6 +19,7 @@ import {
   EVERYONE_OPTIONS,
   everyoneLabel,
   filterPeople,
+  freshViewerRole,
   invitationAccessLabel,
   needsAccessConfirm,
   LEVEL_TO_MODE,
@@ -35,6 +36,7 @@ import {
   withMemberLevel,
   withNewInvitations,
   withoutInvitation,
+  withViewerRole,
 } from "../lib/membersAccess";
 import { syncManager } from "../lib/sync/docSession";
 import { writeTeamAccessCache } from "../lib/teamAccessCache";
@@ -136,7 +138,10 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   const [profile, setProfile] = useState<{ userId: string; tab: ProfileTab } | null>(null);
   const loadGen = useRef(0);
 
-  const manage = canManage && (overview?.canManage ?? canManage);
+  // `canManage` comes from the store's member list, read when the vault
+  // opened; the overview is re-read on every open, so once it has answered
+  // its `canManage` is the authority (a promotion made after launch, #admin).
+  const manage = overview ? overview.canManage : canManage;
   const seatAccount = useSeatAccount(orgId, manage);
 
   const reload = useCallback(async () => {
@@ -179,6 +184,20 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     void reload();
     return () => { loadGen.current++; };
   }, [orgId, canManage, reload]);
+
+  // Teach the store the viewer's fresh role, so every other Vault Settings tab
+  // (and this tab's `canManage` prop, which re-fetches the Everyone and New
+  // members rows) follows a promotion or demotion made after the vault opened.
+  useEffect(() => {
+    if (!overview || !orgId || !myUserId) return;
+    const current = useStore.getState().members ?? [];
+    const stored = current.find((m) => m.userId === myUserId)?.role;
+    const fresh = freshViewerRole(overview, myUserId, stored);
+    if (!fresh || fresh === stored) return;
+    const memberId = overview.members.find((m) => m.userId === myUserId)?.memberId;
+    const next = withViewerRole(current, orgId, myUserId, fresh, memberId);
+    if (next !== current) useStore.setState({ members: next });
+  }, [overview, orgId, myUserId]);
 
   // Clicking the already-active "Members and access" item returns to the
   // first page of the tab: the roster, search cleared.

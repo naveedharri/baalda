@@ -260,6 +260,20 @@ describe("Members and access tab", () => {
     expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
   });
 
+  it("follows a promotion made after the vault opened: the fresh roster, not the store's launch role", async () => {
+    // The store still says "member" (read at launch); the owner has since made u1 an admin.
+    patchStore({ members: [{ id: "m-u1", organizationId: "org-1", userId: "u1", role: "member" }] });
+    api.getMembersOverview.mockResolvedValue(overview([person("u0", "Owner", "owner"), person("u1", "Me", "admin")], true));
+    await render(false);
+    await flush();
+    const headers = [...host.querySelectorAll("th")].map((th) => th.textContent);
+    expect(headers).toContain("Access");
+    expect([...host.querySelectorAll("button")].some((b) => b.textContent === "Invite people")).toBe(true);
+    // The store learns the fresh role, so the dialog's other tabs follow too.
+    const members = (useStore as unknown as { getState: () => { members: { userId: string; role: string }[] } }).getState().members;
+    expect(members.find((m) => m.userId === "u1")?.role).toBe("admin");
+  });
+
   it("gives a plain member a read-only roster", async () => {
     api.getMembersOverview.mockResolvedValue({
       members: [person("u0", "Owner", "owner"), { ...person("u1", "Me"), access: undefined }],

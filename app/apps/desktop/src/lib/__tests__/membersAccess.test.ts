@@ -72,10 +72,12 @@ describe("who may change a person's access", () => {
     // Role change / remove are unchanged: never yourself.
     expect(canActOnMember(args("owner", { userId: "me", role: "owner" }))).toBe(false);
   });
-  it("admin: members and themselves only", () => {
+  it("admin: everyone except the owner", () => {
     expect(canSetMemberAccess(args("admin", { userId: "me", role: "admin" }))).toBe(true);
     expect(canSetMemberAccess(args("admin", { userId: "m", role: "member" }))).toBe(true);
-    expect(canSetMemberAccess(args("admin", { userId: "a", role: "admin" }))).toBe(false);
+    expect(canSetMemberAccess(args("admin", { userId: "a", role: "admin" }))).toBe(true);
+    // Role change / remove stay stricter: an admin never touches another admin.
+    expect(canActOnMember(args("admin", { userId: "a", role: "admin" }))).toBe(false);
     expect(canSetMemberAccess(args("admin", { userId: "o", role: "owner" }))).toBe(false);
   });
   it("member or no manage right: nobody", () => {
@@ -137,5 +139,41 @@ describe("roster patches after a write (#307)", () => {
     expect(inv.invitations.map((i) => i.id)).toEqual(["i2"]);
     const t = m.patchedTeamAccess({ mode: "open", posture: "edit", grantId: "g", overrides: [{} as never] }, "readonly");
     expect(t).toMatchObject({ mode: "readonly", posture: "view", overrides: [] });
+  });
+});
+
+import { freshViewerRole, roleManages, withViewerRole } from "../membersAccess";
+
+describe("the viewer's role follows the freshest authority", () => {
+  const row = (userId: string, role: "owner" | "admin" | "member") => ({
+    userId, memberId: `m-${userId}`, role, name: null, email: null, image: null, joinedAt: null, lastActiveAt: null,
+  });
+  it("the overview's own row beats a role the store learned at launch", () => {
+    const ov = { members: [row("o", "owner"), row("me", "admin")], canManage: true };
+    expect(freshViewerRole(ov, "me", "member")).toBe("admin");
+    expect(roleManages(freshViewerRole(ov, "me", "member"))).toBe(true);
+  });
+  it("a demotion wins too, and a missing row falls back to the server's canManage", () => {
+    expect(freshViewerRole({ members: [row("me", "member")], canManage: false }, "me", "admin")).toBe("member");
+    expect(freshViewerRole({ members: [], canManage: false }, "me", "admin")).toBe("member");
+    expect(freshViewerRole({ members: [], canManage: true }, "me", "admin")).toBe("admin");
+  });
+  it("before the overview answers, the store's role stands", () => {
+    expect(freshViewerRole(null, "me", "member")).toBe("member");
+    expect(roleManages("member")).toBe(false);
+    expect(roleManages(undefined)).toBe(false);
+  });
+  it("withViewerRole patches only the viewer's row and keeps identity when unchanged", () => {
+    const list = [
+      { id: "1", organizationId: "org", userId: "me", role: "member" },
+      { id: "2", organizationId: "org", userId: "x", role: "owner" },
+    ];
+    const next = withViewerRole(list, "org", "me", "admin");
+    expect(next).not.toBe(list);
+    expect(next.map((m) => m.role)).toEqual(["admin", "owner"]);
+    expect(withViewerRole(next, "org", "me", "admin")).toBe(next);
+    expect(withViewerRole([], "org", "me", "admin", "m-me")).toEqual([
+      { id: "m-me", organizationId: "org", userId: "me", role: "admin" },
+    ]);
   });
 });
