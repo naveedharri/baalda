@@ -9,7 +9,7 @@ const STORAGE_KEY = "cbk-theme";
 const MODES: ThemeMode[] = ["light", "dark", "system"];
 
 const mql = () =>
-  typeof window !== "undefined" && "matchMedia" in window
+  typeof window !== "undefined" && typeof window.matchMedia === "function"
     ? window.matchMedia("(prefers-color-scheme: dark)")
     : null;
 
