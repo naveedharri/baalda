@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useHoverMenu } from "./useHoverMenu";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { copyText } from "../lib/clipboard";
 import { toast } from "../lib/toast";
@@ -29,35 +30,16 @@ export function SidebarHeader() {
   const rootMissing = useStore((s) => s.structureNotice.rootMissing);
   const reduceMotion = useReducedMotion();
 
-  const [menuMode, setMenuMode] = useState<"closed" | "hover" | "pinned">("closed");
-  const menuOpen = menuMode !== "closed";
-  const hoverCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const cancelHoverClose = useCallback(() => {
-    if (hoverCloseTimer.current !== null) clearTimeout(hoverCloseTimer.current);
-    hoverCloseTimer.current = null;
-  }, []);
-  const closeMenu = useCallback(() => {
-    cancelHoverClose();
-    setMenuMode("closed");
-  }, [cancelHoverClose]);
-  const togglePinnedMenu = () => {
-    cancelHoverClose();
-    // Clicking a hover preview pins it; only a second click closes it.
-    setMenuMode((mode) => mode === "pinned" ? "closed" : "pinned");
-  };
-  const pinMenu = () => {
-    cancelHoverClose();
-    setMenuMode("pinned");
-  };
-  const scheduleHoverClose = () => {
-    cancelHoverClose();
-    // Bridge the small gap between the tile and the popover without flicker.
-    hoverCloseTimer.current = setTimeout(() => {
-      hoverCloseTimer.current = null;
-      setMenuMode((mode) => mode === "hover" ? "closed" : mode);
-    }, 220);
-  };
-  useEffect(() => cancelHoverClose, [cancelHoverClose]);
+  // Hover previews the switcher, a click pins it (shared with the identity bar).
+  const {
+    open: menuOpen,
+    close: closeMenu,
+    toggle: togglePinnedMenu,
+    pin: pinMenu,
+    hoverEnter,
+    hoverLeave: scheduleHoverClose,
+    cancelHoverClose,
+  } = useHoverMenu();
   const rootRef = useRef<HTMLDivElement>(null);
   const rows = useSwitcherRows();
   useVaultShortcuts(rows);
@@ -154,11 +136,7 @@ export function SidebarHeader() {
           className="vault-switch-tile"
           tabIndex={-1}
           aria-hidden="true"
-          onPointerEnter={(event) => {
-            if (event.pointerType !== "mouse") return;
-            cancelHoverClose();
-            setMenuMode((mode) => mode === "closed" ? "hover" : mode);
-          }}
+          onPointerEnter={hoverEnter}
           onPointerLeave={scheduleHoverClose}
           onClick={togglePinnedMenu}
         >

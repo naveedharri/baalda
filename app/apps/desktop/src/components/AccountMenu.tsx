@@ -12,6 +12,7 @@ import { InvitationRows, useFreshInvitations } from "./InvitationRows";
 import { LazyAvatar } from "./Face";
 import { MenuIcon } from "./MenuIcon";
 import { BugReportDialog } from "./BugReportDialog";
+import { useHoverMenu } from "./useHoverMenu";
 import {
   checkAndAutoInstall,
   currentVersion,
@@ -107,7 +108,10 @@ export function AccountMenu() {
   const settingsRequest = useStore((s) => s.settingsRequest);
   const accountSettingsRequest = useStore((s) => s.accountSettingsRequest);
 
-  const [open, setOpen] = useState(false);
+  // Hover previews the menu and a click pins it, like the vault tile above.
+  const menu = useHoverMenu();
+  const open = menu.open;
+  const closeMenu = menu.close;
   // Invitation ids this device has already shown in the menu; anything else
   // pulses here and on the identity-bar dot until the menu is opened.
   const [seenInvites, setSeenInvites] = useState(loadSeenInvitations);
@@ -206,7 +210,7 @@ export function AccountMenu() {
     if (hadSession.current && session == null) {
       closeSettingsDialog();
       setAuthOpen(false);
-      setOpen(false);
+      closeMenu();
     }
     hadSession.current = session != null;
   }, [session]);
@@ -227,17 +231,17 @@ export function AccountMenu() {
 
   // Opening either settings dialog closes the account popover.
   useEffect(() => {
-    if (settingsDialog) setOpen(false);
+    if (settingsDialog) closeMenu();
   }, [settingsDialog]);
 
   // Close the popover on outside click or Escape.
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: PointerEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(e.target as Node)) closeMenu();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") closeMenu();
     };
     window.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("keydown", onKey);
@@ -245,7 +249,7 @@ export function AccountMenu() {
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [open, closeMenu]);
 
   if (signedOut || authPending || !session) {
     // Signed out is still local-first: the identity bar names the local
@@ -374,12 +378,19 @@ export function AccountMenu() {
       <div className="identity-row">
         <button
           className={`identity-bar ${open ? "open" : ""}`}
-          onClick={() => setOpen((v) => !v)}
+          onClick={menu.toggle}
+          onPointerEnter={menu.hoverEnter}
+          onPointerLeave={menu.hoverLeave}
           aria-haspopup="menu"
           aria-expanded={open}
-          title={`${userLabel} · ${presenceLabel}${
-            syncEnabled && activeOrg ? ` · ${activeOrg.name}` : vault ? ` · ${vault.name}` : ""
-          }`}
+          // No tooltip while the menu shows: it would sit on top of the rows.
+          title={
+            open
+              ? undefined
+              : `${userLabel} · ${presenceLabel}${
+                  syncEnabled && activeOrg ? ` · ${activeOrg.name}` : vault ? ` · ${vault.name}` : ""
+                }`
+          }
         >
           <span className="identity-avatar-wrap">
             <LazyAvatar label={userLabel} image={session.user.image} userId={session.user.id} />
@@ -411,7 +422,7 @@ export function AccountMenu() {
             aria-label="Report a bug"
             aria-haspopup="dialog"
             onClick={() => {
-              setOpen(false);
+              closeMenu();
               setBugOpen(true);
             }}
           >
@@ -435,7 +446,10 @@ export function AccountMenu() {
 
       {open && (
         <AccountPopover
-          onClose={() => setOpen(false)}
+          onClose={closeMenu}
+          onPointerEnter={menu.cancelHoverClose}
+          onPointerLeave={menu.hoverLeave}
+          onPin={menu.pin}
           seenInvites={seenInvites}
           onOpenAccount={() => {
             useStore.getState().requestAccountSettings("profile");
@@ -530,10 +544,17 @@ function AccountPopover({
   onClose,
   onOpenAccount,
   seenInvites,
+  onPointerEnter,
+  onPointerLeave,
+  onPin,
 }: {
   onClose: () => void;
   onOpenAccount: () => void;
   seenInvites: Set<string>;
+  onPointerEnter: () => void;
+  onPointerLeave: () => void;
+  /** A press or focus inside pins a hover-opened menu, as on the vault switcher. */
+  onPin: () => void;
 }) {
   const session = useStore((s) => s.session);
   const userInvitations = useStore((s) => s.userInvitations);
@@ -550,7 +571,14 @@ function AccountPopover({
     // identity card — name, email and avatar, permanently on screen in the
     // sidebar footer — so repeating it here would say what the user is already
     // looking at.
-    <div className="account-popover" role="menu">
+    <div
+      className="account-popover"
+      role="menu"
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
+      onPointerDownCapture={onPin}
+      onFocusCapture={onPin}
+    >
       {userInvitations.length > 0 && (
         <>
           {/* Pending invitations as plain menu rows, a hairline above the
