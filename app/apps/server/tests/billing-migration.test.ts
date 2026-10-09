@@ -18,8 +18,11 @@ const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).sort
 const before = files.filter((f) => f < "051");
 const under = files.filter((f) => f.startsWith("051_") || f.startsWith("052_"));
 
+// Always a `context_test*` name of its own, whatever the base DB is called (CI
+// uses `context`), so the create/drop below can never hit a real database.
 const baseUrl = new URL(config.databaseUrl);
-const testDbName = `${baseUrl.pathname.slice(1)}_mig`;
+const baseName = baseUrl.pathname.slice(1);
+const testDbName = baseName.startsWith("context_test") ? `${baseName}_mig` : "context_test_mig";
 if (!testDbName.startsWith("context_test")) {
   throw new Error(`refusing to run the migration suite against ${testDbName}`);
 }
