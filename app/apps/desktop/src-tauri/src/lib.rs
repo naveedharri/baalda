@@ -11,6 +11,7 @@ mod clipboard;
 // and the `#[tauri::command]` wrappers around them are only frame decoding.
 pub mod commands;
 mod error;
+pub mod folder_safety;
 pub mod extract;
 pub mod extract_worker;
 pub mod import_export;
@@ -275,6 +276,7 @@ pub fn run() {
             commands::get_vaults_root,
             commands::set_vaults_root,
             commands::pick_vaults_root,
+            commands::reset_vaults_root,
             commands::pick_folder,
             commands::pick_files,
             commands::save_file,

@@ -351,6 +351,7 @@ fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> 
 }
 
 fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> AppResult<VaultInfo> {
+    crate::folder_safety::check_vault_folder(&path, app.path().home_dir().ok().as_deref())?;
     if !path.is_dir() {
         return Err(AppError::new(format!(
             "Couldn't open the folder {}: it isn't a folder (it may have been moved, renamed or deleted)",
@@ -844,6 +845,7 @@ pub async fn create_vault(
     }
     let dir = free_vault_dir(Path::new(&parent), name)
         .ok_or_else(|| AppError::new("a folder with that name already exists"))?;
+    crate::folder_safety::check_vault_folder(&dir, app.path().home_dir().ok().as_deref())?;
     std::fs::create_dir_all(&dir).map_err(io_ctx("create the folder", &dir))?;
     open_vault_inner(&app, &state, dir)
 }
@@ -907,27 +909,47 @@ fn default_vaults_root(app: &AppHandle) -> AppResult<PathBuf> {
     Ok(home.join("Documents").join(DEFAULT_ROOT_DIR_NAME))
 }
 
-/// The effective vaults root, auto-initialized to the default and persisted
-/// on first read so the rest of the app can rely on it always existing.
+/// Create `root` (refusing an unsafe one) and only then persist it, so a root
+/// that could not be created is never remembered. Shared by every root setter.
+fn create_and_persist_root(app: &AppHandle, state: &State<AppState>, root: &Path) -> AppResult<()> {
+    let home = app.path().home_dir().ok();
+    crate::folder_safety::check_vaults_root(root, home.as_deref())?;
+    std::fs::create_dir_all(root)
+        .map_err(|e| crate::folder_safety::root_create_error(&e, root, home.as_deref()))?;
+    let mut cfg = read_config(app, state);
+    cfg.vaults_root = Some(root.to_string_lossy().to_string());
+    write_config(app, state, &cfg)
+}
+
+/// The effective vaults root. When none is stored (or the stored one is now
+/// refused, e.g. the home folder from an older build) the default is CREATED
+/// first and persisted only after that succeeded. A permission refusal under
+/// Documents comes back with the `documents_denied` prefix (see
+/// `folder_safety::root_create_error`).
 #[tauri::command]
 pub async fn get_vaults_root(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    let mut cfg = read_config(&app, &state);
-    let root = match cfg.vaults_root.clone() {
-        Some(r) => PathBuf::from(r),
+    let home = app.path().home_dir().ok();
+    let stored = read_config(&app, &state)
+        .vaults_root
+        .map(PathBuf::from)
+        .filter(|r| crate::folder_safety::vaults_root_refusal(r, home.as_deref()).is_none());
+    let root = match stored {
+        Some(r) => {
+            // `Documents\Baalda Vaults` on a default install — a redirected or
+            // OneDrive-managed Documents is exactly where this fails (#128).
+            std::fs::create_dir_all(&r)
+                .map_err(|e| crate::folder_safety::root_create_error(&e, &r, home.as_deref()))?;
+            r
+        }
         None => {
             let d = default_vaults_root(&app)?;
-            cfg.vaults_root = Some(d.to_string_lossy().to_string());
+            create_and_persist_root(&app, &state, &d)?;
             d
         }
     };
-    let _ = write_config(&app, &state, &cfg);
-    // `Documents\Baalda Vaults` on a default install — and the second of the
-    // three #128 candidates, since a redirected/OneDrive-managed Documents is
-    // exactly the kind of place `create_dir_all` fails on.
-    std::fs::create_dir_all(&root).map_err(io_ctx("create the vaults folder", &root))?;
     Ok(root.to_string_lossy().to_string())
 }
 
@@ -939,11 +961,19 @@ pub async fn set_vaults_root(
     state: State<'_, AppState>,
     path: String,
 ) -> AppResult<()> {
-    let p = PathBuf::from(&path);
-    std::fs::create_dir_all(&p).map_err(io_ctx("create the vaults folder", &p))?;
-    let mut cfg = read_config(&app, &state);
-    cfg.vaults_root = Some(p.to_string_lossy().to_string());
-    write_config(&app, &state, &cfg)
+    create_and_persist_root(&app, &state, Path::new(&path))
+}
+
+/// Put the vaults root back to `<home>/Documents/Baalda Vaults` (Account
+/// Settings → Vaults → Reset to default); returns it.
+#[tauri::command]
+pub async fn reset_vaults_root(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    let d = default_vaults_root(&app)?;
+    create_and_persist_root(&app, &state, &d)?;
+    Ok(d.to_string_lossy().to_string())
 }
 
 /// Native folder picker for the managed vaults root; persists and returns it.
@@ -958,10 +988,7 @@ pub async fn pick_vaults_root(
     let path = folder
         .into_path()
         .map_err(|e| AppError::new(format!("invalid folder: {e}")))?;
-    std::fs::create_dir_all(&path).map_err(io_ctx("create the vaults folder", &path))?;
-    let mut cfg = read_config(&app, &state);
-    cfg.vaults_root = Some(path.to_string_lossy().to_string());
-    write_config(&app, &state, &cfg)?;
+    create_and_persist_root(&app, &state, &path)?;
     Ok(Some(path.to_string_lossy().to_string()))
 }
 
@@ -1092,6 +1119,9 @@ pub async fn open_vault_in_root(
     create: Option<bool>,
 ) -> AppResult<VaultInfo> {
     let folder = PathBuf::from(&path);
+    // Before any mkdir: a picked home folder (or Desktop/Documents/Downloads
+    // itself) is refused with a sentence the UI shows as-is.
+    crate::folder_safety::check_vault_folder(&folder, app.path().home_dir().ok().as_deref())?;
     if create.unwrap_or(false) {
         // The first thing BOTH vault-setup buttons do ("Open a folder…" reaches
         // here with the folder the user picked, "Start with an empty folder"
