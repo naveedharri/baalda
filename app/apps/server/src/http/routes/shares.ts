@@ -527,8 +527,8 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       return c.json({ error: "principalId required for user shares" }, 400);
     }
     if (principalType === "user") {
-      // A per-person row is that person's access: an admin may set it for plain
-      // members and themselves only (`canManageMemberAccess`). Creators sharing
+      // A per-person row is that person's access: an admin may set it for
+      // anyone but the owner (`canManageMemberAccess`). Creators sharing
       // their own item keep the older rule.
       const actorRole = await orgRole(gate.organizationId!, session.userId);
       if (actorRole === "admin") {

@@ -50,7 +50,9 @@ export async function requireAccessManager(
  * `lib/membersAccess.ts canManageMemberAccess`:
  *
  *   - owner: anyone, themselves included (their own row is the way back in);
- *   - admin: plain members and themselves, never the owner or another admin;
+ *   - admin: everyone except the owner (plain members, other admins and
+ *     themselves) — decided 2026-10-09; role changes and removal keep the
+ *     stricter matrix where an admin never touches another admin;
  *   - member: nobody.
  */
 export function canManageMemberAccess(
@@ -59,7 +61,7 @@ export function canManageMemberAccess(
   isSelf: boolean,
 ): boolean {
   if (viewerRole === "owner") return true;
-  if (viewerRole === "admin") return isSelf || targetRole === "member";
+  if (viewerRole === "admin") return isSelf || targetRole === "member" || targetRole === "admin";
   return false;
 }
 

@@ -47,7 +47,7 @@ export function assignableRoles(args: MemberRoleArgs): AssignableRole[] {
  *
  *   - owner: anyone, including themselves and other admins/owners — their own
  *     row is the way back in after narrowing the whole vault;
- *   - admin: plain members and themselves;
+ *   - admin: everyone except the owner (members, other admins, themselves);
  *   - member: nobody.
  */
 export function canSetMemberAccess({ canManage, myUserId, myRole, target }: MemberRoleArgs): boolean {

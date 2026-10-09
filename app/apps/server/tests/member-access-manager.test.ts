@@ -7,7 +7,7 @@ import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js
 import { seedFolder, seedMember, seedVault } from "./helpers/seed.js";
 import { canManageMemberAccess } from "../src/permissions/access-management.js";
 
-/** Who may change one member's access: owner → anyone, admin → members + self. */
+/** Who may change one member's access: owner → anyone, admin → anyone but the owner. */
 const rec = recordingAppDeps();
 const app = createApp(rec.deps);
 
@@ -72,31 +72,31 @@ describe("member access management by role", () => {
     expect(canManageMemberAccess("owner", "admin", false)).toBe(true);
     expect(canManageMemberAccess("admin", "member", false)).toBe(true);
     expect(canManageMemberAccess("admin", "admin", true)).toBe(true);
-    expect(canManageMemberAccess("admin", "admin", false)).toBe(false);
+    expect(canManageMemberAccess("admin", "admin", false)).toBe(true);
     expect(canManageMemberAccess("admin", "owner", false)).toBe(false);
     expect(canManageMemberAccess("member", "member", false)).toBe(false);
     expect(canManageMemberAccess("member", "member", true)).toBe(false);
   });
 
-  it("bulk access: admin → member/self ok, admin → owner/admin 403, member → anyone 403", async () => {
+  it("bulk access: admin → member/admin/self ok, admin → owner 403, member → anyone 403", async () => {
     const s = await setup();
     expect((await bulk(s.admin, s.orgId, s.folder, s.member.userId)).status).toBe(200);
     expect((await bulk(s.admin, s.orgId, s.folder, s.admin.userId)).status).toBe(200);
     const toOwner = await bulk(s.admin, s.orgId, s.folder, s.owner.userId);
     expect(toOwner.status).toBe(403);
     expect(await toOwner.json()).toMatchObject({ error: "access_manager_required" });
-    expect((await bulk(s.admin, s.orgId, s.folder, s.admin2.userId)).status).toBe(403);
+    expect((await bulk(s.admin, s.orgId, s.folder, s.admin2.userId)).status).toBe(200);
     expect((await bulk(s.member, s.orgId, s.folder, s.member2.userId)).status).toBe(403);
     expect((await bulk(s.owner, s.orgId, s.folder, s.admin2.userId)).status).toBe(200);
   });
 
-  it("POST /shares per-user: admin → member ok, admin → owner/admin 403", async () => {
+  it("POST /shares per-user: admin → member/admin ok, admin → owner 403", async () => {
     const s = await setup();
     expect((await share(s.admin, s.folder, s.member.userId)).status).toBeLessThan(300);
     const toOwner = await share(s.admin, s.folder, s.owner.userId);
     expect(toOwner.status).toBe(403);
     expect(await toOwner.json()).toMatchObject({ error: "access_manager_required" });
-    expect((await share(s.admin, s.folder, s.admin2.userId)).status).toBe(403);
+    expect((await share(s.admin, s.folder, s.admin2.userId)).status).toBeLessThan(300);
     expect((await share(s.member, s.folder, s.member2.userId)).status).toBe(403);
     expect((await share(s.owner, s.folder, s.admin.userId)).status).toBeLessThan(300);
   });

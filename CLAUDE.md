@@ -442,7 +442,8 @@ No access / Custom) plus a ⋯ menu (View profile, Manage access, Make admin/mem
 members get a read-only roster from `GET /orgs/:orgId/members/overview`. Who may change one person's access is one rule,
 `lib/membersAccess.ts canManageMemberAccess` mirrored by the server's `access-management.ts` helper
 (bulk access, per-user `POST /shares`, the share reset): an owner manages anyone, themselves included;
-an admin manages plain members and themselves, never the owner or another admin (403 `access_manager_required`). "Owners and admins can always
+an admin manages everyone except the owner, other admins included (403 `access_manager_required`;
+decided 2026-10-09; role changes and removal stay stricter, never another admin). "Owners and admins can always
 manage access" means *manage*, never an exemption from the caps they set. No UI shows or creates
 per-folder Everyone overrides; changing the Everyone row (`PUT team-access`) clears any that exist. One person's per-folder checkboxes live in
 their profile's Access tab and apply immediately through the atomic bulk-access API (users
@@ -544,8 +545,8 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   to vault default") → `{removed, disconnectedDocs}`: one transaction deletes every per-user share row
   the member holds in the org (vault/folder/file, their own `denied`/`locked` too, so it can widen as
   well as narrow), leaves `member_access_snapshots` alone, disconnects docs that left their readable
-  set (before/after) and fires `onAclChanged` per vault; owner → anyone, admin → plain members or
-  self, else 403 `access_manager_required`; 404 `not_member`;
+  set (before/after) and fires `onAclChanged` per vault; owner → anyone, admin → anyone but the
+  owner, else 403 `access_manager_required`; 404 `not_member`;
   `POST /orgs/:orgId/invitations` {emails, role, access}), `appearance` (`GET|PUT
   /api/orgs/:orgId/appearance`: any member reads, owner/admin replaces the vault-wide theme/autoColors/
   contentWidth/textSize/lineNumbers/properties object validated by `appearance/schema.ts`, then the vault

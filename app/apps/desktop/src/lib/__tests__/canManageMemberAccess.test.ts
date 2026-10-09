@@ -7,7 +7,7 @@ const ROLES = ["owner", "admin", "member"] as const;
 // impossible (an admin is never the owner); it follows the self rule.
 const EXPECTED: Record<string, Record<string, [boolean, boolean]>> = {
   owner: { owner: [true, true], admin: [true, true], member: [true, true] },
-  admin: { owner: [false, true], admin: [false, true], member: [true, true] },
+  admin: { owner: [false, true], admin: [true, true], member: [true, true] },
   member: { owner: [false, false], admin: [false, false], member: [false, false] },
 };
 
