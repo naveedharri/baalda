@@ -473,30 +473,14 @@ function AccountPopover({
     // sidebar footer — so repeating it here would say what the user is already
     // looking at.
     <div className="account-popover" role="menu">
-      {/* Vault items used to live here; point people at their new home. */}
-      <div className="menu-moved-note" role="note">
-        <MenuIcon>
-          <path d="M12 19V5M5 12l7-7 7 7" />
-        </MenuIcon>
-        <span>
-          Vault settings and switching have moved up. Click the vault icon at the
-          top of the sidebar.
-        </span>
-      </div>
-      <div className="menu-sep" />
       {userInvitations.length > 0 && (
-        <div className="invite-inbox">
-          <div className="subhead">
-            Invitations
-            {userInvitations.length > 1 && (
-              <span className="invite-count"> · {userInvitations.length}</span>
-            )}
-          </div>
-          <InvitationRows invitations={userInvitations} freshIds={freshIds} />
-        </div>
+        <>
+          {/* Pending invitations as plain menu rows, a hairline above the
+              account rows; no eyebrow, since nothing else here has one. */}
+          <InvitationRows invitations={userInvitations} freshIds={freshIds} variant="menu" />
+          <div className="menu-sep" />
+        </>
       )}
-
-      {userInvitations.length > 0 && <div className="menu-sep" />}
       <button className="menu-item" onClick={onOpenAccount}>
         <MenuIcon>
           <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />

@@ -5265,17 +5265,49 @@ button.secondary.about-update-btn:disabled {
   color: var(--accent);
   background: var(--accent-soft);
 }
-.invite-inbox {
-  display: flex;
-  flex-direction: column;
-  background: var(--accent-soft);
-  border-radius: var(--radius-md);
-  padding: var(--sp-2) var(--sp-3) var(--sp-1);
+/* Account menu: one plain menu row per invitation (envelope, vault, "from X"),
+   with Accept and Decline as compact text buttons at the right. An unseen one
+   gets an accent envelope and a small dot, nothing louder. */
+.invite-menu-row {
+  cursor: default;
 }
-.invite-inbox > .subhead {
-  margin: 0 0 var(--sp-1);
+.invite-menu-row .menu-hint {
+  max-width: 35%;
 }
-.invite-count {
+.invite-menu-icon {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.invite-menu-row.is-new .menu-icon {
+  color: var(--accent);
+}
+.invite-menu-row.is-new .invite-menu-icon::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1.5px var(--bg-surface);
+}
+.invite-menu-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.invite-menu-btn {
+  padding: 1px 6px;
+  font-size: var(--fs-xs);
+  line-height: var(--lh-body);
+}
+.invite-menu-btn.decline {
+  color: var(--text-tertiary);
+}
+.invite-menu-btn.decline:hover {
   color: var(--text-secondary);
 }
 /* One row per invitation: name + who asked on the left, Accept and Decline
@@ -8428,22 +8460,6 @@ button.secondary:active:not(:disabled),
 .vault-icon-colors .swatch:disabled {
   cursor: default;
   opacity: 0.6;
-}
-
-/* Account menu: where the vault items went. */
-.menu-moved-note {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-2);
-  padding: var(--sp-2);
-  border-radius: var(--radius-sm);
-  background: var(--bg-hover);
-  color: var(--text-secondary);
-  font-size: var(--fs-xs);
-  line-height: 1.4;
-}
-.menu-moved-note .menu-icon {
-  margin-top: 1px;
 }
 
 /* ---- Account settings → Profile → picture (styled like the vault icon picker) ---- */
