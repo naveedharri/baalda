@@ -29,7 +29,7 @@ vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }
 import { ACCESS_CHECK_MAX, type ApiClient } from "../../api";
 import * as ipc from "../../ipc";
 import type { TreeNode } from "../../ipc";
-import { VaultRegistry, type InboundHost } from "../registry";
+import { OWN_DELETE_TTL_MS, VaultRegistry, type InboundHost } from "../registry";
 import { sha256Hex } from "../../bridge/adapter";
 import { reconcileReport } from "../reconcileReport";
 
@@ -2042,6 +2042,35 @@ describe("own in-app delete of a nested tree", () => {
     expect([...disk.notes.keys()]).toEqual([]);
     expect(reconcileReport.items()).toEqual([]);
     expect(ipc.copyToTrash).not.toHaveBeenCalled();
+    expect(api.createFolder).not.toHaveBeenCalled();
+    expect(api.createNote).not.toHaveBeenCalled();
+  });
+
+  it("a stale listing applied AFTER the disk half never re-creates the folders, even past the own-delete window", async () => {
+    const { disk, api, reg, tombstoneAll } = await tree();
+    vi.mocked(api.createFolder).mockClear();
+    vi.mocked(api.createNote).mockClear();
+    const selection = ["Context/beliefs/captures/new.md", "Context/beliefs/captures", "Context/beliefs", "Context"];
+    for (const p of selection) await reg.deletePath(p);
+    // The sidebar's disk half lands first this time…
+    for (const p of selection) await ipc.deletePath(p);
+    // …then a pull whose listing predates the server commits still names the
+    // notes and the folders.
+    await reg.pull();
+    expect([...disk.folders]).toEqual([]);
+    expect([...disk.notes.keys()]).toEqual([]);
+
+    // Past the own-delete window nothing is left on disk to register.
+    const realNow = Date.now;
+    const later = realNow() + OWN_DELETE_TTL_MS + 1_000;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => later);
+    try {
+      tombstoneAll();
+      await reg.pull();
+    } finally {
+      spy.mockRestore();
+    }
+    expect([...disk.folders]).toEqual([]);
     expect(api.createFolder).not.toHaveBeenCalled();
     expect(api.createNote).not.toHaveBeenCalled();
   });

@@ -2546,6 +2546,12 @@ export class VaultRegistry {
     // and a second pull is a no-op.
     for (const path of plan.createFolders) {
       if (this.stopRun()) break;
+      // A listing fetched before this device's own folder delete committed still
+      // names the folder. Re-creating it after the sidebar removed it left an
+      // empty directory with no server id, which the outbound step registered as
+      // a NEW folder once the own-delete window closed: deleted folders came back
+      // empty, for the whole team.
+      if (this.isOwnDelete(path)) continue;
       try {
         // Only a directory this call actually created is a disk change — and it
         // is OUR change, so its watcher echo is remembered and consumed rather
@@ -4422,6 +4428,10 @@ export class VaultRegistry {
     const held = this.host?.heldDocIds?.() ?? null;
     const toMaterialize = [...resolvedNotePaths].filter((rp) => {
       if (localNotePaths.has(pathKey(rp))) return false;
+      // Same stale-listing race as the inbound folder step: a note this device
+      // just deleted in-app must not come back as a placeholder, which would
+      // also re-create its deleted parent folders on disk.
+      if (this.isOwnDelete(rp)) return false;
       if (held && held.size > 0) {
         const docId = this.byPath.get(rp)?.docId;
         if (docId && held.has(docId)) return false;
