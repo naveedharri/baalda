@@ -325,6 +325,8 @@ pub struct IndexReady {
     pub epoch: u64,
     pub ok: bool,
     pub ms: u64,
+    /// Notes the rebuild left out because they could not be read as text.
+    pub skipped: usize,
 }
 
 /// The epoch of the currently-open vault (0 when none has been opened). The TS
@@ -426,7 +428,7 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
             // The sleeps deliberately keep the mutex: giving it up would let a UI
             // reader see the stale index and render wrong titles, which is the
             // thing the whole ready-handshake above exists to prevent.
-            let mut result = guard.rebuild(&bg_path);
+            let mut result = guard.rebuild_report(&bg_path);
             for attempt in 1..=REBUILD_BUSY_RETRIES {
                 let busy = match &result {
                     Ok(_) => false,
@@ -438,24 +440,32 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
                 if !busy {
                     break;
                 }
-                eprintln!(
+                log::warn!(
                     "[index] rebuild found {} busy (attempt {attempt}/{REBUILD_BUSY_RETRIES}) — retrying",
                     bg_path.display()
                 );
                 std::thread::sleep(std::time::Duration::from_millis(
                     REBUILD_BUSY_BACKOFF_MS << (attempt - 1),
                 ));
-                result = guard.rebuild(&bg_path);
+                result = guard.rebuild_report(&bg_path);
             }
             drop(guard);
-            let ok = match result {
-                Ok(pending) => {
-                    bg_queue.enqueue(pending);
-                    true
+            let (ok, skipped) = match result {
+                Ok(report) => {
+                    if report.skipped > 0 {
+                        log::error!(
+                            "[index] rebuild of {} skipped {} unreadable note(s)",
+                            bg_path.display(),
+                            report.skipped
+                        );
+                    }
+                    bg_queue.enqueue(report.pending);
+                    // Not ok only when there were notes and none could be read.
+                    (report.skipped == 0 || report.skipped < report.notes, report.skipped)
                 }
                 Err(e) => {
-                    eprintln!("[index] rebuild failed for {}: {e}", bg_path.display());
-                    false
+                    log::error!("[index] rebuild failed for {}: {e}", bg_path.display());
+                    (false, 0)
                 }
             };
             // Tells the UI the index is current: titles/backlinks/graph refresh.
@@ -466,6 +476,7 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
                     epoch,
                     ok,
                     ms: started.elapsed().as_millis() as u64,
+                    skipped,
                 },
             );
         });
@@ -2983,13 +2994,14 @@ pub async fn rebuild_index(
     let started = std::time::Instant::now();
     let result = {
         let guard = index.lock().unwrap();
-        guard.rebuild(&vault)
+        guard.rebuild_report(&vault)
     };
-    let ok = result.is_ok();
+    let ok = result.as_ref().is_ok_and(|r| r.skipped == 0 || r.skipped < r.notes);
+    let skipped = result.as_ref().map(|r| r.skipped).unwrap_or(0);
     // Same hand-off as vault open: the rows are reconciled here, the text is
     // extracted on the worker thread.
-    if let (Ok(pending), Some(queue)) = (&result, queue) {
-        queue.enqueue(pending.clone());
+    if let (Ok(report), Some(queue)) = (&result, queue) {
+        queue.enqueue(report.pending.clone());
     }
     let _ = app.emit(
         "index-ready",
@@ -2998,6 +3010,7 @@ pub async fn rebuild_index(
             epoch,
             ok,
             ms: started.elapsed().as_millis() as u64,
+            skipped,
         },
     );
     result.map(|_| ())
