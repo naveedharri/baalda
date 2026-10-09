@@ -621,11 +621,84 @@ pub async fn remove_recent_vault(
     write_config(&app, &state, &cfg)
 }
 
+/// The one sentence the UI shows when a vault folder cannot be trashed. The
+/// raw `trash` error (an `Os { … }` debug dump from Finder's AppleScript) goes
+/// to the log only.
+pub const TRASH_FAILED_MESSAGE: &str = "Couldn't move the folder to the Trash. Close any Finder dialog and try again, or delete the folder yourself.";
+
+const TRASH_ATTEMPTS: u32 = 3;
+const TRASH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Run `primary` up to `attempts` times, `delay` apart, then `fallback` once.
+/// Returns the last error when everything failed. Pure so it can be tested
+/// without touching the real Trash.
+fn trash_with_retry(
+    attempts: u32,
+    delay: std::time::Duration,
+    mut primary: impl FnMut() -> Result<(), String>,
+    fallback: Option<&mut dyn FnMut() -> Result<(), String>>,
+) -> Result<(), String> {
+    let mut last = String::new();
+    for i in 0..attempts.max(1) {
+        match primary() {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                log::warn!("move to trash failed (attempt {}/{attempts}): {e}", i + 1);
+                last = e;
+            }
+        }
+        if i + 1 < attempts {
+            std::thread::sleep(delay);
+        }
+    }
+    if let Some(fallback) = fallback {
+        match fallback() {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                log::warn!("move to trash failed (fallback): {e}");
+                last = e;
+            }
+        }
+    }
+    Err(last)
+}
+
+/// Move `dir` to the OS Trash. On macOS the NSFileManager call goes first: the
+/// crate's default drives Finder through AppleScript, which fails outright
+/// with "The Finder is busy" (-15260) whenever Finder has a dialog open. Finder
+/// stays as the fallback (it supports "Put Back").
+fn move_dir_to_trash(dir: &Path) -> AppResult<()> {
+    #[cfg(target_os = "macos")]
+    let result = {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        let mut ns = trash::TrashContext::default();
+        ns.set_delete_method(DeleteMethod::NsFileManager);
+        let mut finder = || trash::delete(dir).map_err(|e| e.to_string());
+        trash_with_retry(
+            TRASH_ATTEMPTS,
+            TRASH_RETRY_DELAY,
+            || ns.delete(dir).map_err(|e| e.to_string()),
+            Some(&mut finder),
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
+    let result = trash_with_retry(
+        TRASH_ATTEMPTS,
+        TRASH_RETRY_DELAY,
+        || trash::delete(dir).map_err(|e| e.to_string()),
+        None,
+    );
+    result.map_err(|e| {
+        log::warn!("could not move {} to trash: {e}", dir.display());
+        AppError::new(TRASH_FAILED_MESSAGE)
+    })
+}
+
 /// Move a local vault's folder — and all its notes — to the OS trash, then
-/// forget it from the recents list. Used by the local-vault "Delete files"
+/// forget it from the recents list. Used by the local-vault "Delete vault"
 /// action. This is the only copy of a local vault (no server), so we trash
-/// (recoverable) instead of hard-deleting, and the UI gates it behind a
-/// two-click confirm.
+/// (recoverable) instead of hard-deleting, and the UI gates it behind the
+/// standard confirm dialog.
 #[tauri::command]
 pub async fn delete_vault(
     app: AppHandle,
@@ -641,7 +714,14 @@ pub async fn delete_vault(
     if dir.parent().is_none() {
         return Err(AppError::new("refusing to delete a filesystem root"));
     }
-    trash::delete(&dir).map_err(|e| AppError::new(format!("could not move to trash: {e}")))?;
+    // Off the async runtime: the retry sleeps between attempts.
+    let target = dir.clone();
+    tauri::async_runtime::spawn_blocking(move || move_dir_to_trash(&target))
+        .await
+        .map_err(|e| {
+            log::warn!("move to trash task failed: {e}");
+            AppError::new(TRASH_FAILED_MESSAGE)
+        })??;
     // Also drop it from recents / last_vault so it doesn't linger in the switcher.
     let mut cfg = read_config(&app, &state);
     cfg.recent_vaults.retain(|r| r.path != path);
@@ -3070,6 +3150,53 @@ pub async fn read_external_file(path: String) -> AppResult<tauri::ipc::Response>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trash_retry_succeeds_on_a_later_attempt_without_the_fallback() {
+        let mut calls = 0;
+        let mut fallback_calls = 0;
+        let mut fallback = || { fallback_calls += 1; Ok(()) };
+        let out = trash_with_retry(
+            3,
+            std::time::Duration::ZERO,
+            || { calls += 1; if calls < 3 { Err("The Finder is busy".into()) } else { Ok(()) } },
+            Some(&mut fallback),
+        );
+        assert!(out.is_ok());
+        assert_eq!(calls, 3);
+        assert_eq!(fallback_calls, 0);
+    }
+
+    #[test]
+    fn trash_retry_falls_back_after_every_attempt_fails() {
+        let mut calls = 0;
+        let mut fallback_calls = 0;
+        let mut fallback = || { fallback_calls += 1; Ok(()) };
+        let out = trash_with_retry(
+            3,
+            std::time::Duration::ZERO,
+            || { calls += 1; Err("busy".into()) },
+            Some(&mut fallback),
+        );
+        assert!(out.is_ok());
+        assert_eq!(calls, 3);
+        assert_eq!(fallback_calls, 1);
+    }
+
+    #[test]
+    fn trash_retry_reports_the_last_error_when_everything_fails() {
+        let mut fallback = || Err::<(), String>("finder failed".into());
+        let out = trash_with_retry(2, std::time::Duration::ZERO, || Err("ns failed".into()), Some(&mut fallback));
+        assert_eq!(out.unwrap_err(), "finder failed");
+        let out = trash_with_retry(2, std::time::Duration::ZERO, || Err("ns failed".into()), None);
+        assert_eq!(out.unwrap_err(), "ns failed");
+    }
+
+    #[test]
+    fn trash_failure_message_is_one_plain_sentence() {
+        assert!(!TRASH_FAILED_MESSAGE.contains("Os {"));
+        assert!(TRASH_FAILED_MESSAGE.starts_with("Couldn't move the folder to the Trash."));
+    }
 
     #[test]
     fn reset_target_deletes_only_the_open_vault_root() {

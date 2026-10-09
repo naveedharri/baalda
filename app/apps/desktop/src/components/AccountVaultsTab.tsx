@@ -570,6 +570,10 @@ export function AccountVaultsTab() {
       </AsyncButton>
     );
 
+  // A confirm dialog that is open shows the action's error itself; the page's
+  // banner would only repeat it behind the dialog.
+  const errorInDialog = !!(confirmDelete || confirmDeleteLocal || confirmLeave || subDelete);
+
   const chooseView = (next: AccountVaultsView) => {
     setView(next);
     writeAccountVaultsView(next);
@@ -665,7 +669,7 @@ export function AccountVaultsTab() {
       {pageOrg ? (
         <>
           {renderPage(pageOrg)}
-          {actionError && <div className="auth-error">{actionError}</div>}
+          {actionError && !errorInDialog && <div className="auth-error">{actionError}</div>}
         </>
       ) : (
         <>
@@ -920,7 +924,7 @@ export function AccountVaultsTab() {
         </div>
       )}
       {joinError && <div className="auth-error">{joinError}</div>}
-      {actionError && <div className="auth-error">{actionError}</div>}
+      {actionError && !errorInDialog && <div className="auth-error">{actionError}</div>}
       {limitNudge && (
         <LimitNudge
           kind={limitNudge.kind}

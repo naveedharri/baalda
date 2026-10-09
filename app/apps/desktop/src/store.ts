@@ -4351,7 +4351,7 @@ export const useStore = create<AppStore>((set, get) => ({
       get().closeLocalVault();
     }
     // Move the folder (and all its notes) to the OS trash; this also forgets it
-    // from recents. Destructive — the UI gates it behind a two-click confirm.
+    // from recents. Destructive — the UI gates it behind the confirm dialog.
     await ipc.deleteVault(path);
   },
 
