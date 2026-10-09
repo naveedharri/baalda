@@ -220,6 +220,52 @@ describe("subscription lifecycle", () => {
       expect(rows[0].status).toBe("active");
     });
 
+    it("persists a fixed discount from a webhook: charged, list, id and name, no basis points", async () => {
+      const owner = await signUp("fixed-discount-owner@billing.com");
+      const accountId = await ensureAccountForUser(pool, owner.userId);
+      fakeProvider.nextEvent = {
+        eventId: "evt_fixed_1",
+        occurredAt: new Date(),
+        type: "subscription_active",
+        organizationId: "",
+        accountId: accountId!,
+        userId: owner.userId,
+        providerCustomerId: "cus_fixed",
+        providerSubscriptionId: "sub_fixed",
+        plan: "team",
+        status: "active",
+        currentPeriodEnd: new Date(Date.now() + 30 * 86400_000),
+        cancelAtPeriodEnd: false,
+        interval: "month",
+        amount: 3000,
+        currency: "usd",
+        seats: 5,
+        listAmount: 5000,
+        discountId: "disc_fixed",
+        discountName: "Legacy price",
+        discountBasisPoints: null,
+        discountDuration: "forever",
+      } as import("../src/billing/provider.js").NormalizedBillingEvent;
+
+      const res = await req("POST", "/api/billing/webhook", { body: {} });
+      expect(res.status).toBe(200);
+      const { rows } = await pool.query(
+        `SELECT amount, list_amount, seats, discount_id, discount_name, discount_basis_points, discount_duration
+           FROM subscriptions WHERE provider_subscription_id = $1`,
+        ["sub_fixed"],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        list_amount: 5000,
+        seats: 5,
+        discount_id: "disc_fixed",
+        discount_name: "Legacy price",
+        discount_basis_points: null,
+        discount_duration: "forever",
+      });
+      expect(Number(rows[0].amount)).toBe(3000);
+    });
+
     function orphanEvent(
       ownerUserId: string,
       over: Partial<import("../src/billing/provider.js").NormalizedBillingEvent> = {},

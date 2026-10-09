@@ -94,6 +94,27 @@ describe("PolarBillingProvider.previewSeatChange", () => {
     expect(Number.isFinite(p.proratedNow)).toBe(true);
   });
 
+  it("charges added seats at full price now under a fixed discount, $0-charged included", async () => {
+    // $330/yr list, $30 off ⇒ charged $300. Adding 2 seats prorates 2 x $110.
+    vi.spyOn(provider, "getSubscription").mockResolvedValue(
+      snap({ amount: 30000, discountId: "d_fixed", discountName: "Legacy price" }),
+    );
+    const p = await provider.previewSeatChange("sub_1", 5);
+    expect(p.newAmount).toBe(55000 - 3000);
+    expect(p.proratedNow).toBeGreaterThan(21900);
+    expect(p.proratedNow).toBeLessThanOrEqual(22000);
+
+    // Fully comped by a fixed amount: next period = added seats only, and the
+    // proration is still at full price (the fixed amount does not grow).
+    vi.spyOn(provider, "getSubscription").mockResolvedValue(
+      snap({ amount: 0, discountId: "d_comp", discountName: "Comped" }),
+    );
+    const zero = await provider.previewSeatChange("sub_1", 5);
+    expect(zero.newAmount).toBe(22000);
+    expect(zero.proratedNow).toBeGreaterThan(21900);
+    expect(zero.proratedNow).toBeLessThanOrEqual(22000);
+  });
+
   it("prices the next period at list for a once discount, discounted for a forever one", async () => {
     vi.spyOn(provider, "getSubscription").mockResolvedValue(
       snap({
