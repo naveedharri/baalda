@@ -1653,7 +1653,7 @@ async function readAccountBody(accountId: string, canManage: boolean) {
         pendingDecreaseTo !== null
           ? {
               to: pendingDecreaseTo,
-              effectiveAt: row.current_period_end ? new Date(row.current_period_end).toISOString() : null,
+              effectiveAt: row?.current_period_end ? new Date(row.current_period_end).toISOString() : null,
             }
           : null,
     },
