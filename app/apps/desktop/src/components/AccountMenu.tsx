@@ -12,6 +12,16 @@ import { InvitationRows, useFreshInvitations } from "./InvitationRows";
 import { LazyAvatar } from "./Face";
 import { MenuIcon } from "./MenuIcon";
 import { BugReportDialog } from "./BugReportDialog";
+import {
+  checkAndAutoInstall,
+  currentVersion,
+  relaunchForUpdate,
+  subscribeUpdateState,
+  updateState,
+  useUpdateState,
+} from "../lib/updater";
+import { isUpdateBusy, updateCheckToast, updateRowHint } from "../lib/updateMenuRow";
+import { toast } from "../lib/toast";
 
 /* The settings surface is a whole second app (nine tabs, billing, MCP tokens,
    access) and nothing in it is on the first screen, so all three dialogs load
@@ -454,6 +464,68 @@ export function AccountMenu() {
   );
 }
 
+/** The running version, read once per launch so reopening the menu never flashes "…". */
+let menuVersion: string | null = null;
+
+/**
+ * The menu row's click: About's "Check for updates" (or its "Restart now" once
+ * an update is held), reported by a toast because the menu closes on click.
+ */
+function runMenuUpdateCheck(): void {
+  const current = updateState();
+  if (current.phase === "ready") {
+    void relaunchForUpdate();
+    return;
+  }
+  // A check or install is already running; About disables its button then.
+  if (isUpdateBusy(current)) return;
+  const unsubscribe = subscribeUpdateState(() => {
+    const next = updateState();
+    if (next.phase === "checking") return;
+    unsubscribe();
+    const message = updateCheckToast(next);
+    if (message) toast(message.text, message.tone);
+  });
+  void checkAndAutoInstall();
+  // `checkAndAutoInstall` enters `checking` synchronously unless an install
+  // retry already owns the updater; then there is no outcome to wait for.
+  if (updateState().phase !== "checking") unsubscribe();
+}
+
+function UpdateMenuRow({ onClose }: { onClose: () => void }) {
+  const update = useUpdateState();
+  const [version, setVersion] = useState<string | null>(menuVersion);
+  useEffect(() => {
+    if (menuVersion) return;
+    let alive = true;
+    void currentVersion()
+      .then((v) => {
+        menuVersion = v;
+        if (alive) setVersion(v);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return (
+    <button
+      className="menu-item"
+      onClick={() => {
+        onClose();
+        runMenuUpdateCheck();
+      }}
+    >
+      <MenuIcon>
+        <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+        <path d="M21 3v6h-6" />
+      </MenuIcon>
+      <span className="menu-item-label">Check for updates</span>
+      <span className="menu-hint">{updateRowHint(update, version)}</span>
+    </button>
+  );
+}
+
 function AccountPopover({
   onClose,
   onOpenAccount,
@@ -519,6 +591,7 @@ function AccountPopover({
         <span className="menu-item-label">Connection</span>
         <span className="menu-hint">Server URL</span>
       </button>
+      <UpdateMenuRow onClose={onClose} />
 
       <div className="menu-sep" />
       <button

@@ -187,6 +187,14 @@ export function updateState(): UpdateState {
   return state;
 }
 
+/** Listen for state changes outside React; returns the unsubscribe. */
+export function subscribeUpdateState(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
 /**
  * Ask the endpoint whether a newer version exists. Returns true if one is
  * available (and stashes it for `installUpdate`). Safe to call anywhere — in a
