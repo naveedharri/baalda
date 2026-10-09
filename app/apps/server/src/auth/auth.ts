@@ -18,6 +18,7 @@ import { isValidProfileImage } from "./profile-image.js";
 import { hasExpiryNotice } from "../invitations/expiries.js";
 import { invitationActivityChanged } from "../invitations/sweep.js";
 import { applyInvitationAccess } from "../members/invitation-access.js";
+import { announceInvitation, announceInvitationGone } from "../sync/user-events.js";
 
 /**
  * Better Auth (spec 04 §1/§2).
@@ -342,6 +343,16 @@ export const auth = betterAuth({
           } catch (err) {
             console.error("[invitations] expiry notice check failed:", err);
           }
+          // The invitee's open apps show it now, not on their next reload.
+          const inviter = data.inviter as { name?: string | null; email?: string | null } | undefined;
+          await announceInvitation({
+            email: data.invitation.email,
+            invitationId: data.invitation.id,
+            orgId: data.organization.id,
+            orgName: data.organization.name,
+            inviterName: inviter?.name?.trim() || inviter?.email || "",
+            role: String(data.invitation.role ?? "member"),
+          });
         },
         // A teammate accepted an invitation → announce to everyone live in the
         // vault so their roster refreshes and the join celebration fires.
@@ -354,11 +365,13 @@ export const auth = betterAuth({
         afterRemoveMember: async ({ organization }) => {
           await onMembershipTrimmed(authPool, organization.id);
         },
-        afterCancelInvitation: async ({ organization }) => {
+        afterCancelInvitation: async ({ organization, invitation }) => {
           await onMembershipTrimmed(authPool, organization.id);
+          await announceInvitationGone(invitation.id, { email: invitation.email });
         },
-        afterRejectInvitation: async ({ organization }) => {
+        afterRejectInvitation: async ({ organization, invitation, user }) => {
           await onMembershipTrimmed(authPool, organization.id);
+          await announceInvitationGone(invitation.id, { userId: user.id });
         },
         afterAcceptInvitation: async (data) => {
           // Apply the access the inviter chose (invitation_access, m046). The
@@ -370,6 +383,7 @@ export const auth = betterAuth({
           });
           const name = data.user.name?.trim() || data.user.email;
           await announceMemberJoined(data.organization.id, name);
+          await announceInvitationGone(data.invitation.id, { userId: data.user.id });
         },
         // Role changes must go through PATCH /api/orgs/:orgId/members/:userId,
         // which enforces our stricter matrix (an admin may not touch another

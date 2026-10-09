@@ -3,6 +3,7 @@ import type { IncomingMessage, Server as HttpServer } from "node:http";
 import type { Socket } from "node:net";
 import { config } from "../config.js";
 import { type PubSub, vaultTopic } from "./pubsub.js";
+import { decodeUserEvent, USER_EVENTS_CAP, userTopic } from "./user-events.js";
 import { verifyVaultToken } from "../tokens/vault-token.js";
 import { listReadableDocsInVault } from "../permissions/vault-docs.js";
 import { listEmptyDocs, loadDocDiff } from "../yjs/persistence.js";
@@ -488,6 +489,8 @@ class VaultConnection {
   private caps = new Set<string>();
   private readable = new Set<string>();
   private unsubscribe: (() => void) | null = null;
+  /** The user-addressed topic (`invitations` cap only, sync/user-events.ts). */
+  private unsubscribeUser: (() => void) | null = null;
   private helloSeen = false;
   // Set once by cleanup(). `close` fires exactly once, so anything that outlives
   // it (an in-flight hello await) must consult this instead of relying on
@@ -638,6 +641,21 @@ class VaultConnection {
       return;
     }
     this.unsubscribe = off;
+
+    // Events addressed to this USER (an invitation to another vault) ride
+    // whichever vault channel they have open. Opt-in by cap: an old client
+    // would not know the frame.
+    if (this.caps.has(USER_EVENTS_CAP)) {
+      const offUser = await this.pubsub.subscribe(userTopic(this.userId), (p) => {
+        const event = decodeUserEvent(p);
+        if (event && !this.closed) this.send(event);
+      });
+      if (this.closed || this.ws.readyState !== this.ws.OPEN) {
+        offUser();
+        return;
+      }
+      this.unsubscribeUser = offUser;
+    }
 
     // Replay the announce that raced the auth I/O — BEFORE the backfill, so the
     // rest of the vault sees this user (and this user gets the re-announce
@@ -1484,6 +1502,10 @@ class VaultConnection {
         encodePubsubPresence({ userId: this.userId, docId: null, name, color, status }),
       );
       this.announced = false;
+    }
+    if (this.unsubscribeUser) {
+      this.unsubscribeUser();
+      this.unsubscribeUser = null;
     }
     if (this.unsubscribe) {
       this.unsubscribe();

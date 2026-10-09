@@ -8,6 +8,7 @@ import { ReconcileBanner } from "./components/ReconcileBanner";
 import { HeldDeleteNotice } from "./components/HeldDeleteNotice";
 import { NoteRemovedNotice } from "./components/NoteRemovedNotice";
 import { useNoticeSlot } from "./components/useNoticeSlot";
+import { useLiveInvitations } from "./components/useLiveInvitations";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
 import { SyncPausedBannerView } from "./components/SyncPausedBanner";
 import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
@@ -956,6 +957,8 @@ function PromptedAuthDialog() {
 }
 
 export default function App() {
+  // Invitations to other vaults appear live, not on the next reload.
+  useLiveInvitations();
   const vault = useStore((s) => s.vault);
   const openNote = useStore((s) => s.openNote);
   const activeVirtual = useStore(

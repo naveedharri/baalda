@@ -11,6 +11,7 @@ import {
   isActiveStatus,
 } from "../../billing/store.js";
 import { announceMemberJoined } from "../../sync/member-events.js";
+import { announceInvitationGone } from "../../sync/user-events.js";
 import { applyInvitationAccess } from "../../members/invitation-access.js";
 import { billingEnabled } from "../../config.js";
 import { dispatchMail, emailEnabled } from "../../email/mailer.js";
@@ -602,6 +603,10 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     );
     const displayName = who.rows[0]?.name?.trim() || session.email;
     void announceMemberJoined(organizationId, displayName);
+    // The invitations this join answered leave the joiner's other devices.
+    for (const r of invited.rows) {
+      void announceInvitationGone(r.id, { userId: session.userId });
+    }
 
     return c.json({ organizationId, name: target.name, alreadyMember: false, role });
   });

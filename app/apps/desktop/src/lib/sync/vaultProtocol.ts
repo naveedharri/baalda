@@ -57,7 +57,7 @@ export interface HelloFrame {
 }
 
 /** What this build can handle beyond the original protocol. Sent in `hello`. */
-export const CLIENT_CAPS = ["voice", "revocation-batches", "bulk-regrant"];
+export const CLIENT_CAPS = ["voice", "revocation-batches", "bulk-regrant", "invitations"];
 
 /** A teammate's live "who's viewing what" state (mirror of the server type).
  *  `docId` null means the user isn't viewing anything (or left) — clear them. */
@@ -160,6 +160,17 @@ export type ServerControl =
   | ({ t: "presence" } & PresenceState)
   /** A new release exists (#269): a hint to run the normal update check now. */
   | { t: "version-available"; version: string }
+  /** Addressed to THIS user, whatever vault the channel is for (`invitations`
+   *  cap): an invitation arrived, or one was answered/cancelled elsewhere. */
+  | {
+      t: "invitation";
+      invitationId: string;
+      orgId: string;
+      orgName: string;
+      inviterName: string;
+      role: string;
+    }
+  | { t: "invitation-gone"; invitationId: string }
   /** The shrink burst brake (#252) paused — or stopped pausing — THIS user's
    *  content writes in this vault. `until` (ms epoch) and `count` come with a
    *  pause. Never a refusal: local edits stay and sync once it lifts. */
@@ -230,6 +241,20 @@ export function parseServerControl(text: string): ServerControl | null {
     return (v as { meta?: unknown }).meta === true ? { t: "registry", meta: true } : { t: "registry" };
   }
   if (t === "activity") return { t: "activity" };
+  if (t === "invitation" || t === "invitation-gone") {
+    const o = v as Record<string, unknown>;
+    if (typeof o.invitationId !== "string") return null;
+    if (t === "invitation-gone") return { t, invitationId: o.invitationId };
+    const str = (x: unknown) => (typeof x === "string" ? x : "");
+    return {
+      t,
+      invitationId: o.invitationId,
+      orgId: str(o.orgId),
+      orgName: str(o.orgName),
+      inviterName: str(o.inviterName),
+      role: str(o.role) || "member",
+    };
+  }
   if (t === "member" && typeof (v as { name?: unknown }).name === "string") {
     return { t: "member", name: (v as { name: string }).name };
   }

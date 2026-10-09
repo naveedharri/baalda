@@ -803,6 +803,11 @@ interface AppStore {
   /** Change a member's role in the active vault (owner/admin), then refresh. */
   updateMemberRole: (userId: string, role: "member" | "admin") => Promise<void>;
   acceptInvitation: (invitationId: string) => Promise<void>;
+  /** Re-read only the signed-in user's own pending invitations (live arrival,
+   *  window focus, the account menu opening). Cheap: one GET. */
+  refreshUserInvitations: () => Promise<void>;
+  /** Drop one invitation that was answered or cancelled elsewhere. */
+  dropUserInvitation: (invitationId: string) => void;
   joinVault: (code: string) => Promise<void>;
   /** Detach a vault from THIS device (forget its folder, stop syncing it).
    *  Server data and membership are untouched — it can be re-opened later. */
@@ -3861,6 +3866,26 @@ export const useStore = create<AppStore>((set, get) => ({
     if (!activeOrgId) throw new Error("No active vault");
     await authManager.api.updateMemberRole(activeOrgId, userId, role);
     await get().refreshVault();
+  },
+
+  refreshUserInvitations: async () => {
+    if (!get().session) return;
+    const gen = authInitGen;
+    try {
+      const invs = await authManager.api.listUserInvitations();
+      // A sign-out or account switch while the GET was out: not ours to set.
+      if (authInitGen !== gen || !get().session) return;
+      set({ userInvitations: invs.filter((i) => i.status === "pending") });
+    } catch (e) {
+      console.warn("[invitations] refresh failed", e);
+    }
+  },
+
+  dropUserInvitation: (invitationId) => {
+    const cur = get().userInvitations;
+    if (cur.some((i) => i.id === invitationId)) {
+      set({ userInvitations: cur.filter((i) => i.id !== invitationId) });
+    }
   },
 
   acceptInvitation: async (invitationId) => {

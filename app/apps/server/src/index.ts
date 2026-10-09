@@ -17,6 +17,7 @@ import {
   setMemberJoinedPublisher,
   setOrgChangedPublisher,
 } from "./sync/member-events.js";
+import { publishUserEvent, setUserEventPublisher } from "./sync/user-events.js";
 import { backfillIndex } from "./index/indexer.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
@@ -109,6 +110,11 @@ async function main() {
   // connected teammates refresh their roster + celebrate without a reload.
   setMemberJoinedPublisher((vaultId, name) => {
     void vaultChannel.publishMemberJoined(vaultId, name).catch(broadcastFailed("member-joined"));
+  });
+  // Invitations reach the invitee's open apps live, on whatever vault channel
+  // they have open (sync/user-events.ts).
+  setUserEventPublisher((userId, event) => {
+    void publishUserEvent(pubsub, userId, event).catch(broadcastFailed("user-event"));
   });
   // A vault rename / icon change reaches teammates' switchers live (#306).
   setOrgChangedPublisher((vaultId, change) => {

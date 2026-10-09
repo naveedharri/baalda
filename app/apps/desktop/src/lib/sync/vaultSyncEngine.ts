@@ -13,6 +13,7 @@
 import type { AppearanceSettings } from "../appearanceSettings";
 import { ApiClient, ApiError } from "../api";
 import { markOnce } from "../perf";
+import { notifyInvitationFrame } from "../invitationLive";
 import type { ActivityStatus } from "../prefs";
 import {
   bytesToBase64,
@@ -873,6 +874,9 @@ export class VaultSyncEngine {
         this.onServerRevoked?.(control.docIds, false);
       } else if (control.t === "rejected") {
         this.onServerRejected?.(control.docId, control.reason);
+      } else if (control.t === "invitation" || control.t === "invitation-gone") {
+        // User-addressed, not about this vault: hand it to the invitation list.
+        notifyInvitationFrame(control);
       } else if (control.t === "version-available") {
         this.onVersionAvailable?.(control.version);
       } else if (control.t === "brake") {

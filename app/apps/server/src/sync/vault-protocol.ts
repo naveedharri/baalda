@@ -220,6 +220,20 @@ export type ServerControl =
    */
   | { t: "version-available"; version: string }
   /**
+   * User-addressed (sync/user-events.ts), sent only to clients advertising the
+   * `invitations` cap: an invitation to ANY vault arrived for this user, or one
+   * was accepted, declined or cancelled. A hint to re-read the invitation list.
+   */
+  | {
+      t: "invitation";
+      invitationId: string;
+      orgId: string;
+      orgName: string;
+      inviterName: string;
+      role: string;
+    }
+  | { t: "invitation-gone"; invitationId: string }
+  /**
    * The shrink burst brake (#252) holds — or stopped holding — THIS user's
    * content writes in this vault. Addressed to that user only. `held: true`
    * carries when the hold lapses (`until`, ms epoch) and how many notes engaged
