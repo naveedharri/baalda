@@ -32,6 +32,7 @@
 // table, because their widget is editable (./table/TableWidget). Clicking a
 // cell types into the cell, so there is no source to fall back to.
 
+import { onAttachmentArrived } from "../attachmentArrivals";
 import { openImageLightbox } from "../imageLightbox";
 import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { type EditorState, StateField } from "@codemirror/state";
@@ -117,12 +118,19 @@ class HtmlEmbedWidget extends WidgetType {
  * makes, so it reaches the `.md`, Yjs and undo like any edit. While the caret
  * has unfolded the image to source there is no widget, and so no handle.
  */
+/** How long a missing image says "Downloading" before it admits it is not here. */
+const IMAGE_DOWNLOAD_PATIENCE_MS = 90_000;
+/** Per-widget-DOM unsubscribe for {@link ImageWidget.watchMissing}. */
+const imageCleanups = new WeakMap<HTMLElement, () => void>();
+
 class ImageWidget extends WidgetType {
   constructor(
     readonly src: string,
     readonly alt: string,
     readonly width: number | null,
     readonly editable: boolean,
+    /** Vault-relative path when `src` is a file in this vault, else null. */
+    readonly rel: string | null = null,
   ) {
     super();
   }
@@ -147,11 +155,12 @@ class ImageWidget extends WidgetType {
       if (e.detail > 1 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       openImageLightbox(this.src, this.alt);
     });
-    if (!this.editable) return img;
 
     const wrap = document.createElement("span");
     wrap.className = "cm-md-img-wrap";
     wrap.appendChild(img);
+    this.watchMissing(wrap, img);
+    if (!this.editable) return wrap;
     const handle = document.createElement("span");
     handle.className = "cm-md-img-handle";
     handle.setAttribute("aria-hidden", "true");
@@ -205,6 +214,60 @@ class ImageWidget extends WidgetType {
       e.stopPropagation();
     });
     return wrap;
+  }
+  /**
+   * A file that is not on this disk yet — typically a teammate's paste whose
+   * bytes are still downloading — gets a visible placeholder instead of a
+   * broken image, and the picture loads the moment the binary mirror announces
+   * the file (`attachmentArrivals.ts`). A webview remembers a failed load, so
+   * the retry carries a throwaway query, which the asset protocol ignores.
+   */
+  private watchMissing(wrap: HTMLElement, img: HTMLImageElement): void {
+    let placeholder: HTMLElement | null = null;
+    let off: (() => void) | null = null;
+    let giveUp: ReturnType<typeof setTimeout> | null = null;
+    const cleanup = () => {
+      off?.();
+      off = null;
+      if (giveUp) clearTimeout(giveUp);
+      giveUp = null;
+    };
+    img.addEventListener("load", () => {
+      if (!placeholder) return;
+      placeholder.remove();
+      placeholder = null;
+      img.style.display = "";
+      wrap.classList.remove("is-pending");
+      cleanup();
+    });
+    img.addEventListener("error", () => {
+      if (placeholder) return;
+      placeholder = document.createElement("span");
+      placeholder.className = "cm-md-img-pending";
+      placeholder.setAttribute("role", "img");
+      if (this.alt) placeholder.setAttribute("aria-label", this.alt);
+      img.style.display = "none";
+      wrap.classList.add("is-pending");
+      wrap.insertBefore(placeholder, img);
+      if (!this.rel) {
+        placeholder.textContent = "Image could not be loaded";
+        return;
+      }
+      placeholder.textContent = "Downloading image…";
+      const rel = this.rel;
+      off = onAttachmentArrived((arrived) => {
+        if (arrived !== rel) return;
+        img.src = `${this.src}${this.src.includes("?") ? "&" : "?"}v=${Date.now()}`;
+      });
+      giveUp = setTimeout(() => {
+        if (placeholder) placeholder.textContent = "Image not on this device yet";
+      }, IMAGE_DOWNLOAD_PATIENCE_MS);
+    });
+    imageCleanups.set(wrap, cleanup);
+  }
+  destroy(dom: HTMLElement) {
+    imageCleanups.get(dom)?.();
+    imageCleanups.delete(dom);
   }
   ignoreEvent(event: Event) {
     // The handle's gesture is the widget's own: CodeMirror must not move the
@@ -520,7 +583,7 @@ function embedWidget(
   const name = (src.split(/[\\/]/).pop() || alt || "file").split("?")[0];
   switch (format?.viewer) {
     case "image":
-      return new ImageWidget(resolved, alt, width, editable);
+      return new ImageWidget(resolved, alt, width, editable, rel);
     case "pdf":
       return new PdfEmbedWidget(resolved, alt);
     case "video":

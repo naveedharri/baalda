@@ -10,6 +10,7 @@
 // When signed out / offline / unmapped, it falls back to a local Awareness and
 // the bridge's normal seed-from-file (pure local-first).
 
+import { markAccessTreeStale } from "../accessTreeStale";
 import type { AppearanceSettings } from "../appearanceSettings";
 import { NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { Awareness } from "y-protocols/awareness";
@@ -33,6 +34,7 @@ import { viewingDocId } from "../presence/viewingDocId";
 import type { ActivityStatus } from "../prefs";
 import { toast } from "../toast";
 import { AttachmentSync, routesToAttachmentSync } from "./attachments";
+import { EmbedArrivalFetcher } from "./embedArrival";
 import { BinaryDeleteQueue } from "./binaryDeletes";
 import { BootstrapRunner } from "./bootstrap";
 import {
@@ -522,6 +524,11 @@ export class SyncManager implements InboundHost {
     },
   });
   private attachments: AttachmentSync | null = null;
+  /** Fetches the open note's newly embedded `attachments/` files the moment a
+   *  teammate's edit names them (`embedArrival.ts`). Lives with `attachments`. */
+  private embedArrivals: EmbedArrivalFetcher | null = null;
+  /** Detaches the open note's remote-change observer that feeds it. */
+  private embedObserverOff: (() => void) | null = null;
   /** Disk deletes for BINARIES — the blob mirror's own `drainDiskDeletes`
    *  (`binaryDeletes.ts`). Built and torn down beside the mirror it guards. */
   private binaryDeletes: BinaryDeleteQueue | null = null;
@@ -6133,6 +6140,8 @@ export class SyncManager implements InboundHost {
     this.binaryDownloadPhase = false;
     this.attachments?.stop();
     this.attachments = null;
+    this.embedArrivals?.stop();
+    this.embedArrivals = null;
     this.binaryDeletes?.stop();
     this.binaryDeletes = null;
     this.clearVaultPresence();
@@ -6536,6 +6545,9 @@ export class SyncManager implements InboundHost {
         }
         this.handleRegistryChanged("registry-frame");
         this.notifyActivityChanged(scope);
+        // An open person Access tab re-reads its tree (a teammate's new file
+        // or folder, an MCP create).
+        markAccessTreeStale();
       },
       // Trash / shrink listings moved (#260): refetch instead of polling.
       onActivityChanged: () => this.notifyActivityChanged(scope),
@@ -6725,6 +6737,8 @@ export class SyncManager implements InboundHost {
     if (!vaultId) {
       this.attachments?.stop();
       this.attachments = null;
+      this.embedArrivals?.stop();
+      this.embedArrivals = null;
       this.binaryDeletes?.stop();
       this.binaryDeletes = null;
       return;
@@ -6768,6 +6782,15 @@ export class SyncManager implements InboundHost {
       // A pass rebuilds the sidebar's file dots from both listings, so this is
       // also how a removed file's dot goes away.
       onServerChanged: () => this.attachments?.scheduleReconcile(),
+    });
+    this.embedArrivals?.stop();
+    this.embedArrivals = new EmbedArrivalFetcher({
+      exists: (relPath) => ipc.binaryExists(relPath, scope.vaultEpoch),
+      download: async (relPaths) => {
+        const mirror = this.attachments;
+        if (!mirror || !scope.isCurrent()) throw new Error("vault changed");
+        await mirror.downloadMissing(relPaths);
+      },
     });
     this.attachments = new AttachmentSync({
       // A vanished vault root (#221) stops the binary mirror too: a download
@@ -7005,6 +7028,7 @@ export class SyncManager implements InboundHost {
     this.current = sync;
     this.currentDocId = mapping.docId;
     this.currentRelPath = relPath;
+    this.watchEmbeds(bridge);
     // Take over the indicator from the vault channel right away with the
     // provider's initial status (it fires again as the socket progresses).
     this.docStatus = sync.status;
@@ -7168,6 +7192,25 @@ export class SyncManager implements InboundHost {
   }
 
   /**
+   * Feed the open note's text to {@link EmbedArrivalFetcher}: once on open (an
+   * embed the vault feed delivered while the note was closed) and on every
+   * REMOTE transaction (`tr.local` is false only for applied updates, never for
+   * the editor's or the disk bridge's own writes), so a teammate's pasted image
+   * is fetched within a second or two instead of on some later mirror pass.
+   */
+  private watchEmbeds(bridge: NoteBridge): void {
+    this.embedObserverOff?.();
+    const text = bridge.doc.getText("content");
+    const read = () => text.toString();
+    const onText = (_e: Y.YTextEvent, tr: Y.Transaction) => {
+      if (!tr.local) this.embedArrivals?.noteRemoteChange(read);
+    };
+    text.observe(onText);
+    this.embedObserverOff = () => text.unobserve(onText);
+    this.embedArrivals?.noteRemoteChange(read);
+  }
+
+  /**
    * Tear down the open note's network session.
    *
    * `closing` is the editor bridge's own teardown (`bridgeManager.closeCurrent`
@@ -7176,6 +7219,8 @@ export class SyncManager implements InboundHost {
    * store until it settles instead of being handed back at once (#200).
    */
   closeCurrent(closing?: Promise<unknown>): void {
+    this.embedObserverOff?.();
+    this.embedObserverOff = null;
     const closedDoc = this.docStore?.suppressedDoc() ?? null;
     if (closing && closedDoc && this.docStore) this.docStore.holdUntil(closedDoc, closing);
     if (this.current) {

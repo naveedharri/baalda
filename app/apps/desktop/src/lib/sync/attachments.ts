@@ -65,6 +65,7 @@
 // back to the legacy `POST /api/vaults/:id/blobs` and remembers, so exactly one
 // upload pays for the probe.
 
+import { announceAttachmentArrived } from "../attachmentArrivals";
 import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
 import { isTransientPath, pathKey } from "../pathIdentity";
 import { BATCH_MAX_FILES, runPool, useBulkPath } from "./pool";
@@ -2176,7 +2177,13 @@ export class AttachmentSync {
    * request that carries one. `direct` then decides the headers, and that is the
    * whole rule: presign ⇒ nothing, our own route ⇒ the bearer.
    */
+  /** Download one blob, then tell any embed waiting on it (`attachmentArrivals`). */
   private async downloadOne(b: ServerBlob, opts: { overwrite?: boolean } = {}): Promise<void> {
+    await this.downloadOneInner(b, opts);
+    announceAttachmentArrived(b.relPath as string);
+  }
+
+  private async downloadOneInner(b: ServerBlob, opts: { overwrite?: boolean } = {}): Promise<void> {
     const relPath = b.relPath as string;
     // Last line of the "never overwrite an occupied path" invariant
     // ({@link diffAttachments}). The diff already subtracts every path this

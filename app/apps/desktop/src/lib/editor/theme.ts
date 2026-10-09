@@ -229,6 +229,20 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     verticalAlign: "bottom",
     lineHeight: "0",
   },
+  // A missing image (a teammate's paste still downloading) holds its place
+  // with a quiet box instead of a broken-image glyph.
+  ".cm-md-img-pending": {
+    display: "inline-block",
+    padding: "var(--sp-4) var(--sp-5)",
+    border: "1px dashed var(--border)",
+    borderRadius: "var(--radius-sm)",
+    color: "var(--text-tertiary)",
+    fontSize: "0.9em",
+    lineHeight: "1.4",
+  },
+  ".cm-md-img-wrap.is-pending .cm-md-img-handle": {
+    display: "none",
+  },
   ".cm-md-img-handle": {
     position: "absolute",
     right: "2px",
