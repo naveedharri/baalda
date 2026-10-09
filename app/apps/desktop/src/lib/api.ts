@@ -112,6 +112,25 @@ export interface Organization {
   createdAt?: string;
 }
 
+/**
+ * Two facts the notes listing's last page states about the caller (server
+ * 2026-10-09). `null` = the server did not say (an older server), which every
+ * reader treats as "unknown", never as false.
+ */
+export interface ListingVisibility {
+  /** The vault holds live notes or files this user cannot read. */
+  hiddenContent: boolean | null;
+  /** A create at the vault root would be allowed. */
+  canCreateRoot: boolean | null;
+}
+
+function listingVisibility(data: { hiddenContent?: unknown; canCreateRoot?: unknown }): ListingVisibility {
+  return {
+    hiddenContent: typeof data.hiddenContent === "boolean" ? data.hiddenContent : null,
+    canCreateRoot: typeof data.canCreateRoot === "boolean" ? data.canCreateRoot : null,
+  };
+}
+
 export interface Member {
   id: string;
   userId: string;
@@ -2598,15 +2617,17 @@ export class ApiClient {
    */
   async listNoteRegistry(
     vaultId: string,
-  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null }> {
-    const { data } = await this.request<{ notes: RegisteredNote[]; tombstones?: string[] }>(
-      "GET",
-      "/api/notes",
-      { query: { vaultId } },
-    );
+  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null } & ListingVisibility> {
+    const { data } = await this.request<{
+      notes: RegisteredNote[];
+      tombstones?: string[];
+      hiddenContent?: boolean;
+      canCreateRoot?: boolean;
+    }>("GET", "/api/notes", { query: { vaultId } });
     return {
       notes: data.notes ?? [],
       tombstones: Array.isArray(data.tombstones) ? data.tombstones : null,
+      ...listingVisibility(data),
     };
   }
 
@@ -2950,10 +2971,11 @@ export class ApiClient {
   async listNoteRegistryPaged(
     vaultId: string,
     opts: { limit?: number } = {},
-  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null }> {
+  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null } & ListingVisibility> {
     const limit = opts.limit ?? REGISTRY_PAGE_LIMIT;
     const notes: RegisteredNote[] = [];
     let tombstones: string[] | null = null;
+    let visibility: ListingVisibility = { hiddenContent: null, canCreateRoot: null };
     let after: string | undefined;
     // Bounded so a server that keeps answering the same `nextAfter` cannot spin
     // this loop forever; 1000 pages is 1,000,000 notes at the default limit.
@@ -2962,19 +2984,22 @@ export class ApiClient {
         notes: RegisteredNote[];
         tombstones?: string[];
         nextAfter?: string | null;
+        hiddenContent?: boolean;
+        canCreateRoot?: boolean;
       }>("GET", "/api/notes", {
         query: { vaultId, limit: String(limit), after },
         timeoutMs: REGISTRY_LISTING_TIMEOUT_MS,
       });
       notes.push(...(data.notes ?? []));
       tombstones = Array.isArray(data.tombstones) ? data.tombstones : null;
+      visibility = listingVisibility(data);
       const next = typeof data.nextAfter === "string" ? data.nextAfter : null;
       // No cursor ⇒ the last (or only) page. A cursor that did not ADVANCE is a
       // server bug; stopping is strictly better than looping on it.
-      if (!next || next === after) return { notes, tombstones };
+      if (!next || next === after) return { notes, tombstones, ...visibility };
       after = next;
     }
-    return { notes, tombstones };
+    return { notes, tombstones, ...visibility };
   }
 
   // ---- Versioning ---------------------------------------------------------

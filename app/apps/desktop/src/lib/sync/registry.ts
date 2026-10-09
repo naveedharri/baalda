@@ -50,6 +50,7 @@ import { Checkpointer, checkpointBatchFor } from "./checkpoint";
 import { sha256Hex } from "../bridge/adapter";
 import { mergeSv, svFromBase64, svIsEmpty, svToBase64, unseenWork } from "./ackedSv";
 import { reconcileReport } from "./reconcileReport";
+import { vaultVisibility } from "./vaultVisibility";
 import { isSelfAccessChange } from "./selfAccessChanges";
 
 /** A frozen copy of `scope` that is never current, kept by `reset()` so the
@@ -3786,6 +3787,13 @@ export class VaultRegistry {
     this.accountReadOnly = false;
     const [folderRegistry, noteRegistry] = await this.takeListings(vaultId);
     if (this.stale()) return false;
+    // The empty state of a member who can read nothing yet reads this.
+    vaultVisibility.publish({
+      vaultId,
+      readableItems: folderRegistry.folders.length + noteRegistry.notes.length,
+      hiddenContent: noteRegistry.hiddenContent ?? null,
+      canCreateRoot: noteRegistry.canCreateRoot ?? null,
+    });
     const serverFolders = folderRegistry.folders;
     let serverNotes = noteRegistry.notes;
     let { folders, notes } = flattenTree(workingTree);

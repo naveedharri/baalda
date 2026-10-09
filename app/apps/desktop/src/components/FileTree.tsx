@@ -72,6 +72,8 @@ import {
   statusTone,
 } from "../lib/presence/color";
 import { Face } from "./Face";
+import { NothingShared } from "./EditorPlaceholders";
+import { useEmptyVaultView } from "./useEmptyVaultView";
 import type { ShareTarget } from "./ShareDialog";
 
 /* Lazy: the sharing sheet is a context-menu action, and keeping it out of the
@@ -229,6 +231,7 @@ const ICON_TRASH = (
 
 export function FileTree() {
   const tree = useStore((s) => s.tree);
+  const emptyView = useEmptyVaultView();
   const openNote = useStore((s) => s.openNote);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const syncStatus = useStore((s) => s.syncStatus);
@@ -1879,7 +1882,13 @@ export function FileTree() {
         </div>
       ) : null}
       {data.length === 0 ? (
-        <div className="filetree-empty">No notes yet</div>
+        <div className="filetree-empty">
+          {emptyView.state === "nothing-shared" ? (
+            <NothingShared ownerName={emptyView.ownerName} vaultName={emptyView.vaultName} />
+          ) : (
+            "No notes yet"
+          )}
+        </div>
       ) : (
         <RowSharedContext.Provider value={rowShared}>
           <Tree<TreeNode>

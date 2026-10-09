@@ -11,6 +11,7 @@ import {
   canEditDoc,
   canEditFolder,
   canWriteBlob,
+  vaultRootWritable,
 } from "../../permissions/http-gates.js";
 import type { DeleteRefusalCode } from "../../permissions/http-gates.js";
 import { ACCOUNT_READ_ONLY_BODY, refusedForBilling } from "../../permissions/http-gates.js";
@@ -1013,7 +1014,24 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // local file, so it carries the minimum that can justify that.
     if (more) return c.json({ notes, nextAfter });
     const tombstones = await listDeletedReadableDocsInVault(session.userId, vaultId);
-    return c.json({ notes, tombstones: [...tombstones], ...(page ? { nextAfter: null } : {}) });
+    // Two booleans for the empty state of a member who can read nothing yet
+    // (owner decision 2026-10-09). Without `hiddenContent` the desktop cannot
+    // tell "nothing is shared with you" from "this vault is empty", and without
+    // `canCreateRoot` it offers ⌘N where the create would be refused. Last page
+    // only, beside the tombstones, so both halves of the client's check (zero
+    // readable rows AND something hidden) come from one snapshot. A boolean,
+    // never ids: it says that something exists, not what or where.
+    const [hiddenContent, canCreateRoot] = await Promise.all([
+      vaultHasHiddenContent(vaultId, readable),
+      vaultRootWritable(session.userId, org),
+    ]);
+    return c.json({
+      notes,
+      tombstones: [...tombstones],
+      hiddenContent,
+      canCreateRoot,
+      ...(page ? { nextAfter: null } : {}),
+    });
   });
 
   // Rename / move a single note (rel_path / folder / title). doc_id unchanged.
@@ -1324,4 +1342,30 @@ export async function deleteRegisteredFile(
     // Ids and counts only — never the path (#267).
     console.info(`[registry] deleted file ${id} in vault ${row.vault_id} and ${blobs} blob(s)`);
     return { status: "deleted", vaultId: row.vault_id, path: row.path };
+}
+
+/**
+ * Does `vaultId` hold at least one live note or file outside `readable`?
+ * One EXISTS over the vault's live docs with an anti-join against the readable
+ * set, so it stops at the first hidden row and never materialises a list.
+ */
+export async function vaultHasHiddenContent(
+  vaultId: string,
+  readable: Set<string>,
+): Promise<boolean> {
+  const ids = [...readable];
+  const { rows } = await pool.query<{ hidden: boolean }>(
+    `WITH r(id) AS (SELECT unnest($2::text[]))
+     SELECT EXISTS (
+       SELECT 1 FROM notes n
+        WHERE n.vault_id = $1 AND n.deleted_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM r WHERE r.id = n.id)
+       UNION ALL
+       SELECT 1 FROM files f
+        WHERE f.vault_id = $1
+          AND NOT EXISTS (SELECT 1 FROM r WHERE r.id = f.id)
+     ) AS hidden`,
+    [vaultId, ids],
+  );
+  return rows[0]?.hidden === true;
 }

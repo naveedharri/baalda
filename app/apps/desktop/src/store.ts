@@ -48,6 +48,7 @@ import { applyEffectiveTheme, type ThemeMode } from "./lib/theme";
 import { syncManager } from "./lib/sync/docSession";
 import { vaultScopes } from "./lib/sync/vaultScope";
 import { reconcileReport } from "./lib/sync/reconcileReport";
+import { vaultVisibility, type VaultVisibility } from "./lib/sync/vaultVisibility";
 import { resetMembersAccessCaches } from "./lib/membersAccessCaches";
 import type { SyncStatus } from "./lib/sync/syncManager";
 import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
@@ -382,6 +383,10 @@ interface AppStore {
   syncStatus: SyncStatus;
   /** Vault channel connectivity, independent of the open note’s permissions. */
   vaultSyncStatus: SyncStatus;
+  /** What the last registry pull said about this user's view of the vault
+   *  (readable count, hidden content, root create). Mirror of
+   *  `lib/sync/vaultVisibility`; drives `lib/emptyVaultState`. */
+  vaultVisibility: VaultVisibility | null;
   /** When the current doc last flushed all changes to the server — drives
    *  "Synced · just now". Bumped on every server ack, not just initial sync. */
   lastSyncedAt: number | null;
@@ -1944,6 +1949,7 @@ export const useStore = create<AppStore>((set, get) => ({
   members: [],
   pendingInvitations: [],
   userInvitations: [],
+  vaultVisibility: null,
   ...vaultScopedSyncReset(),
   lastSyncedAt: null,
   syncPauseDismissed: null,
@@ -1983,6 +1989,8 @@ export const useStore = create<AppStore>((set, get) => ({
     // already happened.
     const switched = v?.path !== get().vault?.path;
     if (switched) armSyncGate();
+    // The last vault's "nothing shared with you" answer is not this one's.
+    if (switched) vaultVisibility.publish(null);
     set({
       vault: v,
       itemColors: readItemColors(v?.path),
@@ -5029,3 +5037,6 @@ useStore.subscribe((state, prev) => {
     resetMembersAccessCaches();
   }
 });
+
+// Registry pull → store mirror (see `lib/sync/vaultVisibility`).
+vaultVisibility.subscribe((v) => useStore.setState({ vaultVisibility: v }));
