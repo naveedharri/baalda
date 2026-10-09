@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
@@ -13,6 +13,7 @@ import { LazyAvatar } from "./Face";
 import { MenuIcon } from "./MenuIcon";
 import { BugReportDialog } from "./BugReportDialog";
 import { useHoverMenu } from "./useHoverMenu";
+import { createFetchThrottle, isForcedMenuOpen } from "../lib/menuFetchThrottle";
 import {
   checkAndAutoInstall,
   currentVersion,
@@ -112,6 +113,15 @@ export function AccountMenu() {
   const menu = useHoverMenu();
   const open = menu.open;
   const closeMenu = menu.close;
+  // Hover opens the menu often, so its two fetches are throttled to once a
+  // minute each; a click that opens it from closed still asks at once.
+  const bugReportThrottle = useRef(createFetchThrottle()).current;
+  const invitationsThrottle = useRef(createFetchThrottle()).current;
+  const previousMode = useRef(menu.mode);
+  const forcedOpen = isForcedMenuOpen(previousMode.current, menu.mode);
+  useEffect(() => {
+    previousMode.current = menu.mode;
+  }, [menu.mode]);
   // Invitation ids this device has already shown in the menu; anything else
   // pulses here and on the identity-bar dot until the menu is opened.
   const [seenInvites, setSeenInvites] = useState(loadSeenInvitations);
@@ -144,26 +154,39 @@ export function AccountMenu() {
   const [bugReport, setBugReport] = useState(false);
   const serverUrl = useStore((s) => s.serverUrl);
   const userId = session?.user.id ?? null;
+  // getAuthMethods fails CLOSED, so one answer taken while the server was
+  // down (or before it gained the setting) would hide the icon for the whole
+  // session. Ask again whenever the window comes back and the menu opens, at
+  // most once a minute; the last answer stays in the meantime. An answer is
+  // kept while its account + server are still the current ones, whatever the
+  // menu did meanwhile, since the throttle already counted it.
+  const bugReportKey = userId ? `${userId}\n${serverUrl}` : null;
+  const bugReportKeyRef = useRef(bugReportKey);
+  const checkBugReport = useCallback(
+    (force: boolean) => {
+      const key = bugReportKeyRef.current;
+      if (!key || !bugReportThrottle.shouldFetch(key, Date.now(), force)) return;
+      void authManager.api.getAuthMethods().then((m) => {
+        if (bugReportKeyRef.current === key) setBugReport(m.bugReport);
+      });
+    },
+    [bugReportThrottle],
+  );
   useEffect(() => {
-    if (!userId) {
+    bugReportKeyRef.current = bugReportKey;
+    if (!bugReportKey) {
+      bugReportThrottle.reset();
       setBugReport(false);
       return;
     }
-    let alive = true;
-    // getAuthMethods fails CLOSED, so one answer taken while the server was
-    // down (or before it gained the setting) would hide the icon for the whole
-    // session. Ask again whenever the window comes back and the menu opens.
-    const check = () =>
-      void authManager.api.getAuthMethods().then((m) => {
-        if (alive) setBugReport(m.bugReport);
-      });
-    check();
-    window.addEventListener("focus", check);
-    return () => {
-      alive = false;
-      window.removeEventListener("focus", check);
-    };
-  }, [userId, serverUrl, open]);
+    checkBugReport(false);
+    const onFocus = () => checkBugReport(false);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [bugReportKey, checkBugReport, bugReportThrottle]);
+  useEffect(() => {
+    if (open) checkBugReport(forcedOpen);
+  }, [menu.mode]);
 
   // "unknown" is a state the user can now SEE: the sidebar paints before the
   // session restore finishes, so for its first moments we do not yet know
@@ -225,9 +248,13 @@ export function AccountMenu() {
 
   // Opening the menu re-reads pending invitations, so one sent while no live
   // frame reached us shows the moment the user clicks their name.
+  // At most once a minute (see the throttles above).
   useEffect(() => {
-    if (open) void useStore.getState().refreshUserInvitations();
-  }, [open]);
+    if (!open) return;
+    if (invitationsThrottle.shouldFetch(userId ?? "", Date.now(), forcedOpen)) {
+      void useStore.getState().refreshUserInvitations();
+    }
+  }, [menu.mode]);
 
   // Opening either settings dialog closes the account popover.
   useEffect(() => {
