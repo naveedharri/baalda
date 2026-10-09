@@ -30,7 +30,9 @@ strictDepBuilds: true
 ignoredBuiltDependencies:
   - "@openrouter/sdk"
 
-# Security floors for transitive deps (Dependabot). dompurify arrives through
-# mermaid; drop the entry once mermaid's own range requires the fixed version.
+# Security floors for transitive deps (Dependabot). dompurify and katex arrive
+# through mermaid; drop each entry once mermaid's own range requires the fixed
+# version.
 overrides:
   dompurify: ">=3.4.16"
+  katex: ">=0.18.2"
