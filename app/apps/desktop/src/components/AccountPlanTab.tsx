@@ -7,8 +7,8 @@ import {
   billingErrorMessage,
   discountLine,
   formatBytes,
-  invitedChipAction,
-  invitedChipFallbackToast,
+  invitedVaultAction,
+  invitedVaultFallbackToast,
   type InvitedVault,
   LAPSED_COPY,
   PLAN_LOAD_ERROR_COPY,
@@ -175,13 +175,13 @@ export function AccountPlanTab() {
     void st.refreshLocks();
   };
 
-  // An invited-seat chip opens that vault's Vault Settings → Members and
+  // A vault in the Invited popover opens that vault's Vault Settings → Members and
   // access (the two settings dialogs are exclusive, so this closes Account
   // Settings). Another vault is switched to first; one with no folder on this
   // device cannot be, so the Vaults tab is the way in.
   const openInvitedVault = async (v: InvitedVault) => {
     const st = useStore.getState();
-    const action = invitedChipAction({
+    const action = invitedVaultAction({
       orgId: v.orgId,
       activeOrgId: st.session?.activeOrganizationId ?? null,
       openPath: st.vault?.path ?? null,
@@ -189,7 +189,7 @@ export function AccountPlanTab() {
     });
     if (action === "vaults-tab") {
       st.requestAccountSettings("vaults");
-      toast(invitedChipFallbackToast(v.name), "neutral");
+      toast(invitedVaultFallbackToast(v.name), "neutral");
       return;
     }
     if (action === "switch-then-members") {

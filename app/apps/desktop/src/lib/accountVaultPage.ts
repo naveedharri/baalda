@@ -121,7 +121,7 @@ export function vaultPageDetails(input: {
  * "Open Vault Settings": the open vault opens straight away, a vault with a
  * folder here is switched to first, and one never opened on this device
  * cannot be (switching needs a folder), so the action is disabled with a hint.
- * The same rule as the Plan tab's invited-seat chips (`invitedChipAction`).
+ * The same rule as the Plan tab's invited-seat popover (`invitedVaultAction`).
  */
 export function vaultSettingsAction(input: {
   isOpen: boolean;

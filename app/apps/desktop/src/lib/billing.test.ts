@@ -39,10 +39,11 @@ import {
   type SubscriptionFacts,
   type SubscriptionLineFormat,
   seatsDialogSubtitle,
-  invitedChipAction,
-  invitedChipFallbackToast,
-  invitedChipLabel,
-  invitedChips,
+  invitedCountAriaLabel,
+  invitedTotalLabel,
+  invitedVaultAction,
+  invitedVaultFallbackToast,
+  invitedVaults,
 } from "./billing";
 
 describe("plan benefits copy", () => {
@@ -819,33 +820,48 @@ describe("seatsDialogSubtitle", () => {
   });
 });
 
-describe("invited-seat vault chips", () => {
-  it("labels each chip with the vault and its count", () => {
-    expect(invitedChipLabel({ orgId: "o1", name: "Design", count: 2 })).toBe("Design · 2");
-    expect(invitedChipLabel({ orgId: "o1", name: "Design", count: 1 })).toBe("Design · 1");
-  });
-
+describe("invited-seat vaults", () => {
   it("drops empty or missing lists and zero counts", () => {
-    expect(invitedChips(undefined)).toEqual([]);
-    expect(invitedChips(null)).toEqual([]);
-    expect(invitedChips([{ orgId: "a", name: "A", count: 0 }, { orgId: "b", name: "B", count: 3 }])).toEqual([
+    expect(invitedVaults(undefined)).toEqual([]);
+    expect(invitedVaults(null)).toEqual([]);
+    expect(invitedVaults([{ orgId: "a", name: "A", count: 0 }, { orgId: "b", name: "B", count: 3 }])).toEqual([
       { orgId: "b", name: "B", count: 3 },
     ]);
   });
 
+  it("orders by count, most first, then by name ignoring case", () => {
+    const list = [
+      { orgId: "1", name: "sales", count: 1 },
+      { orgId: "2", name: "Design", count: 1 },
+      { orgId: "3", name: "Ops", count: 4 },
+      { orgId: "4", name: "Hello 4", count: 2 },
+    ];
+    expect(invitedVaults(list).map((v) => v.name)).toEqual(["Ops", "Hello 4", "Design", "sales"]);
+    // The server's array is left alone.
+    expect(list[0].name).toBe("sales");
+  });
+
+  it("labels the total and names the vaults for assistive tech", () => {
+    expect(invitedTotalLabel(2)).toBe("2 invited");
+    const one = [{ orgId: "a", name: "Hello 4", count: 2 }];
+    expect(invitedCountAriaLabel(2, one)).toBe("2 invited in Hello 4");
+    const two = [...one, { orgId: "b", name: "Sales", count: 1 }];
+    expect(invitedCountAriaLabel(3, two)).toBe("3 invited across 2 vaults");
+  });
+
   it("opens Members and access for the open vault, switches to a bound one, else the Vaults tab", () => {
     const base = { activeOrgId: "a", openPath: "/v/a" };
-    expect(invitedChipAction({ ...base, orgId: "a", boundPath: "/v/a" })).toBe("open-members");
-    expect(invitedChipAction({ ...base, orgId: "a", boundPath: null })).toBe("open-members");
-    expect(invitedChipAction({ ...base, orgId: "b", boundPath: "/v/b" })).toBe("switch-then-members");
-    expect(invitedChipAction({ ...base, orgId: "b", boundPath: null })).toBe("vaults-tab");
+    expect(invitedVaultAction({ ...base, orgId: "a", boundPath: "/v/a" })).toBe("open-members");
+    expect(invitedVaultAction({ ...base, orgId: "a", boundPath: null })).toBe("open-members");
+    expect(invitedVaultAction({ ...base, orgId: "b", boundPath: "/v/b" })).toBe("switch-then-members");
+    expect(invitedVaultAction({ ...base, orgId: "b", boundPath: null })).toBe("vaults-tab");
     // Active org but another folder on screen: switch to its own folder first.
-    expect(invitedChipAction({ ...base, orgId: "a", boundPath: "/v/other" })).toBe("switch-then-members");
+    expect(invitedVaultAction({ ...base, orgId: "a", boundPath: "/v/other" })).toBe("switch-then-members");
     // Nothing open at all and no folder here.
-    expect(invitedChipAction({ orgId: "a", activeOrgId: "a", openPath: null, boundPath: null })).toBe("vaults-tab");
+    expect(invitedVaultAction({ orgId: "a", activeOrgId: "a", openPath: null, boundPath: null })).toBe("vaults-tab");
   });
 
   it("tells the user to open the vault when it is not on this device", () => {
-    expect(invitedChipFallbackToast("Design")).toBe("Open Design to manage its invitations.");
+    expect(invitedVaultFallbackToast("Design")).toBe("Open Design to manage its invitations.");
   });
 });

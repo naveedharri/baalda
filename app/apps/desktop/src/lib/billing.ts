@@ -760,23 +760,35 @@ export interface InvitedVault {
   count: number;
 }
 
-/** The chip under the Invited number: "<vault> · <count>", always with the count. */
-export function invitedChipLabel(v: InvitedVault): string {
-  return `${v.name} · ${v.count}`;
+/**
+ * The vaults behind the Invited count, as the count's popover lists them:
+ * only vaults that actually hold an invitation, most invitations first, then
+ * by name.
+ */
+export function invitedVaults(list: InvitedVault[] | null | undefined): InvitedVault[] {
+  return (list ?? [])
+    .filter((v) => v.count > 0)
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
 }
 
-/** Only vaults that actually hold an invitation, in the server's order. */
-export function invitedChips(list: InvitedVault[] | null | undefined): InvitedVault[] {
-  return (list ?? []).filter((v) => v.count > 0);
+/** The popover's total: "2 invited". */
+export function invitedTotalLabel(total: number): string {
+  return `${total} invited`;
+}
+
+/** The Invited count's accessible name, which also says where the invitations are. */
+export function invitedCountAriaLabel(total: number, vaults: InvitedVault[]): string {
+  if (vaults.length === 1) return `${invitedTotalLabel(total)} in ${vaults[0].name}`;
+  return `${invitedTotalLabel(total)} across ${vaults.length} vaults`;
 }
 
 /**
- * What clicking an invited-seat chip does. The vault already open goes
+ * What choosing a vault in the Invited popover does. The vault already open goes
  * straight to Vault Settings → Members and access; a vault with a folder on
  * this device is switched to first; one never opened here cannot be switched
  * to without choosing a folder, so it falls back to Account Settings → Vaults.
  */
-export function invitedChipAction(input: {
+export function invitedVaultAction(input: {
   orgId: string;
   activeOrgId: string | null;
   openPath: string | null;
@@ -791,6 +803,6 @@ export function invitedChipAction(input: {
 }
 
 /** The toast for the Vaults-tab fallback. */
-export function invitedChipFallbackToast(name: string): string {
+export function invitedVaultFallbackToast(name: string): string {
   return `Open ${name} to manage its invitations.`;
 }

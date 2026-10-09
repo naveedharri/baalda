@@ -10096,6 +10096,66 @@ body.access-board-grabbing * {
 .seat-breakdown-table td {
   font-variant-numeric: tabular-nums;
 }
+/* The Invited count is the control for its own breakdown: same size and
+   colour as the other counts, a dotted underline as the only affordance,
+   accent on hover / focus / open. Its popover is a `.context-menu`. */
+.seat-invited-trigger {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-decoration-color: var(--text-tertiary);
+  text-underline-offset: 3px;
+  transition: color var(--t-fast) var(--ease);
+}
+.seat-invited-trigger:hover,
+.seat-invited-trigger:focus-visible,
+.seat-invited-trigger[aria-expanded="true"] {
+  color: var(--accent);
+  text-decoration-color: var(--accent);
+}
+.context-menu.seat-invited-menu {
+  min-width: 220px;
+  max-width: 300px;
+}
+/* No tick gutter in this menu, so the heading lines up with the rows. */
+.context-menu.seat-invited-menu li.menu-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding-left: var(--sp-3);
+}
+.seat-invited-total {
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.context-menu.seat-invited-menu li.seat-invited-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  outline: none;
+}
+.context-menu.seat-invited-menu li.seat-invited-row:focus-visible {
+  background: var(--bg-hover);
+}
+.seat-invited-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.seat-invited-count {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.context-menu.seat-invited-menu li.menu-note {
+  max-width: none;
+}
 /* The informational sibling of .limit-nudge: same shape, accent tint. */
 .limit-nudge.is-info {
   background: var(--accent-soft);
@@ -10455,18 +10515,6 @@ body.access-board-grabbing * {
   line-height: 16px;
   overflow-wrap: anywhere;
 }
-/* The Plan card's Invited cell reuses the vault chip as a button. */
-.seat-breakdown-invited {
-  margin-top: 4px;
-}
-button.plan-page-vault-chip {
-  border: 0;
-  font-family: inherit;
-  cursor: pointer;
-}
-button.plan-page-vault-chip:hover {
-  background: var(--bg-active);
-}
 /* Seat column: header and cells share padding and right alignment. The
    table prefix outranks `.members-table th { text-align: left }`. */
 .members-table.plan-page-people .plan-page-seat-col {
@@ -10506,6 +10554,11 @@ button.plan-page-vault-chip:hover {
   gap: 10px;
   margin: var(--sp-2) 0;
 }
+/* Every card is the same shape whatever its text: one-line name and details
+   (ellipsised), the details line always present (empty when unknown), and the
+   chip row pinned to the bottom. The min-height is that stack's natural height
+   (borders 2 + padding 20 + tile 36 + name 16.9 + details 14.95 + gaps 3 +
+   chip row 26 ≈ 119), so a short card never sits lower than its neighbours. */
 .vault-grid-card {
   position: relative;
   display: flex;
@@ -10513,6 +10566,7 @@ button.plan-page-vault-chip:hover {
   align-items: flex-start;
   gap: 1px;
   min-width: 0;
+  min-height: 120px;
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -10559,18 +10613,23 @@ button.plan-page-vault-chip:hover {
 }
 .vault-grid-meta {
   max-width: 100%;
+  min-height: 1.3em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11.5px;
   line-height: 1.3;
 }
+/* Pinned to the card's bottom; its height is reserved even before a chip
+   renders, and the padding keeps the old 6px gap above it. */
 .vault-grid-foot {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin-top: 6px;
+  min-height: 26px;
+  margin-top: auto;
+  padding-top: 6px;
   font-size: 11.5px;
   cursor: default;
 }
