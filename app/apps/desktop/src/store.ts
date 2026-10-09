@@ -914,6 +914,10 @@ interface AppStore {
   deleteLocalVault: (path: string) => Promise<void>;
   /** Detach from the open local folder and drop to the empty/welcome state. */
   closeLocalVault: () => void;
+  /** Bumped whenever a vault delete changes this device's recents, so every
+   *  recents list (welcome screen, Vaults tab) re-reads after the folder is
+   *  gone instead of keeping a row read while it still existed. */
+  recentsVersion: number;
 
   // Resolving a vault's local folder (when none is bound yet)
   /** Open `path` as `orgId`'s folder, bind them, paint the tree, and start sync
@@ -1237,6 +1241,19 @@ async function clearVaultStamp(vault: ipc.VaultInfo, orgId: string): Promise<boo
     }
   }
   return false;
+}
+
+/**
+ * Forget every device-local pointer at a deleted vault folder: any vault bound
+ * to it in `context.orgVaults` and a last-opened pointer at such a vault, so
+ * nothing tries to reopen a path that went to the Trash.
+ */
+export function forgetVaultPath(path: string): void {
+  for (const [orgId, p] of Object.entries(readOrgVaults())) {
+    if (p !== path) continue;
+    forgetOrgVault(orgId);
+    forgetLastVault(orgId);
+  }
 }
 
 /** Drop a vault's remembered local folder (used when removing/deleting it). */
@@ -4245,6 +4262,7 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   membershipLost: null,
+  recentsVersion: 0,
   dismissMembershipLost: () => set({ membershipLost: null }),
 
   deleteRemoteVault: async (organizationId) => {
@@ -4254,8 +4272,23 @@ export const useStore = create<AppStore>((set, get) => ({
     // than swallowed: only the caller can tell the user when the paid period
     // ends and that it can still be moved to another vault until then (#111).
     const result = await authManager.api.deleteRemoteVault(organizationId);
+    // This device's folder, captured BEFORE the teardown forgets the binding.
+    const folderPath = readOrgVaults()[organizationId] ?? null;
     // Then tear down the same local state as a device-level removal.
     await get().removeVaultLocally(organizationId);
+    // The vault is gone for everyone, so this device's copy goes to the Trash
+    // too (owner decision 2026-10-09; recoverable, `.context` included). The
+    // server delete already counts: a trash failure only says so.
+    if (folderPath) {
+      if (get().vault?.path === folderPath) get().closeLocalVault();
+      try {
+        await ipc.deleteVault(folderPath);
+      } catch (e) {
+        toast(e instanceof Error ? e.message : String(e), "error");
+      }
+      forgetVaultPath(folderPath);
+      set((s) => ({ recentsVersion: s.recentsVersion + 1 }));
+    }
     return result;
   },
 
@@ -4448,13 +4481,23 @@ export const useStore = create<AppStore>((set, get) => ({
 
   deleteLocalVault: async (path) => {
     // Tear down open state FIRST if this is the current folder, so nothing keeps
-    // reading from it while it's moved to the trash.
-    if (!get().syncEnabled && get().vault?.path === path) {
+    // reading from it while it's moved to the trash. Whatever the sync state:
+    // a signed-in session with a local folder open used to skip this, so the
+    // app kept (and later tried to reopen) a folder that was in the Trash.
+    if (get().vault?.path === path) {
       get().closeLocalVault();
     }
     // Move the folder (and all its notes) to the OS trash; this also forgets it
-    // from recents. Destructive — the UI gates it behind the confirm dialog.
-    await ipc.deleteVault(path);
+    // from recents and drops a `current` link to it. Destructive — the UI gates
+    // it behind the confirm dialog.
+    try {
+      await ipc.deleteVault(path);
+    } finally {
+      // Re-read recents either way: the welcome screen mounted when the vault
+      // closed above and read them while the folder still existed.
+      set((s) => ({ recentsVersion: s.recentsVersion + 1 }));
+    }
+    forgetVaultPath(path);
   },
 
   closeLocalVault: () => {

@@ -1159,7 +1159,8 @@ export function AccountVaultsTab() {
         >
           <p>
             Every note, folder and attachment in this vault is deleted for
-            everyone. This can't be undone.
+            everyone, and this device's folder moves to the Trash. This can't
+            be undone.
           </p>
           {actionError && <div className="auth-error">{actionError}</div>}
         </ConfirmDialog>
@@ -1200,7 +1201,8 @@ export function AccountVaultsTab() {
           </p>
           <p>
             Every note, folder and attachment in this vault is deleted for
-            everyone. That part can't be undone.
+            everyone, and this device's folder moves to the Trash. That part
+            can't be undone.
           </p>
           {actionError && <div className="auth-error">{actionError}</div>}
         </ConfirmDialog>

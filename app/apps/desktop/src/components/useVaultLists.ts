@@ -18,6 +18,7 @@ export function useRecentVaults(nonce = 0): RecentVault[] {
   // Re-fetch when the open folder changes (a switch/open reorders recents) and
   // when `nonce` is bumped (after a local remove/delete removes a row).
   const openPath = useStore((s) => s.vault?.path);
+  const recentsVersion = useStore((s) => s.recentsVersion);
   useEffect(() => {
     let alive = true;
     ipc
@@ -29,7 +30,7 @@ export function useRecentVaults(nonce = 0): RecentVault[] {
     return () => {
       alive = false;
     };
-  }, [nonce, openPath]);
+  }, [nonce, openPath, recentsVersion]);
   return recents;
 }
 

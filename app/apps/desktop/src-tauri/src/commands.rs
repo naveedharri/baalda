@@ -597,13 +597,20 @@ pub async fn get_recent_vaults(
     }
 
     // Drop entries whose folder has since been moved/deleted; persist if changed.
-    let before = cfg.recent_vaults.len();
-    cfg.recent_vaults.retain(|r| Path::new(&r.path).is_dir());
-    if cfg.recent_vaults.len() != before {
+    if prune_missing_recents(&mut cfg.recent_vaults) {
         let _ = write_config(&app, &state, &cfg);
     }
 
     Ok(cfg.recent_vaults)
+}
+
+/// Drop recents whose folder no longer exists (moved, renamed, trashed by a
+/// vault delete), so no list ever offers to open a path that is gone. Returns
+/// whether anything was dropped.
+fn prune_missing_recents(recents: &mut Vec<RecentVault>) -> bool {
+    let before = recents.len();
+    recents.retain(|r| Path::new(&r.path).is_dir());
+    recents.len() != before
 }
 
 /// Remove one vault from the recents list (welcome-screen "×").
@@ -706,7 +713,10 @@ pub async fn delete_vault(
     path: String,
 ) -> AppResult<()> {
     let dir = PathBuf::from(&path);
-    if !dir.is_dir() {
+    // Already gone (trashed by hand, or a synced vault's folder never made
+    // here): nothing to trash, but still forget it everywhere below.
+    let missing = !dir.exists();
+    if !missing && !dir.is_dir() {
         return Err(AppError::new("selected path is not a folder"));
     }
     // A missing parent means this is a filesystem root — never a real vault
@@ -714,14 +724,18 @@ pub async fn delete_vault(
     if dir.parent().is_none() {
         return Err(AppError::new("refusing to delete a filesystem root"));
     }
-    // Off the async runtime: the retry sleeps between attempts.
-    let target = dir.clone();
-    tauri::async_runtime::spawn_blocking(move || move_dir_to_trash(&target))
-        .await
-        .map_err(|e| {
-            log::warn!("move to trash task failed: {e}");
-            AppError::new(TRASH_FAILED_MESSAGE)
-        })??;
+    if !missing {
+        // Off the async runtime: the retry sleeps between attempts.
+        let target = dir.clone();
+        tauri::async_runtime::spawn_blocking(move || move_dir_to_trash(&target))
+            .await
+            .map_err(|e| {
+                log::warn!("move to trash task failed: {e}");
+                AppError::new(TRASH_FAILED_MESSAGE)
+            })??;
+    }
+    // A `<root>/current` link that pointed at this folder now dangles.
+    remove_current_link_to(&dir);
     // Also drop it from recents / last_vault so it doesn't linger in the switcher.
     let mut cfg = read_config(&app, &state);
     cfg.recent_vaults.retain(|r| r.path != path);
@@ -1361,6 +1375,27 @@ fn remove_current_link(root: &Path) {
     if std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()) {
         if let Err(e) = std::fs::remove_file(&link) {
             log::warn!("[vault] couldn't remove the old `current` link: {e}");
+        }
+    }
+}
+
+/// Remove the sibling `current` link when it points at `dir` (a vault folder
+/// that was just deleted), so the vaults root keeps no dangling link. A link to
+/// any other vault, or a real folder named `current`, is left alone.
+fn remove_current_link_to(dir: &Path) {
+    let Some(root) = dir.parent() else { return };
+    let link = root.join("current");
+    let is_link = std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink());
+    if !is_link {
+        return;
+    }
+    let points_here = std::fs::read_link(&link).is_ok_and(|t| {
+        let t = if t.is_absolute() { t } else { root.join(t) };
+        t == dir
+    });
+    if points_here {
+        if let Err(e) = std::fs::remove_file(&link) {
+            log::warn!("[vault] couldn't remove the `current` link: {e}");
         }
     }
 }
@@ -3196,6 +3231,46 @@ mod tests {
     fn trash_failure_message_is_one_plain_sentence() {
         assert!(!TRASH_FAILED_MESSAGE.contains("Os {"));
         assert!(TRASH_FAILED_MESSAGE.starts_with("Couldn't move the folder to the Trash."));
+    }
+
+    #[test]
+    fn prune_missing_recents_drops_deleted_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kept = tmp.path().join("Kept");
+        std::fs::create_dir_all(&kept).unwrap();
+        let entry = |p: &Path| RecentVault {
+            name: "x".into(),
+            path: p.display().to_string(),
+            opened_at: 0,
+        };
+        let mut list = vec![entry(&tmp.path().join("Gone")), entry(&kept)];
+        assert!(prune_missing_recents(&mut list));
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].path, kept.display().to_string());
+        assert!(!prune_missing_recents(&mut list));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_current_link_to_only_drops_a_link_to_the_deleted_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let gone = root.join("Gone");
+        let other = root.join("Other");
+        std::fs::create_dir_all(&other).unwrap();
+        // Points at another vault: kept.
+        std::os::unix::fs::symlink(&other, root.join("current")).unwrap();
+        remove_current_link_to(&gone);
+        assert!(std::fs::symlink_metadata(root.join("current")).is_ok());
+        // Points at the deleted vault (now dangling): removed.
+        std::fs::remove_file(root.join("current")).unwrap();
+        std::os::unix::fs::symlink(&gone, root.join("current")).unwrap();
+        remove_current_link_to(&gone);
+        assert!(std::fs::symlink_metadata(root.join("current")).is_err());
+        // A real folder named `current` is never touched.
+        std::fs::create_dir_all(root.join("current")).unwrap();
+        remove_current_link_to(&root.join("current"));
+        assert!(root.join("current").is_dir());
     }
 
     #[test]

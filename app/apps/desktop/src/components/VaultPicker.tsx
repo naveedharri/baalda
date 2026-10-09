@@ -113,6 +113,8 @@ export function VaultPicker() {
   // The live vault list. Signed in, this is the truth; signed out the welcome
   // list shows no synced vaults at all, so the cache is never read here.
   const organizations = useStore((s) => s.organizations);
+  // Bumped by a vault delete once its folder is gone (see the recents effect).
+  const recentsVersion = useStore((s) => s.recentsVersion);
   // Sign-in succeeded and a vault is being resolved/created. There's no vault
   // yet, so App still renders this screen — and without saying so, a sign-in
   // that is working looks identical to one that silently did nothing.
@@ -172,7 +174,7 @@ export function VaultPicker() {
     return () => {
       alive = false;
     };
-  }, [organizations, authStatus]);
+  }, [organizations, authStatus, recentsVersion]);
 
   // Each folder's class from its own `.context/config.json` stamp (shared
   // with the Vaults tab and the switcher, session-cached per path):
