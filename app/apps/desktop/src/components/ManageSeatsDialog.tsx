@@ -9,6 +9,7 @@ import {
   seatChangeLocked,
   seatChangeSummary,
   seatsDialogSubtitle,
+  seatsUpdatedToast,
 } from "../lib/billing";
 import { toast } from "../lib/toast";
 import { AsyncButton } from "./AsyncButton";
@@ -51,10 +52,11 @@ export function ManageSeatsDialog({
   const [preview, setPreview] = useState<SeatPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pending = account.seats.pendingDecrease;
+  const scheduled = pending?.to ?? null;
 
   useEffect(() => {
     setPreview(null);
-    if (canceling || seats < floor || seats === current) return;
+    if (canceling || seats < floor || seats === current || seats === scheduled) return;
     let cancelled = false;
     const t = setTimeout(() => {
       authManager.api
@@ -70,7 +72,7 @@ export function ManageSeatsDialog({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [seats, floor, current, canceling]);
+  }, [seats, floor, current, scheduled, canceling]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -83,6 +85,7 @@ export function ManageSeatsDialog({
   const summary = seatChangeSummary({
     seats,
     current,
+    scheduled,
     floor,
     used: account.seats.used,
     minSeats,
@@ -95,8 +98,9 @@ export function ManageSeatsDialog({
   const confirm = async () => {
     setError(null);
     try {
-      await authManager.api.setSeats(seats);
-      toast(`Seats updated to ${seats}.`);
+      const next = await authManager.api.setSeats(seats);
+      const effectiveAt = next?.seats?.pendingDecrease?.effectiveAt ?? account.currentPeriodEnd;
+      toast(seatsUpdatedToast(seats, current, effectiveAt, formatDate));
       onChanged();
       onClose();
     } catch (e) {

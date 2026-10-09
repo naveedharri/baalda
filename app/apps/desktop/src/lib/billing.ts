@@ -495,10 +495,13 @@ export function transferTargets<T extends TransferCandidate>(
 // ---- Plan & Billing (Team model, pure) ----------------------------------------
 
 /** What the Manage seats dialog says about a pending change, and whether
- *  Confirm is allowed. `preview` is null while the estimate is loading. */
+ *  Confirm is allowed. `preview` is null while the estimate is loading.
+ *  `scheduled` is a decrease already set for the period end: choosing that
+ *  same count is no change (the banner above already says it). */
 export function seatChangeSummary(input: {
   seats: number;
   current: number | null;
+  scheduled?: number | null;
   floor: number;
   used: number;
   minSeats: number;
@@ -519,6 +522,7 @@ export function seatChangeSummary(input: {
     };
   }
   if (current != null && seats === current) return { text: null, canConfirm: false };
+  if (input.scheduled != null && seats === input.scheduled) return { text: null, canConfirm: false };
   if (!preview) return { text: null, canConfirm: false };
   const per = interval === "year" ? "year" : "month";
   const money = (v: number | null | undefined): string | null =>
@@ -543,6 +547,21 @@ export function seatChangeSummary(input: {
       : `Goes down to ${seats} ${seats === 1 ? "seat" : "seats"} at the end of this billing period.`,
     canConfirm: true,
   };
+}
+
+/** The toast after Update seats. An increase applies now; a decrease waits
+ *  for the period end, so it names that date (formatted like the dialog's
+ *  "Dropping to" banner). `effectiveAt` is the server's scheduled date. */
+export function seatsUpdatedToast(
+  seats: number,
+  previous: number | null,
+  effectiveAt: string | null | undefined,
+  formatDate: (iso: string) => string,
+): string {
+  if (previous == null || seats >= previous) return `Seats updated to ${seats}.`;
+  return effectiveAt
+    ? `Seats drop to ${seats} on ${formatDate(effectiveAt)}.`
+    : `Seats drop to ${seats} at the end of this billing period.`;
 }
 
 /** Shown when the seat preview has no usable prices. */
@@ -605,7 +624,7 @@ export function seatUsageLines(
 export const LAPSED_COPY =
   "Subscription ended. Sync is read-only until you resume or reduce to 2 people.";
 
-/** The Plan card's seat breakdown: Seats · Claimed · Reserved · Available. */
+/** The Plan card's seat breakdown: Seats · Claimed · Invited · Available. */
 export interface SeatBreakdown {
   purchased: number;
   claimed: number;

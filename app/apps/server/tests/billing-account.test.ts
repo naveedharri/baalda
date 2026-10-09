@@ -551,6 +551,32 @@ describe("account billing routes (team model)", () => {
     expect(forever.price.renewalAmount).toBe(0);
   });
 
+  it("a scheduled seat decrease prices the renewal at the new seat count, once discount at list", async () => {
+    const a = await signUp("renew-drop@b.com");
+    const org = await vault(a);
+    const account = (await ensureAccountForUser(pool, a.userId))!;
+    const subId = await subscribe(account, org, 19);
+    await pool.query(
+      `UPDATE subscriptions SET interval = 'year', amount = 209000, list_amount = 209000
+        WHERE provider_subscription_id = $1`,
+      [subId],
+    );
+    await pool.query(`UPDATE billing_accounts SET seats_pending = 3 WHERE id = $1`, [account]);
+    const body = await (await req("GET", "/api/billing/account", { token: a.token })).json();
+    expect(body.seats.pendingDecrease.to).toBe(3);
+    expect(body.price.renewalAmount).toBe(33000);
+
+    // A spent once discount still renews at list, for the scheduled seats.
+    await pool.query(
+      `UPDATE subscriptions SET amount = 0, discount_id = 'disc_once', discount_duration = 'once'
+        WHERE provider_subscription_id = $1`,
+      [subId],
+    );
+    const once = await (await req("GET", "/api/billing/account", { token: a.token })).json();
+    expect(once.price.charged).toBe(0);
+    expect(once.price.renewalAmount).toBe(33000);
+  });
+
   it("GET account ?refresh=1 answers the stored summary when the provider fails", async () => {
     const a = await signUp("refresh-fail@b.com");
     const org = await vault(a);

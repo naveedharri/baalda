@@ -160,8 +160,19 @@ function asDuration(v: string | null | undefined): DiscountDuration | null {
  * list, the discount was spent on the first payment; `repeating` = charged
  * while started_at + months runs past the current period end, else list.
  * The repeating start is our row's created_at, so it is approximate.
+ *
+ * `renewalSeats` is a seat decrease scheduled for that renewal: the amount
+ * is scaled from the row's seat count to it, so 19 seats at $2,090/yr with a
+ * drop to 3 renews at $330/yr.
  */
-function renewalAmount(row: SubscriptionRow): number | null {
+function renewalAmount(row: SubscriptionRow, renewalSeats: number | null = null): number | null {
+  const amount = renewalAmountAtCurrentSeats(row);
+  const seats = row.seats === null ? null : Number(row.seats);
+  if (amount === null || renewalSeats === null || !seats || renewalSeats === seats) return amount;
+  return Math.round((amount * renewalSeats) / seats);
+}
+
+function renewalAmountAtCurrentSeats(row: SubscriptionRow): number | null {
   const list = row.list_amount === null ? null : Number(row.list_amount);
   const charged = row.amount === null ? null : Number(row.amount);
   const duration = row.discount_id ? asDuration(row.discount_duration) : null;
@@ -1585,6 +1596,7 @@ async function readAccountBody(accountId: string, canManage: boolean) {
   const live = !!row && isActiveStatus(row.status);
   const pending = acct.rows[0]?.seats_pending ?? null;
   const purchased = plan.seatsPurchased;
+  const pendingDecreaseTo = live && pending != null && purchased != null && pending < purchased ? pending : null;
   let people: { userId: string; name: string; email: string; vaults: string[] }[] = [];
   if (canManage) {
     const { rows } = await pool.query<{ user_id: string; name: string; email: string; vaults: string[] }>(
@@ -1613,9 +1625,9 @@ async function readAccountBody(accountId: string, canManage: boolean) {
       used: plan.seatsUsed,
       reserved: plan.seatsReserved,
       pendingDecrease:
-        live && pending != null && purchased != null && pending < purchased
+        pendingDecreaseTo !== null
           ? {
-              to: pending,
+              to: pendingDecreaseTo,
               effectiveAt: row.current_period_end ? new Date(row.current_period_end).toISOString() : null,
             }
           : null,
@@ -1629,7 +1641,7 @@ async function readAccountBody(accountId: string, canManage: boolean) {
             discountBasisPoints: row.discount_basis_points,
             discountDuration: row.discount_id ? asDuration(row.discount_duration) : null,
             discountDurationMonths: row.discount_id ? row.discount_duration_months : null,
-            renewalAmount: renewalAmount(row),
+            renewalAmount: renewalAmount(row, pendingDecreaseTo),
           }
         : null,
     people,

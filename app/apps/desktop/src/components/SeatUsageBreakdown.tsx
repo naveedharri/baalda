@@ -3,7 +3,7 @@ import type { MyBillingAccount } from "../lib/api";
 
 /**
  * Account Settings → Plan & Billing seat breakdown (Team accounts only):
- * Seats · Claimed · Reserved · Available in the members-table styling and
+ * Seats · Claimed · Invited · Available in the members-table styling and
  * the owner's Add or change seats. A planned decrease shows only in the
  * Manage seats dialog.
  * Pure props so it renders statically in tests.
@@ -29,7 +29,7 @@ export function SeatUsageBreakdown({
           <tr>
             <th>Seats</th>
             <th>Claimed</th>
-            <th>Reserved</th>
+            <th>Invited</th>
             <th>Available</th>
           </tr>
         </thead>

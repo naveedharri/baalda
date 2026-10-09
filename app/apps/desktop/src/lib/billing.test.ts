@@ -8,6 +8,7 @@ import {
   formatBytes,
   planPriceLine,
   seatChangeSummary,
+  seatsUpdatedToast,
   seatUsageLines,
   usageAgainstLimit,
   classifyLimitError,
@@ -412,6 +413,25 @@ describe("Plan & Billing helpers", () => {
     formatDate: fmt,
   };
   const preview = { proratedNow: 1250, newAmount: 6000, currentPeriodEnd: "2026-11-01T00:00:00Z" };
+
+  it("seatChangeSummary: the already-scheduled count shows nothing and cannot confirm", () => {
+    const at = { ...base, current: 19, scheduled: 3, floor: 3 };
+    const p = { ...preview, currentPeriodEnd: "2027-10-08T00:00:00Z" };
+    expect(seatChangeSummary({ ...at, seats: 3, preview: p })).toEqual({ text: null, canConfirm: false });
+    expect(seatChangeSummary({ ...at, seats: 4, preview: p })).toEqual({
+      text: "Goes down to 4 seats on 2027-10-08.",
+      canConfirm: true,
+    });
+    expect(seatChangeSummary({ ...at, seats: 19, preview: p })).toEqual({ text: null, canConfirm: false });
+  });
+
+  it("seatsUpdatedToast: a decrease names its date, an increase applies now", () => {
+    const end = "2027-10-08T00:00:00Z";
+    expect(seatsUpdatedToast(3, 19, end, fmt)).toBe("Seats drop to 3 on 2027-10-08.");
+    expect(seatsUpdatedToast(3, 19, null, fmt)).toBe("Seats drop to 3 at the end of this billing period.");
+    expect(seatsUpdatedToast(21, 19, end, fmt)).toBe("Seats updated to 21.");
+    expect(seatsUpdatedToast(5, null, end, fmt)).toBe("Seats updated to 5.");
+  });
 
   it("seatChangeSummary: a zero charge today still reads as money, never NaN", () => {
     expect(seatChangeSummary({ ...base, seats: 6, preview: { ...preview, proratedNow: 0, newAmount: 0 } })).toEqual({

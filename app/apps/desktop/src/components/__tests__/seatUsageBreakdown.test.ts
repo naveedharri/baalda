@@ -19,9 +19,9 @@ function render(overrides: Partial<Parameters<typeof SeatUsageBreakdown>[0]> = {
 }
 
 describe("SeatUsageBreakdown", () => {
-  it("shows Seats, Claimed, Reserved and Available without a caption", () => {
+  it("shows Seats, Claimed, Invited and Available without a caption", () => {
     const html = render();
-    for (const h of ["Seats", "Claimed", "Reserved", "Available"]) expect(html).toContain(`<th>${h}</th>`);
+    for (const h of ["Seats", "Claimed", "Invited", "Available"]) expect(html).toContain(`<th>${h}</th>`);
     expect(cells(html)).toEqual([10, 4, 2, 4]);
     expect(html).not.toContain("Seats are what you pay for");
     expect(html).toContain("Add or change seats");
