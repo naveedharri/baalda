@@ -21,6 +21,7 @@
 //   • honest — a per-item failure is retried with backoff and then RECORDED
 //     (`failures()`), so a vault with failures can never report fully synced.
 
+import { markAccessTreeStale } from "../accessTreeStale";
 import {
   ACCESS_CHECK_MAX,
   ApiClient,
@@ -1217,6 +1218,7 @@ export class VaultRegistry {
     // the case-folded view has to be dropped. See `canonicalNotePath`.
     this.byPathCi = null;
     this.onMapChanged?.();
+    markAccessTreeStale();
   }
 
   /**
@@ -1599,6 +1601,7 @@ export class VaultRegistry {
     if (this.fileByPath.get(relPath) === id) return;
     this.fileByPath.set(relPath, id);
     this.persist();
+    markAccessTreeStale();
   }
 
   /** Add one doc to the persisted authorship list, claiming the list for this
@@ -4184,6 +4187,7 @@ export class VaultRegistry {
           );
           if (out.ok) {
             this.folderByPath.set(f.path, out.value.id);
+            markAccessTreeStale();
             checkpoint.touch();
             mutated = true;
             this.sink.item("ok");
@@ -4626,6 +4630,7 @@ export class VaultRegistry {
           const res = byPath.get(f.path);
           if (res && res.id && (res.status === "created" || res.status === "adopted")) {
             this.folderByPath.set(f.path, res.id);
+            markAccessTreeStale();
             checkpoint.touch();
             mutated = true;
             this.sink.item("ok");
@@ -5215,6 +5220,7 @@ export class VaultRegistry {
       // The server's canonical spelling, as in `registerNote`.
       this.folderByPath.set(created.path ?? relPath, created.id);
       this.persist();
+      markAccessTreeStale();
       return created.id;
     } catch (e) {
       this.recordFailure({
