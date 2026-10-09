@@ -142,16 +142,17 @@ export function SidebarHeader() {
         >
           <VaultTile identity={tileIdentity} name={name} />
         </button>
-        {/* The name, chevron and path hover-open the switcher too, so sweeping
-            across the header never flickers it. Not the wrapper above: the
-            popover lives inside it, and a move from the menu back up to the
-            name would then never count as re-entering. */}
-        <div
-          className="sidebar-header-text"
-          onPointerEnter={hoverEnter}
-          onPointerLeave={scheduleHoverClose}
-        >
-          <div className="sidebar-header-main" ref={mainRef}>
+        <div className="sidebar-header-text">
+          {/* The name and chevron hover-open the switcher too, so sweeping
+              across the header never flickers it. Not the wrapper above: the
+              popover lives inside it, and a move from the menu back up to the
+              name would then never count as re-entering. */}
+          <div
+            className="sidebar-header-main"
+            ref={mainRef}
+            onPointerEnter={hoverEnter}
+            onPointerLeave={scheduleHoverClose}
+          >
             <button
               type="button"
               className={`vault-switch-btn${menuOpen ? " open" : ""}`}
@@ -199,7 +200,15 @@ export function SidebarHeader() {
             </button>
             {switching && <Spinner size="xs" tone="accent" className="vault-switch-spinner" />}
           </div>
-          <div className="vault-line" title={vault.path}>
+          {/* The path is its own control (click to copy) and never opens or pins
+              the switcher. It is neutral ground for the leave grace, though:
+              passing over it on the way to the menu keeps a hover preview up. */}
+          <div
+            className="vault-line"
+            title={vault.path}
+            onPointerEnter={cancelHoverClose}
+            onPointerLeave={scheduleHoverClose}
+          >
             {/* The path is the one thing that is genuinely still the OLD vault's
                 while switching — the folder hasn't swapped yet. Say so rather than
                 showing a path that contradicts the name above it. */}

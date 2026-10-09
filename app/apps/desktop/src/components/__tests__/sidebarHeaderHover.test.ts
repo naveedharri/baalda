@@ -100,8 +100,8 @@ describe("vault switcher hover and click", () => {
     expect(menu()).toBeNull();
   });
 
-  it("opens from the name and path too, without flickering across the header", () => {
-    const text = () => host.querySelector<HTMLDivElement>(".sidebar-header-text")!;
+  it("opens from the name too, without flickering across the header", () => {
+    const text = () => host.querySelector<HTMLDivElement>(".sidebar-header-main")!;
     point(text(), "pointerover");
     expect(menu()).not.toBeNull();
     // Tile to name: leaving one and entering the other keeps it open.
@@ -129,14 +129,29 @@ describe("vault switcher hover and click", () => {
     expect(host.querySelector(".vault-switch-btn")!.hasAttribute("title")).toBe(false);
   });
 
-  it("copies the path on click without pinning a hover-opened switcher", async () => {
+  it("never opens or pins the switcher from the path, which copies on click", async () => {
     const path = () => host.querySelector<HTMLSpanElement>(".vault-path-copy")!;
     point(path(), "pointerover");
-    expect(menu()).not.toBeNull();
+    advance(300);
+    expect(menu()).toBeNull();
     await act(async () => path().click());
     expect(copyText).toHaveBeenCalledWith("/vault");
     expect(host.querySelector(".vault-path-copied")).not.toBeNull();
-    point(path(), "pointerout");
+    expect(menu()).toBeNull();
+  });
+
+  it("keeps a hover preview up while passing from the name over the path", async () => {
+    const name = () => host.querySelector<HTMLDivElement>(".sidebar-header-main")!;
+    const line = () => host.querySelector<HTMLDivElement>(".vault-line")!;
+    point(name(), "pointerover");
+    expect(menu()).not.toBeNull();
+    point(name(), "pointerout", "mouse", line());
+    point(line(), "pointerover", "mouse", name());
+    advance(300);
+    expect(menu()).not.toBeNull();
+    // A click there copies and leaves the preview a preview: leaving closes it.
+    await act(async () => line().querySelector<HTMLSpanElement>(".vault-path-copy")!.click());
+    point(line(), "pointerout");
     advance(220);
     expect(menu()).toBeNull();
   });
