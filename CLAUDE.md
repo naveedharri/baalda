@@ -389,7 +389,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 The top banners above the editor share ONE notice slot (`lib/noticeSlot.ts`, hook
 `components/useNoticeSlot.ts`): each claims it and only the highest-priority claim shows, in the
 order held bulk delete > reconcile summary > open note deleted/access removed > vault made local
-only > vault folder missing > Team subscription lapsed (read-only sync) > closed-app changes > not syncing > sync paused > note limit > create
+only > membership ended (folder deleted) > vault folder missing > Team subscription lapsed (read-only sync) > closed-app changes > not syncing > sync paused > note limit > create
 refusal > open note's file gone on disk > attachments local only. Informational notices fade after
 `NOTICE_FADE_MS` (20 s) through their own Dismiss; notices with a pending choice (sign in, locate,
 upgrade, close note, keep local) stay until answered. A faded notice loses nothing: Activity keeps

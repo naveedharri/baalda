@@ -25,6 +25,7 @@ export const NOTICE_PRIORITY = [
   "reconcile",
   "note-removed",
   "vault-unsynced",
+  "membership-lost",
   "root-missing",
   "account-lapsed",
   "closed-app-changes",

@@ -57,7 +57,7 @@ export interface HelloFrame {
 }
 
 /** What this build can handle beyond the original protocol. Sent in `hello`. */
-export const CLIENT_CAPS = ["voice", "revocation-batches", "bulk-regrant", "invitations"];
+export const CLIENT_CAPS = ["voice", "revocation-batches", "bulk-regrant", "member-removed", "invitations"];
 
 /** A teammate's live "who's viewing what" state (mirror of the server type).
  *  `docId` null means the user isn't viewing anything (or left) — clear them. */
@@ -153,6 +153,9 @@ export type ServerControl =
   /** The vault's Trash or shrink-event listings changed (#260). */
   | { t: "activity" }
   | { t: "member"; name: string }
+  /** `userId` lost membership of vault `orgId` (removed by an owner/admin, or
+   *  left). Sent only to that user's own sockets, then the server closes them. */
+  | { t: "member-removed"; orgId: string; userId: string; reason: "removed" | "left" }
   /** The vault's name or icon changed (#306): patch the vault list in place. */
   | { t: "org"; name?: string; logo?: string | null }
   /** The vault's appearance defaults changed: the WHOLE settings object. */
@@ -241,6 +244,13 @@ export function parseServerControl(text: string): ServerControl | null {
     return (v as { meta?: unknown }).meta === true ? { t: "registry", meta: true } : { t: "registry" };
   }
   if (t === "activity") return { t: "activity" };
+  if (t === "member-removed") {
+    const o = v as { orgId?: unknown; userId?: unknown; reason?: unknown };
+    if (typeof o.orgId !== "string" || o.orgId.length === 0) return null;
+    if (typeof o.userId !== "string" || o.userId.length === 0) return null;
+    if (o.reason !== "removed" && o.reason !== "left") return null;
+    return { t: "member-removed", orgId: o.orgId, userId: o.userId, reason: o.reason };
+  }
   if (t === "invitation" || t === "invitation-gone") {
     const o = v as Record<string, unknown>;
     if (typeof o.invitationId !== "string") return null;

@@ -2074,6 +2074,23 @@ export class ApiClient {
   }
 
   /**
+   * Which of `orgIds` the signed-in user is still a member of. Raw answer;
+   * `lib/vault/membershipLost.ts` decides what counts as a removal (only
+   * `notMember`). Throws ApiError on any non-2xx, including 404 on a server
+   * without the route.
+   */
+  async membershipCheck(
+    orgIds: string[],
+  ): Promise<{ member: string[]; notMember: string[]; unknown: string[] }> {
+    const { data } = await this.request<{ member: string[]; notMember: string[]; unknown: string[] }>(
+      "POST",
+      "/api/orgs/membership-check",
+      { body: { orgIds } },
+    );
+    return data;
+  }
+
+  /**
    * Change a member's role (owner/admin). Same authz shape as removeMember:
    * an admin may only change plain members; nobody touches the owner or
    * themselves. The server force-closes the member's live sync sockets so the

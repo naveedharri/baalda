@@ -91,6 +91,20 @@ import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault
 import { planLanding } from "./lib/vault/landing";
 import { foreignFolderMessage, planTurnOnSync } from "./lib/vault/turnOnSync";
 import { planUnsyncStamp } from "./lib/vault/unsyncPlan";
+import {
+  checkFailure,
+  chunk,
+  forgetMembership,
+  frameTargetsMe,
+  knownMemberships,
+  markMembershipCheckUnsupported,
+  membershipCheckUnsupported,
+  membershipLostNotice,
+  orgIdsToCheck,
+  rememberMemberships,
+  removalsFromCheck,
+  type MembershipLossReason,
+} from "./lib/vault/membershipLost";
 import { forgetTeamAccessCache } from "./lib/teamAccessCache";
 import { planOpen } from "./lib/sync/openGate";
 import { IPC_CONCURRENCY, runPool } from "./lib/sync/pool";
@@ -817,6 +831,23 @@ interface AppStore {
    *  (moved to the OS Trash, never deleted outright). Owners get the server's
    *  409 and are pointed at Delete instead. */
   leaveVault: (organizationId: string) => Promise<void>;
+  /**
+   * Membership of a vault this account does not own ended (removed, or left):
+   * stop syncing it, close it if open, PERMANENTLY delete its folder here and
+   * forget it. Only on a positive server signal; a vault the account still
+   * lists (owners always are) is never touched.
+   */
+  handleMembershipLost: (
+    organizationId: string,
+    reason: MembershipLossReason,
+    /** The folder, when the caller captured it before the binding was forgotten. */
+    knownPath?: string | null,
+  ) => Promise<void>;
+  /** Launch check: ask the server about known vaults no longer listed. */
+  checkLostMemberships: () => Promise<void>;
+  /** The one-line notice after a membership-loss removal (null = none). */
+  membershipLost: { text: string; at: number } | null;
+  dismissMembershipLost: () => void;
   /** Permanently delete a vault everywhere (owner only), then detach it.
    *  Hands back the server's report so the caller can say what became of the
    *  vault's subscription — deleting a Team vault stops it at the END of the
@@ -2835,6 +2866,14 @@ export const useStore = create<AppStore>((set, get) => ({
     // A teammate joined the vault — refresh the roster live (no reload) and
     // celebrate. Fires for everyone already connected; the joiner celebrates
     // locally in joinVault/acceptInvitation (they connect after the push).
+    // This user lost membership of the vault (removed, or left on another
+    // device). Only our own userId counts; the action re-checks the org list.
+    syncManager.setMemberRemovedListener((change) => {
+      if (!frameTargetsMe(change.userId, get().session?.user.id)) return;
+      void get()
+        .handleMembershipLost(change.orgId, change.reason)
+        .catch((e: unknown) => console.warn("[vault] membership-lost cleanup failed", e));
+    });
     syncManager.setMemberJoinedListener((name) => {
       void get().refreshVault();
       // Re-announce so the newcomer sees who is already here. Their own first
@@ -3989,23 +4028,103 @@ export const useStore = create<AppStore>((set, get) => ({
     // Server first: an owner's 409 (or being offline) must leave this device
     // exactly as it was. Once this returns, the membership is gone everywhere.
     await authManager.api.leaveVault(organizationId);
-    // Then the same detach a device-level removal does — switch off it if it
-    // is open, forget its folder binding, re-list the account's vaults.
-    await get().removeVaultLocally(organizationId);
-    // The server unpinned the vault from our session; pick that up so nothing
-    // here keeps asking about a vault we can no longer see.
+    // The server confirmed: the membership is gone. Run the membership-loss
+    // cleanup — stop syncing, close it if open, and PERMANENTLY delete its
+    // folder here (owner decision 2026-10-09: no Trash, no recovery copy).
+    await get().handleMembershipLost(organizationId, "left", path);
+  },
+
+  handleMembershipLost: async (organizationId, reason, knownPath) => {
+    const name =
+      get().organizations.find((o) => o.id === organizationId)?.name ?? null;
+    const path = knownPath ?? readOrgVaults()[organizationId] ?? null;
+    // Re-list first: a vault the account still lists is a live membership
+    // (owners always are), and a stale or replayed frame must not delete it.
     const refreshed = await authManager.currentSession().catch(() => null);
     if (refreshed) set({ session: refreshed });
-    // Finally the folder itself. A departed member should not keep a copy of
-    // the team's notes lying around, so unlike "Remove from device" this one
-    // goes — to the Trash, where a mistaken click is still recoverable. Never
-    // the folder that is open now (the detach above may have switched into it).
-    if (path && get().vault?.path !== path) {
-      await ipc.deleteVault(path).catch((e: unknown) => {
-        console.warn("[vault] left the vault but couldn't trash its folder", path, e);
+    await get()
+      .refreshVault()
+      .catch((e: unknown) => console.warn("[vault] refresh before membership cleanup failed", e));
+    if (get().organizations.some((o) => o.id === organizationId)) return;
+
+    const vault = get().vault;
+    const isOpen =
+      (vault != null && path != null && vault.path === path) ||
+      get().session?.activeOrganizationId === organizationId;
+    if (isOpen) {
+      // Same order as "make local only": stop the sync layer first, then
+      // close every tab and the vault itself before the folder goes.
+      leaveVaultSync();
+      get().closeAllTabs();
+      get().closeNote();
+      set({ vault: null, ...vaultScopedSyncReset(), pendingVaultFolder: null });
+      void ipc.clearLastVault().catch(() => {
+        /* best-effort — the folder is about to be gone anyway */
       });
     }
+    if (path) {
+      forgetPersisted(path);
+      reconcileReport.clear(path);
+    }
+    forgetOrgVault(organizationId);
+    forgetLastVault(organizationId);
+    forgetTeamAccessCache(get().serverUrl, organizationId);
+    const userId = get().session?.user.id;
+    if (userId) forgetMembership(get().serverUrl, userId, organizationId);
+
+    if (path) {
+      // Rust refuses links, roots, the home and vaults folders, and any folder
+      // whose own stamp names a different vault. Permanent: no Trash, and the
+      // CRDT store under `.context/` goes with it. Also drops it from recents.
+      await ipc.deleteDepartedVault(path, organizationId).catch((e: unknown) => {
+        console.warn("[vault] membership ended but the folder could not be deleted", path, e);
+      });
+    }
+
+    if (isOpen) {
+      const next = get().organizations[0];
+      if (next) {
+        await get()
+          .setActiveOrganization(next.id)
+          .catch((e: unknown) => console.warn("[vault] switch after membership loss failed", e));
+      }
+    }
+    const text = membershipLostNotice(name ?? path?.split(/[\\/]/).filter(Boolean).pop() ?? "", reason);
+    // The notice slot lives in the editor column; with no vault open (welcome
+    // screen) the same line goes out as a toast instead, never both.
+    if (get().vault) set({ membershipLost: { text, at: Date.now() } });
+    else toast(text, "neutral");
   },
+
+  checkLostMemberships: async () => {
+    const serverUrl = get().serverUrl;
+    const userId = get().session?.user.id;
+    if (!userId || get().authStatus !== "signed-in") return;
+    if (membershipCheckUnsupported(serverUrl)) return;
+    const listed = get().organizations.map((o) => o.id);
+    rememberMemberships(serverUrl, userId, listed);
+    const asked = orgIdsToCheck({
+      ledger: knownMemberships(serverUrl, userId),
+      bound: readOrgVaults(),
+      listed,
+    });
+    for (const ids of chunk(asked)) {
+      let body: unknown;
+      try {
+        body = await authManager.api.membershipCheck(ids);
+      } catch (e) {
+        const status = e instanceof ApiError ? e.status : null;
+        if (checkFailure(status) === "unsupported") markMembershipCheckUnsupported(serverUrl);
+        return;
+      }
+      for (const orgId of removalsFromCheck(ids, body)) {
+        await get().handleMembershipLost(orgId, "removed");
+      }
+    }
+  },
+
+  membershipLost: null,
+  dismissMembershipLost: () => set({ membershipLost: null }),
 
   deleteRemoteVault: async (organizationId) => {
     // Permanent, server-side, owner-only. 403s here if the caller isn't owner.

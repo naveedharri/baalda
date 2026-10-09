@@ -257,6 +257,44 @@ function VaultUnsyncedBanner() {
 }
 
 /**
+ * "You were removed from <vault>" / "You left <vault>": this device deleted
+ * that vault's folder after the server said the membership ended
+ * (`handleMembershipLost`). Informational: fades after NOTICE_FADE_MS.
+ *
+ * Also runs the launch membership check once per signed-in (server, user):
+ * a removal that happened while the app was closed is caught here.
+ */
+function MembershipLostBanner() {
+  const notice = useStore((s) => s.membershipLost);
+  const authStatus = useStore((s) => s.authStatus);
+  const userId = useStore((s) => s.session?.user.id ?? null);
+  const serverUrl = useStore((s) => s.serverUrl);
+  const checked = useRef<string | null>(null);
+
+  useEffect(() => {
+    // Safe before the vault list loads: only a server `notMember` acts, and
+    // `handleMembershipLost` re-lists the account's vaults before it deletes.
+    if (authStatus !== "signed-in" || !userId) return;
+    const key = `${serverUrl}|${userId}`;
+    if (checked.current === key) return;
+    checked.current = key;
+    void useStore
+      .getState()
+      .checkLostMemberships()
+      .catch((e) => console.warn("[vault] membership check failed", e));
+  }, [authStatus, userId, serverUrl]);
+
+  const dismiss = () => useStore.getState().dismissMembershipLost();
+  const visible = useNoticeSlot("membership-lost", notice != null, { onFade: dismiss });
+  return (
+    <CreateRefusalBannerView
+      text={visible && notice ? { lead: notice.text, detail: "" } : null}
+      onDismiss={dismiss}
+    />
+  );
+}
+
+/**
  * The Free note-limit upgrade strip (the only part of the old "N notes didn't
  * sync" banner that survives — see `noteLimitBanner`).
  *
@@ -1581,6 +1619,7 @@ export default function App() {
           </SilentBoundary>
           <NoteRemovedNotice />
           <VaultUnsyncedBanner />
+          <MembershipLostBanner />
           <VaultRootMissingBanner />
           <AccountLapsedNotice />
           <ClosedAppChangesBanner />

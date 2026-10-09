@@ -297,7 +297,7 @@ export function AccountVaultsTab() {
   // Leave a vault someone else owns (confirmed above). Server first, then the
   // vault leaves this device entirely; the dialog stays open on failure so the
   // server's reason (an owner's 409, offline) has somewhere to show.
-  const leaveVault = async (orgId: string, name: string) => {
+  const leaveVault = async (orgId: string, _name: string) => {
     if (busy) return;
     setBusy(true);
     setActionError(null);
@@ -305,7 +305,7 @@ export function AccountVaultsTab() {
       await useStore.getState().leaveVault(orgId);
       setBound(readOrgVaults());
       setConfirmLeave(null);
-      toast(`You left ${name}.`, "neutral");
+      // The store shows the one "You left <vault>" notice after the cleanup.
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setActionError(message);
@@ -1114,7 +1114,8 @@ export function AccountVaultsTab() {
             {bound[confirmLeave.orgId] ? (
               <>
                 Its folder on this device, <strong>{folderName(confirmLeave.orgId)}</strong>,
-                moves to the Trash.
+                is permanently deleted, including any changes that haven't synced. It
+                does not go to the Trash.
               </>
             ) : (
               "Nothing from it is stored on this device."

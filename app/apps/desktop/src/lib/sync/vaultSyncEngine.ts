@@ -125,6 +125,9 @@ export interface VaultSyncEngineOptions {
   /** Fired when a new teammate joined the vault (`member`): the client
    *  refreshes its roster and shows a join celebration. */
   onMemberJoined?: (name: string) => void;
+  /** Fired when the server says a user lost membership of this vault
+   *  (`member-removed`). The session decides whether it is THIS user. */
+  onMemberRemoved?: (change: { orgId: string; userId: string; reason: "removed" | "left" }) => void;
   /** Fired when the vault's name or icon changed (`org`, #306); only the
    *  fields present in the frame are set. */
   onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
@@ -343,6 +346,7 @@ export class VaultSyncEngine {
   private readonly onRegistryChanged?: (meta?: boolean) => void;
   private readonly onActivityChanged?: () => void;
   private readonly onMemberJoined?: (name: string) => void;
+  private readonly onMemberRemoved?: (change: { orgId: string; userId: string; reason: "removed" | "left" }) => void;
   private readonly onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
   private readonly onAppearanceChanged?: (change: { orgId?: string; settings: AppearanceSettings }) => void;
   private readonly onPresence?: (peer: VaultPeer) => void;
@@ -450,6 +454,7 @@ export class VaultSyncEngine {
     this.onRegistryChanged = opts.onRegistryChanged;
     this.onActivityChanged = opts.onActivityChanged;
     this.onMemberJoined = opts.onMemberJoined;
+    this.onMemberRemoved = opts.onMemberRemoved;
     this.onOrgChanged = opts.onOrgChanged;
     this.onAppearanceChanged = opts.onAppearanceChanged;
     this.onPresence = opts.onPresence;
@@ -899,6 +904,8 @@ export class VaultSyncEngine {
         this.onRegistryChanged?.(control.meta === true);
       } else if (control.t === "activity") {
         this.onActivityChanged?.();
+      } else if (control.t === "member-removed") {
+        this.onMemberRemoved?.({ orgId: control.orgId, userId: control.userId, reason: control.reason });
       } else if (control.t === "member") {
         // A new teammate joined — refresh the roster + celebrate.
         this.onMemberJoined?.(control.name);

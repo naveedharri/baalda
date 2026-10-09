@@ -722,6 +722,107 @@ pub fn check_reset_target(
     Ok(canon)
 }
 
+/// Membership ended (removed by an owner/admin, or left): PERMANENTLY delete
+/// that vault's folder on this device. Not the Trash and no recovery copy, by
+/// product decision (2026-10-09): a departed member keeps no copy of the
+/// team's notes. The UI calls this only on a positive server signal.
+///
+/// Guarded by [`check_departed_target`]. When the folder is the open vault the
+/// watcher and index are released first, and the vault slot is cleared.
+#[tauri::command]
+pub async fn delete_departed_vault(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    organization_id: String,
+) -> AppResult<()> {
+    let vaults_root = read_config(&app, &state)
+        .vaults_root
+        .map(PathBuf::from)
+        .or_else(|| default_vaults_root(&app).ok());
+    let home = app.path().home_dir().ok();
+    let target = check_departed_target(Path::new(&path), &organization_id, vaults_root.as_deref(), home.as_deref())?;
+    let (watcher, index) = {
+        let mut inner = state.inner.lock().unwrap();
+        let is_open = inner
+            .vault
+            .as_ref()
+            .and_then(|v| std::fs::canonicalize(v).ok())
+            .is_some_and(|v| v == target);
+        if is_open {
+            inner.vault = None;
+            (inner.watcher.take(), inner.index.take())
+        } else {
+            (None, None)
+        }
+    };
+    drop(watcher);
+    drop(index);
+    std::fs::remove_dir_all(&target).map_err(io_ctx("delete the vault folder", &target))?;
+    let mut cfg = read_config(&app, &state);
+    cfg.recent_vaults.retain(|r| r.path != path);
+    if cfg.last_vault.as_deref() == Some(path.as_str()) {
+        cfg.last_vault = None;
+    }
+    write_config(&app, &state, &cfg)
+}
+
+/// The refusals of [`delete_departed_vault`], pure so each one is testable.
+/// The folder must be a real directory (never a link), not a filesystem root,
+/// not the home folder or the vaults root (nor contain either), and its own
+/// `.context/config.json` must be stamped with exactly `organization_id`.
+/// Returns the canonical folder to delete.
+pub fn check_departed_target(
+    target: &Path,
+    organization_id: &str,
+    vaults_root: Option<&Path>,
+    home: Option<&Path>,
+) -> AppResult<PathBuf> {
+    let refuse = |why: &str| -> AppResult<PathBuf> {
+        Err(AppError::new(format!("Refusing to delete {}: {why}", target.display())))
+    };
+    if organization_id.trim().is_empty() {
+        return refuse("no vault id was given");
+    }
+    let meta = match std::fs::symlink_metadata(target) {
+        Ok(m) => m,
+        Err(_) => return refuse("the folder doesn't exist"),
+    };
+    if meta.file_type().is_symlink() {
+        return refuse("it is a link, not the vault folder itself");
+    }
+    if !meta.is_dir() {
+        return refuse("it isn't a folder");
+    }
+    let canon = match std::fs::canonicalize(target) {
+        Ok(p) => p,
+        Err(_) => return refuse("its location can't be resolved"),
+    };
+    if canon.parent().is_none() {
+        return refuse("it is a filesystem root");
+    }
+    if let Some(home) = home {
+        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+        if home.starts_with(&canon) {
+            return refuse("it is your home folder or contains it");
+        }
+    }
+    if let Some(root) = vaults_root {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        if root.starts_with(&canon) {
+            return refuse("it is the vaults folder or contains it");
+        }
+    }
+    let stamp = std::fs::File::open(canon.join(".context").join("config.json"))
+        .ok()
+        .and_then(|f| serde_json::from_reader::<_, VaultStamp>(std::io::BufReader::new(f)).ok());
+    match stamp.and_then(|s| s.organization_id) {
+        Some(id) if id == organization_id => Ok(canon),
+        Some(_) => refuse("it is stamped with a different vault"),
+        None => refuse("it carries no vault stamp"),
+    }
+}
+
 /// Create a brand-new empty vault folder `<parent>/<name>` and open it. A name
 /// whose folder is taken gets a numeric suffix (see `free_vault_dir`) rather
 /// than an error — duplicate vault names are allowed.
@@ -3036,6 +3137,43 @@ mod tests {
         // separator trimmed so the label reads "D:".
         assert_eq!(root_label("D:\\"), "D:");
         assert_eq!(root_label("/"), "/");
+    }
+
+    /// Membership-loss deletion is permanent, so its target checks are strict.
+    #[test]
+    fn departed_target_requires_matching_stamp_and_refuses_links_and_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("vaults");
+        let vault = root.join("team");
+        std::fs::create_dir_all(vault.join(".context")).unwrap();
+        std::fs::write(
+            vault.join(".context").join("config.json"),
+            r#"{"organizationId":"org-1","serverVaultId":"col-1"}"#,
+        )
+        .unwrap();
+        // Matching stamp: allowed.
+        assert!(check_departed_target(&vault, "org-1", Some(&root), None).is_ok());
+        // Another vault's id: refused.
+        assert!(check_departed_target(&vault, "org-2", Some(&root), None).is_err());
+        // Empty id: refused.
+        assert!(check_departed_target(&vault, "", Some(&root), None).is_err());
+        // The vaults root itself (and anything containing it): refused.
+        assert!(check_departed_target(&root, "org-1", Some(&root), None).is_err());
+        // Home or a folder containing home: refused.
+        assert!(check_departed_target(&vault, "org-1", Some(&root), Some(&vault.join(".context"))).is_err());
+        // No stamp: refused.
+        let bare = root.join("bare");
+        std::fs::create_dir_all(bare.join(".context")).unwrap();
+        assert!(check_departed_target(&bare, "org-1", Some(&root), None).is_err());
+        // Missing folder: refused.
+        assert!(check_departed_target(&root.join("nope"), "org-1", Some(&root), None).is_err());
+        // A link to the vault: refused.
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&vault, &link).unwrap();
+            assert!(check_departed_target(&link, "org-1", Some(&root), None).is_err());
+        }
     }
 
     /// The rediscovery/launch probe must identify a vault folder without opening

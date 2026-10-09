@@ -472,6 +472,7 @@ export class SyncManager implements InboundHost {
     reason: "deleted" | "revoked",
   ) => void;
   private onMemberJoined?: (name: string) => void;
+  private onMemberRemoved?: (change: { orgId: string; userId: string; reason: "removed" | "left" }) => void;
   private onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
   private onAppearanceChanged?: (change: { orgId?: string; settings: AppearanceSettings }) => void;
   /** Mirrors the registry's {relPath → docId} map to the UI (coalesced). */
@@ -1452,6 +1453,14 @@ export class SyncManager implements InboundHost {
    */
   setMemberJoinedListener(cb: ((name: string) => void) | undefined): void {
     this.onMemberJoined = cb;
+  }
+
+  /** UI subscribes here for `member-removed`: a user lost membership of this
+   *  vault. The store checks it is the signed-in user before acting. */
+  setMemberRemovedListener(
+    cb: ((change: { orgId: string; userId: string; reason: "removed" | "left" }) => void) | undefined,
+  ): void {
+    this.onMemberRemoved = cb;
   }
 
   /** UI subscribes here to patch the open vault's name/icon live (#306). */
@@ -6527,6 +6536,7 @@ export class SyncManager implements InboundHost {
       onActivityChanged: () => this.notifyActivityChanged(scope),
       // A new teammate joined the vault — refresh roster + celebrate.
       onMemberJoined: (name) => this.onMemberJoined?.(name),
+      onMemberRemoved: (change) => this.onMemberRemoved?.(change),
       // The vault was renamed or got a new icon (#306).
       onOrgChanged: (change) => this.onOrgChanged?.(change),
       // The vault's appearance defaults changed — same live path as the icon.

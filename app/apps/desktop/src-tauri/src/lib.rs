@@ -210,6 +210,7 @@ pub fn run() {
             commands::remove_recent_vault,
             commands::delete_vault,
             commands::reset_vault_local_copy,
+            commands::delete_departed_vault,
             commands::create_vault,
             commands::is_vault,
             commands::list_tree,
