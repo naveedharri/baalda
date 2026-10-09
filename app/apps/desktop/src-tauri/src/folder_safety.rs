@@ -17,6 +17,13 @@ use crate::error::AppError;
 /// macOS refused to let Baalda create its default root under Documents.
 pub const DOCUMENTS_DENIED: &str = "documents_denied: ";
 
+/// The vaults root is always a dedicated folder with this name (owner rule,
+/// 2026-10-09): a picked Desktop becomes `Desktop/Baalda Vaults`, so new vault
+/// folders and the `current` link never sit loose among the user's own files,
+/// and listing the root never peeks into unrelated folders (which trips macOS
+/// "access data from other apps" prompts).
+pub const ROOT_DIR_NAME: &str = "Baalda Vaults";
+
 /// The home sub-folders refused as a vault THEMSELVES (anything inside is fine).
 const PROTECTED_HOME_CHILDREN: [&str; 3] = ["Desktop", "Documents", "Downloads"];
 
@@ -60,20 +67,35 @@ pub fn vault_folder_refusal(path: &Path, home: Option<&Path>) -> Option<String> 
     None
 }
 
-/// Why `path` may not be the vaults root, or `None` when it is fine.
+/// Why `path` may not be PICKED as the place for the vaults root, or `None`.
+/// Only the top of the disk and the folders above home are refused: nothing
+/// can be created there. Home itself is fine, it becomes `~/Baalda Vaults`
+/// (see [`nest_vaults_root`]).
 pub fn vaults_root_refusal(path: &Path, home: Option<&Path>) -> Option<String> {
     let p = norm(path);
     if p.parent().is_none() {
         return Some("Baalda cannot keep vaults at the top of your disk. Choose a folder inside your home folder.".into());
     }
     let h = norm(home?);
-    if p == h {
-        return Some("Baalda cannot keep vaults directly in your home folder. Choose a folder inside it, such as Documents/Baalda Vaults.".into());
-    }
-    if h.starts_with(&p) {
+    if h != p && h.starts_with(&p) {
         return Some("Baalda cannot keep vaults in a folder that contains your home folder. Choose a folder inside your home folder.".into());
     }
     None
+}
+
+/// The root to store for a picked folder: the folder itself when it is
+/// already named "Baalda Vaults" (any case) or is the current root, else
+/// `<picked>/Baalda Vaults`.
+pub fn nest_vaults_root(picked: &Path, current: Option<&Path>) -> PathBuf {
+    let named = picked
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(ROOT_DIR_NAME));
+    let is_current = current.is_some_and(|c| norm(c) == norm(picked));
+    if named || is_current {
+        picked.to_path_buf()
+    } else {
+        picked.join(ROOT_DIR_NAME)
+    }
 }
 
 /// `Err` with the refusal sentence when `path` may not be a vault folder.
@@ -152,9 +174,22 @@ mod tests {
     }
 
     #[test]
-    fn root_refuses_home_ancestors_and_disk_top_but_allows_desktop() {
+    fn root_nests_a_baalda_vaults_folder_under_the_pick() {
         let h = home();
-        assert!(vaults_root_refusal(&h, Some(&h)).is_some());
+        assert_eq!(nest_vaults_root(&h.join("Desktop"), None), h.join("Desktop/Baalda Vaults"));
+        assert_eq!(nest_vaults_root(&h, None), h.join("Baalda Vaults"));
+        assert_eq!(nest_vaults_root(&h.join("Documents/Baalda Vaults"), None), h.join("Documents/Baalda Vaults"));
+        assert_eq!(nest_vaults_root(&h.join("Sync/baalda vaults"), None), h.join("Sync/baalda vaults"));
+        // Re-picking the stored root (an older one not named "Baalda Vaults") keeps it.
+        let old = h.join("Baalda");
+        assert_eq!(nest_vaults_root(&old, Some(&old)), old);
+        assert_eq!(nest_vaults_root(&h.join("Desktop"), Some(&old)), h.join("Desktop/Baalda Vaults"));
+    }
+
+    #[test]
+    fn root_refuses_home_ancestors_and_disk_top_but_allows_home_and_desktop() {
+        let h = home();
+        assert!(vaults_root_refusal(&h, Some(&h)).is_none());
         assert!(vaults_root_refusal(Path::new("/Users"), Some(&h)).is_some());
         assert!(vaults_root_refusal(Path::new("/"), Some(&h)).is_some());
         assert!(vaults_root_refusal(Path::new("/"), None).is_some());
@@ -173,7 +208,7 @@ mod tests {
             let link = tmp.path().join("link");
             std::os::unix::fs::symlink(&h, &link).unwrap();
             assert!(vault_folder_refusal(&link, Some(&h)).is_some());
-            assert!(vaults_root_refusal(&link, Some(&h)).is_some());
+            assert!(vaults_root_refusal(&tmp.path().join("link/.."), Some(&h)).is_some());
         }
     }
 

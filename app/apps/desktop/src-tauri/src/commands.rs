@@ -907,7 +907,7 @@ pub async fn get_server_url(
 
 /// User-visible name of the default managed-root folder. Layer-1 brand surface
 /// (spec: rebrand policy) — the one place the default root folder name is set.
-const DEFAULT_ROOT_DIR_NAME: &str = "Baalda Vaults";
+const DEFAULT_ROOT_DIR_NAME: &str = crate::folder_safety::ROOT_DIR_NAME;
 
 /// Default managed root: `<home>/Documents/Baalda Vaults`. Lives under Documents
 /// so it's easy to find in the OS file browser (Finder/Explorer both surface
@@ -922,21 +922,45 @@ fn default_vaults_root(app: &AppHandle) -> AppResult<PathBuf> {
 
 /// Create `root` (refusing an unsafe one) and only then persist it, so a root
 /// that could not be created is never remembered. Shared by every root setter.
+/// When the root moves, the old root's `current` link is removed and, with a
+/// vault open, re-created inside the new root; vault folders stay put.
 fn create_and_persist_root(app: &AppHandle, state: &State<AppState>, root: &Path) -> AppResult<()> {
     let home = app.path().home_dir().ok();
     crate::folder_safety::check_vaults_root(root, home.as_deref())?;
     std::fs::create_dir_all(root)
         .map_err(|e| crate::folder_safety::root_create_error(&e, root, home.as_deref()))?;
     let mut cfg = read_config(app, state);
+    let old = cfg.vaults_root.clone().map(PathBuf::from);
     cfg.vaults_root = Some(root.to_string_lossy().to_string());
-    write_config(app, state, &cfg)
+    write_config(app, state, &cfg)?;
+    if let Some(old) = old.filter(|o| o.as_path() != root) {
+        remove_current_link(&old);
+        let open = state.inner.lock().unwrap().vault.clone();
+        if let Some(open) = open {
+            repoint_current(root, &open);
+        }
+    }
+    Ok(())
 }
 
-/// The effective vaults root. When none is stored (or the stored one is now
-/// refused, e.g. the home folder from an older build) the default is CREATED
-/// first and persisted only after that succeeded. A permission refusal under
-/// Documents comes back with the `documents_denied` prefix (see
-/// `folder_safety::root_create_error`).
+/// Pick a root: refuse the top of the disk and folders above home, then nest
+/// a dedicated "Baalda Vaults" folder under the pick (unless it is one already
+/// or is the current root), create it, persist it, and return it.
+fn choose_root(app: &AppHandle, state: &State<AppState>, picked: &Path) -> AppResult<PathBuf> {
+    let home = app.path().home_dir().ok();
+    crate::folder_safety::check_vaults_root(picked, home.as_deref())?;
+    let current = read_config(app, state).vaults_root.map(PathBuf::from);
+    let root = crate::folder_safety::nest_vaults_root(picked, current.as_deref());
+    create_and_persist_root(app, state, &root)?;
+    Ok(root)
+}
+
+/// The effective vaults root. With none stored, or a stored one above home,
+/// the default is CREATED first and persisted only after that succeeded. A
+/// stored root that is not a dedicated folder (home, or its Desktop, Documents
+/// or Downloads itself, from an older build) gets a "Baalda Vaults" folder
+/// nested under it. A permission refusal under Documents comes back with the
+/// `documents_denied` prefix (see `folder_safety::root_create_error`).
 #[tauri::command]
 pub async fn get_vaults_root(
     app: AppHandle,
@@ -948,12 +972,17 @@ pub async fn get_vaults_root(
         .map(PathBuf::from)
         .filter(|r| crate::folder_safety::vaults_root_refusal(r, home.as_deref()).is_none());
     let root = match stored {
-        Some(r) => {
+        Some(r) if crate::folder_safety::vault_folder_refusal(&r, home.as_deref()).is_none() => {
             // `Documents\Baalda Vaults` on a default install — a redirected or
             // OneDrive-managed Documents is exactly where this fails (#128).
             std::fs::create_dir_all(&r)
                 .map_err(|e| crate::folder_safety::root_create_error(&e, &r, home.as_deref()))?;
             r
+        }
+        Some(r) => {
+            let nested = r.join(DEFAULT_ROOT_DIR_NAME);
+            create_and_persist_root(&app, &state, &nested)?;
+            nested
         }
         None => {
             let d = default_vaults_root(&app)?;
@@ -965,14 +994,15 @@ pub async fn get_vaults_root(
 }
 
 /// Change the managed vaults root (existing vault folders keep their location;
-/// only newly created ones land under the new root).
+/// only newly created ones land under the new root). Returns the stored root,
+/// which is `<path>/Baalda Vaults` unless `path` is already such a folder.
 #[tauri::command]
 pub async fn set_vaults_root(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
-) -> AppResult<()> {
-    create_and_persist_root(&app, &state, Path::new(&path))
+) -> AppResult<String> {
+    Ok(choose_root(&app, &state, Path::new(&path))?.to_string_lossy().to_string())
 }
 
 /// Put the vaults root back to `<home>/Documents/Baalda Vaults` (Account
@@ -987,7 +1017,8 @@ pub async fn reset_vaults_root(
     Ok(d.to_string_lossy().to_string())
 }
 
-/// Native folder picker for the managed vaults root; persists and returns it.
+/// Native folder picker for the managed vaults root; persists and returns the
+/// final (nested) root.
 #[tauri::command]
 pub async fn pick_vaults_root(
     app: AppHandle,
@@ -999,8 +1030,7 @@ pub async fn pick_vaults_root(
     let path = folder
         .into_path()
         .map_err(|e| AppError::new(format!("invalid folder: {e}")))?;
-    create_and_persist_root(&app, &state, &path)?;
-    Ok(Some(path.to_string_lossy().to_string()))
+    Ok(Some(choose_root(&app, &state, &path)?.to_string_lossy().to_string()))
 }
 
 /// Native folder picker that only returns the chosen path (does NOT open it as
@@ -1242,6 +1272,17 @@ pub async fn list_vaults_root_dirs(
         }
     }
     Ok(out)
+}
+
+/// Remove `<root>/current` when it is a link (never a real folder of that
+/// name). Used when the vaults root moves, so the old root keeps no stale link.
+fn remove_current_link(root: &Path) {
+    let link = root.join("current");
+    if std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()) {
+        if let Err(e) = std::fs::remove_file(&link) {
+            log::warn!("[vault] couldn't remove the old `current` link: {e}");
+        }
+    }
 }
 
 /// Point `<root>/current` at `target`. Best-effort: it never clobbers a real

@@ -1094,7 +1094,6 @@ export function AccountVaultsTab() {
         <>
           <div className="menu-sep" />
           <div className="subhead">Vault folder location</div>
-          <div className="muted">New vaults are created here.</div>
           <div className="join-code-row">
             <code className="vault-root-path" title={root ?? rootError ?? ""}>
               {root ?? (rootError ? "Not available" : "…")}
@@ -1117,6 +1116,7 @@ export function AccountVaultsTab() {
               Reset to default
             </button>
           </div>
+          <div className="muted">New vaults are created inside this folder.</div>
           {rootError && <p className="error">{rootError}</p>}
         </>
       )}

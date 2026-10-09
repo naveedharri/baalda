@@ -17,7 +17,7 @@ export const FILES_AND_FOLDERS_SETTINGS_URL =
 
 /** What the Set-up prompt says when Documents is blocked. */
 export const DOCUMENTS_BLOCKED_TEXT =
-  "macOS blocked Baalda from using your Documents folder. Allow Baalda under Files and Folders in System Settings, then try again.";
+  "macOS blocked Baalda from using your Documents folder. Allow it in System Settings → Privacy & Security → Files and Folders → Baalda → Documents Folder, then try again.";
 
 function rawMessage(e: unknown): string {
   if (e instanceof Error) return e.message;
