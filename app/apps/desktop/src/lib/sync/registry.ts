@@ -631,6 +631,10 @@ const FOLDER_MOVE_MIN_RATIO = 0.8;
  *  comfortably past the watcher debounce and the 2.5 s disk-delete grace. */
 const OWN_MOVE_TTL_MS = 120_000;
 
+/** How long a path this device deleted in-app stays "ours" (see
+ *  `RegistrySync.isOwnDelete`): past the pulls its own delete triggers. */
+export const OWN_DELETE_TTL_MS = 60_000;
+
 /**
  * The longest a sidebar delete of a not-yet-registered path waits for the
  * registrations in flight (see `settleRegistrations`). Past it the delete goes
@@ -1061,6 +1065,16 @@ export class VaultRegistry {
    * {@link isOwnMove}.
    */
   private ownMoves = new Map<string, number>();
+  /**
+   * Paths (case-folded) this device deleted in-app moments ago, keyed to when.
+   * A sidebar delete is server-first, then disk: between the two, a pull the
+   * delete itself triggered sees the tombstoned folders still on disk with
+   * notes in them, re-registered or kept them (`folderKept`, "because you
+   * added notes"), and ran the unseen-work gate on notes the user had just
+   * deleted on purpose. A path under one of these is the user's own decision,
+   * never a teammate's delete to second-guess. See {@link isOwnDelete}.
+   */
+  private ownDeletes = new Map<string, number>();
   private unhydratedPlaceholders = new Set<string>();
   /** Everything that could not be registered in the last run. */
   private failed: RegistryFailure[] = [];
@@ -1335,6 +1349,7 @@ export class VaultRegistry {
     // suppress the next vault's first watcher event for the same relative path.
     this.materialized.clear();
     this.ownMoves.clear();
+    this.ownDeletes.clear();
     this.unhydratedPlaceholders.clear();
     // The identical-config memo (see {@link writeConfig}) is only honest while
     // this registry is the last thing that wrote `.context/config.json`. A
@@ -1491,6 +1506,38 @@ export class VaultRegistry {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Did this device delete `relPath`, or a folder above it, in-app within
+   * {@link OWN_DELETE_TTL_MS}? Not consumed, entries age out.
+   */
+  isOwnDelete(relPath: string): boolean {
+    if (this.ownDeletes.size === 0) return false;
+    const now = Date.now();
+    const parts = pathKey(relPath).split("/");
+    for (let i = parts.length; i > 0; i--) {
+      const key = parts.slice(0, i).join("/");
+      const at = this.ownDeletes.get(key);
+      if (at === undefined) continue;
+      if (now - at > OWN_DELETE_TTL_MS) {
+        this.ownDeletes.delete(key);
+        continue;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /** Mark in-app deletes as this device's own (see {@link ownDeletes}). */
+  markOwnDeletes(paths: readonly string[]): void {
+    if (this.ownDeletes.size > 20_000) this.ownDeletes.clear();
+    const now = Date.now();
+    for (const p of paths) this.ownDeletes.set(pathKey(p), now);
+  }
+
+  private unmarkOwnDelete(path: string): void {
+    this.ownDeletes.delete(pathKey(path));
   }
 
   private noteOwnMove(from: string, to: string): void {
@@ -2564,7 +2611,11 @@ export class VaultRegistry {
           // a recovery copy under `.context/trash` first (offline
           // reconciliation D1/D7). Measured BEFORE the release, while a resident
           // bridge still answers for ops not yet in SQLite.
-          const verdict = await this.unseenWorkVerdict(gone.docId, gone.path);
+          // A note this device deleted in-app moments ago is the user's own
+          // decision: no recovery copy, no report, whatever it held unpushed.
+          const verdict = gone.reason !== "revoked" && this.isOwnDelete(gone.path)
+            ? "none"
+            : await this.unseenWorkVerdict(gone.docId, gone.path);
           if (verdict === "unknown") {
             // Unprovable identity: the old "left on disk" refusal, unchanged.
             this.recordFailure({
@@ -2778,7 +2829,14 @@ export class VaultRegistry {
       if (this.stopRun()) break;
       const folderId = this.folderByPath.get(path) ?? this.revokedFolders.get(path);
       try {
-        const removed = await ipc.deleteFolderIfEmpty(path, this.epoch());
+        // A folder this device deleted in-app is removed whole (the sidebar's
+        // own recursive delete), never kept as a teammate's delete would be.
+        const own = this.isOwnDelete(path);
+        let removed = await ipc.deleteFolderIfEmpty(path, this.epoch());
+        if (!removed && own) {
+          await ipc.deletePath(path, this.epoch());
+          removed = true;
+        }
         // A folder that left the visible set and is still on disk (its notes
         // not removed yet) keeps its id so a later pass can retry the removal.
         if (
@@ -2798,7 +2856,7 @@ export class VaultRegistry {
         if (removed) {
           changedDisk = true;
           this.markMaterialized(path); // our removal; one watcher echo to swallow
-        } else if (tombstonedFolders.has(path)) {
+        } else if (tombstonedFolders.has(path) && !own) {
           reconcileReport.record({
             kind: "folderKept",
             path,
@@ -3912,7 +3970,11 @@ export class VaultRegistry {
     // leave those lookups missing. The id is the identity; the spelling is ours.
     const localFolderPathCi = new Map(folders.map((f) => [pathKey(f.path), f.path] as const));
     for (const f of serverFolders) {
-      this.folderByPath.set(localFolderPathCi.get(pathKey(f.path)) ?? f.path, f.id);
+      const rp = localFolderPathCi.get(pathKey(f.path)) ?? f.path;
+      // A listing fetched before this device's own folder delete landed still
+      // names the folder; re-mapping it would resurrect a dead id locally.
+      if (this.isOwnDelete(rp)) continue;
+      this.folderByPath.set(rp, f.id);
     }
     // …and drop the twin the merge left behind. Both spellings are in the
     // persisted map for a vault that had case-duplicated rows, and neither is
@@ -3937,6 +3999,7 @@ export class VaultRegistry {
       (f) =>
         !this.folderByPath.has(f.path) &&
         !this.hiddenPaths.has(pathKey(f.path)) &&
+        !this.isOwnDelete(f.path) &&
         !this.isHeldRefusal(f.path),
     );
 
@@ -4027,6 +4090,7 @@ export class VaultRegistry {
         !this.aliasPaths.has(n.path) &&
         !this.hiddenPaths.has(pathKey(n.path)) &&
         !this.deletedPaths.has(pathKey(n.path)) &&
+        !this.isOwnDelete(n.path) &&
         !this.isHeldRefusal(n.path),
     );
 
@@ -5335,6 +5399,18 @@ export class VaultRegistry {
     if (!this.isMappedPath(path) && (await this.settleRegistrations()) && this.stale()) return;
     const vaultId = this.serverVaultId;
     if (!vaultId) return;
+    // Marked BEFORE the request: the server broadcasts `registry-changed` as
+    // it commits, and the pull that triggers must already see this as ours.
+    this.markOwnDeletes([path]);
+    try {
+      await this.deletePathOnServer(path, vaultId);
+    } catch (e) {
+      this.unmarkOwnDelete(path);
+      throw e;
+    }
+  }
+
+  private async deletePathOnServer(path: string, vaultId: string): Promise<void> {
     const folderId = this.folderByPath.get(path);
     if (folderId) {
       try {
@@ -5444,7 +5520,20 @@ export class VaultRegistry {
     }
     const vaultId = this.serverVaultId;
     if (!vaultId) return answer();
+    // Before any request, as in `deletePath`; refusals are unmarked at the end.
+    this.markOwnDeletes(unique);
+    const result = await this.deletePathsOnServer(unique, vaultId, out, fail, answer);
+    for (const o of result) if (o.status !== "deleted") this.unmarkOwnDelete(o.path);
+    return result;
+  }
 
+  private async deletePathsOnServer(
+    unique: string[],
+    vaultId: string,
+    out: Map<string, NoteDeleteOutcome>,
+    fail: (path: string, e: unknown) => void,
+    answer: () => NoteDeleteOutcome[],
+  ): Promise<NoteDeleteOutcome[]> {
     const notes: Array<{ path: string; docId: string }> = [];
     for (const path of unique) {
       if (this.folderByPath.has(path)) {

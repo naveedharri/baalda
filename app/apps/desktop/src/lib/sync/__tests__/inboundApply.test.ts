@@ -1975,6 +1975,93 @@ describe("offline reconciliation — folder kept by this device's new notes (D8)
   });
 });
 
+describe("own in-app delete of a nested tree", () => {
+  /** Context/beliefs/captures/a.md (d1), Context/beliefs/b.md (d2), agreed on a
+   *  first pass; then an unpushed local note lands in captures and d1 holds ops
+   *  the server never acknowledged. */
+  async function tree() {
+    reconcileReport.clear();
+    const disk = new FakeDisk();
+    for (const f of ["Context", "Context/beliefs", "Context/beliefs/captures"]) disk.folders.add(f);
+    disk.notes.set("Context/beliefs/captures/a.md", "d1");
+    disk.bodies.set("Context/beliefs/captures/a.md", "a");
+    disk.notes.set("Context/beliefs/b.md", "d2");
+    disk.bodies.set("Context/beliefs/b.md", "b");
+    install(disk);
+    // Recursive, like Rust's `delete_path`.
+    vi.mocked(ipc.deletePath).mockImplementation((async (p: string) => {
+      const under = (x: string) => x === p || x.startsWith(p + "/");
+      for (const n of [...disk.notes.keys()]) if (under(n)) { disk.notes.delete(n); disk.bodies.delete(n); }
+      for (const f of [...disk.folders]) if (under(f)) disk.folders.delete(f);
+    }) as never);
+    const state: ServerState = {
+      notes: [
+        { id: "d1", rel_path: "Context/beliefs/captures/a.md" },
+        { id: "d2", rel_path: "Context/beliefs/b.md" },
+      ],
+      folders: [
+        { id: "f1", path: "Context" },
+        { id: "f2", path: "Context/beliefs" },
+        { id: "f3", path: "Context/beliefs/captures" },
+      ],
+    };
+    const api = fakeApi(state);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    disk.notes.set("Context/beliefs/captures/new.md", "local-new");
+    disk.bodies.set("Context/beliefs/captures/new.md", "written, not pushed yet");
+    disk.unseen.add("d1");
+    const tombstoneAll = () => {
+      state.notes = [];
+      state.folders = [];
+      state.tombstones = ["d1", "d2"];
+      state.folderTombstones = ["f1", "f2", "f3"];
+    };
+    return { disk, api, reg, tombstoneAll };
+  }
+
+  it("removes everything, even with pulls racing between server and disk, and reports nothing", async () => {
+    const { disk, api, reg, tombstoneAll } = await tree();
+    vi.mocked(api.createFolder).mockClear();
+    vi.mocked(api.createNote).mockClear();
+    vi.mocked(ipc.copyToTrash).mockClear();
+    const selection = ["Context/beliefs/captures", "Context/beliefs", "Context"];
+    // Server first, deepest first, as the sidebar's bulk delete orders them.
+    for (const p of selection) await reg.deletePath(p);
+    // A pull whose listing predates the commit still names the folders…
+    await reg.pull();
+    // …then one that sees the tombstones, both before the disk half ran.
+    tombstoneAll();
+    await reg.pull();
+    // The sidebar's own disk half, then a settling pull.
+    for (const p of selection) await ipc.deletePath(p);
+    await reg.pull();
+
+    expect([...disk.folders]).toEqual([]);
+    expect([...disk.notes.keys()]).toEqual([]);
+    expect(reconcileReport.items()).toEqual([]);
+    expect(ipc.copyToTrash).not.toHaveBeenCalled();
+    expect(api.createFolder).not.toHaveBeenCalled();
+    expect(api.createNote).not.toHaveBeenCalled();
+  });
+
+  it("a teammate's delete of the same tree still keeps the folder holding this device's new note", async () => {
+    const { disk, reg, tombstoneAll } = await tree();
+    tombstoneAll();
+    await reg.pull();
+
+    expect(disk.folders.has("Context/beliefs/captures")).toBe(true);
+    expect(disk.notes.has("Context/beliefs/captures/new.md")).toBe(true);
+    expect(disk.notes.has("Context/beliefs/b.md")).toBe(false);
+    expect(reconcileReport.items()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "folderKept", path: "Context/beliefs/captures" }),
+      ]),
+    );
+  });
+});
+
 describe("offline reconciliation — same-path create (D4)", () => {
   /** Pass 1 agrees on `a.md` (a baseline exists); then this device creates
    *  `P.md` offline while a teammate's `P.md` lands on the server. */
