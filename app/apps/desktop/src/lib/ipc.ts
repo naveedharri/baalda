@@ -349,6 +349,8 @@ export const setVaultsRoot = (path: string) =>
   invoke<void>("set_vaults_root", { path });
 /** Native folder picker for the managed vaults root; persists + returns it. */
 export const pickVaultsRoot = () => invoke<string | null>("pick_vaults_root");
+/** Put the vaults root back to Documents/Baalda Vaults (created first); returns it. */
+export const resetVaultsRoot = () => invoke<string>("reset_vaults_root");
 /** Native folder picker that only returns the path (does not open it). */
 export const pickFolder = () => invoke<string | null>("pick_folder");
 /** Native multi-file picker; returns chosen absolute paths (null if cancelled). */

@@ -9,6 +9,7 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { ApiError, type BillingUsage, type MyBillingAccount, type OrgBilling } from "../lib/api";
 import { toast } from "../lib/toast";
+import { folderErrorText } from "../lib/vault/folderErrors";
 import { authManager } from "../lib/auth/authManager";
 import { classifyLimitError, type LimitKind, limitFromError } from "../lib/billing";
 import * as ipc from "../lib/ipc";
@@ -79,6 +80,7 @@ export function AccountVaultsTab() {
   );
 
   const [root, setRoot] = useState<string | null>(null);
+  const [rootError, setRootError] = useState<string | null>(null);
   const [bound, setBound] = useState<Record<string, string>>(() => readOrgVaults());
   const [creating, setCreating] = useState(false);
   const [orgName, setOrgName] = useState("");
@@ -158,7 +160,10 @@ export function AccountVaultsTab() {
       .then((r) => {
         if (!cancelled) setRoot(r);
       })
-      .catch(() => {});
+      .catch((e) => {
+        // Show WHY there is no root (e.g. macOS blocked Documents), not "…".
+        if (!cancelled) setRootError(folderErrorText(e));
+      });
     return () => {
       cancelled = true;
     };
@@ -441,12 +446,27 @@ export function AccountVaultsTab() {
     }
   };
 
+  // Both go through Rust's refusal of the home folder, its parents and the
+  // top of the disk; a refusal (or a blocked Documents) is shown as a toast.
   const changeRoot = async () => {
     try {
       const picked = await ipc.pickVaultsRoot();
-      if (picked) setRoot(picked);
-    } catch {
-      /* picker cancelled/unavailable */
+      if (picked) {
+        setRoot(picked);
+        setRootError(null);
+      }
+    } catch (e) {
+      toast(folderErrorText(e), "error");
+    }
+  };
+  const resetRoot = async () => {
+    try {
+      setRoot(await ipc.resetVaultsRoot());
+      setRootError(null);
+    } catch (e) {
+      const text = folderErrorText(e);
+      setRootError(text);
+      toast(text, "error");
     }
   };
 
@@ -1076,8 +1096,8 @@ export function AccountVaultsTab() {
           <div className="subhead">Vault folder location</div>
           <div className="muted">New vaults are created here.</div>
           <div className="join-code-row">
-            <code className="vault-root-path" title={root ?? ""}>
-              {root ?? "…"}
+            <code className="vault-root-path" title={root ?? rootError ?? ""}>
+              {root ?? (rootError ? "Not available" : "…")}
             </code>
             <span
               className="account-vaults-info"
@@ -1093,7 +1113,11 @@ export function AccountVaultsTab() {
             <button className="link-btn" onClick={() => void changeRoot()}>
               Change…
             </button>
+            <button className="link-btn" onClick={() => void resetRoot()}>
+              Reset to default
+            </button>
           </div>
+          {rootError && <p className="error">{rootError}</p>}
         </>
       )}
 

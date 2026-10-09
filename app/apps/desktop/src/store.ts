@@ -6,6 +6,7 @@
 import { setSelfAvatarImage } from "./lib/avatarIdentity";
 import { create } from "zustand";
 import * as ipc from "./lib/ipc";
+import { DOCUMENTS_BLOCKED_TEXT, isDocumentsDenied } from "./lib/vault/folderErrors";
 import { bridgeManager } from "./lib/bridge";
 import {
   colorsAdopted,
@@ -188,6 +189,10 @@ export interface PendingVaultFolder {
     /** The vault's folder is GONE (not merely failed to open): the prompt then
      *  offers Restore here / Locate folder…, like the in-vault banner (#228). */
     missing?: boolean;
+    /** macOS refused Baalda the Documents folder, so the default vaults root
+     *  couldn't be created: the prompt offers Open System Settings / Try again
+     *  and only a secondary "Choose another folder…". */
+    documentsDenied?: boolean;
   } | null;
   /** The vault was JUST created, so the folder it lands in may receive
    *  first-run starter content if empty. Never set for existing vaults. */
@@ -3801,6 +3806,12 @@ export const useStore = create<AppStore>((set, get) => ({
       } catch (e) {
         console.warn("[vault] auto folder failed; asking instead", e);
         if (superseded()) return;
+        // Documents blocked by macOS privacy: explain it rather than invite
+        // "any folder" (a user once picked their home folder from here).
+        if (isDocumentsDenied(e)) {
+          askForFolder({ text: DOCUMENTS_BLOCKED_TEXT, path: null, documentsDenied: true });
+          return;
+        }
       }
       askForFolder(null);
     }

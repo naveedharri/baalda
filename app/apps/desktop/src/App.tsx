@@ -43,6 +43,7 @@ import { usePendingReviewCount } from "./components/ReviewTab";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
+import { FILES_AND_FOLDERS_SETTINGS_URL, folderErrorText } from "./lib/vault/folderErrors";
 import * as perf from "./lib/perf";
 import { implicatedFolders, refreshWorthy } from "./lib/tree/lazyTree";
 import { DISK_DELETE_GRACE_MS, syncManager } from "./lib/sync/docSession";
@@ -499,6 +500,8 @@ function VaultFolderPrompt() {
   if (!pending) return null;
   // The folder is GONE (#228): same wording and actions as the in-vault banner.
   const missing = pending.reason?.missing === true;
+  // macOS refused the Documents folder: explain and offer System Settings.
+  const documentsDenied = pending.reason?.documentsDenied === true;
 
   const run = (fn: () => Promise<void>) => async () => {
     setBusy(true);
@@ -506,11 +509,33 @@ function VaultFolderPrompt() {
     try {
       await fn();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(folderErrorText(e));
     } finally {
       setBusy(false);
     }
   };
+
+  const settingsBtn = (
+    <AsyncButton
+      key="settings"
+      className="wf-btn wf-btn-primary"
+      disabled={busy}
+      spinnerTone="on-accent"
+      onClick={run(() => ipc.openExternal(FILES_AND_FOLDERS_SETTINGS_URL))}
+    >
+      <span>Open System Settings</span>
+    </AsyncButton>
+  );
+  const retryBtn = (
+    <AsyncButton
+      key="retry"
+      className="wf-btn wf-btn-ghost"
+      disabled={busy}
+      onClick={run(() => useStore.getState().startEmptyVault())}
+    >
+      <span>Try again</span>
+    </AsyncButton>
+  );
 
   const pickBtn = (
     <AsyncButton
@@ -584,8 +609,22 @@ function VaultFolderPrompt() {
           {/* Both of these open a vault: a native picker, then a full vault open
               + reconcile. Easily a second or two, so each reports for itself. */}
           {/* A missing folder leads with Restore here, like the banner (#228). */}
-          {missing ? [emptyBtn, pickBtn] : [pickBtn, emptyBtn]}
+          {documentsDenied
+            ? [settingsBtn, retryBtn]
+            : missing
+              ? [emptyBtn, pickBtn]
+              : [pickBtn, emptyBtn]}
         </div>
+        {documentsDenied && (
+          <button
+            type="button"
+            className="link-btn wf-switch"
+            disabled={busy}
+            onClick={run(() => useStore.getState().chooseVaultFolder())}
+          >
+            Choose another folder…
+          </button>
+        )}
         {missing && (
           <button
             type="button"
