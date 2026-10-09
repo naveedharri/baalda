@@ -13,7 +13,7 @@ vi.mock("../../store", () => ({
     structureNotice: { rootMissing: false },
   }),
 }));
-const copyText = vi.fn(async () => true);
+const copyText = vi.fn(async (_text: string) => true);
 vi.mock("../../lib/clipboard", () => ({ copyText: (text: string) => copyText(text) }));
 vi.mock("../../lib/toast", () => ({ toast: vi.fn() }));
 vi.mock("../VaultSwitcher", () => ({
