@@ -30,6 +30,8 @@ import {
   encodePubsubVoice,
   encodeVoiceFrame,
   decodePubsub,
+  encodePubsubMemberRemoved,
+  type MemberRemovedReason,
   decodeVoiceFrame,
   VOICE_FRAME,
   VOICE_RATE_BYTES_PER_SEC,
@@ -359,6 +361,18 @@ export class VaultChannel {
         ? encodePubsubBrake(userId, true, state.until, state.count)
         : encodePubsubBrake(userId, false),
     );
+  }
+
+  /** `userId` is no longer a member of `orgId`, whose note collection is
+   *  `vaultId`. Every instance tells that user's connections (cap-gated) and
+   *  closes them with `WS_CLOSE_UNAUTHORIZED`; nobody else hears it. */
+  async publishMemberRemoved(
+    vaultId: string,
+    orgId: string,
+    userId: string,
+    reason: MemberRemovedReason,
+  ): Promise<void> {
+    await this.pubsub.publish(vaultTopic(vaultId), encodePubsubMemberRemoved(orgId, userId, reason));
   }
 
   /** Wire the channel onto the HTTP server's upgrade at `config.vaultSyncPath`. */
@@ -1100,6 +1114,21 @@ class VaultConnection {
       }
       return;
     }
+    if (msg.type === "member-removed") {
+      // Only the departed user's own sockets. Tell a client that understands
+      // the frame, then close regardless of cap: the membership is gone, so the
+      // reconnect fails at the token mint (403) and stops there.
+      if (msg.userId !== this.userId) return;
+      if (this.caps.has("member-removed")) {
+        this.send({ t: "member-removed", orgId: msg.orgId, userId: msg.userId, reason: msg.reason });
+      }
+      console.warn(
+        `[vault-channel] closing user=${this.userId} vault=${this.vaultId ?? "?"}: membership ended (${msg.reason})`,
+      );
+      this.ws.close(WS_CLOSE_UNAUTHORIZED, "membership_ended");
+      this.cleanup();
+      return;
+    }
     if (msg.type === "member-joined") {
       // Org-wide news, not doc-scoped — forward to every subscriber of this
       // vault so their roster refreshes and the join celebration fires live.
@@ -1130,18 +1159,9 @@ class VaultConnection {
       // Vault-wide, like member-joined: audio is addressed to the team, and
       // vault membership is already proven by the token behind every connection.
       //
-      // KNOWN LIMITATION, narrowed but not gone. Member removal now publishes
-      // `acl-changed`, so a removed member's readable set empties immediately and
-      // every doc is dropped — note CONTENT is no longer TTL-bound.
-      //
-      // What remains is the vault-WIDE frames, which are deliberately not
-      // doc-gated: this one and `member-joined`. The socket itself survives (there
-      // is still no `disconnectDoc` equivalent for the vault channel), so a
-      // just-removed member can still hear audio and see joins until the socket
-      // drops or their vault token expires (`SYNC_TOKEN_TTL_SECONDS`, 600s by
-      // default). Closing that needs a `PS_MEMBER_REMOVED` frame carrying a userId
-      // each connection compares against its own and self-terminates on; tracked
-      // as follow-up work, not solved here.
+      // Membership ending publishes `member-removed`, which closes the departed
+      // user's vault-channel sockets on every instance, so vault-wide frames
+      // like this one stop reaching them at once rather than at token expiry.
       //
       // Two gates. Never echo to the speaker — they are hearing themselves live
       // and a loopback would be an echo, not a feature. And only send to clients

@@ -10,7 +10,7 @@ import {
   findByOrg,
   isActiveStatus,
 } from "../../billing/store.js";
-import { announceMemberJoined } from "../../sync/member-events.js";
+import { announceMemberJoined, announceMemberRemoved } from "../../sync/member-events.js";
 import { announceInvitationGone } from "../../sync/user-events.js";
 import { applyInvitationAccess } from "../../members/invitation-access.js";
 import { billingEnabled } from "../../config.js";
@@ -90,6 +90,9 @@ export interface OrgDeps {
   billingProvider?: BillingProvider;
 }
 
+/** Most org ids one `POST /api/orgs/membership-check` answers. */
+export const MEMBERSHIP_CHECK_MAX = 200;
+
 // Crockford-style base32 alphabet: no ambiguous 0/O/1/I. 32 symbols.
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_LEN = 8;
@@ -136,7 +139,12 @@ async function resolveActiveOrg(
  * Shares the user *created for others* (`created_by`) are untouched — only
  * grants TO this user (`principal_id`) go.
  */
-async function revokeMembership(deps: OrgDeps, orgId: string, userId: string): Promise<void> {
+async function revokeMembership(
+  deps: OrgDeps,
+  orgId: string,
+  userId: string,
+  reason: "removed" | "left",
+): Promise<void> {
   // Snapshot the org's docs so we can kill any live sockets the departing
   // member holds. closeConnections on a doc with no live socket is a cheap
   // no-op, so covering every doc in the org is fine (this is rare).
@@ -187,6 +195,10 @@ async function revokeMembership(deps: OrgDeps, orgId: string, userId: string): P
   // `listReadableDocsInVault`, which has to see the post-delete state to
   // conclude the departed member may now read nothing.
   for (const vaultId of vaultIds) deps.onAclChanged(vaultId);
+  // …and close the departed user's vault-channel sockets outright, telling a
+  // client that understands it why (`member-removed`), so vault-wide frames
+  // (voice, joins) stop now rather than at token expiry.
+  await announceMemberRemoved(orgId, userId, reason);
 }
 
 /**
@@ -725,6 +737,50 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
   });
 
   /**
+   * Am I still a member of these vaults? (any signed-in user)
+   *
+   * POST /api/orgs/membership-check {orgIds} → {member, notMember, unknown}.
+   * A launch-time check: a desktop that was closed when it was removed learns
+   * it here. `notMember` names only orgs that EXIST and do not list the caller;
+   * an id with no organization row at all goes to `unknown`, so a stale or
+   * foreign stamp is never mistaken for a removal. Every input id lands in
+   * exactly one list. At most `MEMBERSHIP_CHECK_MAX` ids (400 `too_many_ids`).
+   */
+  orgRoutes.post("/orgs/membership-check", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const body = (await c.req.json().catch(() => null)) as { orgIds?: unknown } | null;
+    const raw = body?.orgIds;
+    if (!Array.isArray(raw) || !raw.every((id) => typeof id === "string")) {
+      return c.json({ error: "invalid_body", message: "orgIds must be an array of strings" }, 400);
+    }
+    const orgIds = [...new Set(raw as string[])];
+    if (orgIds.length > MEMBERSHIP_CHECK_MAX) {
+      return c.json({ error: "too_many_ids", max: MEMBERSHIP_CHECK_MAX }, 400);
+    }
+    if (orgIds.length === 0) return c.json({ member: [], notMember: [], unknown: [] });
+    const { rows } = await pool.query<{ id: string; is_member: boolean }>(
+      `SELECT o.id,
+              EXISTS (SELECT 1 FROM member m
+                       WHERE m."organizationId" = o.id AND m."userId" = $2) AS is_member
+         FROM organization o
+        WHERE o.id = ANY($1::text[])`,
+      [orgIds, session.userId],
+    );
+    const found = new Map(rows.map((r) => [r.id, r.is_member]));
+    const member: string[] = [];
+    const notMember: string[] = [];
+    const unknown: string[] = [];
+    for (const id of orgIds) {
+      const m = found.get(id);
+      if (m === undefined) unknown.push(id);
+      else if (m) member.push(id);
+      else notMember.push(id);
+    }
+    return c.json({ member, notMember, unknown });
+  });
+
+  /**
    * Does this vault still exist, and may I see it? (any signed-in user)
    *
    * Exists to tell "the vault was made local only" apart from "that folder
@@ -790,7 +846,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       return c.json({ error: "Only the owner can remove an admin" }, 403);
     }
 
-    await revokeMembership(deps, orgId, targetUserId);
+    await revokeMembership(deps, orgId, targetUserId, "removed");
     await onMembershipTrimmed(pool, orgId);
     return c.json({ removed: true });
   });
@@ -839,7 +895,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     const me = people.find((p) => p.email === session.email) ?? people.find((p) => p.role !== "owner") ?? null;
     const orgName = people[0]?.org_name ?? "your vault";
 
-    await revokeMembership(deps, orgId, session.userId);
+    await revokeMembership(deps, orgId, session.userId, "left");
     await onMembershipTrimmed(pool, orgId);
 
     // Fire-and-forget, after the commit: a mail failure must never undo or

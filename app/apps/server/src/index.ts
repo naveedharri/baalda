@@ -14,7 +14,7 @@ import { createPubSub } from "./sync/pubsub.js";
 import { VaultChannel } from "./sync/vault-channel.js";
 import {
   setAppearanceChangedPublisher,
-  setMemberJoinedPublisher,
+  setMemberJoinedPublisher, setMemberRemovedPublisher,
   setOrgChangedPublisher,
 } from "./sync/member-events.js";
 import { publishUserEvent, setUserEventPublisher } from "./sync/user-events.js";
@@ -115,6 +115,12 @@ async function main() {
   // they have open (sync/user-events.ts).
   setUserEventPublisher((userId, event) => {
     void publishUserEvent(pubsub, userId, event).catch(broadcastFailed("user-event"));
+  });
+  // A removed/departed member's vault-channel sockets are told and closed.
+  setMemberRemovedPublisher((vaultId, orgId, userId, reason) => {
+    void vaultChannel
+      .publishMemberRemoved(vaultId, orgId, userId, reason)
+      .catch(broadcastFailed("member-removed"));
   });
   // A vault rename / icon change reaches teammates' switchers live (#306).
   setOrgChangedPublisher((vaultId, change) => {

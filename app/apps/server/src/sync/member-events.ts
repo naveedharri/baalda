@@ -100,3 +100,41 @@ export async function announceAppearanceChanged(change: AppearanceChangedFields)
     console.error("announceAppearanceChanged failed:", err);
   }
 }
+
+/** Why a membership ended: an owner/admin removed them, or they left. */
+export type MemberRemovedReason = "removed" | "left";
+type MemberRemovedPublisher = (
+  vaultId: string,
+  orgId: string,
+  userId: string,
+  reason: MemberRemovedReason,
+) => void;
+
+let publishRemoved: MemberRemovedPublisher | null = null;
+
+export function setMemberRemovedPublisher(fn: MemberRemovedPublisher | null): void {
+  publishRemoved = fn;
+}
+
+/**
+ * Tell `userId`'s live vault-channel connections that their membership of
+ * `organizationId` ended, which also closes them. Call AFTER the member row is
+ * gone, so the client's reconnect fails at the token mint. Same fan-out and
+ * best-effort contract as {@link announceMemberJoined}.
+ */
+export async function announceMemberRemoved(
+  organizationId: string,
+  userId: string,
+  reason: MemberRemovedReason,
+): Promise<void> {
+  if (!publishRemoved) return;
+  try {
+    const { rows } = await pool.query<{ id: string }>(
+      "SELECT id FROM vaults WHERE organization_id = $1",
+      [organizationId],
+    );
+    for (const { id } of rows) publishRemoved(id, organizationId, userId, reason);
+  } catch (err) {
+    console.error("announceMemberRemoved failed:", err);
+  }
+}

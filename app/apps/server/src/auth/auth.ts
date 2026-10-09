@@ -1,5 +1,5 @@
 import { betterAuth } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { bearer, mcp, organization } from "better-auth/plugins";
 import { Algorithm, hash as argonHash, verify as argonVerify } from "@node-rs/argon2";
 import pg from "pg";
@@ -9,7 +9,7 @@ import { canAddMember, canCreateOrganization } from "../billing/entitlements.js"
 import { checkInviteSeat, checkJoinSeat, seatRefusalBody, teamModel, type SeatRefusal } from "../billing/plan.js";
 import { ensureAccountForOrg } from "../billing/accounts.js";
 import { onMembershipTrimmed } from "../billing/lapse.js";
-import { announceMemberJoined, announceOrgChanged } from "../sync/member-events.js";
+import { announceMemberJoined, announceMemberRemoved, announceOrgChanged } from "../sync/member-events.js";
 import { dispatchMail, emailEnabled } from "../email/mailer.js";
 import { verifyEmailEmail } from "../email/templates.js";
 import { clearThrottle } from "./signin-throttle.js";
@@ -206,6 +206,21 @@ export const auth = betterAuth({
   },
   // The profile picture (`image`) is validated on every update — see
   // auth/profile-image.ts. Provider sign-ups write a photo URL, which passes.
+  // Better Auth's `/organization/leave` has no organization hook, so it is
+  // caught here: once it succeeded, close the leaver's vault-channel sockets
+  // exactly like our POST /api/orgs/:orgId/leave does.
+  hooks: {
+    after: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/organization/leave") return;
+      const returned = ctx.context.returned as
+        | { userId?: unknown; organizationId?: unknown }
+        | Error
+        | undefined;
+      if (!returned || returned instanceof Error) return;
+      if (typeof returned.userId !== "string" || typeof returned.organizationId !== "string") return;
+      await announceMemberRemoved(returned.organizationId, returned.userId, "left");
+    }),
+  },
   databaseHooks: {
     user: {
       update: {
@@ -362,8 +377,11 @@ export const auth = betterAuth({
         // Seats/vaults shrank: a lapsed account trimmed back under the Free
         // limits is lifted (billing/lapse.ts). Runs after Better Auth's write;
         // `onMembershipTrimmed` never throws.
-        afterRemoveMember: async ({ organization }) => {
+        afterRemoveMember: async ({ organization, member }) => {
           await onMembershipTrimmed(authPool, organization.id);
+          // Better Auth's own remove-member endpoint: close the removed user's
+          // live vault-channel sockets like DELETE /api/orgs/:orgId/members/:userId.
+          await announceMemberRemoved(organization.id, member.userId, "removed");
         },
         afterCancelInvitation: async ({ organization, invitation }) => {
           await onMembershipTrimmed(authPool, organization.id);
