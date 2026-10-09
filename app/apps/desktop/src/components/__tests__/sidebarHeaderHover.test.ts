@@ -13,7 +13,8 @@ vi.mock("../../store", () => ({
     structureNotice: { rootMissing: false },
   }),
 }));
-vi.mock("../../lib/clipboard", () => ({ copyText: vi.fn() }));
+const copyText = vi.fn(async () => true);
+vi.mock("../../lib/clipboard", () => ({ copyText: (text: string) => copyText(text) }));
 vi.mock("../../lib/toast", () => ({ toast: vi.fn() }));
 vi.mock("../VaultSwitcher", () => ({
   useSwitcherRows: () => [],
@@ -126,6 +127,18 @@ describe("vault switcher hover and click", () => {
     point(tile(), "pointerover");
     expect(vaultName().hasAttribute("title")).toBe(false);
     expect(host.querySelector(".vault-switch-btn")!.hasAttribute("title")).toBe(false);
+  });
+
+  it("copies the path on click without pinning a hover-opened switcher", async () => {
+    const path = () => host.querySelector<HTMLSpanElement>(".vault-path-copy")!;
+    point(path(), "pointerover");
+    expect(menu()).not.toBeNull();
+    await act(async () => path().click());
+    expect(copyText).toHaveBeenCalledWith("/vault");
+    expect(host.querySelector(".vault-path-copied")).not.toBeNull();
+    point(path(), "pointerout");
+    advance(220);
+    expect(menu()).toBeNull();
   });
 
   it("does not interpret a touch pointer as hover", () => {
