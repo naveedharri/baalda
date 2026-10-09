@@ -12,6 +12,7 @@ import {
   seedNote,
   seedOrg,
   seedShare,
+  seedUserVaultGrant,
   seedVault,
   seedVaultGrant,
 } from "./helpers/seed.js";
@@ -84,5 +85,16 @@ describe("attachments/ upload gate", () => {
     await seedShare(org, "folder", folder, member.userId, "view");
     const res = await intent(member, vault);
     expect(res.status).toBe(403);
+  });
+
+  it("lets a member whose own vault level is Can edit upload an embed in a sealed vault", async () => {
+    const { member, org, vault } = await setup("embed-personal", "sealed");
+    await seedUserVaultGrant(org, member.userId, "edit");
+    expect((await intent(member, vault)).status).toBe(200);
+  });
+
+  it("does not count authorship: the owner of a sealed vault with no grant is refused", async () => {
+    const { owner, vault } = await setup("embed-owner-sealed", "sealed");
+    expect((await intent(owner, vault)).status).toBe(403);
   });
 });
