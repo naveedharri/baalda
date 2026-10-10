@@ -1230,6 +1230,7 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     if (row && isActiveStatus(row.status) && row.cancel_at_period_end) {
       return c.json(SUBSCRIPTION_CANCELING_BODY, 409);
     }
+    if (legacySub(row)) return c.json(LEGACY_PLAN_BODY, 409);
     if (row && isActiveStatus(row.status) && row.provider_subscription_id) {
       try {
         const preview = await deps.provider.previewSeatChange(row.provider_subscription_id, seats, {
@@ -1273,6 +1274,7 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     }
     // Scheduled to cancel: Polar refuses a seat change until it is resumed.
     if (row.cancel_at_period_end) return c.json(SUBSCRIPTION_CANCELING_BODY, 409);
+    if (legacySub(row)) return c.json(LEGACY_PLAN_BODY, 409);
     const plan = await resolveAccountPlan(pool, { accountId: ctx.accountId });
     const floor = Math.max(teamMinSeats(), plan.seatsUsed);
     if (seats < floor) return c.json({ error: "below_floor", code: "below_floor", floor }, 400);
@@ -1558,6 +1560,21 @@ const SUBSCRIPTION_CANCELING_BODY = {
   message: "Resume your plan before changing seats.",
 } as const;
 
+/** A seat change on a legacy (pre-Team) subscription: it has no seats to change. */
+const LEGACY_PLAN_BODY = {
+  error: "legacy_plan",
+  code: "legacy_plan",
+  message: "Your plan includes unlimited people, so there are no seats to change.",
+} as const;
+
+/**
+ * A live subscription on a legacy (pre-Team) product. Every Team-product row has
+ * `seats` set (polar.ts seatFields), so `seats IS NULL` on an active row is the signal.
+ */
+const legacySub = (
+  row: { status: string; provider_subscription_id: string | null; seats: number | null } | null | undefined,
+): boolean => !!row && isActiveStatus(row.status) && !!row.provider_subscription_id && row.seats === null;
+
 async function accountSubscription(accountId: string): Promise<SubscriptionRow | null> {
   const { rows } = await pool.query<SubscriptionRow>(
     `SELECT ${SUBSCRIPTION_COLUMNS} FROM subscriptions
@@ -1669,6 +1686,7 @@ async function readAccountBody(accountId: string, canManage: boolean) {
     interval: live ? normalizeIntervalForApi(row.interval) : null,
     currentPeriodEnd: row?.current_period_end ? new Date(row.current_period_end).toISOString() : null,
     cancelAtPeriodEnd: row?.cancel_at_period_end ?? false,
+    legacyPlan: legacySub(row),
     seats: {
       purchased,
       used: plan.seatsUsed,
