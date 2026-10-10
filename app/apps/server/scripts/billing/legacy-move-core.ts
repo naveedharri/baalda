@@ -29,6 +29,8 @@ export interface RawSubView {
   pendingProductId: string | null;
   seats: number | null;
   pendingSeats: number | null;
+  /** Post-discount charge per period Polar reports (minor units); absent when not reported. */
+  amount?: number;
   cancelAtPeriodEnd: boolean;
   discount: {
     id: string;
@@ -200,7 +202,14 @@ export function planAccount(input: PlanInput): PlanResult {
   };
 }
 
-export function describePlan(p: AccountPlan): string {
+/**
+ * A legacy product is not seat-based and the Team one is: Polar refuses
+ * `next_period` for that switch ("must apply immediately"), so the product
+ * change is ALWAYS `invoice`, whatever was requested.
+ */
+export const PRODUCT_CHANGE_PRORATION: ProrationMode = "invoice";
+
+export function describePlan(p: AccountPlan, requested?: ProrationMode): string {
   const d = p.discount
     ? p.discount.type === "fixed"
       ? `fixed ${p.discount.amount}c`
@@ -211,11 +220,31 @@ export function describePlan(p: AccountPlan): string {
     ` people=${p.people} pending=${p.pending} seats=${p.seats} list=${p.list} target=${p.target}` +
     ` discount=${d} expected=${p.expected}` +
     (p.lower ? ` LOWER: --allow-lower, owner pays ${dollars(p.list)} instead of ${dollars(p.target)}` : "") +
-    (p.keep.discountId ? ` (replaces existing discount ${p.keep.discountId})` : "")
+    (p.keep.discountId ? ` (replaces existing discount ${p.keep.discountId})` : "") +
+    ` proration=${PRODUCT_CHANGE_PRORATION} (product change + seats PATCH)` +
+    (requested && requested !== PRODUCT_CHANGE_PRORATION
+      ? ` (requested ${requested}: Polar refuses it for a non-seat to seat change)`
+      : "")
   );
 }
 
+/** A Polar discount as the reuse check reads it (`discounts.list`). */
+export interface ExistingDiscount {
+  id: string;
+  name: string;
+  type: string;
+  duration: string;
+  amount: number | null;
+  currency: string | null;
+  basisPoints: number | null;
+  productIds: string[];
+  redemptions: number;
+}
+
 export interface ExecuteDeps {
+  /** Discounts whose name is exactly `name` (read only). */
+  listDiscounts(name: string): Promise<ExistingDiscount[]>;
+  deleteDiscount(id: string): Promise<unknown>;
   createDiscount(args: {
     name: string;
     type: "fixed" | "percentage";
@@ -238,6 +267,66 @@ export interface ExecuteOptions {
 }
 
 export type ExecuteStatus = "moved" | "scheduled" | "planned" | "refused" | "failed";
+
+/** Does an existing `legacy-<acct>` discount equal what the plan would create? */
+export function discountMatchesPlan(plan: AccountPlan, d: ExistingDiscount): boolean {
+  const pd = plan.discount;
+  if (!pd || d.name !== `legacy-${plan.accountId}` || d.duration !== "forever") return false;
+  if (d.productIds.length !== 1 || d.productIds[0] !== plan.teamProduct) return false;
+  if (pd.type === "fixed") {
+    return (
+      d.type === "fixed" &&
+      d.amount === pd.amount &&
+      (d.currency ?? "").toLowerCase() === plan.currency.toLowerCase()
+    );
+  }
+  return d.type === "percentage" && d.basisPoints === pd.bp;
+}
+
+const describeDiscount = (d: ExistingDiscount): string =>
+  `${d.type} ${d.type === "percentage" ? `${d.basisPoints}bp` : `${d.amount}c`} ${d.duration}` +
+  ` products=${d.productIds.join(",") || "none"} redemptions=${d.redemptions}`;
+
+/** Map a raw SDK discount (camelCase) to the fields the reuse check reads. */
+export function toExistingDiscount(raw: unknown): ExistingDiscount {
+  const d = (raw ?? {}) as Record<string, unknown>;
+  const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+  return {
+    id: String(d.id),
+    name: String(d.name ?? ""),
+    type: String(d.type ?? ""),
+    duration: String(d.duration ?? ""),
+    amount: num(d.amount),
+    currency: d.currency ? String(d.currency) : null,
+    basisPoints: num(d.basisPoints),
+    productIds: ((d.products ?? []) as Array<Record<string, unknown>>).map((x) => String(x.id)),
+    redemptions: num(d.redemptionsCount) ?? 0,
+  };
+}
+
+type DiscountDecision =
+  | { kind: "none" }
+  | { kind: "reuse"; id: string; stale: ExistingDiscount[] }
+  | { kind: "create"; stale: ExistingDiscount[] }
+  | { kind: "refuse"; reason: string };
+
+/**
+ * Reuse a matching `legacy-<acct>` discount (an earlier run created it and then
+ * failed); a mismatched one is stale and replaced, unless someone redeemed it or
+ * it is the keeper's own discount (then the owner finishes by hand).
+ */
+async function decideDiscount(plan: AccountPlan, before: RawSubView, deps: ExecuteDeps): Promise<DiscountDecision> {
+  if (!plan.discount) return { kind: "none" };
+  const name = `legacy-${plan.accountId}`;
+  const found = (await deps.listDiscounts(name)).filter((d) => d.name === name);
+  const match = found.find((d) => discountMatchesPlan(plan, d));
+  const stale = found.filter((d) => !discountMatchesPlan(plan, d));
+  const blocked = stale.find((d) => d.redemptions > 0 || d.id === before.discount?.id);
+  if (blocked) {
+    return { kind: "refuse", reason: `stale discount ${blocked.id} (${describeDiscount(blocked)}) is in use; finish by hand` };
+  }
+  return match ? { kind: "reuse", id: match.id, stale } : { kind: "create", stale };
+}
 
 const effProduct = (r: RawSubView): string | null => r.pendingProductId ?? r.productId;
 const effSeats = (r: RawSubView): number | null => r.pendingSeats ?? r.seats;
@@ -262,8 +351,22 @@ export function chargeOf(plan: AccountPlan, raw: RawSubView): number | null {
 }
 
 /** Every reason the re-read does not match the plan; empty means verified. */
-export function verifyProblems(plan: AccountPlan, raw: RawSubView, scheduledBefore: boolean): string[] {
+export function verifyProblems(
+  plan: AccountPlan,
+  raw: RawSubView,
+  scheduledBefore: boolean,
+  immediate = false,
+): string[] {
   const out: string[] = [];
+  if (immediate) {
+    // An immediate change must already be CURRENT, not pending, and Polar's own
+    // post-discount amount must be the planned charge.
+    if (raw.productId !== plan.teamProduct) out.push(`current product ${raw.productId} is not Team ${plan.teamProduct}`);
+    if (raw.pendingProductId !== null) out.push(`product change still pending (${raw.pendingProductId})`);
+    if (raw.seats !== plan.seats) out.push(`current seats ${raw.seats} != planned ${plan.seats}`);
+    if (raw.amount === undefined) out.push("Polar did not report the subscription amount");
+    else if (raw.amount !== plan.expected) out.push(`Polar amount ${raw.amount} != planned ${plan.expected}`);
+  }
   if (effProduct(raw) !== plan.teamProduct) out.push(`product ${effProduct(raw)} is not Team ${plan.teamProduct}`);
   if (effSeats(raw) !== plan.seats) out.push(`seats ${effSeats(raw)} != planned ${plan.seats}`);
   const charge = chargeOf(plan, raw);
@@ -320,10 +423,31 @@ export async function executeAccount(
       log("  product change pending; discount not visible yet, re-run after renewal to verify (nothing changed, nothing cancelled)");
       return "scheduled";
     }
+    const changeProduct = !scheduled;
+    if (changeProduct && opts.proration !== PRODUCT_CHANGE_PRORATION) {
+      log(
+        `  WARNING: --proration ${opts.proration} ignored for the product change and its seats PATCH;` +
+          ` Polar requires ${PRODUCT_CHANGE_PRORATION} when switching a non-seat product to a seat product`,
+      );
+    }
+    const seatsProration: ProrationMode = changeProduct ? PRODUCT_CHANGE_PRORATION : opts.proration;
+    const decision = changeProduct ? await decideDiscount(plan, before, deps) : ({ kind: "none" } as const);
+    if (decision.kind === "refuse") {
+      log(`  REFUSED: ${decision.reason}; nothing changed`);
+      return "refused";
+    }
+
     if (opts.dryRun) {
       if (scheduled) log(`  already scheduled: product + discount skipped (target not recomputed)`);
-      else log(`  would ${plan.discount ? "create discount, " : ""}change product (${opts.proration})`);
-      if (effSeats(before) !== plan.seats) log(`  would set seats ${effSeats(before)} -> ${plan.seats} (${opts.proration})`);
+      else {
+        if (decision.kind === "reuse" || decision.kind === "create") {
+          for (const d of decision.stale) log(`  would replace stale discount ${d.id} (${describeDiscount(d)})`);
+          log(decision.kind === "reuse" ? `  would reuse discount ${decision.id}` : "  would create discount");
+        }
+        log(`  would change product (${PRODUCT_CHANGE_PRORATION})`);
+      }
+      if (changeProduct) log(`  would set seats -> ${plan.seats} (${seatsProration}) in a second PATCH`);
+      else if (effSeats(before) !== plan.seats) log(`  would set seats ${effSeats(before)} -> ${plan.seats} (${seatsProration})`);
       for (const o of toCancel) log(`  would cancel ${o.id} at period end after verify`);
       return "planned";
     }
@@ -332,7 +456,16 @@ export async function executeAccount(
       log("  already scheduled: discount + product skipped");
     } else {
       let discountId: string | undefined;
-      if (plan.discount) {
+      if (decision.kind === "reuse" || decision.kind === "create") {
+        for (const d of decision.stale) {
+          await deps.deleteDiscount(d.id);
+          log(`  replacing stale discount ${d.id} (${describeDiscount(d)}): deleted`);
+        }
+      }
+      if (decision.kind === "reuse") {
+        discountId = decision.id;
+        log(`  reusing discount ${decision.id}`);
+      } else if (decision.kind === "create" && plan.discount) {
         const d = await deps.createDiscount({
           name: `legacy-${plan.accountId}`,
           type: plan.discount.type,
@@ -345,14 +478,25 @@ export async function executeAccount(
         discountId = d.id;
         log(`  discount created ${d.id}`);
       }
-      await deps.changeProduct(keepId, plan.teamProduct, opts.proration, discountId);
-      log(`  product changed (${opts.proration})`);
+      await deps.changeProduct(keepId, plan.teamProduct, PRODUCT_CHANGE_PRORATION, discountId);
+      log(`  product changed (${PRODUCT_CHANGE_PRORATION})`);
     }
 
+    // Polar's update body is a union: `seats` cannot ride in the product PATCH.
     const mid = scheduled ? before : await deps.getRaw(keepId);
-    if (!mid || effSeats(mid) !== plan.seats) {
-      await deps.updateSeats(keepId, plan.seats, opts.proration);
-      log(`  seats set ${plan.seats} (${opts.proration})`);
+    if (changeProduct || !mid || effSeats(mid) !== plan.seats) {
+      if (changeProduct) {
+        log(
+          `  seats PATCH follows the product change (${seatsProration}): Polar may issue TWO proration invoices;` +
+            " the owner must check both at Polar",
+        );
+      }
+      if (!mid || effSeats(mid) !== plan.seats) {
+        await deps.updateSeats(keepId, plan.seats, seatsProration);
+        log(`  seats set ${plan.seats} (${seatsProration})`);
+      } else {
+        log(`  seats already ${plan.seats} after the product change`);
+      }
     }
 
     const after = await deps.getRaw(keepId);
@@ -360,7 +504,7 @@ export async function executeAccount(
       log(`  MISMATCH: ${keepId} vanished on re-read; nothing cancelled`);
       return "refused";
     }
-    const problems = verifyProblems(plan, after, scheduled);
+    const problems = verifyProblems(plan, after, scheduled, changeProduct);
     const charge = chargeOf(plan, after);
     if (problems.length) {
       log(`  verify MISMATCH: ${problems.join("; ")}; target=${plan.target} expected=${charge}; nothing cancelled`);
@@ -368,8 +512,12 @@ export async function executeAccount(
     }
     log(
       `  verify OK: product=${effProduct(after)} seats=${effSeats(after)} discount=${after.discount?.type ?? "none"}` +
-        ` ${scheduled ? `expected=${charge} (already scheduled, target not recomputed)` : `target=${plan.target} expected=${charge}`}`,
+        ` ${scheduled ? `expected=${charge} (already scheduled, target not recomputed)` : `target=${plan.target} expected=${charge}`}` +
+        (after.amount !== undefined ? ` polarAmount=${after.amount}` : ""),
     );
+    if (changeProduct) {
+      log(`  proration invoice: not exposed by the subscription read; the owner must check ${keepId}'s invoices at Polar`);
+    }
     for (const o of toCancel) {
       await deps.cancelSubscription(o.id, "period_end");
       log(`  cancelled ${o.id} at period end (amount=${o.amount} ends ${o.currentPeriodEnd ?? "?"})`);
@@ -395,6 +543,7 @@ export function toRawSubView(raw: unknown): RawSubView {
     pendingProductId: pu?.productId ? String(pu.productId) : null,
     seats: num(s.seats),
     pendingSeats: num(pu?.seats),
+    ...(typeof s.amount === "number" ? { amount: s.amount } : {}),
     cancelAtPeriodEnd: !!s.cancelAtPeriodEnd,
     discount: d
       ? {
@@ -490,7 +639,7 @@ export async function runAccount(
     deps.log(`\n${plan.refusal}`);
     return plan.kind === "leaving" ? "skipped-leaving" : "refused";
   }
-  deps.log(`\n${describePlan(plan)}`);
+  deps.log(`\n${describePlan(plan, opts.proration)}`);
   if (plan.lower) {
     deps.log(
       `  WARNING --allow-lower: today's charge ${dollars(plan.target)} is ABOVE Team list ${dollars(plan.list)};` +

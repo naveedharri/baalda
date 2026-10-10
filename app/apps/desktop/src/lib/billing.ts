@@ -273,6 +273,9 @@ export function seatChangeLocked(account: Pick<MyBillingAccount, "cancelAtPeriod
 
 export const RESUME_TO_CHANGE_SEATS = "Resume your plan to change seats.";
 
+/** Manage seats on a legacy plan (it has unlimited people, nothing to buy). */
+export const LEGACY_NO_SEATS_COPY = "Your plan includes unlimited people, so there are no seats to change.";
+
 /** The Manage seats dialog's subtitle: "19 seats · 1 person on your account".
  *  `seats` is null before a first purchase and then reads as people only. */
 export function seatsDialogSubtitle(seats: number | null, people: number): string {
@@ -606,6 +609,81 @@ export function planPriceLine(
   return `${formatMoney(price.perSeat, team.currency)} per seat / ${iv}`;
 }
 
+/** The account fields the legacy-plan checks read. */
+export type LegacyPlanAccountLike = {
+  plan: "free" | "team";
+  status: string;
+  interval: "month" | "year" | null;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  legacyPlan?: boolean;
+  legacyCharges?: { amount: number; interval: "month" | "year" }[];
+  seats: { purchased: number | null };
+  price: { charged: number } | null;
+  complimentaryUntil: string | null;
+};
+
+/**
+ * A paying customer still on their original (pre-Team) product: unlimited
+ * people at their old price, no seats to buy. The server says so directly;
+ * an older server is inferred from a live Team plan with no seats bought that
+ * is not a complimentary grant.
+ */
+export function isLegacyPlan(account: LegacyPlanAccountLike): boolean {
+  return (
+    account.legacyPlan ??
+    (account.plan === "team" &&
+      account.seats.purchased == null &&
+      account.status !== "none" &&
+      !account.complimentaryUntil)
+  );
+}
+
+/** "Legacy plan · unlimited people at your original price · $10/mo · renews Nov 3, 2026". */
+export function legacyPlanLine(
+  account: LegacyPlanAccountLike,
+  currency: string,
+  formatDate: (iso: string) => string,
+): string {
+  const parts = ["Legacy plan", "unlimited people at your original price"];
+  const charges = account.legacyCharges;
+  if (charges && charges.length > 0) {
+    // Several old Pro vaults each bill on their own: sum per interval,
+    // monthly first ("$20/mo", or "$10/mo + $0/yr" when they differ).
+    const sums = (["month", "year"] as const)
+      .map((interval) => ({
+        interval,
+        rows: charges.filter((c) => c.interval === interval),
+      }))
+      .filter((g) => g.rows.length > 0)
+      .map((g) => `${formatMoney(g.rows.reduce((t, c) => t + c.amount, 0), currency)}/${g.interval === "year" ? "yr" : "mo"}`);
+    parts.push(sums.join(" + "));
+  } else if (account.price && Number.isFinite(account.price.charged)) {
+    parts.push(`${formatMoney(account.price.charged, currency)}/${account.interval === "year" ? "yr" : "mo"}`);
+  }
+  if (account.currentPeriodEnd) {
+    parts.push(`${account.cancelAtPeriodEnd ? "cancels on" : "renews"} ${formatDate(account.currentPeriodEnd)}`);
+  }
+  return parts.join(" · ");
+}
+
+/**
+ * The People table on Plan & Billing. Only a bought-seats Team account uses a
+ * seat per person; a legacy or complimentary Team account (no seats bought)
+ * has unlimited people, so it gets no Seat column. Free gets neither.
+ */
+export function peopleTableCopy(account: {
+  plan: "free" | "team";
+  seats: { purchased: number | null };
+  legacyPlan?: boolean;
+}): { note: string | null; seatColumn: boolean } {
+  if (account.plan !== "team") return { note: null, seatColumn: false };
+  if (account.legacyPlan || account.seats.purchased == null) {
+    return { note: "Everyone on your account, across all your vaults.", seatColumn: false };
+  }
+  return { note: "Each person uses one seat, whichever vaults they're in.", seatColumn: true };
+}
+
 /** "N of M seats used" plus invited and pending-decrease lines. */
 export function seatUsageLines(
   seats: { purchased: number | null; used: number; reserved: number; pendingDecrease: { to: number; effectiveAt: string } | null },
@@ -676,6 +754,12 @@ export function membersSeatLine(
     const b = seatBreakdown(account.seats);
     const owner = viewerIsOwner ? "your" : ownerName ? `${ownerName}'s` : "the owner's";
     return `Uses ${b.claimed} of ${b.purchased} seats on ${owner} account · ${b.reserved} invited`;
+  }
+  if (account.plan === "team") {
+    // Legacy or complimentary Team: no seats bought, no people limit.
+    const owner = viewerIsOwner ? "your" : ownerName ? `${ownerName}'s` : "the owner's";
+    const n = account.seats.used;
+    return `Team · unlimited people on ${owner} account (${n} ${n === 1 ? "person" : "people"})`;
   }
   const cap = freeLimitOf(account);
   return `Free includes ${cap} ${cap === 1 ? "person" : "people"} on this account (${account.seats.used} of ${cap} used)`;

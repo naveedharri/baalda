@@ -10,7 +10,10 @@ import {
   invitedVaultAction,
   invitedVaultFallbackToast,
   type InvitedVault,
+  isLegacyPlan,
   LAPSED_COPY,
+  legacyPlanLine,
+  peopleTableCopy,
   PLAN_LOAD_ERROR_COPY,
   planStatusPill,
   planPriceLine,
@@ -231,7 +234,11 @@ export function AccountPlanTab() {
 
   // ---- Header line under the plan name ----
   const seatsBought = account.seats.purchased;
-  const summary = isTeam
+  const legacy = isTeam && isLegacyPlan(account);
+  const peopleCopy = peopleTableCopy({ ...account, legacyPlan: legacy });
+  const summary = legacy
+    ? legacyPlanLine(account, config.team?.currency ?? "usd", formatDate)
+    : isTeam
     ? [
         planPriceLine(account.plan, account.interval, config.team),
         seatsBought != null ? plural(seatsBought, "seat", "seats") : null,
@@ -341,9 +348,11 @@ export function AccountPlanTab() {
                       Cancel plan
                     </AsyncButton>
                   )}
-                  <AsyncButton className="primary" onClick={() => setManagingSeats(true)}>
-                    Add or change seats
-                  </AsyncButton>
+                  {!legacy && (
+                    <AsyncButton className="primary" onClick={() => setManagingSeats(true)}>
+                      Add or change seats
+                    </AsyncButton>
+                  )}
                 </>
               )}
             </div>
@@ -419,17 +428,13 @@ export function AccountPlanTab() {
       {account.canManage && account.people.length > 0 && (
         <>
           <div className="subhead">People on this account</div>
-          {isTeam && (
-            <div className="billing-section-note muted">
-              Each person uses one seat, whichever vaults they're in.
-            </div>
-          )}
+          {peopleCopy.note && <div className="billing-section-note muted">{peopleCopy.note}</div>}
           <table className="members-table plan-page-people">
             <thead>
               <tr>
                 <th>Person</th>
                 <th>Vaults</th>
-                {isTeam && <th className="plan-page-seat-col">Seat</th>}
+                {peopleCopy.seatColumn && <th className="plan-page-seat-col">Seat</th>}
               </tr>
             </thead>
             <tbody>
@@ -454,7 +459,7 @@ export function AccountPlanTab() {
                         })}
                       </div>
                     </td>
-                    {isTeam && <td className="muted plan-page-seat-col">1 seat</td>}
+                    {peopleCopy.seatColumn && <td className="muted plan-page-seat-col">1 seat</td>}
                   </tr>
                 );
               })}

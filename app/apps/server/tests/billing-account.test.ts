@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { testAppDeps } from "./helpers/app.js";
 import { makeFakeProvider, makeSnapshot } from "./helpers/billing-provider.js";
@@ -487,6 +487,73 @@ describe("account billing routes (team model)", () => {
     expect(preview.status).toBe(409);
     expect(fakeProvider.seatUpdates.length).toBe(before);
     expect(subId).toBeTruthy();
+  });
+
+  it("seats: a legacy subscription (seats NULL) answers 409 legacy_plan without calling the provider", async () => {
+    const a = await signUp("legacy-a@b.com");
+    const org = await vault(a);
+    const account = (await ensureAccountForUser(pool, a.userId))!;
+    await subscribe(account, org, 3);
+    await pool.query(`UPDATE subscriptions SET seats = NULL WHERE billing_account_id = $1`, [account]);
+
+    const summary = await (await req("GET", "/api/billing/account", { token: a.token })).json();
+    expect(summary.legacyPlan).toBe(true);
+
+    const previewSpy = vi.spyOn(fakeProvider, "previewSeatChange");
+    try {
+      const before = fakeProvider.seatUpdates.length;
+      const patch = await req("PATCH", "/api/billing/account/seats", { token: a.token, body: { seats: 4 } });
+      expect(patch.status).toBe(409);
+      expect(await patch.json()).toEqual({
+        error: "legacy_plan",
+        code: "legacy_plan",
+        message: "Your plan includes unlimited people, so there are no seats to change.",
+      });
+      const preview = await req("GET", "/api/billing/account/seats/preview?seats=4", { token: a.token });
+      expect(preview.status).toBe(409);
+      expect(await preview.json()).toMatchObject({ code: "legacy_plan" });
+      expect(fakeProvider.seatUpdates.length).toBe(before);
+      expect(previewSpy).not.toHaveBeenCalled();
+    } finally {
+      previewSpy.mockRestore();
+    }
+  });
+
+  it("account read: legacyPlan is false for a seated Team subscription", async () => {
+    const a = await signUp("seated-a@b.com");
+    const org = await vault(a);
+    const account = (await ensureAccountForUser(pool, a.userId))!;
+    await subscribe(account, org, 3);
+    const summary = await (await req("GET", "/api/billing/account", { token: a.token })).json();
+    expect(summary.legacyPlan).toBe(false);
+    expect(summary.legacyCharges).toBeUndefined();
+  });
+
+  it("account read: legacyCharges lists every live legacy subscription on the account", async () => {
+    const a = await signUp("legacy-two-a@b.com");
+    const org1 = await vault(a);
+    const org2 = await vault(a);
+    const org3 = await vault(a);
+    const account = (await ensureAccountForUser(pool, a.userId))!;
+    await subscribe(account, org1, 1);
+    await subscribe(account, org2, 1);
+    const ended = await subscribe(account, org3, 1);
+    await pool.query(`UPDATE subscriptions SET status = 'canceled' WHERE provider_subscription_id = $1`, [ended]);
+    await pool.query(`UPDATE subscriptions SET seats = NULL WHERE billing_account_id = $1`, [account]);
+    await pool.query(
+      `UPDATE subscriptions SET status = 'past_due', interval = 'year', amount = 0 WHERE organization_id = $1`,
+      [org2],
+    );
+
+    const summary = await (await req("GET", "/api/billing/account", { token: a.token })).json();
+    expect(summary.legacyPlan).toBe(true);
+    expect(summary.legacyCharges).toHaveLength(2);
+    expect(summary.legacyCharges).toEqual(
+      expect.arrayContaining([
+        { amount: 1000, currency: "usd", interval: "month", organizationId: org1, vaultName: expect.any(String), status: "active" },
+        { amount: 0, currency: "usd", interval: "year", organizationId: org2, vaultName: expect.any(String), status: "past_due" },
+      ]),
+    );
   });
 
   it("GET account ?refresh=1 re-reads the live subscription from the provider; plain GET does not", async () => {
