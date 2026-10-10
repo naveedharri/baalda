@@ -13,10 +13,20 @@
  *   discount = seats x per-seat list - target as a Polar FOREVER discount scoped
  *              to the Team product: FIXED amount by default (exact charge; a $0
  *              sub gets the full list), --percentage for basis points
- *   then: product -> Team product (+ discount) and, only if the effective seats
- *   differ, a seats PATCH, both with --proration.
+ *   then: product -> Team product (+ discount) with proration `invoice`, then a
+ *   seats PATCH, also `invoice`. A legacy product is not seat-based and Polar
+ *   refuses `next_period` for a non-seat to seat switch ("must apply
+ *   immediately"), so `--proration next_period` only warns. Polar's update body
+ *   is a union (seats vs product/discount), so seats cannot ride in the product
+ *   PATCH: the owner may see TWO proration invoices, checked at Polar by hand.
+ * Discounts are reused: an existing `legacy-<account>` discount of the planned
+ * type, amount/basis points, `forever` duration and Team product scope is
+ * attached instead of creating another; a mismatched one is deleted and
+ * replaced (refused when it was redeemed or is the keeper's own discount).
  * Verify re-reads the subscription with the raw Polar client and requires:
- * product (pending or current) = Team product, effective seats = planned, the
+ * after an immediate change the CURRENT product = Team product (nothing
+ * pending), current seats = planned and Polar's post-discount `amount` = the
+ * planned charge; always: effective product = Team, effective seats = planned, the
  * attached discount of the planned type and amount (or basis points), and
  * expected charge = list - discount equal to the planned charge (fixed: the
  * target EXACTLY). Only after verify is OK are the group's other live subs
@@ -46,7 +56,8 @@
  *   pnpm exec tsx scripts/billing/move-legacy-subs.ts --execute --server sandbox
  *   pnpm exec tsx scripts/billing/move-legacy-subs.ts --execute --server production --yes
  *   flags: --larger (default sum)   --percentage (default fixed)
- *          --proration invoice|next_period (default next_period)
+ *          --proration invoice|next_period (default invoice; the product change
+ *                      is always invoice, next_period only warns)
  *          --only <providerSubscriptionId> (that sub's account + interval group)
  *          --allow-lower (move a charge above Team list with no discount)
  *          value flags take `--flag value` or `--flag=value`
@@ -61,7 +72,9 @@ import { PolarBillingProvider } from "../../src/billing/polar.js";
 import {
   runAccount,
   seatPriceOf,
+  toExistingDiscount,
   toRawSubView,
+  type ExistingDiscount,
   type CustomerSubView,
   type Interval,
   type LegacySub,
@@ -97,9 +110,9 @@ const MODE: "fixed" | "percentage" = has("--percentage") ? "percentage" : "fixed
 const ALLOW_LOWER = has("--allow-lower");
 const ONLY = val("--only");
 const SERVER = val("--server");
-// Default stays `next_period` until the Polar sandbox check (plan §3.2 step 0)
-// confirms immediate proration nets to ~$0; then flip this default to `invoice`.
-const PRORATION_ARG = val("--proration") ?? "next_period";
+// Polar refuses `next_period` for a non-seat to seat product change (production
+// run 2026-10-10), so the executor uses `invoice` for it whatever is passed.
+const PRORATION_ARG = val("--proration") ?? "invoice";
 
 if (PRORATION_ARG !== "invoice" && PRORATION_ARG !== "next_period") {
   fail(`--proration must be invoice or next_period, got ${PRORATION_ARG}`);
@@ -195,6 +208,15 @@ function customerSubView(raw: Record<string, unknown>): CustomerSubView {
 }
 
 const deps: RunDeps = {
+  // `query` filters by name loosely; the core keeps exact-name matches only.
+  listDiscounts: async (name) => {
+    const out: ExistingDiscount[] = [];
+    for await (const page of await polar.discounts.list({ query: name, limit: 100 })) {
+      for (const raw of page.result.items) out.push(toExistingDiscount(raw));
+    }
+    return out.filter((d) => d.name === name);
+  },
+  deleteDiscount: (id) => polar.discounts.delete({ id }),
   createDiscount: (args) => provider.createDiscount(args),
   changeProduct: (id, product, proration, discountId) => provider.changeProduct(id, product, proration, discountId),
   updateSeats: (id, seats, proration) => provider.updateSeats(id, seats, proration),

@@ -8,6 +8,7 @@ import {
   toRawSubView,
   type AccountPlan,
   type ExecuteDeps,
+  type ExistingDiscount,
   type LegacySub,
   type PlanInput,
   type RawSubView,
@@ -51,12 +52,25 @@ function plan(over: Partial<PlanInput>): AccountPlan {
   return p;
 }
 
-/** A fake Polar: changeProduct/updateSeats/createDiscount mutate the raw view getRaw returns. */
-function fakePolar(initial: RawSubView, opts: { discountOverride?: RawSubView["discount"] } = {}) {
+/**
+ * A fake Polar: changeProduct/updateSeats/createDiscount mutate the raw view
+ * getRaw returns. `invoice` applies at once (current fields), `next_period`
+ * lands in the pending update; a current Team product reports its amount.
+ */
+const PER_SEAT: Record<string, number> = { "team-month": 1000, "team-year": 11000 };
+function fakePolar(
+  initial: RawSubView,
+  opts: { discountOverride?: RawSubView["discount"]; existing?: ExistingDiscount[] } = {},
+) {
   let raw: RawSubView = { ...initial };
   const created: Array<{ id: string; name: string; type: string; amount: number | null; basisPoints: number | null }> = [];
   const lines: string[] = [];
+  const existing = [...(opts.existing ?? [])];
   const deps: ExecuteDeps = {
+    listDiscounts: vi.fn(async (name: string) => existing.filter((d) => d.name === name)),
+    deleteDiscount: vi.fn(async (id: string) => {
+      existing.splice(existing.findIndex((d) => d.id === id), 1);
+    }),
     createDiscount: vi.fn(async (a) => {
       const d = {
         id: `d${created.length + 1}`,
@@ -68,19 +82,49 @@ function fakePolar(initial: RawSubView, opts: { discountOverride?: RawSubView["d
       created.push(d);
       return { id: d.id };
     }),
-    changeProduct: vi.fn(async (_id, productId, _p, discountId) => {
-      raw = { ...raw, pendingProductId: productId };
-      if (discountId) raw.discount = opts.discountOverride ?? created.find((d) => d.id === discountId)!;
+    changeProduct: vi.fn(async (_id, productId, proration, discountId) => {
+      raw =
+        proration === "invoice"
+          ? { ...raw, productId, pendingProductId: null }
+          : { ...raw, pendingProductId: productId };
+      if (discountId) {
+        const ex = existing.find((d) => d.id === discountId);
+        raw.discount =
+          opts.discountOverride ??
+          (ex
+            ? { id: ex.id, name: ex.name, type: ex.type, amount: ex.amount, basisPoints: ex.basisPoints }
+            : created.find((d) => d.id === discountId)!);
+      }
     }),
-    updateSeats: vi.fn(async (_id, seats) => {
-      raw = { ...raw, pendingSeats: seats };
+    updateSeats: vi.fn(async (_id, seats, proration) => {
+      raw = proration === "invoice" ? { ...raw, seats, pendingSeats: null } : { ...raw, pendingSeats: seats };
     }),
-    getRaw: vi.fn(async () => ({ ...raw })),
+    getRaw: vi.fn(async () => {
+      const per = raw.productId ? PER_SEAT[raw.productId] : undefined;
+      const seats = raw.pendingSeats ?? raw.seats;
+      if (per === undefined || seats === null) return { ...raw };
+      const d = raw.discount;
+      const off = !d ? 0 : d.type === "fixed" ? d.amount ?? 0 : Math.round((seats * per * (d.basisPoints ?? 0)) / 10000);
+      return { ...raw, amount: Math.max(0, seats * per - off) };
+    }),
     cancelSubscription: vi.fn(async () => undefined),
     log: (l) => lines.push(l),
   };
   return { deps, lines };
 }
+
+const existingDiscount = (over: Partial<ExistingDiscount>): ExistingDiscount => ({
+  id: "old",
+  name: "legacy-acct",
+  type: "fixed",
+  duration: "forever",
+  amount: 2000,
+  currency: "usd",
+  basisPoints: null,
+  productIds: ["team-month"],
+  redemptions: 0,
+  ...over,
+});
 
 const legacyRaw = (): RawSubView => ({
   productId: "legacy-month-product",
@@ -175,8 +219,8 @@ describe("executeAccount", () => {
     const { deps, lines } = fakePolar(legacyRaw());
     const status = await executeAccount(p, deps, { proration: "next_period" });
     expect(status).toBe("moved");
-    expect(deps.changeProduct).toHaveBeenCalledWith("late", "team-month", "next_period", "d1");
-    expect(deps.updateSeats).toHaveBeenCalledWith("late", 23, "next_period");
+    expect(deps.changeProduct).toHaveBeenCalledWith("late", "team-month", "invoice", "d1");
+    expect(deps.updateSeats).toHaveBeenCalledWith("late", 23, "invoice");
     expect(deps.cancelSubscription).toHaveBeenCalledTimes(1);
     expect(deps.cancelSubscription).toHaveBeenCalledWith("early", "period_end");
     // verify precedes the cancel
@@ -277,7 +321,7 @@ describe("price above Team list", () => {
     const { deps } = fakePolar(legacyRaw());
     expect(await executeAccount(p, deps, { proration: "next_period" })).toBe("moved");
     expect(deps.createDiscount).not.toHaveBeenCalled();
-    expect(deps.changeProduct).toHaveBeenCalledWith("big", "team-month", "next_period", undefined);
+    expect(deps.changeProduct).toHaveBeenCalledWith("big", "team-month", "invoice", undefined);
   });
 });
 
@@ -377,5 +421,86 @@ describe("Polar mapping helpers", () => {
     expect(seatPriceOf(price([1000]))).toEqual({ cents: 1000 });
     expect("error" in seatPriceOf(price([1000, 900]))).toBe(true);
     expect("error" in seatPriceOf({ prices: [] })).toBe(true);
+  });
+});
+
+describe("immediate proration and discount reuse (2026-10-10 cut-over failure)", () => {
+  it("(a) a non-seat to seat change uses invoice even when next_period was requested", async () => {
+    const p = plan({});
+    const { deps, lines } = fakePolar(legacyRaw());
+    expect(await executeAccount(p, deps, { proration: "next_period" })).toBe("moved");
+    expect(deps.changeProduct).toHaveBeenCalledWith("s1", "team-month", "invoice", "d1");
+    expect(deps.updateSeats).toHaveBeenCalledWith("s1", 3, "invoice");
+    const out = lines.join("\n");
+    expect(out).toContain("WARNING: --proration next_period ignored");
+    expect(out).toContain("TWO proration invoices");
+    expect(out).toContain("polarAmount=1000");
+  });
+
+  it("(a) the plan line names the proration and the refused request", async () => {
+    const lines: string[] = [];
+    const { deps } = fakePolar(legacyRaw());
+    const run: RunDeps = { ...deps, listCustomerSubs: vi.fn(async () => []), dbTeamRows: vi.fn(async () => []), log: (l) => lines.push(l) };
+    await runAccount(input({}), run, { proration: "next_period", dryRun: true });
+    expect(lines.find((l) => l.includes("account=acct"))).toContain(
+      "proration=invoice (product change + seats PATCH) (requested next_period: Polar refuses it for a non-seat to seat change)",
+    );
+  });
+
+  it("(b) an existing matching legacy discount is reused, nothing created", async () => {
+    const p = plan({});
+    const { deps, lines } = fakePolar(legacyRaw(), { existing: [existingDiscount({ id: "keep-me" })] });
+    expect(await executeAccount(p, deps, { proration: "invoice" })).toBe("moved");
+    expect(deps.listDiscounts).toHaveBeenCalledWith("legacy-acct");
+    expect(deps.createDiscount).not.toHaveBeenCalled();
+    expect(deps.deleteDiscount).not.toHaveBeenCalled();
+    expect(deps.changeProduct).toHaveBeenCalledWith("s1", "team-month", "invoice", "keep-me");
+    expect(lines.join("\n")).toContain("reusing discount keep-me");
+  });
+
+  it("(c) a mismatched legacy discount is deleted and the right one created", async () => {
+    const p = plan({});
+    const { deps, lines } = fakePolar(legacyRaw(), { existing: [existingDiscount({ id: "stale", amount: 1500 })] });
+    expect(await executeAccount(p, deps, { proration: "invoice" })).toBe("moved");
+    expect(deps.deleteDiscount).toHaveBeenCalledWith("stale");
+    expect(deps.createDiscount).toHaveBeenCalledTimes(1);
+    expect(deps.changeProduct).toHaveBeenCalledWith("s1", "team-month", "invoice", "d1");
+    expect(lines.join("\n")).toContain("replacing stale discount stale");
+  });
+
+  it("(c) a mismatched discount someone redeemed refuses the account and changes nothing", async () => {
+    const p = plan({});
+    const { deps } = fakePolar(legacyRaw(), { existing: [existingDiscount({ id: "used", amount: 1500, redemptions: 1 })] });
+    expect(await executeAccount(p, deps, { proration: "invoice" })).toBe("refused");
+    expect(deps.deleteDiscount).not.toHaveBeenCalled();
+    expect(deps.createDiscount).not.toHaveBeenCalled();
+    expect(deps.changeProduct).not.toHaveBeenCalled();
+  });
+
+  it("(d) a dry run reports reuse/replace and calls neither delete nor create", async () => {
+    const { deps, lines } = fakePolar(legacyRaw(), {
+      existing: [existingDiscount({ id: "keep-me" }), existingDiscount({ id: "stale", productIds: ["team-year"] })],
+    });
+    expect(await executeAccount(plan({}), deps, { proration: "invoice", dryRun: true })).toBe("planned");
+    expect(deps.deleteDiscount).not.toHaveBeenCalled();
+    expect(deps.createDiscount).not.toHaveBeenCalled();
+    expect(deps.changeProduct).not.toHaveBeenCalled();
+    const out = lines.join("\n");
+    expect(out).toContain("would replace stale discount stale");
+    expect(out).toContain("would reuse discount keep-me");
+  });
+
+  it("refuses when Polar's post-discount amount is not the target, cancelling nothing", async () => {
+    const p = plan({ subs: [sub({ id: "k" }), sub({ id: "o", currentPeriodEnd: "2026-10-01T00:00:00Z" })] });
+    const { deps, lines } = fakePolar(legacyRaw());
+    const read = deps.getRaw as ReturnType<typeof vi.fn>;
+    const real = read.getMockImplementation()!;
+    read.mockImplementation(async (id: string) => {
+      const r = await real(id);
+      return r.amount === undefined ? r : { ...r, amount: r.amount + 1 };
+    });
+    expect(await executeAccount(p, deps, { proration: "invoice" })).toBe("refused");
+    expect(lines.join("\n")).toContain("Polar amount 2001 != planned 2000");
+    expect(deps.cancelSubscription).not.toHaveBeenCalled();
   });
 });
