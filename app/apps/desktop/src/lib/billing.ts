@@ -617,6 +617,7 @@ export type LegacyPlanAccountLike = {
   currentPeriodEnd: string | null;
   cancelAtPeriodEnd: boolean;
   legacyPlan?: boolean;
+  legacyCharges?: { amount: number; interval: "month" | "year" }[];
   seats: { purchased: number | null };
   price: { charged: number } | null;
   complimentaryUntil: string | null;
@@ -645,13 +646,42 @@ export function legacyPlanLine(
   formatDate: (iso: string) => string,
 ): string {
   const parts = ["Legacy plan", "unlimited people at your original price"];
-  if (account.price && Number.isFinite(account.price.charged)) {
+  const charges = account.legacyCharges;
+  if (charges && charges.length > 0) {
+    // Several old Pro vaults each bill on their own: sum per interval,
+    // monthly first ("$20/mo", or "$10/mo + $0/yr" when they differ).
+    const sums = (["month", "year"] as const)
+      .map((interval) => ({
+        interval,
+        rows: charges.filter((c) => c.interval === interval),
+      }))
+      .filter((g) => g.rows.length > 0)
+      .map((g) => `${formatMoney(g.rows.reduce((t, c) => t + c.amount, 0), currency)}/${g.interval === "year" ? "yr" : "mo"}`);
+    parts.push(sums.join(" + "));
+  } else if (account.price && Number.isFinite(account.price.charged)) {
     parts.push(`${formatMoney(account.price.charged, currency)}/${account.interval === "year" ? "yr" : "mo"}`);
   }
   if (account.currentPeriodEnd) {
     parts.push(`${account.cancelAtPeriodEnd ? "cancels on" : "renews"} ${formatDate(account.currentPeriodEnd)}`);
   }
   return parts.join(" · ");
+}
+
+/**
+ * The People table on Plan & Billing. Only a bought-seats Team account uses a
+ * seat per person; a legacy or complimentary Team account (no seats bought)
+ * has unlimited people, so it gets no Seat column. Free gets neither.
+ */
+export function peopleTableCopy(account: {
+  plan: "free" | "team";
+  seats: { purchased: number | null };
+  legacyPlan?: boolean;
+}): { note: string | null; seatColumn: boolean } {
+  if (account.plan !== "team") return { note: null, seatColumn: false };
+  if (account.legacyPlan || account.seats.purchased == null) {
+    return { note: "Everyone on your account, across all your vaults.", seatColumn: false };
+  }
+  return { note: "Each person uses one seat, whichever vaults they're in.", seatColumn: true };
 }
 
 /** "N of M seats used" plus invited and pending-decrease lines. */

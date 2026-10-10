@@ -3,6 +3,7 @@ import { ApiError } from "./api";
 import {
   isLegacyPlan,
   legacyPlanLine,
+  peopleTableCopy,
   membersSeatLine,
   invitePrewarning,
   freePeopleCopy,
@@ -621,6 +622,47 @@ describe("legacy plan", () => {
     expect(legacyPlanLine({ ...legacy, price: null, currentPeriodEnd: null }, "usd", fmt)).toBe(
       "Legacy plan · unlimited people at your original price",
     );
+  });
+  it("sums several legacy subscriptions on one interval", () => {
+    const charges = [
+      { amount: 1000, interval: "month" as const },
+      { amount: 1000, interval: "month" as const },
+    ];
+    expect(legacyPlanLine({ ...legacy, legacyCharges: charges }, "usd", fmt)).toBe(
+      "Legacy plan · unlimited people at your original price · $20/mo · renews 2026-11-03",
+    );
+  });
+  it("sums per interval when the legacy subscriptions differ", () => {
+    const charges = [
+      { amount: 0, interval: "year" as const },
+      { amount: 1000, interval: "month" as const },
+    ];
+    expect(legacyPlanLine({ ...legacy, legacyCharges: charges }, "usd", fmt)).toBe(
+      "Legacy plan · unlimited people at your original price · $10/mo + $0/yr · renews 2026-11-03",
+    );
+  });
+  it("one legacy charge reads like the single price; no field falls back to price.charged", () => {
+    expect(
+      legacyPlanLine({ ...legacy, legacyCharges: [{ amount: 1000, interval: "month" }] }, "usd", fmt),
+    ).toBe("Legacy plan · unlimited people at your original price · $10/mo · renews 2026-11-03");
+    expect(legacyPlanLine({ ...legacy, legacyCharges: [] }, "usd", fmt)).toBe(
+      "Legacy plan · unlimited people at your original price · $10/mo · renews 2026-11-03",
+    );
+  });
+  it("people table: no Seat column for legacy or complimentary Team, one seat each when seats are bought", () => {
+    expect(peopleTableCopy({ plan: "team", seats: { purchased: null }, legacyPlan: true })).toEqual({
+      note: "Everyone on your account, across all your vaults.",
+      seatColumn: false,
+    });
+    expect(peopleTableCopy({ plan: "team", seats: { purchased: null } })).toEqual({
+      note: "Everyone on your account, across all your vaults.",
+      seatColumn: false,
+    });
+    expect(peopleTableCopy({ plan: "team", seats: { purchased: 5 } })).toEqual({
+      note: "Each person uses one seat, whichever vaults they're in.",
+      seatColumn: true,
+    });
+    expect(peopleTableCopy({ plan: "free", seats: { purchased: null } })).toEqual({ note: null, seatColumn: false });
   });
 });
 

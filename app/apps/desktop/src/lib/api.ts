@@ -865,6 +865,16 @@ export interface BillingConfig {
 export type BillingStatus = "none" | "active" | "past_due" | "canceled";
 
 /** `GET /api/billing/account`: the caller's billing account (Team model). */
+/** One live legacy (pre-Team) subscription; `amount` in minor units. */
+export interface LegacyCharge {
+  amount: number;
+  currency: string;
+  interval: "month" | "year";
+  organizationId: string | null;
+  vaultName: string | null;
+  status: string;
+}
+
 export interface MyBillingAccount {
   id: string;
   status: BillingStatus;
@@ -875,6 +885,9 @@ export interface MyBillingAccount {
   /** A live subscription on a pre-Team product: unlimited people, no seats to
    *  change. Absent on older servers (`isLegacyPlan` infers it). */
   legacyPlan?: boolean;
+  /** Every live legacy subscription on the account (one per old Pro vault), sent
+   *  only to a manager of a legacy account. Absent on older servers. */
+  legacyCharges?: LegacyCharge[];
   seats: {
     /** null on Free (no seats bought). */
     purchased: number | null;
