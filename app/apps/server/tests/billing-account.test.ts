@@ -526,6 +526,34 @@ describe("account billing routes (team model)", () => {
     await subscribe(account, org, 3);
     const summary = await (await req("GET", "/api/billing/account", { token: a.token })).json();
     expect(summary.legacyPlan).toBe(false);
+    expect(summary.legacyCharges).toBeUndefined();
+  });
+
+  it("account read: legacyCharges lists every live legacy subscription on the account", async () => {
+    const a = await signUp("legacy-two-a@b.com");
+    const org1 = await vault(a);
+    const org2 = await vault(a);
+    const org3 = await vault(a);
+    const account = (await ensureAccountForUser(pool, a.userId))!;
+    await subscribe(account, org1, 1);
+    await subscribe(account, org2, 1);
+    const ended = await subscribe(account, org3, 1);
+    await pool.query(`UPDATE subscriptions SET status = 'canceled' WHERE provider_subscription_id = $1`, [ended]);
+    await pool.query(`UPDATE subscriptions SET seats = NULL WHERE billing_account_id = $1`, [account]);
+    await pool.query(
+      `UPDATE subscriptions SET status = 'past_due', interval = 'year', amount = 0 WHERE organization_id = $1`,
+      [org2],
+    );
+
+    const summary = await (await req("GET", "/api/billing/account", { token: a.token })).json();
+    expect(summary.legacyPlan).toBe(true);
+    expect(summary.legacyCharges).toHaveLength(2);
+    expect(summary.legacyCharges).toEqual(
+      expect.arrayContaining([
+        { amount: 1000, currency: "usd", interval: "month", organizationId: org1, vaultName: expect.any(String), status: "active" },
+        { amount: 0, currency: "usd", interval: "year", organizationId: org2, vaultName: expect.any(String), status: "past_due" },
+      ]),
+    );
   });
 
   it("GET account ?refresh=1 re-reads the live subscription from the provider; plain GET does not", async () => {

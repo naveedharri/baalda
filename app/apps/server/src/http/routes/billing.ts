@@ -1617,6 +1617,42 @@ async function seatsUsedForOrg(orgId: string): Promise<{ seats: number }> {
   return { seats: rows[0]?.n ?? 0 };
 }
 
+/**
+ * Every live legacy (seats NULL) subscription attached to the account, one per
+ * old Pro vault. `accountSubscription` prices only the best row, so a legacy
+ * owner with two old vaults would see half their bill without this.
+ */
+async function legacyCharges(accountId: string) {
+  const { rows } = await pool.query<{
+    amount: string | number | null;
+    currency: string | null;
+    interval: string | null;
+    organization_id: string | null;
+    vault_name: string | null;
+    status: string;
+  }>(
+    `SELECT s.amount, s.currency, s.interval, s.organization_id,
+            COALESCE(o.name, s.org_name) AS vault_name, s.status
+       FROM subscriptions s
+       LEFT JOIN organization o ON o.id = s.organization_id
+      WHERE s.billing_account_id = $1
+        AND s.deleted_at IS NULL
+        AND s.seats IS NULL
+        AND s.provider_subscription_id IS NOT NULL
+        AND s.status IN ('active', 'past_due')
+      ORDER BY s.created_at, s.id`,
+    [accountId],
+  );
+  return rows.map((r) => ({
+    amount: r.amount === null ? 0 : Number(r.amount),
+    currency: r.currency ?? "usd",
+    interval: (normalizeIntervalForApi(r.interval) === "year" ? "year" : "month") as "month" | "year",
+    organizationId: r.organization_id,
+    vaultName: r.vault_name,
+    status: r.status,
+  }));
+}
+
 /** The `GET /api/billing/account` body. People and price only for a manager. */
 async function readAccountBody(accountId: string, canManage: boolean) {
   const [plan, row, acct, vaultRows, invitedRows] = await Promise.all([
@@ -1679,6 +1715,8 @@ async function readAccountBody(accountId: string, canManage: boolean) {
     people = rows.map((r) => ({ userId: r.user_id, name: r.name, email: r.email, vaults: r.vaults }));
   }
   const complimentaryUntil = acct.rows[0]?.complimentary_until;
+  const isLegacy = legacySub(row);
+  const charges = isLegacy && canManage ? await legacyCharges(accountId) : null;
   return {
     id: accountId,
     status: plan.status,
@@ -1686,7 +1724,9 @@ async function readAccountBody(accountId: string, canManage: boolean) {
     interval: live ? normalizeIntervalForApi(row.interval) : null,
     currentPeriodEnd: row?.current_period_end ? new Date(row.current_period_end).toISOString() : null,
     cancelAtPeriodEnd: row?.cancel_at_period_end ?? false,
-    legacyPlan: legacySub(row),
+    legacyPlan: isLegacy,
+    // Only for a legacy manager: every live legacy row, so the price can be summed.
+    ...(charges ? { legacyCharges: charges } : {}),
     seats: {
       purchased,
       used: plan.seatsUsed,
