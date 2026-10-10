@@ -3,7 +3,6 @@ import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import type { VaultInfo, RecentVault } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
 import {
-  readKnownVaults,
   readOrgVaults,
   requestJoinWithCode,
   requestOpenVault,
@@ -11,6 +10,8 @@ import {
 } from "../store";
 import { Wordmark } from "./Logo";
 import { Spinner } from "./Spinner";
+import { useLocalFolderClasses } from "./useVaultLists";
+import { filterRecentsForWelcome } from "../lib/vault/vaultList";
 
 /* Its own handle on the same chunk every other sign-in mount uses — the
    welcome screen must not drag the auth modal in just by rendering. */
@@ -109,10 +110,11 @@ export function VaultPicker() {
   // with its own idea of what happens after sign-in. The prompted one wins —
   // it is the one that arrived with a reason attached.
   const authPrompt = useStore((s) => s.authPrompt);
-  // The live vault list. Signed in, this is the truth and the cache below is
-  // only its mirror; signed out it is empty and the cache is all we have.
+  // The live vault list. Signed in, this is the truth; signed out the welcome
+  // list shows no synced vaults at all, so the cache is never read here.
   const organizations = useStore((s) => s.organizations);
-  const serverUrl = useStore((s) => s.serverUrl);
+  // Bumped by a vault delete once its folder is gone (see the recents effect).
+  const recentsVersion = useStore((s) => s.recentsVersion);
   // Sign-in succeeded and a vault is being resolved/created. There's no vault
   // yet, so App still renders this screen — and without saying so, a sign-in
   // that is working looks identical to one that silently did nothing.
@@ -120,6 +122,9 @@ export function VaultPicker() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recents, setRecents] = useState<RecentVault[]>([]);
+  // The list stays unpainted until the first recents read lands AND every
+  // folder's stamp has settled, so no row appears and then vanishes.
+  const [recentsLoaded, setRecentsLoaded] = useState(false);
   // When a signed-out user clicks a remote vault we open the sign-in modal;
   // the vault to land in afterwards is stashed via requestOpenVault().
   const [signInOpen, setSignInOpen] = useState(false);
@@ -164,36 +169,29 @@ export function VaultPicker() {
       } catch {
         /* no recents — ignore */
       }
+      if (alive) setRecentsLoaded(true);
     })();
     return () => {
       alive = false;
     };
-  }, [organizations, authStatus]);
+  }, [organizations, authStatus, recentsVersion]);
 
-  // { path → the vault (org) that folder's own `.context/config.json` is
-  // stamped for }. The on-disk truth behind the row tags: the localStorage
-  // caches (org list, org→folder bindings) are per-device and easy to lose,
-  // and every cache miss used to demote a synced folder to a plain "recent" —
-  // openable signed-out with no hint that its edits sync somewhere.
-  const [stamps, setStamps] = useState<Record<string, string>>({});
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      const peeked = await Promise.all(
-        recents.map(async (r) => {
-          const stamp = await ipc.peekVaultStamp(r.path).catch(() => null);
-          return [r.path, stamp?.organizationId ?? null] as const;
-        }),
-      );
-      if (!alive) return;
-      const next: Record<string, string> = {};
-      for (const [path, orgId] of peeked) if (orgId) next[path] = orgId;
-      setStamps(next);
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [recents]);
+  // Each folder's class from its own `.context/config.json` stamp (shared
+  // with the Vaults tab and the switcher, session-cached per path):
+  // `member` = stamped for a vault this account is in, `foreign` = stamped
+  // for a vault it cannot see, `local` = no stamp. The localStorage caches
+  // are per-device and easy to lose, so the stamp is what tags a row.
+  // Signed out there are no member vaults, so every stamped folder is foreign.
+  const signedIn = authStatus === "signed-in";
+  const memberOrgIds = useMemo(
+    () => (signedIn ? organizations.map((o) => o.id) : []),
+    [signedIn, organizations],
+  );
+  const {
+    classes: folderClasses,
+    resolved: foldersResolved,
+    stampedOrgIds,
+  } = useLocalFolderClasses(recents, memberOrgIds);
 
   // If this screen goes away mid-join (a vault opened by some other route),
   // the landing suppression must not outlive it. A *successful* join disarms
@@ -428,41 +426,43 @@ export function VaultPicker() {
   // with two.
   const inFlow = naming || joining || landingVault;
 
-  // Merge synced (remote) vaults with local recents into one list. Remote
-  // vaults come from the locally-cached org list (survives sign-out) and are
-  // shown first; their bound folder — if any — comes from the org→folder map,
-  // healed by the folders' own config stamps when the map is missing. Local
-  // recents backing a synced vault are folded into the remote row (by path)
-  // so nothing shows twice; the ones left over carry their own stamp so a
-  // synced folder is *tagged* as synced even when its vault isn't in the
-  // cached list at all (other account, cleared cache, other server).
+  // Merge synced (remote) vaults with local recents into one list (owner
+  // decision 2026-10-07). Signed in: this account's vaults first (from the
+  // store's live list, never the cache, which would resurrect a vault deleted
+  // moments ago), then the recent folders `filterRecentsForWelcome` keeps —
+  // member and local ones; folders bound to another account are hidden.
+  // Signed out: ONLY local folders. No synced vault is listed at all, not even
+  // with a "sign in to open" hint; the sign-in line below the list covers it.
+  // A remote row's folder comes from the org→folder map, healed by the
+  // folders' own stamps when the map is missing; recents backing a remote row
+  // are folded into it (by path) so nothing shows twice.
   const entries = useMemo<PickerEntry[]>(() => {
-    // Signed in, the store's list is authoritative — reading the cache here
-    // would resurrect a vault deleted moments ago, because the cache is only
-    // rewritten by the next `refreshVault`. Signed out, the cache is the point:
-    // it is what lets this screen still offer your synced vaults.
-    const known =
-      authStatus === "signed-in"
-        ? organizations.map((o) => ({ id: o.id, name: o.name }))
-        : readKnownVaults(serverUrl);
+    const visible = filterRecentsForWelcome(recents, folderClasses, signedIn);
+    const known = signedIn ? organizations.map((o) => ({ id: o.id, name: o.name })) : [];
     const orgVaults = readOrgVaults();
     // Fallback folder per org from the folders' own stamps — recents are
     // newest-first, so the first stamped match wins (the one most recently
     // opened, i.e. the copy the user actually uses).
     const stampedPathByOrg: Record<string, string> = {};
-    for (const r of recents) {
-      const org = stamps[r.path];
+    for (const r of visible) {
+      const org = folderClasses.get(r.path) === "member" ? stampedOrgIds.get(r.path) : undefined;
       if (org && !(org in stampedPathByOrg)) stampedPathByOrg[org] = r.path;
     }
-    const remote: PickerEntry[] = known.map((w) => ({
-      kind: "remote",
-      key: `org:${w.id}`,
-      name: w.name,
-      path: orgVaults[w.id] ?? stampedPathByOrg[w.id] ?? null,
-      orgId: w.id,
-    }));
+    const remote: PickerEntry[] = known.map((w) => {
+      // A binding to a folder stamped for another account is not this vault's
+      // folder (the stamp outranks the binding).
+      const bound = orgVaults[w.id];
+      const boundOk = bound && folderClasses.get(bound) !== "foreign";
+      return {
+        kind: "remote",
+        key: `org:${w.id}`,
+        name: w.name,
+        path: (boundOk ? bound : undefined) ?? stampedPathByOrg[w.id] ?? null,
+        orgId: w.id,
+      };
+    });
     const consumed = new Set(remote.map((r) => r.path).filter(Boolean));
-    const local: PickerEntry[] = recents
+    const local: PickerEntry[] = visible
       .filter((r) => !consumed.has(r.path))
       .map((r) => ({
         kind: "local",
@@ -470,10 +470,13 @@ export function VaultPicker() {
         name: r.name,
         path: r.path,
         openedAt: r.openedAt,
-        syncedOrgId: stamps[r.path] ?? null,
+        syncedOrgId:
+          folderClasses.get(r.path) === "member" ? (stampedOrgIds.get(r.path) ?? null) : null,
       }));
     return [...remote, ...local];
-  }, [recents, stamps, organizations, authStatus, serverUrl]);
+  }, [recents, folderClasses, stampedOrgIds, organizations, signedIn]);
+  // Flash-free: paint nothing until the recents read and every stamp settled.
+  const listReady = recentsLoaded && foldersResolved;
 
   // Show the 3 most recent by default; the rest live in the "Show all" modal.
   const RECENT_LIMIT = 3;
@@ -484,7 +487,7 @@ export function VaultPicker() {
   // Every row carries a truthful state tag (docs' vault states): "Remote" =
   // synced, no local folder here yet; "Synced" = synced with a folder on this
   // device; "Local" = a plain folder that syncs nowhere. The tag comes from
-  // the folder's own config (via `stamps`), not just the localStorage caches,
+  // the folder's own config stamp, not just the localStorage caches,
   // so signing out can't demote a synced vault to an untagged "recent".
   const renderEntry = (e: PickerEntry) => {
     const synced = isSyncedEntry(e);
@@ -522,10 +525,8 @@ export function VaultPicker() {
             {opening === e.key
               ? "Opening…"
               : e.path
-                ? synced && authStatus !== "signed-in"
-                  ? `${tidyPath(e.path)} · sign in to open`
-                  : tidyPath(e.path)
-                : "Synced · sign in to open"}
+                ? tidyPath(e.path)
+                : "Not on this device yet"}
           </span>
         </button>
         {/* The remove × overlays the row's top-right corner on hover (the tag
@@ -780,7 +781,7 @@ export function VaultPicker() {
 
         {error && <p className="error">{error}</p>}
 
-        {!inFlow && entries.length > 0 && (
+        {!inFlow && listReady && entries.length > 0 && (
           <motion.div
             className="recent-list"
             initial={reduceMotion ? false : { opacity: 0, y: 8 }}

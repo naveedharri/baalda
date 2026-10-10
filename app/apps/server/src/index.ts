@@ -12,10 +12,17 @@ import {
 import { attachSyncUpgrade } from "./sync/http-upgrade.js";
 import { createPubSub } from "./sync/pubsub.js";
 import { VaultChannel } from "./sync/vault-channel.js";
-import { setMemberJoinedPublisher, setOrgChangedPublisher } from "./sync/member-events.js";
+import {
+  setAppearanceChangedPublisher,
+  setMemberJoinedPublisher, setMemberRemovedPublisher,
+  setOrgChangedPublisher,
+} from "./sync/member-events.js";
+import { publishUserEvent, setUserEventPublisher } from "./sync/user-events.js";
 import { backfillIndex } from "./index/indexer.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
+import { setLapseNotifier, startLapseScheduler, stopLapseScheduler } from "./billing/lapse.js";
+import { formatDocName } from "./sync/doc-name.js";
 import { setTrashActivityPublisher } from "./trash/activity.js";
 import { startInvitationSweep, stopInvitationSweep } from "./invitations/scheduler.js";
 import { setInvitationActivityPublisher } from "./invitations/sweep.js";
@@ -104,9 +111,26 @@ async function main() {
   setMemberJoinedPublisher((vaultId, name) => {
     void vaultChannel.publishMemberJoined(vaultId, name).catch(broadcastFailed("member-joined"));
   });
+  // Invitations reach the invitee's open apps live, on whatever vault channel
+  // they have open (sync/user-events.ts).
+  setUserEventPublisher((userId, event) => {
+    void publishUserEvent(pubsub, userId, event).catch(broadcastFailed("user-event"));
+  });
+  // A removed/departed member's vault-channel sockets are told and closed.
+  setMemberRemovedPublisher((vaultId, orgId, userId, reason) => {
+    void vaultChannel
+      .publishMemberRemoved(vaultId, orgId, userId, reason)
+      .catch(broadcastFailed("member-removed"));
+  });
   // A vault rename / icon change reaches teammates' switchers live (#306).
   setOrgChangedPublisher((vaultId, change) => {
     void vaultChannel.publishOrgChanged(vaultId, change).catch(broadcastFailed("org-changed"));
+  });
+  // A vault appearance change applies live on every member's app.
+  setAppearanceChangedPublisher((vaultId, change) => {
+    void vaultChannel
+      .publishAppearanceChanged(vaultId, change)
+      .catch(broadcastFailed("appearance-changed"));
   });
   // Soft delete / restore / purge → open Activity feeds refetch Trash (#260).
   setTrashActivityPublisher((vaultId) => {
@@ -358,6 +382,19 @@ async function main() {
   startBlobGc();
   // Trash retention: notes past `purge_after` lose their CRDT, versions and row.
   startTrashPurge();
+  // Billing lapse (account read-only): on a flip, the same ACL fan-out as
+  // PUT team-access, and close the collection's live sockets so
+  // `onAuthenticate` re-admits them with the new readOnly.
+  setLapseNotifier((vaultId) => {
+    invalidateReadableCache(vaultId);
+    void vaultChannel.publishAclChanged(vaultId).catch(broadcastFailed("acl-changed"));
+    const prefix = formatDocName(vaultId, "");
+    for (const [name, doc] of sync.hocuspocus.documents) {
+      if (!name.startsWith(prefix)) continue;
+      for (const conn of doc.getConnections()) conn.close();
+    }
+  });
+  startLapseScheduler();
   // Invitation reminders (one email a day before expiry, only when email is
   // configured) and one Activity notice per invitation that expired (#268).
   startInvitationSweep();
@@ -367,6 +404,7 @@ async function main() {
     versionCapture?.stop();
     stopBlobGc();
     stopTrashPurge();
+    stopLapseScheduler();
     stopInvitationSweep();
     syncWss.close();
     releaseWatch?.stop();

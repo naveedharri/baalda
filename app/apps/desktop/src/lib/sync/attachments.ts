@@ -65,6 +65,7 @@
 // back to the legacy `POST /api/vaults/:id/blobs` and remembers, so exactly one
 // upload pays for the probe.
 
+import { announceAttachmentArrived } from "../attachmentArrivals";
 import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
 import { isTransientPath, pathKey } from "../pathIdentity";
 import { BATCH_MAX_FILES, runPool, useBulkPath } from "./pool";
@@ -539,6 +540,12 @@ function errStatus(e: unknown): number | null {
  * (`code`, or `error`/`code` inside `body`) is what both the real
  * `BlobTransportError` and a test's plain object have in common.
  */
+/** The plan a 402 names (`requiredPlan`); a server without the field is a per-vault (Pro) one. */
+function requiresTeam(e: unknown): boolean {
+  const body = e && typeof e === "object" ? (e as { body?: unknown }).body : null;
+  return !!body && typeof body === "object" && (body as { requiredPlan?: unknown }).requiredPlan === "team";
+}
+
 function errCode(e: unknown): string | null {
   if (!e || typeof e !== "object") return null;
   const direct = (e as { code?: unknown }).code;
@@ -673,6 +680,10 @@ async function runProbeFirst<T>(
   }
   await runPool(items.slice(1), (item, i) => worker(item, i + 1), opts);
 }
+
+/** How long an `attachments/` drop refused for access (403) waits before the
+ *  mirror asks again on its own. */
+export const EMBED_REFUSAL_RETRY_MS = 60_000;
 
 /** How long a `files-indexed` burst collects before the text pass runs. */
 const TEXT_DEBOUNCE_MS = 800;
@@ -1032,6 +1043,17 @@ export class AttachmentSync {
    * than path so a rename does not resurrect the attempt.
    */
   private readonly permanentSkips = new Set<string>();
+  /**
+   * `attachments/` drops the server refused with a 403 (no write access here),
+   * by sha → when to ask again. NOT a permanent skip: access is a setting an
+   * owner changes, and an image pasted into a note someone can edit must reach
+   * the team once they may write. Re-asked after {@link EMBED_REFUSAL_RETRY_MS}
+   * and at once on {@link recheckEmbedUploads} (an access change, a reconnect).
+   */
+  private readonly embedRefusedUntil = new Map<string, number>();
+  private embedRefusalTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The "your image could not be shared" toast, once per sync instance. */
+  private embedRefusalNotified = false;
   /** The storage-full toast is raised at most once per sync instance. */
   private storageLimitNotified = false;
   /** relPath → the state the sidebar draws for it (see `deps.onFileStates`). */
@@ -1262,13 +1284,48 @@ export class AttachmentSync {
       if (failures.length) throw new Error(failures.join("\n"));
     } catch (e) {
       if (this.handleAttachmentSyncRequired(e, false)) {
-        throw new Error("This server requires Pro to download files in this vault, including files uploaded before the restriction. Upgrade this vault or contact its owner.");
+        throw new Error(
+          requiresTeam(e)
+            ? "Standalone file sync needs the Team plan, including files uploaded before the restriction. The account owner can upgrade in Account Settings → Plan & Billing."
+            : "This server requires Pro to download files in this vault, including files uploaded before the restriction. Upgrade this vault or contact its owner.",
+        );
       }
       throw e;
     } finally {
       this.running = false;
       if (this.rerun && this.current()) this.scheduleReconcile();
     }
+  }
+
+  /**
+   * Access may have changed (a reauth, an ACL frame, a reconnect): every
+   * `attachments/` drop refused for access is asked for again on the next pass.
+   */
+  recheckEmbedUploads(): void {
+    if (this.embedRefusedUntil.size === 0) return;
+    this.embedRefusedUntil.clear();
+    if (this.embedRefusalTimer) this.clearTimeoutImpl(this.embedRefusalTimer);
+    this.embedRefusalTimer = null;
+    this.scheduleReconcile();
+  }
+
+  private refuseEmbedForNow(a: LocalAttachment): void {
+    this.embedRefusedUntil.set(a.sha256, Date.now() + EMBED_REFUSAL_RETRY_MS);
+    console.warn(
+      `[attachments] ${a.relPath} refused (403) — no write access here; asking again in ${EMBED_REFUSAL_RETRY_MS / 1000} s`,
+    );
+    if (!this.embedRefusalNotified) {
+      this.embedRefusalNotified = true;
+      this.deps.notify?.(
+        "An image you added is only on this device: you don't have permission to add files to this vault. It will sync once an owner or admin gives you edit access.",
+        "error",
+      );
+    }
+    if (this.embedRefusalTimer) return;
+    this.embedRefusalTimer = this.setTimeoutImpl(() => {
+      this.embedRefusalTimer = null;
+      if (this.current()) this.scheduleReconcile();
+    }, EMBED_REFUSAL_RETRY_MS);
   }
 
   /** Clear a plan refusal after billing refresh has confirmed an upgrade. */
@@ -1453,6 +1510,11 @@ export class AttachmentSync {
         // is skipped without a round trip — see `permanentSkips`.
         if (this.attachmentSyncBlocked && !isUnderAttachments(a.relPath)) return;
         if (this.permanentSkips.has(a.sha256)) return;
+        const refusedUntil = this.embedRefusedUntil.get(a.sha256);
+        if (refusedUntil !== undefined) {
+          if (Date.now() < refusedUntil) return;
+          this.embedRefusedUntil.delete(a.sha256);
+        }
         if (this.unreadable.has(pathKey(a.relPath))) return;
         // An unregistered path while the delete queue is still trying to settle a
         // window is very likely the arrival half of a rename it is about to pair.
@@ -1497,6 +1559,12 @@ export class AttachmentSync {
           }
           if (this.handleAttachmentSyncRequired(e)) return;
           if (e instanceof AbortPass && e.reason === "attachment_sync_requires_pro") return;
+          // A lapsed Team account is read-only, not a broken file: no error row.
+          if (e instanceof AbortPass && e.reason === "account_read_only") {
+            this.setFileState(a.relPath, "queued");
+            aborted = e.reason;
+            return;
+          }
           if (e instanceof AbortPass) {
             // Nothing else in this pass can succeed either. Downloads are skipped
             // too: the vault is full, and the next pass will find the same state.
@@ -1865,6 +1933,12 @@ export class AttachmentSync {
         this.forgetDeadFileId(a.relPath, docId);
         return this.uploadOneClaimed(a, true);
       }
+      if (status === 403 && isUnderAttachments(a.relPath)) {
+        // An image pasted into a note: the refusal is about this person's
+        // access, which can change, never about these bytes. Ask again later.
+        this.refuseEmbedForNow(a);
+        return false;
+      }
       if (status === 413 || status === 415 || status === 400 || status === 403) {
         // Permanent for these bytes: the file is over the cap or of a type the
         // server refuses. Retrying it every pass is a guaranteed failure every
@@ -2140,7 +2214,9 @@ export class AttachmentSync {
       this.deps.onEntitlementBlocked?.(true);
       if (announce) {
         this.deps.notify?.(
-          "Upgrade to Pro to sync standalone files. Embedded attachments sync with notes on supported servers.",
+          requiresTeam(e)
+            ? "Standalone files sync on the Team plan. Embedded attachments still sync with notes."
+            : "Upgrade to Pro to sync standalone files. Embedded attachments sync with notes on supported servers.",
           "neutral",
         );
       }
@@ -2158,7 +2234,13 @@ export class AttachmentSync {
    * request that carries one. `direct` then decides the headers, and that is the
    * whole rule: presign ⇒ nothing, our own route ⇒ the bearer.
    */
+  /** Download one blob, then tell any embed waiting on it (`attachmentArrivals`). */
   private async downloadOne(b: ServerBlob, opts: { overwrite?: boolean } = {}): Promise<void> {
+    await this.downloadOneInner(b, opts);
+    announceAttachmentArrived(b.relPath as string);
+  }
+
+  private async downloadOneInner(b: ServerBlob, opts: { overwrite?: boolean } = {}): Promise<void> {
     const relPath = b.relPath as string;
     // Last line of the "never overwrite an occupied path" invariant
     // ({@link diffAttachments}). The diff already subtracts every path this
@@ -2698,6 +2780,10 @@ export class AttachmentSync {
     if (this.timer) {
       this.clearTimeoutImpl(this.timer);
       this.timer = null;
+    }
+    if (this.embedRefusalTimer) {
+      this.clearTimeoutImpl(this.embedRefusalTimer);
+      this.embedRefusalTimer = null;
     }
     // The text pass holds the same captured vaultId and must die with it.
     if (this.textTimer) {

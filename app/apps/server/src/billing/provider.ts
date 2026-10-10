@@ -16,6 +16,18 @@ export type BillingInterval = "month" | "year";
  * verification fails. Provider-neutral so the webhook route can answer 403
  * without importing any provider package.
  */
+/**
+ * The provider refused a subscription change because the subscription is
+ * cancelled or scheduled to cancel at period end. Provider-neutral so a route
+ * can answer 409 `subscription_canceling` instead of the provider's raw error.
+ */
+export class SubscriptionCancelingError extends Error {
+  constructor(message = "Resume your plan before changing seats.") {
+    super(message);
+    this.name = "SubscriptionCancelingError";
+  }
+}
+
 export class WebhookSignatureError extends Error {
   constructor(message = "Invalid webhook signature") {
     super(message);
@@ -53,9 +65,14 @@ export interface NormalizedBillingEvent {
     | "subscription_updated"
     | "subscription_canceled"
     | "subscription_revoked";
-  /** The vault (organization) this subscription belongs to (from checkout metadata). */
+  /**
+   * The vault (organization) this subscription belongs to (legacy
+   * `metadata.organization_id`). EMPTY STRING when the subscription carries
+   * only `billing_account_id` (Team checkout without a vault); resolve by
+   * `providerSubscriptionId`, then `accountId`, then this.
+   */
   organizationId: string;
-  providerCustomerId: string;
+  providerCustomerId: string | null;
   providerSubscriptionId: string;
   /** Our internal plan id (currently always "pro"). */
   plan: string;
@@ -77,6 +94,31 @@ export interface NormalizedBillingEvent {
   amount: number | null;
   /** ISO-4217-ish currency code, lowercased by the provider (e.g. "usd"). */
   currency: string | null;
+  /** Seats on the subscription (seat-based Team products); null for legacy per-vault prices. */
+  seats: number | null;
+  /**
+   * List price before any discount, in minor units: per-seat price x seats when
+   * the provider lets us derive it, else null. `amount` stays what is CHARGED.
+   */
+  listAmount: number | null;
+  /** The discount applied to the subscription (legacy price is a forever discount). */
+  discountId: string | null;
+  discountName: string | null;
+  /** A percentage discount's size (10000 = 100% off); null/absent for a fixed or no discount. */
+  discountBasisPoints?: number | null;
+  /**
+   * How long the discount lasts: `once` covers the first payment only,
+   * `repeating` lasts `discountDurationMonths`, `forever` every renewal.
+   * Null/absent when unknown or no discount.
+   */
+  discountDuration?: DiscountDuration | null;
+  discountDurationMonths?: number | null;
+  /** Seats scheduled by a `next_period` change, applied at the next renewal. */
+  pendingSeats: number | null;
+  /** `metadata.billing_account_id` (Team billing); null on legacy subscriptions. */
+  accountId: string | null;
+  /** The provider product the subscription is on (classifies legacy vs Team). */
+  productId: string | null;
 }
 
 /**
@@ -90,9 +132,40 @@ export interface NormalizedBillingEvent {
  * goes through the SAME upsert (and the same `event_ts` ordering guard) the
  * webhook uses, so a snapshot and a webhook racing each other still converge.
  */
+/** How long a provider discount lasts (Polar's `discount.duration`). */
+export type DiscountDuration = "once" | "repeating" | "forever";
+
+/** The discount as stored on our subscription row, for a seat preview. */
+export interface StoredDiscount {
+  discountId: string | null;
+  discountBasisPoints: number | null;
+  discountDuration?: DiscountDuration | null;
+  discountDurationMonths?: number | null;
+  /** When the subscription started (our row's created_at), for a repeating discount. */
+  startedAt?: Date | null;
+}
+
+/**
+ * Whether a `repeating` discount still covers the renewal at `periodEnd`:
+ * true when `startedAt` + `months` falls after it. Approximate (calendar
+ * months from our row's created_at, not Polar's own discount start); an
+ * unknown start, month count or period end counts as covered, matching the
+ * pre-duration behaviour.
+ */
+export function repeatingCoversRenewal(
+  startedAt: Date | null,
+  months: number | null,
+  periodEnd: Date | null,
+): boolean {
+  if (!startedAt || months === null || !periodEnd) return true;
+  const until = new Date(startedAt.getTime());
+  until.setUTCMonth(until.getUTCMonth() + months);
+  return until.getTime() > periodEnd.getTime();
+}
+
 export interface SubscriptionSnapshot {
   providerSubscriptionId: string;
-  providerCustomerId: string;
+  providerCustomerId: string | null;
   /** Normalized the same way as the webhook: "active" | "past_due" | "canceled". */
   status: "active" | "past_due" | "canceled";
   currentPeriodEnd: Date | null;
@@ -103,6 +176,31 @@ export interface SubscriptionSnapshot {
   currency: string | null;
   /** Provider `modifiedAt` — used as `event_ts` for the ordering guard. */
   modifiedAt: Date;
+  /** Seats on the subscription (seat-based Team products); null for legacy per-vault prices. */
+  seats: number | null;
+  /**
+   * List price before any discount, in minor units: per-seat price x seats when
+   * the provider lets us derive it, else null. `amount` stays what is CHARGED.
+   */
+  listAmount: number | null;
+  /** The discount applied to the subscription (legacy price is a forever discount). */
+  discountId: string | null;
+  discountName: string | null;
+  /** A percentage discount's size (10000 = 100% off); null/absent for a fixed or no discount. */
+  discountBasisPoints?: number | null;
+  /**
+   * How long the discount lasts: `once` covers the first payment only,
+   * `repeating` lasts `discountDurationMonths`, `forever` every renewal.
+   * Null/absent when unknown or no discount.
+   */
+  discountDuration?: DiscountDuration | null;
+  discountDurationMonths?: number | null;
+  /** Seats scheduled by a `next_period` change, applied at the next renewal. */
+  pendingSeats: number | null;
+  /** `metadata.billing_account_id` (Team billing); null on legacy subscriptions. */
+  accountId: string | null;
+  /** The provider product the subscription is on (classifies legacy vs Team). */
+  productId: string | null;
 }
 
 /**
@@ -122,6 +220,8 @@ export interface CheckoutSnapshot {
   status: "open" | "expired" | "confirmed" | "succeeded" | "failed";
   /** The vault this checkout was started for (`metadata.organization_id`). */
   orgId: string | null;
+  /** The billing account this checkout was started for (`metadata.billing_account_id`). */
+  accountId: string | null;
   /** The user who started it (`metadata.user_id`). */
   userId: string | null;
   /** Set once the checkout has produced a subscription. */
@@ -129,10 +229,59 @@ export interface CheckoutSnapshot {
   providerCustomerId: string | null;
 }
 
+/**
+ * How a mid-period subscription change is billed (Polar's proration behaviour):
+ *  - `invoice`     — charge/credit the prorated difference immediately.
+ *  - `prorate`     — add the prorated difference to the next invoice.
+ *  - `next_period` — schedule the change for the next renewal (`pendingSeats`).
+ */
+export type ProrationBehavior = "invoice" | "prorate" | "next_period";
+
+export interface CreateDiscountArgs {
+  name: string;
+  type: "fixed" | "percentage";
+  /** Fixed discount per period, minor units. Required when `type` is fixed. */
+  amountCents?: number;
+  /** Percentage in basis points (10000 = 100%). Required when `type` is percentage. */
+  basisPoints?: number;
+  currency: string;
+  /** Always forever: the legacy price must hold for the life of the subscription. */
+  durationForever: true;
+  /** Products the discount may apply to (the Team seat products). */
+  productIds: string[];
+}
+
+/** What a seat change would cost, before it is made. */
+export interface SeatChangePreview {
+  currentSeats: number | null;
+  newSeats: number;
+  /** Charged amount per period after the change, minor units (discount kept). */
+  newAmount: number | null;
+  /** Per-seat price used, minor units. */
+  perSeat: number | null;
+  currency: string | null;
+  interval: BillingInterval | null;
+  /** Prorated charge for the remainder of this period if billed now (estimate). */
+  proratedNow: number | null;
+  currentPeriodEnd: Date | null;
+  /**
+   * Always true for Polar 0.48.1: it has no preview endpoint, so this is
+   * derived from the subscription's amount/seats/period, not quoted by Polar.
+   */
+  estimated: boolean;
+}
+
 export interface CreateCheckoutArgs {
-  orgId: string;
+  /** The billing account (Team) the subscription pays for. */
+  accountId: string;
+  /** Legacy alias route only: the vault the checkout was started from. */
+  orgId?: string;
   userId: string;
   email: string;
+  /** Seats bought upfront (manual seat mode). */
+  seats: number;
+  /** Minimum seats the checkout allows (TEAM_MIN_SEATS). */
+  minSeats: number;
   interval: BillingInterval;
   /**
    * Absolute URL the provider redirects to after successful payment. May carry
@@ -141,11 +290,19 @@ export interface CreateCheckoutArgs {
    * payment by id (see {@link BillingProvider.getCheckout}).
    */
   successUrl: string;
+  /**
+   * The allow-listed desktop scheme that started the checkout (`baalda`,
+   * `baalda-staging`, `baalda-dev`), recorded as checkout metadata
+   * `client_scheme` for support; the hand-back itself rides on `successUrl`.
+   */
+  clientScheme?: string;
 }
 
 export interface BillingProvider {
   /** Create a hosted checkout session and return its URL. */
-  createCheckout(args: CreateCheckoutArgs): Promise<{ url: string }>;
+  /** `id` is the provider's checkout id, so a client can ask the server to
+   *  reconcile this checkout while it waits (no webhook needed). */
+  createCheckout(args: CreateCheckoutArgs): Promise<{ url: string; id?: string }>;
   /** Create a customer-portal session (manage / cancel) and return its URL. */
   getPortalUrl(args: { customerId: string }): Promise<{ url: string }>;
   /**
@@ -183,6 +340,9 @@ export interface BillingProvider {
    */
   getCheckout(checkoutId: string): Promise<CheckoutSnapshot | null>;
   /**
+   * @deprecated Use {@link setSubscriptionAccount}. Kept for the per-vault
+   * transfer route until `BILLING_MODEL=team` is the only mode.
+   *
    * Re-point a subscription's `organization_id` / `user_id` metadata after a
    * transfer. Best-effort: the caller logs and carries on, because our own row
    * is the source of truth and webhooks resolve by provider subscription id
@@ -193,6 +353,36 @@ export interface BillingProvider {
     orgId: string,
     userId: string,
   ): Promise<void>;
+  /** Same as {@link setSubscriptionOrg} for a billing account (`billing_account_id`). */
+  setSubscriptionAccount(
+    providerSubscriptionId: string,
+    accountId: string,
+    userId?: string,
+  ): Promise<void>;
+  /** Change the seat count. Returns the provider's state after the change. */
+  updateSeats(
+    providerSubscriptionId: string,
+    seats: number,
+    proration: ProrationBehavior,
+  ): Promise<SubscriptionSnapshot>;
+  /** Move a subscription to another product (legacy per-vault price to Team seats). */
+  changeProduct(
+    providerSubscriptionId: string,
+    productId: string,
+    proration: ProrationBehavior,
+    discountId?: string,
+  ): Promise<SubscriptionSnapshot>;
+  /** Attach an existing discount to a live subscription. */
+  applyDiscount(providerSubscriptionId: string, discountId: string): Promise<SubscriptionSnapshot>;
+  /** Create a discount at the provider; returns its id. */
+  createDiscount(args: CreateDiscountArgs): Promise<{ id: string; name: string }>;
+  /** Estimate a seat change without making it (see {@link SeatChangePreview.estimated}). */
+  previewSeatChange(
+    providerSubscriptionId: string,
+    seats: number,
+    /** The stored discount: its basis points stand in when the live read omits them. */
+    stored?: StoredDiscount,
+  ): Promise<SeatChangePreview>;
   /**
    * Verify a raw webhook body + headers and normalize it. Returns `null` for a
    * valid signature carrying an event we don't act on (caller answers 202).

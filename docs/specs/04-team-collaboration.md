@@ -53,6 +53,13 @@ Roles for MVP — keep exactly three (matches Notion/Outline/Docmost): **owner**
 transfer the vault, and transfer the subscription between vaults they own), **admin** (manage
 members, invitations, settings), **member** (basic access).
 
+> **2026-10-07 (`BILLING_MODEL=team`):** billing moves from the vault to the owner's Team account,
+> which every vault they own is attached to. The owner buys seats (minimum 3); seats used = distinct
+> accepted members across the account's vaults, owner included, and pending invitations reserve a
+> seat (402 `seat_limit_reached` when full). Free accounts allow 2 people and 1 synced vault.
+> Moving a subscription between vaults is retired (`transfer_retired`); vaults move between
+> accounts the owner holds instead.
+
 ## 3. Sharing & permissions
 
 ### The industry pattern (what the references do)

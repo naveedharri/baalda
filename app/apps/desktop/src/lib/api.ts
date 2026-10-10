@@ -1,7 +1,16 @@
+import { parseAppearanceSettings, type AppearanceSettings } from "./appearanceSettings";
 import type { SeedResultFields } from "./sync/seedRegister";
 import { rememberAvatarImage } from "./avatarIdentity";
 import { parseHealth, type ServerHealth } from "./serverFeatures";
 import { CLIENT_OUTDATED_CODE, CLIENT_VERSION, CLIENT_VERSION_PARAM } from "./clientVersion";
+import { APP_CHANNEL, APP_SCHEME } from "./deepLinkScheme";
+
+/**
+ * Which build starts a checkout, so the server's success page hands back to
+ * THIS app (`baalda-staging://` for Staging, `baalda-dev://` for a dev build)
+ * rather than whichever app owns `baalda://`. The server allow-lists the scheme.
+ */
+const CHECKOUT_CLIENT = { channel: APP_CHANNEL, scheme: APP_SCHEME } as const;
 import type { AssistantProvider, HousekeeperStatus, HousekeeperScan, HousekeeperEdit, DiagnosticInput, DiagnosticReview } from "./housekeeper";
 // Type-only import: `bulkTypes.ts` is the hand-mirrored copy of the server's
 // wire contract, and importing the TYPES keeps this module a runtime leaf.
@@ -101,6 +110,30 @@ export interface Organization {
   /** The vault's icon (`lib/vaultIcon.ts` wire format); null = the default. */
   logo?: string | null;
   createdAt?: string;
+}
+
+/**
+ * Two facts the notes listing's last page states about the caller (server
+ * 2026-10-09). Absent = the server did not say (an older server), which every
+ * reader treats as "unknown" (`?? null`), never as false. A field is present
+ * only when the server sent a boolean, so an old server's listing keeps
+ * exactly its old shape.
+ */
+export interface ListingVisibility {
+  /** The vault holds live notes or files this user cannot read. */
+  hiddenContent: boolean | null;
+  /** A create at the vault root would be allowed. */
+  canCreateRoot: boolean | null;
+}
+
+function listingVisibility(data: {
+  hiddenContent?: unknown;
+  canCreateRoot?: unknown;
+}): Partial<ListingVisibility> {
+  const out: Partial<ListingVisibility> = {};
+  if (typeof data.hiddenContent === "boolean") out.hiddenContent = data.hiddenContent;
+  if (typeof data.canCreateRoot === "boolean") out.canCreateRoot = data.canCreateRoot;
+  return out;
 }
 
 export interface Member {
@@ -336,6 +369,12 @@ export interface Share {
   permission: "view" | "edit" | "readonly" | "locked" | "denied";
   createdBy?: string;
   created_by?: string;
+  /**
+   * Why a synthetic lock exists. `billing_lapsed` marks the vault row the
+   * server adds when the vault's Team account lapsed (id `billing:<orgId>`):
+   * sync is read-only until the plan resumes, whatever the access settings say.
+   */
+  reason?: "billing_lapsed" | (string & {});
 }
 
 export type Permission = "view" | "edit";
@@ -808,8 +847,91 @@ export interface BillingPlan {
  *  server has no billing configured — a self-host runs with unlimited limits. */
 export interface BillingConfig {
   enabled: boolean;
+  /** `team` = per-seat account billing; `vault` (or absent) = an older server
+   *  that bills each vault separately through `plans`. */
+  model?: "vault" | "team";
+  free?: { people: number; syncedVaults: number };
+  team?: {
+    minSeats: number;
+    currency: string;
+    /** `perSeat` in minor units (cents). */
+    prices: { interval: "month" | "year"; perSeat: number }[];
+  };
+  /** Old servers (`model` absent or `vault`). */
   plans?: BillingPlan[];
   freeLimits?: { vaultsPerUser: number; membersPerVault: number; notesPerVault?: number };
+}
+
+export type BillingStatus = "none" | "active" | "past_due" | "canceled";
+
+/** `GET /api/billing/account`: the caller's billing account (Team model). */
+export interface MyBillingAccount {
+  id: string;
+  status: BillingStatus;
+  plan: "free" | "team";
+  interval: "month" | "year" | null;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  seats: {
+    /** null on Free (no seats bought). */
+    purchased: number | null;
+    used: number;
+    reserved: number;
+    pendingDecrease: { to: number; effectiveAt: string } | null;
+  };
+  /** Minor units; `charged < list` is a legacy (grandfathered) price. */
+  price: {
+    list: number;
+    charged: number;
+    discountName: string | null;
+    /** How long the discount lasts; absent on servers before migration 055. */
+    discountDuration?: "once" | "repeating" | "forever" | null;
+    discountDurationMonths?: number | null;
+    /** What the next renewal costs (list once a one-time discount is spent). */
+    renewalAmount?: number | null;
+  } | null;
+  people: { userId: string; name: string; email: string; vaults: string[] }[];
+  vaults: { orgId: string; name: string }[];
+  /** Vaults with pending invitations that hold seats; counts sum to
+   *  `seats.reserved`. Absent on older servers. */
+  invitedByVault?: { orgId: string; name: string; count: number }[];
+  limits: { people: number | null; vaults: number | null; assistant: boolean; fileSync: boolean };
+  lapsed: boolean;
+  canManage: boolean;
+  complimentaryUntil: string | null;
+}
+
+export interface BillingUsageVault {
+  orgId: string;
+  name: string;
+  people: number;
+  notes: number;
+  storageBytes: number;
+  files: number;
+}
+
+/** `GET /api/billing/account/usage`. */
+export interface BillingUsage {
+  vaults: BillingUsageVault[];
+  totals: { people: number; notes: number; storageBytes: number; files: number; vaults?: number };
+  limits: MyBillingAccount["limits"];
+}
+
+/** `GET /api/billing/account/seats/preview?seats=n`. Minor units (cents); any
+ *  amount the server cannot work out is null. */
+export interface SeatPreview {
+  currentSeats: number | null;
+  newSeats: number;
+  /** Charged per period after the change, discount kept. */
+  newAmount: number | null;
+  perSeat: number | null;
+  currency: string | null;
+  interval: "month" | "year" | null;
+  /** Estimated prorated charge today for an increase. */
+  proratedNow: number | null;
+  currentPeriodEnd: string | null;
+  estimated: boolean;
+  floor?: number;
 }
 
 /** A single vault's subscription state + seat usage. */
@@ -827,6 +949,11 @@ export interface OrgBilling {
   currency: string | null;
   /** `limit: null` = unlimited (paid). */
   seats: { members: number; pendingInvitations: number; limit: number | null };
+  /** Team model only (`BILLING_MODEL=team`): the plan of the billing account
+   *  this vault is attached to, and that account's id. Absent on servers still
+   *  on the per-vault model, where `plan` is the whole answer. */
+  accountPlan?: "free" | "team";
+  accountId?: string | null;
 }
 
 /** One row of the Subscriptions list: a vault the caller belongs to. */
@@ -848,6 +975,11 @@ export interface MyBillingVault {
   canManage: boolean;
   /** Owner AND the subscription is live: may move it to another vault. */
   canTransfer: boolean;
+  /** Team model only (`BILLING_MODEL=team`): the plan of the billing account
+   *  this vault is attached to, and that account's id. Absent on servers still
+   *  on the per-vault model, where `plan` is the whole answer. */
+  accountPlan?: "free" | "team";
+  accountId?: string | null;
 }
 
 /**
@@ -1966,6 +2098,23 @@ export class ApiClient {
   }
 
   /**
+   * Which of `orgIds` the signed-in user is still a member of. Raw answer;
+   * `lib/vault/membershipLost.ts` decides what counts as a removal (only
+   * `notMember`). Throws ApiError on any non-2xx, including 404 on a server
+   * without the route.
+   */
+  async membershipCheck(
+    orgIds: string[],
+  ): Promise<{ member: string[]; notMember: string[]; unknown: string[] }> {
+    const { data } = await this.request<{ member: string[]; notMember: string[]; unknown: string[] }>(
+      "POST",
+      "/api/orgs/membership-check",
+      { body: { orgIds } },
+    );
+    return data;
+  }
+
+  /**
    * Change a member's role (owner/admin). Same authz shape as removeMember:
    * an admin may only change plain members; nobody touches the owner or
    * themselves. The server force-closes the member's live sync sockets so the
@@ -2072,12 +2221,30 @@ export class ApiClient {
    */
   async getBillingConfig(): Promise<BillingConfig> {
     try {
-      const { data } = await this.request<BillingConfig>("GET", "/api/billing/config");
-      if (!data || data.enabled !== true) return { enabled: false };
-      return { enabled: true, plans: data.plans, freeLimits: data.freeLimits };
+      return await this.probeBillingConfig();
     } catch {
       return { enabled: false };
     }
+  }
+
+  /**
+   * The same request as {@link getBillingConfig}, but a failure THROWS instead
+   * of reading as "disabled". For screens that state a verdict about billing
+   * (Account Settings → Plan & Billing): a network error, a restarting server
+   * or a 5xx is not an answer, so `classifyBillingConfigResult` in
+   * `lib/billing.ts` decides what the caught error means (404 ⇒ disabled).
+   */
+  async probeBillingConfig(): Promise<BillingConfig> {
+    const { data } = await this.request<BillingConfig>("GET", "/api/billing/config");
+    if (!data || data.enabled !== true) return { enabled: false };
+    return {
+      enabled: true,
+      model: data.model ?? "vault",
+      free: data.free,
+      team: data.team,
+      plans: data.plans,
+      freeLimits: data.freeLimits,
+    };
   }
 
   /** A vault's subscription state + seat usage (any member of the org). */
@@ -2097,7 +2264,7 @@ export class ApiClient {
     const { data } = await this.request<{ url: string }>(
       "POST",
       `/api/billing/orgs/${encodeURIComponent(orgId)}/checkout`,
-      { body: { interval } },
+      { body: { interval, client: CHECKOUT_CLIENT } },
     );
     return data;
   }
@@ -2140,7 +2307,106 @@ export class ApiClient {
     return data;
   }
 
+  // ---- Team account billing (servers with `model: "team"`) ----------------
+
+  /** The caller's billing account: plan, seats, people who count, vaults. */
+  /** `refresh` asks the server to re-read the live subscription from the
+   *  provider once (throttled server-side); older servers ignore it. Only the
+   *  Plan & Billing mount and the checkout hand-back pass it. */
+  async getBillingAccount(opts: { orgId?: string; refresh?: boolean } = {}): Promise<MyBillingAccount> {
+    const params = new URLSearchParams();
+    if (opts.orgId) params.set("orgId", opts.orgId);
+    if (opts.refresh) params.set("refresh", "1");
+    const qs = params.toString();
+    const q = qs ? `?${qs}` : "";
+    const { data } = await this.request<MyBillingAccount>("GET", `/api/billing/account${q}`);
+    return data;
+  }
+
+  /** Per-vault usage and totals for the caller's account, or for the account
+   *  `orgId` is billed on (any member of that vault may read it). */
+  async getBillingUsage(opts: { orgId?: string } = {}): Promise<BillingUsage> {
+    const q = opts.orgId ? `?orgId=${encodeURIComponent(opts.orgId)}` : "";
+    const { data } = await this.request<BillingUsage>("GET", `/api/billing/account/usage${q}`);
+    return data;
+  }
+
+  /** What changing to `seats` would cost now and next period. */
+  async previewSeatChange(seats: number): Promise<SeatPreview> {
+    const { data } = await this.request<SeatPreview>(
+      "GET",
+      `/api/billing/account/seats/preview?seats=${encodeURIComponent(String(seats))}`,
+    );
+    return data;
+  }
+
+  /** Increase (immediate, prorated) or decrease (at period end) seats. */
+  async setSeats(seats: number): Promise<MyBillingAccount> {
+    const { data } = await this.request<MyBillingAccount>("PATCH", "/api/billing/account/seats", {
+      body: { seats },
+    });
+    return data;
+  }
+
+  /** Start a hosted Team checkout for the caller's account. */
+  async teamCheckout(input: {
+    seats: number;
+    interval: "month" | "year";
+    successUrl?: string;
+  }): Promise<{ url: string; checkoutId?: string }> {
+    const { data } = await this.request<{ url: string; checkoutId?: string }>(
+      "POST",
+      "/api/billing/account/checkout",
+      { body: { ...input, client: CHECKOUT_CLIENT } },
+    );
+    return data;
+  }
+
+  /** Ask the server to read a Team checkout back from the payment provider
+   *  and record its subscription if it has been paid, so the wait never
+   *  depends on a webhook. Answers the account. 404 on an older server
+   *  (no route) or a checkout that is not this account's. */
+  async reconcileTeamCheckout(checkoutId: string): Promise<MyBillingAccount> {
+    const { data } = await this.request<MyBillingAccount>(
+      "POST",
+      "/api/billing/account/reconcile",
+      { body: { checkoutId } },
+    );
+    return data;
+  }
+
+  /** Cancel the account's Team subscription at the period end. */
+  async accountCancel(): Promise<MyBillingAccount> {
+    const { data } = await this.request<MyBillingAccount>("POST", "/api/billing/account/cancel");
+    return data;
+  }
+
+  /** Undo a pending cancel. */
+  async accountResume(): Promise<MyBillingAccount> {
+    const { data } = await this.request<MyBillingAccount>("POST", "/api/billing/account/resume");
+    return data;
+  }
+
+  /** The provider's customer portal for the account. */
+  async accountPortalUrl(): Promise<{ url: string }> {
+    const { data } = await this.request<{ url: string }>("POST", "/api/billing/account/portal");
+    return data;
+  }
+
+  /** Attach a vault to another billing account the caller manages. */
+  async moveVault(orgId: string, toAccountId: string): Promise<{ moved: boolean }> {
+    const { data } = await this.request<{ moved: boolean }>(
+      "POST",
+      `/api/billing/orgs/${encodeURIComponent(orgId)}/move`,
+      { body: { toAccountId } },
+    );
+    return data;
+  }
+
   /**
+   * @deprecated Per-vault subscriptions are gone on Team-model servers; use
+   * {@link moveVault}. Kept for older servers.
+   *
    * Move a live subscription from one vault to another the caller owns. The
    * source may be a deleted vault's tombstone, which is the whole point: it
    * turns "I deleted the wrong vault" into a recoverable mistake instead of a
@@ -2356,15 +2622,17 @@ export class ApiClient {
    */
   async listNoteRegistry(
     vaultId: string,
-  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null }> {
-    const { data } = await this.request<{ notes: RegisteredNote[]; tombstones?: string[] }>(
-      "GET",
-      "/api/notes",
-      { query: { vaultId } },
-    );
+  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null } & Partial<ListingVisibility>> {
+    const { data } = await this.request<{
+      notes: RegisteredNote[];
+      tombstones?: string[];
+      hiddenContent?: boolean;
+      canCreateRoot?: boolean;
+    }>("GET", "/api/notes", { query: { vaultId } });
     return {
       notes: data.notes ?? [],
       tombstones: Array.isArray(data.tombstones) ? data.tombstones : null,
+      ...listingVisibility(data),
     };
   }
 
@@ -2708,10 +2976,11 @@ export class ApiClient {
   async listNoteRegistryPaged(
     vaultId: string,
     opts: { limit?: number } = {},
-  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null }> {
+  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null } & Partial<ListingVisibility>> {
     const limit = opts.limit ?? REGISTRY_PAGE_LIMIT;
     const notes: RegisteredNote[] = [];
     let tombstones: string[] | null = null;
+    let visibility: Partial<ListingVisibility> = {};
     let after: string | undefined;
     // Bounded so a server that keeps answering the same `nextAfter` cannot spin
     // this loop forever; 1000 pages is 1,000,000 notes at the default limit.
@@ -2720,19 +2989,22 @@ export class ApiClient {
         notes: RegisteredNote[];
         tombstones?: string[];
         nextAfter?: string | null;
+        hiddenContent?: boolean;
+        canCreateRoot?: boolean;
       }>("GET", "/api/notes", {
         query: { vaultId, limit: String(limit), after },
         timeoutMs: REGISTRY_LISTING_TIMEOUT_MS,
       });
       notes.push(...(data.notes ?? []));
       tombstones = Array.isArray(data.tombstones) ? data.tombstones : null;
+      visibility = listingVisibility(data);
       const next = typeof data.nextAfter === "string" ? data.nextAfter : null;
       // No cursor ⇒ the last (or only) page. A cursor that did not ADVANCE is a
       // server bug; stopping is strictly better than looping on it.
-      if (!next || next === after) return { notes, tombstones };
+      if (!next || next === after) return { notes, tombstones, ...visibility };
       after = next;
     }
-    return { notes, tombstones };
+    return { notes, tombstones, ...visibility };
   }
 
   // ---- Versioning ---------------------------------------------------------
@@ -2961,6 +3233,33 @@ export class ApiClient {
       posture: data.posture ?? (mode === "open" ? "edit" : mode === "readonly" ? "view" : "sealed"),
       grantId: data.grantId ?? null,
       overrides: data.overrides ?? [],
+    };
+  }
+
+  /** The vault's appearance defaults for everyone (`settings` keys optional). */
+  async getVaultAppearance(orgId: string): Promise<VaultAppearanceResponse> {
+    const { data } = await this.request<VaultAppearanceResponse>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/appearance`,
+    );
+    return {
+      settings: parseAppearanceSettings(data?.settings),
+      updatedAt: data?.updatedAt ?? null,
+      updatedBy: data?.updatedBy ?? null,
+    };
+  }
+
+  /** Replace the vault's appearance defaults (owner/admin). */
+  async putVaultAppearance(orgId: string, settings: AppearanceSettings): Promise<VaultAppearanceResponse> {
+    const { data } = await this.request<VaultAppearanceResponse>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/appearance`,
+      { body: { settings } },
+    );
+    return {
+      settings: parseAppearanceSettings(data?.settings ?? settings),
+      updatedAt: data?.updatedAt ?? null,
+      updatedBy: data?.updatedBy ?? null,
     };
   }
 
@@ -3569,4 +3868,10 @@ export function shareResourceType(s: Share): "folder" | "file" | "vault" {
 }
 export function shareResourceId(s: Share): string {
   return s.resourceId ?? s.resource_id ?? "";
+}
+
+export interface VaultAppearanceResponse {
+  settings: AppearanceSettings;
+  updatedAt: string | null;
+  updatedBy: string | null;
 }

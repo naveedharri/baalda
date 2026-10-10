@@ -10,6 +10,9 @@
 // When signed out / offline / unmapped, it falls back to a local Awareness and
 // the bridge's normal seed-from-file (pure local-first).
 
+import { markAccessTreeStale } from "../accessTreeStale";
+import { isAttachmentWanted, onAttachmentWanted } from "../attachmentArrivals";
+import type { AppearanceSettings } from "../appearanceSettings";
 import { NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
@@ -32,6 +35,7 @@ import { viewingDocId } from "../presence/viewingDocId";
 import type { ActivityStatus } from "../prefs";
 import { toast } from "../toast";
 import { AttachmentSync, routesToAttachmentSync } from "./attachments";
+import { EmbedArrivalFetcher } from "./embedArrival";
 import { BinaryDeleteQueue } from "./binaryDeletes";
 import { BootstrapRunner } from "./bootstrap";
 import {
@@ -471,7 +475,9 @@ export class SyncManager implements InboundHost {
     reason: "deleted" | "revoked",
   ) => void;
   private onMemberJoined?: (name: string) => void;
+  private onMemberRemoved?: (change: { orgId: string; userId: string; reason: "removed" | "left" }) => void;
   private onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
+  private onAppearanceChanged?: (change: { orgId?: string; settings: AppearanceSettings }) => void;
   /** Mirrors the registry's {relPath → docId} map to the UI (coalesced). */
   private onRegistryMap?: (map: Record<string, string>) => void;
   /** Mirrors the registry's {docId → last-edit} stamps to the UI. */
@@ -519,6 +525,13 @@ export class SyncManager implements InboundHost {
     },
   });
   private attachments: AttachmentSync | null = null;
+  /** Fetches the open note's newly embedded `attachments/` files the moment a
+   *  teammate's edit names them (`embedArrival.ts`). Lives with `attachments`. */
+  private embedArrivals: EmbedArrivalFetcher | null = null;
+  /** Detaches the open note's remote-change observer that feeds it. */
+  private embedObserverOff: (() => void) | null = null;
+  /** Detaches the fetcher from image widgets asking for a missing file. */
+  private embedWantOff: (() => void) | null = null;
   /** Disk deletes for BINARIES — the blob mirror's own `drainDiskDeletes`
    *  (`binaryDeletes.ts`). Built and torn down beside the mirror it guards. */
   private binaryDeletes: BinaryDeleteQueue | null = null;
@@ -905,6 +918,12 @@ export class SyncManager implements InboundHost {
   private onVaultPresence?: (peers: VaultPeer[]) => void;
 
   /** UI subscribes here to render the connection indicator. */
+  /** True while the open note's last known grant is view-only. A reconnect
+   *  does not clear it; only an editable token does. */
+  get openDocReadOnly(): boolean {
+    return this.current?.readOnly === true;
+  }
+
   setStatusListener(cb: ((status: SyncStatus) => void) | undefined): void {
     this.onStatus = cb;
   }
@@ -1218,7 +1237,14 @@ export class SyncManager implements InboundHost {
     // Otherwise a healthy channel means the app IS connected, whatever this one
     // note's socket is doing. Only when the channel itself is unhealthy does the
     // note's view of the world add anything.
-    return vault === "synced" ? "synced" : doc;
+    //
+    // A view-only grant outlives one socket. Every re-mint (the token refresh
+    // ~9 min, any `reauth` in the vault, a network blip) drops the doc to
+    // "connecting" until the new token lands, and reporting the channel's
+    // "synced" for that window told the editor the note was editable: the
+    // view-only banner vanished and keystrokes were accepted for up to ~2 s.
+    if (vault === "synced") return this.current.readOnly ? "read-only" : "synced";
+    return doc;
   }
 
   /** Record the open note's provider status and re-emit the effective status.
@@ -1347,7 +1373,7 @@ export class SyncManager implements InboundHost {
 
   /** Ask the server again without clearing an existing refusal. Billing
    * refreshes use this to learn a policy change in a running client; a blocked
-   * mirror remains blocked until a confirmed Pro transition resets it. */
+   * mirror remains blocked until a confirmed Team transition resets it. */
   checkAttachmentEntitlement(): void {
     this.attachments?.scheduleReconcile();
   }
@@ -1439,7 +1465,22 @@ export class SyncManager implements InboundHost {
     this.onMemberJoined = cb;
   }
 
+  /** UI subscribes here for `member-removed`: a user lost membership of this
+   *  vault. The store checks it is the signed-in user before acting. */
+  setMemberRemovedListener(
+    cb: ((change: { orgId: string; userId: string; reason: "removed" | "left" }) => void) | undefined,
+  ): void {
+    this.onMemberRemoved = cb;
+  }
+
   /** UI subscribes here to patch the open vault's name/icon live (#306). */
+  /** UI subscribes here for live vault appearance defaults (same path as #306). */
+  setAppearanceChangedListener(
+    cb: ((change: { orgId?: string; settings: AppearanceSettings }) => void) | undefined,
+  ): void {
+    this.onAppearanceChanged = cb;
+  }
+
   setOrgChangedListener(
     cb: ((change: { name?: string; logo?: string | null }) => void) | undefined,
   ): void {
@@ -1460,6 +1501,14 @@ export class SyncManager implements InboundHost {
    * vault arrived"; the vault engine wires this one in `startVaultEngine`.
    */
   handleRegistryChanged(reason: RegistryPullReason): void {
+    // A reconnect, a registry frame or an ACL change may mean the server now
+    // holds an embed this device is still waiting for: ask for it now.
+    this.embedArrivals?.nudge();
+    // An access change or a reconnect may have lifted a refusal of this
+    // device's own pasted images: ask for them again too.
+    if (reason === "reauth" || reason === "acl-revoked" || reason === "channel-synced") {
+      this.attachments?.recheckEmbedUploads();
+    }
     // Which trigger asked for this pull. A pull that keeps re-arming itself is
     // invisible without this line — the badge just blinks "Syncing" — and the
     // NAME is the whole value: `reauth` vs `registry-frame` is what separated
@@ -1738,6 +1787,11 @@ export class SyncManager implements InboundHost {
    * member's local copies. A change nobody announced is not a revocation; it
    * stays under the ordinary 50% cap and is reported as a refusal instead.
    */
+  /** {@link InboundHost.mayRemoveRefusedEmptyFolders}: live, root present. */
+  mayRemoveRefusedEmptyFolders(): boolean {
+    return this.isLive() && !this.rootMissing;
+  }
+
   revocationAuthority(): boolean {
     return this.isLive() && aclSignalIsFresh(this.aclChangedAt, Date.now());
   }
@@ -6097,6 +6151,7 @@ export class SyncManager implements InboundHost {
     this.binaryDownloadPhase = false;
     this.attachments?.stop();
     this.attachments = null;
+    this.stopEmbedArrivals();
     this.binaryDeletes?.stop();
     this.binaryDeletes = null;
     this.clearVaultPresence();
@@ -6500,13 +6555,19 @@ export class SyncManager implements InboundHost {
         }
         this.handleRegistryChanged("registry-frame");
         this.notifyActivityChanged(scope);
+        // An open person Access tab re-reads its tree (a teammate's new file
+        // or folder, an MCP create).
+        markAccessTreeStale();
       },
       // Trash / shrink listings moved (#260): refetch instead of polling.
       onActivityChanged: () => this.notifyActivityChanged(scope),
       // A new teammate joined the vault — refresh roster + celebrate.
       onMemberJoined: (name) => this.onMemberJoined?.(name),
+      onMemberRemoved: (change) => this.onMemberRemoved?.(change),
       // The vault was renamed or got a new icon (#306).
       onOrgChanged: (change) => this.onOrgChanged?.(change),
+      // The vault's appearance defaults changed — same live path as the icon.
+      onAppearanceChanged: (change) => this.onAppearanceChanged?.(change),
       // A teammate's viewing state changed — update the sidebar presence roster.
       onPresence: (peer) => this.handleVaultPresence(peer),
       // A teammate is talking. Play it as it lands; nothing is kept.
@@ -6686,6 +6747,7 @@ export class SyncManager implements InboundHost {
     if (!vaultId) {
       this.attachments?.stop();
       this.attachments = null;
+      this.stopEmbedArrivals();
       this.binaryDeletes?.stop();
       this.binaryDeletes = null;
       return;
@@ -6728,8 +6790,25 @@ export class SyncManager implements InboundHost {
       notify: (text, tone) => toast(text, tone ?? "error"),
       // A pass rebuilds the sidebar's file dots from both listings, so this is
       // also how a removed file's dot goes away.
-      onServerChanged: () => this.attachments?.scheduleReconcile(),
+      onServerChanged: () => {
+        this.attachments?.scheduleReconcile();
+        this.embedArrivals?.nudge();
+      },
     });
+    this.stopEmbedArrivals();
+    const embeds = new EmbedArrivalFetcher({
+      exists: (relPath) => ipc.binaryExists(relPath, scope.vaultEpoch),
+      download: async (relPaths) => {
+        const mirror = this.attachments;
+        if (!mirror || !scope.isCurrent()) throw new Error("vault changed");
+        await mirror.downloadMissing(relPaths);
+      },
+      isWanted: isAttachmentWanted,
+    });
+    this.embedArrivals = embeds;
+    // An image that could not load asks for its file, whatever the fetcher's
+    // own scan decided earlier (scrolled back into view, note reopened).
+    this.embedWantOff = onAttachmentWanted((relPath) => void embeds.request([relPath]));
     this.attachments = new AttachmentSync({
       // A vanished vault root (#221) stops the binary mirror too: a download
       // would re-create the old folder, a missing file would read as a delete.
@@ -6966,6 +7045,7 @@ export class SyncManager implements InboundHost {
     this.current = sync;
     this.currentDocId = mapping.docId;
     this.currentRelPath = relPath;
+    this.watchEmbeds(bridge);
     // Take over the indicator from the vault channel right away with the
     // provider's initial status (it fires again as the socket progresses).
     this.docStatus = sync.status;
@@ -7129,6 +7209,32 @@ export class SyncManager implements InboundHost {
   }
 
   /**
+   * Feed the open note's text to {@link EmbedArrivalFetcher}: once on open (an
+   * embed the vault feed delivered while the note was closed) and on every
+   * REMOTE transaction (`tr.local` is false only for applied updates, never for
+   * the editor's or the disk bridge's own writes), so a teammate's pasted image
+   * is fetched within a second or two instead of on some later mirror pass.
+   */
+  private stopEmbedArrivals(): void {
+    this.embedWantOff?.();
+    this.embedWantOff = null;
+    this.embedArrivals?.stop();
+    this.embedArrivals = null;
+  }
+
+  private watchEmbeds(bridge: NoteBridge): void {
+    this.embedObserverOff?.();
+    const text = bridge.doc.getText("content");
+    const read = () => text.toString();
+    const onText = (_e: Y.YTextEvent, tr: Y.Transaction) => {
+      if (!tr.local) this.embedArrivals?.noteRemoteChange(read);
+    };
+    text.observe(onText);
+    this.embedObserverOff = () => text.unobserve(onText);
+    this.embedArrivals?.noteRemoteChange(read);
+  }
+
+  /**
    * Tear down the open note's network session.
    *
    * `closing` is the editor bridge's own teardown (`bridgeManager.closeCurrent`
@@ -7137,6 +7243,8 @@ export class SyncManager implements InboundHost {
    * store until it settles instead of being handed back at once (#200).
    */
   closeCurrent(closing?: Promise<unknown>): void {
+    this.embedObserverOff?.();
+    this.embedObserverOff = null;
     const closedDoc = this.docStore?.suppressedDoc() ?? null;
     if (closing && closedDoc && this.docStore) this.docStore.holdUntil(closedDoc, closing);
     if (this.current) {

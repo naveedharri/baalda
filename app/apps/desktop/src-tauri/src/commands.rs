@@ -325,6 +325,8 @@ pub struct IndexReady {
     pub epoch: u64,
     pub ok: bool,
     pub ms: u64,
+    /// Notes the rebuild left out because they could not be read as text.
+    pub skipped: usize,
 }
 
 /// The epoch of the currently-open vault (0 when none has been opened). The TS
@@ -351,6 +353,7 @@ fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> 
 }
 
 fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> AppResult<VaultInfo> {
+    crate::folder_safety::check_vault_folder(&path, app.path().home_dir().ok().as_deref())?;
     if !path.is_dir() {
         return Err(AppError::new(format!(
             "Couldn't open the folder {}: it isn't a folder (it may have been moved, renamed or deleted)",
@@ -425,7 +428,7 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
             // The sleeps deliberately keep the mutex: giving it up would let a UI
             // reader see the stale index and render wrong titles, which is the
             // thing the whole ready-handshake above exists to prevent.
-            let mut result = guard.rebuild(&bg_path);
+            let mut result = guard.rebuild_report(&bg_path);
             for attempt in 1..=REBUILD_BUSY_RETRIES {
                 let busy = match &result {
                     Ok(_) => false,
@@ -437,24 +440,32 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
                 if !busy {
                     break;
                 }
-                eprintln!(
+                log::warn!(
                     "[index] rebuild found {} busy (attempt {attempt}/{REBUILD_BUSY_RETRIES}) — retrying",
                     bg_path.display()
                 );
                 std::thread::sleep(std::time::Duration::from_millis(
                     REBUILD_BUSY_BACKOFF_MS << (attempt - 1),
                 ));
-                result = guard.rebuild(&bg_path);
+                result = guard.rebuild_report(&bg_path);
             }
             drop(guard);
-            let ok = match result {
-                Ok(pending) => {
-                    bg_queue.enqueue(pending);
-                    true
+            let (ok, skipped) = match result {
+                Ok(report) => {
+                    if report.skipped > 0 {
+                        log::error!(
+                            "[index] rebuild of {} skipped {} unreadable note(s)",
+                            bg_path.display(),
+                            report.skipped
+                        );
+                    }
+                    bg_queue.enqueue(report.pending);
+                    // Not ok only when there were notes and none could be read.
+                    (report.skipped == 0 || report.skipped < report.notes, report.skipped)
                 }
                 Err(e) => {
-                    eprintln!("[index] rebuild failed for {}: {e}", bg_path.display());
-                    false
+                    log::error!("[index] rebuild failed for {}: {e}", bg_path.display());
+                    (false, 0)
                 }
             };
             // Tells the UI the index is current: titles/backlinks/graph refresh.
@@ -465,6 +476,7 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
                     epoch,
                     ok,
                     ms: started.elapsed().as_millis() as u64,
+                    skipped,
                 },
             );
         });
@@ -585,13 +597,20 @@ pub async fn get_recent_vaults(
     }
 
     // Drop entries whose folder has since been moved/deleted; persist if changed.
-    let before = cfg.recent_vaults.len();
-    cfg.recent_vaults.retain(|r| Path::new(&r.path).is_dir());
-    if cfg.recent_vaults.len() != before {
+    if prune_missing_recents(&mut cfg.recent_vaults) {
         let _ = write_config(&app, &state, &cfg);
     }
 
     Ok(cfg.recent_vaults)
+}
+
+/// Drop recents whose folder no longer exists (moved, renamed, trashed by a
+/// vault delete), so no list ever offers to open a path that is gone. Returns
+/// whether anything was dropped.
+fn prune_missing_recents(recents: &mut Vec<RecentVault>) -> bool {
+    let before = recents.len();
+    recents.retain(|r| Path::new(&r.path).is_dir());
+    recents.len() != before
 }
 
 /// Remove one vault from the recents list (welcome-screen "×").
@@ -609,11 +628,84 @@ pub async fn remove_recent_vault(
     write_config(&app, &state, &cfg)
 }
 
+/// The one sentence the UI shows when a vault folder cannot be trashed. The
+/// raw `trash` error (an `Os { … }` debug dump from Finder's AppleScript) goes
+/// to the log only.
+pub const TRASH_FAILED_MESSAGE: &str = "Couldn't move the folder to the Trash. Close any Finder dialog and try again, or delete the folder yourself.";
+
+const TRASH_ATTEMPTS: u32 = 3;
+const TRASH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Run `primary` up to `attempts` times, `delay` apart, then `fallback` once.
+/// Returns the last error when everything failed. Pure so it can be tested
+/// without touching the real Trash.
+fn trash_with_retry(
+    attempts: u32,
+    delay: std::time::Duration,
+    mut primary: impl FnMut() -> Result<(), String>,
+    fallback: Option<&mut dyn FnMut() -> Result<(), String>>,
+) -> Result<(), String> {
+    let mut last = String::new();
+    for i in 0..attempts.max(1) {
+        match primary() {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                log::warn!("move to trash failed (attempt {}/{attempts}): {e}", i + 1);
+                last = e;
+            }
+        }
+        if i + 1 < attempts {
+            std::thread::sleep(delay);
+        }
+    }
+    if let Some(fallback) = fallback {
+        match fallback() {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                log::warn!("move to trash failed (fallback): {e}");
+                last = e;
+            }
+        }
+    }
+    Err(last)
+}
+
+/// Move `dir` to the OS Trash. On macOS the NSFileManager call goes first: the
+/// crate's default drives Finder through AppleScript, which fails outright
+/// with "The Finder is busy" (-15260) whenever Finder has a dialog open. Finder
+/// stays as the fallback (it supports "Put Back").
+fn move_dir_to_trash(dir: &Path) -> AppResult<()> {
+    #[cfg(target_os = "macos")]
+    let result = {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        let mut ns = trash::TrashContext::default();
+        ns.set_delete_method(DeleteMethod::NsFileManager);
+        let mut finder = || trash::delete(dir).map_err(|e| e.to_string());
+        trash_with_retry(
+            TRASH_ATTEMPTS,
+            TRASH_RETRY_DELAY,
+            || ns.delete(dir).map_err(|e| e.to_string()),
+            Some(&mut finder),
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
+    let result = trash_with_retry(
+        TRASH_ATTEMPTS,
+        TRASH_RETRY_DELAY,
+        || trash::delete(dir).map_err(|e| e.to_string()),
+        None,
+    );
+    result.map_err(|e| {
+        log::warn!("could not move {} to trash: {e}", dir.display());
+        AppError::new(TRASH_FAILED_MESSAGE)
+    })
+}
+
 /// Move a local vault's folder — and all its notes — to the OS trash, then
-/// forget it from the recents list. Used by the local-vault "Delete files"
+/// forget it from the recents list. Used by the local-vault "Delete vault"
 /// action. This is the only copy of a local vault (no server), so we trash
-/// (recoverable) instead of hard-deleting, and the UI gates it behind a
-/// two-click confirm.
+/// (recoverable) instead of hard-deleting, and the UI gates it behind the
+/// standard confirm dialog.
 #[tauri::command]
 pub async fn delete_vault(
     app: AppHandle,
@@ -621,7 +713,10 @@ pub async fn delete_vault(
     path: String,
 ) -> AppResult<()> {
     let dir = PathBuf::from(&path);
-    if !dir.is_dir() {
+    // Already gone (trashed by hand, or a synced vault's folder never made
+    // here): nothing to trash, but still forget it everywhere below.
+    let missing = !dir.exists();
+    if !missing && !dir.is_dir() {
         return Err(AppError::new("selected path is not a folder"));
     }
     // A missing parent means this is a filesystem root — never a real vault
@@ -629,7 +724,18 @@ pub async fn delete_vault(
     if dir.parent().is_none() {
         return Err(AppError::new("refusing to delete a filesystem root"));
     }
-    trash::delete(&dir).map_err(|e| AppError::new(format!("could not move to trash: {e}")))?;
+    if !missing {
+        // Off the async runtime: the retry sleeps between attempts.
+        let target = dir.clone();
+        tauri::async_runtime::spawn_blocking(move || move_dir_to_trash(&target))
+            .await
+            .map_err(|e| {
+                log::warn!("move to trash task failed: {e}");
+                AppError::new(TRASH_FAILED_MESSAGE)
+            })??;
+    }
+    // A `<root>/current` link that pointed at this folder now dangles.
+    remove_current_link_to(&dir);
     // Also drop it from recents / last_vault so it doesn't linger in the switcher.
     let mut cfg = read_config(&app, &state);
     cfg.recent_vaults.retain(|r| r.path != path);
@@ -722,6 +828,107 @@ pub fn check_reset_target(
     Ok(canon)
 }
 
+/// Membership ended (removed by an owner/admin, or left): PERMANENTLY delete
+/// that vault's folder on this device. Not the Trash and no recovery copy, by
+/// product decision (2026-10-09): a departed member keeps no copy of the
+/// team's notes. The UI calls this only on a positive server signal.
+///
+/// Guarded by [`check_departed_target`]. When the folder is the open vault the
+/// watcher and index are released first, and the vault slot is cleared.
+#[tauri::command]
+pub async fn delete_departed_vault(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    organization_id: String,
+) -> AppResult<()> {
+    let vaults_root = read_config(&app, &state)
+        .vaults_root
+        .map(PathBuf::from)
+        .or_else(|| default_vaults_root(&app).ok());
+    let home = app.path().home_dir().ok();
+    let target = check_departed_target(Path::new(&path), &organization_id, vaults_root.as_deref(), home.as_deref())?;
+    let (watcher, index) = {
+        let mut inner = state.inner.lock().unwrap();
+        let is_open = inner
+            .vault
+            .as_ref()
+            .and_then(|v| std::fs::canonicalize(v).ok())
+            .is_some_and(|v| v == target);
+        if is_open {
+            inner.vault = None;
+            (inner.watcher.take(), inner.index.take())
+        } else {
+            (None, None)
+        }
+    };
+    drop(watcher);
+    drop(index);
+    std::fs::remove_dir_all(&target).map_err(io_ctx("delete the vault folder", &target))?;
+    let mut cfg = read_config(&app, &state);
+    cfg.recent_vaults.retain(|r| r.path != path);
+    if cfg.last_vault.as_deref() == Some(path.as_str()) {
+        cfg.last_vault = None;
+    }
+    write_config(&app, &state, &cfg)
+}
+
+/// The refusals of [`delete_departed_vault`], pure so each one is testable.
+/// The folder must be a real directory (never a link), not a filesystem root,
+/// not the home folder or the vaults root (nor contain either), and its own
+/// `.context/config.json` must be stamped with exactly `organization_id`.
+/// Returns the canonical folder to delete.
+pub fn check_departed_target(
+    target: &Path,
+    organization_id: &str,
+    vaults_root: Option<&Path>,
+    home: Option<&Path>,
+) -> AppResult<PathBuf> {
+    let refuse = |why: &str| -> AppResult<PathBuf> {
+        Err(AppError::new(format!("Refusing to delete {}: {why}", target.display())))
+    };
+    if organization_id.trim().is_empty() {
+        return refuse("no vault id was given");
+    }
+    let meta = match std::fs::symlink_metadata(target) {
+        Ok(m) => m,
+        Err(_) => return refuse("the folder doesn't exist"),
+    };
+    if meta.file_type().is_symlink() {
+        return refuse("it is a link, not the vault folder itself");
+    }
+    if !meta.is_dir() {
+        return refuse("it isn't a folder");
+    }
+    let canon = match std::fs::canonicalize(target) {
+        Ok(p) => p,
+        Err(_) => return refuse("its location can't be resolved"),
+    };
+    if canon.parent().is_none() {
+        return refuse("it is a filesystem root");
+    }
+    if let Some(home) = home {
+        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+        if home.starts_with(&canon) {
+            return refuse("it is your home folder or contains it");
+        }
+    }
+    if let Some(root) = vaults_root {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        if root.starts_with(&canon) {
+            return refuse("it is the vaults folder or contains it");
+        }
+    }
+    let stamp = std::fs::File::open(canon.join(".context").join("config.json"))
+        .ok()
+        .and_then(|f| serde_json::from_reader::<_, VaultStamp>(std::io::BufReader::new(f)).ok());
+    match stamp.and_then(|s| s.organization_id) {
+        Some(id) if id == organization_id => Ok(canon),
+        Some(_) => refuse("it is stamped with a different vault"),
+        None => refuse("it carries no vault stamp"),
+    }
+}
+
 /// Create a brand-new empty vault folder `<parent>/<name>` and open it. A name
 /// whose folder is taken gets a numeric suffix (see `free_vault_dir`) rather
 /// than an error — duplicate vault names are allowed.
@@ -743,6 +950,7 @@ pub async fn create_vault(
     }
     let dir = free_vault_dir(Path::new(&parent), name)
         .ok_or_else(|| AppError::new("a folder with that name already exists"))?;
+    crate::folder_safety::check_vault_folder(&dir, app.path().home_dir().ok().as_deref())?;
     std::fs::create_dir_all(&dir).map_err(io_ctx("create the folder", &dir))?;
     open_vault_inner(&app, &state, dir)
 }
@@ -793,7 +1001,7 @@ pub async fn get_server_url(
 
 /// User-visible name of the default managed-root folder. Layer-1 brand surface
 /// (spec: rebrand policy) — the one place the default root folder name is set.
-const DEFAULT_ROOT_DIR_NAME: &str = "Baalda Vaults";
+const DEFAULT_ROOT_DIR_NAME: &str = crate::folder_safety::ROOT_DIR_NAME;
 
 /// Default managed root: `<home>/Documents/Baalda Vaults`. Lives under Documents
 /// so it's easy to find in the OS file browser (Finder/Explorer both surface
@@ -806,46 +1014,105 @@ fn default_vaults_root(app: &AppHandle) -> AppResult<PathBuf> {
     Ok(home.join("Documents").join(DEFAULT_ROOT_DIR_NAME))
 }
 
-/// The effective vaults root, auto-initialized to the default and persisted
-/// on first read so the rest of the app can rely on it always existing.
+/// Create `root` (refusing an unsafe one) and only then persist it, so a root
+/// that could not be created is never remembered. Shared by every root setter.
+/// When the root moves, the old root's `current` link is removed and, with a
+/// vault open, re-created inside the new root; vault folders stay put.
+fn create_and_persist_root(app: &AppHandle, state: &State<AppState>, root: &Path) -> AppResult<()> {
+    let home = app.path().home_dir().ok();
+    crate::folder_safety::check_vaults_root(root, home.as_deref())?;
+    std::fs::create_dir_all(root)
+        .map_err(|e| crate::folder_safety::root_create_error(&e, root, home.as_deref()))?;
+    let mut cfg = read_config(app, state);
+    let old = cfg.vaults_root.clone().map(PathBuf::from);
+    cfg.vaults_root = Some(root.to_string_lossy().to_string());
+    write_config(app, state, &cfg)?;
+    if let Some(old) = old.filter(|o| o.as_path() != root) {
+        remove_current_link(&old);
+        let open = state.inner.lock().unwrap().vault.clone();
+        if let Some(open) = open {
+            repoint_current(root, &open);
+        }
+    }
+    Ok(())
+}
+
+/// Pick a root: refuse the top of the disk and folders above home, then nest
+/// a dedicated "Baalda Vaults" folder under the pick (unless it is one already
+/// or is the current root), create it, persist it, and return it.
+fn choose_root(app: &AppHandle, state: &State<AppState>, picked: &Path) -> AppResult<PathBuf> {
+    let home = app.path().home_dir().ok();
+    crate::folder_safety::check_vaults_root(picked, home.as_deref())?;
+    let current = read_config(app, state).vaults_root.map(PathBuf::from);
+    let root = crate::folder_safety::nest_vaults_root(picked, current.as_deref());
+    create_and_persist_root(app, state, &root)?;
+    Ok(root)
+}
+
+/// The effective vaults root. With none stored, or a stored one above home,
+/// the default is CREATED first and persisted only after that succeeded. A
+/// stored root that is not a dedicated folder (home, or its Desktop, Documents
+/// or Downloads itself, from an older build) gets a "Baalda Vaults" folder
+/// nested under it. A permission refusal under Documents comes back with the
+/// `documents_denied` prefix (see `folder_safety::root_create_error`).
 #[tauri::command]
 pub async fn get_vaults_root(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    let mut cfg = read_config(&app, &state);
-    let root = match cfg.vaults_root.clone() {
-        Some(r) => PathBuf::from(r),
+    let home = app.path().home_dir().ok();
+    let stored = read_config(&app, &state)
+        .vaults_root
+        .map(PathBuf::from)
+        .filter(|r| crate::folder_safety::vaults_root_refusal(r, home.as_deref()).is_none());
+    let root = match stored {
+        Some(r) if crate::folder_safety::vault_folder_refusal(&r, home.as_deref()).is_none() => {
+            // `Documents\Baalda Vaults` on a default install — a redirected or
+            // OneDrive-managed Documents is exactly where this fails (#128).
+            std::fs::create_dir_all(&r)
+                .map_err(|e| crate::folder_safety::root_create_error(&e, &r, home.as_deref()))?;
+            r
+        }
+        Some(r) => {
+            let nested = r.join(DEFAULT_ROOT_DIR_NAME);
+            create_and_persist_root(&app, &state, &nested)?;
+            nested
+        }
         None => {
             let d = default_vaults_root(&app)?;
-            cfg.vaults_root = Some(d.to_string_lossy().to_string());
+            create_and_persist_root(&app, &state, &d)?;
             d
         }
     };
-    let _ = write_config(&app, &state, &cfg);
-    // `Documents\Baalda Vaults` on a default install — and the second of the
-    // three #128 candidates, since a redirected/OneDrive-managed Documents is
-    // exactly the kind of place `create_dir_all` fails on.
-    std::fs::create_dir_all(&root).map_err(io_ctx("create the vaults folder", &root))?;
     Ok(root.to_string_lossy().to_string())
 }
 
 /// Change the managed vaults root (existing vault folders keep their location;
-/// only newly created ones land under the new root).
+/// only newly created ones land under the new root). Returns the stored root,
+/// which is `<path>/Baalda Vaults` unless `path` is already such a folder.
 #[tauri::command]
 pub async fn set_vaults_root(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
-) -> AppResult<()> {
-    let p = PathBuf::from(&path);
-    std::fs::create_dir_all(&p).map_err(io_ctx("create the vaults folder", &p))?;
-    let mut cfg = read_config(&app, &state);
-    cfg.vaults_root = Some(p.to_string_lossy().to_string());
-    write_config(&app, &state, &cfg)
+) -> AppResult<String> {
+    Ok(choose_root(&app, &state, Path::new(&path))?.to_string_lossy().to_string())
 }
 
-/// Native folder picker for the managed vaults root; persists and returns it.
+/// Put the vaults root back to `<home>/Documents/Baalda Vaults` (Account
+/// Settings → Vaults → Reset to default); returns it.
+#[tauri::command]
+pub async fn reset_vaults_root(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    let d = default_vaults_root(&app)?;
+    create_and_persist_root(&app, &state, &d)?;
+    Ok(d.to_string_lossy().to_string())
+}
+
+/// Native folder picker for the managed vaults root; persists and returns the
+/// final (nested) root.
 #[tauri::command]
 pub async fn pick_vaults_root(
     app: AppHandle,
@@ -857,11 +1124,7 @@ pub async fn pick_vaults_root(
     let path = folder
         .into_path()
         .map_err(|e| AppError::new(format!("invalid folder: {e}")))?;
-    std::fs::create_dir_all(&path).map_err(io_ctx("create the vaults folder", &path))?;
-    let mut cfg = read_config(&app, &state);
-    cfg.vaults_root = Some(path.to_string_lossy().to_string());
-    write_config(&app, &state, &cfg)?;
-    Ok(Some(path.to_string_lossy().to_string()))
+    Ok(Some(choose_root(&app, &state, &path)?.to_string_lossy().to_string()))
 }
 
 /// Native folder picker that only returns the chosen path (does NOT open it as
@@ -991,6 +1254,9 @@ pub async fn open_vault_in_root(
     create: Option<bool>,
 ) -> AppResult<VaultInfo> {
     let folder = PathBuf::from(&path);
+    // Before any mkdir: a picked home folder (or Desktop/Documents/Downloads
+    // itself) is refused with a sentence the UI shows as-is.
+    crate::folder_safety::check_vault_folder(&folder, app.path().home_dir().ok().as_deref())?;
     if create.unwrap_or(false) {
         // The first thing BOTH vault-setup buttons do ("Open a folder…" reaches
         // here with the folder the user picked, "Start with an empty folder"
@@ -1100,6 +1366,38 @@ pub async fn list_vaults_root_dirs(
         }
     }
     Ok(out)
+}
+
+/// Remove `<root>/current` when it is a link (never a real folder of that
+/// name). Used when the vaults root moves, so the old root keeps no stale link.
+fn remove_current_link(root: &Path) {
+    let link = root.join("current");
+    if std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()) {
+        if let Err(e) = std::fs::remove_file(&link) {
+            log::warn!("[vault] couldn't remove the old `current` link: {e}");
+        }
+    }
+}
+
+/// Remove the sibling `current` link when it points at `dir` (a vault folder
+/// that was just deleted), so the vaults root keeps no dangling link. A link to
+/// any other vault, or a real folder named `current`, is left alone.
+fn remove_current_link_to(dir: &Path) {
+    let Some(root) = dir.parent() else { return };
+    let link = root.join("current");
+    let is_link = std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink());
+    if !is_link {
+        return;
+    }
+    let points_here = std::fs::read_link(&link).is_ok_and(|t| {
+        let t = if t.is_absolute() { t } else { root.join(t) };
+        t == dir
+    });
+    if points_here {
+        if let Err(e) = std::fs::remove_file(&link) {
+            log::warn!("[vault] couldn't remove the `current` link: {e}");
+        }
+    }
 }
 
 /// Point `<root>/current` at `target`. Best-effort: it never clobbers a real
@@ -2852,13 +3150,14 @@ pub async fn rebuild_index(
     let started = std::time::Instant::now();
     let result = {
         let guard = index.lock().unwrap();
-        guard.rebuild(&vault)
+        guard.rebuild_report(&vault)
     };
-    let ok = result.is_ok();
+    let ok = result.as_ref().is_ok_and(|r| r.skipped == 0 || r.skipped < r.notes);
+    let skipped = result.as_ref().map(|r| r.skipped).unwrap_or(0);
     // Same hand-off as vault open: the rows are reconciled here, the text is
     // extracted on the worker thread.
-    if let (Ok(pending), Some(queue)) = (&result, queue) {
-        queue.enqueue(pending.clone());
+    if let (Ok(report), Some(queue)) = (&result, queue) {
+        queue.enqueue(report.pending.clone());
     }
     let _ = app.emit(
         "index-ready",
@@ -2867,6 +3166,7 @@ pub async fn rebuild_index(
             epoch,
             ok,
             ms: started.elapsed().as_millis() as u64,
+            skipped,
         },
     );
     result.map(|_| ())
@@ -2885,6 +3185,93 @@ pub async fn read_external_file(path: String) -> AppResult<tauri::ipc::Response>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trash_retry_succeeds_on_a_later_attempt_without_the_fallback() {
+        let mut calls = 0;
+        let mut fallback_calls = 0;
+        let mut fallback = || { fallback_calls += 1; Ok(()) };
+        let out = trash_with_retry(
+            3,
+            std::time::Duration::ZERO,
+            || { calls += 1; if calls < 3 { Err("The Finder is busy".into()) } else { Ok(()) } },
+            Some(&mut fallback),
+        );
+        assert!(out.is_ok());
+        assert_eq!(calls, 3);
+        assert_eq!(fallback_calls, 0);
+    }
+
+    #[test]
+    fn trash_retry_falls_back_after_every_attempt_fails() {
+        let mut calls = 0;
+        let mut fallback_calls = 0;
+        let mut fallback = || { fallback_calls += 1; Ok(()) };
+        let out = trash_with_retry(
+            3,
+            std::time::Duration::ZERO,
+            || { calls += 1; Err("busy".into()) },
+            Some(&mut fallback),
+        );
+        assert!(out.is_ok());
+        assert_eq!(calls, 3);
+        assert_eq!(fallback_calls, 1);
+    }
+
+    #[test]
+    fn trash_retry_reports_the_last_error_when_everything_fails() {
+        let mut fallback = || Err::<(), String>("finder failed".into());
+        let out = trash_with_retry(2, std::time::Duration::ZERO, || Err("ns failed".into()), Some(&mut fallback));
+        assert_eq!(out.unwrap_err(), "finder failed");
+        let out = trash_with_retry(2, std::time::Duration::ZERO, || Err("ns failed".into()), None);
+        assert_eq!(out.unwrap_err(), "ns failed");
+    }
+
+    #[test]
+    fn trash_failure_message_is_one_plain_sentence() {
+        assert!(!TRASH_FAILED_MESSAGE.contains("Os {"));
+        assert!(TRASH_FAILED_MESSAGE.starts_with("Couldn't move the folder to the Trash."));
+    }
+
+    #[test]
+    fn prune_missing_recents_drops_deleted_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kept = tmp.path().join("Kept");
+        std::fs::create_dir_all(&kept).unwrap();
+        let entry = |p: &Path| RecentVault {
+            name: "x".into(),
+            path: p.display().to_string(),
+            opened_at: 0,
+        };
+        let mut list = vec![entry(&tmp.path().join("Gone")), entry(&kept)];
+        assert!(prune_missing_recents(&mut list));
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].path, kept.display().to_string());
+        assert!(!prune_missing_recents(&mut list));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_current_link_to_only_drops_a_link_to_the_deleted_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let gone = root.join("Gone");
+        let other = root.join("Other");
+        std::fs::create_dir_all(&other).unwrap();
+        // Points at another vault: kept.
+        std::os::unix::fs::symlink(&other, root.join("current")).unwrap();
+        remove_current_link_to(&gone);
+        assert!(std::fs::symlink_metadata(root.join("current")).is_ok());
+        // Points at the deleted vault (now dangling): removed.
+        std::fs::remove_file(root.join("current")).unwrap();
+        std::os::unix::fs::symlink(&gone, root.join("current")).unwrap();
+        remove_current_link_to(&gone);
+        assert!(std::fs::symlink_metadata(root.join("current")).is_err());
+        // A real folder named `current` is never touched.
+        std::fs::create_dir_all(root.join("current")).unwrap();
+        remove_current_link_to(&root.join("current"));
+        assert!(root.join("current").is_dir());
+    }
 
     #[test]
     fn reset_target_deletes_only_the_open_vault_root() {
@@ -3036,6 +3423,43 @@ mod tests {
         // separator trimmed so the label reads "D:".
         assert_eq!(root_label("D:\\"), "D:");
         assert_eq!(root_label("/"), "/");
+    }
+
+    /// Membership-loss deletion is permanent, so its target checks are strict.
+    #[test]
+    fn departed_target_requires_matching_stamp_and_refuses_links_and_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("vaults");
+        let vault = root.join("team");
+        std::fs::create_dir_all(vault.join(".context")).unwrap();
+        std::fs::write(
+            vault.join(".context").join("config.json"),
+            r#"{"organizationId":"org-1","serverVaultId":"col-1"}"#,
+        )
+        .unwrap();
+        // Matching stamp: allowed.
+        assert!(check_departed_target(&vault, "org-1", Some(&root), None).is_ok());
+        // Another vault's id: refused.
+        assert!(check_departed_target(&vault, "org-2", Some(&root), None).is_err());
+        // Empty id: refused.
+        assert!(check_departed_target(&vault, "", Some(&root), None).is_err());
+        // The vaults root itself (and anything containing it): refused.
+        assert!(check_departed_target(&root, "org-1", Some(&root), None).is_err());
+        // Home or a folder containing home: refused.
+        assert!(check_departed_target(&vault, "org-1", Some(&root), Some(&vault.join(".context"))).is_err());
+        // No stamp: refused.
+        let bare = root.join("bare");
+        std::fs::create_dir_all(bare.join(".context")).unwrap();
+        assert!(check_departed_target(&bare, "org-1", Some(&root), None).is_err());
+        // Missing folder: refused.
+        assert!(check_departed_target(&root.join("nope"), "org-1", Some(&root), None).is_err());
+        // A link to the vault: refused.
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&vault, &link).unwrap();
+            assert!(check_departed_target(&link, "org-1", Some(&root), None).is_err());
+        }
     }
 
     /// The rediscovery/launch probe must identify a vault folder without opening

@@ -40,10 +40,10 @@ it("local and Free vaults cannot request AI analysis", async () => {
   await render({ vaultId: null });
   expect(api.housekeeperStatus).not.toHaveBeenCalled();
   expect(button("Scan vault")).toBeUndefined();
-  api.housekeeperStatus.mockRejectedValue(new ApiError(402, "Pro required"));
+  api.housekeeperStatus.mockRejectedValue(new ApiError(402, "Team required"));
   await render();
   expect(button("Scan vault")).toBeUndefined();
-  expect(host.textContent).toContain("requires a Pro subscription");
+  expect(host.textContent).toContain("requires a Team subscription");
 });
 it("uses freshly collected evidence before asking the model", async () => {
   const collectDiagnostics = vi.fn().mockResolvedValue(diagnostics);
@@ -79,13 +79,13 @@ it("late inference cannot populate another vault", async () => {
   await act(async () => resolve({ checked: 15, model: "jev", findings: [finding] }));
   expect(button("Review link fixes")).toBeUndefined();
 });
-it("recommended repairs recheck Pro and run only when selected", async () => {
+it("recommended repairs recheck Team and run only when selected", async () => {
   const onDiagnosticAction = vi.fn().mockResolvedValue("Index rebuilt");
   api.housekeeperDiagnose.mockResolvedValue({ checked: 15, model: "jev", findings: [{ ...finding, id: "stale-index", action: "rebuild-index" }] });
   await render({ onDiagnosticAction }); await click("Scan vault");
   expect(onDiagnosticAction).not.toHaveBeenCalled(); await click("Rebuild index");
   expect(onDiagnosticAction).toHaveBeenCalledWith("stale-index", "rebuild-index");
-  await click("Scan vault"); api.housekeeperStatus.mockRejectedValue(new ApiError(402, "Pro required")); await click("Rebuild index");
+  await click("Scan vault"); api.housekeeperStatus.mockRejectedValue(new ApiError(402, "Team required")); await click("Rebuild index");
   expect(onDiagnosticAction).toHaveBeenCalledTimes(1);
 });
 

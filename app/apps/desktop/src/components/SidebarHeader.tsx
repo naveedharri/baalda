@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useHoverMenu } from "./useHoverMenu";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { copyText } from "../lib/clipboard";
 import { toast } from "../lib/toast";
@@ -29,35 +30,17 @@ export function SidebarHeader() {
   const rootMissing = useStore((s) => s.structureNotice.rootMissing);
   const reduceMotion = useReducedMotion();
 
-  const [menuMode, setMenuMode] = useState<"closed" | "hover" | "pinned">("closed");
-  const menuOpen = menuMode !== "closed";
-  const hoverCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const cancelHoverClose = useCallback(() => {
-    if (hoverCloseTimer.current !== null) clearTimeout(hoverCloseTimer.current);
-    hoverCloseTimer.current = null;
-  }, []);
-  const closeMenu = useCallback(() => {
-    cancelHoverClose();
-    setMenuMode("closed");
-  }, [cancelHoverClose]);
-  const togglePinnedMenu = () => {
-    cancelHoverClose();
-    // Clicking a hover preview pins it; only a second click closes it.
-    setMenuMode((mode) => mode === "pinned" ? "closed" : "pinned");
-  };
-  const pinMenu = () => {
-    cancelHoverClose();
-    setMenuMode("pinned");
-  };
-  const scheduleHoverClose = () => {
-    cancelHoverClose();
-    // Bridge the small gap between the tile and the popover without flicker.
-    hoverCloseTimer.current = setTimeout(() => {
-      hoverCloseTimer.current = null;
-      setMenuMode((mode) => mode === "hover" ? "closed" : mode);
-    }, 220);
-  };
-  useEffect(() => cancelHoverClose, [cancelHoverClose]);
+  // Hover previews the switcher, a click pins it (shared with the identity bar).
+  const {
+    open: menuOpen,
+    close: closeMenu,
+    toggle: togglePinnedMenu,
+    pin: pinMenu,
+    hoverEnter,
+    hoverLeave: scheduleHoverClose,
+    cancelHoverClose,
+    dismissPreview,
+  } = useHoverMenu();
   const rootRef = useRef<HTMLDivElement>(null);
   const rows = useSwitcherRows();
   useVaultShortcuts(rows);
@@ -154,24 +137,29 @@ export function SidebarHeader() {
           className="vault-switch-tile"
           tabIndex={-1}
           aria-hidden="true"
-          onPointerEnter={(event) => {
-            if (event.pointerType !== "mouse") return;
-            cancelHoverClose();
-            setMenuMode((mode) => mode === "closed" ? "hover" : mode);
-          }}
+          onPointerEnter={hoverEnter}
           onPointerLeave={scheduleHoverClose}
           onClick={togglePinnedMenu}
         >
           <VaultTile identity={tileIdentity} name={name} />
         </button>
         <div className="sidebar-header-text">
-          <div className="sidebar-header-main" ref={mainRef}>
+          {/* The name and chevron hover-open the switcher too, so sweeping
+              across the header never flickers it. Not the wrapper above: the
+              popover lives inside it, and a move from the menu back up to the
+              name would then never count as re-entering. */}
+          <div
+            className="sidebar-header-main"
+            ref={mainRef}
+            onPointerEnter={hoverEnter}
+            onPointerLeave={scheduleHoverClose}
+          >
             <button
               type="button"
               className={`vault-switch-btn${menuOpen ? " open" : ""}`}
               aria-haspopup="menu"
               aria-expanded={menuOpen}
-              title="Switch vault"
+              title={menuOpen ? undefined : "Switch vault"}
               onClick={togglePinnedMenu}
             >
               {/* Keyed on the name so a switch cross-fades between the two vaults
@@ -186,7 +174,8 @@ export function SidebarHeader() {
                     if (el) measureName();
                   }}
                   className="vault-name"
-                  title={name}
+                  // No tooltip while the switcher shows: it would sit on its rows.
+                  title={menuOpen ? undefined : name}
                   initial={reduceMotion ? false : { opacity: 0, y: -4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={reduceMotion ? undefined : { opacity: 0, y: 4 }}
@@ -212,7 +201,15 @@ export function SidebarHeader() {
             </button>
             {switching && <Spinner size="xs" tone="accent" className="vault-switch-spinner" />}
           </div>
-          <div className="vault-line" title={vault.path}>
+          {/* The path is its own control (click to copy) and never opens or pins
+              the switcher. It is neutral ground for the leave grace, though:
+              passing over it on the way to the menu keeps a hover preview up. */}
+          <div
+            className="vault-line"
+            title={vault.path}
+            onPointerEnter={cancelHoverClose}
+            onPointerLeave={scheduleHoverClose}
+          >
             {/* The path is the one thing that is genuinely still the OLD vault's
                 while switching — the folder hasn't swapped yet. Say so rather than
                 showing a path that contradicts the name above it. */}
@@ -224,10 +221,15 @@ export function SidebarHeader() {
               title={`Copy ${vault.path}`}
               aria-label="Copy vault folder path"
               onMouseDown={(event) => event.stopPropagation()}
-              onClick={() => void copyPath()}
+              onClick={() => {
+                // A hover preview would cover the copied check; a pinned menu stays.
+                dismissPreview();
+                void copyPath();
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
+                  dismissPreview();
                   void copyPath();
                 }
               }}

@@ -7,10 +7,20 @@
   opens the mic. It is not optional: without it the system terminates the app
   the moment getUserMedia asks for audio, rather than showing a prompt. Pairs
   with com.apple.security.device.audio-input in entitlements.plist.
+
+  The three folder descriptions are what macOS shows when Baalda first touches
+  Documents (the default vaults root, Documents/Baalda Vaults), Desktop or
+  Downloads (only ever a vault folder the user picked there).
 -->
 <plist version="1.0">
 <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>Baalda uses your microphone only while you hold the talk button, to broadcast live audio to your vault. Nothing is recorded or stored.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Baalda keeps your vaults in Documents/Baalda Vaults.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Baalda only reads a vault folder you choose here.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Baalda only reads a vault folder you choose here.</string>
 </dict>
 </plist>

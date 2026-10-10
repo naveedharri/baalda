@@ -1,3 +1,5 @@
+import { parseAppearanceSettings, type AppearanceSettings } from "../appearanceSettings";
+
 // Client half of the vault replication channel framing (spec 05 §3.1). Mirrors
 // the server's `sync/vault-protocol.ts`: JSON text control frames + binary data
 // frames [docIdLen u16 BE][docId utf8][update bytes]. Kept tiny and pure so the
@@ -55,7 +57,7 @@ export interface HelloFrame {
 }
 
 /** What this build can handle beyond the original protocol. Sent in `hello`. */
-export const CLIENT_CAPS = ["voice", "revocation-batches", "bulk-regrant"];
+export const CLIENT_CAPS = ["voice", "revocation-batches", "bulk-regrant", "member-removed", "invitations"];
 
 /** A teammate's live "who's viewing what" state (mirror of the server type).
  *  `docId` null means the user isn't viewing anything (or left) — clear them. */
@@ -151,11 +153,27 @@ export type ServerControl =
   /** The vault's Trash or shrink-event listings changed (#260). */
   | { t: "activity" }
   | { t: "member"; name: string }
+  /** `userId` lost membership of vault `orgId` (removed by an owner/admin, or
+   *  left). Sent only to that user's own sockets, then the server closes them. */
+  | { t: "member-removed"; orgId: string; userId: string; reason: "removed" | "left" }
   /** The vault's name or icon changed (#306): patch the vault list in place. */
   | { t: "org"; name?: string; logo?: string | null }
+  /** The vault's appearance defaults changed: the WHOLE settings object. */
+  | { t: "appearance-changed"; orgId?: string; settings: AppearanceSettings; updatedAt?: string }
   | ({ t: "presence" } & PresenceState)
   /** A new release exists (#269): a hint to run the normal update check now. */
   | { t: "version-available"; version: string }
+  /** Addressed to THIS user, whatever vault the channel is for (`invitations`
+   *  cap): an invitation arrived, or one was answered/cancelled elsewhere. */
+  | {
+      t: "invitation";
+      invitationId: string;
+      orgId: string;
+      orgName: string;
+      inviterName: string;
+      role: string;
+    }
+  | { t: "invitation-gone"; invitationId: string }
   /** The shrink burst brake (#252) paused — or stopped pausing — THIS user's
    *  content writes in this vault. `until` (ms epoch) and `count` come with a
    *  pause. Never a refusal: local edits stay and sync once it lifts. */
@@ -226,6 +244,27 @@ export function parseServerControl(text: string): ServerControl | null {
     return (v as { meta?: unknown }).meta === true ? { t: "registry", meta: true } : { t: "registry" };
   }
   if (t === "activity") return { t: "activity" };
+  if (t === "member-removed") {
+    const o = v as { orgId?: unknown; userId?: unknown; reason?: unknown };
+    if (typeof o.orgId !== "string" || o.orgId.length === 0) return null;
+    if (typeof o.userId !== "string" || o.userId.length === 0) return null;
+    if (o.reason !== "removed" && o.reason !== "left") return null;
+    return { t: "member-removed", orgId: o.orgId, userId: o.userId, reason: o.reason };
+  }
+  if (t === "invitation" || t === "invitation-gone") {
+    const o = v as Record<string, unknown>;
+    if (typeof o.invitationId !== "string") return null;
+    if (t === "invitation-gone") return { t, invitationId: o.invitationId };
+    const str = (x: unknown) => (typeof x === "string" ? x : "");
+    return {
+      t,
+      invitationId: o.invitationId,
+      orgId: str(o.orgId),
+      orgName: str(o.orgName),
+      inviterName: str(o.inviterName),
+      role: str(o.role) || "member",
+    };
+  }
   if (t === "member" && typeof (v as { name?: unknown }).name === "string") {
     return { t: "member", name: (v as { name: string }).name };
   }
@@ -235,6 +274,16 @@ export function parseServerControl(text: string): ServerControl | null {
     if (typeof o.name === "string") frame.name = o.name;
     if (typeof o.logo === "string" || o.logo === null) frame.logo = o.logo;
     return frame;
+  }
+  // Accept the contract's `type` spelling as well as this protocol's `t`.
+  if (t === "appearance-changed" || (v as { type?: unknown }).type === "appearance-changed") {
+    const o = v as { orgId?: unknown; settings?: unknown; updatedAt?: unknown };
+    return {
+      t: "appearance-changed",
+      ...(typeof o.orgId === "string" ? { orgId: o.orgId } : {}),
+      settings: parseAppearanceSettings(o.settings),
+      ...(typeof o.updatedAt === "string" ? { updatedAt: o.updatedAt } : {}),
+    };
   }
   if (t === "presence") {
     const o = v as Record<string, unknown>;

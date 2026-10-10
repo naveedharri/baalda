@@ -14,6 +14,47 @@ import {
   type ResolverCache,
 } from "./resolver.js";
 import { listReadableDocsInVault, vaultAccess } from "./vault-docs.js";
+import { isAccountReadOnly } from "../billing/lapse.js";
+
+/** The refusal a billing-lapsed vault answers every write with (HTTP 402),
+ *  ahead of `no_write_access` / `root_frozen`. */
+export const ACCOUNT_READ_ONLY = { code: "account_read_only", status: 402 } as const;
+
+/**
+ * Is this vault's billing account lapsed (account-wide read-only)? Route
+ * handlers whose gate below answered `false` call this to turn the generic
+ * 403 into `ACCOUNT_READ_ONLY` (402); the boolean gates already refuse.
+ */
+export async function billingReadOnly(
+  organizationId: string,
+  db: Queryable = defaultPool,
+  cache?: ResolverCache,
+): Promise<boolean> {
+  return isAccountReadOnly(db, organizationId, cache);
+}
+
+/** User-facing text of a billing-lapse refusal (HTTP 402 and MCP alike). */
+export const ACCOUNT_READ_ONLY_MESSAGE =
+  "Your Team subscription ended, so this vault is read-only until it is resumed or reduced to the free limits.";
+
+/** The 402 body a refused write answers with while the account is lapsed. */
+export const ACCOUNT_READ_ONLY_BODY = {
+  error: "account_read_only",
+  code: "account_read_only",
+  message: ACCOUNT_READ_ONLY_MESSAGE,
+} as const;
+
+/** For a write a gate already refused: is the reason a billing lapse? Never
+ *  throws (an unanswered check keeps the ordinary 403). */
+export async function refusedForBilling(organizationId: string | null | undefined): Promise<boolean> {
+  if (!organizationId) return false;
+  try {
+    return await billingReadOnly(organizationId);
+  } catch (err) {
+    console.error("[billing] read-only check failed:", err);
+    return false;
+  }
+}
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -79,6 +120,8 @@ export async function canEditFolder(
   );
   const row = rows[0];
   if (!row) return false;
+  // Billing lapse: nothing is writable, owners included (before every overlay).
+  if (await isAccountReadOnly(db, row.organization_id, cache)) return false;
 
   const role = cache
     ? await cache.role(db, row.organization_id, userId)
@@ -371,6 +414,8 @@ export async function vaultRootWritable(
   db: Queryable = defaultPool,
   cache?: ResolverCache,
 ): Promise<boolean> {
+  // Billing lapse caps everyone, ahead of the person's own level.
+  if (await isAccountReadOnly(db, organizationId, cache)) return false;
   // A person's own vault level decides for them, whatever the posture.
   const personal = cache
     ? await cache.personal(db, organizationId, userId)
@@ -396,11 +441,12 @@ export async function vaultRootWritable(
  *
  * Attachments carry no folder_id and no per-blob ACL row (see
  * {@link canReadAttachment}: read access is derived from the notes that embed
- * them), so there is no folder to resolve a lock or a `view` grant against —
- * only the vault-wide posture applies here, and it is the one that matters:
- * under Read-only NOBODY adds bytes to the vault, owners and admins included,
- * exactly as `vaultBaseline` caps every other write. A per-user vault-scoped
- * `edit` grant lifts one person out, as everywhere else.
+ * them), so there is no folder to resolve a lock or a `view` grant against.
+ * A writable vault root answers yes. Under Can view / No access the root is
+ * closed, and then the question is whether the person can edit ANY folder,
+ * note or file in the vault (a per-user vault `edit` grant, or a folder/note
+ * grant that lifts them): an editor of a note must be able to upload the image
+ * they paste into it. Someone who can edit nothing adds no bytes.
  *
  * Known limit, now confined to the blobs it was always really about: a member
  * who is read-only only because of a folder lock or a folder `view` grant can
@@ -417,7 +463,60 @@ export async function canWriteAttachment(
 ): Promise<boolean> {
   const access = await vaultAccess(db, userId, vaultId);
   if (!access || access.role === null) return false; // unknown vault or not a member
-  return vaultRootWritable(userId, access.organizationId, db);
+  if (await vaultRootWritable(userId, access.organizationId, db)) return true;
+  // Under Can view / No access the root is closed, but a person may still edit
+  // notes through a folder or note grant, and pasting an image into one of
+  // those notes writes a hash-named drop the note then embeds. Refusing those
+  // bytes left the embed text syncing to every teammate while the picture never
+  // left the pasting device. So anyone who can really edit SOMETHING in this
+  // vault may upload a drop; it stays inert until a note they can edit names it.
+  return editsSomethingInVault(userId, access.organizationId, vaultId, db);
+}
+
+/** How many edit grants {@link editsSomethingInVault} resolves before giving up. */
+const EMBED_GRANT_PROBE_LIMIT = 25;
+
+/**
+ * Does `userId` hold an EFFECTIVE edit grant on any folder, note or file in
+ * `vaultId`? Candidates are the per-user and org-wide `edit` share rows on items
+ * in this vault (the user's own first); each is confirmed through the same
+ * resolver the item's own writes answer to, so a lock or a deny that cancels a
+ * grant cancels it here too.
+ */
+async function editsSomethingInVault(
+  userId: string,
+  organizationId: string,
+  vaultId: string,
+  db: Queryable,
+): Promise<boolean> {
+  const { rows } = await db.query<{ resource_type: string; resource_id: string }>(
+    `SELECT s.resource_type, s.resource_id
+       FROM shares s
+      WHERE s.org_id = $1
+        AND s.permission = 'edit'
+        AND s.resource_type IN ('folder', 'file')
+        AND ((s.principal_type = 'user' AND s.principal_id = $2)
+             OR (s.principal_type = 'org' AND s.principal_id = $1))
+        AND (
+          (s.resource_type = 'folder'
+             AND EXISTS (SELECT 1 FROM folders f WHERE f.id = s.resource_id AND f.vault_id = $3))
+          OR (s.resource_type = 'file'
+             AND (EXISTS (SELECT 1 FROM notes n
+                           WHERE n.id = s.resource_id AND n.vault_id = $3 AND n.deleted_at IS NULL)
+                  OR EXISTS (SELECT 1 FROM files fl WHERE fl.id = s.resource_id AND fl.vault_id = $3)))
+        )
+      ORDER BY (s.principal_type = 'user') DESC
+      LIMIT ${EMBED_GRANT_PROBE_LIMIT}`,
+    [organizationId, userId, vaultId],
+  );
+  for (const r of rows) {
+    const ok =
+      r.resource_type === "folder"
+        ? await canEditFolder(userId, r.resource_id, db)
+        : await canEditDoc(userId, r.resource_id, db);
+    if (ok) return true;
+  }
+  return false;
 }
 
 /**
@@ -471,7 +570,7 @@ export async function canWriteBlob(
   return canWriteAttachment(userId, vaultId, db);
 }
 
-export type DeleteRefusalCode = "delete_not_creator" | "folder_has_others_items";
+export type DeleteRefusalCode = "delete_not_creator" | "folder_has_others_items" | "account_read_only";
 export type DeleteGate = { ok: true } | { ok: false; code: DeleteRefusalCode };
 
 /** True when a Better Auth role string (possibly comma-joined) names owner or admin. */
@@ -505,6 +604,8 @@ export async function canDeleteItem(
     id: string;
   },
 ): Promise<DeleteGate> {
+  // Billing lapse: no deletes either, owners included (402 `account_read_only`).
+  if (await isAccountReadOnly(db, input.orgId)) return { ok: false, code: "account_read_only" };
   const role =
     input.orgRole !== undefined ? input.orgRole : await orgRole(input.orgId, input.userId, db);
   if (isManagerRole(role)) return { ok: true };

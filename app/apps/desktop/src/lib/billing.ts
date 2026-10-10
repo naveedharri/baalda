@@ -9,22 +9,129 @@
 // the (stringified) body for the literal token.
 
 import { ApiError } from "./api";
+import type { BillingConfig, MyBillingAccount } from "./api";
 
-export type LimitKind = "vault_limit" | "member_limit" | "note_limit";
+export type LimitKind =
+  | "vault_limit"
+  | "member_limit"
+  | "note_limit"
+  | "seat_limit"
+  | "housekeeper"
+  | "attachment"
+  | "storage_limit"
+  | "read_only";
 
-/** One product promise, shared by every Pro card so checkout and Settings do
+/** Every 402 contract token the desktop classifies, in match order. The order
+ *  matters because the haystack is a substring scan: none of these is a
+ *  substring of another today, but the specific ones still go first. Pinned
+ *  against the server sources by `__tests__/billingCodesLockstep.test.ts`. */
+export const LIMIT_CODES: ReadonlyArray<readonly [string, LimitKind]> = [
+  ["seat_limit_reached", "seat_limit"],
+  ["account_read_only", "read_only"],
+  ["note_limit_reached", "note_limit"],
+  ["vault_limit_reached", "vault_limit"],
+  ["member_limit_reached", "member_limit"],
+  ["storage_limit_reached", "storage_limit"],
+  ["housekeeper_requires_team", "housekeeper"],
+  ["housekeeper_requires_pro", "housekeeper"],
+  ["attachment_sync_requires_pro", "attachment"],
+];
+
+/** One product promise, shared by every Team card so checkout and Settings do
  * not drift. Note sync and local previews are deliberately absent: both are
- * Free features, while cross-device standalone-file sync is the paid boundary. */
-export const PRO_BENEFITS = [
-  "Sync standalone files across devices and with your team",
-  "Jev from TypeSafe is available on Baalda",
-  "Unlimited team members",
-  "Doesn't count toward your free vaults",
+ * Free features. */
+export const TEAM_BENEFITS = [
+  "Unlimited people, one seat each",
+  "Unlimited synced vaults",
+  "Standalone file sync",
+  "Baalda Assistant",
   "Priority support",
 ] as const;
 
+/** What the Free plan includes, as the Upgrade dialog's Free card lists it. */
+export const FREE_PLAN_INCLUDES = [
+  "2 people",
+  "1 synced vault",
+  "Unlimited notes and attachments",
+  "MCP for your AI tools",
+  "Real-time collaboration",
+] as const;
+
+/** @deprecated Use {@link TEAM_BENEFITS}. Kept for older imports. */
+export const PRO_BENEFITS = TEAM_BENEFITS;
+
+/** Pro's promise on servers that still bill PER VAULT (`model` absent or
+ *  `vault`). Only vault-mode branches use it; Team-model screens keep
+ *  {@link TEAM_BENEFITS}. */
+export const LEGACY_PRO_BENEFITS = [
+  "Unlimited team members",
+  "Standalone file sync",
+  "Baalda Assistant",
+  "Doesn't count toward your free vaults",
+] as const;
+
+/** The per-vault model's Free explanation, built from the server's own
+ *  `freeLimits` when it sends them (defaults: 3 members per vault, 2 free
+ *  vaults). Vault-mode branches only. */
+export function legacyFreePlanExplanation(
+  limits?: { vaultsPerUser?: number; membersPerVault?: number } | null,
+): string {
+  const members = limits?.membersPerVault ?? 3;
+  const vaults = limits?.vaultsPerUser ?? 2;
+  return `Free includes ${members} member${members === 1 ? "" : "s"} per vault, ${vaults} free vault${vaults === 1 ? "" : "s"}, note sync, embedded attachments and MCP. Pro adds unlimited members, standalone file sync and Baalda Assistant.`;
+}
+
+/** {@link legacyFreePlanExplanation} with the default limits. */
+export const LEGACY_FREE_PLAN_EXPLANATION = legacyFreePlanExplanation();
+
+/** What a Free account does not get, listed beside the upgrade. */
+export const FREE_PLAN_LACKS = [
+  "More than 2 people",
+  "More than 1 synced vault",
+  "Standalone file sync",
+  "Baalda Assistant",
+] as const;
+
 export const FREE_PLAN_EXPLANATION =
-  "Free includes note sync and embedded attachments. Pro adds standalone file sync and Baalda Assistant.";
+  "Free includes 2 people, 1 synced vault, note sync, embedded attachments and MCP. Team adds more people, unlimited vaults, standalone file sync and Baalda Assistant.";
+
+/** "Free includes N people": N is the account's own Free limit (grandfathered
+ *  accounts hold more than the default 2). */
+export const freePeopleIncluded = (n: number): string => `Free includes ${n} ${n === 1 ? "person" : "people"}.`;
+export function freePeopleCopy(n: number | null = null): string {
+  return `${freePeopleIncluded(n ?? 2)} Upgrade to Team to add more.`;
+}
+export const FREE_PEOPLE_COPY = freePeopleCopy(2);
+/** The Upgrade dialog's reason line when a people limit sent the user there. */
+export function peopleLimitReason(n: number | null = null): string {
+  return `${freePeopleIncluded(n ?? 2)} Team has no limit.`;
+}
+export const PEOPLE_LIMIT_REASON = peopleLimitReason(2);
+/** An admin's line: whom to ask to add seats (or upgrade). */
+export function askOwnerTo(ownerName: string | null | undefined, what: string): string {
+  return `${ownerName ? `Ask ${ownerName}` : "Ask the vault owner"} to ${what}.`;
+}
+
+const syncedVaults = (n: number) => `${n} synced vault${n === 1 ? "" : "s"}`;
+
+/**
+ * Team-model nudge for a refused vault (`vault_limit_reached`). `n` is the
+ * server's `limit`, which is above the default for a grandfathered account.
+ */
+export function teamVaultLimitCopy(n: number): string {
+  return `Free includes ${syncedVaults(n)} on your account. Upgrade to Team for unlimited synced vaults.`;
+}
+
+/** The Upgrade dialog's reason line for a refused vault. */
+export function vaultLimitReason(n: number): string {
+  return `Free includes ${syncedVaults(n)}. Team has no limit.`;
+}
+export const ASK_OWNER_SEATS_COPY = "Ask the vault owner to add seats.";
+
+/** "All 5 seats are in use." — or the count-free form when the server sent none. */
+export function seatsFullCopy(seats: number | null): string {
+  return seats != null ? `All ${seats} seats are in use.` : "All seats are in use.";
+}
 
 /** Every place the contract token might surface on a rejected request. */
 function haystack(e: ApiError): string {
@@ -45,10 +152,152 @@ function haystack(e: ApiError): string {
 export function classifyLimitError(e: unknown): LimitKind | null {
   if (!(e instanceof ApiError) || e.status !== 402) return null;
   const hay = haystack(e);
-  if (hay.includes("note_limit_reached")) return "note_limit";
-  if (hay.includes("vault_limit_reached")) return "vault_limit";
-  if (hay.includes("member_limit_reached")) return "member_limit";
+  for (const [code, kind] of LIMIT_CODES) if (hay.includes(code)) return kind;
   return null;
+}
+
+function numField(body: unknown, key: string): number | null {
+  if (!body || typeof body !== "object" || !(key in body)) return null;
+  const v = (body as Record<string, unknown>)[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** The seat counts a `seat_limit_reached` 402 carried, or null when `e` is not
+ *  one. A field the server left out reads as null rather than 0. */
+export function seatLimitFromError(
+  e: unknown,
+): { seats: number | null; used: number | null; pending: number | null } | null {
+  if (classifyLimitError(e) !== "seat_limit") return null;
+  const body = (e as ApiError).body;
+  return { seats: numField(body, "seats"), used: numField(body, "used"), pending: numField(body, "pending") };
+}
+
+// ---- Team seats (pure) -----------------------------------------------------
+
+/** The seat stepper's floor: never below the plan minimum or the people who
+ *  already count. There is no ceiling. */
+export function seatBounds(used: number, minSeats: number): { min: number; max: null } {
+  return { min: Math.max(minSeats, Math.max(0, Math.floor(used))), max: null };
+}
+
+/** What the stepper starts on: the floor. */
+export function defaultSeats(used: number, minSeats: number): number {
+  return seatBounds(used, minSeats).min;
+}
+
+export function seatTotalCents(seats: number, perSeat: number): number {
+  return seats * perSeat;
+}
+
+/** "Save 8%" from the two configured per-seat prices, or null when there is no
+ *  yearly price (or no monthly one to compare it with, or no saving). */
+export function yearlySavingsLabel(cfg: Pick<BillingConfig, "team"> | null | undefined): string | null {
+  const prices = cfg?.team?.prices ?? [];
+  const month = prices.find((p) => p.interval === "month")?.perSeat;
+  const year = prices.find((p) => p.interval === "year")?.perSeat;
+  if (month == null || year == null || month <= 0) return null;
+  const pct = Math.round((1 - year / (month * 12)) * 100);
+  return pct > 0 ? `Save ${pct}%` : null;
+}
+
+/** "$10" / "$10.50" / "€110". Fixed `en-US` grouping so it is testable. */
+export function formatMoney(cents: number, currency: string): string {
+  const code = currency.toUpperCase();
+  const whole = cents % 100 === 0;
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: code,
+      minimumFractionDigits: whole ? 0 : 2,
+      maximumFractionDigits: 2,
+    }).format(cents / 100);
+  } catch {
+    return `${(cents / 100).toFixed(whole ? 0 : 2)} ${code}`;
+  }
+}
+
+/** "5 seats × $10 = $50/mo". */
+export function seatTotalLine(
+  seats: number,
+  perSeat: number,
+  currency: string,
+  interval: "month" | "year",
+): string {
+  const per = interval === "year" ? "/yr" : "/mo";
+  return `${seats} ${seats === 1 ? "seat" : "seats"} × ${formatMoney(perSeat, currency)} = ${formatMoney(seatTotalCents(seats, perSeat), currency)}${per}`;
+}
+
+/** True for the forever discount `move-legacy-subs.ts` creates (`legacy-<accountId>`). */
+export function isLegacyDiscount(name: string | null | undefined): boolean {
+  return typeof name === "string" && /^legacy(-|$)/i.test(name.trim());
+}
+
+/** ONE short line under the plan summary when the account pays less than the
+ *  list price, else null: "Legacy price $5/mo · saving $5/mo" for a migrated
+ *  legacy subscription, "Discount LAUNCH100 · saving $330/yr" for any other
+ *  named discount, "Discounted · saving …" when the name is unknown. */
+export function discountLine(
+  account: Pick<MyBillingAccount, "price" | "interval"> & { currency?: string | null },
+): string | null {
+  const p = account.price;
+  if (!p || p.charged >= p.list) return null;
+  const per = account.interval === "year" ? "/yr" : "/mo";
+  const currency = account.currency ?? "usd";
+  const saving = `saving ${formatMoney(p.list - p.charged, currency)}${per}`;
+  const label = p.discountName?.trim() && !isLegacyDiscount(p.discountName)
+    ? `Discount ${p.discountName.trim()}`
+    : "Discount";
+  const renews = `${formatMoney(p.renewalAmount ?? p.list, currency)}${per}`;
+  // A promo code often lasts one payment or a few months: say when it ends
+  // instead of promising the saving every renewal. Forever and an unknown
+  // duration (an older server) keep the saving wording.
+  if (p.discountDuration === "once") {
+    return `${label} applied to your first payment · renews at ${renews}`;
+  }
+  if (p.discountDuration === "repeating" && p.discountDurationMonths) {
+    const months = p.discountDurationMonths === 1 ? "1 month" : `${p.discountDurationMonths} months`;
+    return `${label} for ${months} · then ${renews}`;
+  }
+  if (isLegacyDiscount(p.discountName)) {
+    return `Legacy price ${formatMoney(p.charged, currency)}${per} · ${saving}`;
+  }
+  const name = p.discountName?.trim();
+  return `${name ? `Discount ${name}` : "Discounted"} · ${saving}`;
+}
+
+/** Manage seats is locked while the subscription is set to cancel at the
+ *  period end: the only change on offer is Resume plan. */
+export function seatChangeLocked(account: Pick<MyBillingAccount, "cancelAtPeriodEnd">): boolean {
+  return account.cancelAtPeriodEnd === true;
+}
+
+export const RESUME_TO_CHANGE_SEATS = "Resume your plan to change seats.";
+
+/** The Manage seats dialog's subtitle: "19 seats · 1 person on your account".
+ *  `seats` is null before a first purchase and then reads as people only. */
+export function seatsDialogSubtitle(seats: number | null, people: number): string {
+  const who = `${people} ${people === 1 ? "person" : "people"} on your account`;
+  return seats == null ? who : `${seats} ${seats === 1 ? "seat" : "seats"} · ${who}`;
+}
+const BILLING_FALLBACK =
+  "Billing couldn't make that change right now. Try again, or open Manage billing.";
+
+/**
+ * A billing error as a sentence for people: the server's own `message` for
+ * coded refusals (`subscription_canceling` maps to {@link RESUME_TO_CHANGE_SEATS}
+ * when it carries none), and a plain fallback instead of a raw provider string
+ * such as "Polar subscriptions.update(seats): … (HTTP 403)" or a bare 5xx.
+ */
+export function billingErrorMessage(e: unknown): string {
+  if (!(e instanceof ApiError)) return e instanceof Error ? e.message : String(e);
+  const body = e.body && typeof e.body === "object" ? (e.body as Record<string, unknown>) : null;
+  const code = typeof body?.code === "string" ? body.code : typeof body?.error === "string" ? body.error : null;
+  const message = typeof body?.message === "string" ? body.message.trim() : "";
+  const raw = (m: string) => /\bpolar\b|\(HTTP \d{3}\)|^HTTP \d{3}$|subscriptions\.\w+\(/i.test(m);
+  if (code === "subscription_canceling") return message && !raw(message) ? message : RESUME_TO_CHANGE_SEATS;
+  if (message && !raw(message)) return message;
+  if (e.status >= 500 || e.status === 0) return BILLING_FALLBACK;
+  return e.message && !raw(e.message) && !/^[a-z_]+$/.test(e.message) ? e.message : BILLING_FALLBACK;
 }
 
 /**
@@ -129,18 +378,88 @@ export function subscriptionStatusLine(
 }
 
 /**
- * Text for a row's plan pill. Pro carries its status when that status is worth
- * interrupting for; a healthy Pro just says Pro, because the line under it
+ * Text for a row's plan pill. Team carries its status when that status is worth
+ * interrupting for; a healthy Team just says Team, because the line under it
  * already carries the renewal.
  */
 export function planPillLabel(row: {
-  plan: "free" | "pro";
+  plan: "free" | "pro" | "team";
   status: SubscriptionFacts["status"];
+  readOnly?: boolean;
+  complimentary?: boolean;
+  lapsed?: boolean;
 }): string {
-  if (row.plan !== "pro") return "Free";
+  if (row.readOnly || row.lapsed) return "Read-only";
+  if (row.plan === "free") return "Free";
   if (row.status === "past_due") return "Past due";
   if (row.status === "canceled") return "Canceled";
-  return "Pro";
+  if (row.complimentary) return "Team (complimentary)";
+  return "Team";
+}
+
+/** A plan header's status pill. `tone` is the `billing-status` modifier class. */
+export interface PlanStatusPill {
+  label: string;
+  tone: "active" | "past_due" | "canceled";
+}
+
+/**
+ * The status pill beside the current plan's name in Plan & Billing: the
+ * subscription's STATE, never the plan name again. Free has no status (null).
+ * Read-only outranks everything, then past due (the money is the problem),
+ * then a scheduled cancellation, which must never read as Active.
+ */
+export function planStatusPill(
+  account: Pick<MyBillingAccount, "plan" | "status" | "cancelAtPeriodEnd" | "currentPeriodEnd" | "lapsed">,
+  fmtDate: (iso: string) => string,
+): PlanStatusPill | null {
+  if (account.lapsed) return { label: "Read-only", tone: "canceled" };
+  if (account.plan === "free") return null;
+  if (account.status === "past_due") return { label: "Past due", tone: "past_due" };
+  if (account.cancelAtPeriodEnd) {
+    return {
+      label: account.currentPeriodEnd ? `Cancels on ${fmtDate(account.currentPeriodEnd)}` : "Cancels at period end",
+      tone: "past_due",
+    };
+  }
+  if (account.status === "canceled") return { label: "Canceled", tone: "canceled" };
+  return { label: "Active", tone: "active" };
+}
+
+/**
+ * Vault Settings → Usage header, drawn by `PlanHeader` exactly like Plan &
+ * Billing: the plan name ("Team" / "Free"), the same status pill (Active
+ * included; null on Free, which reads "Free forever"), and whose account pays
+ * when it is not the caller's. When the vault is billed on the caller's own
+ * account (no other account id, or the same one) it reads that account exactly
+ * like Plan & Billing; otherwise the vault's resolved plan from `/mine`
+ * (`accountPlan`), whose subscription state this caller cannot see, so a Team
+ * vault there reads Active.
+ */
+export function vaultPlanLine(input: {
+  account: Pick<
+    MyBillingAccount,
+    "id" | "plan" | "status" | "cancelAtPeriodEnd" | "currentPeriodEnd" | "lapsed"
+  > | null;
+  vaultAccountId: string | null;
+  fallbackPlan: "free" | "pro" | "team";
+  isOwner: boolean;
+  /** The vault owner's display name, for a member's "Billed on X's account". */
+  ownerName?: string | null;
+  fmtDate: (iso: string) => string;
+}): { plan: "Team" | "Free"; status: PlanStatusPill | null; billedOn: string | null } {
+  const a = input.account;
+  if (input.isOwner && a && (!input.vaultAccountId || input.vaultAccountId === a.id)) {
+    return { plan: a.plan === "free" ? "Free" : "Team", status: planStatusPill(a, input.fmtDate), billedOn: null };
+  }
+  const isFree = input.fallbackPlan === "free";
+  const plan = isFree ? "Free" : "Team";
+  const status: PlanStatusPill | null = isFree ? null : { label: "Active", tone: "active" };
+  if (!input.isOwner) {
+    const name = input.ownerName?.trim();
+    return { plan, status, billedOn: name ? `Billed on ${name}'s account` : "Billed on the owner's account" };
+  }
+  return { plan, status, billedOn: input.vaultAccountId && a ? "Billed on another account" : null };
 }
 
 /** The shape {@link transferTargets} filters on — a `MyBillingVault`, loosened
@@ -148,7 +467,7 @@ export function planPillLabel(row: {
 export interface TransferCandidate {
   orgId: string;
   role: "owner" | "admin" | "member";
-  plan: "free" | "pro";
+  plan: "free" | "pro" | "team";
   status: SubscriptionFacts["status"];
 }
 
@@ -171,4 +490,319 @@ export function transferTargets<T extends TransferCandidate>(
       v.status !== "active" &&
       v.status !== "past_due",
   );
+}
+
+// ---- Plan & Billing (Team model, pure) ----------------------------------------
+
+/** What the Manage seats dialog says about a pending change, and whether
+ *  Confirm is allowed. `preview` is null while the estimate is loading.
+ *  `scheduled` is a decrease already set for the period end: choosing that
+ *  same count is no change (the banner above already says it). */
+export function seatChangeSummary(input: {
+  seats: number;
+  current: number | null;
+  scheduled?: number | null;
+  floor: number;
+  used: number;
+  minSeats: number;
+  preview: {
+    proratedNow: number | null;
+    newAmount: number | null;
+    currentPeriodEnd: string | null;
+  } | null;
+  currency: string;
+  interval: "month" | "year";
+  formatDate: (iso: string) => string;
+}): { text: string | null; canConfirm: boolean } {
+  const { seats, current, floor, used, minSeats, preview, currency, interval } = input;
+  if (seats < floor) {
+    return {
+      text: `You can't go below the people already on your account (${used}) or the ${minSeats}-seat minimum.`,
+      canConfirm: false,
+    };
+  }
+  if (current != null && seats === current) return { text: null, canConfirm: false };
+  if (input.scheduled != null && seats === input.scheduled) return { text: null, canConfirm: false };
+  if (!preview) return { text: null, canConfirm: false };
+  const per = interval === "year" ? "year" : "month";
+  const money = (v: number | null | undefined): string | null =>
+    typeof v === "number" && Number.isFinite(v) ? formatMoney(v, currency) : null;
+  if (current == null || seats > current) {
+    const now = money(preview.proratedNow);
+    const next = money(preview.newAmount);
+    let text: string;
+    if (now !== null && next !== null) {
+      text = `You'll be charged about ${now} today (prorated); then ${next} per ${per}.`;
+    } else if (next !== null) {
+      text = `Then ${next} per ${per}. Your next invoice will show the exact amount.`;
+    } else {
+      text = SEAT_PRICE_UNKNOWN;
+    }
+    return { text, canConfirm: true };
+  }
+  const end = preview.currentPeriodEnd;
+  return {
+    text: end
+      ? `Goes down to ${seats} ${seats === 1 ? "seat" : "seats"} on ${input.formatDate(end)}.`
+      : `Goes down to ${seats} ${seats === 1 ? "seat" : "seats"} at the end of this billing period.`,
+    canConfirm: true,
+  };
+}
+
+/** The toast after Update seats. An increase applies now; a decrease waits
+ *  for the period end, so it names that date (formatted like the dialog's
+ *  "Dropping to" banner). `effectiveAt` is the server's scheduled date. */
+export function seatsUpdatedToast(
+  seats: number,
+  previous: number | null,
+  effectiveAt: string | null | undefined,
+  formatDate: (iso: string) => string,
+): string {
+  if (previous == null || seats >= previous) return `Seats updated to ${seats}.`;
+  return effectiveAt
+    ? `Seats drop to ${seats} on ${formatDate(effectiveAt)}.`
+    : `Seats drop to ${seats} at the end of this billing period.`;
+}
+
+/** Shown when the seat preview has no usable prices. */
+export const SEAT_PRICE_UNKNOWN = "Your next invoice will show the exact amount.";
+
+/** "1.2 MB" style byte counts for the Usage table. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  const rounded = i === 0 || v >= 10 ? Math.round(v) : Math.round(v * 10) / 10;
+  return `${rounded} ${units[i]}`;
+}
+
+/** "2 of 2 people" when a ceiling applies (Free), else the plain count. */
+export function usageAgainstLimit(
+  count: number,
+  limit: number | null | undefined,
+  singular: string,
+  plural: string,
+): string {
+  const noun = (n: number) => (n === 1 ? singular : plural);
+  if (limit == null) return `${count} ${noun(count)}`;
+  return `${count} of ${limit} ${noun(limit)}`;
+}
+
+/** The price line on the Plan card: "Free" or "$10 per seat / month". */
+export function planPriceLine(
+  plan: "free" | "team",
+  interval: "month" | "year" | null,
+  team: { currency: string; prices: { interval: "month" | "year"; perSeat: number }[] } | null | undefined,
+): string {
+  if (plan === "free") return "Free";
+  const iv = interval ?? "month";
+  const price = team?.prices.find((p) => p.interval === iv);
+  if (!price || !team) return "Team";
+  return `${formatMoney(price.perSeat, team.currency)} per seat / ${iv}`;
+}
+
+/** "N of M seats used" plus invited and pending-decrease lines. */
+export function seatUsageLines(
+  seats: { purchased: number | null; used: number; reserved: number; pendingDecrease: { to: number; effectiveAt: string } | null },
+  formatDate: (iso: string) => string,
+): string[] {
+  const lines: string[] = [];
+  if (seats.purchased != null) lines.push(`${seats.used} of ${seats.purchased} seats used`);
+  else lines.push(`${seats.used} ${seats.used === 1 ? "person" : "people"}`);
+  if (seats.reserved > 0) lines.push(`${seats.reserved} invited`);
+  if (seats.pendingDecrease) {
+    lines.push(`Goes down to ${seats.pendingDecrease.to} on ${formatDate(seats.pendingDecrease.effectiveAt)}`);
+  }
+  return lines;
+}
+
+export const LAPSED_COPY =
+  "Subscription ended. Sync is read-only until you resume or reduce to 2 people.";
+
+/** The Plan card's seat breakdown: Seats · Claimed · Invited · Available. */
+export interface SeatBreakdown {
+  purchased: number;
+  claimed: number;
+  reserved: number;
+  available: number;
+}
+
+/**
+ * Every accepted person claims a seat and every pending invitation reserves
+ * one; what is left is available, never below 0 (an over-limit account shows
+ * 0, not a negative). `pendingDecrease` is shown separately and does not
+ * change these numbers until it takes effect.
+ */
+export function seatBreakdown(seats: {
+  purchased: number | null;
+  used: number;
+  reserved: number;
+}): SeatBreakdown {
+  const purchased = Math.max(0, seats.purchased ?? 0);
+  const claimed = Math.max(0, seats.used);
+  const reserved = Math.max(0, seats.reserved);
+  return { purchased, claimed, reserved, available: Math.max(0, purchased - claimed - reserved) };
+}
+
+/** The slice of `MyBillingAccount` the seat line and invite warning read. */
+export type SeatAccountLike = {
+  plan: "free" | "team";
+  seats: { purchased: number | null; used: number; reserved: number };
+  limits?: { people: number | null } | null;
+};
+
+/** The account's own Free people limit (2 unless grandfathered higher). */
+export function freeLimitOf(account: SeatAccountLike): number {
+  const n = account.limits?.people;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 2;
+}
+
+/**
+ * The quiet line above the Members and access roster. Team: seats on the
+ * owner's account; Free: the 2 included people. The account
+ * owner reads "your account".
+ */
+export function membersSeatLine(
+  account: SeatAccountLike,
+  ownerName: string | null,
+  viewerIsOwner = false,
+): string {
+  if (account.plan === "team" && account.seats.purchased != null) {
+    const b = seatBreakdown(account.seats);
+    const owner = viewerIsOwner ? "your" : ownerName ? `${ownerName}'s` : "the owner's";
+    return `Uses ${b.claimed} of ${b.purchased} seats on ${owner} account · ${b.reserved} invited`;
+  }
+  const cap = freeLimitOf(account);
+  return `Free includes ${cap} ${cap === 1 ? "person" : "people"} on this account (${account.seats.used} of ${cap} used)`;
+}
+
+/**
+ * The Invite people dialog's warning BEFORE anyone types, when the account has
+ * no seat left. Null while seats remain (or billing is off). It never blocks
+ * the send: someone already on the account takes no new seat. Only the owner
+ * gets an action; an admin is told whom to ask.
+ */
+export function invitePrewarning(
+  account: SeatAccountLike,
+  ownerName: string | null,
+  viewerIsOwner: boolean,
+): { text: string; action: "add-seats" | "upgrade" | null } | null {
+  if (account.plan === "team" && account.seats.purchased != null) {
+    const b = seatBreakdown(account.seats);
+    if (b.available > 0) return null;
+    const full = seatsFullCopy(b.purchased);
+    const tail = b.reserved > 0 ? ` ${b.reserved} reserved by pending invitations.` : "";
+    return viewerIsOwner
+      ? { text: `${full}${tail} New people need a seat; people already on your account don't.`, action: "add-seats" }
+      : { text: `${full}${tail} ${askOwnerTo(ownerName, "add seats")}`, action: null };
+  }
+  const cap = freeLimitOf(account);
+  if (account.plan === "free" && account.seats.used + account.seats.reserved >= cap) {
+    return viewerIsOwner
+      ? { text: freePeopleCopy(cap), action: "upgrade" }
+      : { text: `${freePeopleIncluded(cap)} ${askOwnerTo(ownerName, "upgrade to Team")}`, action: null };
+  }
+  return null;
+}
+
+/** What Account Settings → Plan & Billing should show for one config fetch. */
+export type BillingConfigState = "team" | "vault" | "disabled" | "error";
+
+/**
+ * Classify the outcome of `probeBillingConfig`: pass the config it resolved
+ * with, or the error it threw. Only a DEFINITIVE answer is a verdict — a 200
+ * with `enabled: false`, or a 404 (the billing routes 404 when the server has
+ * billing off). Anything else that failed (network, timeout, 5xx, 401) is
+ * `error`, never "disabled": a failed fetch says nothing about the server.
+ */
+export function classifyBillingConfigResult(result: unknown): BillingConfigState {
+  if (result instanceof ApiError) return result.status === 404 ? "disabled" : "error";
+  if (result instanceof Error || result == null || typeof result !== "object") return "error";
+  const config = result as Partial<BillingConfig>;
+  if (typeof config.enabled !== "boolean") return "error";
+  if (!config.enabled) return "disabled";
+  return config.model === "team" ? "team" : "vault";
+}
+
+/** The Plan tab's one sentence for a fetch that failed (after its retry). */
+export const PLAN_LOAD_ERROR_COPY = "Couldn't load your plan. Check your connection and try again.";
+
+/** The plan line on a server with billing off (self-hosted without a provider). */
+export const SELF_HOSTED_PLAN_COPY = "Everything is included on this server. There are no plan limits.";
+
+/**
+ * Has a Team checkout we are waiting on been paid? True once the account is
+ * on the Team plan or its subscription is active / past due (past due is
+ * still a paid plan in its grace window).
+ */
+export function teamCheckoutPaid(
+  account: { plan?: string | null; status?: string | null } | null | undefined,
+): boolean {
+  if (!account) return false;
+  return account.plan === "team" || account.status === "active" || account.status === "past_due";
+}
+
+/** Poll delay while waiting for a checkout: every 3 s for the first minute,
+ *  then every 10 s. */
+export function checkoutPollDelay(elapsedMs: number): number {
+  return elapsedMs < 60_000 ? 3_000 : 10_000;
+}
+
+/** One vault holding invited seats (`GET /api/billing/account` `invitedByVault`). */
+export interface InvitedVault {
+  orgId: string;
+  name: string;
+  count: number;
+}
+
+/**
+ * The vaults behind the Invited count, as the count's popover lists them:
+ * only vaults that actually hold an invitation, most invitations first, then
+ * by name.
+ */
+export function invitedVaults(list: InvitedVault[] | null | undefined): InvitedVault[] {
+  return (list ?? [])
+    .filter((v) => v.count > 0)
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+}
+
+/** The popover's total: "2 invited". */
+export function invitedTotalLabel(total: number): string {
+  return `${total} invited`;
+}
+
+/** The Invited count's accessible name, which also says where the invitations are. */
+export function invitedCountAriaLabel(total: number, vaults: InvitedVault[]): string {
+  if (vaults.length === 1) return `${invitedTotalLabel(total)} in ${vaults[0].name}`;
+  return `${invitedTotalLabel(total)} across ${vaults.length} vaults`;
+}
+
+/**
+ * What choosing a vault in the Invited popover does. The vault already open goes
+ * straight to Vault Settings → Members and access; a vault with a folder on
+ * this device is switched to first; one never opened here cannot be switched
+ * to without choosing a folder, so it falls back to Account Settings → Vaults.
+ */
+export function invitedVaultAction(input: {
+  orgId: string;
+  activeOrgId: string | null;
+  openPath: string | null;
+  boundPath: string | null;
+}): "open-members" | "switch-then-members" | "vaults-tab" {
+  const { orgId, activeOrgId, openPath, boundPath } = input;
+  if (orgId === activeOrgId && openPath != null && (boundPath == null || boundPath === openPath)) {
+    return "open-members";
+  }
+  if (boundPath) return "switch-then-members";
+  return "vaults-tab";
+}
+
+/** The toast for the Vaults-tab fallback. */
+export function invitedVaultFallbackToast(name: string): string {
+  return `Open ${name} to manage its invitations.`;
 }

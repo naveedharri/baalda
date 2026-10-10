@@ -178,6 +178,7 @@ export type BulkErrorCode =
   | "note_limit_reached"
   | "root_frozen"
   | "no_write_access"
+  | "account_read_only"
   | "no_edit_permission"
   | "unknown_note"
   | "note_too_large"

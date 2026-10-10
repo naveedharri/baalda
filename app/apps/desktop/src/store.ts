@@ -6,6 +6,7 @@
 import { setSelfAvatarImage } from "./lib/avatarIdentity";
 import { create } from "zustand";
 import * as ipc from "./lib/ipc";
+import { DOCUMENTS_BLOCKED_TEXT, isDocumentsDenied } from "./lib/vault/folderErrors";
 import { bridgeManager } from "./lib/bridge";
 import {
   colorsAdopted,
@@ -38,9 +39,17 @@ import {
   vaultRootFrozen,
 } from "./lib/api";
 import { authManager } from "./lib/auth/authManager";
+import {
+  effectiveAppearance,
+  withAppearance,
+  type AppearanceKey,
+  type AppearanceSettings,
+} from "./lib/appearanceSettings";
+import { applyEffectiveTheme, type ThemeMode } from "./lib/theme";
 import { syncManager } from "./lib/sync/docSession";
 import { vaultScopes } from "./lib/sync/vaultScope";
 import { reconcileReport } from "./lib/sync/reconcileReport";
+import { vaultVisibility, type VaultVisibility } from "./lib/sync/vaultVisibility";
 import { resetMembersAccessCaches } from "./lib/membersAccessCaches";
 import type { SyncStatus } from "./lib/sync/syncManager";
 import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
@@ -55,6 +64,8 @@ import {
   type ActivityStatus,
   type EditorMeasure,
   readActivityStatus,
+  readAppearanceOverrides,
+  writeAppearanceOverrides,
   readAutomaticItemColors,
   readMentionSound,
   readEditorMeasure,
@@ -82,10 +93,29 @@ import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault
 import { planLanding } from "./lib/vault/landing";
 import { foreignFolderMessage, planTurnOnSync } from "./lib/vault/turnOnSync";
 import { planUnsyncStamp } from "./lib/vault/unsyncPlan";
+import {
+  checkFailure,
+  chunk,
+  forgetMembership,
+  frameTargetsMe,
+  knownMemberships,
+  markMembershipCheckUnsupported,
+  membershipCheckUnsupported,
+  membershipLostNotice,
+  orgIdsToCheck,
+  rememberMemberships,
+  removalsFromCheck,
+  type MembershipLossReason,
+} from "./lib/vault/membershipLost";
 import { forgetTeamAccessCache } from "./lib/teamAccessCache";
 import { planOpen } from "./lib/sync/openGate";
 import { IPC_CONCURRENCY, runPool } from "./lib/sync/pool";
 import { rediscoverVaultFolder } from "./lib/vault/rediscover";
+import {
+  MISSING_FOLDER_SETTLE_MS,
+  planMissingFolder,
+  reboundToastText,
+} from "./lib/vault/missingFolder";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { dismissToast, toast } from "./lib/toast";
 import { isEditorNote } from "./lib/notePath";
@@ -164,6 +194,10 @@ export interface PendingVaultFolder {
     /** The vault's folder is GONE (not merely failed to open): the prompt then
      *  offers Restore here / Locate folder…, like the in-vault banner (#228). */
     missing?: boolean;
+    /** macOS refused Baalda the Documents folder, so the default vaults root
+     *  couldn't be created: the prompt offers Open System Settings / Try again
+     *  and only a secondary "Choose another folder…". */
+    documentsDenied?: boolean;
   } | null;
   /** The vault was JUST created, so the folder it lands in may receive
    *  first-run starter content if empty. Never set for existing vaults. */
@@ -233,6 +267,15 @@ interface AppStore {
    * while the app was closed. Mirrored for the banners; the sync layer owns it.
    */
   structureNotice: StructureNotice;
+  /**
+   * A missing vault folder inside the vaults root was recreated automatically
+   * (2026-10-09) — drives the informational "restored it" notice, whose one
+   * action locates the original folder instead.
+   */
+  folderAutoRestored: { orgId: string; name: string; path: string } | null;
+  dismissFolderAutoRestored: () => void;
+  /** The notice's "Locate the original instead…": bind a folder the user picks. */
+  locateOriginalVaultFolder: () => Promise<void>;
   /**
    * Mirror the sync layer's notice. The moment the vault folder goes missing
    * (#228) the open tabs close: every one of them names a file that is gone.
@@ -359,6 +402,10 @@ interface AppStore {
   syncStatus: SyncStatus;
   /** Vault channel connectivity, independent of the open note’s permissions. */
   vaultSyncStatus: SyncStatus;
+  /** What the last registry pull said about this user's view of the vault
+   *  (readable count, hidden content, root create). Mirror of
+   *  `lib/sync/vaultVisibility`; drives `lib/emptyVaultState`. */
+  vaultVisibility: VaultVisibility | null;
   /** When the current doc last flushed all changes to the server — drives
    *  "Synced · just now". Bumped on every server ack, not just initial sync. */
   lastSyncedAt: number | null;
@@ -522,6 +569,16 @@ interface AppStore {
   editorFontSize: number;
   /** Show the editor's line-number gutter. Off by default. */
   lineNumbers: boolean;
+  /** This device's personal appearance OVERRIDES (absent key = inherit the
+   *  open vault's default). The five editor/colour fields above and
+   *  `themeMode` are the EFFECTIVE values derived from these, the open
+   *  vault's `vaultAppearance` and the app defaults (`lib/appearance.ts`). */
+  appearanceOverrides: AppearanceSettings;
+  /** Vault appearance defaults by org id, fetched on vault open and patched
+   *  live by the vault channel's `appearance-changed` frame. */
+  vaultAppearance: Record<string, AppearanceSettings>;
+  /** The effective theme mode currently painted. */
+  themeMode: ThemeMode;
   /** How the sidebar arranges everything the user hasn't arranged by hand.
    *  Layered UNDER `itemOrder`, never replacing it — see `lib/tree/sort`. */
   treeSort: TreeSort;
@@ -609,6 +666,22 @@ interface AppStore {
    * sidebar colour explanation). Owned and consumed by `AccountMenu`. */
   accountSettingsRequest: { tab: AccountSettingsTab; token: number } | null;
   requestAccountSettings: (tab: AccountSettingsTab) => void;
+  /**
+   * Which full-screen settings dialog is showing. The two are mutually
+   * exclusive: `requestSettings` and `requestAccountSettings` set this in the
+   * same update as their request, so opening one always closes the other and
+   * every cross-link swaps instead of stacking. Rendered by `AccountMenu`.
+   */
+  settingsDialog: "vault" | "account" | null;
+  /** Close a settings dialog; with `which`, only if that one is showing. */
+  closeSettingsDialog: (which?: "vault" | "account") => void;
+  /**
+   * Open the Upgrade (plan comparison) dialog from any screen. `reason` is one
+   * muted line under its heading. Consumed by `UpgradeDialogHost` (main.tsx).
+   */
+  upgradeDialogRequest: { reason?: string; orgId?: string; token: number } | null;
+  requestUpgradeDialog: (opts?: { reason?: string; orgId?: string }) => void;
+  clearUpgradeDialogRequest: () => void;
   /**
    * Whether the connected server lacks features this app needs (UI mirror
    * only; `lib/serverFeatures.ts`). Null = unknown or not checked yet, which
@@ -698,6 +771,17 @@ interface AppStore {
   setEditorMeasure: (measure: EditorMeasure) => void;
   setEditorFontSize: (px: number) => void;
   setLineNumbers: (on: boolean) => void;
+  /** Set (value) or clear back to "inherit" (undefined) one personal override. */
+  setAppearanceOverride: <K extends AppearanceKey>(key: K, value: AppearanceSettings[K] | undefined) => void;
+  /** Recompute the effective appearance and paint it (theme, editor font token). */
+  applyAppearance: () => void;
+  /** Fetch an org's appearance defaults into `vaultAppearance`. Never throws. */
+  loadVaultAppearance: (orgId: string) => Promise<void>;
+  /** Owner/admin: replace an org's defaults — applied optimistically, then PUT.
+   *  Rolls back to the previous object if the server refuses. */
+  saveVaultAppearance: (orgId: string, settings: AppearanceSettings) => Promise<void>;
+  /** A live `appearance-changed` frame (or any server answer) for an org. */
+  receiveVaultAppearance: (orgId: string, settings: AppearanceSettings) => void;
   /** Open the mic and start broadcasting to the vault (button pressed). */
   startBroadcast: () => Promise<void>;
   /** Stop broadcasting and release the mic (button released). */
@@ -757,6 +841,11 @@ interface AppStore {
   /** Change a member's role in the active vault (owner/admin), then refresh. */
   updateMemberRole: (userId: string, role: "member" | "admin") => Promise<void>;
   acceptInvitation: (invitationId: string) => Promise<void>;
+  /** Re-read only the signed-in user's own pending invitations (live arrival,
+   *  window focus, the account menu opening). Cheap: one GET. */
+  refreshUserInvitations: () => Promise<void>;
+  /** Drop one invitation that was answered or cancelled elsewhere. */
+  dropUserInvitation: (invitationId: string) => void;
   joinVault: (code: string) => Promise<void>;
   /** Detach a vault from THIS device (forget its folder, stop syncing it).
    *  Server data and membership are untouched — it can be re-opened later. */
@@ -766,9 +855,26 @@ interface AppStore {
    *  (moved to the OS Trash, never deleted outright). Owners get the server's
    *  409 and are pointed at Delete instead. */
   leaveVault: (organizationId: string) => Promise<void>;
+  /**
+   * Membership of a vault this account does not own ended (removed, or left):
+   * stop syncing it, close it if open, PERMANENTLY delete its folder here and
+   * forget it. Only on a positive server signal; a vault the account still
+   * lists (owners always are) is never touched.
+   */
+  handleMembershipLost: (
+    organizationId: string,
+    reason: MembershipLossReason,
+    /** The folder, when the caller captured it before the binding was forgotten. */
+    knownPath?: string | null,
+  ) => Promise<void>;
+  /** Launch check: ask the server about known vaults no longer listed. */
+  checkLostMemberships: () => Promise<void>;
+  /** The one-line notice after a membership-loss removal (null = none). */
+  membershipLost: { text: string; at: number } | null;
+  dismissMembershipLost: () => void;
   /** Permanently delete a vault everywhere (owner only), then detach it.
    *  Hands back the server's report so the caller can say what became of the
-   *  vault's subscription — deleting a Pro vault stops it at the END of the
+   *  vault's subscription — deleting a Team vault stops it at the END of the
    *  period rather than instantly, and that date is the whole message (#111). */
   deleteRemoteVault: (organizationId: string) => Promise<VaultDeleteResult>;
   /**
@@ -808,6 +914,10 @@ interface AppStore {
   deleteLocalVault: (path: string) => Promise<void>;
   /** Detach from the open local folder and drop to the empty/welcome state. */
   closeLocalVault: () => void;
+  /** Bumped whenever a vault delete changes this device's recents, so every
+   *  recents list (welcome screen, Vaults tab) re-reads after the folder is
+   *  gone instead of keeping a row read while it still existed. */
+  recentsVersion: number;
 
   // Resolving a vault's local folder (when none is bound yet)
   /** Open `path` as `orgId`'s folder, bind them, paint the tree, and start sync
@@ -848,6 +958,12 @@ interface AppStore {
    */
   restoreVaultFolder: () => Promise<void>;
   locateVaultFolder: () => Promise<void>;
+  /**
+   * The live "root vanished" path: when the open synced vault's folder sat
+   * inside the vaults root, rebind a renamed copy or recreate it without
+   * asking (`lib/vault/missingFolder.ts`). Leaves the banner up otherwise.
+   */
+  autoRecoverMissingRoot: () => Promise<void>;
   /**
    * Reset local copy (#228): permanently delete this device's folder of the
    * open synced vault, then run Restore here. Sync stops first; the deliberate
@@ -1127,6 +1243,19 @@ async function clearVaultStamp(vault: ipc.VaultInfo, orgId: string): Promise<boo
   return false;
 }
 
+/**
+ * Forget every device-local pointer at a deleted vault folder: any vault bound
+ * to it in `context.orgVaults` and a last-opened pointer at such a vault, so
+ * nothing tries to reopen a path that went to the Trash.
+ */
+export function forgetVaultPath(path: string): void {
+  for (const [orgId, p] of Object.entries(readOrgVaults())) {
+    if (p !== path) continue;
+    forgetOrgVault(orgId);
+    forgetLastVault(orgId);
+  }
+}
+
 /** Drop a vault's remembered local folder (used when removing/deleting it). */
 function forgetOrgVault(orgId: string): void {
   const map = readOrgVaults();
@@ -1271,6 +1400,37 @@ interface FolderRecoveryTarget {
   path: string | null;
   seedIfEmpty?: boolean;
   stillCurrent: () => boolean;
+}
+
+/**
+ * Decide, after a short settle, what a missing vault folder needs
+ * (`planMissingFolder`). The wait lets a Finder rename land so its new folder
+ * shows up in the stamp scan; the existence re-check catches a rename-back.
+ * Answers `present` when the folder came back by itself.
+ */
+async function planForMissingFolder(
+  orgId: string | null,
+  path: string,
+): Promise<ReturnType<typeof planMissingFolder> | { kind: "present" }> {
+  await new Promise((r) => setTimeout(r, MISSING_FOLDER_SETTLE_MS));
+  if (await ipc.folderExists(path).catch(() => false)) return { kind: "present" };
+  let root: string | null = null;
+  try {
+    root = await ipc.getVaultsRoot();
+    // A missing (or unreadable) root is not ours to recreate into: ask.
+    if (!(await ipc.folderExists(root).catch(() => false))) root = null;
+  } catch {
+    root = null;
+  }
+  let found: string | null = null;
+  if (orgId) {
+    try {
+      found = await findExistingVaultFolder(orgId);
+    } catch (e) {
+      console.warn("[vault] folder rediscovery failed", e);
+    }
+  }
+  return planMissingFolder({ path, root, stampMatches: found, canSync: !!orgId });
 }
 
 function folderRecoveryTarget(get: () => AppStore): FolderRecoveryTarget | null {
@@ -1801,7 +1961,26 @@ export const useStore = create<AppStore>((set, get) => ({
   applyStructureNotice: (notice) => {
     const wasMissing = get().structureNotice.rootMissing;
     set({ structureNotice: notice });
-    if (notice.rootMissing && !wasMissing) get().closeAllTabs();
+    if (notice.rootMissing && !wasMissing) {
+      get().closeAllTabs();
+      void get()
+        .autoRecoverMissingRoot()
+        .catch((e) => console.warn("[vault] auto-recovery of the missing folder failed", e));
+    }
+  },
+  folderAutoRestored: null,
+  dismissFolderAutoRestored: () => set({ folderAutoRestored: null }),
+  locateOriginalVaultFolder: async () => {
+    const restored = get().folderAutoRestored;
+    if (!restored) return;
+    const picked = await ipc.pickFolder();
+    if (!picked) return; // cancelled: keep the notice and the restored folder
+    // A switch while the picker was open: this vault is no longer the open one.
+    if (get().folderAutoRestored?.orgId !== restored.orgId) return;
+    // The same bind "Locate folder…" makes, through the same folder refusals.
+    // The recreated folder stays on disk: it already holds a synced copy.
+    await get().applyVaultFolder(restored.orgId, picked);
+    set({ folderAutoRestored: null });
   },
 
   releaseBulkDelete: async (how) => {
@@ -1823,8 +2002,16 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ rightPanel: null, versionPanelDocId: null, noteVersions: null, versionPreview: null }),
   setRightPanelTab: (tab) => get().openRightPanel(tab),
   settingsDismissToken: 0,
-  dismissSettings: () => set((s) => ({ settingsDismissToken: s.settingsDismissToken + 1 })),
+  dismissSettings: () =>
+    set((s) => ({
+      settingsDismissToken: s.settingsDismissToken + 1,
+      settingsDialog: s.settingsDialog === "vault" ? null : s.settingsDialog,
+    })),
   accountSettingsRequest: null,
+  settingsDialog: null,
+  closeSettingsDialog: (which) =>
+    set((s) => (which && s.settingsDialog !== which ? {} : { settingsDialog: null })),
+  upgradeDialogRequest: null,
   backendStatus: null,
   setBackendStatus: (backendStatus) => set({ backendStatus }),
   revealedPath: null,
@@ -1854,6 +2041,7 @@ export const useStore = create<AppStore>((set, get) => ({
   members: [],
   pendingInvitations: [],
   userInvitations: [],
+  vaultVisibility: null,
   ...vaultScopedSyncReset(),
   lastSyncedAt: null,
   syncPauseDismissed: null,
@@ -1875,6 +2063,9 @@ export const useStore = create<AppStore>((set, get) => ({
   editorMeasure: readEditorMeasure(),
   editorFontSize: readEditorFontSize(),
   lineNumbers: readLineNumbers(),
+  appearanceOverrides: readAppearanceOverrides(null),
+  vaultAppearance: {},
+  themeMode: "system",
   pendingTitleFocus: null,
   treeSort: readTreeSort(),
   folderSorts: {},
@@ -1890,6 +2081,8 @@ export const useStore = create<AppStore>((set, get) => ({
     // already happened.
     const switched = v?.path !== get().vault?.path;
     if (switched) armSyncGate();
+    // The last vault's "nothing shared with you" answer is not this one's.
+    if (switched) vaultVisibility.publish(null);
     set({
       vault: v,
       itemColors: readItemColors(v?.path),
@@ -1972,7 +2165,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
   setAutomaticItemColors: (enabled) => {
     writeAutomaticItemColors(get().session?.user.id, enabled);
-    set({ automaticItemColors: enabled });
+    get().setAppearanceOverride("autoColors", enabled);
   },
 
   refreshTree: async (folders) => {
@@ -2328,8 +2521,15 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   requestSettings: (tab) => {
+    // The vault list lives in Account Settings → Vaults (2026-10-07). Signed
+    // out there is no account page, so Vault Settings keeps it for local folders.
+    if (tab === "vaults" && get().session) {
+      get().requestAccountSettings("vaults");
+      return;
+    }
     set((s) => ({
       settingsRequest: { tab, token: (s.settingsRequest?.token ?? 0) + 1 },
+      settingsDialog: "vault",
     }));
   },
 
@@ -2339,8 +2539,21 @@ export const useStore = create<AppStore>((set, get) => ({
         tab,
         token: (s.accountSettingsRequest?.token ?? 0) + 1,
       },
+      settingsDialog: "account",
     }));
   },
+
+  requestUpgradeDialog: (opts) => {
+    set((s) => ({
+      upgradeDialogRequest: {
+        reason: opts?.reason,
+        orgId: opts?.orgId,
+        token: (s.upgradeDialogRequest?.token ?? 0) + 1,
+      },
+    }));
+  },
+
+  clearUpgradeDialogRequest: () => set({ upgradeDialogRequest: null }),
 
   setRevealedPath: (path) => set({ revealedPath: path }),
 
@@ -2753,6 +2966,14 @@ export const useStore = create<AppStore>((set, get) => ({
     // A teammate joined the vault — refresh the roster live (no reload) and
     // celebrate. Fires for everyone already connected; the joiner celebrates
     // locally in joinVault/acceptInvitation (they connect after the push).
+    // This user lost membership of the vault (removed, or left on another
+    // device). Only our own userId counts; the action re-checks the org list.
+    syncManager.setMemberRemovedListener((change) => {
+      if (!frameTargetsMe(change.userId, get().session?.user.id)) return;
+      void get()
+        .handleMembershipLost(change.orgId, change.reason)
+        .catch((e: unknown) => console.warn("[vault] membership-lost cleanup failed", e));
+    });
     syncManager.setMemberJoinedListener((name) => {
       void get().refreshVault();
       // Re-announce so the newcomer sees who is already here. Their own first
@@ -2763,6 +2984,12 @@ export const useStore = create<AppStore>((set, get) => ({
     });
     // The open vault was renamed or got a new icon on another device (#306):
     // patch it in place; with nothing usable in the frame, re-list.
+    // Vault appearance defaults changed on another device: same live path as
+    // the vault's name/icon (#306), keyed by the frame's org.
+    syncManager.setAppearanceChangedListener((change) => {
+      const orgId = change.orgId ?? get().session?.activeOrganizationId ?? null;
+      if (orgId) get().receiveVaultAppearance(orgId, change.settings);
+    });
     syncManager.setOrgChangedListener((change) => {
       const orgId = get().session?.activeOrganizationId ?? null;
       const hasFields = change.name !== undefined || change.logo !== undefined;
@@ -3125,24 +3352,86 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ mentionSound: enabled });
   },
 
+  // The personal setters now record an OVERRIDE; the effective field follows
+  // through applyAppearance. The legacy per-key writes stay so an older build
+  // opened on this device still sees the choice.
   setPropertiesMode: (mode) => {
     writePropertiesMode(mode);
-    set({ propertiesMode: mode });
+    get().setAppearanceOverride("properties", mode);
   },
 
   setEditorMeasure: (measure) => {
     writeEditorMeasure(measure);
-    set({ editorMeasure: measure });
+    get().setAppearanceOverride("contentWidth", measure);
   },
   setEditorFontSize: (px) => {
     writeEditorFontSize(px);
-    applyEditorFontSize(px);
-    set({ editorFontSize: px });
+    get().setAppearanceOverride("textSize", px);
   },
 
   setLineNumbers: (on) => {
     writeLineNumbers(on);
-    set({ lineNumbers: on });
+    get().setAppearanceOverride("lineNumbers", on);
+  },
+
+  setAppearanceOverride: (key, value) => {
+    const next = withAppearance(get().appearanceOverrides, key, value);
+    writeAppearanceOverrides(next);
+    set({ appearanceOverrides: next });
+    get().applyAppearance();
+  },
+
+  applyAppearance: () => {
+    const st = get();
+    // Only the OPEN vault's defaults apply: a theme set by a vault you left
+    // must not follow you into a local vault or a different team.
+    const orgId = st.vault && st.syncEnabled ? (st.session?.activeOrganizationId ?? null) : null;
+    const eff = effectiveAppearance(st.appearanceOverrides, orgId ? st.vaultAppearance[orgId] : null);
+    applyEditorFontSize(eff.textSize);
+    applyEffectiveTheme(eff.theme);
+    const patch = {
+      themeMode: eff.theme,
+      automaticItemColors: eff.autoColors,
+      editorMeasure: eff.contentWidth,
+      editorFontSize: eff.textSize,
+      lineNumbers: eff.lineNumbers,
+      propertiesMode: eff.properties,
+    };
+    if (
+      (Object.keys(patch) as Array<keyof typeof patch>).some((k) => st[k] !== patch[k])
+    ) {
+      set(patch);
+    }
+  },
+
+  loadVaultAppearance: async (orgId) => {
+    try {
+      const res = await authManager.api.getVaultAppearance(orgId);
+      get().receiveVaultAppearance(orgId, res.settings);
+    } catch {
+      // Older server (404) or offline: the vault simply sets nothing we know of.
+    }
+  },
+
+  saveVaultAppearance: async (orgId, settings) => {
+    const prev = get().vaultAppearance[orgId] ?? {};
+    get().receiveVaultAppearance(orgId, settings);
+    try {
+      const res = await authManager.api.putVaultAppearance(orgId, settings);
+      // A later local save may have landed meanwhile; only adopt the answer
+      // if nothing newer replaced what we sent.
+      if (get().vaultAppearance[orgId] === settings || shallowSameAppearance(get().vaultAppearance[orgId], settings)) {
+        get().receiveVaultAppearance(orgId, res.settings);
+      }
+    } catch (e) {
+      get().receiveVaultAppearance(orgId, prev);
+      throw e;
+    }
+  },
+
+  receiveVaultAppearance: (orgId, settings) => {
+    set({ vaultAppearance: { ...get().vaultAppearance, [orgId]: settings } });
+    get().applyAppearance();
   },
 
   startBroadcast: async () => {
@@ -3572,6 +3861,38 @@ export const useStore = create<AppStore>((set, get) => ({
       // vault while the user's real notes sit in the moved folder — the exact
       // surprise-duplicate this flow used to produce. Ask for the new location.
       if (bound) {
+        // Inside the vaults root the folder is ours to manage: rebind a renamed
+        // copy or recreate it and sync down, and say so (2026-10-09). Outside
+        // the root (an unmounted drive looks exactly like a delete) we ask.
+        const plan = await planForMissingFolder(organizationId, bound);
+        if (superseded()) return;
+        if (plan.kind === "present" || plan.kind === "rebind") {
+          const target = plan.kind === "rebind" ? plan.path : bound;
+          try {
+            await get().applyVaultFolder(organizationId, target);
+            if (plan.kind === "rebind") toast(reboundToastText(orgName, target));
+            return;
+          } catch (e) {
+            console.warn("[vault] rebinding the vault folder failed", e);
+            if (superseded()) return;
+          }
+        } else if (plan.kind === "recreate") {
+          try {
+            await get().applyVaultFolder(organizationId, bound, {
+              create: true,
+              seedIfEmpty: opts.seedIfEmpty,
+            });
+            set({ folderAutoRestored: { orgId: organizationId, name: orgName, path: bound } });
+            return;
+          } catch (e) {
+            console.warn("[vault] auto-restoring the vault folder failed; asking", e);
+            if (superseded()) return;
+            if (isDocumentsDenied(e)) {
+              askForFolder({ text: DOCUMENTS_BLOCKED_TEXT, path: null, documentsDenied: true });
+              return;
+            }
+          }
+        }
         askForFolder({
           text: "This vault's folder is missing. It was moved, renamed or deleted.",
           path: bound,
@@ -3604,6 +3925,12 @@ export const useStore = create<AppStore>((set, get) => ({
       } catch (e) {
         console.warn("[vault] auto folder failed; asking instead", e);
         if (superseded()) return;
+        // Documents blocked by macOS privacy: explain it rather than invite
+        // "any folder" (a user once picked their home folder from here).
+        if (isDocumentsDenied(e)) {
+          askForFolder({ text: DOCUMENTS_BLOCKED_TEXT, path: null, documentsDenied: true });
+          return;
+        }
       }
       askForFolder(null);
     }
@@ -3674,9 +4001,12 @@ export const useStore = create<AppStore>((set, get) => ({
 
   handleBillingLink: async (orgId) => {
     if (get().authStatus !== "signed-in") {
-      toast("Payment received. Sign in to see your Pro vault.", "neutral");
+      toast("Payment received. Sign in to see your Team plan.", "neutral");
       return;
     }
+    // Ask the server to re-read the live subscription from the provider once
+    // (a webhook may not have landed yet); a failure or an old server is fine.
+    await authManager.api.getBillingAccount({ refresh: true }).catch(() => undefined);
     // Both readers of the fact: the active vault's badge/limits and the
     // Subscriptions list. The Upgrade dialog, if it is still open, watches
     // these and flips to its success screen on its own.
@@ -3690,7 +4020,7 @@ export const useStore = create<AppStore>((set, get) => ({
     if (isPro) {
       const name = row?.name;
       toast(
-        name ? `${name} is now on Pro — unlimited team members.` : "You're on Pro — this vault is now unlimited.",
+        name ? `${name} is now on Team.` : "You are now on Team.",
         "success",
       );
       return;
@@ -3713,6 +4043,26 @@ export const useStore = create<AppStore>((set, get) => ({
     if (!activeOrgId) throw new Error("No active vault");
     await authManager.api.updateMemberRole(activeOrgId, userId, role);
     await get().refreshVault();
+  },
+
+  refreshUserInvitations: async () => {
+    if (!get().session) return;
+    const gen = authInitGen;
+    try {
+      const invs = await authManager.api.listUserInvitations();
+      // A sign-out or account switch while the GET was out: not ours to set.
+      if (authInitGen !== gen || !get().session) return;
+      set({ userInvitations: invs.filter((i) => i.status === "pending") });
+    } catch (e) {
+      console.warn("[invitations] refresh failed", e);
+    }
+  },
+
+  dropUserInvitation: (invitationId) => {
+    const cur = get().userInvitations;
+    if (cur.some((i) => i.id === invitationId)) {
+      set({ userInvitations: cur.filter((i) => i.id !== invitationId) });
+    }
   },
 
   acceptInvitation: async (invitationId) => {
@@ -3816,33 +4166,129 @@ export const useStore = create<AppStore>((set, get) => ({
     // Server first: an owner's 409 (or being offline) must leave this device
     // exactly as it was. Once this returns, the membership is gone everywhere.
     await authManager.api.leaveVault(organizationId);
-    // Then the same detach a device-level removal does — switch off it if it
-    // is open, forget its folder binding, re-list the account's vaults.
-    await get().removeVaultLocally(organizationId);
-    // The server unpinned the vault from our session; pick that up so nothing
-    // here keeps asking about a vault we can no longer see.
+    // The server confirmed: the membership is gone. Run the membership-loss
+    // cleanup — stop syncing, close it if open, and PERMANENTLY delete its
+    // folder here (owner decision 2026-10-09: no Trash, no recovery copy).
+    await get().handleMembershipLost(organizationId, "left", path);
+  },
+
+  handleMembershipLost: async (organizationId, reason, knownPath) => {
+    const name =
+      get().organizations.find((o) => o.id === organizationId)?.name ?? null;
+    const path = knownPath ?? readOrgVaults()[organizationId] ?? null;
+    // Re-list first: a vault the account still lists is a live membership
+    // (owners always are), and a stale or replayed frame must not delete it.
     const refreshed = await authManager.currentSession().catch(() => null);
     if (refreshed) set({ session: refreshed });
-    // Finally the folder itself. A departed member should not keep a copy of
-    // the team's notes lying around, so unlike "Remove from device" this one
-    // goes — to the Trash, where a mistaken click is still recoverable. Never
-    // the folder that is open now (the detach above may have switched into it).
-    if (path && get().vault?.path !== path) {
-      await ipc.deleteVault(path).catch((e: unknown) => {
-        console.warn("[vault] left the vault but couldn't trash its folder", path, e);
+    await get()
+      .refreshVault()
+      .catch((e: unknown) => console.warn("[vault] refresh before membership cleanup failed", e));
+    if (get().organizations.some((o) => o.id === organizationId)) return;
+
+    const vault = get().vault;
+    const isOpen =
+      (vault != null && path != null && vault.path === path) ||
+      get().session?.activeOrganizationId === organizationId;
+    if (isOpen) {
+      // Same order as "make local only": stop the sync layer first, then
+      // close every tab and the vault itself before the folder goes.
+      leaveVaultSync();
+      get().closeAllTabs();
+      get().closeNote();
+      set({ vault: null, ...vaultScopedSyncReset(), pendingVaultFolder: null });
+      void ipc.clearLastVault().catch(() => {
+        /* best-effort — the folder is about to be gone anyway */
       });
+    }
+    if (path) {
+      forgetPersisted(path);
+      reconcileReport.clear(path);
+    }
+    forgetOrgVault(organizationId);
+    forgetLastVault(organizationId);
+    forgetTeamAccessCache(get().serverUrl, organizationId);
+    const userId = get().session?.user.id;
+    if (userId) forgetMembership(get().serverUrl, userId, organizationId);
+
+    if (path) {
+      // Rust refuses links, roots, the home and vaults folders, and any folder
+      // whose own stamp names a different vault. Permanent: no Trash, and the
+      // CRDT store under `.context/` goes with it. Also drops it from recents.
+      await ipc.deleteDepartedVault(path, organizationId).catch((e: unknown) => {
+        console.warn("[vault] membership ended but the folder could not be deleted", path, e);
+      });
+    }
+
+    if (isOpen) {
+      const next = get().organizations[0];
+      if (next) {
+        await get()
+          .setActiveOrganization(next.id)
+          .catch((e: unknown) => console.warn("[vault] switch after membership loss failed", e));
+      }
+    }
+    const text = membershipLostNotice(name ?? path?.split(/[\\/]/).filter(Boolean).pop() ?? "", reason);
+    // The notice slot lives in the editor column; with no vault open (welcome
+    // screen) the same line goes out as a toast instead, never both.
+    if (get().vault) set({ membershipLost: { text, at: Date.now() } });
+    else toast(text, "neutral");
+  },
+
+  checkLostMemberships: async () => {
+    const serverUrl = get().serverUrl;
+    const userId = get().session?.user.id;
+    if (!userId || get().authStatus !== "signed-in") return;
+    if (membershipCheckUnsupported(serverUrl)) return;
+    const listed = get().organizations.map((o) => o.id);
+    rememberMemberships(serverUrl, userId, listed);
+    const asked = orgIdsToCheck({
+      ledger: knownMemberships(serverUrl, userId),
+      bound: readOrgVaults(),
+      listed,
+    });
+    for (const ids of chunk(asked)) {
+      let body: unknown;
+      try {
+        body = await authManager.api.membershipCheck(ids);
+      } catch (e) {
+        const status = e instanceof ApiError ? e.status : null;
+        if (checkFailure(status) === "unsupported") markMembershipCheckUnsupported(serverUrl);
+        return;
+      }
+      for (const orgId of removalsFromCheck(ids, body)) {
+        await get().handleMembershipLost(orgId, "removed");
+      }
     }
   },
 
+  membershipLost: null,
+  recentsVersion: 0,
+  dismissMembershipLost: () => set({ membershipLost: null }),
+
   deleteRemoteVault: async (organizationId) => {
     // Permanent, server-side, owner-only. 403s here if the caller isn't owner.
-    // A vault on Pro is cancelled at the provider FIRST, so a 502 here means
+    // A vault on Team is cancelled at the provider FIRST, so a 502 here means
     // nothing was deleted — which is also why the result is handed back rather
     // than swallowed: only the caller can tell the user when the paid period
     // ends and that it can still be moved to another vault until then (#111).
     const result = await authManager.api.deleteRemoteVault(organizationId);
+    // This device's folder, captured BEFORE the teardown forgets the binding.
+    const folderPath = readOrgVaults()[organizationId] ?? null;
     // Then tear down the same local state as a device-level removal.
     await get().removeVaultLocally(organizationId);
+    // The vault is gone for everyone, so this device's copy goes to the Trash
+    // too (owner decision 2026-10-09; recoverable, `.context` included). The
+    // server delete already counts: a trash failure only says so.
+    if (folderPath) {
+      if (get().vault?.path === folderPath) get().closeLocalVault();
+      try {
+        await ipc.deleteVault(folderPath);
+      } catch (e) {
+        toast(e instanceof Error ? e.message : String(e), "error");
+      }
+      forgetVaultPath(folderPath);
+      set((s) => ({ recentsVersion: s.recentsVersion + 1 }));
+    }
     return result;
   },
 
@@ -4035,13 +4481,23 @@ export const useStore = create<AppStore>((set, get) => ({
 
   deleteLocalVault: async (path) => {
     // Tear down open state FIRST if this is the current folder, so nothing keeps
-    // reading from it while it's moved to the trash.
-    if (!get().syncEnabled && get().vault?.path === path) {
+    // reading from it while it's moved to the trash. Whatever the sync state:
+    // a signed-in session with a local folder open used to skip this, so the
+    // app kept (and later tried to reopen) a folder that was in the Trash.
+    if (get().vault?.path === path) {
       get().closeLocalVault();
     }
     // Move the folder (and all its notes) to the OS trash; this also forgets it
-    // from recents. Destructive — the UI gates it behind a two-click confirm.
-    await ipc.deleteVault(path);
+    // from recents and drops a `current` link to it. Destructive — the UI gates
+    // it behind the confirm dialog.
+    try {
+      await ipc.deleteVault(path);
+    } finally {
+      // Re-read recents either way: the welcome screen mounted when the vault
+      // closed above and read them while the folder still existed.
+      set((s) => ({ recentsVersion: s.recentsVersion + 1 }));
+    }
+    forgetVaultPath(path);
   },
 
   closeLocalVault: () => {
@@ -4158,6 +4614,31 @@ export const useStore = create<AppStore>((set, get) => ({
     // it is (same rule as "Open existing") — even for a just-created vault.
     if (target.orgId) await get().applyVaultFolder(target.orgId, picked);
     else await get().openLocalVault(picked);
+  },
+
+  autoRecoverMissingRoot: async () => {
+    const v = get().vault;
+    const orgId = get().syncEnabled ? (get().session?.activeOrganizationId ?? null) : null;
+    // A local-only vault has nothing to sync down: the banner stays.
+    if (!v || !orgId) return;
+    const still = () =>
+      get().vault?.epoch === v.epoch && get().structureNotice.rootMissing && !get().pendingVaultFolder;
+    const plan = await planForMissingFolder(orgId, v.path);
+    if (!still()) return;
+    if (plan.kind === "rebind") {
+      await get().applyVaultFolder(orgId, plan.path);
+      toast(reboundToastText(v.name, plan.path));
+      return;
+    }
+    if (plan.kind !== "recreate") return; // ask: the banner's choice stands
+    try {
+      await get().restoreVaultFolder();
+    } catch (e) {
+      // The banner is still up with its two choices; nothing else to do.
+      console.warn("[vault] auto-restore failed; leaving the banner", e);
+      return;
+    }
+    set({ folderAutoRestored: { orgId, name: v.name, path: v.path } });
   },
 
   resetLocalVaultCopy: async () => {
@@ -4433,7 +4914,7 @@ export const useStore = create<AppStore>((set, get) => ({
         (vault) => vault.orgId === activeOrgId && vault.plan === "pro",
       );
       // An attachment-plan refusal is memoised after the first 402 so watcher
-      // retries cannot loop. Only a confirmed Free -> Pro transition clears
+      // retries cannot loop. Only a confirmed Free -> Team transition clears
       // that refusal and schedules a fresh attachment comparison.
       if (!wasPro && isPro) syncManager.recheckAttachmentEntitlement();
       else syncManager.checkAttachmentEntitlement?.();
@@ -4687,6 +5168,44 @@ if (import.meta.hot) {
 // startup (after restart) as well as on every change.
 applyEditorFontSize(useStore.getState().editorFontSize);
 
+function shallowSameAppearance(a: AppearanceSettings | undefined, b: AppearanceSettings): boolean {
+  return JSON.stringify(a ?? {}) === JSON.stringify(b);
+}
+
+// Vault appearance: recompute the effective look whenever the open vault (or
+// its org) changes, and fetch that org's defaults once per open. A switch to a
+// local vault or another team drops the previous vault's theme immediately.
+useStore.getState().applyAppearance();
+useStore.subscribe((state, prev) => {
+  const org = (st: typeof state) =>
+    st.vault && st.syncEnabled ? (st.session?.activeOrganizationId ?? null) : null;
+  const now = org(state);
+  const before = org(prev);
+  if (now !== before || state.vault !== prev.vault) {
+    state.applyAppearance();
+    if (now && (now !== before || state.vault?.path !== prev.vault?.path)) {
+      void state.loadVaultAppearance(now);
+    }
+  } else if (
+    now &&
+    state.vaultSyncStatus === "synced" &&
+    prev.vaultSyncStatus !== "synced"
+  ) {
+    // Appearance is not in the channel's `ready`: refetch on every (re)connect
+    // so a frame missed while disconnected cannot leave a stale look.
+    void state.loadVaultAppearance(now);
+  }
+  // The account-scoped legacy auto-colour key needs the user id: migrate with
+  // it the first time a session appears on a device that never migrated.
+  if (state.session?.user.id !== prev.session?.user.id && state.session?.user.id) {
+    const overrides = readAppearanceOverrides(state.session.user.id);
+    if (JSON.stringify(overrides) !== JSON.stringify(state.appearanceOverrides)) {
+      useStore.setState({ appearanceOverrides: overrides });
+      state.applyAppearance();
+    }
+  }
+});
+
 // The Members and access caches are paint-only but keyed per server, not per
 // account: sign-out, a different account or a different server forgets them
 // so one account's roster never paints for another (#307).
@@ -4699,3 +5218,6 @@ useStore.subscribe((state, prev) => {
     resetMembersAccessCaches();
   }
 });
+
+// Registry pull → store mirror (see `lib/sync/vaultVisibility`).
+vaultVisibility.subscribe((v) => useStore.setState({ vaultVisibility: v }));

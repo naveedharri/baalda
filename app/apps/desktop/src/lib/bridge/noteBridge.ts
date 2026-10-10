@@ -6,9 +6,10 @@
 // This module is pure: it takes all I/O through `BridgeIO`, so it runs under
 // vitest in Node with an in-memory fake and no Tauri/DOM.
 
+import { DIFF_EQUAL } from "diff-match-patch";
 import * as Y from "yjs";
 import { isBlankTruncation } from "./blankFile";
-import { applyDiff, changeRatio, computeDiff } from "./diff";
+import { applyDiff, changeRatio, computeDiff, withoutPullInsertions } from "./diff";
 import { markLocalEdit } from "./localEdits";
 import { isReadOnlyDoc, readOnlyCopyKeeper } from "./readOnlyDocs";
 import {
@@ -702,7 +703,7 @@ export class NoteBridge {
       const branch = new Y.Doc();
       Y.applyUpdate(branch, base);
       try {
-        return await this.mergeDiskRead(() => branch, () => {}, this.everHadContent);
+        return await this.mergeDiskRead(() => branch, () => {}, this.everHadContent, true);
       } finally {
         branch.destroy();
       }
@@ -735,6 +736,7 @@ export class NoteBridge {
     getBaseline: () => Y.Doc,
     stopTracking: () => void,
     hadContent: boolean,
+    fixedBase = false,
   ): Promise<boolean> {
     let fileText: string;
     try {
@@ -876,7 +878,32 @@ export class NoteBridge {
       return false;
     }
 
-    const diffs = computeDiff(current, fileText);
+    let diffs = computeDiff(current, fileText);
+    if (fixedBase) {
+      // The mirror image of "never re-diff older file bytes against newly
+      // arrived peer content": never diff a file that ALREADY holds the
+      // peer's content against a base that lacks it. After a pull the file
+      // may carry the server's text (written by the read-only rebase, a cold
+      // apply or bootstrap) while the live doc also holds a local op the
+      // server never took (a read-only socket drops it). The file then equals
+      // neither the live doc, the pre-pull doc nor the disk base, and the
+      // pre-pull → file diff re-inserts every peer insertion under this
+      // device's client id: the note grows nested copies of itself on each
+      // pull. Keep only what the file adds beyond what the pull delivered.
+      const live = this.text.toString();
+      diffs = withoutPullInsertions(
+        diffs,
+        computeDiff(current, live),
+        computeDiff(live, fileText),
+      );
+      if (!diffs.some(([op]) => op !== DIFF_EQUAL)) {
+        // Nothing of the file's own is left: it is behind the doc. Write the
+        // doc out instead of merging.
+        this.lastWrittenHash = fileHash;
+        this.scheduleEgest();
+        return false;
+      }
+    }
     const ratio = changeRatio(diffs, current.length, fileText.length);
 
     if (ratio > this.cfg.largeDiffRatio) {

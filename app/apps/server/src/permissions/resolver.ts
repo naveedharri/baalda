@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { lapseEnforced, resolveAccountPlan, type AccountPlan } from "../billing/plan.js";
 import { pool as defaultPool } from "../db/pool.js";
 
 /**
@@ -101,6 +102,12 @@ export interface ResolverCache {
   /** The person's own vault level ({@link personalVaultLevel}), a fact about
    *  the (vault, user) like the three above — read at most once per request. */
   personal(db: Queryable, organizationId: string, userId: string): Promise<PersonalVaultLevel>;
+  /** The billing plan of the account this vault is attached to
+   *  (`billing/plan.ts resolveAccountPlan`), read at most once per request. */
+  planFor(db: Queryable, organizationId: string): Promise<AccountPlan>;
+  /** True when the vault's billing account is lapsed (account-wide read-only);
+   *  delegates to {@link planFor}, so it shares that memo. */
+  billingReadOnly(db: Queryable, organizationId: string): Promise<boolean>;
   ancestors(db: Queryable, folderId: string | null): Promise<string[]>;
   /**
    * Role, join snapshot and vault posture for one (vault, user) in ONE query,
@@ -145,6 +152,7 @@ export function createResolverCache(): ResolverCache {
   const baselines = new Map<string, Promise<VaultPosture>>();
   const snapshots = new Map<string, Promise<MemberAccessSnapshot | null>>();
   const personals = new Map<string, Promise<PersonalVaultLevel>>();
+  const plans = new Map<string, Promise<AccountPlan>>();
   const chains = new Map<string, Promise<string[]>>();
   const memberships = new Map<string, Promise<MembershipFacts>>();
   const preloadedDocs = new Map<string, PreloadedDoc>();
@@ -171,6 +179,11 @@ export function createResolverCache(): ResolverCache {
       memo(personals, `${organizationId}\u0000${userId}`, () =>
         personalVaultLevel(db, organizationId, userId),
       ),
+    planFor: (db, organizationId) =>
+      memo(plans, organizationId, () => resolveAccountPlan(db, { orgId: organizationId })),
+    billingReadOnly: async (db, organizationId) =>
+      lapseEnforced() &&
+      (await memo(plans, organizationId, () => resolveAccountPlan(db, { orgId: organizationId }))).lapsed,
     ancestors: (db, folderId) =>
       folderId === null
         ? Promise.resolve([])
@@ -1087,6 +1100,12 @@ export async function isDenied(
   return rows.length > 0;
 }
 
+/**
+ * Billing lapse cap (pricing rev §3.4): a vault whose account is lapsed is
+ * read-only for everyone — `edit` becomes `view`, every other answer passes
+ * through. Reads stay intact (no `ready.revoked` storm); management routes do
+ * not consult this resolver, so the owner can still trim, resume or detach.
+ */
 export async function effectivePermission(
   userId: string,
   docId: string,
@@ -1097,11 +1116,28 @@ export async function effectivePermission(
   /** Resolve a soft-deleted note as if it were live (see `trash/access.ts`). */
   opts: { includeDeleted?: boolean } = {},
 ): Promise<Permission> {
+  const out: { organizationId?: string } = {};
+  const perm = await effectivePermissionInner(userId, docId, db, cache, opts, out);
+  if (perm !== "edit" || !out.organizationId) return perm;
+  const memo = cache ?? createResolverCache();
+  return (await memo.billingReadOnly(db, out.organizationId)) ? "view" : perm;
+}
+
+async function effectivePermissionInner(
+  userId: string,
+  docId: string,
+  db: Queryable,
+  cache: ResolverCache | undefined,
+  opts: { includeDeleted?: boolean },
+  /** Receives the doc's vault so the wrapper reuses this lookup. */
+  out: { organizationId?: string },
+): Promise<Permission> {
   // A doc the batch prefetched answers from what that read loaded; anything
   // else — no cache, not prefetched, or a soft-deleted lookup — reads live.
   const pre = cache && opts.includeDeleted !== true ? cache.preloaded(docId) : undefined;
   const loc = pre ? pre.loc : await locateDoc(db, docId, opts.includeDeleted === true);
   if (!loc) return "none";
+  out.organizationId = loc.organizationId;
 
   const folderIds = pre
     ? pre.folderIds
@@ -1363,6 +1399,23 @@ export async function resolveAccessForUser(
   cache?: ResolverCache,
   /** Preloaded rows for `ctx.organizationId` — see {@link AccessIndex}. */
   accessIndex?: AccessIndex,
+): Promise<ResolvedAccess> {
+  const resolved = await resolveAccessForUserInner(ctx, userId, role, db, cache, accessIndex);
+  if (resolved.permission !== "edit") return resolved;
+  // Billing lapse cap, exactly as in {@link effectivePermission}.
+  const memo = cache ?? createResolverCache();
+  return (await memo.billingReadOnly(db, ctx.organizationId))
+    ? { ...resolved, permission: "view" }
+    : resolved;
+}
+
+async function resolveAccessForUserInner(
+  ctx: AccessContext,
+  userId: string,
+  role: string | null,
+  db: Queryable,
+  cache: ResolverCache | undefined,
+  accessIndex: AccessIndex | undefined,
 ): Promise<ResolvedAccess> {
   const index = accessIndex?.organizationId === ctx.organizationId ? accessIndex : undefined;
   const denied = (principalType: "user" | "org", principalId: string) =>

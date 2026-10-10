@@ -464,14 +464,14 @@ describe("HealthView", () => {
     expect(html).not.toContain(">Healthy<");
     expect(html).not.toContain("All 6,974 notes are on the Remote Vault");
     expect(html).toContain("<h4>Only on this computer · 160 items</h4>");
-    expect(html).toContain("PDFs, images and other files need Pro to sync. Notes and folders sync on every plan.");
+    expect(html).toContain("PDFs, images and other files need Team to sync. Notes and folders sync on every plan.");
     expect(html).not.toMatch(/other formats?/i);
     expect(html).toContain("Select all");
     expect(html).not.toContain("Select files");
-    expect(html.match(/class="health-pro-tag">Pro</g)?.length).toBe(20);
+    expect(html.match(/class="health-pro-tag">Team</g)?.length).toBe(20);
     expect(html).toContain("Show more (140 remaining)");
     // The container owns the single upgrade CTA in the top attachment banner.
-    expect(html).not.toContain("Upgrade to Pro");
+    expect(html).not.toContain("Upgrade to Team");
     expect(html).not.toContain(">Check again<");
     expect(html).not.toContain("health-difference-side");
     expect(html).not.toContain("Nothing needs attention");

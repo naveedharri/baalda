@@ -57,6 +57,19 @@
   height: 100%;
 }
 
+/* "Nothing is shared with you yet." — same colour and size as the prompt
+   it replaces; the title is the only emphasis. */
+.nothing-shared {
+  max-width: 34em;
+}
+.nothing-shared p {
+  margin: 0;
+}
+.nothing-shared .nothing-shared-title {
+  color: var(--text-secondary);
+  margin-bottom: var(--sp-1);
+}
+
 .editor-empty {
   display: grid;
   place-items: center;

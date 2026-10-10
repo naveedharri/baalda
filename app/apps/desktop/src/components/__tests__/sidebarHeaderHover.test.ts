@@ -13,7 +13,8 @@ vi.mock("../../store", () => ({
     structureNotice: { rootMissing: false },
   }),
 }));
-vi.mock("../../lib/clipboard", () => ({ copyText: vi.fn() }));
+const copyText = vi.fn(async (_text: string) => true);
+vi.mock("../../lib/clipboard", () => ({ copyText: (text: string) => copyText(text) }));
 vi.mock("../../lib/toast", () => ({ toast: vi.fn() }));
 vi.mock("../VaultSwitcher", () => ({
   useSwitcherRows: () => [],
@@ -97,6 +98,84 @@ describe("vault switcher hover and click", () => {
     act(() => host.querySelector<HTMLButtonElement>(".vault-switch-btn")!.click());
     point(document.body, "pointerdown");
     expect(menu()).toBeNull();
+  });
+
+  it("opens from the name too, without flickering across the header", () => {
+    const text = () => host.querySelector<HTMLDivElement>(".sidebar-header-main")!;
+    point(text(), "pointerover");
+    expect(menu()).not.toBeNull();
+    // Tile to name: leaving one and entering the other keeps it open.
+    point(text(), "pointerout", "mouse", tile());
+    point(tile(), "pointerover", "mouse", text());
+    advance(300);
+    expect(menu()).not.toBeNull();
+    // Menu back up to the name counts as re-entering the header.
+    point(tile(), "pointerout", "mouse", menu()!);
+    point(menu()!, "pointerover", "mouse", tile());
+    point(menu()!, "pointerout", "mouse", text());
+    point(text(), "pointerover", "mouse", menu()!);
+    advance(300);
+    expect(menu()).not.toBeNull();
+    point(text(), "pointerout");
+    advance(220);
+    expect(menu()).toBeNull();
+  });
+
+  it("drops the name tooltip while the switcher is open", () => {
+    const vaultName = () => host.querySelector<HTMLSpanElement>(".vault-name")!;
+    expect(vaultName().title).toBe("Product");
+    point(tile(), "pointerover");
+    expect(vaultName().hasAttribute("title")).toBe(false);
+    expect(host.querySelector(".vault-switch-btn")!.hasAttribute("title")).toBe(false);
+  });
+
+  it("never opens or pins the switcher from the path, which copies on click", async () => {
+    const path = () => host.querySelector<HTMLSpanElement>(".vault-path-copy")!;
+    point(path(), "pointerover");
+    advance(300);
+    expect(menu()).toBeNull();
+    await act(async () => path().click());
+    expect(copyText).toHaveBeenCalledWith("/vault");
+    expect(host.querySelector(".vault-path-copied")).not.toBeNull();
+    expect(menu()).toBeNull();
+  });
+
+  it("keeps a hover preview up from the name, over the path, into the menu", () => {
+    const name = () => host.querySelector<HTMLDivElement>(".sidebar-header-main")!;
+    const line = () => host.querySelector<HTMLDivElement>(".vault-line")!;
+    point(name(), "pointerover");
+    expect(menu()).not.toBeNull();
+    point(name(), "pointerout", "mouse", line());
+    point(line(), "pointerover", "mouse", name());
+    advance(300);
+    expect(menu()).not.toBeNull();
+    point(line(), "pointerout", "mouse", menu()!);
+    point(menu()!, "pointerover", "mouse", line());
+    advance(300);
+    expect(menu()).not.toBeNull();
+    point(menu()!, "pointerout");
+    advance(220);
+    expect(menu()).toBeNull();
+  });
+
+  it("closes a hover preview at once on a path click, so the copied check shows", async () => {
+    const name = () => host.querySelector<HTMLDivElement>(".sidebar-header-main")!;
+    const line = () => host.querySelector<HTMLDivElement>(".vault-line")!;
+    point(name(), "pointerover");
+    point(name(), "pointerout", "mouse", line());
+    point(line(), "pointerover", "mouse", name());
+    expect(menu()).not.toBeNull();
+    await act(async () => line().querySelector<HTMLSpanElement>(".vault-path-copy")!.click());
+    expect(menu()).toBeNull();
+    expect(host.querySelector(".vault-path-copied")).not.toBeNull();
+  });
+
+  it("leaves a click-pinned switcher open on a path click", async () => {
+    act(() => tile().click());
+    expect(menu()).not.toBeNull();
+    await act(async () => host.querySelector<HTMLSpanElement>(".vault-path-copy")!.click());
+    expect(menu()).not.toBeNull();
+    expect(copyText).toHaveBeenCalledWith("/vault");
   });
 
   it("does not interpret a touch pointer as hover", () => {

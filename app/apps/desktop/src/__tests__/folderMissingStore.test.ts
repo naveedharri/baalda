@@ -54,6 +54,11 @@ const ipcMock = vi.hoisted(() => ({
   deletePath: vi.fn(async () => {}),
   getVaultsRoot: vi.fn(async () => "/root"),
   listVaultsRootDirs: vi.fn(async () => [] as string[]),
+  folderExists: vi.fn(async (p: string) => p === "/root"),
+  getRecentVaults: vi.fn(async () => [] as { path: string }[]),
+  peekVaultStamp: vi.fn(
+    async (_p: string) => null as { organizationId: string | null; serverVaultId: string | null } | null,
+  ),
 }));
 
 vi.mock("../lib/ipc", () => ipcMock);
@@ -106,6 +111,9 @@ beforeEach(() => {
   });
   openLocalVault = vi.fn(async () => {});
   ipcMock.pickFolder.mockResolvedValue("/moved/a");
+  ipcMock.folderExists.mockImplementation(async (p: string) => p === "/root");
+  ipcMock.listVaultsRootDirs.mockResolvedValue([]);
+  ipcMock.peekVaultStamp.mockResolvedValue(null);
   useStore.setState({
     vault: vault(),
     session: null,
@@ -116,6 +124,7 @@ beforeEach(() => {
     openNote: null,
     applyVaultFolder: applyVaultFolder as never,
     openLocalVault: openLocalVault as never,
+    folderAutoRestored: null,
   });
 });
 
@@ -248,5 +257,84 @@ describe("Reset local copy", () => {
     ipcMock.resetVaultLocalCopy.mockRejectedValueOnce(new Error("Refusing to reset"));
     await expect(useStore.getState().resetLocalVaultCopy()).rejects.toThrow("Refusing");
     expect(applyVaultFolder).not.toHaveBeenCalled();
+  });
+});
+
+describe("auto-recovery of a missing folder (2026-10-09)", () => {
+  const inside = (): VaultInfo => ({ path: "/root/a", name: "Hello 4", epoch: 1 }) as VaultInfo;
+
+  async function recover() {
+    vi.useFakeTimers();
+    try {
+      const run = useStore.getState().autoRecoverMissingRoot();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await run;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it("recreates a folder inside the vaults root without asking, and says so", async () => {
+    synced();
+    useStore.setState({ vault: inside() });
+    await recover();
+    expect(applyVaultFolder).toHaveBeenCalledWith(ORG, "/root/a", {
+      create: true,
+      seedIfEmpty: undefined,
+    });
+    expect(useStore.getState().folderAutoRestored).toEqual({
+      orgId: ORG,
+      name: "Hello 4",
+      path: "/root/a",
+    });
+  });
+
+  it("leaves a folder outside the vaults root to the banner", async () => {
+    synced();
+    await recover();
+    expect(applyVaultFolder).not.toHaveBeenCalled();
+    expect(useStore.getState().folderAutoRestored).toBeNull();
+  });
+
+  it("never recreates a local-only vault", async () => {
+    useStore.setState({ vault: inside() });
+    await recover();
+    expect(applyVaultFolder).not.toHaveBeenCalled();
+  });
+
+  it("asks when the vaults root itself is gone", async () => {
+    synced();
+    useStore.setState({ vault: inside() });
+    ipcMock.folderExists.mockResolvedValue(false);
+    await recover();
+    expect(applyVaultFolder).not.toHaveBeenCalled();
+  });
+
+  it("rebinds to a renamed folder carrying this vault's stamp", async () => {
+    synced();
+    useStore.setState({ vault: inside() });
+    ipcMock.listVaultsRootDirs.mockResolvedValue(["/root/renamed"]);
+    ipcMock.peekVaultStamp.mockImplementation(async (p: string) =>
+      p === "/root/renamed" ? { organizationId: ORG, serverVaultId: null } : null,
+    );
+    await recover();
+    expect(applyVaultFolder).toHaveBeenCalledWith(ORG, "/root/renamed");
+    expect(useStore.getState().folderAutoRestored).toBeNull();
+  });
+
+  it("does nothing when the folder came back while it settled", async () => {
+    synced();
+    useStore.setState({ vault: inside() });
+    ipcMock.folderExists.mockResolvedValue(true);
+    await recover();
+    expect(applyVaultFolder).not.toHaveBeenCalled();
+  });
+
+  it("Locate the original instead… binds the picked folder and clears the notice", async () => {
+    synced();
+    useStore.setState({ folderAutoRestored: { orgId: ORG, name: "a", path: "/root/a" } });
+    await useStore.getState().locateOriginalVaultFolder();
+    expect(applyVaultFolder).toHaveBeenCalledWith(ORG, "/moved/a");
+    expect(useStore.getState().folderAutoRestored).toBeNull();
   });
 });

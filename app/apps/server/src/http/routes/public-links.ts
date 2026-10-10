@@ -6,6 +6,7 @@ import { pool } from "../../db/pool.js";
 import { config } from "../../config.js";
 import { BRAND_NAME } from "../../brand.js";
 import { orgRole } from "../../permissions/lookup.js";
+import { ACCOUNT_READ_ONLY_BODY, refusedForBilling } from "../../permissions/http-gates.js";
 import { effectivePermission } from "../../permissions/resolver.js";
 import { getSession } from "../session.js";
 import { renderNoteHtml } from "../../render/note-html.js";
@@ -136,6 +137,9 @@ publicLinkApiRoutes.post("/notes/:docId/public-link", async (c) => {
   const docId = c.req.param("docId");
   const g = await gate(session.userId, docId);
   if (!g.ok) return c.json({ error: g.error }, g.status);
+  // Minting publishes the note: refused while the account is lapsed. Revoking
+  // (DELETE below) stays allowed, since it only narrows exposure.
+  if (await refusedForBilling(g.note.organizationId)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
 
   // Create-or-get: repeated copies must return the SAME url. The unique
   // doc_id key makes the race harmless — the loser's insert is a no-op and

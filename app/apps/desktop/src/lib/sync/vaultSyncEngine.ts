@@ -10,8 +10,10 @@
 // current on disk regardless of the UI. The engine itself never touches disk or
 // CodeMirror — it moves opaque Yjs updates to the sink.
 
+import type { AppearanceSettings } from "../appearanceSettings";
 import { ApiClient, ApiError } from "../api";
 import { markOnce } from "../perf";
+import { notifyInvitationFrame } from "../invitationLive";
 import type { ActivityStatus } from "../prefs";
 import {
   bytesToBase64,
@@ -123,9 +125,14 @@ export interface VaultSyncEngineOptions {
   /** Fired when a new teammate joined the vault (`member`): the client
    *  refreshes its roster and shows a join celebration. */
   onMemberJoined?: (name: string) => void;
+  /** Fired when the server says a user lost membership of this vault
+   *  (`member-removed`). The session decides whether it is THIS user. */
+  onMemberRemoved?: (change: { orgId: string; userId: string; reason: "removed" | "left" }) => void;
   /** Fired when the vault's name or icon changed (`org`, #306); only the
    *  fields present in the frame are set. */
   onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
+  /** Fired when the vault's appearance defaults changed (`appearance-changed`). */
+  onAppearanceChanged?: (change: { orgId?: string; settings: AppearanceSettings }) => void;
   /** Fired for each teammate presence update (`presence`): who is now viewing
    *  which note (docId null = they left / closed the note). The sink aggregates
    *  these into the sidebar roster. */
@@ -339,7 +346,9 @@ export class VaultSyncEngine {
   private readonly onRegistryChanged?: (meta?: boolean) => void;
   private readonly onActivityChanged?: () => void;
   private readonly onMemberJoined?: (name: string) => void;
+  private readonly onMemberRemoved?: (change: { orgId: string; userId: string; reason: "removed" | "left" }) => void;
   private readonly onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
+  private readonly onAppearanceChanged?: (change: { orgId?: string; settings: AppearanceSettings }) => void;
   private readonly onPresence?: (peer: VaultPeer) => void;
   private readonly onVoice?: (frame: VoiceFrame) => void;
   private readonly onInboundProgress?: (done: number, total: number) => void;
@@ -445,7 +454,9 @@ export class VaultSyncEngine {
     this.onRegistryChanged = opts.onRegistryChanged;
     this.onActivityChanged = opts.onActivityChanged;
     this.onMemberJoined = opts.onMemberJoined;
+    this.onMemberRemoved = opts.onMemberRemoved;
     this.onOrgChanged = opts.onOrgChanged;
+    this.onAppearanceChanged = opts.onAppearanceChanged;
     this.onPresence = opts.onPresence;
     this.onVoice = opts.onVoice;
     this.onInboundProgress = opts.onInboundProgress;
@@ -868,6 +879,9 @@ export class VaultSyncEngine {
         this.onServerRevoked?.(control.docIds, false);
       } else if (control.t === "rejected") {
         this.onServerRejected?.(control.docId, control.reason);
+      } else if (control.t === "invitation" || control.t === "invitation-gone") {
+        // User-addressed, not about this vault: hand it to the invitation list.
+        notifyInvitationFrame(control);
       } else if (control.t === "version-available") {
         this.onVersionAvailable?.(control.version);
       } else if (control.t === "brake") {
@@ -890,12 +904,16 @@ export class VaultSyncEngine {
         this.onRegistryChanged?.(control.meta === true);
       } else if (control.t === "activity") {
         this.onActivityChanged?.();
+      } else if (control.t === "member-removed") {
+        this.onMemberRemoved?.({ orgId: control.orgId, userId: control.userId, reason: control.reason });
       } else if (control.t === "member") {
         // A new teammate joined — refresh the roster + celebrate.
         this.onMemberJoined?.(control.name);
       } else if (control.t === "org") {
         const { t: _t, ...change } = control;
         this.onOrgChanged?.(change);
+      } else if (control.t === "appearance-changed") {
+        this.onAppearanceChanged?.({ orgId: control.orgId, settings: control.settings });
       } else if (control.t === "presence") {
         // A teammate's viewing state changed — feed the sidebar roster.
         this.onPresence?.({

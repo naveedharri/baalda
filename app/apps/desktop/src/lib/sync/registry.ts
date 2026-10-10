@@ -21,6 +21,7 @@
 //   • honest — a per-item failure is retried with backoff and then RECORDED
 //     (`failures()`), so a vault with failures can never report fully synced.
 
+import { markAccessTreeStale } from "../accessTreeStale";
 import {
   ACCESS_CHECK_MAX,
   ApiClient,
@@ -49,6 +50,7 @@ import { Checkpointer, checkpointBatchFor } from "./checkpoint";
 import { sha256Hex } from "../bridge/adapter";
 import { mergeSv, svFromBase64, svIsEmpty, svToBase64, unseenWork } from "./ackedSv";
 import { reconcileReport } from "./reconcileReport";
+import { vaultVisibility } from "./vaultVisibility";
 import { isSelfAccessChange } from "./selfAccessChanges";
 
 /** A frozen copy of `scope` that is never current, kept by `reset()` so the
@@ -196,6 +198,12 @@ interface VaultSyncConfig {
    * means "no base", and a doc with no base never overwrites the server.
    */
   fileBases?: Record<string, string>;
+  /**
+   * Folders that left this user's visible set while still on disk, path → their
+   * last server id (`VaultRegistry.revokedFolders`): kept so the empty-only
+   * removal is retried after a relaunch. Absent means none pending.
+   */
+  revokedFolders?: Record<string, string>;
   /**
    * docIds whose CONTENT this device has confirmed on the server (the bulk
    * upload's resume point — see `ContentUploader`).
@@ -400,6 +408,12 @@ export interface InboundHost {
    * which keeps the conservative behaviour as the default.
    */
   revocationAuthority?(): boolean;
+  /**
+   * May this pass remove an EMPTY, unmapped folder whose registration the server
+   * just refused with `no_write_access`? True only while the session is live and
+   * the vault root is present. Optional: no host means never.
+   */
+  mayRemoveRefusedEmptyFolders?(): boolean;
   /**
    * WHICH docs the server has named as no longer readable in this vault session
    * — the union of every `ready.revoked` list and every live `drop` frame — or
@@ -619,6 +633,10 @@ const FOLDER_MOVE_MIN_RATIO = 0.8;
  *  comfortably past the watcher debounce and the 2.5 s disk-delete grace. */
 const OWN_MOVE_TTL_MS = 120_000;
 
+/** How long a path this device deleted in-app stays "ours" (see
+ *  `RegistrySync.isOwnDelete`): past the pulls its own delete triggers. */
+export const OWN_DELETE_TTL_MS = 60_000;
+
 /**
  * The longest a sidebar delete of a not-yet-registered path waits for the
  * registrations in flight (see `settleRegistrations`). Past it the delete goes
@@ -760,6 +778,21 @@ export class VaultRegistry {
    *  Null = not built / invalidated; see `canonicalNotePath`. */
   private byPathCi: Map<string, string> | null = null;
   private folderByPath = new Map<string, string>();
+  /**
+   * Folders that LEFT this user's visible set (access revoked: not listed, not
+   * tombstoned, not moved) while still on disk, path → their last server id.
+   * `folderByPath` is re-derived from the listing every pass, so without this a
+   * folder whose notes were still on disk when its removal was first tried (the
+   * note revocation held for its ACL signal or access check, or refused by the
+   * cap) lost its id for good and stayed as an empty shell once the notes went
+   * on a later pass. Fed back into `planInbound` as a recorded id so the same
+   * gated, empty-only removal is retried; dropped once the folder is gone, is
+   * listed again, or is tombstoned. Session memory only.
+   */
+  private revokedFolders = new Map<string, string>();
+  /** Folder paths (pathKey) the server refused to register with
+   *  `no_write_access` during the current pass. */
+  private noWriteFolderRefusals = new Set<string>();
   /** Tree-binary relPath → server `files` id (see `VaultSyncConfig.files`).
    *  Deliberately NOT part of `byPath`/`byDocId`: those two are the CRDT note
    *  join, and a binary has no Y.Doc, no bridge and no content upload. */
@@ -1034,6 +1067,16 @@ export class VaultRegistry {
    * {@link isOwnMove}.
    */
   private ownMoves = new Map<string, number>();
+  /**
+   * Paths (case-folded) this device deleted in-app moments ago, keyed to when.
+   * A sidebar delete is server-first, then disk: between the two, a pull the
+   * delete itself triggered sees the tombstoned folders still on disk with
+   * notes in them, re-registered or kept them (`folderKept`, "because you
+   * added notes"), and ran the unseen-work gate on notes the user had just
+   * deleted on purpose. A path under one of these is the user's own decision,
+   * never a teammate's delete to second-guess. See {@link isOwnDelete}.
+   */
+  private ownDeletes = new Map<string, number>();
   private unhydratedPlaceholders = new Set<string>();
   /** Everything that could not be registered in the last run. */
   private failed: RegistryFailure[] = [];
@@ -1042,6 +1085,8 @@ export class VaultRegistry {
   /** Set when the server refused on a plan limit: the rest of the run is
    *  pointless (every further create would 402 too), so it stops. */
   private limitReached: string | null = null;
+  /** Set by a 402 `account_read_only` (lapsed Team account) this run. */
+  private accountReadOnly = false;
 
   /**
    * The scope this registry's *contents* belong to: `serverVaultId` and the path
@@ -1174,6 +1219,7 @@ export class VaultRegistry {
     // the case-folded view has to be dropped. See `canonicalNotePath`.
     this.byPathCi = null;
     this.onMapChanged?.();
+    markAccessTreeStale();
   }
 
   /**
@@ -1283,6 +1329,8 @@ export class VaultRegistry {
     this.deletedDocIds.clear();
     this.heldRefused.clear();
     this.folderByPath.clear();
+    this.revokedFolders.clear();
+    this.noWriteFolderRefusals.clear();
     // Server ids for vault A's binaries name nothing in vault B.
     this.fileByPath.clear();
     this.filesConfirmed.clear();
@@ -1299,10 +1347,12 @@ export class VaultRegistry {
     this.baselineVaultId = null;
     this.failed = [];
     this.limitReached = null;
+    this.accountReadOnly = false;
     // Paths, so they belong to the vault we are leaving — and a stale entry would
     // suppress the next vault's first watcher event for the same relative path.
     this.materialized.clear();
     this.ownMoves.clear();
+    this.ownDeletes.clear();
     this.unhydratedPlaceholders.clear();
     // The identical-config memo (see {@link writeConfig}) is only honest while
     // this registry is the last thing that wrote `.context/config.json`. A
@@ -1461,6 +1511,38 @@ export class VaultRegistry {
     return true;
   }
 
+  /**
+   * Did this device delete `relPath`, or a folder above it, in-app within
+   * {@link OWN_DELETE_TTL_MS}? Not consumed, entries age out.
+   */
+  isOwnDelete(relPath: string): boolean {
+    if (this.ownDeletes.size === 0) return false;
+    const now = Date.now();
+    const parts = pathKey(relPath).split("/");
+    for (let i = parts.length; i > 0; i--) {
+      const key = parts.slice(0, i).join("/");
+      const at = this.ownDeletes.get(key);
+      if (at === undefined) continue;
+      if (now - at > OWN_DELETE_TTL_MS) {
+        this.ownDeletes.delete(key);
+        continue;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /** Mark in-app deletes as this device's own (see {@link ownDeletes}). */
+  markOwnDeletes(paths: readonly string[]): void {
+    if (this.ownDeletes.size > 20_000) this.ownDeletes.clear();
+    const now = Date.now();
+    for (const p of paths) this.ownDeletes.set(pathKey(p), now);
+  }
+
+  private unmarkOwnDelete(path: string): void {
+    this.ownDeletes.delete(pathKey(path));
+  }
+
   private noteOwnMove(from: string, to: string): void {
     if (this.ownMoves.size > 20_000) this.ownMoves.clear();
     const now = Date.now();
@@ -1520,6 +1602,7 @@ export class VaultRegistry {
     if (this.fileByPath.get(relPath) === id) return;
     this.fileByPath.set(relPath, id);
     this.persist();
+    markAccessTreeStale();
   }
 
   /** Add one doc to the persisted authorship list, claiming the list for this
@@ -1948,6 +2031,11 @@ export class VaultRegistry {
     }
   }
 
+  /** True once this run saw a 402 `account_read_only` (the Team account lapsed). */
+  isAccountReadOnly(): boolean {
+    return this.accountReadOnly;
+  }
+
   /** The plan-limit code that stopped the run, if one did. */
   limitCode(): string | null {
     return this.limitReached ?? this.failed.find(f => f.code === "note_limit_reached")?.code ?? null;
@@ -1962,6 +2050,9 @@ export class VaultRegistry {
    * protected the user's notes would be invisible to them.
    */
   recordFailure(f: RegistryFailure): "ok" | "failed" {
+    if (f.kind === "folder" && f.code === "no_write_access") {
+      this.noWriteFolderRefusals.add(pathKey(f.path));
+    }
     // Something already exists at this path that this user cannot see (an item
     // set to Private after it reached their disk). Not a failure and nothing to
     // fix: the file stays exactly where it is, local-only, and the path is left
@@ -1973,6 +2064,13 @@ export class VaultRegistry {
     // The id names a note deleted on the server. Reported ONCE (the path is
     // skipped from now on — see `deletedPaths`), with a reason that says the
     // file is safe and why it no longer syncs.
+    // The billing account lapsed: sync is read-only for the whole account.
+    // That is a state, not a broken item, so it never becomes a failure row;
+    // the run stops because every further write would get the same answer.
+    if (f.code === "account_read_only") {
+      this.accountReadOnly = true;
+      return "failed";
+    }
     if (f.code === "note_deleted" && f.kind === "note") {
       const firstTime = !this.deletedPaths.has(pathKey(f.path));
       this.deletedPaths.add(pathKey(f.path));
@@ -2023,7 +2121,7 @@ export class VaultRegistry {
   /** Stop the current bulk run? Either the vault moved on, or the server told us
    *  we've hit a plan limit and every further create would 402 as well. */
   private stopRun(): boolean {
-    return this.stale() || this.limitReached != null;
+    return this.stale() || this.limitReached != null || this.accountReadOnly;
   }
 
   // ---- config.json -------------------------------------------------------
@@ -2058,6 +2156,9 @@ export class VaultRegistry {
       // bytes it always did and the identical-config memo keeps working.
       ...(this.filesConfirmed.size > 0 ? { filesConfirmed: [...this.filesConfirmed] } : {}),
       ...(this.fileBases.size > 0 ? { fileBases: Object.fromEntries(this.fileBases) } : {}),
+      ...(this.revokedFolders.size > 0
+        ? { revokedFolders: Object.fromEntries(this.revokedFolders) }
+        : {}),
       pushed: [...this.pushed],
       ...(this.ackedSvs.size > 0 ? { ackedSv: Object.fromEntries(this.ackedSvs) } : {}),
       ...(this.unhydratedPlaceholders.size > 0
@@ -2392,7 +2493,9 @@ export class VaultRegistry {
       folderTombstones: args.folderTombstones ? new Set(args.folderTombstones) : null,
       // The persisted path → server-folder-id join: an id match against a
       // tombstone is proof the local folder IS the deleted one.
-      localFolderIds: new Map(this.folderByPath),
+      // Plus the ids of folders that left the visible set on an earlier pass
+      // but could not be removed yet (`revokedFolders`).
+      localFolderIds: new Map([...this.revokedFolders, ...this.folderByPath]),
       // Both listings came back 200 (a failure throws out of `syncStructure`
       // before this runs), the session is live, and the server itself announced
       // an access change moments ago — so a doc absent from these listings has
@@ -2443,6 +2546,12 @@ export class VaultRegistry {
     // and a second pull is a no-op.
     for (const path of plan.createFolders) {
       if (this.stopRun()) break;
+      // A listing fetched before this device's own folder delete committed still
+      // names the folder. Re-creating it after the sidebar removed it left an
+      // empty directory with no server id, which the outbound step registered as
+      // a NEW folder once the own-delete window closed: deleted folders came back
+      // empty, for the whole team.
+      if (this.isOwnDelete(path)) continue;
       try {
         // Only a directory this call actually created is a disk change — and it
         // is OUR change, so its watcher echo is remembered and consumed rather
@@ -2512,7 +2621,11 @@ export class VaultRegistry {
           // a recovery copy under `.context/trash` first (offline
           // reconciliation D1/D7). Measured BEFORE the release, while a resident
           // bridge still answers for ops not yet in SQLite.
-          const verdict = await this.unseenWorkVerdict(gone.docId, gone.path);
+          // A note this device deleted in-app moments ago is the user's own
+          // decision: no recovery copy, no report, whatever it held unpushed.
+          const verdict = gone.reason !== "revoked" && this.isOwnDelete(gone.path)
+            ? "none"
+            : await this.unseenWorkVerdict(gone.docId, gone.path);
           if (verdict === "unknown") {
             // Unprovable identity: the old "left on disk" refusal, unchanged.
             this.recordFailure({
@@ -2720,15 +2833,40 @@ export class VaultRegistry {
       const dead = new Set(args.folderTombstones);
       for (const [rp, id] of this.folderByPath) if (dead.has(id)) tombstonedFolders.add(rp);
     }
+    const listedFolderIds = new Set(args.serverFolders.map((f) => f.id));
+    const deadFolderIds = new Set(args.folderTombstones ?? []);
     for (const path of plan.removeFolders) {
       if (this.stopRun()) break;
+      const folderId = this.folderByPath.get(path) ?? this.revokedFolders.get(path);
       try {
-        const removed = await ipc.deleteFolderIfEmpty(path, this.epoch());
+        // A folder this device deleted in-app is removed whole (the sidebar's
+        // own recursive delete), never kept as a teammate's delete would be.
+        const own = this.isOwnDelete(path);
+        let removed = await ipc.deleteFolderIfEmpty(path, this.epoch());
+        if (!removed && own) {
+          await ipc.deletePath(path, this.epoch());
+          removed = true;
+        }
+        // A folder that left the visible set and is still on disk (its notes
+        // not removed yet) keeps its id so a later pass can retry the removal.
+        if (
+          !removed &&
+          folderId !== undefined &&
+          !listedFolderIds.has(folderId) &&
+          !deadFolderIds.has(folderId)
+        ) {
+          if (this.revokedFolders.get(path) !== folderId) {
+            this.revokedFolders.set(path, folderId);
+            this.persist();
+          }
+        } else if (this.revokedFolders.delete(path)) {
+          this.persist();
+        }
         this.sink.item("ok");
         if (removed) {
           changedDisk = true;
           this.markMaterialized(path); // our removal; one watcher echo to swallow
-        } else if (tombstonedFolders.has(path)) {
+        } else if (tombstonedFolders.has(path) && !own) {
           reconcileReport.record({
             kind: "folderKept",
             path,
@@ -3326,6 +3464,7 @@ export class VaultRegistry {
     for (const [rp, id] of Object.entries(cfg.folders ?? {})) {
       if (typeof id === "string" && id) this.folderByPath.set(rp, id);
     }
+    this.adoptRevokedFolders(cfg.revokedFolders);
     this.adoptConfigFiles(cfg.files ?? {}, cfg.filesConfirmed ?? [], cfg.fileBases ?? {});
     this.pushed = new Set(cfg.pushed ?? []);
     this.ackedSvs = adoptAcked(cfg.ackedSv, null);
@@ -3362,6 +3501,7 @@ export class VaultRegistry {
     this.organizationId = input.organizationId;
     this.failed = [];
     this.limitReached = null;
+    this.accountReadOnly = false;
     // NOT unconditional: `newCheckpointer` disposes the previous one, and after
     // a prime that one may hold a `markPushed` for a note the user opened during
     // the window — dropping it loses a real fact about the server.
@@ -3490,6 +3630,7 @@ export class VaultRegistry {
         if (typeof id === "string" && id) this.folderByPath.set(rp, id);
       }
     }
+    if (cfg.serverVaultId === vaultId) this.adoptRevokedFolders(cfg.revokedFolders);
     // Same guard for the tree-binary map: an id minted against another
     // collection names nothing here.
     if (cfg.serverVaultId === vaultId && cfg.files) {
@@ -3649,8 +3790,16 @@ export class VaultRegistry {
     // back from "N not synced" even after the underlying cause was gone.
     this.failed = [];
     this.limitReached = null;
+    this.accountReadOnly = false;
     const [folderRegistry, noteRegistry] = await this.takeListings(vaultId);
     if (this.stale()) return false;
+    // The empty state of a member who can read nothing yet reads this.
+    vaultVisibility.publish({
+      vaultId,
+      readableItems: folderRegistry.folders.length + noteRegistry.notes.length,
+      hiddenContent: noteRegistry.hiddenContent ?? null,
+      canCreateRoot: noteRegistry.canCreateRoot ?? null,
+    });
     const serverFolders = folderRegistry.folders;
     let serverNotes = noteRegistry.notes;
     let { folders, notes } = flattenTree(workingTree);
@@ -3806,15 +3955,43 @@ export class VaultRegistry {
     const serverFolderByPathCi = new Map(
       serverFolders.map((f) => [pathKey(f.path), f.id] as const),
     );
+    const listedFolderIds = new Set(serverFolders.map((f) => f.id));
+    const deadFolderIds = new Set(folderRegistry.tombstones ?? []);
+    const onDiskFoldersCi = new Set(folders.map((f) => pathKey(f.path)));
     for (const [rp, id] of [...this.folderByPath]) {
-      if (serverFolderByPathCi.get(pathKey(rp)) !== id) this.folderByPath.delete(rp);
+      if (serverFolderByPathCi.get(pathKey(rp)) !== id) {
+        this.folderByPath.delete(rp);
+        // Left the visible set (not moved, not deleted) and still on disk: keep
+        // the id so the next inbound pass can remove it once it is empty.
+        if (
+          !listedFolderIds.has(id) &&
+          !deadFolderIds.has(id) &&
+          onDiskFoldersCi.has(pathKey(rp)) &&
+          this.revokedFolders.get(rp) !== id
+        ) {
+          this.revokedFolders.set(rp, id);
+          this.persist();
+        }
+      }
+    }
+    // A revoked folder that is listed again, was deleted, or left the disk is
+    // no longer pending removal.
+    for (const [rp, id] of [...this.revokedFolders]) {
+      if (listedFolderIds.has(id) || deadFolderIds.has(id) || !onDiskFoldersCi.has(pathKey(rp))) {
+        this.revokedFolders.delete(rp);
+        this.persist();
+      }
     }
     // The path we keep is the one on DISK: every other lookup in this class is
     // made with a local path, so mapping the server's spelling instead would
     // leave those lookups missing. The id is the identity; the spelling is ours.
     const localFolderPathCi = new Map(folders.map((f) => [pathKey(f.path), f.path] as const));
     for (const f of serverFolders) {
-      this.folderByPath.set(localFolderPathCi.get(pathKey(f.path)) ?? f.path, f.id);
+      const rp = localFolderPathCi.get(pathKey(f.path)) ?? f.path;
+      // A listing fetched before this device's own folder delete landed still
+      // names the folder; re-mapping it would resurrect a dead id locally.
+      if (this.isOwnDelete(rp)) continue;
+      this.folderByPath.set(rp, f.id);
     }
     // …and drop the twin the merge left behind. Both spellings are in the
     // persisted map for a vault that had case-duplicated rows, and neither is
@@ -3839,6 +4016,7 @@ export class VaultRegistry {
       (f) =>
         !this.folderByPath.has(f.path) &&
         !this.hiddenPaths.has(pathKey(f.path)) &&
+        !this.isOwnDelete(f.path) &&
         !this.isHeldRefusal(f.path),
     );
 
@@ -3929,6 +4107,7 @@ export class VaultRegistry {
         !this.aliasPaths.has(n.path) &&
         !this.hiddenPaths.has(pathKey(n.path)) &&
         !this.deletedPaths.has(pathKey(n.path)) &&
+        !this.isOwnDelete(n.path) &&
         !this.isHeldRefusal(n.path),
     );
 
@@ -3999,6 +4178,7 @@ export class VaultRegistry {
     // At/above the threshold the whole set goes in batches instead: the server
     // sorts by depth and resolves parents IN-REQUEST, which is what removes the
     // level-by-level serialization (a deep tree paid one round trip per level).
+    this.noWriteFolderRefusals.clear();
     if (useBulkPath(missingFolders.length)) {
       if (await this.registerFoldersBatched(vaultId, missingFolders, checkpoint)) {
         mutated = true;
@@ -4021,6 +4201,7 @@ export class VaultRegistry {
           );
           if (out.ok) {
             this.folderByPath.set(f.path, out.value.id);
+            markAccessTreeStale();
             checkpoint.touch();
             mutated = true;
             this.sink.item("ok");
@@ -4038,6 +4219,12 @@ export class VaultRegistry {
       );
     }
     if (this.stale()) return mutated;
+    if (this.noWriteFolderRefusals.size > 0) {
+      const gone = await this.removeRefusedEmptyFolders(folders.map((f) => f.path));
+      this.noWriteFolderRefusals.clear();
+      if (this.stale()) return mutated;
+      if (gone.length > 0) mutated = true;
+    }
     // A folder refused just now holds its notes too (see `isHeldRefusal`):
     // without its id each would be refused on its own.
     if (this.heldRefused.size > 0) {
@@ -4241,6 +4428,10 @@ export class VaultRegistry {
     const held = this.host?.heldDocIds?.() ?? null;
     const toMaterialize = [...resolvedNotePaths].filter((rp) => {
       if (localNotePaths.has(pathKey(rp))) return false;
+      // Same stale-listing race as the inbound folder step: a note this device
+      // just deleted in-app must not come back as a placeholder, which would
+      // also re-create its deleted parent folders on disk.
+      if (this.isOwnDelete(rp)) return false;
       if (held && held.size > 0) {
         const docId = this.byPath.get(rp)?.docId;
         if (docId && held.has(docId)) return false;
@@ -4457,6 +4648,7 @@ export class VaultRegistry {
           const res = byPath.get(f.path);
           if (res && res.id && (res.status === "created" || res.status === "adopted")) {
             this.folderByPath.set(f.path, res.id);
+            markAccessTreeStale();
             checkpoint.touch();
             mutated = true;
             this.sink.item("ok");
@@ -5046,6 +5238,7 @@ export class VaultRegistry {
       // The server's canonical spelling, as in `registerNote`.
       this.folderByPath.set(created.path ?? relPath, created.id);
       this.persist();
+      markAccessTreeStale();
       return created.id;
     } catch (e) {
       this.recordFailure({
@@ -5230,6 +5423,18 @@ export class VaultRegistry {
     if (!this.isMappedPath(path) && (await this.settleRegistrations()) && this.stale()) return;
     const vaultId = this.serverVaultId;
     if (!vaultId) return;
+    // Marked BEFORE the request: the server broadcasts `registry-changed` as
+    // it commits, and the pull that triggers must already see this as ours.
+    this.markOwnDeletes([path]);
+    try {
+      await this.deletePathOnServer(path, vaultId);
+    } catch (e) {
+      this.unmarkOwnDelete(path);
+      throw e;
+    }
+  }
+
+  private async deletePathOnServer(path: string, vaultId: string): Promise<void> {
     const folderId = this.folderByPath.get(path);
     if (folderId) {
       try {
@@ -5339,7 +5544,20 @@ export class VaultRegistry {
     }
     const vaultId = this.serverVaultId;
     if (!vaultId) return answer();
+    // Before any request, as in `deletePath`; refusals are unmarked at the end.
+    this.markOwnDeletes(unique);
+    const result = await this.deletePathsOnServer(unique, vaultId, out, fail, answer);
+    for (const o of result) if (o.status !== "deleted") this.unmarkOwnDelete(o.path);
+    return result;
+  }
 
+  private async deletePathsOnServer(
+    unique: string[],
+    vaultId: string,
+    out: Map<string, NoteDeleteOutcome>,
+    fail: (path: string, e: unknown) => void,
+    answer: () => NoteDeleteOutcome[],
+  ): Promise<NoteDeleteOutcome[]> {
     const notes: Array<{ path: string; docId: string }> = [];
     for (const path of unique) {
       if (this.folderByPath.has(path)) {
@@ -5453,6 +5671,63 @@ export class VaultRegistry {
 
   /** Queue a write of the current in-memory maps to `.context/config.json`.
    *  Batched by the checkpointer — never a synchronous read-modify-write. */
+  /** Restore `revokedFolders` from config; malformed entries are skipped. */
+  private adoptRevokedFolders(raw: Record<string, string> | undefined): void {
+    if (!raw || typeof raw !== "object") return;
+    for (const [rp, id] of Object.entries(raw)) {
+      if (typeof id === "string" && id && typeof rp === "string" && rp) this.revokedFolders.set(rp, id);
+    }
+  }
+
+  /**
+   * Remove EMPTY folders the server just refused to register with
+   * `no_write_access`: an account that cannot create there cannot sync them,
+   * and an empty directory loses nothing. This is what clears shells stranded
+   * before `revokedFolders` existed (their ids were already forgotten).
+   *
+   * Each refused folder's local subtree goes bottom-up through the empty-only,
+   * non-recursive `deleteFolderIfEmpty` (Rust refuses ignored paths first), so
+   * any file anywhere below keeps it and its ancestors. Mapped descendants are
+   * never touched. Runs only when the host says the session is live and the
+   * vault root is present. Returns the paths removed.
+   */
+  private async removeRefusedEmptyFolders(localFolders: readonly string[]): Promise<string[]> {
+    const removed: string[] = [];
+    if (this.noWriteFolderRefusals.size === 0) return removed;
+    if (this.host?.mayRemoveRefusedEmptyFolders?.() !== true) return removed;
+    const refused = this.noWriteFolderRefusals;
+    const targets = localFolders.filter((p) => {
+      if (this.folderByPath.has(p)) return false;
+      let key = pathKey(p);
+      for (;;) {
+        if (refused.has(key)) return true;
+        const cut = key.lastIndexOf("/");
+        if (cut < 0) return false;
+        key = key.slice(0, cut);
+      }
+    });
+    // Deepest first, so a parent is judged only after its children went.
+    targets.sort((a, b) => b.split("/").length - a.split("/").length);
+    for (const path of targets) {
+      if (this.stopRun()) break;
+      try {
+        if (await ipc.deleteFolderIfEmpty(path, this.epoch())) {
+          this.markMaterialized(path); // our removal; one watcher echo to swallow
+          removed.push(path);
+        }
+      } catch (e) {
+        if (ipc.isVaultMismatch(e)) break;
+        // Left in place; the refusal row already says why it does not sync.
+      }
+    }
+    if (removed.length > 0) {
+      const gone = new Set(removed.map((p) => pathKey(p)));
+      this.failed = this.failed.filter((f) => !(f.kind === "folder" && gone.has(pathKey(f.path))));
+      for (const key of gone) this.heldRefused.delete(key);
+    }
+    return removed;
+  }
+
   private persist(): void {
     if (this.stale()) return;
     if (!this.serverVaultId) return;

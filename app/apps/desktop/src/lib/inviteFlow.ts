@@ -7,6 +7,7 @@
  */
 
 import type { InviteDeepLink } from "./inviteLink";
+import { classifyLimitError, freePeopleIncluded, limitFromError, seatLimitFromError, seatsFullCopy } from "./billing";
 
 // ---- Pending invite queue --------------------------------------------------
 // Module state, not store state — a handoff between two moments of one flow
@@ -70,6 +71,18 @@ export interface AcceptInviteContext {
  * gets rewritten into friendly copy is a failure nobody can debug.
  */
 export function acceptInviteFailureMessage(err: unknown, ctx: AcceptInviteContext): string {
+  // A people limit at acceptance (the hard seat gate) speaks to the INVITEE:
+  // they cannot buy seats, so the sentence says whom to ask.
+  const limit = classifyLimitError(err);
+  if (limit === "seat_limit") {
+    return `${seatsFullCopy(seatLimitFromError(err)?.seats ?? null)} Ask the person who invited you to add a seat, then accept again.`;
+  }
+  if (limit === "member_limit") {
+    return `${freePeopleIncluded(limitFromError(err) ?? 2)} This vault is full. Ask the person who invited you to upgrade to Team, then accept again.`;
+  }
+  if (limit === "read_only") {
+    return "This vault's subscription ended, so it can't take new people right now. Ask the person who invited you to resume it.";
+  }
   const raw = err instanceof Error ? err.message : String(err ?? "");
   if (/not the recipient of the invitation/i.test(raw)) {
     const invited = ctx.inviteEmail;

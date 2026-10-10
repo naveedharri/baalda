@@ -29,6 +29,9 @@ const DEBOUNCE_MS = 2000;
 
 // Per-doc pending timers (debounce). Keyed by docId.
 const pending = new Map<string, ReturnType<typeof setTimeout>>();
+// Index runs whose timer already fired, so {@link flushIndexQueue} can wait for
+// them too (a 0 ms schedule is usually mid-flight by the caller's next await).
+const inFlight = new Set<Promise<void>>();
 
 /**
  * Parse `[[wikilink]]` targets out of note text. Captures the title portion
@@ -154,9 +157,13 @@ export function scheduleIndex(docId: string, delayMs: number = DEBOUNCE_MS): voi
   if (existing) clearTimeout(existing);
   const timer = setTimeout(() => {
     pending.delete(docId);
-    indexDoc(docId).catch((err) => {
-      console.error(`[indexer] failed to index ${docId}:`, err);
-    });
+    const run = indexDoc(docId)
+      .then(() => undefined)
+      .catch((err) => {
+        console.error(`[indexer] failed to index ${docId}:`, err);
+      })
+      .finally(() => inFlight.delete(run));
+    inFlight.add(run);
   }, delayMs);
   // Don't keep the event loop alive just for a pending index.
   if (typeof timer.unref === "function") timer.unref();
@@ -164,7 +171,8 @@ export function scheduleIndex(docId: string, delayMs: number = DEBOUNCE_MS): voi
 }
 
 /**
- * Run every pending debounced index NOW, and wait for it.
+ * Run every pending debounced index NOW, and wait for it — plus any run whose
+ * timer already fired and is still in flight.
  *
  * A test hook, and the reason the bulk `docs/batch` path may hand its docs to
  * {@link scheduleIndex} instead of awaiting {@link indexDoc} per item: search is
@@ -191,6 +199,7 @@ export async function flushIndexQueue(): Promise<void> {
       console.error(`[indexer] failed to index ${id}:`, err);
     }
   }
+  await Promise.all([...inFlight]);
 }
 
 /**

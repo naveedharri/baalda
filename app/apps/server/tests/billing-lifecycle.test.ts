@@ -6,6 +6,7 @@ import { makeFakeProvider, makeSnapshot } from "./helpers/billing-provider.js";
 import { config } from "../src/config.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
+import { ensureAccountForUser } from "../src/billing/accounts.js";
 import { createOrg, signUp, type TestUser } from "./helpers/auth.js";
 
 /**
@@ -42,6 +43,9 @@ function req(
   );
 }
 
+// Real provider ids are unique (migration 052 indexes them), so the default is too.
+let seededSubs = 0;
+
 /** Seed a subscription row the way a webhook would have written it. */
 async function seedSubscription(
   orgId: string,
@@ -71,7 +75,7 @@ async function seedSubscription(
     [
       orgId,
       extra.customerId ?? "cus_test",
-      extra.subId ?? "sub_test",
+      extra.subId ?? `sub_${orgId}_${++seededSubs}`,
       status,
       extra.periodEnd ?? new Date(Date.now() + 30 * 86400_000),
       extra.cancelAtPeriodEnd ?? false,
@@ -178,6 +182,88 @@ describe("subscription lifecycle", () => {
       // The owner is not a user on this server — most likely another
       // deployment sharing the provider org — so nothing is canceled.
       expect(fakeProvider.canceled).toEqual([]);
+    });
+
+    it("writes an account-only row (no org, no tombstone) for a checkout from an account with no vault", async () => {
+      const owner = await signUp("no-vault-owner@billing.com");
+      const accountId = await ensureAccountForUser(pool, owner.userId);
+      expect(accountId).toBeTruthy();
+      fakeProvider.nextEvent = {
+        eventId: "evt_no_vault_1",
+        occurredAt: new Date(),
+        type: "subscription_active",
+        organizationId: "",
+        accountId: accountId!,
+        userId: owner.userId,
+        providerCustomerId: "cus_no_vault",
+        providerSubscriptionId: "sub_no_vault",
+        plan: "team",
+        status: "active",
+        currentPeriodEnd: new Date(Date.now() + 30 * 86400_000),
+        cancelAtPeriodEnd: false,
+        interval: "month",
+        amount: 1000,
+        currency: "usd",
+      } as import("../src/billing/provider.js").NormalizedBillingEvent;
+
+      const res = await req("POST", "/api/billing/webhook", { body: {} });
+      expect(res.status).toBe(200);
+
+      const { rows } = await pool.query(
+        "SELECT organization_id, billing_account_id, deleted_at, status FROM subscriptions WHERE provider_subscription_id = $1",
+        ["sub_no_vault"],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].organization_id).toBeNull();
+      expect(rows[0].billing_account_id).toBe(accountId);
+      expect(rows[0].deleted_at).toBeNull();
+      expect(rows[0].status).toBe("active");
+    });
+
+    it("persists a fixed discount from a webhook: charged, list, id and name, no basis points", async () => {
+      const owner = await signUp("fixed-discount-owner@billing.com");
+      const accountId = await ensureAccountForUser(pool, owner.userId);
+      fakeProvider.nextEvent = {
+        eventId: "evt_fixed_1",
+        occurredAt: new Date(),
+        type: "subscription_active",
+        organizationId: "",
+        accountId: accountId!,
+        userId: owner.userId,
+        providerCustomerId: "cus_fixed",
+        providerSubscriptionId: "sub_fixed",
+        plan: "team",
+        status: "active",
+        currentPeriodEnd: new Date(Date.now() + 30 * 86400_000),
+        cancelAtPeriodEnd: false,
+        interval: "month",
+        amount: 3000,
+        currency: "usd",
+        seats: 5,
+        listAmount: 5000,
+        discountId: "disc_fixed",
+        discountName: "Legacy price",
+        discountBasisPoints: null,
+        discountDuration: "forever",
+      } as import("../src/billing/provider.js").NormalizedBillingEvent;
+
+      const res = await req("POST", "/api/billing/webhook", { body: {} });
+      expect(res.status).toBe(200);
+      const { rows } = await pool.query(
+        `SELECT amount, list_amount, seats, discount_id, discount_name, discount_basis_points, discount_duration
+           FROM subscriptions WHERE provider_subscription_id = $1`,
+        ["sub_fixed"],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        list_amount: 5000,
+        seats: 5,
+        discount_id: "disc_fixed",
+        discount_name: "Legacy price",
+        discount_basis_points: null,
+        discount_duration: "forever",
+      });
+      expect(Number(rows[0].amount)).toBe(3000);
     });
 
     function orphanEvent(

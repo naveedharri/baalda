@@ -29,7 +29,7 @@ vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }
 import { ACCESS_CHECK_MAX, type ApiClient } from "../../api";
 import * as ipc from "../../ipc";
 import type { TreeNode } from "../../ipc";
-import { VaultRegistry, type InboundHost } from "../registry";
+import { OWN_DELETE_TTL_MS, VaultRegistry, type InboundHost } from "../registry";
 import { sha256Hex } from "../../bridge/adapter";
 import { reconcileReport } from "../reconcileReport";
 
@@ -1098,12 +1098,13 @@ describe("inbound folder deletion", () => {
 describe("whole-vault Private reaches the member's disk", () => {
   const N = 40;
 
-  function memberVault(): { disk: FakeDisk; state: ServerState } {
+  function memberVault(nested = false): { disk: FakeDisk; state: ServerState } {
     const disk = new FakeDisk();
     disk.folders.add("Docs");
+    if (nested) disk.folders.add("Docs/Guides");
     const notes: Array<{ id: string; rel_path: string }> = [];
     for (let i = 0; i < N; i++) {
-      const path = `Docs/n${i}.md`;
+      const path = nested && i % 2 === 1 ? `Docs/Guides/n${i}.md` : `Docs/n${i}.md`;
       disk.notes.set(path, `d${i}`);
       // Real content, and confirmed upstream below: the trash executor refuses
       // any doc whose bytes this device never sent, so an empty-file vault
@@ -1111,7 +1112,9 @@ describe("whole-vault Private reaches the member's disk", () => {
       disk.bodies.set(path, `note ${i}`);
       notes.push({ id: `d${i}`, rel_path: path });
     }
-    return { disk, state: { notes, folders: [{ id: "f1", path: "Docs" }] } };
+    const folders = [{ id: "f1", path: "Docs" }];
+    if (nested) folders.push({ id: "f2", path: "Docs/Guides" });
+    return { disk, state: { notes, folders } };
   }
 
   /** Reconcile once (the shared state), carry the config, then reconcile against
@@ -1126,9 +1129,11 @@ describe("whole-vault Private reaches the member's disk", () => {
       /** Run a SECOND pull after the first, the way a launch does: the reconcile
        *  is not authoritative, the channel's pull that follows is. */
       thenAuthoritative?: boolean;
+      /** Half the notes in a nested `Docs/Guides` subfolder. */
+      nested?: boolean;
     } = {},
   ) {
-    const { disk, state } = memberVault();
+    const { disk, state } = memberVault(opts.nested);
     install(disk);
     const reg1 = new VaultRegistry(fakeApi(state));
     reg1.setInboundHost(recordingHost().host);
@@ -1145,6 +1150,14 @@ describe("whole-vault Private reaches the member's disk", () => {
       folderTombstones: [],
       accessCheck: opts.accessCheck,
     });
+    if (opts.nested) {
+      // A member with No access may not create anything, so the server refuses
+      // to re-register a leftover folder rather than handing it a fresh id.
+      const { ApiError } = await import("../../api");
+      vi.mocked(api.createFolder).mockImplementation(async () => {
+        throw new ApiError(403, "no write access", { code: "no_write_access" });
+      });
+    }
     let live = authority;
     const reg = new VaultRegistry(api);
     const host = recordingHost(false);
@@ -1193,6 +1206,37 @@ describe("whole-vault Private reaches the member's disk", () => {
     expect(r.disk.notes.size).toBe(0);
     expect(r.disk.deleted).toHaveLength(N);
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
+  });
+
+  it("remembers the pending folders across a relaunch", async () => {
+    // The refused pass leaves the notes and so the folders; a relaunch reads the
+    // config back, and the authoritative pull there must still remove them.
+    const r = await afterPrivate(false, { nested: true });
+    expect(r.disk.folders.size).toBe(2);
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const saved = writes[writes.length - 1]?.[0] as unknown as string;
+    const cfg = JSON.parse(saved) as { revokedFolders?: Record<string, string> };
+    expect(cfg.revokedFolders).toEqual({ Docs: "f1", "Docs/Guides": "f2" });
+
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(saved as never);
+    const reg2 = new VaultRegistry(r.api);
+    const host2 = recordingHost(true);
+    reg2.setInboundHost(host2.host);
+    for (let i = 0; i < N; i++) reg2.markPushed(`d${i}`);
+    await reg2.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(r.disk.notes.size).toBe(0);
+    expect(r.disk.folders.size).toBe(0);
+  });
+
+  it("removes the emptied folder subtree on the pass that FOLLOWS a refused one", async () => {
+    // The refused pass tries the folders while their notes are still on disk,
+    // so the empty-only removal keeps them. The authoritative pass that removes
+    // the notes must still remove the folders, children before parents, rather
+    // than leave empty shells in the sidebar (re-invited with No access).
+    const r = await afterPrivate(false, { thenAuthoritative: true, nested: true });
+
+    expect(r.disk.notes.size).toBe(0);
+    expect(r.disk.folders.size).toBe(0);
   });
 
   it("refuses every removal the resolver will not confirm", async () => {
@@ -1931,6 +1975,122 @@ describe("offline reconciliation — folder kept by this device's new notes (D8)
   });
 });
 
+describe("own in-app delete of a nested tree", () => {
+  /** Context/beliefs/captures/a.md (d1), Context/beliefs/b.md (d2), agreed on a
+   *  first pass; then an unpushed local note lands in captures and d1 holds ops
+   *  the server never acknowledged. */
+  async function tree() {
+    reconcileReport.clear();
+    const disk = new FakeDisk();
+    for (const f of ["Context", "Context/beliefs", "Context/beliefs/captures"]) disk.folders.add(f);
+    disk.notes.set("Context/beliefs/captures/a.md", "d1");
+    disk.bodies.set("Context/beliefs/captures/a.md", "a");
+    disk.notes.set("Context/beliefs/b.md", "d2");
+    disk.bodies.set("Context/beliefs/b.md", "b");
+    install(disk);
+    // Recursive, like Rust's `delete_path`.
+    vi.mocked(ipc.deletePath).mockImplementation((async (p: string) => {
+      const under = (x: string) => x === p || x.startsWith(p + "/");
+      for (const n of [...disk.notes.keys()]) if (under(n)) { disk.notes.delete(n); disk.bodies.delete(n); }
+      for (const f of [...disk.folders]) if (under(f)) disk.folders.delete(f);
+    }) as never);
+    const state: ServerState = {
+      notes: [
+        { id: "d1", rel_path: "Context/beliefs/captures/a.md" },
+        { id: "d2", rel_path: "Context/beliefs/b.md" },
+      ],
+      folders: [
+        { id: "f1", path: "Context" },
+        { id: "f2", path: "Context/beliefs" },
+        { id: "f3", path: "Context/beliefs/captures" },
+      ],
+    };
+    const api = fakeApi(state);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    disk.notes.set("Context/beliefs/captures/new.md", "local-new");
+    disk.bodies.set("Context/beliefs/captures/new.md", "written, not pushed yet");
+    disk.unseen.add("d1");
+    const tombstoneAll = () => {
+      state.notes = [];
+      state.folders = [];
+      state.tombstones = ["d1", "d2"];
+      state.folderTombstones = ["f1", "f2", "f3"];
+    };
+    return { disk, api, reg, tombstoneAll };
+  }
+
+  it("removes everything, even with pulls racing between server and disk, and reports nothing", async () => {
+    const { disk, api, reg, tombstoneAll } = await tree();
+    vi.mocked(api.createFolder).mockClear();
+    vi.mocked(api.createNote).mockClear();
+    vi.mocked(ipc.copyToTrash).mockClear();
+    const selection = ["Context/beliefs/captures", "Context/beliefs", "Context"];
+    // Server first, deepest first, as the sidebar's bulk delete orders them.
+    for (const p of selection) await reg.deletePath(p);
+    // A pull whose listing predates the commit still names the folders…
+    await reg.pull();
+    // …then one that sees the tombstones, both before the disk half ran.
+    tombstoneAll();
+    await reg.pull();
+    // The sidebar's own disk half, then a settling pull.
+    for (const p of selection) await ipc.deletePath(p);
+    await reg.pull();
+
+    expect([...disk.folders]).toEqual([]);
+    expect([...disk.notes.keys()]).toEqual([]);
+    expect(reconcileReport.items()).toEqual([]);
+    expect(ipc.copyToTrash).not.toHaveBeenCalled();
+    expect(api.createFolder).not.toHaveBeenCalled();
+    expect(api.createNote).not.toHaveBeenCalled();
+  });
+
+  it("a stale listing applied AFTER the disk half never re-creates the folders, even past the own-delete window", async () => {
+    const { disk, api, reg, tombstoneAll } = await tree();
+    vi.mocked(api.createFolder).mockClear();
+    vi.mocked(api.createNote).mockClear();
+    const selection = ["Context/beliefs/captures/new.md", "Context/beliefs/captures", "Context/beliefs", "Context"];
+    for (const p of selection) await reg.deletePath(p);
+    // The sidebar's disk half lands first this time…
+    for (const p of selection) await ipc.deletePath(p);
+    // …then a pull whose listing predates the server commits still names the
+    // notes and the folders.
+    await reg.pull();
+    expect([...disk.folders]).toEqual([]);
+    expect([...disk.notes.keys()]).toEqual([]);
+
+    // Past the own-delete window nothing is left on disk to register.
+    const realNow = Date.now;
+    const later = realNow() + OWN_DELETE_TTL_MS + 1_000;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => later);
+    try {
+      tombstoneAll();
+      await reg.pull();
+    } finally {
+      spy.mockRestore();
+    }
+    expect([...disk.folders]).toEqual([]);
+    expect(api.createFolder).not.toHaveBeenCalled();
+    expect(api.createNote).not.toHaveBeenCalled();
+  });
+
+  it("a teammate's delete of the same tree still keeps the folder holding this device's new note", async () => {
+    const { disk, reg, tombstoneAll } = await tree();
+    tombstoneAll();
+    await reg.pull();
+
+    expect(disk.folders.has("Context/beliefs/captures")).toBe(true);
+    expect(disk.notes.has("Context/beliefs/captures/new.md")).toBe(true);
+    expect(disk.notes.has("Context/beliefs/b.md")).toBe(false);
+    expect(reconcileReport.items()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "folderKept", path: "Context/beliefs/captures" }),
+      ]),
+    );
+  });
+});
+
 describe("offline reconciliation — same-path create (D4)", () => {
   /** Pass 1 agrees on `a.md` (a baseline exists); then this device creates
    *  `P.md` offline while a teammate's `P.md` lands on the server. */
@@ -2211,5 +2371,52 @@ describe("access grants", () => {
     // Nothing new: nothing fires.
     await reg.pull();
     expect(grants).toHaveLength(1);
+  });
+});
+
+describe("empty folders the server refuses to register", () => {
+  async function refusedPass(opts: { status: number; code?: string; withFile?: boolean; live?: boolean }) {
+    const disk = new FakeDisk();
+    disk.folders.add("A");
+    disk.folders.add("A/B");
+    if (opts.withFile) {
+      disk.notes.set("A/B/x.md", "dx");
+      disk.bodies.set("A/B/x.md", "kept");
+    }
+    install(disk);
+    const api = fakeApi({ notes: [], tombstones: [], folders: [], folderTombstones: [] });
+    const { ApiError } = await import("../../api");
+    vi.mocked(api.createFolder).mockImplementation(async () => {
+      throw new ApiError(opts.status, "refused", opts.code ? { code: opts.code } : {});
+    });
+    const reg = new VaultRegistry(api);
+    const host = recordingHost();
+    (host.host as { mayRemoveRefusedEmptyFolders?: () => boolean }).mayRemoveRefusedEmptyFolders = () =>
+      opts.live ?? true;
+    reg.setInboundHost(host.host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    return { disk, reg, api };
+  }
+
+  it("removes nested empty unmapped folders refused with no_write_access, bottom-up", async () => {
+    const r = await refusedPass({ status: 403, code: "no_write_access" });
+    expect(r.disk.folders.size).toBe(0);
+    expect(r.reg.hasFailures()).toBe(false);
+  });
+
+  it("keeps them when anything is inside", async () => {
+    const r = await refusedPass({ status: 403, code: "no_write_access", withFile: true });
+    expect([...r.disk.folders].sort()).toEqual(["A", "A/B"]);
+    expect(r.disk.notes.has("A/B/x.md")).toBe(true);
+  });
+
+  it("keeps them when the refusal is anything else (a 500)", async () => {
+    const r = await refusedPass({ status: 500 });
+    expect([...r.disk.folders].sort()).toEqual(["A", "A/B"]);
+  });
+
+  it("keeps them when the session is not live or the root is missing", async () => {
+    const r = await refusedPass({ status: 403, code: "no_write_access", live: false });
+    expect([...r.disk.folders].sort()).toEqual(["A", "A/B"]);
   });
 });

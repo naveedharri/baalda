@@ -1,12 +1,29 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
 import { statusTone } from "../lib/presence/color";
-import { AsyncButton } from "./AsyncButton";
+import {
+  loadSeenInvitations,
+  onSeenInvitationsChanged,
+  unseenInvitations,
+} from "../lib/inviteSeen";
+import { InvitationRows, useFreshInvitations } from "./InvitationRows";
 import { LazyAvatar } from "./Face";
 import { MenuIcon } from "./MenuIcon";
 import { BugReportDialog } from "./BugReportDialog";
+import { useHoverMenu } from "./useHoverMenu";
+import { createFetchThrottle, isForcedMenuOpen } from "../lib/menuFetchThrottle";
+import {
+  checkAndAutoInstall,
+  currentVersion,
+  relaunchForUpdate,
+  subscribeUpdateState,
+  updateState,
+  useUpdateState,
+} from "../lib/updater";
+import { isUpdateBusy, updateCheckToast, updateRowHint } from "../lib/updateMenuRow";
+import { toast } from "../lib/toast";
 
 /* The settings surface is a whole second app (nine tabs, billing, MCP tokens,
    access) and nothing in it is on the first screen, so all three dialogs load
@@ -90,18 +107,38 @@ export function AccountMenu() {
   // sync banner and the sync pill both point at Health). This component owns the
   // only settings dialog, so it is the only place that can answer.
   const settingsRequest = useStore((s) => s.settingsRequest);
-  const settingsDismissToken = useStore((s) => s.settingsDismissToken);
   const accountSettingsRequest = useStore((s) => s.accountSettingsRequest);
 
-  const [open, setOpen] = useState(false);
+  // Hover previews the menu and a click pins it, like the vault tile above.
+  const menu = useHoverMenu();
+  const open = menu.open;
+  const closeMenu = menu.close;
+  // Hover opens the menu often, so its two fetches are throttled to once a
+  // minute each; a click that opens it from closed still asks at once.
+  const bugReportThrottle = useRef(createFetchThrottle()).current;
+  const invitationsThrottle = useRef(createFetchThrottle()).current;
+  const previousMode = useRef(menu.mode);
+  const forcedOpen = isForcedMenuOpen(previousMode.current, menu.mode);
+  useEffect(() => {
+    previousMode.current = menu.mode;
+  }, [menu.mode]);
+  // Invitation ids this device has already shown in the menu; anything else
+  // pulses here and on the identity-bar dot until the menu is opened.
+  const [seenInvites, setSeenInvites] = useState(loadSeenInvitations);
+  // Any surface that shows the rows (this menu, Account Settings → Vaults)
+  // writes the seen set; follow it so the identity dot settles either way.
+  useEffect(() => onSeenInvitationsChanged(setSeenInvites), []);
   const [authOpen, setAuthOpen] = useState(false);
-  const [membersOpen, setMembersOpen] = useState(false);
-  // Which settings tab the vault page should open on (View all → Vaults).
-  const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>(undefined);
-  const [accountOpen, setAccountOpen] = useState(false);
-  const [accountSettingsTab, setAccountSettingsTab] = useState<
-    AccountSettingsTab | undefined
-  >(undefined);
+  // Which full-screen settings dialog shows lives in the store, so opening one
+  // closes the other in the same update (`requestSettings` /
+  // `requestAccountSettings`): every cross-link swaps instead of stacking. The
+  // page each one opens on is the tab its latest request named.
+  const settingsDialog = useStore((s) => s.settingsDialog);
+  const closeSettingsDialog = useStore((s) => s.closeSettingsDialog);
+  const membersOpen = settingsDialog === "vault";
+  const accountOpen = settingsDialog === "account";
+  const settingsTab: SettingsTab | undefined = settingsRequest?.tab;
+  const accountSettingsTab: AccountSettingsTab | undefined = accountSettingsRequest?.tab;
   // Signed out with a folder open: is that folder actually a SYNCED vault
   // (its `.context/config.json` is stamped with a vault id)? Labeling it
   // "Local · not synced" is factually wrong — the edits made here will merge
@@ -117,26 +154,39 @@ export function AccountMenu() {
   const [bugReport, setBugReport] = useState(false);
   const serverUrl = useStore((s) => s.serverUrl);
   const userId = session?.user.id ?? null;
+  // getAuthMethods fails CLOSED, so one answer taken while the server was
+  // down (or before it gained the setting) would hide the icon for the whole
+  // session. Ask again whenever the window comes back and the menu opens, at
+  // most once a minute; the last answer stays in the meantime. An answer is
+  // kept while its account + server are still the current ones, whatever the
+  // menu did meanwhile, since the throttle already counted it.
+  const bugReportKey = userId ? `${userId}\n${serverUrl}` : null;
+  const bugReportKeyRef = useRef(bugReportKey);
+  const checkBugReport = useCallback(
+    (force: boolean) => {
+      const key = bugReportKeyRef.current;
+      if (!key || !bugReportThrottle.shouldFetch(key, Date.now(), force)) return;
+      void authManager.api.getAuthMethods().then((m) => {
+        if (bugReportKeyRef.current === key) setBugReport(m.bugReport);
+      });
+    },
+    [bugReportThrottle],
+  );
   useEffect(() => {
-    if (!userId) {
+    bugReportKeyRef.current = bugReportKey;
+    if (!bugReportKey) {
+      bugReportThrottle.reset();
       setBugReport(false);
       return;
     }
-    let alive = true;
-    // getAuthMethods fails CLOSED, so one answer taken while the server was
-    // down (or before it gained the setting) would hide the icon for the whole
-    // session. Ask again whenever the window comes back and the menu opens.
-    const check = () =>
-      void authManager.api.getAuthMethods().then((m) => {
-        if (alive) setBugReport(m.bugReport);
-      });
-    check();
-    window.addEventListener("focus", check);
-    return () => {
-      alive = false;
-      window.removeEventListener("focus", check);
-    };
-  }, [userId, serverUrl, open]);
+    checkBugReport(false);
+    const onFocus = () => checkBugReport(false);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [bugReportKey, checkBugReport, bugReportThrottle]);
+  useEffect(() => {
+    if (open) checkBugReport(forcedOpen);
+  }, [menu.mode]);
 
   // "unknown" is a state the user can now SEE: the sidebar paints before the
   // session restore finishes, so for its first moments we do not yet know
@@ -173,9 +223,7 @@ export function AccountMenu() {
   // showing — which is why the dialog below is keyed on it: `initialTab` is read
   // once, on mount, so a request that arrives while settings are already open
   // has to remount the dialog to land on its page.
-  useEffect(() => {
-    if (settingsDismissToken > 0) setMembersOpen(false);
-  }, [settingsDismissToken]);
+  // (`dismissSettings` clears the store's dialog flag itself.)
 
   // Sign-out closes every dialog this component owns (#302), for the case where
   // it stays mounted through sign-out → sign-in (see the tokens below for the
@@ -183,45 +231,44 @@ export function AccountMenu() {
   const hadSession = useRef(session != null);
   useEffect(() => {
     if (hadSession.current && session == null) {
-      setMembersOpen(false);
-      setAccountOpen(false);
+      closeSettingsDialog();
       setAuthOpen(false);
-      setOpen(false);
+      closeMenu();
     }
     hadSession.current = session != null;
   }, [session]);
 
-  // Requests are tokens kept in the store, so the last one outlives this
-  // component. Sign-out swaps the app for the sign-in screen and unmounts it;
-  // on sign-in it would mount, read that old request and reopen both settings
-  // dialogs (#302). Only a token newer than the one seen at mount opens a dialog.
-  const seenSettingsToken = useRef(settingsRequest?.token ?? 0);
-  const seenAccountSettingsToken = useRef(accountSettingsRequest?.token ?? 0);
-
+  // The open dialog is kept in the store, so it outlives this component.
+  // Sign-out swaps the app for the sign-in screen and unmounts it; on sign-in
+  // it would mount and reopen whichever settings dialog was showing (#302).
+  // Only a request made while this component is mounted opens a dialog.
   useEffect(() => {
-    if (!settingsRequest || settingsRequest.token <= seenSettingsToken.current) return;
-    seenSettingsToken.current = settingsRequest.token;
-    setOpen(false);
-    setSettingsTab(settingsRequest.tab);
-    setMembersOpen(true);
-  }, [settingsRequest]);
+    useStore.getState().closeSettingsDialog();
+  }, []);
 
+  // Opening the menu re-reads pending invitations, so one sent while no live
+  // frame reached us shows the moment the user clicks their name.
+  // At most once a minute (see the throttles above).
   useEffect(() => {
-    if (!accountSettingsRequest || accountSettingsRequest.token <= seenAccountSettingsToken.current) return;
-    seenAccountSettingsToken.current = accountSettingsRequest.token;
-    setOpen(false);
-    setAccountSettingsTab(accountSettingsRequest.tab);
-    setAccountOpen(true);
-  }, [accountSettingsRequest]);
+    if (!open) return;
+    if (invitationsThrottle.shouldFetch(userId ?? "", Date.now(), forcedOpen)) {
+      void useStore.getState().refreshUserInvitations();
+    }
+  }, [menu.mode]);
+
+  // Opening either settings dialog closes the account popover.
+  useEffect(() => {
+    if (settingsDialog) closeMenu();
+  }, [settingsDialog]);
 
   // Close the popover on outside click or Escape.
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: PointerEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(e.target as Node)) closeMenu();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") closeMenu();
     };
     window.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("keydown", onKey);
@@ -229,7 +276,7 @@ export function AccountMenu() {
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [open, closeMenu]);
 
   if (signedOut || authPending || !session) {
     // Signed out is still local-first: the identity bar names the local
@@ -307,7 +354,7 @@ export function AccountMenu() {
           <Suspense fallback={null}>
             <VaultSettingsDialog
               key={settingsRequest?.token ?? 0}
-              onClose={() => setMembersOpen(false)}
+              onClose={() => closeSettingsDialog("vault")}
               onRequestSignIn={() => setAuthOpen(true)}
               initialTab={settingsTab}
             />
@@ -321,6 +368,7 @@ export function AccountMenu() {
     organizations.find((o) => o.id === session.activeOrganizationId) ?? null;
   const userLabel = session.user.name || session.user.email;
   const hasInvites = userInvitations.length > 0;
+  const hasNewInvites = unseenInvitations(userInvitations, seenInvites).length > 0;
   // Presence light on the avatar. Connectivity gates it first — no-access is
   // blocked, an in-flight socket is idle. Once we're actually live (synced or
   // read-only), the user's *chosen* availability takes over: online → green,
@@ -357,12 +405,19 @@ export function AccountMenu() {
       <div className="identity-row">
         <button
           className={`identity-bar ${open ? "open" : ""}`}
-          onClick={() => setOpen((v) => !v)}
+          onClick={menu.toggle}
+          onPointerEnter={menu.hoverEnter}
+          onPointerLeave={menu.hoverLeave}
           aria-haspopup="menu"
           aria-expanded={open}
-          title={`${userLabel} · ${presenceLabel}${
-            syncEnabled && activeOrg ? ` · ${activeOrg.name}` : vault ? ` · ${vault.name}` : ""
-          }`}
+          // No tooltip while the menu shows: it would sit on top of the rows.
+          title={
+            open
+              ? undefined
+              : `${userLabel} · ${presenceLabel}${
+                  syncEnabled && activeOrg ? ` · ${activeOrg.name}` : vault ? ` · ${vault.name}` : ""
+                }`
+          }
         >
           <span className="identity-avatar-wrap">
             <LazyAvatar label={userLabel} image={session.user.image} userId={session.user.id} />
@@ -379,7 +434,12 @@ export function AccountMenu() {
               {session.user.name ? session.user.email : presenceLabel}
             </span>
           </span>
-          {hasInvites && <span className="identity-alert" aria-label="Pending invitation" />}
+          {hasInvites && (
+            <span
+              className={`identity-alert${hasNewInvites ? " is-new" : ""}`}
+              aria-label={hasNewInvites ? "New invitation" : "Pending invitation"}
+            />
+          )}
         </button>
         {bugReport && (
           <button
@@ -389,7 +449,7 @@ export function AccountMenu() {
             aria-label="Report a bug"
             aria-haspopup="dialog"
             onClick={() => {
-              setOpen(false);
+              closeMenu();
               setBugOpen(true);
             }}
           >
@@ -413,11 +473,13 @@ export function AccountMenu() {
 
       {open && (
         <AccountPopover
-          onClose={() => setOpen(false)}
+          onClose={closeMenu}
+          onPointerEnter={menu.cancelHoverClose}
+          onPointerLeave={menu.hoverLeave}
+          onPin={menu.pin}
+          seenInvites={seenInvites}
           onOpenAccount={() => {
-            setOpen(false);
-            setAccountSettingsTab(undefined);
-            setAccountOpen(true);
+            useStore.getState().requestAccountSettings("profile");
           }}
         />
       )}
@@ -425,7 +487,7 @@ export function AccountMenu() {
         <Suspense fallback={null}>
           <VaultSettingsDialog
             key={settingsRequest?.token ?? 0}
-            onClose={() => setMembersOpen(false)}
+            onClose={() => closeSettingsDialog("vault")}
             initialTab={settingsTab}
           />
         </Suspense>
@@ -434,7 +496,7 @@ export function AccountMenu() {
         <Suspense fallback={null}>
           <AccountSettings
             key={accountSettingsRequest?.token ?? 0}
-            onClose={() => setAccountOpen(false)}
+            onClose={() => closeSettingsDialog("account")}
             initialTab={accountSettingsTab}
           />
         </Suspense>
@@ -443,15 +505,91 @@ export function AccountMenu() {
   );
 }
 
+/** The running version, read once per launch so reopening the menu never flashes "…". */
+let menuVersion: string | null = null;
+
+/**
+ * The menu row's click: About's "Check for updates" (or its "Restart now" once
+ * an update is held), reported by a toast because the menu closes on click.
+ */
+function runMenuUpdateCheck(): void {
+  const current = updateState();
+  if (current.phase === "ready") {
+    void relaunchForUpdate();
+    return;
+  }
+  // A check or install is already running; About disables its button then.
+  if (isUpdateBusy(current)) return;
+  const unsubscribe = subscribeUpdateState(() => {
+    const next = updateState();
+    if (next.phase === "checking") return;
+    unsubscribe();
+    const message = updateCheckToast(next);
+    if (message) toast(message.text, message.tone);
+  });
+  void checkAndAutoInstall();
+  // `checkAndAutoInstall` enters `checking` synchronously unless an install
+  // retry already owns the updater; then there is no outcome to wait for.
+  if (updateState().phase !== "checking") unsubscribe();
+}
+
+function UpdateMenuRow({ onClose }: { onClose: () => void }) {
+  const update = useUpdateState();
+  const [version, setVersion] = useState<string | null>(menuVersion);
+  useEffect(() => {
+    if (menuVersion) return;
+    let alive = true;
+    void currentVersion()
+      .then((v) => {
+        menuVersion = v;
+        if (alive) setVersion(v);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return (
+    <button
+      className="menu-item"
+      onClick={() => {
+        onClose();
+        runMenuUpdateCheck();
+      }}
+    >
+      <MenuIcon>
+        <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+        <path d="M21 3v6h-6" />
+      </MenuIcon>
+      <span className="menu-item-label">Check for updates</span>
+      <span className="menu-hint">{updateRowHint(update, version)}</span>
+    </button>
+  );
+}
+
 function AccountPopover({
   onClose,
   onOpenAccount,
+  seenInvites,
+  onPointerEnter,
+  onPointerLeave,
+  onPin,
 }: {
   onClose: () => void;
   onOpenAccount: () => void;
+  seenInvites: Set<string>;
+  onPointerEnter: () => void;
+  onPointerLeave: () => void;
+  /** A press or focus inside pins a hover-opened menu, as on the vault switcher. */
+  onPin: () => void;
 }) {
   const session = useStore((s) => s.session);
   const userInvitations = useStore((s) => s.userInvitations);
+  // What was new when the menu opened keeps its glow for this opening; the
+  // seen set is written now (so the identity dot settles) and again whenever
+  // the list changes while open (so an arrival during it counts as seen, and
+  // answered invitations are pruned).
+  const freshIds = useFreshInvitations(userInvitations, seenInvites);
 
   if (!session) return null;
 
@@ -460,68 +598,22 @@ function AccountPopover({
     // identity card — name, email and avatar, permanently on screen in the
     // sidebar footer — so repeating it here would say what the user is already
     // looking at.
-    <div className="account-popover" role="menu">
-      {/* Vault items used to live here; point people at their new home. */}
-      <div className="menu-moved-note" role="note">
-        <MenuIcon>
-          <path d="M12 19V5M5 12l7-7 7 7" />
-        </MenuIcon>
-        <span>
-          Vault settings and switching have moved up. Click the vault icon at the
-          top of the sidebar.
-        </span>
-      </div>
-      <div className="menu-sep" />
+    <div
+      className="account-popover"
+      role="menu"
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
+      onPointerDownCapture={onPin}
+      onFocusCapture={onPin}
+    >
       {userInvitations.length > 0 && (
-        <div className="invite-inbox">
-          <div className="subhead">You're invited</div>
-          {userInvitations.map((inv) => (
-            <div key={inv.id} className="invite-row">
-              {/* The vault's NAME and the inviter's, not "Vault invitation" with
-                  an org id hidden in a title attribute — nobody recognises a
-                  vault by its id, and this row is the whole basis for deciding
-                  whether to accept. Both fields come from our own
-                  /api/invitations/mine; Better Auth's fallback route has
-                  neither, hence the plain-language defaults. */}
-              <span className="invite-row-meta">
-                <span className="invite-row-title">
-                  Join {inv.organizationName ?? "a vault"}
-                </span>
-                <span className="muted">
-                  {inv.inviterName ? `invited by ${inv.inviterName} · ` : ""}
-                  {inv.role}
-                </span>
-              </span>
-              {/* Accepting is: accept → re-read session → roster → switch into
-                  the vault → bind a folder → reconcile. Easily seconds, and it
-                  used to be a bare fire-and-forget click with no acknowledgement
-                  of any kind. */}
-              <AsyncButton
-                className="primary sm"
-                onClick={() => useStore.getState().acceptInvitation(inv.id)}
-              >
-                Accept
-              </AsyncButton>
-              {/* Declining is a real answer, and without it the only way to
-                  clear the row is to join a vault you were never joining. */}
-              <AsyncButton
-                className="link-btn"
-                onClick={async () => {
-                  try {
-                    await authManager.api.rejectInvitation(inv.id);
-                  } finally {
-                    await useStore.getState().refreshVault();
-                  }
-                }}
-              >
-                Decline
-              </AsyncButton>
-            </div>
-          ))}
-        </div>
+        <>
+          {/* Pending invitations as plain menu rows, a hairline above the
+              account rows; no eyebrow, since nothing else here has one. */}
+          <InvitationRows invitations={userInvitations} freshIds={freshIds} variant="menu" />
+          <div className="menu-sep" />
+        </>
       )}
-
-      {userInvitations.length > 0 && <div className="menu-sep" />}
       <button className="menu-item" onClick={onOpenAccount}>
         <MenuIcon>
           <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
@@ -554,6 +646,7 @@ function AccountPopover({
         <span className="menu-item-label">Connection</span>
         <span className="menu-hint">Server URL</span>
       </button>
+      <UpdateMenuRow onClose={onClose} />
 
       <div className="menu-sep" />
       <button

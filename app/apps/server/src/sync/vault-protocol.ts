@@ -205,6 +205,12 @@ export type ServerControl =
    * client patches its vault list in place; old clients ignore an unknown `t`.
    */
   | { t: "org"; name?: string; logo?: string | null }
+  /**
+   * The vault's shared appearance changed (owner/admin `PUT
+   * /api/orgs/:orgId/appearance`). Carries the whole settings object so the
+   * client applies it without a GET; old clients ignore an unknown `t`.
+   */
+  | { t: "appearance-changed"; orgId: string; settings: Record<string, unknown>; updatedAt: string }
   | ({ t: "presence" } & PresenceState) // a teammate's live viewing state changed
   /**
    * A new desktop release exists (`sync/release-watch.ts`, #269). A HINT to run
@@ -214,6 +220,20 @@ export type ServerControl =
    */
   | { t: "version-available"; version: string }
   /**
+   * User-addressed (sync/user-events.ts), sent only to clients advertising the
+   * `invitations` cap: an invitation to ANY vault arrived for this user, or one
+   * was accepted, declined or cancelled. A hint to re-read the invitation list.
+   */
+  | {
+      t: "invitation";
+      invitationId: string;
+      orgId: string;
+      orgName: string;
+      inviterName: string;
+      role: string;
+    }
+  | { t: "invitation-gone"; invitationId: string }
+  /**
    * The shrink burst brake (#252) holds — or stopped holding — THIS user's
    * content writes in this vault. Addressed to that user only. `held: true`
    * carries when the hold lapses (`until`, ms epoch) and how many notes engaged
@@ -222,7 +242,17 @@ export type ServerControl =
    * and only shows that sync is paused. Older clients ignore an unknown `t`.
    */
   | { t: "brake"; held: boolean; until?: number; count?: number }
+  /**
+   * THIS user is no longer a member of the vault (`orgId`): an owner/admin
+   * removed them (`removed`) or they left (`left`). Addressed to that user's
+   * connections only, and only to clients advertising the `member-removed`
+   * cap; the server closes the socket with `WS_CLOSE_UNAUTHORIZED` right after,
+   * cap or not, and every reconnect then fails at the token mint (403).
+   */
+  | { t: "member-removed"; orgId: string; userId: string; reason: MemberRemovedReason }
   | { t: "err"; message: string };
+
+export type MemberRemovedReason = "removed" | "left";
 
 /** Client's post-hello presence frame: declares what note it's currently on.
  *  `docId` is null when the client has no note open. `userId` is intentionally
@@ -439,7 +469,28 @@ export const PS_BRAKE = 0x0b;
 /** The vault's (organization's) name or icon changed — see the `org` frame. */
 export const PS_ORG_CHANGED = 0x0c;
 
+/** A user lost membership of the vault — see the `member-removed` frame.
+ *  Addressed to that user only; every instance closes their sockets. */
+export const PS_MEMBER_REMOVED = 0x0e;
+
 export type OrgChange = { name?: string; logo?: string | null };
+
+/** The vault's shared appearance changed — see the `appearance-changed` frame. */
+export const PS_APPEARANCE_CHANGED = 0x0d;
+
+export type AppearanceChange = {
+  orgId: string;
+  settings: Record<string, unknown>;
+  updatedAt: string;
+};
+
+export function encodePubsubAppearanceChanged(change: AppearanceChange): Uint8Array {
+  const body = enc.encode(JSON.stringify(change));
+  const out = new Uint8Array(1 + body.length);
+  out[0] = PS_APPEARANCE_CHANGED;
+  out.set(body, 1);
+  return out;
+}
 
 /** JSON body after the type: only the fields that are present. */
 export function encodePubsubOrgChanged(change: OrgChange): Uint8Array {
@@ -552,6 +603,19 @@ export function encodePubsubBrake(
   return out;
 }
 
+/** `userId` stopped being a member of `orgId`; addressed to that user only. */
+export function encodePubsubMemberRemoved(
+  orgId: string,
+  userId: string,
+  reason: MemberRemovedReason,
+): Uint8Array {
+  const body = enc.encode(JSON.stringify({ orgId, userId, reason }));
+  const out = new Uint8Array(1 + body.length);
+  out[0] = PS_MEMBER_REMOVED;
+  out.set(body, 1);
+  return out;
+}
+
 /** Ask every connection in the vault to re-announce its presence — sent when a
  *  client joins so it learns who's already viewing what (stateless: no instance
  *  holds the whole roster, so newcomers pull it via a re-announce round). */
@@ -567,11 +631,13 @@ export type PubsubMessage =
   | { type: "activity-changed" }
   | { type: "member-joined"; name: string }
   | { type: "org-changed"; change: OrgChange }
+  | { type: "appearance-changed"; change: AppearanceChange }
   | { type: "presence"; presence: PresenceState }
   | { type: "presence-query" }
   | { type: "voice"; frame: Uint8Array; speakerId: string }
   | { type: "rejected"; userId: string; docId: string; reason: "read_only" }
-  | { type: "brake"; userId: string; held: boolean; until?: number; count?: number };
+  | { type: "brake"; userId: string; held: boolean; until?: number; count?: number }
+  | { type: "member-removed"; orgId: string; userId: string; reason: MemberRemovedReason };
 
 export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
   if (bytes.length < 1) return null;
@@ -610,6 +676,26 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
         return { type: "org-changed", change };
       } catch {
         return { type: "org-changed", change: {} };
+      }
+    }
+    case PS_APPEARANCE_CHANGED: {
+      try {
+        const p = JSON.parse(dec.decode(bytes.subarray(1))) as Partial<AppearanceChange>;
+        if (
+          typeof p.orgId !== "string" ||
+          typeof p.updatedAt !== "string" ||
+          !p.settings ||
+          typeof p.settings !== "object" ||
+          Array.isArray(p.settings)
+        ) {
+          return null;
+        }
+        return {
+          type: "appearance-changed",
+          change: { orgId: p.orgId, settings: p.settings, updatedAt: p.updatedAt },
+        };
+      } catch {
+        return null;
       }
     }
     case PS_PRESENCE: {
@@ -664,6 +750,20 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
           ...(p.held && typeof p.until === "number" ? { until: p.until } : {}),
           ...(p.held && typeof p.count === "number" ? { count: p.count } : {}),
         };
+      } catch {
+        return null;
+      }
+    }
+    case PS_MEMBER_REMOVED: {
+      try {
+        const p = JSON.parse(dec.decode(bytes.subarray(1))) as {
+          orgId?: unknown;
+          userId?: unknown;
+          reason?: unknown;
+        };
+        if (typeof p.orgId !== "string" || typeof p.userId !== "string") return null;
+        if (p.reason !== "removed" && p.reason !== "left") return null;
+        return { type: "member-removed", orgId: p.orgId, userId: p.userId, reason: p.reason };
       } catch {
         return null;
       }

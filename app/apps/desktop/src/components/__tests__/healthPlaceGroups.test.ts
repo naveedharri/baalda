@@ -120,7 +120,7 @@ describe("Only on the Remote Vault", () => {
     expect(actions.removeServerFile).toHaveBeenCalledWith("s.pdf");
   });
 
-  it("uses the shared Pro line and hides downloads when blocked", async () => {
+  it("uses the shared Team line and hides downloads when blocked", async () => {
     await act(async () => root.render(createElement(RemoteOnlyGroup, {
       inventory, actions, downloadsBlocked: true, showCheckAgain: false, stale: false,
     })));

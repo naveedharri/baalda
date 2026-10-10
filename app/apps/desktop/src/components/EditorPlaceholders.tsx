@@ -4,6 +4,13 @@
    CodeMirror into the startup bundle. Their styles are in `editor.css`, which
    `cssCodeSplit: false` keeps in the one eager stylesheet. */
 
+import {
+  NOTHING_SHARED_TITLE,
+  editorEmptyPrompt,
+  nothingSharedBody,
+} from "../lib/emptyVaultState";
+import { useEmptyVaultView } from "./useEmptyVaultView";
+
 /**
  * Placeholder for a note that is still opening.
  *
@@ -62,9 +69,35 @@ const SKELETON_PARAGRAPHS: readonly (readonly number[])[] = [
 
 /** No note open: the editor column's resting state. */
 export function EditorEmpty() {
+  const view = useEmptyVaultView();
+  if (view.state === "nothing-shared") {
+    return (
+      <div className="editor-empty">
+        <NothingShared ownerName={view.ownerName} vaultName={view.vaultName} />
+      </div>
+    );
+  }
   return (
     <div className="editor-empty">
-      <p>Select a note, or press ⌘N to create one.</p>
+      <p>{editorEmptyPrompt(view.canCreateRoot)}</p>
+    </div>
+  );
+}
+
+/** "Nothing is shared with you yet." — a member who can read nothing in a
+ *  vault that is not empty (`lib/emptyVaultState`). Shared by the editor
+ *  column and the sidebar's empty tree; inherits their typography. */
+export function NothingShared({
+  ownerName,
+  vaultName,
+}: {
+  ownerName: string | null;
+  vaultName: string | null;
+}) {
+  return (
+    <div className="nothing-shared">
+      <p className="nothing-shared-title">{NOTHING_SHARED_TITLE}</p>
+      <p>{nothingSharedBody(ownerName, vaultName)}</p>
     </div>
   );
 }

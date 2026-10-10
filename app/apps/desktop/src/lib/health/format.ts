@@ -202,6 +202,24 @@ const MONTHS = [
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
+/** "19:34, 8 Oct 2026": an exact local time and day for a detail line. */
+export function clockDate(ms: number): string {
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "—";
+  return `${clockTime(ms)}, ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+/**
+ * Split a vault path into its folder part (with the trailing slash) and its
+ * filename, so a row can let the folder ellipsize while the filename stays
+ * whole: the CSS form of `middleTruncate`, which adapts to any panel width.
+ */
+export function splitPath(path: string): { dir: string; name: string } {
+  const slash = path.lastIndexOf("/");
+  if (slash < 0) return { dir: "", name: path };
+  return { dir: path.slice(0, slash + 1), name: path.slice(slash + 1) };
+}
+
 /** The heading over one day of the timeline: "Today", "Yesterday", "12 Sep". */
 export function dayLabel(ms: number, now: number): string {
   const d = new Date(ms);

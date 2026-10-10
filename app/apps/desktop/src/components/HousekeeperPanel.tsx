@@ -111,7 +111,7 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onGoTo
   useEffect(() => { if (repairOpen) showRepair(); }, [repairOpen]);
   const availableNotes = notes.filter(n => /\.md$/i.test(n.path));
   return <section className="housekeeper-panel" aria-label="Baalda Assistant">
-    <div className="housekeeper-heading"><h3>Baalda Assistant</h3>{status?.requiresPro !== false && <span className="housekeeper-badge">Pro</span>}</div>
+    <div className="housekeeper-heading"><h3>Baalda Assistant</h3>{(status?.requiresTeam ?? status?.requiresPro) !== false && <span className="housekeeper-badge">Team</span>}</div>
     <p className="housekeeper-intro">Keep your vault tidy. Review every change.</p>
     <div className="housekeeper-announcement"><span className="housekeeper-badge">NEW</span><span>TypeSafe Jev is now available in Baalda.</span></div>
     {identity && <>
@@ -124,7 +124,7 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onGoTo
     </>}
     <div hidden={identity !== undefined && pane !== "diagnostics"}>
     {!vaultId ? <div className="housekeeper-callout"><p>Connect this vault to sync and sign in to use Housekeeper.</p>{onGoToGeneral && <button className="secondary" onClick={onGoToGeneral}>Set up sync</button>}</div> : locked ? <div className="housekeeper-callout">
-      <p>Housekeeper requires a Pro subscription for this vault.</p>
+      <p>Housekeeper requires a Team subscription for this vault.</p>
       <div className="housekeeper-actions">{onUpgrade && <button className="primary" onClick={onUpgrade}>Upgrade vault</button>}
       <button className="secondary" onClick={() => setRefresh(n => n + 1)}>Check access again</button></div>
     </div> : status?.available ? <>
@@ -233,7 +233,7 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onGoTo
         </li>)}</ul>
       </div>}
       </div>}
-    </> : <p>{status ? "Housekeeper is not configured on this server. Ask the server administrator to configure OpenRouter." : error ? "Housekeeper could not connect." : "Checking Pro access…"}</p>}
+    </> : <p>{status ? "Housekeeper is not configured on this server. Ask the server administrator to configure OpenRouter." : error ? "Housekeeper could not connect." : "Checking Team access…"}</p>}
     {!status?.available && localFindings}
     {notice && <p role="status">{notice}</p>}
     {undoId && vaultId && <button className="secondary" disabled={busy} onClick={() => void run(async () => {

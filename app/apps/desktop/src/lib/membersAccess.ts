@@ -3,6 +3,7 @@
 
 import type {
   InvitationOverview,
+  Member,
   InviteManyResult,
   MemberAccessLevel,
   MemberOverview,
@@ -304,4 +305,72 @@ export function withNewInvitations(
   if (!added.length) return ov;
   const emails = new Set(added.map((i) => i.email.toLowerCase()));
   return { ...ov, invitations: [...added, ...ov.invitations.filter((i) => !emails.has(i.email.toLowerCase()))] };
+}
+
+/**
+ * May a viewer with `viewerRole` change the ACCESS of a member with
+ * `targetRole`? The one rule the UI asks, mirrored by the server's
+ * `permissions/access-management.ts canManageMemberAccess`:
+ *
+ *   - owner: anyone, themselves included (their own row is the way back in
+ *     after narrowing the whole vault);
+ *   - admin: everyone except the owner (plain members, other admins and
+ *     themselves) — decided 2026-10-09; role changes and removal keep the
+ *     stricter matrix where an admin never touches another admin;
+ *   - member: nobody.
+ */
+export function canManageMemberAccess(
+  viewerRole: string | null | undefined,
+  targetRole: string | null | undefined,
+  isSelf: boolean,
+): boolean {
+  if (viewerRole === "owner") return true;
+  if (viewerRole === "admin") return isSelf || targetRole === "member" || targetRole === "admin";
+  return false;
+}
+
+/**
+ * The signed-in viewer's role in this vault, from the FRESHEST authority.
+ * The store's `members` list is read when the vault opens, so a promotion
+ * made after that (an owner making someone admin) leaves it stale for the
+ * rest of the session; the roster overview is re-read every time the tab
+ * opens. Its own row wins, then the server's `canManage` (a manager row we
+ * somehow lack still means owner/admin), then the store's role.
+ */
+export function freshViewerRole(
+  overview: Pick<MembersOverview, "members" | "canManage"> | null | undefined,
+  myUserId: string | undefined,
+  storedRole: string | undefined,
+): string | undefined {
+  const mine = overview && myUserId ? overview.members.find((m) => m.userId === myUserId)?.role : undefined;
+  if (mine) return mine;
+  if (overview && !overview.canManage && (storedRole === "owner" || storedRole === "admin")) return "member";
+  return storedRole;
+}
+
+/** May this role see the manager view (Everyone row, Invite, Access column)? */
+export function roleManages(role: string | null | undefined): boolean {
+  return role === "owner" || role === "admin";
+}
+
+/**
+ * The store's member list with the viewer's role in `orgId` set to `role`.
+ * Returns the SAME array when nothing changes, so a caller can skip the
+ * store write; adds the row when the store never learned it.
+ */
+export function withViewerRole(
+  members: readonly Member[],
+  orgId: string,
+  userId: string,
+  role: string,
+  memberId?: string,
+): Member[] {
+  const i = members.findIndex((m) => m.organizationId === orgId && m.userId === userId);
+  if (i >= 0) {
+    if (members[i].role === role) return members as Member[];
+    const next = members.slice();
+    next[i] = { ...members[i], role };
+    return next;
+  }
+  return [...members, { id: memberId ?? `${orgId}:${userId}`, organizationId: orgId, userId, role }];
 }

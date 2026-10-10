@@ -1,6 +1,8 @@
 import type {
   BillingProvider,
   CheckoutSnapshot,
+  CreateDiscountArgs,
+  ProrationBehavior,
   NormalizedBillingEvent,
   SubscriptionSnapshot,
 } from "../../src/billing/provider.js";
@@ -29,6 +31,25 @@ export interface MetadataCall {
   userId: string;
 }
 
+export interface SeatsCall {
+  id: string;
+  seats: number;
+  proration: ProrationBehavior;
+}
+
+export interface ProductCall {
+  id: string;
+  productId: string;
+  proration: ProrationBehavior;
+  discountId?: string;
+}
+
+export interface AccountMetadataCall {
+  id: string;
+  accountId: string;
+  userId?: string;
+}
+
 export interface FakeProvider extends BillingProvider {
   /** Scripted result for the next `verifyAndNormalizeWebhook`. */
   nextEvent: NormalizedBillingEvent | null;
@@ -49,6 +70,14 @@ export interface FakeProvider extends BillingProvider {
   failResume: Error | null;
   failGet: Error | null;
   failMetadata: Error | null;
+  seatUpdates: SeatsCall[];
+  productChanges: ProductCall[];
+  discountsApplied: { id: string; discountId: string }[];
+  discountsCreated: CreateDiscountArgs[];
+  accountMetadataWrites: AccountMetadataCall[];
+  failSeats: Error | null;
+  failProduct: Error | null;
+  failDiscount: Error | null;
   reset(): void;
 }
 
@@ -63,6 +92,13 @@ export function makeSnapshot(over: Partial<SubscriptionSnapshot> = {}): Subscrip
     amount: 1000,
     currency: "usd",
     modifiedAt: new Date(),
+    seats: null,
+    listAmount: 1000,
+    discountId: null,
+    discountName: null,
+    pendingSeats: null,
+    accountId: null,
+    productId: null,
     ...over,
   };
 }
@@ -83,6 +119,14 @@ export function makeFakeProvider(): FakeProvider {
     failResume: null,
     failGet: null,
     failMetadata: null,
+    seatUpdates: [],
+    productChanges: [],
+    discountsApplied: [],
+    discountsCreated: [],
+    accountMetadataWrites: [],
+    failSeats: null,
+    failProduct: null,
+    failDiscount: null,
 
     reset() {
       this.nextEvent = null;
@@ -99,11 +143,19 @@ export function makeFakeProvider(): FakeProvider {
       this.failResume = null;
       this.failGet = null;
       this.failMetadata = null;
+      this.seatUpdates = [];
+      this.productChanges = [];
+      this.discountsApplied = [];
+      this.discountsCreated = [];
+      this.accountMetadataWrites = [];
+      this.failSeats = null;
+      this.failProduct = null;
+      this.failDiscount = null;
     },
 
     async createCheckout(args) {
       this.lastCheckout = args;
-      return { url: `https://polar.test/checkout/${args.interval}` };
+      return { url: `https://polar.test/checkout/${args.interval}`, id: `chk_${args.interval}` };
     },
 
     async getPortalUrl(args) {
@@ -151,6 +203,66 @@ export function makeFakeProvider(): FakeProvider {
     async setSubscriptionOrg(id, orgId, userId) {
       if (this.failMetadata) throw this.failMetadata;
       this.metadataWrites.push({ id, orgId, userId });
+    },
+
+    async setSubscriptionAccount(id, accountId, userId) {
+      if (this.failMetadata) throw this.failMetadata;
+      this.accountMetadataWrites.push({ id, accountId, userId });
+    },
+
+    async updateSeats(id, seats, proration) {
+      if (this.failSeats) throw this.failSeats;
+      this.seatUpdates.push({ id, seats, proration });
+      const deferred = proration === "next_period";
+      const perSeat = this.snapshot.interval === "year" ? 11000 : 1000;
+      return {
+        ...this.snapshot,
+        providerSubscriptionId: id,
+        seats: deferred ? this.snapshot.seats : seats,
+        pendingSeats: deferred ? seats : null,
+        listAmount: deferred ? this.snapshot.listAmount : perSeat * seats,
+        modifiedAt: new Date(),
+      };
+    },
+
+    async changeProduct(id, productId, proration, discountId) {
+      if (this.failProduct) throw this.failProduct;
+      this.productChanges.push({ id, productId, proration, discountId });
+      return {
+        ...this.snapshot,
+        providerSubscriptionId: id,
+        productId,
+        discountId: discountId ?? this.snapshot.discountId,
+        modifiedAt: new Date(),
+      };
+    },
+
+    async applyDiscount(id, discountId) {
+      if (this.failDiscount) throw this.failDiscount;
+      this.discountsApplied.push({ id, discountId });
+      return { ...this.snapshot, providerSubscriptionId: id, discountId, modifiedAt: new Date() };
+    },
+
+    async createDiscount(args) {
+      if (this.failDiscount) throw this.failDiscount;
+      this.discountsCreated.push(args);
+      return { id: `disc_${this.discountsCreated.length}`, name: args.name };
+    },
+
+    async previewSeatChange(id, seats) {
+      if (this.failGet) throw this.failGet;
+      const perSeat = this.snapshot.interval === "year" ? 11000 : 1000;
+      return {
+        currentSeats: this.snapshot.seats,
+        newSeats: seats,
+        newAmount: perSeat * seats,
+        perSeat,
+        currency: this.snapshot.currency,
+        interval: this.snapshot.interval,
+        proratedNow: 0,
+        currentPeriodEnd: this.snapshot.currentPeriodEnd,
+        estimated: true,
+      };
     },
 
     verifyAndNormalizeWebhook() {

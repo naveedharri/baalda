@@ -2,6 +2,7 @@ import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { config, billingEnabled } from "../config.js";
 import type { BillingInterval } from "./provider.js";
+import { resolveAccountPlan, teamModel, checkInviteSeat } from "./plan.js";
 
 /**
  * Entitlement checks. These read ONLY our own tables (`subscriptions`, `member`,
@@ -181,6 +182,15 @@ export async function storageLimitBytes(
   orgId: string,
   db: Queryable = defaultPool,
 ): Promise<number | null> {
+  if (teamModel()) return (await resolveAccountPlan(db, { orgId })).limits.storageBytes;
+  return legacyStorageLimitBytes(orgId, db);
+}
+
+/** Vault-model storage cap (today's per-org rule). */
+export async function legacyStorageLimitBytes(
+  orgId: string,
+  db: Queryable = defaultPool,
+): Promise<number | null> {
   if (!billingEnabled()) return null;
   if (await orgHasActiveSubscription(orgId, db)) return null;
   return config.freeMaxStorageMb * 1024 * 1024;
@@ -223,6 +233,15 @@ export async function canSyncAttachments(
   orgId: string,
   db: Queryable = defaultPool,
 ): Promise<boolean> {
+  if (teamModel()) return (await resolveAccountPlan(db, { orgId })).limits.fileSync;
+  return legacyCanSyncAttachments(orgId, db);
+}
+
+/** Vault-model standalone-file sync rule (today's per-org rule). */
+export async function legacyCanSyncAttachments(
+  orgId: string,
+  db: Queryable = defaultPool,
+): Promise<boolean> {
   if (!billingEnabled()) return true;
   return orgHasActiveSubscription(orgId, db);
 }
@@ -235,6 +254,12 @@ export async function canCreateOrganization(
   userId: string,
   db: Queryable = defaultPool,
 ): Promise<{ allowed: boolean; limit: number }> {
+  if (teamModel()) {
+    // Team model: the creator's account (the one they own) gets the new vault.
+    const plan = await resolveAccountPlan(db, { userId });
+    const cap = plan.limits.vaults;
+    return { allowed: cap === null || plan.vaultsAttached < cap, limit: cap ?? plan.vaultsAttached + 1 };
+  }
   let limit = config.freeMaxVaults;
   if (!billingEnabled()) return { allowed: true, limit };
   limit = await freeVaultLimitForUser(userId, db);
@@ -251,6 +276,19 @@ export async function canAddMember(
   orgId: string,
   db: Queryable = defaultPool,
 ): Promise<{ allowed: boolean; limit: number }> {
+  if (teamModel()) {
+    // Compat answer only; the call sites use `checkInviteSeat` / `checkJoinSeat`
+    // directly so they can say which limit (people vs seats) was hit.
+    const refused = await checkInviteSeat(db, orgId, null);
+    if (!refused) return { allowed: true, limit: config.freeMaxMembers };
+    return {
+      allowed: false,
+      limit:
+        refused.code === "seat_limit_reached" ? refused.seats
+        : refused.code === "member_limit_reached" ? refused.limit
+        : config.freeMaxMembers,
+    };
+  }
   const limit = config.freeMaxMembers;
   if (!billingEnabled()) return { allowed: true, limit };
   if (await orgHasActiveSubscription(orgId, db)) return { allowed: true, limit };

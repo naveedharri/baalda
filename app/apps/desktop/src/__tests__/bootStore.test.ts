@@ -78,7 +78,9 @@ const sync = vi.hoisted(() => ({
   setAclListener: vi.fn(),
   setInboundListeners: vi.fn(),
   setMemberJoinedListener: vi.fn(),
+  setMemberRemovedListener: vi.fn(),
   setOrgChangedListener: vi.fn(),
+  setAppearanceChangedListener: vi.fn(),
   setVaultPresenceListener: vi.fn(),
   setVoiceListener: vi.fn(),
   setSyncProgressListener: vi.fn(),
@@ -298,7 +300,7 @@ describe("attachment entitlement — vault-scoped server verdict", () => {
     expect(useStore.getState().attachmentSyncBlocked).toBe(false);
   });
 
-  it("retries attachments exactly when billing confirms a Free-to-Pro upgrade", async () => {
+  it("retries attachments exactly when billing confirms a Free-to-Team upgrade", async () => {
     useStore.setState({
       session: session(),
       billingConfig: { enabled: true } as never,

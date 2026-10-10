@@ -11,8 +11,10 @@ import {
   canEditDoc,
   canEditFolder,
   canWriteBlob,
+  vaultRootWritable,
 } from "../../permissions/http-gates.js";
 import type { DeleteRefusalCode } from "../../permissions/http-gates.js";
+import { ACCOUNT_READ_ONLY_BODY, refusedForBilling } from "../../permissions/http-gates.js";
 import { deleteDocBlobs } from "./blobs.js";
 import { createResolverCache, effectivePermission, loadAccessIndex } from "../../permissions/resolver.js";
 import { boardModes, encodeBoardModes } from "../../permissions/access-board.js";
@@ -614,10 +616,11 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       sort: body.sort,
     });
     if (out.status === "error") {
-      if (out.code === "note_limit_reached") return c.json({ error: out.message, code: out.code, limit: 20000 }, 402);
+      if (out.code === "note_limit_reached") return c.json({ error: out.message, code: out.code, limit: ("limit" in out && out.limit) || 20000 }, 402);
       if (out.code === "path_folder_mismatch") return c.json({ error: out.message, code: out.code }, 400);
       if (out.code === "root_frozen") return c.json(ROOT_FROZEN_ERROR, 403);
       if (out.code === "not_readable") return c.json({ error: out.message, code: out.code }, 409);
+      if (await refusedForBilling(org)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json(NO_WRITE_ACCESS_ERROR("folder"), 403);
     }
     const f = out.row;
@@ -749,6 +752,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // the folder's creator, or an edit share. Blocks renaming/moving folders a
     // member has no rights on.
     if (!(await canEditFolder(session.userId, id))) {
+      if (await refusedForBilling(await vaultOrg(row.vault_id))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json({ error: "You cannot modify this folder" }, 403);
     }
     const newParentId = body.parentId === undefined ? undefined : (body.parentId ?? null);
@@ -775,6 +779,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       plan.parentId !== current.parent_id &&
       !(await canEditFolder(session.userId, plan.parentId))
     ) {
+      if (await refusedForBilling(await vaultOrg(row.vault_id))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json({ error: "You cannot move this folder there" }, 403);
     }
 
@@ -816,14 +821,18 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     );
     const row = rows[0];
     if (!row) return c.json({ error: "Unknown folder" }, 404);
+    const folderOrg = await vaultOrg(row.vault_id);
     if (!(await canEditFolder(session.userId, id))) {
+      if (await refusedForBilling(folderOrg)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json({ error: "You cannot delete this folder" }, 403);
     }
-    const folderOrg = await vaultOrg(row.vault_id);
     const folderGate = folderOrg
       ? await canDeleteItem(pool, { orgId: folderOrg, userId: session.userId, kind: "folder", id })
       : ({ ok: false, code: "delete_not_creator" } as const);
-    if (!folderGate.ok) return c.json(deleteRefusal(folderGate.code), 403);
+    if (!folderGate.ok) {
+      if (folderGate.code === "account_read_only") return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+      return c.json(deleteRefusal(folderGate.code), 403);
+    }
     const { deletedNoteIds } = await deleteFolderCascade(pool, id, session.userId);
     // Their derived index rows go with them (see the single-note delete below)…
     await purgeNoteIndex(deletedNoteIds);
@@ -903,10 +912,11 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: out.message, code: out.code, docId: out.id }, 409);
     }
     if (out.status === "error") {
-      if (out.code === "note_limit_reached") return c.json({ error: out.message, code: out.code, limit: 20000 }, 402);
+      if (out.code === "note_limit_reached") return c.json({ error: out.message, code: out.code, limit: ("limit" in out && out.limit) || 20000 }, 402);
       if (out.code === "path_folder_mismatch") return c.json({ error: out.message, code: out.code }, 400);
       if (out.code === "root_frozen") return c.json(ROOT_FROZEN_ERROR, 403);
       if (out.code === "not_readable") return c.json({ error: out.message, code: out.code }, 409);
+      if (await refusedForBilling(org)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json(NO_WRITE_ACCESS_ERROR("note"), 403);
     }
     const n = out.row;
@@ -1004,7 +1014,24 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // local file, so it carries the minimum that can justify that.
     if (more) return c.json({ notes, nextAfter });
     const tombstones = await listDeletedReadableDocsInVault(session.userId, vaultId);
-    return c.json({ notes, tombstones: [...tombstones], ...(page ? { nextAfter: null } : {}) });
+    // Two booleans for the empty state of a member who can read nothing yet
+    // (owner decision 2026-10-09). Without `hiddenContent` the desktop cannot
+    // tell "nothing is shared with you" from "this vault is empty", and without
+    // `canCreateRoot` it offers ⌘N where the create would be refused. Last page
+    // only, beside the tombstones, so both halves of the client's check (zero
+    // readable rows AND something hidden) come from one snapshot. A boolean,
+    // never ids: it says that something exists, not what or where.
+    const [hiddenContent, canCreateRoot] = await Promise.all([
+      vaultHasHiddenContent(vaultId, readable),
+      vaultRootWritable(session.userId, org),
+    ]);
+    return c.json({
+      notes,
+      tombstones: [...tombstones],
+      hiddenContent,
+      canCreateRoot,
+      ...(page ? { nextAfter: null } : {}),
+    });
   });
 
   // Rename / move a single note (rel_path / folder / title). doc_id unchanged.
@@ -1023,6 +1050,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // not bare membership. This also closes the relocate-to-escalate path: a
     // member with no access to the note can't rename/move it at all.
     if (!(await canEditDoc(session.userId, id))) {
+      if (await refusedForBilling(await vaultOrg(row.vault_id))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json({ error: "You cannot modify this note" }, 403);
     }
     const folderId = body.folderId === undefined ? undefined : (body.folderId ?? null);
@@ -1079,6 +1107,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       plan.folderId !== row.folder_id &&
       !(await canEditFolder(session.userId, plan.folderId))
     ) {
+      if (await refusedForBilling(await vaultOrg(row.vault_id))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json({ error: "You cannot move this note there" }, 403);
     }
     // Dragging a note out to the root is a root creation by another name —
@@ -1125,14 +1154,18 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const row = rows[0];
     if (!row) return c.json({ error: "Unknown note" }, 404);
     // Edit permission required to destroy a note — not bare membership.
+    const noteOrg = await vaultOrg(row.vault_id);
     if (!(await canEditDoc(session.userId, id))) {
+      if (await refusedForBilling(noteOrg)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json({ error: "You cannot delete this note" }, 403);
     }
-    const noteOrg = await vaultOrg(row.vault_id);
     const noteGate = noteOrg
       ? await canDeleteItem(pool, { orgId: noteOrg, userId: session.userId, kind: "note", id })
       : ({ ok: false, code: "delete_not_creator" } as const);
-    if (!noteGate.ok) return c.json(deleteRefusal(noteGate.code), 403);
+    if (!noteGate.ok) {
+      if (noteGate.code === "account_read_only") return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+      return c.json(deleteRefusal(noteGate.code), 403);
+    }
     await pool.query(`UPDATE notes SET ${softDeleteSet("$2")} WHERE id = $1`, [id, session.userId]);
     // Drop the DERIVED search/graph rows with the note. They are a rebuildable
     // cache of the canonical Yjs state (migration 005), and note_index keeps a
@@ -1180,11 +1213,12 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const ctx = registerCtx(vaultId, session.userId);
     const out = await registerFile(ctx, { path, docId, folderId: folderId ?? null });
     if (out.status === "error") {
-      if (out.code === "note_limit_reached") return c.json({ error: out.message, code: out.code, limit: 20000 }, 402);
+      if (out.code === "note_limit_reached") return c.json({ error: out.message, code: out.code, limit: ("limit" in out && out.limit) || 20000 }, 402);
       if (out.code === "path_folder_mismatch") return c.json({ error: out.message, code: out.code }, 400);
       if (out.code === "transient_file") return c.json({ error: out.message, code: out.code }, 400);
       if (out.code === "root_frozen") return c.json(ROOT_FROZEN_ERROR, 403);
       if (out.code === "not_readable") return c.json({ error: out.message, code: out.code }, 409);
+      if (await refusedForBilling(org)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
     }
     const fileRow = out.row;
@@ -1231,6 +1265,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const out = await deleteRegisteredFile(session.userId, id);
     if (out.status === "gone") return c.body(null, 204);
     if (out.status === "not_member") return c.json({ error: "Not a member of this vault" }, 403);
+    if (out.status === "account_read_only") return c.json(ACCOUNT_READ_ONLY_BODY, 402);
     if (out.status === "forbidden") return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
     if (out.status === "not_creator") return c.json(deleteRefusal("delete_not_creator"), 403);
     changed(c, out.vaultId);
@@ -1244,6 +1279,7 @@ export type FileDeleteResult =
   | { status: "gone" }
   | { status: "not_member" }
   | { status: "forbidden" }
+  | { status: "account_read_only" }
   | { status: "not_creator" }
   | { status: "deleted"; vaultId: string; path: string };
 
@@ -1283,10 +1319,12 @@ export async function deleteRegisteredFile(
     // away (`canWriteBlob` → `canCreateIn` on the file's folder): a Read-only
     // vault, a locked share or a sealed posture refuses both ends.
     if (!(await canWriteBlob(userId, { vault_id: row.vault_id, rel_path: row.path, doc_id: id }))) {
-      return { status: "forbidden" };
+      return (await refusedForBilling(org)) ? { status: "account_read_only" } : { status: "forbidden" };
     }
     // Members delete only files they registered; owners/admins delete anything.
-    if (!(await canDeleteItem(pool, { orgId: org, userId, kind: "file", id })).ok) {
+    const fileGate = await canDeleteItem(pool, { orgId: org, userId, kind: "file", id });
+    if (!fileGate.ok) {
+      if (fileGate.code === "account_read_only") return { status: "account_read_only" };
       return { status: "not_creator" };
     }
 
@@ -1304,4 +1342,30 @@ export async function deleteRegisteredFile(
     // Ids and counts only — never the path (#267).
     console.info(`[registry] deleted file ${id} in vault ${row.vault_id} and ${blobs} blob(s)`);
     return { status: "deleted", vaultId: row.vault_id, path: row.path };
+}
+
+/**
+ * Does `vaultId` hold at least one live note or file outside `readable`?
+ * One EXISTS over the vault's live docs with an anti-join against the readable
+ * set, so it stops at the first hidden row and never materialises a list.
+ */
+export async function vaultHasHiddenContent(
+  vaultId: string,
+  readable: Set<string>,
+): Promise<boolean> {
+  const ids = [...readable];
+  const { rows } = await pool.query<{ hidden: boolean }>(
+    `WITH r(id) AS (SELECT unnest($2::text[]))
+     SELECT EXISTS (
+       SELECT 1 FROM notes n
+        WHERE n.vault_id = $1 AND n.deleted_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM r WHERE r.id = n.id)
+       UNION ALL
+       SELECT 1 FROM files f
+        WHERE f.vault_id = $1
+          AND NOT EXISTS (SELECT 1 FROM r WHERE r.id = f.id)
+     ) AS hidden`,
+    [vaultId, ids],
+  );
+  return rows[0]?.hidden === true;
 }

@@ -3,6 +3,7 @@ import type { IncomingMessage, Server as HttpServer } from "node:http";
 import type { Socket } from "node:net";
 import { config } from "../config.js";
 import { type PubSub, vaultTopic } from "./pubsub.js";
+import { decodeUserEvent, USER_EVENTS_CAP, userTopic } from "./user-events.js";
 import { verifyVaultToken } from "../tokens/vault-token.js";
 import { listReadableDocsInVault } from "../permissions/vault-docs.js";
 import { listEmptyDocs, loadDocDiff } from "../yjs/persistence.js";
@@ -19,6 +20,8 @@ import {
   encodePubsubActivityChanged,
   encodePubsubMemberJoined,
   encodePubsubOrgChanged,
+  encodePubsubAppearanceChanged,
+  type AppearanceChange,
   type OrgChange,
   encodePubsubRejected,
   encodePubsubBrake,
@@ -27,6 +30,8 @@ import {
   encodePubsubVoice,
   encodeVoiceFrame,
   decodePubsub,
+  encodePubsubMemberRemoved,
+  type MemberRemovedReason,
   decodeVoiceFrame,
   VOICE_FRAME,
   VOICE_RATE_BYTES_PER_SEC,
@@ -331,6 +336,12 @@ export class VaultChannel {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubOrgChanged(change));
   }
 
+  /** The vault's shared appearance changed; every subscriber applies the
+   *  settings carried inline (same org-wide fan-out as {@link publishOrgChanged}). */
+  async publishAppearanceChanged(vaultId: string, change: AppearanceChange): Promise<void> {
+    await this.pubsub.publish(vaultTopic(vaultId), encodePubsubAppearanceChanged(change));
+  }
+
   /** A read-only connection's edit was dropped (`ready`-independent; see the
    *  `rejected` frame). Every instance forwards it to that user's sockets. */
   async publishRejected(vaultId: string, userId: string, docId: string): Promise<void> {
@@ -350,6 +361,18 @@ export class VaultChannel {
         ? encodePubsubBrake(userId, true, state.until, state.count)
         : encodePubsubBrake(userId, false),
     );
+  }
+
+  /** `userId` is no longer a member of `orgId`, whose note collection is
+   *  `vaultId`. Every instance tells that user's connections (cap-gated) and
+   *  closes them with `WS_CLOSE_UNAUTHORIZED`; nobody else hears it. */
+  async publishMemberRemoved(
+    vaultId: string,
+    orgId: string,
+    userId: string,
+    reason: MemberRemovedReason,
+  ): Promise<void> {
+    await this.pubsub.publish(vaultTopic(vaultId), encodePubsubMemberRemoved(orgId, userId, reason));
   }
 
   /** Wire the channel onto the HTTP server's upgrade at `config.vaultSyncPath`. */
@@ -480,6 +503,8 @@ class VaultConnection {
   private caps = new Set<string>();
   private readable = new Set<string>();
   private unsubscribe: (() => void) | null = null;
+  /** The user-addressed topic (`invitations` cap only, sync/user-events.ts). */
+  private unsubscribeUser: (() => void) | null = null;
   private helloSeen = false;
   // Set once by cleanup(). `close` fires exactly once, so anything that outlives
   // it (an in-flight hello await) must consult this instead of relying on
@@ -630,6 +655,21 @@ class VaultConnection {
       return;
     }
     this.unsubscribe = off;
+
+    // Events addressed to this USER (an invitation to another vault) ride
+    // whichever vault channel they have open. Opt-in by cap: an old client
+    // would not know the frame.
+    if (this.caps.has(USER_EVENTS_CAP)) {
+      const offUser = await this.pubsub.subscribe(userTopic(this.userId), (p) => {
+        const event = decodeUserEvent(p);
+        if (event && !this.closed) this.send(event);
+      });
+      if (this.closed || this.ws.readyState !== this.ws.OPEN) {
+        offUser();
+        return;
+      }
+      this.unsubscribeUser = offUser;
+    }
 
     // Replay the announce that raced the auth I/O — BEFORE the backfill, so the
     // rest of the vault sees this user (and this user gets the re-announce
@@ -1074,6 +1114,21 @@ class VaultConnection {
       }
       return;
     }
+    if (msg.type === "member-removed") {
+      // Only the departed user's own sockets. Tell a client that understands
+      // the frame, then close regardless of cap: the membership is gone, so the
+      // reconnect fails at the token mint (403) and stops there.
+      if (msg.userId !== this.userId) return;
+      if (this.caps.has("member-removed")) {
+        this.send({ t: "member-removed", orgId: msg.orgId, userId: msg.userId, reason: msg.reason });
+      }
+      console.warn(
+        `[vault-channel] closing user=${this.userId} vault=${this.vaultId ?? "?"}: membership ended (${msg.reason})`,
+      );
+      this.ws.close(WS_CLOSE_UNAUTHORIZED, "membership_ended");
+      this.cleanup();
+      return;
+    }
     if (msg.type === "member-joined") {
       // Org-wide news, not doc-scoped — forward to every subscriber of this
       // vault so their roster refreshes and the join celebration fires live.
@@ -1083,6 +1138,11 @@ class VaultConnection {
     if (msg.type === "org-changed") {
       // Org-wide like a join: every subscriber patches the vault's name/icon.
       this.send({ t: "org", ...msg.change });
+      return;
+    }
+    if (msg.type === "appearance-changed") {
+      // Org-wide like `org`: every member applies the vault's appearance.
+      this.send({ t: "appearance-changed", ...msg.change });
       return;
     }
     if (msg.type === "presence") {
@@ -1099,18 +1159,9 @@ class VaultConnection {
       // Vault-wide, like member-joined: audio is addressed to the team, and
       // vault membership is already proven by the token behind every connection.
       //
-      // KNOWN LIMITATION, narrowed but not gone. Member removal now publishes
-      // `acl-changed`, so a removed member's readable set empties immediately and
-      // every doc is dropped — note CONTENT is no longer TTL-bound.
-      //
-      // What remains is the vault-WIDE frames, which are deliberately not
-      // doc-gated: this one and `member-joined`. The socket itself survives (there
-      // is still no `disconnectDoc` equivalent for the vault channel), so a
-      // just-removed member can still hear audio and see joins until the socket
-      // drops or their vault token expires (`SYNC_TOKEN_TTL_SECONDS`, 600s by
-      // default). Closing that needs a `PS_MEMBER_REMOVED` frame carrying a userId
-      // each connection compares against its own and self-terminates on; tracked
-      // as follow-up work, not solved here.
+      // Membership ending publishes `member-removed`, which closes the departed
+      // user's vault-channel sockets on every instance, so vault-wide frames
+      // like this one stop reaching them at once rather than at token expiry.
       //
       // Two gates. Never echo to the speaker — they are hearing themselves live
       // and a loopback would be an echo, not a feature. And only send to clients
@@ -1471,6 +1522,10 @@ class VaultConnection {
         encodePubsubPresence({ userId: this.userId, docId: null, name, color, status }),
       );
       this.announced = false;
+    }
+    if (this.unsubscribeUser) {
+      this.unsubscribeUser();
+      this.unsubscribeUser = null;
     }
     if (this.unsubscribe) {
       this.unsubscribe();

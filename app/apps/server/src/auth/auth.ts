@@ -1,12 +1,15 @@
 import { betterAuth } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { bearer, mcp, organization } from "better-auth/plugins";
 import { Algorithm, hash as argonHash, verify as argonVerify } from "@node-rs/argon2";
 import pg from "pg";
 import { config } from "../config.js";
 import { BRAND_NAME } from "../brand.js";
 import { canAddMember, canCreateOrganization } from "../billing/entitlements.js";
-import { announceMemberJoined, announceOrgChanged } from "../sync/member-events.js";
+import { checkInviteSeat, checkJoinSeat, seatRefusalBody, teamModel, type SeatRefusal } from "../billing/plan.js";
+import { ensureAccountForOrg } from "../billing/accounts.js";
+import { onMembershipTrimmed } from "../billing/lapse.js";
+import { announceMemberJoined, announceMemberRemoved, announceOrgChanged } from "../sync/member-events.js";
 import { dispatchMail, emailEnabled } from "../email/mailer.js";
 import { verifyEmailEmail } from "../email/templates.js";
 import { clearThrottle } from "./signin-throttle.js";
@@ -15,6 +18,7 @@ import { isValidProfileImage } from "./profile-image.js";
 import { hasExpiryNotice } from "../invitations/expiries.js";
 import { invitationActivityChanged } from "../invitations/sweep.js";
 import { applyInvitationAccess } from "../members/invitation-access.js";
+import { announceInvitation, announceInvitationGone } from "../sync/user-events.js";
 
 /**
  * Better Auth (spec 04 §1/§2).
@@ -202,6 +206,21 @@ export const auth = betterAuth({
   },
   // The profile picture (`image`) is validated on every update — see
   // auth/profile-image.ts. Provider sign-ups write a photo URL, which passes.
+  // Better Auth's `/organization/leave` has no organization hook, so it is
+  // caught here: once it succeeded, close the leaver's vault-channel sockets
+  // exactly like our POST /api/orgs/:orgId/leave does.
+  hooks: {
+    after: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/organization/leave") return;
+      const returned = ctx.context.returned as
+        | { userId?: unknown; organizationId?: unknown }
+        | Error
+        | undefined;
+      if (!returned || returned instanceof Error) return;
+      if (typeof returned.userId !== "string" || typeof returned.organizationId !== "string") return;
+      await announceMemberRemoved(returned.organizationId, returned.userId, "left");
+    }),
+  },
   databaseHooks: {
     user: {
       update: {
@@ -283,11 +302,32 @@ export const auth = betterAuth({
             });
           }
         },
+        // Attach the new vault to its owner's billing account (migration 051),
+        // so seats and free limits count it from the start. Billing also
+        // attaches lazily, so a failure here only logs.
+        afterCreateOrganization: async ({ organization }) => {
+          if (!organization) return;
+          try {
+            await ensureAccountForOrg(authPool, organization.id);
+          } catch (err) {
+            console.error(
+              `billing: could not attach vault ${organization.id} to an account:`,
+              (err as Error).message,
+            );
+          }
+        },
         beforeCreateInvitation: async (data) => {
           // A re-invite replaces a pending row rather than adding a seat, so it
           // must pass even at the cap — otherwise a full free vault could never
           // re-send a lost invitation.
           if (await hasPendingInvitation(data.organization.id, data.invitation.email)) return;
+          if (teamModel()) {
+            // Soft gate: people + reserved seats + this address must fit the
+            // account's limit (Free people cap, or Team purchased seats).
+            const refused = await checkInviteSeat(authPool, data.organization.id, data.invitation.email);
+            if (refused) throw seatError(refused);
+            return;
+          }
           const { allowed, limit } = await canAddMember(data.organization.id);
           if (!allowed) {
             throw new APIError("PAYMENT_REQUIRED", {
@@ -296,6 +336,16 @@ export const auth = betterAuth({
               limit,
             });
           }
+        },
+        // Hard gate at acceptance (team model only; vault mode never gated it):
+        // members + 1 must fit, and someone already on the account takes no seat.
+        beforeAcceptInvitation: async (data) => {
+          if (!teamModel()) return;
+          const refused = await checkJoinSeat(authPool, data.organization.id, {
+            userId: data.user.id,
+            email: data.user.email,
+          });
+          if (refused) throw seatError(refused);
         },
         // A re-invite (Resend) answers an "expired unaccepted" Activity notice
         // for that address (#268): tell open feeds so it drops without a poll.
@@ -308,12 +358,39 @@ export const auth = betterAuth({
           } catch (err) {
             console.error("[invitations] expiry notice check failed:", err);
           }
+          // The invitee's open apps show it now, not on their next reload.
+          const inviter = data.inviter as { name?: string | null; email?: string | null } | undefined;
+          await announceInvitation({
+            email: data.invitation.email,
+            invitationId: data.invitation.id,
+            orgId: data.organization.id,
+            orgName: data.organization.name,
+            inviterName: inviter?.name?.trim() || inviter?.email || "",
+            role: String(data.invitation.role ?? "member"),
+          });
         },
         // A teammate accepted an invitation → announce to everyone live in the
         // vault so their roster refreshes and the join celebration fires.
         // (The join-code path bypasses Better Auth and announces itself; org
         // creation adds the owner via `afterAddMember`, which we deliberately
         // don't hook — no one should be "welcomed" to their own new vault.)
+        // Seats/vaults shrank: a lapsed account trimmed back under the Free
+        // limits is lifted (billing/lapse.ts). Runs after Better Auth's write;
+        // `onMembershipTrimmed` never throws.
+        afterRemoveMember: async ({ organization, member }) => {
+          await onMembershipTrimmed(authPool, organization.id);
+          // Better Auth's own remove-member endpoint: close the removed user's
+          // live vault-channel sockets like DELETE /api/orgs/:orgId/members/:userId.
+          await announceMemberRemoved(organization.id, member.userId, "removed");
+        },
+        afterCancelInvitation: async ({ organization, invitation }) => {
+          await onMembershipTrimmed(authPool, organization.id);
+          await announceInvitationGone(invitation.id, { email: invitation.email });
+        },
+        afterRejectInvitation: async ({ organization, invitation, user }) => {
+          await onMembershipTrimmed(authPool, organization.id);
+          await announceInvitationGone(invitation.id, { userId: user.id });
+        },
         afterAcceptInvitation: async (data) => {
           // Apply the access the inviter chose (invitation_access, m046). The
           // member row exists by now; best-effort, never fails the accept.
@@ -324,6 +401,7 @@ export const auth = betterAuth({
           });
           const name = data.user.name?.trim() || data.user.email;
           await announceMemberJoined(data.organization.id, name);
+          await announceInvitationGone(data.invitation.id, { userId: data.user.id });
         },
         // Role changes must go through PATCH /api/orgs/:orgId/members/:userId,
         // which enforces our stricter matrix (an admin may not touch another
@@ -363,3 +441,10 @@ export const auth = betterAuth({
 });
 
 export type Auth = typeof auth;
+
+/** 402 for a refused seat, in Better Auth's error envelope. `message` stays the
+ *  bare token for member_limit_reached (old desktops match it) and is a full
+ *  sentence for seat_limit_reached. */
+function seatError(refused: SeatRefusal): APIError {
+  return new APIError("PAYMENT_REQUIRED", seatRefusalBody(refused) as { message: string });
+}

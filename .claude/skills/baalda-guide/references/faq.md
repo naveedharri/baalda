@@ -10,19 +10,19 @@ notes too. Think "Obsidian, but multiplayer and AI-friendly".
 ## Is it free?
 The desktop app and the server are open source (Apache 2.0). Using it on your own computer is
 free forever, and you can run your own server for free with no limits. The managed backend
-(hosted by Baalda, the app's default) also starts free: 3 vaults per user and 3 members per
-vault. Past that, upgrade a vault to Pro from inside the app.
+(hosted by Baalda, the app's default) also starts free: up to 2 people and 1 synced vault, with
+the AI connection point (MCP) included. Past that, upgrade to Team from inside the app.
 
 ## What does the paid plan cost, and can my team start today?
-Yes, today. Sign up in the app, turn on sync, invite the team. The free tier covers 3 people per
-vault and 3 vaults per person. When you need more members or more vaults, go to Vault Settings →
-Billing → Upgrade to Pro: $10 per vault per month or $97 per vault per year, priced per vault,
-not per person, with unlimited members. Only the vault owner or an admin pays; everyone else just
-needs a free account. baalda.com/pricing is the place to ask questions or talk to the team, but
-nobody has to wait for a call to get started.
+Yes, today. Sign up in the app, turn on sync, invite the team. Free covers 2 people and 1 synced
+vault. For more, the owner opens Account Settings → Plan & Billing and buys Team: $10 per seat per
+month or $110 per seat per year, minimum 3 seats, one seat per person including the owner. One
+Team account covers all the owner's vaults, and adds the Baalda Assistant and standalone file
+sync. baalda.com/pricing is the place to ask questions or talk to the team, but nobody has to wait
+for a call to get started.
 
 ## Can I leave a vault someone else owns?
-Yes. Open Vault Settings → Vaults, click **Leave** next to the vault and confirm. You lose access
+Yes. Open Account Settings → Vaults, click **Leave** next to the vault and confirm. You lose access
 straight away on every device you are signed in on, the vault leaves your switcher, and the folder
 on that device goes to the Trash rather than staying behind as a copy. The owner is emailed that
 you left (and you get a receipt) when the server sends email. Nobody else's access changes. If you
@@ -30,26 +30,14 @@ want back in, ask the owner for a new invitation or join code. The owner of a va
 it; they delete it instead. If you only want the vault off one computer but want to stay a member,
 use **Remove from device**.
 
-## What happens to my subscription if I delete a vault?
-Deleting the vault stops the billing, but not mid-month: it is set to finish at the end of the
-period you have already paid for, so there is no further charge and no refund needed. If Baalda
-cannot reach the payment provider to do that, it refuses to delete the vault and shows you the
-error, so you never end up paying for something that is gone. The subscription stays visible
-under Vault Settings → Billing → "From deleted vaults", where you can move it to another vault,
-cancel it straight away, or open the billing portal.
+## What happens if our payment stops?
+Once the paid period ends (or a failed payment runs out of its grace period), every vault on the
+account keeps syncing read-only for everyone until the owner renews or gets back under the Free
+limits. Notes stay editable on each computer and nothing is deleted.
 
-## I deleted my Pro vault and made a new one. Can I move the subscription?
-Yes. Open Vault Settings → Billing, find it under "From deleted vaults", and choose **Transfer**.
-A dialog lists the vaults it can move to, with their member counts; pick the new vault (it has to
-be one you own that is not already on Pro), confirm, and it takes over the
-same price and the same billing period. Because the old vault was deleted, the subscription had
-been set to stop at the end of the period; transferring it starts it renewing again on the new
-vault. Only the owner can do this.
-
-## Can one vault have two subscriptions?
-No. A vault is either Free or on one Pro subscription. If you try to buy Pro for a vault that
-already has it, Baalda refuses instead of charging you twice. If you want to change how you pay
-(monthly to yearly, say), use "Manage subscription" to open the billing portal.
+## We already paid for Pro. Does our price change?
+No. Existing subscriptions move to Team at the price you pay today, shown in the app as a legacy
+discount. Seats you add later cost the regular Team price.
 
 ## I forgot my password.
 On the sign-in screen choose **Forgot password?**, enter your email, and follow the link we

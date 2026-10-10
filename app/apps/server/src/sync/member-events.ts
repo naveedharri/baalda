@@ -68,3 +68,73 @@ export async function announceOrgChanged(
     console.error("announceOrgChanged failed:", err);
   }
 }
+
+/** The vault's shared appearance after an owner/admin saved it. */
+export type AppearanceChangedFields = {
+  orgId: string;
+  settings: Record<string, unknown>;
+  updatedAt: string;
+};
+type AppearanceChangedPublisher = (vaultId: string, change: AppearanceChangedFields) => void;
+
+let publishAppearance: AppearanceChangedPublisher | null = null;
+
+export function setAppearanceChangedPublisher(fn: AppearanceChangedPublisher | null): void {
+  publishAppearance = fn;
+}
+
+/**
+ * Tell everyone live in a vault that its appearance changed, carrying the whole
+ * settings object so clients apply it without a GET. Same fan-out and
+ * best-effort contract as {@link announceOrgChanged}.
+ */
+export async function announceAppearanceChanged(change: AppearanceChangedFields): Promise<void> {
+  if (!publishAppearance) return;
+  try {
+    const { rows } = await pool.query<{ id: string }>(
+      "SELECT id FROM vaults WHERE organization_id = $1",
+      [change.orgId],
+    );
+    for (const { id } of rows) publishAppearance(id, change);
+  } catch (err) {
+    console.error("announceAppearanceChanged failed:", err);
+  }
+}
+
+/** Why a membership ended: an owner/admin removed them, or they left. */
+export type MemberRemovedReason = "removed" | "left";
+type MemberRemovedPublisher = (
+  vaultId: string,
+  orgId: string,
+  userId: string,
+  reason: MemberRemovedReason,
+) => void;
+
+let publishRemoved: MemberRemovedPublisher | null = null;
+
+export function setMemberRemovedPublisher(fn: MemberRemovedPublisher | null): void {
+  publishRemoved = fn;
+}
+
+/**
+ * Tell `userId`'s live vault-channel connections that their membership of
+ * `organizationId` ended, which also closes them. Call AFTER the member row is
+ * gone, so the client's reconnect fails at the token mint. Same fan-out and
+ * best-effort contract as {@link announceMemberJoined}.
+ */
+export async function announceMemberRemoved(
+  organizationId: string,
+  userId: string,
+  reason: MemberRemovedReason,
+): Promise<void> {
+  if (!publishRemoved) return;
+  try {
+    const { rows } = await pool.query<{ id: string }>(
+      "SELECT id FROM vaults WHERE organization_id = $1",
+      [organizationId],
+    );
+    for (const { id } of rows) publishRemoved(id, organizationId, userId, reason);
+  } catch (err) {
+    console.error("announceMemberRemoved failed:", err);
+  }
+}

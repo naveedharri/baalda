@@ -56,7 +56,7 @@ describe("member shares reset", () => {
     await pool.end();
   });
 
-  it("gates: member 403, admin on another admin/owner 403, admin on member/self 200, owner on anyone 200, non-member 404", async () => {
+  it("gates: member 403, admin on owner 403, admin on member/admin/self 200, owner on anyone 200, non-member 404", async () => {
     const { owner, orgId } = await setup();
     const m = await addMember(orgId, "m@reset.test");
     const m2 = await addMember(orgId, "m2@reset.test");
@@ -66,7 +66,7 @@ describe("member shares reset", () => {
 
     expect((await reset(m, orgId, m2.userId)).status).toBe(403);
     expect((await reset(m, orgId, m.userId)).status).toBe(403);
-    expect((await reset(admin, orgId, admin2.userId)).status).toBe(403);
+    expect((await reset(admin, orgId, admin2.userId)).status).toBe(200);
     expect((await reset(admin, orgId, owner.userId)).status).toBe(403);
     expect((await reset(admin, orgId, m.userId)).status).toBe(200);
     expect((await reset(admin, orgId, admin.userId)).status).toBe(200);

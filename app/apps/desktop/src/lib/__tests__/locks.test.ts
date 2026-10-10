@@ -23,6 +23,7 @@ import type { Share } from "../api";
 import type { TreeNode } from "../ipc";
 import {
   effectiveLockForPath,
+  hasBillingLapsedLock,
   hasVaultLock,
   itemLockRows,
   LOCK_TITLES,
@@ -295,5 +296,30 @@ describe("effectiveLockForPath", () => {
     expect(effectiveLockForPath(map, "Projects/Deep/buried.md")).toBe("all");
     // Outside that folder the vault is still the only thing deciding.
     expect(effectiveLockForPath(map, "loose.md")).toBe("vault");
+  });
+});
+
+describe("billing-lapsed vault lock", () => {
+  const lapsed: Share = {
+    id: "billing:org-1",
+    resource_type: "vault",
+    resource_id: "org-1",
+    principal_type: "org",
+    principal_id: "org-1",
+    permission: "locked",
+    reason: "billing_lapsed",
+  };
+  const posture: Share = { ...lapsed, id: "vault:org-1", reason: undefined };
+
+  it("is recognised by its reason, and still counts as the vault posture", () => {
+    expect(hasBillingLapsedLock([lapsed])).toBe(true);
+    expect(hasVaultLock([lapsed])).toBe(true);
+    expect(itemLockRows([lapsed])).toEqual([]);
+  });
+
+  it("is not claimed by an ordinary Read-only posture or an item row", () => {
+    expect(hasBillingLapsedLock([posture])).toBe(false);
+    expect(hasBillingLapsedLock([{ ...lapsed, resource_type: "folder" }])).toBe(false);
+    expect(hasBillingLapsedLock([])).toBe(false);
   });
 });

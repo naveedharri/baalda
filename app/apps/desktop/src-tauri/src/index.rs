@@ -68,6 +68,32 @@ pub enum LinkScope<'a> {
 /// The distinction is the point of the hash gate: an `Unchanged` file cost one
 /// read and one sha256 and wrote nothing, so it must not join the link pass and
 /// the UI must not be told to act on it.
+/// What [`Index::rebuild_report`] did.
+pub struct RebuildReport {
+    /// Binaries whose text extraction is stale (what `rebuild` returns).
+    pub pending: Vec<PathBuf>,
+    /// Notes left out because their file could not be read as text.
+    pub skipped: usize,
+    /// Notes found on disk, skipped ones included.
+    pub notes: usize,
+}
+
+/// An `index_one` failure on a file that cannot be read as UTF-8 text right now
+/// becomes `None` (logged; the caller counts it). Any other failure, such as a
+/// database error, still aborts the rebuild.
+fn skip_unreadable(res: AppResult<IndexedNote>, abs: &Path) -> AppResult<Option<IndexedNote>> {
+    match res {
+        Ok(n) => Ok(Some(n)),
+        Err(e) => match std::fs::read_to_string(abs) {
+            Err(io) => {
+                log::error!("[index] skipping unreadable note {}: {io}", abs.display());
+                Ok(None)
+            }
+            Ok(_) => Err(e),
+        },
+    }
+}
+
 enum IndexedNote {
     /// The note's rows were (re)written. Carries the doc_id.
     Indexed(String),
@@ -560,7 +586,16 @@ impl Index {
     /// (`watcher::ExtractQueue`), which does that work off this thread and
     /// outside the index mutex.
     pub fn rebuild(&self, vault: &Path) -> AppResult<Vec<PathBuf>> {
+        self.rebuild_report(vault).map(|r| r.pending)
+    }
+
+    /// [`Index::rebuild`] plus how many notes it had to skip. ONE unreadable
+    /// note (no permission, invalid UTF-8) used to abort the whole rebuild, so a
+    /// vault with a single bad file never finished indexing; it is now logged,
+    /// counted and left out, and every other note is indexed.
+    pub fn rebuild_report(&self, vault: &Path) -> AppResult<RebuildReport> {
         let started = Instant::now();
+        let mut skipped = 0usize;
         let mut touched = 0usize;
         let tx = self.conn.unchecked_transaction()?;
 
@@ -708,19 +743,23 @@ impl Index {
                 // `Unchanged` from the hash gate, and then it has touched no
                 // link answer either.
                 Some((id, _, _)) => {
-                    if let IndexedNote::Indexed(_) =
-                        self.index_one(&tx, vault, abs, Some(id.clone()))?
-                    {
-                        touched += 1;
-                        notes_changed = true;
+                    match skip_unreadable(self.index_one(&tx, vault, abs, Some(id.clone())), abs)? {
+                        Some(IndexedNote::Indexed(_)) => {
+                            touched += 1;
+                            notes_changed = true;
+                        }
+                        Some(IndexedNote::Unchanged) => {}
+                        None => skipped += 1,
                     }
                 }
                 // New file.
-                None => {
-                    self.index_one(&tx, vault, abs, None)?;
-                    touched += 1;
-                    notes_changed = true;
-                }
+                None => match skip_unreadable(self.index_one(&tx, vault, abs, None), abs)? {
+                    Some(_) => {
+                        touched += 1;
+                        notes_changed = true;
+                    }
+                    None => skipped += 1,
+                },
             }
         }
 
@@ -774,7 +813,7 @@ impl Index {
             if folders_changed { " (folders)" } else { "" },
             started.elapsed().as_millis()
         );
-        Ok(pending_files)
+        Ok(RebuildReport { pending: pending_files, skipped, notes: seen_notes.len() })
     }
 
     /// (Re)index a BATCH of notes: ONE transaction, ONE link-resolution pass.
@@ -3361,6 +3400,29 @@ mod tests {
         assert!(idx.list_property_values("nope", 200).unwrap().is_empty());
         // The cap is a cap, not a suggestion.
         assert_eq!(idx.list_property_values("tags", 2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn rebuild_skips_a_note_that_is_not_utf8_and_indexes_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        std::fs::write(v.join("good.md"), "# Good\n#tag [[other]]").unwrap();
+        std::fs::write(v.join("bad.md"), [0xff, 0xfe, 0x00, 0xc3, 0x28]).unwrap();
+        let idx = Index::open(&v).unwrap();
+        let report = idx.rebuild_report(&v).unwrap();
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.notes, 2);
+        let paths: Vec<String> = idx
+            .conn
+            .prepare("SELECT path FROM notes")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(paths, vec!["good.md".to_string()]);
+        // A second pass skips it again rather than failing.
+        assert_eq!(idx.rebuild_report(&v).unwrap().skipped, 1);
     }
 
     #[test]

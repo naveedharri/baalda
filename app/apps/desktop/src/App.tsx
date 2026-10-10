@@ -8,6 +8,7 @@ import { ReconcileBanner } from "./components/ReconcileBanner";
 import { HeldDeleteNotice } from "./components/HeldDeleteNotice";
 import { NoteRemovedNotice } from "./components/NoteRemovedNotice";
 import { useNoticeSlot } from "./components/useNoticeSlot";
+import { useLiveInvitations } from "./components/useLiveInvitations";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
 import { SyncPausedBannerView } from "./components/SyncPausedBanner";
 import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
@@ -42,6 +43,8 @@ import { usePendingReviewCount } from "./components/ReviewTab";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
+import { FILES_AND_FOLDERS_SETTINGS_URL, folderErrorText } from "./lib/vault/folderErrors";
+import { LOCATE_ORIGINAL, autoRestoredNoticeText } from "./lib/vault/missingFolder";
 import * as perf from "./lib/perf";
 import { implicatedFolders, refreshWorthy } from "./lib/tree/lazyTree";
 import { DISK_DELETE_GRACE_MS, syncManager } from "./lib/sync/docSession";
@@ -74,6 +77,7 @@ import { editorMeasureStyle } from "./lib/editorMeasure";
 import { noteLabel } from "./lib/notePath";
 import { ShareNoteButton } from "./components/ShareNoteButton";
 import { AttachmentSyncNotice } from "./components/AttachmentSyncNotice";
+import { AccountLapsedNotice } from "./components/AccountLapsedNotice";
 import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { readSidebarHidden, writeSidebarHidden } from "./lib/prefs";
@@ -255,6 +259,44 @@ function VaultUnsyncedBanner() {
 }
 
 /**
+ * "You were removed from <vault>" / "You left <vault>": this device deleted
+ * that vault's folder after the server said the membership ended
+ * (`handleMembershipLost`). Informational: fades after NOTICE_FADE_MS.
+ *
+ * Also runs the launch membership check once per signed-in (server, user):
+ * a removal that happened while the app was closed is caught here.
+ */
+function MembershipLostBanner() {
+  const notice = useStore((s) => s.membershipLost);
+  const authStatus = useStore((s) => s.authStatus);
+  const userId = useStore((s) => s.session?.user.id ?? null);
+  const serverUrl = useStore((s) => s.serverUrl);
+  const checked = useRef<string | null>(null);
+
+  useEffect(() => {
+    // Safe before the vault list loads: only a server `notMember` acts, and
+    // `handleMembershipLost` re-lists the account's vaults before it deletes.
+    if (authStatus !== "signed-in" || !userId) return;
+    const key = `${serverUrl}|${userId}`;
+    if (checked.current === key) return;
+    checked.current = key;
+    void useStore
+      .getState()
+      .checkLostMemberships()
+      .catch((e) => console.warn("[vault] membership check failed", e));
+  }, [authStatus, userId, serverUrl]);
+
+  const dismiss = () => useStore.getState().dismissMembershipLost();
+  const visible = useNoticeSlot("membership-lost", notice != null, { onFade: dismiss });
+  return (
+    <CreateRefusalBannerView
+      text={visible && notice ? { lead: notice.text, detail: "" } : null}
+      onDismiss={dismiss}
+    />
+  );
+}
+
+/**
  * The Free note-limit upgrade strip (the only part of the old "N notes didn't
  * sync" banner that survives — see `noteLimitBanner`).
  *
@@ -343,8 +385,43 @@ function VaultRootMissingBanner() {
       busy={busy}
       onRestore={run(() => useStore.getState().restoreVaultFolder())}
       onLocate={run(() => useStore.getState().locateVaultFolder())}
-      onSwitch={() => useStore.getState().requestSettings("vaults")}
+      onSwitch={() => {
+        const st = useStore.getState();
+        if (st.session) st.requestAccountSettings("vaults");
+        else st.requestSettings("vaults");
+      }}
     />
+  );
+}
+
+/**
+ * A missing vault folder inside the vaults root was recreated and is syncing
+ * down (2026-10-09): say so, and offer the original folder instead. Fades
+ * after NOTICE_FADE_MS like every informational notice.
+ */
+function VaultRootRestoredBanner() {
+  const restored = useStore((s) => s.folderAutoRestored);
+  const activeOrg = useStore((s) => s.session?.activeOrganizationId ?? null);
+  const show = !!restored && restored.orgId === activeOrg;
+  const dismiss = () => useStore.getState().dismissFolderAutoRestored();
+  const visible = useNoticeSlot("root-restored", show, { onFade: dismiss });
+  const locate = async () => {
+    try {
+      await useStore.getState().locateOriginalVaultFolder();
+    } catch (e) {
+      toast(folderErrorText(e), "error");
+    }
+  };
+  return (
+    <Banner show={visible} role="status">
+      <span>{restored ? autoRestoredNoticeText(restored.name) : ""}</span>
+      <div className="banner-actions">
+        <button className="secondary" onClick={locate}>
+          {LOCATE_ORIGINAL}
+        </button>
+        <button onClick={dismiss}>Dismiss</button>
+      </div>
+    </Banner>
   );
 }
 
@@ -455,6 +532,8 @@ function VaultFolderPrompt() {
   if (!pending) return null;
   // The folder is GONE (#228): same wording and actions as the in-vault banner.
   const missing = pending.reason?.missing === true;
+  // macOS refused the Documents folder: explain and offer System Settings.
+  const documentsDenied = pending.reason?.documentsDenied === true;
 
   const run = (fn: () => Promise<void>) => async () => {
     setBusy(true);
@@ -462,11 +541,33 @@ function VaultFolderPrompt() {
     try {
       await fn();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(folderErrorText(e));
     } finally {
       setBusy(false);
     }
   };
+
+  const settingsBtn = (
+    <AsyncButton
+      key="settings"
+      className="wf-btn wf-btn-primary"
+      disabled={busy}
+      spinnerTone="on-accent"
+      onClick={run(() => ipc.openExternal(FILES_AND_FOLDERS_SETTINGS_URL))}
+    >
+      <span>Open System Settings</span>
+    </AsyncButton>
+  );
+  const retryBtn = (
+    <AsyncButton
+      key="retry"
+      className="wf-btn wf-btn-ghost"
+      disabled={busy}
+      onClick={run(() => useStore.getState().startEmptyVault())}
+    >
+      <span>Try again</span>
+    </AsyncButton>
+  );
 
   const pickBtn = (
     <AsyncButton
@@ -540,8 +641,22 @@ function VaultFolderPrompt() {
           {/* Both of these open a vault: a native picker, then a full vault open
               + reconcile. Easily a second or two, so each reports for itself. */}
           {/* A missing folder leads with Restore here, like the banner (#228). */}
-          {missing ? [emptyBtn, pickBtn] : [pickBtn, emptyBtn]}
+          {documentsDenied
+            ? [settingsBtn, retryBtn]
+            : missing
+              ? [emptyBtn, pickBtn]
+              : [pickBtn, emptyBtn]}
         </div>
+        {documentsDenied && (
+          <button
+            type="button"
+            className="link-btn wf-switch"
+            disabled={busy}
+            onClick={run(() => useStore.getState().chooseVaultFolder())}
+          >
+            Choose another folder…
+          </button>
+        )}
         {missing && (
           <button
             type="button"
@@ -951,6 +1066,8 @@ function PromptedAuthDialog() {
 }
 
 export default function App() {
+  // Invitations to other vaults appear live, not on the next reload.
+  useLiveInvitations();
   const vault = useStore((s) => s.vault);
   const openNote = useStore((s) => s.openNote);
   const activeVirtual = useStore(
@@ -1573,7 +1690,10 @@ export default function App() {
           </SilentBoundary>
           <NoteRemovedNotice />
           <VaultUnsyncedBanner />
+          <MembershipLostBanner />
           <VaultRootMissingBanner />
+          <VaultRootRestoredBanner />
+          <AccountLapsedNotice />
           <ClosedAppChangesBanner />
           <NotSyncingBanner />
           <SyncPausedBanner />

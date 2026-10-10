@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  EMBED_REFUSAL_RETRY_MS,
   AttachmentSync,
   diffAttachments,
   isSafeAttachmentRelPath,
@@ -944,6 +945,52 @@ describe("AttachmentSync per-file state (store.fileSyncState)", () => {
     // Retry is the user's way to ask again — exactly once more.
     await sync.retryFiles(["Team/refused.jpg"]);
     expect(asked()).toBe(2);
+  });
+
+  it("never gives up for good on a pasted image refused for access (403)", async () => {
+    let refuse = true;
+    const { deps, log } = withStates(
+      [{ relPath: "attachments/pasted.png", bytes: new Uint8Array([1]) }],
+      () => (refuse ? serverError(403, "no_write_access") : SINGLE_INTENT),
+    );
+    const timers: number[] = [];
+    let now = 1_000_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const sync = new AttachmentSync(
+        deps,
+        400,
+        ((_fn: () => void, ms: number) => {
+          timers.push(ms);
+          return 0 as never;
+        }) as never,
+        () => {},
+      );
+      const asked = () => log.intents.filter((i) => i.relPath === "attachments/pasted.png").length;
+      await sync.reconcile();
+      expect(asked()).toBe(1);
+      // Said once, and a re-ask is armed rather than a permanent skip.
+      expect(log.toasts).toHaveLength(1);
+      expect(timers).toContain(EMBED_REFUSAL_RETRY_MS);
+
+      // Inside the cooldown a pass does not ask again...
+      await sync.reconcile();
+      expect(asked()).toBe(1);
+      // ...after it, it does, without a second toast.
+      now += EMBED_REFUSAL_RETRY_MS + 1;
+      await sync.reconcile();
+      expect(asked()).toBe(2);
+      expect(log.toasts).toHaveLength(1);
+
+      // An access change asks at once, and this time the owner granted edit.
+      refuse = false;
+      sync.recheckEmbedUploads();
+      await sync.reconcile();
+      expect(asked()).toBe(3);
+      expect(log.puts.length).toBeGreaterThan(0);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("leaves the hidden attachments/ store out — it has no row to badge", async () => {

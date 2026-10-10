@@ -22,6 +22,13 @@ tags: [baalda, status, roadmap]
 - **Billing:** 🟢 Per-vault Pro via Polar, with the full subscription lifecycle (2026-09-09, #109–#111):
   deleting a vault cancels at period end before it deletes, subscriptions survive as tombstones, and an
   owner can transfer one between their vaults from Vault Settings → Billing.
+  **2026-10-07 (branch `feat/team-seat-billing`):** Free + Team pricing behind `BILLING_MODEL=team`
+  (default `vault` until the production flip). Free: 2 people per account, 1 synced vault, MCP
+  included, no Assistant, no standalone file sync. Team: $10 per seat per month or $110 per seat
+  per year, minimum 3 seats, unlimited vaults on one account, managed in Account Settings → Plan &
+  Usage. A lapsed account syncs read-only; local files stay editable. Per-vault transfer is retired
+  under the Team model (`transfer_retired`); existing subscribers keep their price through a Polar
+  discount.
 - **Offline reconciliation:** 🟡 In review (2026-09-26, branch `feat/offline-reconciliation`): inbound
   deletes/revocations gate on a server-acknowledged state vector (unsent edits get a recovery copy
   first), same-path creates become two notes, closed-app renames keep their id, a once-per-session
@@ -270,7 +277,7 @@ Six changes that together make a vault something a team can actually govern.
 - Permission-filtered candidates, explicit excerpt-sharing consent, exact-change
   previews, revision-guarded Yjs writes, and guarded short-lived Undo.
 - Commercial engine under `ee/`; open-core builds remain independent. Provider
-  credentials and a Pro vault are required for live use. See [setup and preview
+  credentials and a Pro vault (Team under `BILLING_MODEL=team`) are required for live use. See [setup and preview
   limits](HOUSEKEEPER.md). Real-provider quality evaluation remains outstanding.
 
 The Assistant now lives in **AI** with a compact provider card, user-owned
@@ -302,6 +309,8 @@ servers accept up to 20,000 live notes; extra registrations return
 `note_limit_reached` and local files remain intact. Existing identities still
 reconcile. Registry batches and MCP creation share a per-vault advisory lock for
 capacity checks. The sync banner links to the upgrade page with updated benefits.
+(2026-10-07: under `BILLING_MODEL=team` the Free cap is the hidden `ABUSE_MAX_NOTES` ceiling,
+100,000 per vault by default, and the Assistant requires Team instead of Pro.)
 Sign-in uses a body portal. The sidebar alone says AI (Beta), with an accented
 sparkle; provider settings use a warm amber card and a key-ready indicator.
 

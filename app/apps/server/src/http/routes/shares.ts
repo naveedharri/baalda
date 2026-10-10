@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isAccountReadOnly } from "../../billing/lapse.js";
 import { Hono } from "hono";
 import type pg from "pg";
 import { pool } from "../../db/pool.js";
@@ -25,6 +26,7 @@ import { getSession } from "../session.js";
 import {
   AccessManagementError,
   applyBulkAccess,
+  canManageMemberAccess,
   getJoinDefault,
   nextAccessRevision,
   setJoinDefault,
@@ -524,6 +526,18 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     if (typeof principalId !== "string" || !principalId) {
       return c.json({ error: "principalId required for user shares" }, 400);
     }
+    if (principalType === "user") {
+      // A per-person row is that person's access: an admin may set it for
+      // anyone but the owner (`canManageMemberAccess`). Creators sharing
+      // their own item keep the older rule.
+      const actorRole = await orgRole(gate.organizationId!, session.userId);
+      if (actorRole === "admin") {
+        const targetRole = await orgRole(gate.organizationId!, principalId);
+        if (targetRole && !canManageMemberAccess(actorRole, targetRole, principalId === session.userId)) {
+          return c.json({ error: "access_manager_required", message: "An admin can only change the access of members or themselves" }, 403);
+        }
+      }
+    }
 
     // Locks are subsumption-aware: an Everyone/org lock on a resource makes any
     // per-user lock on the SAME resource redundant. Without this, a resource can
@@ -685,6 +699,23 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           )`,
       [vaultId],
     );
+
+    // Billing lapse (account read-only): padlock the whole vault for everyone
+    // with NO lifts — no grant frees anyone from it. Non-routable id, as below.
+    if (await isAccountReadOnly(pool, org)) {
+      rows.push({
+        id: `billing:${org}`,
+        resource_type: "vault",
+        resource_id: org,
+        principal_type: "org",
+        principal_id: org,
+        permission: "locked",
+        reason: "billing_lapsed",
+        created_by: null,
+        created_at: null,
+      });
+      return c.json({ locks: rows });
+    }
 
     const posture = await vaultPostureRow(pool, org);
     // The caller's OWN vault level replaces the posture for them (resolver

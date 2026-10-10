@@ -25,7 +25,11 @@ export const NOTICE_PRIORITY = [
   "reconcile",
   "note-removed",
   "vault-unsynced",
+  "membership-lost",
   "root-missing",
+  // A missing folder inside the vaults root was recreated (informational).
+  "root-restored",
+  "account-lapsed",
   "closed-app-changes",
   "not-syncing",
   "sync-paused",

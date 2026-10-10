@@ -1,6 +1,8 @@
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { orgRole } from "../permissions/lookup.js";
+import { ensureAccountForOrg, ensureAccountForUser } from "./accounts.js";
+import { onSubscriptionStateChanged } from "./lapse.js";
 
 /**
  * The ONE write path for the `subscriptions` table.
@@ -40,7 +42,20 @@ export function isActiveStatus(status: string): boolean {
 
 /** A `subscriptions` row exactly as stored. */
 export interface SubscriptionRow {
-  organization_id: string;
+  /** Surrogate key (migration 052): the provider subscription id, or `legacy:<org>`. */
+  id: string;
+  /** Null only for an account-level row that names no vault. */
+  organization_id: string | null;
+  billing_account_id: string | null;
+  seats: number | null;
+  list_amount: number | null;
+  discount_id: string | null;
+  discount_name: string | null;
+  /** A percentage discount's size (10000 = 100% off); null for fixed or none (m054). */
+  discount_basis_points: number | null;
+  /** How long the discount lasts: once | repeating | forever; null = unknown or none (m055). */
+  discount_duration: string | null;
+  discount_duration_months: number | null;
   provider: string;
   provider_customer_id: string | null;
   provider_subscription_id: string | null;
@@ -61,14 +76,17 @@ export interface SubscriptionRow {
 }
 
 /** Every column of `subscriptions`, for SELECTs that hand back a whole row. */
-export const SUBSCRIPTION_COLUMNS = `organization_id, provider, provider_customer_id,
+export const SUBSCRIPTION_COLUMNS = `id, organization_id, billing_account_id,
+       seats, list_amount, discount_id, discount_name, discount_basis_points,
+       discount_duration, discount_duration_months,
+       provider, provider_customer_id,
        provider_subscription_id, plan, status, current_period_end,
        cancel_at_period_end, event_ts, deleted_at, org_name, owner_user_id,
        interval, amount, currency, created_at, updated_at`;
 
 /** What a caller knows about a subscription and wants persisted. */
 export interface SubscriptionState {
-  organizationId: string;
+  organizationId: string | null;
   providerCustomerId: string | null;
   providerSubscriptionId: string | null;
   /** Our internal plan id (currently always "pro"). */
@@ -95,6 +113,61 @@ export interface SubscriptionState {
    * webhook, or the caller's own id for a delete/transfer.
    */
   ownerUserId?: string | null;
+  /** Purchased seats on the Team subscription (from the provider snapshot). */
+  seats?: number | null;
+  /** Seats × unit price before any discount, minor units. */
+  listAmount?: number | null;
+  /**
+   * The provider discount on the subscription (legacy price lives here).
+   * `undefined` keeps what is stored; `null` clears it (discount removed).
+   */
+  discountId?: string | null;
+  discountName?: string | null;
+  /**
+   * A percentage discount's basis points. Written with `discountId`; a null
+   * for the SAME discount id keeps the stored value (a payload that omitted it).
+   */
+  discountBasisPoints?: number | null;
+  /** The discount's duration and months, kept like `discountBasisPoints`. */
+  discountDuration?: string | null;
+  discountDurationMonths?: number | null;
+  /** Billing account, when the caller already knows it; else resolved from the org. */
+  accountId?: string | null;
+}
+
+/**
+ * Which stored row a write lands on: the row holding this provider
+ * subscription, else the vault's row, else a new id. Resolving first keeps a
+ * snapshot and a webhook converging on ONE row whatever its `id` says.
+ */
+async function resolveRowId(client: Queryable, state: SubscriptionState): Promise<string> {
+  if (state.providerSubscriptionId) {
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT id FROM subscriptions WHERE provider_subscription_id = $1
+        ORDER BY updated_at DESC LIMIT 1`,
+      [state.providerSubscriptionId],
+    );
+    if (rows[0]) return rows[0].id;
+  }
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT id FROM subscriptions WHERE organization_id = $1`,
+    [state.organizationId],
+  );
+  if (rows[0]) return rows[0].id;
+  return state.providerSubscriptionId || `legacy:${state.organizationId}`;
+}
+
+/** The account a subscription belongs to: given, else the vault's, else the owner's. */
+async function resolveAccountId(
+  client: Queryable,
+  state: SubscriptionState,
+): Promise<string | null> {
+  if (state.accountId) return state.accountId;
+  const viaOrg = state.organizationId
+    ? await ensureAccountForOrg(client, state.organizationId)
+    : null;
+  if (viaOrg) return viaOrg;
+  return state.ownerUserId ? ensureAccountForUser(client, state.ownerUserId) : null;
 }
 
 /**
@@ -108,13 +181,28 @@ export async function applySubscriptionState(
   client: Queryable,
   state: SubscriptionState,
 ): Promise<SubscriptionRow | null> {
+  // An account-level checkout from an account with NO attached vault names no
+  // org: the row belongs to the account alone (organization_id NULL), never a
+  // tombstone of a vault that never existed.
+  const accountOnly =
+    !state.organizationId &&
+    !!state.accountId &&
+    (
+      await client.query("SELECT 1 FROM billing_accounts WHERE id = $1", [state.accountId])
+    ).rows.length > 0;
+  const orgId: string | null = accountOnly ? null : state.organizationId;
+  const id = await resolveRowId(client, state);
+  const accountId = await resolveAccountId(client, state);
+
   await client.query(
     `INSERT INTO subscriptions (
-       organization_id, provider, provider_customer_id, provider_subscription_id,
+       id, organization_id, provider, provider_customer_id, provider_subscription_id,
        plan, status, current_period_end, cancel_at_period_end, event_ts,
-       interval, amount, currency, updated_at
-     ) VALUES ($1, 'polar', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
-     ON CONFLICT (organization_id) DO UPDATE SET
+       interval, amount, currency, seats, list_amount, discount_id, discount_name,
+       discount_basis_points, discount_duration, discount_duration_months, updated_at
+     ) VALUES ($1, $2, 'polar', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+               $13, $14, $15, $16, $18, $19, $20, now())
+     ON CONFLICT (id) DO UPDATE SET
        -- COALESCE, not a bare overwrite: a snapshot that didn't carry the
        -- customer id must not erase the one the portal needs to open.
        provider_customer_id     = COALESCE(EXCLUDED.provider_customer_id, subscriptions.provider_customer_id),
@@ -127,11 +215,38 @@ export async function applySubscriptionState(
        interval                 = COALESCE(EXCLUDED.interval, subscriptions.interval),
        amount                   = COALESCE(EXCLUDED.amount, subscriptions.amount),
        currency                 = COALESCE(EXCLUDED.currency, subscriptions.currency),
+       seats                    = COALESCE(EXCLUDED.seats, subscriptions.seats),
+       list_amount              = COALESCE(EXCLUDED.list_amount, subscriptions.list_amount),
+       -- A discount can be removed, so null clears it; only an absent field keeps it.
+       discount_id              = CASE WHEN $17 THEN EXCLUDED.discount_id ELSE subscriptions.discount_id END,
+       discount_name            = CASE WHEN $17 THEN EXCLUDED.discount_name ELSE subscriptions.discount_name END,
+       discount_basis_points    = CASE
+                                    WHEN NOT $17 THEN subscriptions.discount_basis_points
+                                    WHEN EXCLUDED.discount_basis_points IS NULL
+                                     AND EXCLUDED.discount_id IS NOT DISTINCT FROM subscriptions.discount_id
+                                      THEN subscriptions.discount_basis_points
+                                    ELSE EXCLUDED.discount_basis_points
+                                  END,
+       discount_duration        = CASE
+                                    WHEN NOT $17 THEN subscriptions.discount_duration
+                                    WHEN EXCLUDED.discount_duration IS NULL
+                                     AND EXCLUDED.discount_id IS NOT DISTINCT FROM subscriptions.discount_id
+                                      THEN subscriptions.discount_duration
+                                    ELSE EXCLUDED.discount_duration
+                                  END,
+       discount_duration_months = CASE
+                                    WHEN NOT $17 THEN subscriptions.discount_duration_months
+                                    WHEN EXCLUDED.discount_duration IS NULL
+                                     AND EXCLUDED.discount_id IS NOT DISTINCT FROM subscriptions.discount_id
+                                      THEN subscriptions.discount_duration_months
+                                    ELSE EXCLUDED.discount_duration_months
+                                  END,
        updated_at               = now()
      WHERE subscriptions.event_ts IS NULL
         OR EXCLUDED.event_ts >= subscriptions.event_ts`,
     [
-      state.organizationId,
+      id,
+      orgId,
       state.providerCustomerId || null,
       state.providerSubscriptionId || null,
       state.plan,
@@ -142,13 +257,21 @@ export async function applySubscriptionState(
       state.interval,
       state.amount,
       state.currency,
+      state.seats ?? null,
+      state.listAmount ?? null,
+      state.discountId ?? null,
+      state.discountName ?? null,
+      state.discountId !== undefined,
+      state.discountId ? (state.discountBasisPoints ?? null) : null,
+      state.discountId ? (state.discountDuration ?? null) : null,
+      state.discountId ? (state.discountDurationMonths ?? null) : null,
     ],
   );
 
   // Bookkeeping, outside the ordering guard (see the file header). `org_name`
   // is refreshed from the live org and otherwise kept — a tombstone has no org
   // to read a name from, and losing the snapshot would leave the owner staring
-  // at an unnamed charge.
+  // at an unnamed charge. The account is ours too, so it is not guarded either.
   const { rows } = await client.query<SubscriptionRow>(
     `UPDATE subscriptions SET
        org_name      = COALESCE((SELECT name FROM organization WHERE id = $1), org_name),
@@ -159,17 +282,34 @@ export async function applySubscriptionState(
                            ORDER BY m."createdAt" LIMIT 1),
                          $2),
        deleted_at    = CASE WHEN $3 THEN $4::timestamptz ELSE deleted_at END,
+       billing_account_id = COALESCE($6, billing_account_id),
        updated_at    = now()
-     WHERE organization_id = $1
+     WHERE id = $5
      RETURNING ${SUBSCRIPTION_COLUMNS}`,
     [
-      state.organizationId,
+      orgId,
       state.ownerUserId ?? null,
-      state.deletedAt !== undefined,
-      state.deletedAt ?? null,
+      accountOnly || state.deletedAt !== undefined,
+      accountOnly ? null : (state.deletedAt ?? null),
+      id,
+      accountId,
     ],
   );
+  // Lapse transitions (in or out) re-judge after commit and fan out per vault.
+  void onSubscriptionStateChanged(client, { accountId: rows[0]?.billing_account_id ?? accountId, orgId });
   return rows[0] ?? null;
+}
+
+/** Point a subscription row at a billing account (or detach it with null). */
+export async function setSubscriptionAccount(
+  client: Queryable,
+  subId: string,
+  accountId: string | null,
+): Promise<void> {
+  await client.query(
+    `UPDATE subscriptions SET billing_account_id = $2, updated_at = now() WHERE id = $1`,
+    [subId, accountId],
+  );
 }
 
 /** Read one org's subscription row, or null. */
@@ -192,9 +332,9 @@ export async function findByOrg(
  * the vault the subscription came from (the metadata PATCH is best-effort), so
  * trusting metadata would walk a live subscription straight back onto a vault
  * that no longer holds it — and, if that vault had been deleted, resurrect its
- * tombstone as the paid one. There is no unique index on the column on purpose
- * (a canceled row for an old vault may legitimately linger holding the same
- * id), so the most recently written row wins.
+ * tombstone as the paid one. Migration 052 adds a partial unique index on the
+ * column where the data allows it; most-recent-wins stays for a database whose
+ * lingering duplicates made it skip that index.
  */
 export async function findByProviderSubscription(
   client: Queryable,
@@ -226,5 +366,6 @@ export async function canManageSubscriptionRow(
   db: Queryable = defaultPool,
 ): Promise<boolean> {
   if (row.deleted_at) return row.owner_user_id === userId;
+  if (!row.organization_id) return false;
   return (await orgRole(row.organization_id, userId, db)) === "owner";
 }

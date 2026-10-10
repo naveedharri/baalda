@@ -264,3 +264,46 @@ describe("open gate after a vault switch", () => {
     expect(useStore.getState().openFolderIsSynced).toBe(true);
   });
 });
+
+// Vault Settings and Account Settings are both full-screen dialogs, and they
+// cross-link (Usage → "Open Plan & Billing", the bottom-left links, the Vaults
+// tab). Opening one must close the other in the same update, or the user has
+// to close two stacked dialogs.
+describe("settings dialogs swap instead of stacking", () => {
+  beforeEach(() => {
+    useStore.setState({ settingsDialog: null, session: null });
+  });
+
+  it("opening Account Settings closes Vault Settings and lands on the asked tab", () => {
+    useStore.getState().requestSettings("billing");
+    expect(useStore.getState().settingsDialog).toBe("vault");
+    useStore.getState().requestAccountSettings("plan");
+    expect(useStore.getState().settingsDialog).toBe("account");
+    expect(useStore.getState().accountSettingsRequest?.tab).toBe("plan");
+  });
+
+  it("opening Vault Settings closes Account Settings and lands on the asked tab", () => {
+    useStore.getState().requestAccountSettings("vaults");
+    expect(useStore.getState().settingsDialog).toBe("account");
+    useStore.getState().requestSettings("general");
+    expect(useStore.getState().settingsDialog).toBe("vault");
+    expect(useStore.getState().settingsRequest?.tab).toBe("general");
+  });
+
+  it("closing names its own dialog, so a stale close never shuts the other", () => {
+    useStore.getState().requestAccountSettings("plan");
+    useStore.getState().closeSettingsDialog("vault");
+    expect(useStore.getState().settingsDialog).toBe("account");
+    useStore.getState().closeSettingsDialog("account");
+    expect(useStore.getState().settingsDialog).toBeNull();
+  });
+
+  it("dismissSettings closes only Vault Settings", () => {
+    useStore.getState().requestSettings("general");
+    useStore.getState().dismissSettings();
+    expect(useStore.getState().settingsDialog).toBeNull();
+    useStore.getState().requestAccountSettings("plan");
+    useStore.getState().dismissSettings();
+    expect(useStore.getState().settingsDialog).toBe("account");
+  });
+});

@@ -27,7 +27,6 @@ import {
   itemColorFill,
   itemColorValue,
 } from "../lib/appearance";
-import { readAutomaticItemColors } from "../lib/prefs";
 import {
   applyOrder,
   childrenAt,
@@ -73,6 +72,8 @@ import {
   statusTone,
 } from "../lib/presence/color";
 import { Face } from "./Face";
+import { NothingShared } from "./EditorPlaceholders";
+import { useEmptyVaultView } from "./useEmptyVaultView";
 import type { ShareTarget } from "./ShareDialog";
 
 /* Lazy: the sharing sheet is a context-menu action, and keeping it out of the
@@ -230,6 +231,7 @@ const ICON_TRASH = (
 
 export function FileTree() {
   const tree = useStore((s) => s.tree);
+  const emptyView = useEmptyVaultView();
   const openNote = useStore((s) => s.openNote);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const syncStatus = useStore((s) => s.syncStatus);
@@ -252,9 +254,9 @@ export function FileTree() {
   const docIdByPath = useStore((s) => s.docIdByPath);
   const titles = useStore((s) => s.titles);
   const [containerRef, dim] = useDimensions();
-  useEffect(() => {
-    useStore.setState({ automaticItemColors: readAutomaticItemColors(session?.user.id) });
-  }, [session?.user.id]);
+  // `automaticItemColors` is the EFFECTIVE value (personal ?? vault ?? default,
+  // store.applyAppearance). This used to re-read the legacy per-account key on
+  // mount, which overwrote the effective value and ignored vault defaults.
   const treeRef = useRef<TreeApi<TreeNode> | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   // The ⋯ menu's "Sort by" and "Color" rows are one line each; their options
@@ -1880,7 +1882,13 @@ export function FileTree() {
         </div>
       ) : null}
       {data.length === 0 ? (
-        <div className="filetree-empty">No notes yet</div>
+        <div className="filetree-empty">
+          {emptyView.state === "nothing-shared" ? (
+            <NothingShared ownerName={emptyView.ownerName} vaultName={emptyView.vaultName} />
+          ) : (
+            "No notes yet"
+          )}
+        </div>
       ) : (
         <RowSharedContext.Provider value={rowShared}>
           <Tree<TreeNode>

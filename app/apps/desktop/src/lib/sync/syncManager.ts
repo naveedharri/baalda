@@ -14,7 +14,7 @@ import type * as Y from "yjs";
 import { ApiClient, ApiError } from "../api";
 import { TokenRefreshScheduler } from "./tokenRefresh";
 import { TerminalSyncError } from "./contentUpload";
-import { markReadOnlyDoc } from "../bridge/readOnlyDocs";
+import { isReadOnlyDoc, markReadOnlyDoc } from "../bridge/readOnlyDocs";
 
 export type SyncStatus =
   | "offline" // no network provider / signed out
@@ -247,6 +247,10 @@ export class DocSync {
     this.onFlushed = opts.onFlushed;
     this.settleDelayMs = opts.settleDelayMs ?? 700;
     this.doc = opts.doc;
+    // A view-only verdict this app session already has (an earlier token, a
+    // `rejected` frame) holds from the first frame. Every mint overwrites it,
+    // so a grant that became editable since is picked up on connect.
+    this._readOnly = isReadOnlyDoc(opts.docId);
 
     const wsUrl = opts.wsUrl ?? deriveWsUrl(this.api.getBaseUrl());
     const name = `vault:${opts.vaultId}/note:${opts.docId}`;

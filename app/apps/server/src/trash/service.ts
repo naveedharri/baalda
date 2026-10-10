@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { pool as defaultPool } from "../db/pool.js";
 import { orgRole, vaultOrg } from "../permissions/lookup.js";
+import { ACCOUNT_READ_ONLY_MESSAGE, refusedForBilling } from "../permissions/http-gates.js";
 import { deletedReadableDocsForActivity } from "../permissions/readable-cache.js";
 import { basename, dirname, findFolderByPath, joinPath } from "../registry/tree-ops.js";
 import { extractDocText, purgeNoteIndex } from "../index/indexer.js";
@@ -31,7 +32,7 @@ export interface TrashItem {
 
 export class TrashError extends Error {
   constructor(
-    readonly status: 400 | 403 | 404 | 409 | 410,
+    readonly status: 400 | 402 | 403 | 404 | 409 | 410,
     readonly code: string,
     message: string,
   ) {
@@ -235,6 +236,11 @@ export async function restoreNote(
   const org = await vaultOrg(note.vault_id);
   const role = org ? await orgRole(org, userId) : null;
   const manager = role === "owner" || role === "admin";
+  // A lapsed Team account is read-only for everyone, owners and admins
+  // included: a restore re-adds a live note, so it is a content write.
+  if (role && (await refusedForBilling(org))) {
+    throw new TrashError(402, "account_read_only", ACCOUNT_READ_ONLY_MESSAGE);
+  }
   if (!manager && (await trashedNotePermission(userId, docId)) !== "edit") {
     throw new TrashError(403, "no_edit_permission", "You cannot restore this note");
   }

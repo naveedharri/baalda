@@ -7,6 +7,11 @@
 import type { ServerChoice } from "./auth/serverChoice";
 import type { PropertiesMode } from "./editor/frontmatter";
 import { isTreeSort, type FolderSorts, type TreeSort } from "./tree/sort";
+import {
+  migrateStoredAppearance,
+  parseAppearanceSettings,
+  type AppearanceSettings,
+} from "./appearanceSettings";
 
 export type ActivityStatus = "online" | "away" | "busy" | "invisible";
 
@@ -435,5 +440,69 @@ export function writeSidebarHidden(hidden: boolean): void {
     localStorage.setItem(SIDEBAR_HIDDEN_KEY, hidden ? "hidden" : "shown");
   } catch {
     /* localStorage unavailable — the choice stays in-memory only */
+  }
+}
+
+// ---- Personal appearance overrides (vault defaults, #appearance) -------------
+
+const APPEARANCE_OVERRIDES_KEY = "context.appearanceOverrides.v1";
+const THEME_STORAGE_KEY = "cbk-theme";
+
+/**
+ * This device's personal appearance OVERRIDES — a key present here wins over
+ * the open vault's default; an absent key INHERITS it (`lib/appearance.ts`).
+ *
+ * The first read on a device that predates vault defaults migrates the old
+ * per-setting keys once (`migrateStoredAppearance`): a stored choice stays an
+ * override so nobody's look changes, except one equal to the app default,
+ * which becomes inherit. The old keys are left alone and never read again.
+ */
+export function readAppearanceOverrides(userId?: string | null): AppearanceSettings {
+  try {
+    const raw = localStorage.getItem(APPEARANCE_OVERRIDES_KEY);
+    if (raw !== null) return parseAppearanceSettings(JSON.parse(raw));
+  } catch {
+    /* corrupted JSON: fall through to a fresh migration */
+  }
+  let migrated: AppearanceSettings = {};
+  try {
+    const legacyLine = localStorage.getItem(LINE_NUMBERS_KEY);
+    // Account-scoped legacy key; before sign-in is known, any account on this
+    // device that turned automatic colours off counts as that choice.
+    let legacyAuto = localStorage.getItem(AUTOMATIC_ITEM_COLORS_KEY + (userId ?? "local"));
+    if (legacyAuto === null && !userId) {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k?.startsWith(AUTOMATIC_ITEM_COLORS_KEY) && localStorage.getItem(k) === "off") {
+          legacyAuto = "off";
+          break;
+        }
+      }
+    }
+    migrated = migrateStoredAppearance({
+      theme: localStorage.getItem(THEME_STORAGE_KEY) ?? undefined,
+      autoColors: legacyAuto === null ? undefined : legacyAuto !== "off",
+      contentWidth:
+        localStorage.getItem(EDITOR_MEASURE_KEY) !== null ||
+        localStorage.getItem(LEGACY_READABLE_LINE_LENGTH_KEY) !== null
+          ? readEditorMeasure()
+          : undefined,
+      textSize:
+        localStorage.getItem(EDITOR_FONT_SIZE_KEY) !== null ? readEditorFontSize() : undefined,
+      lineNumbers: legacyLine === null ? undefined : legacyLine === "on",
+      properties: localStorage.getItem(PROPERTIES_MODE_KEY) ?? undefined,
+    });
+  } catch {
+    /* localStorage unavailable — nothing to migrate */
+  }
+  writeAppearanceOverrides(migrated);
+  return migrated;
+}
+
+export function writeAppearanceOverrides(overrides: AppearanceSettings): void {
+  try {
+    localStorage.setItem(APPEARANCE_OVERRIDES_KEY, JSON.stringify(overrides));
+  } catch {
+    /* localStorage unavailable — overrides stay in-memory only */
   }
 }
