@@ -10,7 +10,9 @@ import {
   invitedVaultAction,
   invitedVaultFallbackToast,
   type InvitedVault,
+  isLegacyPlan,
   LAPSED_COPY,
+  legacyPlanLine,
   PLAN_LOAD_ERROR_COPY,
   planStatusPill,
   planPriceLine,
@@ -231,7 +233,10 @@ export function AccountPlanTab() {
 
   // ---- Header line under the plan name ----
   const seatsBought = account.seats.purchased;
-  const summary = isTeam
+  const legacy = isTeam && isLegacyPlan(account);
+  const summary = legacy
+    ? legacyPlanLine(account, config.team?.currency ?? "usd", formatDate)
+    : isTeam
     ? [
         planPriceLine(account.plan, account.interval, config.team),
         seatsBought != null ? plural(seatsBought, "seat", "seats") : null,
@@ -341,9 +346,11 @@ export function AccountPlanTab() {
                       Cancel plan
                     </AsyncButton>
                   )}
-                  <AsyncButton className="primary" onClick={() => setManagingSeats(true)}>
-                    Add or change seats
-                  </AsyncButton>
+                  {!legacy && (
+                    <AsyncButton className="primary" onClick={() => setManagingSeats(true)}>
+                      Add or change seats
+                    </AsyncButton>
+                  )}
                 </>
               )}
             </div>

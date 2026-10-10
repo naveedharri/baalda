@@ -872,6 +872,9 @@ export interface MyBillingAccount {
   interval: "month" | "year" | null;
   currentPeriodEnd: string | null;
   cancelAtPeriodEnd: boolean;
+  /** A live subscription on a pre-Team product: unlimited people, no seats to
+   *  change. Absent on older servers (`isLegacyPlan` infers it). */
+  legacyPlan?: boolean;
   seats: {
     /** null on Free (no seats bought). */
     purchased: number | null;

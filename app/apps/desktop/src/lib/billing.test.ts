@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./api";
 import {
+  isLegacyPlan,
+  legacyPlanLine,
   membersSeatLine,
   invitePrewarning,
   freePeopleCopy,
@@ -565,6 +567,59 @@ describe("membersSeatLine", () => {
   it("uses the Free wording without purchased seats", () => {
     expect(membersSeatLine({ plan: "free", seats: { purchased: null, used: 1, reserved: 0 } }, "Sara")).toBe(
       "Free includes 2 people on this account (1 of 2 used)",
+    );
+  });
+});
+
+describe("membersSeatLine on Team without seats", () => {
+  const unlimited = { plan: "team" as const, seats: { purchased: null, used: 7, reserved: 0 } };
+  it("reads unlimited people, never the Free copy", () => {
+    expect(membersSeatLine(unlimited, "Sara", true)).toBe("Team · unlimited people on your account (7 people)");
+    expect(membersSeatLine(unlimited, "Sara")).toBe("Team · unlimited people on Sara's account (7 people)");
+    expect(membersSeatLine(unlimited, null)).toBe("Team · unlimited people on the owner's account (7 people)");
+    expect(membersSeatLine({ ...unlimited, seats: { purchased: null, used: 1, reserved: 0 } }, null, true)).toBe(
+      "Team · unlimited people on your account (1 person)",
+    );
+  });
+});
+
+describe("legacy plan", () => {
+  const legacy = {
+    plan: "team" as const,
+    status: "active",
+    interval: "month" as const,
+    currentPeriodEnd: "2026-11-03T00:00:00.000Z",
+    cancelAtPeriodEnd: false,
+    seats: { purchased: null },
+    price: { charged: 1000 },
+    complimentaryUntil: null,
+  };
+  const fmt = (iso: string) => iso.slice(0, 10);
+  it("trusts the server flag either way", () => {
+    expect(isLegacyPlan({ ...legacy, legacyPlan: true, seats: { purchased: 5 } })).toBe(true);
+    expect(isLegacyPlan({ ...legacy, legacyPlan: false })).toBe(false);
+  });
+  it("infers it on an older server: live Team with no seats", () => {
+    expect(isLegacyPlan(legacy)).toBe(true);
+    expect(isLegacyPlan({ ...legacy, seats: { purchased: 3 } })).toBe(false);
+    expect(isLegacyPlan({ ...legacy, plan: "free" })).toBe(false);
+    expect(isLegacyPlan({ ...legacy, status: "none" })).toBe(false);
+  });
+  it("excludes a complimentary Team account", () => {
+    expect(isLegacyPlan({ ...legacy, complimentaryUntil: "2027-01-01T00:00:00.000Z" })).toBe(false);
+  });
+  it("shows the real charged price, monthly and yearly, renewing or canceling", () => {
+    expect(legacyPlanLine(legacy, "usd", fmt)).toBe(
+      "Legacy plan · unlimited people at your original price · $10/mo · renews 2026-11-03",
+    );
+    expect(legacyPlanLine({ ...legacy, interval: "year", price: { charged: 9900 } }, "usd", fmt)).toBe(
+      "Legacy plan · unlimited people at your original price · $99/yr · renews 2026-11-03",
+    );
+    expect(legacyPlanLine({ ...legacy, cancelAtPeriodEnd: true }, "usd", fmt)).toBe(
+      "Legacy plan · unlimited people at your original price · $10/mo · cancels on 2026-11-03",
+    );
+    expect(legacyPlanLine({ ...legacy, price: null, currentPeriodEnd: null }, "usd", fmt)).toBe(
+      "Legacy plan · unlimited people at your original price",
     );
   });
 });

@@ -4,6 +4,8 @@ import type { BillingConfig, MyBillingAccount, SeatPreview } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import {
   billingErrorMessage,
+  isLegacyPlan,
+  LEGACY_NO_SEATS_COPY,
   RESUME_TO_CHANGE_SEATS,
   seatBounds,
   seatChangeLocked,
@@ -45,6 +47,9 @@ export function ManageSeatsDialog({
   onKeepSeats: () => Promise<boolean>;
 }) {
   const canceling = seatChangeLocked(account);
+  // A legacy plan has unlimited people and no seats (an older server still
+  // lets the dialog open): say so, never preview a seat change.
+  const legacy = isLegacyPlan(account);
   const minSeats = config.team?.minSeats ?? 3;
   const floor = seatBounds(account.seats.used, minSeats).min;
   const current = account.seats.purchased;
@@ -56,7 +61,7 @@ export function ManageSeatsDialog({
 
   useEffect(() => {
     setPreview(null);
-    if (canceling || seats < floor || seats === current || seats === scheduled) return;
+    if (legacy || canceling || seats < floor || seats === current || seats === scheduled) return;
     let cancelled = false;
     const t = setTimeout(() => {
       authManager.api
@@ -72,7 +77,7 @@ export function ManageSeatsDialog({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [seats, floor, current, scheduled, canceling]);
+  }, [seats, floor, current, scheduled, canceling, legacy]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -129,7 +134,9 @@ export function ManageSeatsDialog({
           <h2 className="confirm-title">Manage seats</h2>
           <p className="manage-seats-subtitle">{subtitle}</p>
         </div>
-        {canceling ? (
+        {legacy ? (
+          <p className="manage-seats-text">{LEGACY_NO_SEATS_COPY}</p>
+        ) : canceling ? (
           <p className="manage-seats-text">{RESUME_TO_CHANGE_SEATS}</p>
         ) : (
           <>
@@ -180,9 +187,9 @@ export function ManageSeatsDialog({
         {error && <div className="auth-error">{error}</div>}
         <div className="confirm-actions invite-people-actions">
           <button type="button" className="ghost-pill" onClick={onClose}>
-            Cancel
+            {legacy ? "Close" : "Cancel"}
           </button>
-          {canceling ? (
+          {legacy ? null : canceling ? (
             <AsyncButton
               className="primary"
               spinnerTone="on-accent"
