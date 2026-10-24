@@ -10,7 +10,7 @@
 // on, so it is checked through a real `EditorView` before anything else.
 
 import { beforeAll, describe, expect, it } from "vitest";
-import { foldedRanges, foldEffect } from "@codemirror/language";
+import { ensureSyntaxTree, foldedRanges, foldEffect } from "@codemirror/language";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { baseExtensions } from "./index";
@@ -41,7 +41,7 @@ beforeAll(() => {
 });
 
 function makeState(doc: string): EditorState {
-  return EditorState.create({
+  const state = EditorState.create({
     doc,
     extensions: baseExtensions({
       doc,
@@ -49,6 +49,11 @@ function makeState(doc: string): EditorState {
       onNavigate: () => {},
     }),
   });
+  // State creation parses on a time budget; a slow CI runner can come back
+  // with a partial tree and no list or heading node to fold. Finish the parse,
+  // then step the state once so `syntaxTree` sees the completed tree.
+  ensureSyntaxTree(state, state.doc.length, 5000);
+  return state.update({}).state;
 }
 
 function makeView(doc: string): EditorView {
