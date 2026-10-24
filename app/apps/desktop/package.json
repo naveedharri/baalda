@@ -76,7 +76,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "jsdom": "^29.1.1",
     "typescript": "catalog:",
-    "vite": "^7.0.4",
+    "vite": "^7.3.7",
     "vitest": "catalog:",
     "ws": "^8.21.0"
   }
