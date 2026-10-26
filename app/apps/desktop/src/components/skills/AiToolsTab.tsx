@@ -5,6 +5,8 @@
 
 import { useEffect, useState } from "react";
 import * as ipc from "../../lib/ipc";
+import { authManager } from "../../lib/auth/authManager";
+import { toast } from "../../lib/toast";
 import type { SkillTarget, SkillTargetInfo } from "../../lib/ipc";
 import { loadSkillsPrefs, onSkillsPrefsChanged } from "../../lib/skills/prefs";
 import { skillDisplayName } from "../../lib/skills/display";
@@ -28,6 +30,7 @@ import { ToolLogo } from "./ToolLogos";
 import "../editor.css";
 import { EmptyState, InstallButton, LoadError, ProgressBar, SkeletonCards, SkillCard, TARGET_SHORT, ToolRowSkeleton, WarnMark } from "./parts";
 import { SkillsMenuButton } from "./SkillsMenuButton";
+import { TipAnchor } from "./SquareTip";
 import { overallState, stateLines, targetStates } from "../../lib/skills/installState";
 import type { ManifestSkill } from "../../lib/skills/types";
 import "./skills.css";
@@ -94,7 +97,7 @@ export function AiToolsTab() {
    * it, ✓ when here (Required can't be removed), and the amber "!" with its
    * choices when a copy here was edited, its name is taken, or it failed.
    */
-  const square = (orgId: string, skill: ManifestSkill) => {
+  const square = (orgId: string, role: string, skill: ManifestSkill) => {
     const optional = skill.delivery === "optional";
     const on = !optional || isSkillOnThisDevice(serverUrl, orgId, skill.skillId);
     const states = targetStates(results, prefs.targets, orgId, skill.skillId);
@@ -122,17 +125,37 @@ export function AiToolsTab() {
         { key: "check", label: "Check again", onSelect: () => checkSkillsNow() },
       ];
       return (
-        <SkillsMenuButton
-          label={<WarnMark />}
-          caret={false}
-          className={`skills-install is-${overall}`}
-          ariaLabel={`Fix ${skillDisplayName(skill.name)}`}
-          title={lines}
-          actions={actions}
+        <TipAnchor content={{ heading: overall === "bad" ? "Couldn't install on this computer" : "Needs a look on this computer", lines: lines.split("\n"), note: "Click to choose what to do" }}>
+          <SkillsMenuButton
+            label={<WarnMark />}
+            caret={false}
+            className={`skills-install is-${overall}`}
+            ariaLabel={`Fix ${skillDisplayName(skill.name)}. ${lines.split("\n").join(". ")}`}
+            actions={actions}
+          />
+        </TipAnchor>
+      );
+    }
+    if (!optional) {
+      const canManage = role === "owner" || role === "admin";
+      return (
+        <InstallButton
+          kind="required"
+          title={`Required by your team\n${lines}`}
+          name={skill.name}
+          canManage={canManage}
+          onMakeOptional={
+            canManage
+              ? async () => {
+                  await authManager.api.patchSkill(orgId, skill.skillId, { delivery: "optional" });
+                  toast(`${skillDisplayName(skill.name)} is now optional. People can remove it from their computer.`);
+                  checkSkillsNow();
+                }
+              : undefined
+          }
         />
       );
     }
-    if (!optional) return <InstallButton kind="required" title={`Required by your team\n${lines}`} />;
     if (on) {
       return (
         <InstallButton
@@ -227,7 +250,7 @@ export function AiToolsTab() {
                   </span>
                 }
                 description={skill.description || "No description yet."}
-                action={square(org.orgId, skill)}
+                action={square(org.orgId, org.role, skill)}
               />
             ))}
           </ul>

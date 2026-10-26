@@ -343,6 +343,13 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     });
 
   /** This computer's side of one skill: the tool cluster and the install square. */
+  /** A Required ✓'s "Make optional" (admins): the same PATCH as the skill page's select. */
+  const makeOptional = async (s: SkillSummary) => {
+    await authManager.api.patchSkill(orgId, s.id, { delivery: "optional" });
+    toast(`${skillDisplayName(s.name)} is now optional. People can remove it from their computer.`);
+    await reload();
+  };
+
   const install = (s: SkillSummary) => {
     if (s.effectiveVersion === null) return { button: null };
     const states = targetStates(device.results, targetsOn, orgId, s.id);
@@ -356,7 +363,15 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     } else if (optedIn && (overall === "warn" || overall === "bad")) {
       button = <InstallButton kind={overall} title={`${lines}\nOpen to fix`} onClick={() => setOpenId(s.id)} />;
     } else if (!optional) {
-      button = <InstallButton kind="required" title={`Required by your team\n${lines}`} />;
+      button = (
+        <InstallButton
+          kind="required"
+          title={`Required by your team\n${lines}`}
+          name={s.name}
+          canManage={manage}
+          onMakeOptional={manage ? () => makeOptional(s) : undefined}
+        />
+      );
     } else if (optedIn) {
       button = <InstallButton kind="installed" title={`On this computer · click to remove\n${lines}`} onClick={() => setRemoving(s)} />;
     } else {

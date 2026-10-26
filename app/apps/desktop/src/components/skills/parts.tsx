@@ -7,6 +7,7 @@ import { useAsyncAction } from "../../lib/useAsyncAction";
 import { Spinner } from "../Spinner";
 import * as ipc from "../../lib/ipc";
 import { skillDisplayName } from "../../lib/skills/display";
+import { RequiredActions, requiredTip, TipCard, tipFromTitle, tipText, useAnchoredTip, type TipContent } from "./SquareTip";
 import type { SkillDetail, SkillSummary } from "../../lib/skills/types";
 import type { SkillTarget } from "../../lib/ipc";
 
@@ -120,53 +121,100 @@ export type InstallKind = "add" | "installed" | "required" | "busy" | "warn" | "
 
 /**
  * Claude Desktop's install square: "+" to use a skill on this computer, a
- * green "✓" when it is here (Required ones can't be removed), "!" for a
- * problem. Clicks never reach the card underneath.
+ * green "✓" when it is here, "!" for a problem. Clicks never reach the card
+ * underneath. `title` ("Heading\nline…") shows as an instant tooltip
+ * (`SquareTip.tsx`), never the OS one. A Required ✓ can't be removed, so it
+ * says why: a lock badge, `cursor: help`, and a click (Enter/Space) opens the
+ * same text as a popover, with "Make optional" when `onMakeOptional` is given
+ * (admins) and "Got it" for everyone.
  */
 export function InstallButton({
   kind,
   title,
   onClick,
   large = false,
+  name = "",
+  canManage = false,
+  onMakeOptional,
 }: {
   kind: InstallKind;
   title: string;
   onClick?: () => void;
   /** 30px (list rows) rather than 26px (cards). */
   large?: boolean;
+  /** Required only: the skill's name (for an error toast). */
+  name?: string;
+  /** Required only: adds "Change it to Optional on the skill's page." */
+  canManage?: boolean;
+  /** Required only, admins: the popover's "Make optional". */
+  onMakeOptional?: () => Promise<void>;
 }) {
-  const passive = kind === "required" || kind === "busy" || kind === "blocked" || !onClick;
+  const tip = useAnchoredTip<HTMLButtonElement>();
+  const required = kind === "required";
+  const content: TipContent = required
+    ? requiredTip(tipFromTitle(title).lines?.filter((l) => l !== "Required by your team") ?? [], canManage)
+    : tipFromTitle(title);
+  const passive = !required && (kind === "busy" || kind === "blocked" || !onClick);
   return (
-    <button
-      type="button"
-      className={`skills-install is-${kind}${large ? " is-lg" : ""}`}
-      title={title}
-      aria-label={title}
-      aria-disabled={passive || undefined}
-      onClick={(e) => {
-        e.stopPropagation();
-        if (!passive) onClick?.();
-      }}
-      onKeyDown={(e) => e.stopPropagation()}
-    >
-      {kind === "busy" ? (
-        <span className="spinner spinner-xs spinner-inherit" aria-hidden="true" />
+    <>
+      <button
+        ref={tip.ref}
+        type="button"
+        className={`skills-install is-${kind}${large ? " is-lg" : ""}`}
+        aria-label={tipText(content)}
+        aria-disabled={passive || undefined}
+        aria-haspopup={required ? "dialog" : undefined}
+        aria-expanded={required ? tip.pinned : undefined}
+        {...tip.handlers}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (required) tip.setPinned((v) => !v);
+          else if (!passive) onClick?.();
+        }}
+        onKeyDown={(e) => e.stopPropagation()}
+      >
+        {kind === "busy" ? (
+          <span className="spinner spinner-xs spinner-inherit" aria-hidden="true" />
+        ) : (
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            {kind === "add" ? (
+              <path d="M8 3v10M3 8h10" />
+            ) : kind === "update" ? (
+              <path d="M8 13V3.5M4 7l4-4 4 4" />
+            ) : kind === "blocked" ? (
+              <path d="M4.5 8h7" />
+            ) : kind === "warn" || kind === "bad" ? (
+              <path d="M8 3.5v5.5M8 12.2v.3" />
+            ) : (
+              <path d="m3.5 8.5 3 3 6-7" />
+            )}
+          </svg>
+        )}
+        {required && <LockBadge />}
+      </button>
+      {tip.pinned ? (
+        <TipCard
+          anchor={tip.ref.current}
+          content={content}
+          onClose={() => tip.setPinned(false)}
+          actions={<RequiredActions name={skillDisplayName(name)} onMakeOptional={onMakeOptional} onClose={() => tip.setPinned(false)} />}
+        />
       ) : (
-        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          {kind === "add" ? (
-            <path d="M8 3v10M3 8h10" />
-          ) : kind === "update" ? (
-            <path d="M8 13V3.5M4 7l4-4 4 4" />
-          ) : kind === "blocked" ? (
-            <path d="M4.5 8h7" />
-          ) : kind === "warn" || kind === "bad" ? (
-            <path d="M8 3.5v5.5M8 12.2v.3" />
-          ) : (
-            <path d="m3.5 8.5 3 3 6-7" />
-          )}
-        </svg>
+        tip.hover && content.heading && <TipCard anchor={tip.ref.current} content={content} />
       )}
-    </button>
+    </>
+  );
+}
+
+/** The small padlock on a Required ✓: fixed, not a toggle. */
+export function LockBadge() {
+  return (
+    <span className="skills-lock-badge" aria-hidden="true">
+      <svg viewBox="0 0 12 12" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2.5" y="5.5" width="7" height="5" rx="1" />
+        <path d="M4 5.5V4a2 2 0 0 1 4 0v1.5" />
+      </svg>
+    </span>
   );
 }
 

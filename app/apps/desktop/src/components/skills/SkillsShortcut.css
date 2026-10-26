@@ -49,8 +49,17 @@
   padding: 1.5px;
   color: var(--text-tertiary);
 }
-.skills-shortcut-label {
+/* The label and, while it's new, the inline "New" tag (6px after it) with
+   its sparkles: one flexible block, so the count stays at the row's end. */
+.skills-shortcut-name {
+  position: relative;
   flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.skills-shortcut-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -70,81 +79,85 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* "New" for 14 days from its first showing: a frosted accent glass pill with
-   a slowly breathing glow and three tiny sparkles twinkling in turn (one at a
-   time). Sparkles are absolutely placed around the chip, inside the 32px row,
-   so nothing shifts. Reduced motion: the same glass and glow, still. */
+/* "New" for 14 days from its first showing: a flat inline tag that belongs to
+   the row (no halo, no depth), its text with a slow light sweep, and nine tiny
+   sparkles twinkling over the label and tag. Reduced motion: the flat tag. */
 .skills-shortcut-new {
-  position: relative;
   flex: none;
   display: inline-flex;
   align-items: center;
-  padding: 1px 7px;
+  height: 16px;
+  padding: 0 6px;
   border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 45%, transparent);
-  /* The darker accent in light mode, the lighter one in dark mode. */
-  color: var(--accent-hover);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
   font-size: 10.5px;
   font-weight: 600;
   line-height: 14px;
   letter-spacing: 0.02em;
-  animation: skills-chip-breathe 3s ease-in-out infinite;
 }
-@keyframes skills-chip-breathe {
-  0%,
+/* The darker accent in light mode, the lighter one in dark mode, with a
+   brighter band passing through the letters only. */
+.skills-shortcut-new-text {
+  color: var(--accent-hover);
+  background: linear-gradient(
+    100deg,
+    var(--accent-hover) 0%,
+    var(--accent-hover) 40%,
+    color-mix(in srgb, var(--accent) 45%, #fff) 50%,
+    var(--accent-hover) 60%,
+    var(--accent-hover) 100%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: skills-new-sweep 2.8s ease-in-out infinite;
+}
+@keyframes skills-new-sweep {
+  0% {
+    background-position: 100% 0;
+  }
+  60%,
   100% {
-    box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 30%, transparent);
+    background-position: 0% 0;
   }
-  50% {
-    box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 55%, transparent);
-  }
+}
+.skills-sparkles {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 .skills-sparkle {
   position: absolute;
-  font-size: 7px;
   line-height: 1;
-  color: var(--accent-hover);
+  color: var(--accent);
   opacity: 0;
   transform: scale(0);
-  pointer-events: none;
-  animation: skills-sparkle 2.4s ease-in-out infinite;
+  animation-name: skills-sparkle;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
 }
-.skills-sparkle.s1 {
-  top: -4px;
-  left: -3px;
-}
-.skills-sparkle.s2 {
-  top: -5px;
-  right: -2px;
-  animation-delay: 0.8s;
-}
-.skills-sparkle.s3 {
-  bottom: -4px;
-  right: 6px;
-  font-size: 6px;
-  animation-delay: 1.6s;
-}
+/* Lit for the first 30% of each loop: nine sparkles ⇒ about 2–3 at a time. */
 @keyframes skills-sparkle {
   0%,
-  40%,
+  30%,
   100% {
     opacity: 0;
     transform: scale(0) rotate(0deg);
   }
-  20% {
-    opacity: 1;
+  15% {
+    opacity: var(--sparkle-peak, 0.8);
     transform: scale(1) rotate(45deg);
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .skills-shortcut-new {
+  .skills-shortcut-new-text {
     animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
   }
-  .skills-sparkle {
+  .skills-sparkles {
     display: none;
   }
 }

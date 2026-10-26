@@ -12,6 +12,7 @@ import { skillDisplayName } from "../../lib/skills/display";
 import {
   AI_TOOL_NAME,
   detectedAiTools,
+  stateLines,
   targetStates,
   teamAvailability,
   type TargetState,
@@ -35,7 +36,8 @@ import type { SkillDetail } from "../../lib/skills/types";
 import { toast } from "../../lib/toast";
 import { useStore } from "../../store";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { BusyButton } from "./parts";
+import { BusyButton, LockBadge } from "./parts";
+import { RequiredBadge } from "./SquareTip";
 import { SkillsMenuButton } from "./SkillsMenuButton";
 import { ToolMarks } from "./ToolLogos";
 
@@ -91,7 +93,18 @@ function useSkillHere(orgId: string, skill: SkillDetail) {
 }
 
 /** The header's install control (same 34px group as Publish). */
-export function InstallControl({ orgId, skill, canManage }: { orgId: string; skill: SkillDetail; canManage: boolean }) {
+export function InstallControl({
+  orgId,
+  skill,
+  canManage,
+  onMakeOptional,
+}: {
+  orgId: string;
+  skill: SkillDetail;
+  canManage: boolean;
+  /** Admins: the Required badge's "Make optional" (the skill page's PATCH). */
+  onMakeOptional?: () => Promise<void>;
+}) {
   const here = useSkillHere(orgId, skill);
   const scan = useDeviceScan();
   const [removing, setRemoving] = useState(false);
@@ -139,12 +152,18 @@ export function InstallControl({ orgId, skill, canManage }: { orgId: string; ski
   }
   if (!here.optional) {
     return (
-      <span className="skills-installed-static" title="Required by your team, so it can't be removed">
+      <RequiredBadge
+        name={name}
+        lines={stateLines(here.states, skill.effectiveVersion)}
+        canManage={canManage}
+        onMakeOptional={canManage ? onMakeOptional : undefined}
+      >
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="M20 6 9 17l-5-5" />
         </svg>
         Installed for everyone
-      </span>
+        <LockBadge />
+      </RequiredBadge>
     );
   }
   if (here.optedIn) {

@@ -132,6 +132,14 @@ export function SkillDetail({
     }
   };
 
+  /** The Required badge's "Make optional": same PATCH as the delivery select, errors to the caller's toast. */
+  const makeOptional = async () => {
+    await authManager.api.patchSkill(orgId, skillId, { delivery: "optional" });
+    toast(`${skillDisplayName(skill?.name ?? "")} is now optional. People can remove it from their computer.`);
+    await load();
+    onChanged();
+  };
+
   const full = focus && section === "draft" && canManage;
   useEffect(() => {
     if (!full) return;
@@ -244,7 +252,7 @@ export function SkillDetail({
         </div>
         <div className="skills-detail-controls">
           {device.active && skill.effectiveVersion !== null && (
-            <InstallControl orgId={orgId} skill={skill} canManage={canManage} />
+            <InstallControl orgId={orgId} skill={skill} canManage={canManage} onMakeOptional={makeOptional} />
           )}
           {canManage ? (
             <>

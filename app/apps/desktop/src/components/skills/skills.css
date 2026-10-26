@@ -1159,8 +1159,75 @@ code.skills-target-path {
 .skills-install.is-installed:hover {
   border-color: color-mix(in srgb, var(--access-edit-fg) 55%, transparent);
 }
+/* Required: fixed, not a toggle. A help cursor, a quieter fill and a lock. */
 .skills-install.is-required {
-  cursor: default;
+  position: relative;
+  cursor: help;
+  background: color-mix(in srgb, var(--access-edit-bg) 55%, var(--bg-surface));
+}
+.skills-install:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.skills-lock-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+
+/* Instant tooltips and the Required popover (`SquareTip.tsx`). */
+.skills-tip {
+  position: fixed;
+  z-index: 410;
+  max-width: 260px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+.skills-tip.is-popover {
+  pointer-events: auto;
+  max-width: 280px;
+  padding: 10px 12px;
+}
+.skills-tip-heading {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.skills-tip-body {
+  margin-top: 2px;
+}
+.skills-tip-lines {
+  margin-top: 6px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.skills-tip-note {
+  margin-top: 6px;
+  color: var(--text-tertiary);
+}
+.skills-tip-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: 10px;
+}
+.skills-tip-anchor {
+  display: inline-flex;
 }
 .skills-install.is-busy {
   cursor: default;
@@ -1786,15 +1853,28 @@ button.secondary.skills-fix-btn {
   color: var(--access-view-fg);
 }
 .skills-installed-static {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 34px;
   padding: 0 4px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  font: inherit;
   font-size: var(--fs-sm);
   font-weight: 500;
   color: var(--text-tertiary);
-  cursor: default;
+  cursor: help;
+}
+.skills-installed-static:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.skills-installed-static .skills-lock-badge {
+  position: static;
+  margin-left: 2px;
 }
 
 /* Just added: ONE slow glow, dim → bright → dim over 5s, then nothing left.

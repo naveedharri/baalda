@@ -876,12 +876,20 @@ Command names, argument names and every wire shape in §4.2/§4.6 are unchanged.
 - **Name (2026-10-27):** the feature is called **Agent Skills** in the UI (sidebar shortcut, Vault
   Settings tab, page title, "← Agent Skills" back links, the AI tools section). Sentences about the
   items keep "skill(s)"; identifiers, routes, tab ids and prefs keys stay `skills`.
+- **Install square tips (2026-10-27):** every square (+, ✓, !, also the marketplace's) shows an
+  instant tooltip after 150ms (`SquareTip.tsx`), never the OS `title`. A Required ✓ is fixed, not
+  a toggle: a lock badge, a quieter fill, `cursor: help`; hover says "Required by your team · It's
+  always installed on everyone's computer and can't be removed." plus the per-tool lines (admins:
+  "Change it to Optional on the skill's page."), and a click or Enter/Space opens the same text as
+  a popover with "Make optional" (admins; the same PATCH, then a toast) and "Got it". The skill
+  page's "✓ Installed for everyone" and the AI tools grid behave the same.
 - **Sidebar Skills shortcut (experimental, `SHOW_SKILLS_SHORTCUT`):** at the bottom of the sidebar
   just above the profile section (outside the footer and its divider), its box copied from a file
   tree row (full bleed, 32px, flat hover). A "New" chip shows beside the count for 14 days from its
   first showing on this computer (localStorage `context.skills.newChip.v3`, a timestamp; no storage
-  ⇒ the session): a frosted accent glass pill with a slowly breathing glow and three tiny sparkles
-  twinkling in turn; static glass and glow under reduced motion. The attention dot and the muted
+  ⇒ the session): a flat inline accent tag 6px after the label (16% fill, 30% hairline, no halo),
+  a slow light sweep through its letters only, and nine tiny sparkles over the label and tag on
+  staggered 1.6–2.6s loops (2–3 lit at a time); the plain tag under reduced motion. The attention dot and the muted
   team count show as well.
 
 ## Addendum — Marketplace import (server)
