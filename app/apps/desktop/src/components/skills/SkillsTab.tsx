@@ -26,7 +26,7 @@ import { toast } from "../../lib/toast";
 import { useStore } from "../../store";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { MarketplaceBrowser } from "./MarketplaceBrowser";
-import { EmptyState, GitHubGlyph, InstallButton, LoadError, SearchToggle, SkillGridSkeleton, skillAuthor, SkillIcon } from "./parts";
+import { EmptyState, SkillCard, GitHubGlyph, InstallButton, LoadError, SearchToggle, SkillGridSkeleton, skillAuthor } from "./parts";
 import { Spinner } from "../Spinner";
 import { withTimeout } from "../../lib/skills/loading";
 import { primeCatalog } from "../../lib/skills/catalogCache";
@@ -413,46 +413,32 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
 
   const groupBody = (g: SkillGroup) => (
       <ul className="skills-grid">
-        {g.skills.map((s) => {
-          const here = install(s);
-          return (
-            <li
-              key={s.id}
-              data-skill-id={s.id}
-              className={`skills-card${ringId === s.id ? " is-highlight" : ""}${leaving.has(s.id) ? " is-leaving" : ""}`}
-              {...openProps(s)}
-            >
-              <SkillIcon large />
-              <span className="skills-card-main">
-                <span className="skills-card-title-row">
-                  <span className="skills-row-name">{skillDisplayName(s.name)}</span>
-                  {newIds.has(s.id) && <span className="skills-new-chip">New</span>}
-                </span>
-                <span className="skills-card-byline">{metaLine(s, true)}</span>
-                <span className="skills-card-desc">{s.description || "No description yet."}</span>
-              </span>
-              <span className="skills-card-action">
-                {manage && (
-                  // The menu is portalled, but React still bubbles its clicks
-                  // up here: keep them from opening the card.
-                  <span className="skills-card-more" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-                    <RowActionsMenu
-                      ariaLabel={`More for ${skillDisplayName(s.name)}`}
-                      actions={[
-                        { key: "open", label: "Open", onSelect: () => openProps(s).onClick() },
-                        ...(s.effectiveVersion !== null
-                          ? [{ key: "zip", label: "Download .zip", onSelect: () => downloadSkillZip(orgId, s.id, s.name, s.effectiveVersion!) }]
-                          : []),
-                        { key: "remove", label: "Remove from team", danger: true, separated: true, onSelect: () => setTeamRemoving(s) },
-                      ]}
-                    />
-                  </span>
-                )}
-                {here.button}
-              </span>
-            </li>
-          );
-        })}
+        {g.skills.map((s) => (
+          <SkillCard
+            key={s.id}
+            name={s.name}
+            titleExtra={newIds.has(s.id) && <span className="skills-new-chip">New</span>}
+            byline={metaLine(s, true)}
+            description={s.description || "No description yet."}
+            action={install(s).button}
+            className={`${ringId === s.id ? "is-highlight" : ""}${leaving.has(s.id) ? " is-leaving" : ""}`.trim()}
+            li={{ "data-skill-id": s.id, ...openProps(s) }}
+            more={
+              manage && (
+                <RowActionsMenu
+                  ariaLabel={`More for ${skillDisplayName(s.name)}`}
+                  actions={[
+                    { key: "open", label: "Open", onSelect: () => openProps(s).onClick() },
+                    ...(s.effectiveVersion !== null
+                      ? [{ key: "zip", label: "Download .zip", onSelect: () => downloadSkillZip(orgId, s.id, s.name, s.effectiveVersion!) }]
+                      : []),
+                    { key: "remove", label: "Remove from team", danger: true, separated: true, onSelect: () => setTeamRemoving(s) },
+                  ]}
+                />
+              )
+            }
+          />
+        ))}
       </ul>
   );
 

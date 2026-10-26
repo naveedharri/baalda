@@ -143,22 +143,6 @@ button.primary.skills-btn-sm {
   background: var(--access-view-bg);
   color: var(--access-view-fg);
 }
-.skills-dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  margin: 0 6px;
-  border-radius: 50%;
-  background: var(--text-tertiary);
-}
-.skills-dot.is-good { background: #22c55e; }
-.skills-dot.is-busy { background: var(--accent); animation: skills-pulse 1.2s ease-in-out infinite; }
-.skills-dot.is-warn { background: #f59e0b; }
-.skills-dot.is-bad { background: var(--danger, #ef4444); }
-.skills-dot.is-off { background: transparent; box-shadow: inset 0 0 0 1.5px var(--text-tertiary); }
-@keyframes skills-pulse {
-  50% { opacity: 0.35; }
-}
 .skills-hint-bad {
   color: var(--danger, #dc2626);
 }
@@ -890,40 +874,84 @@ code.skills-target-path {
   display: inline-flex;
   align-items: center;
 }
+/* Cards after Claude's skills directory: a very light grey fill, no border or
+   shadow, a touch darker on hover. Three per row, two below
+   ~760px of panel and one below ~480px (container queries on `.skills-scroll`,
+   or `.skills-grid-host` where a grid lives outside the Skills tab);
+   rows share one height. A neutral 40px tile, the title, a muted byline under it, and a
+   three-line description that runs almost to the right edge. The
+   status square (and an admin's ⋯) sit absolutely at the top right, so only
+   the title row and the description keep clear of them. */
+.skills-scroll,
+.skills-grid-host {
+  container: skills-panel / inline-size;
+}
 .skills-grid {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: 1fr;
   gap: var(--sp-3);
+}
+@container skills-panel (max-width: 760px) {
+  .skills-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@container skills-panel (max-width: 480px) {
+  .skills-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .skills-card {
+  /* A very light warm grey just under the panel's white (#f5f5f3-ish), like
+     Claude's skills directory; the tile is the surface so it pops. */
+  --skills-card-bg: color-mix(in srgb, var(--text-primary) 3.5%, var(--bg-surface));
+  --skills-card-bg-hover: color-mix(in srgb, var(--text-primary) 6%, var(--bg-surface));
+  --skills-tile-bg: var(--bg-surface);
   position: relative;
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
+  grid-template-columns: 40px minmax(0, 1fr);
   align-items: start;
   gap: var(--sp-3);
-  min-height: 148px;
-  padding: var(--sp-4) var(--sp-4) var(--sp-4) var(--sp-5);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-surface);
+  min-height: 168px;
+  padding: 18px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--skills-card-bg);
   cursor: pointer;
-  transition:
-    border-color var(--t-fast) var(--ease),
-    box-shadow var(--t-fast) var(--ease),
-    transform var(--t-fast) var(--ease);
+  transition: background var(--t-fast) var(--ease);
 }
-.skills-card:not(.is-static):hover,
+/* Dark: a touch lighter than the panel; the tile a touch darker. */
+[data-theme="dark"] .skills-card {
+  --skills-card-bg: color-mix(in srgb, var(--text-primary) 5%, var(--bg-surface));
+  --skills-card-bg-hover: color-mix(in srgb, var(--text-primary) 8%, var(--bg-surface));
+  --skills-tile-bg: color-mix(in srgb, #000 14%, var(--bg-surface));
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) .skills-card {
+    --skills-card-bg: color-mix(in srgb, var(--text-primary) 5%, var(--bg-surface));
+    --skills-card-bg-hover: color-mix(in srgb, var(--text-primary) 8%, var(--bg-surface));
+    --skills-tile-bg: color-mix(in srgb, #000 14%, var(--bg-surface));
+  }
+}
+.skills-card:not(.is-static):hover {
+  background: var(--skills-card-bg-hover);
+}
 .skills-card:not(.is-static):focus-visible {
-  border-color: var(--border-strong, var(--border));
-  box-shadow: var(--shadow-sm);
-  transform: translateY(-1px);
   outline: none;
+  box-shadow: var(--focus-ring);
 }
 .skills-card.is-static {
   cursor: default;
+}
+/* The icon tile: the surface with a hairline and a neutral glyph. */
+.skills-card .skills-icon.is-lg {
+  background: var(--skills-tile-bg);
+  border-color: var(--border);
+  color: var(--text-tertiary);
 }
 .skills-card-main {
   display: flex;
@@ -932,33 +960,62 @@ code.skills-target-path {
   min-width: 0;
   height: 100%;
 }
-.skills-card-desc {
-  flex: none;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  max-height: calc(1.45em * 3);
-  font-size: var(--fs-sm);
-  line-height: 1.45;
-  color: var(--text-secondary);
+/* Title and byline keep clear of the square (26px + gap); with an admin's ⋯
+   beside it, more. The description starts below the square. */
+.skills-card-title-row,
+.skills-card-byline {
+  padding-right: 36px;
 }
-.skills-card-meta {
+.skills-card.has-more .skills-card-title-row,
+.skills-card.has-more .skills-card-byline {
+  padding-right: 68px;
+}
+.skills-card-byline {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   min-width: 0;
-  margin-top: auto;
-  padding-top: var(--sp-2);
+  margin: -2px 0 2px;
 }
-.skills-card-meta .skills-tool-cluster,
-.skills-card-meta .skills-tool-tags {
-  margin-left: auto;
+.skills-card .skills-row-name {
+  font-weight: 600;
+}
+.skills-card-desc {
+  flex: none;
+  display: block;
+  overflow: hidden;
+  max-height: calc(1.45em * 3);
+  margin-right: 44px;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+/* No "…": when it runs past three lines, the end of the last line fades out. */
+.skills-card-desc.is-clipped {
+  -webkit-mask-image:
+    linear-gradient(to right, #000 calc(100% - 72px), transparent),
+    linear-gradient(#000, #000);
+  mask-image:
+    linear-gradient(to right, #000 calc(100% - 72px), transparent),
+    linear-gradient(#000, #000);
+  -webkit-mask-size: 100% 1.45em, 100% calc(100% - 1.45em);
+  mask-size: 100% 1.45em, 100% calc(100% - 1.45em);
+  -webkit-mask-position: 0 100%, 0 0;
+  mask-position: 0 100%, 0 0;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
 }
 .skills-card-action {
+  position: absolute;
+  top: var(--sp-4);
+  right: var(--sp-4);
   display: flex;
   align-items: center;
   gap: var(--sp-1);
+}
+.skills-skel-byline {
+  margin-bottom: 4px;
 }
 /* Admin ⋯ beside the status square: shown on hover/focus, kept while its menu is open. */
 .skills-card-more {
@@ -984,18 +1041,6 @@ code.skills-target-path {
   .skills-card.is-leaving {
     transform: none;
   }
-}
-/* Kept for the skeleton cards. */
-.skills-card-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-.skills-card-foot {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 .skills-token-field {
   flex: 0 1 220px;
@@ -1389,11 +1434,6 @@ button.secondary.skills-hdr-btn {
   width: 22px;
   height: 22px;
 }
-.skills-card-byline {
-  display: flex;
-  min-width: 0;
-  margin: -2px 0 2px;
-}
 
 /* Skill page header: one control group on one centre line. */
 .skills-detail-controls {
@@ -1477,8 +1517,7 @@ button.secondary.skills-hdr-btn.skills-ctl {
   100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .skills-new-dot,
-  .skills-dot.is-busy {
+  .skills-new-dot {
     animation: none;
   }
 }

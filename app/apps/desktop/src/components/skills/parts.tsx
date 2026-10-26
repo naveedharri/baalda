@@ -2,13 +2,13 @@
 // page, the marketplace and AI tools draw rows, tags, status and loading the
 // same way.
 
-import { forwardRef, useEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from "react";
 import { useAsyncAction } from "../../lib/useAsyncAction";
 import { Spinner } from "../Spinner";
 import * as ipc from "../../lib/ipc";
+import { skillDisplayName } from "../../lib/skills/display";
 import type { SkillDetail, SkillSummary } from "../../lib/skills/types";
 import type { SkillTarget } from "../../lib/ipc";
-import type { SkillTargetResult, SkillTargetState } from "../../lib/skills/syncEngine";
 
 /**
  * Who a skill is by: the repo owner for an imported skill (linking to the
@@ -107,6 +107,15 @@ export function SkillIcon({ large = false }: { large?: boolean }) {
   );
 }
 
+/** The install square's "!" (edited, name taken, failed), for a square that opens a menu. */
+export function WarnMark() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M8 3.5v5.5M8 12.2v.3" />
+    </svg>
+  );
+}
+
 export type InstallKind = "add" | "installed" | "required" | "busy" | "warn" | "bad" | "update" | "blocked";
 
 /**
@@ -170,43 +179,88 @@ export function Tag({ children, tone, title }: { children: ReactNode; tone?: "go
   );
 }
 
-export type DotTone = "good" | "busy" | "warn" | "bad" | "off";
-
-export function StatusDot({ tone, label }: { tone: DotTone; label: string }) {
-  return <span className={`skills-dot is-${tone}`} title={label} aria-label={label} role="img" />;
-}
-
-const STATE_RANK: Record<SkillTargetState, number> = {
-  failed: 5,
-  conflict: 4,
-  edited: 3,
-  updating: 2,
-  keptMine: 1,
-  upToDate: 0,
-};
-
-const STATE_DOT: Record<SkillTargetState, { tone: DotTone; label: string }> = {
-  upToDate: { tone: "good", label: "Up to date on this computer" },
-  updating: { tone: "busy", label: "Updating on this computer" },
-  keptMine: { tone: "good", label: "Your edited copy is kept on this computer" },
-  edited: { tone: "warn", label: "Edited on this computer" },
-  conflict: { tone: "warn", label: "Another skill uses this name on this computer" },
-  failed: { tone: "bad", label: "Couldn't install on this computer" },
-};
-
-/** One dot for a skill on this device: the most urgent state across its targets. */
-export function deviceDot(results: readonly SkillTargetResult[], orgId: string, skillId: string): { tone: DotTone; label: string } {
-  let worst: SkillTargetState | null = null;
-  for (const r of results) {
-    if (r.orgId !== orgId || r.skillId !== skillId) continue;
-    if (worst === null || STATE_RANK[r.state] > STATE_RANK[worst]) worst = r.state;
-  }
-  return worst ? STATE_DOT[worst] : { tone: "off", label: "Not on this computer" };
-}
-
 export const TARGET_SHORT: Record<SkillTarget, string> = { claude: "Claude", agents: "Other tools" };
 
-/** Placeholder cards matching `.skills-grid` cards. */
+/**
+ * A card's description: at most three lines, clipped without "…". Only when it
+ * actually overflows does the end of the last line fade out (`is-clipped`).
+ */
+export function CardDescription({ text }: { text: string }) {
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const [clipped, setClipped] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const check = () => setClipped(el.scrollHeight > el.clientHeight + 1);
+    check();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text]);
+  return (
+    <span ref={ref} className={`skills-card-desc${clipped ? " is-clipped" : ""}`}>
+      {text}
+    </span>
+  );
+}
+
+/**
+ * One skill card in a `.skills-grid` (the Skills tab's team and device grids,
+ * Account Settings → AI tools): the neutral tile, `/name` (plus `titleExtra`,
+ * e.g. the "New" chip), a muted one-line byline, the clamped description, and
+ * at the top right the install square with an optional hover ⋯ (`more`).
+ * `li` carries the card's own props: click/keys to open, data attributes, a
+ * state class. Without an `onClick` there it is static.
+ */
+export function SkillCard({
+  name,
+  titleExtra,
+  byline,
+  description,
+  action,
+  more,
+  className = "",
+  li,
+}: {
+  name: string;
+  titleExtra?: ReactNode;
+  byline: ReactNode;
+  description: string;
+  action?: ReactNode;
+  more?: ReactNode;
+  className?: string;
+  li?: HTMLAttributes<HTMLLIElement> & Record<`data-${string}`, string>;
+}) {
+  const interactive = !!li?.onClick;
+  return (
+    <li {...li} className={`skills-card${more ? " has-more" : ""}${interactive ? "" : " is-static"}${className ? ` ${className}` : ""}`}>
+      <SkillIcon large />
+      <span className="skills-card-main">
+        <span className="skills-card-title-row">
+          <span className="skills-row-name">{skillDisplayName(name)}</span>
+          {titleExtra}
+        </span>
+        <span className="skills-card-byline">{byline}</span>
+        <CardDescription text={description} />
+      </span>
+      {(action || more) && (
+        <span className="skills-card-action">
+          {more && (
+            // The menu is portalled, but React still bubbles its clicks up
+            // here: keep them from opening the card.
+            <span className="skills-card-more" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+              {more}
+            </span>
+          )}
+          {action}
+        </span>
+      )}
+    </li>
+  );
+}
+
+/** Placeholder cards matching `.skills-grid` cards (neutral, no tile colour): title, byline, three description lines. */
 export function SkeletonCards({ count = 3, label = "Loading" }: { count?: number; label?: string }) {
   return (
     <ul className="skills-grid" role="status" aria-busy="true" aria-label={label}>
@@ -214,12 +268,15 @@ export function SkeletonCards({ count = 3, label = "Loading" }: { count?: number
         <li key={i} className="skills-card is-static" aria-hidden="true">
           <span className="skel-line skills-skel-icon is-lg" />
           <span className="skills-card-main">
-            <span className="skel-line" style={{ width: `${40 + (i % 3) * 12}%` }} />
-            <span className="skel-line skills-skel-sub" style={{ width: "92%" }} />
-            <span className="skel-line skills-skel-sub" style={{ width: "64%" }} />
-            <span className="skel-line skills-skel-sub" style={{ width: "38%", marginTop: "auto" }} />
+            <span className="skel-line" style={{ width: `${28 + (i % 3) * 10}%` }} />
+            <span className="skel-line skills-skel-sub skills-skel-byline" style={{ width: "34%" }} />
+            <span className="skel-line skills-skel-sub" style={{ width: "94%" }} />
+            <span className="skel-line skills-skel-sub" style={{ width: "88%" }} />
+            <span className="skel-line skills-skel-sub" style={{ width: "56%" }} />
           </span>
-          <span className="skel-line skills-skel-install" />
+          <span className="skills-card-action">
+            <span className="skel-line skills-skel-install" />
+          </span>
         </li>
       ))}
     </ul>

@@ -12,6 +12,7 @@ import {
   checkSkillsNow,
   isSkillOnThisDevice,
   keepMySkill,
+  replaceNameTakenSkill,
   setSkillOnThisDevice,
   setSkillTargetEnabled,
   useSkillsDeviceState,
@@ -25,7 +26,10 @@ import { ConfirmDialog } from "../ConfirmDialog";
 import { Switch } from "../Switch";
 import { ToolLogo } from "./ToolLogos";
 import "../editor.css";
-import { deviceDot, EmptyState, InstallButton, LoadError, ProgressBar, RowSkeletons, SkillIcon, StatusDot, Tag, TARGET_SHORT, ToolRowSkeleton } from "./parts";
+import { EmptyState, InstallButton, LoadError, ProgressBar, SkeletonCards, SkillCard, TARGET_SHORT, ToolRowSkeleton, WarnMark } from "./parts";
+import { SkillsMenuButton } from "./SkillsMenuButton";
+import { overallState, stateLines, targetStates } from "../../lib/skills/installState";
+import type { ManifestSkill } from "../../lib/skills/types";
 import "./skills.css";
 
 const TARGET_LABEL: Record<SkillTarget, string> = {
@@ -79,13 +83,67 @@ export function AiToolsTab() {
   }
 
   const results = state.results;
-  const stateOf = (orgId: string, skillId: string, target: SkillTarget) =>
-    results.find((r) => r.orgId === orgId && r.skillId === skillId && r.target === target) ?? null;
 
   const rows = (state.manifest?.orgs ?? []).flatMap((org) =>
     org.skills.map((skill) => ({ org, skill })),
   );
   const multiVault = (state.manifest?.orgs.length ?? 0) > 1;
+
+  /**
+   * The Skills tab's install square for one skill on this computer: + to use
+   * it, ✓ when here (Required can't be removed), and the amber "!" with its
+   * choices when a copy here was edited, its name is taken, or it failed.
+   */
+  const square = (orgId: string, skill: ManifestSkill) => {
+    const optional = skill.delivery === "optional";
+    const on = !optional || isSkillOnThisDevice(serverUrl, orgId, skill.skillId);
+    const states = targetStates(results, prefs.targets, orgId, skill.skillId);
+    const overall = overallState(states);
+    const lines = stateLines(states, skill.version).join("\n");
+    if (on && (overall === "warn" || overall === "bad")) {
+      const targetsIn = (state: string) => (Object.keys(states) as SkillTarget[]).filter((t) => states[t] === state);
+      const edited = targetsIn("edited");
+      const conflict = targetsIn("conflict");
+      const which = (t: SkillTarget, many: boolean, label: string) => (many ? `${label} (${TARGET_SHORT[t]})` : label);
+      const actions = [
+        ...edited.flatMap((t) => [
+          { key: `keep-${t}`, label: which(t, edited.length > 1, "Keep mine"), hint: "Leave your edited copy as it is", onSelect: () => keepMySkill(orgId, skill.skillId, t) },
+          { key: `team-${t}`, label: which(t, edited.length > 1, "Use team version"), hint: "Your copy is backed up first", onSelect: () => applyTeamSkillVersion(orgId, skill.skillId, t) },
+        ]),
+        ...conflict.flatMap((t) => {
+          const own = results.find((r) => r.orgId === orgId && r.skillId === skill.skillId && r.target === t)?.conflict === "unmanaged";
+          return own
+            ? [
+                { key: `nt-team-${t}`, label: which(t, conflict.length > 1, "Use team version"), hint: "Your copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.skillId, t) },
+                { key: `nt-keep-${t}`, label: which(t, conflict.length > 1, "Keep my own"), hint: "Leave your folder as it is on this computer", onSelect: () => keepMySkill(orgId, skill.skillId, t) },
+              ]
+            : [];
+        }),
+        { key: "check", label: "Check again", onSelect: () => checkSkillsNow() },
+      ];
+      return (
+        <SkillsMenuButton
+          label={<WarnMark />}
+          caret={false}
+          className={`skills-install is-${overall}`}
+          ariaLabel={`Fix ${skillDisplayName(skill.name)}`}
+          title={lines}
+          actions={actions}
+        />
+      );
+    }
+    if (!optional) return <InstallButton kind="required" title={`Required by your team\n${lines}`} />;
+    if (on) {
+      return (
+        <InstallButton
+          kind="installed"
+          title={`On this computer · click to remove\n${lines}`}
+          onClick={() => setRemoving({ orgId, skillId: skill.skillId, name: skill.name })}
+        />
+      );
+    }
+    return <InstallButton kind="add" title="Use on this computer" onClick={() => setSkillOnThisDevice(orgId, skill.skillId, true)} />;
+  };
 
   const openBackups = async () => {
     const dir = await ipc.skillsBackupsDir();
@@ -151,77 +209,29 @@ export function AiToolsTab() {
       {!state.active ? (
         <div className="muted">Sign in to get your team's skills.</div>
       ) : !state.manifest ? (
-        <RowSkeletons count={3} square={false} label="Checking for skills" />
+        <div className="skills-grid-host">
+          <SkeletonCards count={3} label="Checking for skills" />
+        </div>
       ) : rows.length === 0 ? (
         <EmptyState title="No skills yet">Your vaults haven't published any skills.</EmptyState>
       ) : (
-        <ul className="skills-list">
-          {rows.map(({ org, skill }) => {
-            const optional = skill.delivery === "optional";
-            const on = !optional || isSkillOnThisDevice(serverUrl, org.orgId, skill.skillId);
-            const active = targets.filter((t) => prefs.targets[t.target]);
-            const edited = active.filter((t) => stateOf(org.orgId, skill.skillId, t.target)?.state === "edited");
-            const kept = active.some((t) => stateOf(org.orgId, skill.skillId, t.target)?.state === "keptMine");
-            const conflict = active.some((t) => stateOf(org.orgId, skill.skillId, t.target)?.state === "conflict");
-            const dot = deviceDot(results, org.orgId, skill.skillId);
-            return (
-              <li key={`${org.orgId}:${skill.skillId}`} className="skills-list-row is-static">
-                <SkillIcon />
-                <span className="skills-row-main">
-                  <span className="skills-row-name">{skillDisplayName(skill.name)}</span>
-                  <span className="skills-row-desc">
-                    {multiVault ? `${org.orgName} · ` : ""}v{skill.version} · {optional ? "Optional" : "Required"}
+        <div className="skills-grid-host">
+          <ul className="skills-grid">
+            {rows.map(({ org, skill }) => (
+              <SkillCard
+                key={`${org.orgId}:${skill.skillId}`}
+                name={skill.name}
+                byline={
+                  <span className="skills-meta-line">
+                    {multiVault ? `${org.orgName} · ` : ""}v{skill.version} · {skill.delivery === "optional" ? "Optional" : "Required"}
                   </span>
-                </span>
-                <span className="skills-row-side">
-                  {on && edited.length > 0 ? (
-                    <>
-                      <Tag tone="warn" title={edited.map((t) => TARGET_SHORT[t.target]).join(", ")}>Edited here</Tag>
-                      <RowActionsMenu
-                        ariaLabel={`Choose for ${skill.name}`}
-                        actions={edited.flatMap((t) => [
-                          {
-                            key: `keep-${t.target}`,
-                            label: edited.length > 1 ? `Keep mine (${TARGET_SHORT[t.target]})` : "Keep mine",
-                            onSelect: () => keepMySkill(org.orgId, skill.skillId, t.target),
-                          },
-                          {
-                            key: `team-${t.target}`,
-                            label: edited.length > 1 ? `Use team version (${TARGET_SHORT[t.target]})` : "Use team version",
-                            onSelect: () => applyTeamSkillVersion(org.orgId, skill.skillId, t.target),
-                          },
-                        ])}
-                      />
-                    </>
-                  ) : on && conflict ? (
-                    <Tag tone="warn" title="Another folder on this computer uses this name">Name taken</Tag>
-                  ) : on && kept ? (
-                    <Tag>Kept yours</Tag>
-                  ) : on ? (
-                    <StatusDot tone={dot.tone} label={dot.label} />
-                  ) : null}
-                  {optional ? (
-                    on ? (
-                      <InstallButton
-                        kind="installed"
-                        title="On this computer · click to remove"
-                        onClick={() => setRemoving({ orgId: org.orgId, skillId: skill.skillId, name: skill.name })}
-                      />
-                    ) : (
-                      <InstallButton
-                        kind="add"
-                        title="Use on this computer"
-                        onClick={() => setSkillOnThisDevice(org.orgId, skill.skillId, true)}
-                      />
-                    )
-                  ) : (
-                    <InstallButton kind="required" title="Required by your team" />
-                  )}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
+                }
+                description={skill.description || "No description yet."}
+                action={square(org.orgId, skill)}
+              />
+            ))}
+          </ul>
+        </div>
       )}
 
       {removing && (

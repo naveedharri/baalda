@@ -670,7 +670,22 @@ through `skills_read_folder` on its `realPath`) with Reveal in Finder; admins ca
 team** (now labelled **Add to team**) a non-managed one: create + publish v1 "Added from <name>'s computer", then land on the Team grid with the card ringed (`useHighlightSkill`), refusing a name the
 vault already uses.
 
-2026-10-27 polish: cards carry a byline under the name ("By Sara Lee · v1"), no logos. A skill
+2026-10-27 polish: cards follow Claude's skills directory: a very light grey fill just under the
+panel (`text-primary` 3.5% over `--bg-surface`; 6% on hover, no lift), no border or shadow, 12px
+radius; the icon tile is the surface with a hairline and a neutral glyph so it pops (dark: the card
+5% lighter than the panel, the tile a touch darker). Three per row, two below
+~760px of panel and one below ~480px (container queries on `.skills-scroll` or `.skills-grid-host`), rows of one height,
+at least 168px tall. A neutral 40px icon tile (per-card palette tints were tried and dropped), `/name`, a
+muted byline directly under the name ("By Sara Lee · v1", "anthropics/skills · v1", "Claude ·
+Codex · 7 files", plus "Disabled in Claude" on device cards), and a description clipped at three
+lines with a fade on the last line's end instead of "…" (`parts.tsx CardDescription`, only when it
+overflows); the status square and
+an admin's hover ⋯ sit at the top right. Skeleton cards are neutral (title, byline, three lines). No
+logos on cards. Every grid draws the same `parts.tsx SkillCard`: the team and device grids and
+Account Settings → AI tools, whose "Agent Skills" list is a grid of these cards too (byline
+"v1 · Optional", with the vault name first only for people in more than one vault; the square
+carries the state with no separate dot, and its amber "!" opens Keep mine / Use team version, the
+name-taken choices, and Check again; the cards there don't open anything). A skill
 page (team or device) shows a source pill ("Made by your team", "From owner/repo", "Your skill",
 "Claude plugin", "Claude org") and an "Available in" line of AI tools (`installState.ts
 teamAvailability` / `deviceGrouping.ts deviceAvailability`): full when that tool can use the skill

@@ -30,7 +30,7 @@ import { DeviceSkillFiles } from "./DeviceSkillFiles";
 import { AvailableIn } from "./ToolLogos";
 import { detectedAiTools } from "../../lib/skills/installState";
 import { AsyncButton } from "../AsyncButton";
-import { BusyButton, EmptyState, LoadError, ProgressBar, RefreshIcon, SkillGridSkeleton, SkillIcon, Tag } from "./parts";
+import { BusyButton, SkillCard, EmptyState, LoadError, ProgressBar, RefreshIcon, SkillGridSkeleton, SkillIcon, Tag } from "./parts";
 
 
 function message(e: unknown): string {
@@ -140,21 +140,19 @@ export function DeviceSkillsView({
   const body = (g: DeviceGroup) => (
       <ul className="skills-grid">
         {g.items.map((item) => (
-          <li key={`${item.realPath}|${item.hint ?? ""}`} className={`skills-card${isDisabled(item) ? " is-disabled" : ""}`} {...itemProps(item)}>
-            <SkillIcon large />
-            <span className="skills-card-main">
-              <span className="skills-row-name">{skillDisplayName(item.name)}</span>
-              <span className="skills-card-byline">
+          <SkillCard
+            key={`${item.realPath}|${item.hint ?? ""}`}
+            name={item.name}
+            byline={
+              <>
                 <span className="skills-meta-line" title={metaText(item)}>{metaText(item)}</span>
-              </span>
-              <span className="skills-card-desc">{item.description || "No description."}</span>
-              {isDisabled(item) && (
-                <span className="skills-card-meta">
-                  <Tag>Disabled in Claude</Tag>
-                </span>
-              )}
-            </span>
-          </li>
+                {isDisabled(item) && <Tag>Disabled in Claude</Tag>}
+              </>
+            }
+            description={item.description || "No description."}
+            className={isDisabled(item) ? "is-disabled" : ""}
+            li={itemProps(item)}
+          />
         ))}
       </ul>
   );
