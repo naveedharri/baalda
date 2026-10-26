@@ -164,6 +164,21 @@ Errors: single `AppError(String)` (`error.rs`).
   deliberately ignore); a rename therefore arrives as an unpaired `removed` + `modified` in one batch.
 - `attachments.rs` — path-validated binary I/O under `attachments/`; never enters the note/CRDT pipeline.
 - `keychain.rs` — `keyring` crate, service `com.baalda.context`; trait-based so tests use a fake.
+- `skills_sync.rs` — team skills on disk (`docs/SKILLS.md` §4). Writes ONLY
+  `<claude config dir>/skills/<name>` (`$CLAUDE_CONFIG_DIR` if absolute, else `~/.claude`) and
+  `~/.agents/skills/<name>` (Codex, Cursor, Gemini CLI, Copilot, OpenCode); never `~/.codex/skills`
+  (deprecated). Every command is `trusted_window`-gated; name and relPath rules are re-validated in
+  Rust, never trusted from the webview; a symlinked root/ancestor is refused. A folder is ours only
+  when its `.baalda-managed.json` matches the owner = skillId + orgId + serverUrl + userId (a marker
+  with no `userId` is legacy and matches any user); a marker naming another folder counts as none.
+  Anything else (unmanaged, another server/vault/user) is never written or removed: install
+  `conflict` (`unmanaged`/`other_owner`), remove `conflict`. Install = validate shas → stage in
+  `.baalda-staging-<uuid>` → write the marker last → re-verify staged hashes → rename the old dir
+  aside, rename staging in, roll back on failure (never rename over a dir). A drifted (edited) copy
+  is `edited` unless `force` ("Use team version"), which copies it to app data `skill-backups/`
+  first. Remove `delete` backs up a drifted copy then removes the dir; `release` deletes only the
+  marker (no backup) so the folder stays as the user's own skill. Install/remove share one
+  process-wide lock; `skills_scan` sweeps stale staging/old dirs after 1 h.
 
 Tauri events to the UI: **`vault-opened`** and **`files-changed`** (the only two).
 
@@ -552,6 +567,57 @@ the self-hoster to update it. Clicking opens Account Settings → About. The ver
 mirror (`backendStatus`) and never gates sync on its own; the sync layer reads the same cached
 feature set.
 
+### Desktop — team skills (`src/lib/skills/`)
+`syncEngine.ts` is PURE: `planSkillsSync` (manifest + device prefs + Rust scan → actions) and
+`runSkillsPlan` (injected deps). Rules: no manifest ⇒ no plan (a failed fetch never removes);
+owned = marker on THIS server and (no `userId` or THIS user), everything else is foreign — never
+removed, never installed over, only a `conflict` on a wanted name; an edited copy is never
+overwritten by a run (`edited`, or `keptMine` when Keep mine is set); a removal (team deleted,
+lost membership, opted out, target switched off) RELEASES an edited/kept copy
+and deletes a clean one; a cross-org name clash goes to the vault already holding the folder,
+else the first by vault name then id. `syncHost.ts` runs it for every vault the user belongs to on
+the current server (`GET /api/skills/manifest`) at sign-in, on `skills-changed` (debounced 2 s), every
+15 min and on Check now, one run at a time. The API client is shared and a server switch repoints
+it before App's effect stops the host, so a run halts (plans and acts on nothing) once the client's
+base URL differs from the host's, and `store.setServerUrl` pauses the host first (`pauseSkillsSync`,
+resumed unless a switch to another URL landed). Device prefs (`prefs.ts`, localStorage
+`context.skills.device.v1`): target switches, Optional opt-ins and Keep mine keyed by
+server|org|skill(|target). UI: Vault Settings → **Skills** (`components/skills/`; admins edit,
+members read and opt in): a grid of cards (no list view), with a Team | On this device toggle
+(both counted; the read-only device scan runs once per session, `deviceScan.ts`), grouped "Made by your team" first then one collapsible group per import source
+(`lib/skills/grouping.ts`); a skill's page has one-click Publish (auto note, `publishNotes.ts`), delivery and version menus, Versions with
+.zip download, and a Draft editor: a file tree (`fileTree.ts`, folders first, SKILL.md pinned)
+beside a standalone CodeMirror 6 view (`SkillCodeEditor.tsx`, NOT the CRDT note editor; one undo
+history per file, ⌘S), a SKILL.md Name (locked) / Description header that edits the frontmatter by
+one span replacement (`skillMdEdit.ts`, raw fallback when unreadable), autosave ~1 s after typing
+(PATCH with `baseRevision`; `stale_draft` stops it and offers Load latest) and an Expand full view.
+Account Settings → **AI tools** shows this machine's targets and per-skill state. There is NO
+publishing to GitHub or claude.ai (the "Claude Chat & Cowork" bridge and `skipClaudeLocal` were
+removed 2026-10-26); GitHub is an import source only, and the admin's token for it lives only in the
+OS keychain (`baalda.skills.github:<serverUrl>|<orgId>`), managed on the marketplace page.
+- **Marketplace import** (`marketplace.ts` + `components/skills/MarketplaceBrowser.tsx`, Skills →
+  Browse marketplace, admins): a pasted `owner/repo` / GitHub URL / `@ref` is saved as a vault
+  source, then browsed with `commits/{ref ?? HEAD}` + ONE recursive `git/trees` call (a `truncated`
+  tree is refused). Detection, first match wins: Claude (`.claude-plugin/marketplace.json`,
+  relative sources via `metadata.pluginRoot`, `{source:"github"}` followed into its repo, other
+  source types "not supported yet"), Codex (`.agents/plugins/marketplace.json`, `{source:"local",
+  path}`, `.codex-plugin/plugin.json`), else every `SKILL.md` folder ≤5 deep outside
+  `node_modules`; a marketplace yielding no skills falls back to that scan. A plugin's listed
+  `skills` paths (entry, then `plugin.json`) REPLACE the default `<root>/skills/*`, and a folder two
+  plugins list shows once. Only SKILL.md is read for the listing (rows appear `pending` via
+  `onPartial`, 16 reads in flight); sizes and caps come from the tree, files are fetched on import
+  with the upload skip rules. With the admin's keychain token reads go through `/git/blobs`;
+  without one through `raw.githubusercontent.com/{repo}/{commitSha}/…`, so a public repo costs two
+  anonymous API calls. Errors are plain words (`MarketplaceError`: not_found, rate_limited with the
+  reset time, unauthorized, truncated, network). Import = create with files + `source`, then
+  publish v1 "Imported from o/r@<7-char sha>" (Optional; a refused publish keeps the draft);
+  `skills.source` `{repo, ref, path, commitSha, treeSha, pluginName?}` matches rows by repo
+  (case-insensitive) + path: Imported, Update available (tree sha moved) or Name taken (refused).
+  Pull update = draft PUT with the upstream files AND the new `source` under one `baseRevision`,
+  then the admin reviews and publishes; an imported skill's page re-checks its own source
+  (`SkillSourceRow`, `loadOriginSkill`: one commit + one tree call) and offers Pull update. Limits: truncated monorepos cannot be browsed, one request
+  per SKILL.md (~40 s for 300 skills), §1.3 caps refuse oversized upstream skills.
+
 ### Server (`app/apps/server/src/`)
 Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same
 Hocuspocus instance is also served on the HTTP port at `/sync` (`sync/http-upgrade.ts`) so the whole
@@ -802,7 +868,7 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   is the server package version read once at startup, `minDesktopVersion` the live
   `client-version.ts` floor (null when off), `features` today `notes-with-state`
   (`registry/seed-on-register.ts`), `bootstrap-only` (`routes/bootstrap.ts`), `files-with-bytes`
-  (`routes/blobs.ts`) and `access-board` (`routes/registry.ts`). A missing `features` means none. Desktops pick their path from it once per
+  (`routes/blobs.ts`), `access-board` (`routes/registry.ts`) and `skills` (`skills/feature.ts`). A missing `features` means none. Desktops pick their path from it once per
   server URL; the per-item `seeded` flag stays the fallback.
 - **Registration with state** (`registry/seed-on-register.ts`, used by `POST
   /api/vaults/:vaultId/notes/batch` in `routes/bulk.ts` and `POST /api/notes` in
@@ -850,7 +916,7 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   and counts only, never paths or text.
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
-  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note/list_attachments/read_attachment_text/move_file/delete_file`.
+  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note/list_attachments/read_attachment_text/move_file/delete_file/list_skills/get_skill/read_skill_file`.
   `delete_file` shares `deleteRegisteredFile` (`http/routes/registry.ts`) with `DELETE /api/files/:id`;
   `move_file` re-registers the id at a new path through `registerFile`, like `POST /api/files`.
   `read_note` returns a `revision` (sha256 of the body); `update_note`/`append_note`/`edit_note` take an
@@ -875,6 +941,25 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   byte path built to avoid exactly that (see the note in `tools.ts`).
   Token = `mcp_…` minted from desktop Vault Settings → MCP; scoped to one (user, vault), gated by
   the **same** per-file ACL. Only a sha256 hash is stored.
+- `skills/` + `http/routes/skills.ts` + `mcp/skills.ts` — team AI skills (`docs/SKILLS.md`), free on
+  every plan, stored in their own tables (`bytea`), never blobs or notes. Owners/admins edit one draft
+  per skill (`baseRevision`, 409 `stale_draft`) and Publish it into an immutable numbered version
+  (409 `nothing_to_publish` when the bundle hash equals the latest); only published versions are
+  delivered; effective = pinned ?? latest; Required installs for every member, Optional per device
+  opt-in. Routes under `/api`: `GET /skills/manifest` (every membership org, metadata only, fixed
+  query count), `/orgs/:orgId/skills[/:skillId[/draft[/reset]|/publish|/versions/:v]]`,
+  `/orgs/:orgId/skill-sources[/:sourceId]` (GitHub marketplaces to IMPORT from — the server never
+  calls GitHub, and there is no publish-to-GitHub bridge or per-vault skill settings; marketplace
+  sources: GET member, POST/DELETE admin, 100 per org; `source` rides create/PATCH/draft PUT);
+  members read, `isSkillAdmin` (owner/admin) writes
+  (403 `skills_admin_required`); 500 live skills per org (409 `skill_limit_reached`), 1000 files /
+  5 MiB per file / 25 MiB per version (400 `skill_too_many_files`, 413 `skill_file_too_large` /
+  `skill_too_large`, each with `limit` + plain `message`), route body limit 36 MiB. Publish, delivery/pin change and delete
+  call `member-events.ts announceSkillsChanged`, which publishes PS `0x0f` per vault;
+  the vault channel sends `{t: "skills-changed", orgId}` org-wide like `appearance-changed` (a hint:
+  desktops refetch the manifest). MCP `list_skills`/`get_skill`/`read_skill_file` (read-only, never
+  drafts). Bundle hash = sha256 over `relPath\0sha256\0(1|0)\n` sorted by UTF-8 bytes, identical in
+  `skills/validate.ts` and the desktop's `lib/skills/validate.ts`.
 - `index/` — `embedder.ts` is a dependency-free 256-dim hashed bag-of-words (works air-gapped;
   `OPENAI_API_KEY` swap noted but not wired). `indexer.ts` derives search + wikilink graph from Yjs state.
 - `db/migrate.ts` — plain SQL in `migrations/*.sql`, applied in filename order, tracked in `_migrations`.
@@ -885,6 +970,9 @@ camelCase quoted, migration 001), app tables (all ids `TEXT`, migration 002+): `
 `blobs` (`doc_id` = the `files` row these bytes are, or NULL for an `attachments/` drop — m028),
 `blob_text` (a file's extracted text + vector; derived, purgeable, cascades with the blob and the
 vault — m028), `vault_appearance` (per-org shared appearance JSON, one row per vault — m053),
+`skills` (+ `source` JSONB for imported skills) + `skill_versions` + `skill_version_files` +
+`skill_draft_files` (team AI skills, file bytes as `bytea` — m060) and `skill_sources` (marketplace
+import, same migration),
 `invitation_access` (access chosen at invite, applied then deleted on accept — m046;
 the same migration adds `member.last_seen_at`, stamped at most every 10 min), `org_join_codes`, `note_index`, `note_links`, `mcp_tokens`, `public_links` (one
 plaintext token per note; revoke = DELETE), `vault_checkpoint_blobs` + `checkpoint_blob_bytes`

@@ -1,0 +1,127 @@
+/* Experimental sidebar Skills row, at the bottom of the sidebar just above the
+   profile section's divider (outside it). Its box is a file tree row's exactly
+   (App.css `.tree-row` + FileTree's inset): the same full-bleed edges, 32px
+   height, 17px glyph inset, flat fill and colours, so its hover reads as one
+   of the tree's. */
+.skills-shortcut {
+  flex: none;
+  /* The tree's bleed (`.filetree`): cancel the sidebar's side padding. */
+  margin: 0 calc(-1 * var(--sp-1)) 0 calc(-1 * var(--sp-2));
+  padding: 2px 0 6px;
+}
+.skills-shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--sp-3) 0 17px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition:
+    background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.skills-shortcut-row:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.skills-shortcut-row:active {
+  background: var(--bg-active);
+}
+.skills-shortcut-row:focus-visible {
+  outline: none;
+  box-shadow: inset var(--focus-ring);
+}
+.skills-shortcut-row svg {
+  flex: none;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  padding: 1.5px;
+  color: var(--text-tertiary);
+}
+.skills-shortcut-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skills-shortcut-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.skills-shortcut-count {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* "New" until the shortcut is clicked once: an accent gradient with a soft
+   glow and a slow light band sweeping across. Calm under reduced motion. */
+.skills-shortcut-new {
+  position: relative;
+  overflow: hidden;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: linear-gradient(
+    120deg,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 70%, #fff)
+  );
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 50%, transparent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  letter-spacing: 0.02em;
+}
+.skills-shortcut-new > span {
+  font-size: 9px;
+}
+.skills-shortcut-new::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.55) 50%,
+    transparent 70%
+  );
+  transform: translateX(-100%);
+  animation: skills-shortcut-shimmer 2.8s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes skills-shortcut-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  60%,
+  100% {
+    transform: translateX(100%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skills-shortcut-new::after {
+    animation: none;
+    display: none;
+  }
+}

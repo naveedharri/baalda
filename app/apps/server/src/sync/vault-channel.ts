@@ -22,6 +22,7 @@ import {
   encodePubsubMemberJoined,
   encodePubsubOrgChanged,
   encodePubsubAppearanceChanged,
+  encodePubsubSkillsChanged,
   type AppearanceChange,
   type OrgChange,
   encodePubsubRejected,
@@ -351,6 +352,12 @@ export class VaultChannel {
    *  settings carried inline (same org-wide fan-out as {@link publishOrgChanged}). */
   async publishAppearanceChanged(vaultId: string, change: AppearanceChange): Promise<void> {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubAppearanceChanged(change));
+  }
+
+  /** The vault's team skills changed; every subscriber refetches its skills
+   *  manifest (same org-wide fan-out as {@link publishOrgChanged}). */
+  async publishSkillsChanged(vaultId: string, orgId: string): Promise<void> {
+    await this.pubsub.publish(vaultTopic(vaultId), encodePubsubSkillsChanged(orgId));
   }
 
   /** A read-only connection's edit was dropped (`ready`-independent; see the
@@ -1207,6 +1214,11 @@ class VaultConnection {
     if (msg.type === "appearance-changed") {
       // Org-wide like `org`: every member applies the vault's appearance.
       this.send({ t: "appearance-changed", ...msg.change });
+      return;
+    }
+    if (msg.type === "skills-changed") {
+      // Org-wide like `appearance-changed`: skills are not doc-scoped, no ACL filter.
+      this.send({ t: "skills-changed", orgId: msg.orgId });
       return;
     }
     if (msg.type === "presence") {

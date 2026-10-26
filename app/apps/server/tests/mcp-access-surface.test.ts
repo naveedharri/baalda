@@ -138,6 +138,9 @@ describe("MCP access-management HTTP surface", () => {
       "delete_folder",
       "move_note",
       "move_folder",
+      "list_skills",
+      "get_skill",
+      "read_skill_file",
     ]);
     expect(tools.get("manage_access").inputSchema).toMatchObject({
       required: ["resources", "audience", "mode"],
@@ -175,6 +178,9 @@ describe("MCP access-management HTTP surface", () => {
       "get_access_default",
       "list_resource_access",
       "list_access_audit",
+      "list_skills",
+      "get_skill",
+      "read_skill_file",
     ]);
     const destructive = new Set([
       "delete_note",

@@ -132,7 +132,7 @@ pub struct RunAgentRequest {
     pub run_id: String,
 }
 
-fn trusted_window(window: &Webview) -> AppResult<()> {
+pub(crate) fn trusted_window(window: &Webview) -> AppResult<()> {
     let url = window.url()?;
     let trusted = window.label() == "main"
         && match url.scheme() {

@@ -18,6 +18,7 @@ export type SettingsTab =
   | "members"
   | "billing"
   | "mcp"
+  | "skills"
   | "versioning"
   | "import-export"
   | "appearance";
@@ -29,6 +30,7 @@ export type AccountSettingsTab =
   | "status"
   | "appearance"
   | "notifications"
+  | "ai-tools"
   | "connection"
   | "plan"
   | "vaults"

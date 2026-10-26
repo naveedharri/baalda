@@ -24,6 +24,7 @@ pub mod notefile;
 pub mod oauth;
 pub mod parse;
 mod relaunch;
+pub mod skills_sync;
 mod state;
 pub mod stats;
 pub mod trash;
@@ -209,6 +210,18 @@ pub fn run() {
             agent_runner::detect_agents,
             agent_runner::run_agent,
             agent_runner::cancel_agent,
+            skills_sync::skills_targets,
+            skills_sync::skills_scan,
+            skills_sync::skills_install,
+            skills_sync::skills_remove,
+            skills_sync::skills_read_folder,
+            skills_sync::skills_read_zip,
+            skills_sync::skills_export_zip,
+            skills_sync::skills_backups_dir,
+            skills_sync::skills_scan_device,
+            skills_sync::skills_read_device_skill_md,
+            skills_sync::skills_list_device_skill_files,
+            skills_sync::skills_read_device_skill_file,
             dashboard::query_notes,
             dashboard::list_notes_by_tag,
             dashboard::list_notes_by_property,

@@ -373,3 +373,21 @@ and hover/pressed colours are one accent tint (`--bg-hover`/`--bg-active`).
 - **Backend-behind notice.** The desktop shows a persistent line at the bottom of the sidebar when its
   server lacks a feature it needs (judged from `/health` `features`, never the version), with
   separate copy for the managed service and self-hosted servers.
+
+## Team skills (2026-10-26, staging)
+
+- **Skills catalog per vault.** Owners/admins create a skill (a folder with a root `SKILL.md`), edit
+  its one draft and Publish it into an immutable numbered version with release notes; a skill is
+  Required (every member) or Optional (opted into per device), and a version can be pinned. Stored
+  in the server's own tables (migration 060), free on every plan. Spec: [[SKILLS]].
+- **Delivered to this machine's AI tools.** Every signed-in desktop installs the effective versions
+  from all its vaults into `~/.claude/skills` (Claude Code) and `~/.agents/skills` (Codex, Cursor,
+  Gemini CLI, Copilot, OpenCode) on sign-in, on the `skills-changed` vault-channel frame, every
+  15 min and on Check now. Only folders carrying this server's and this user's marker are touched;
+  an edited copy is never overwritten without "Use team version" (backed up first), and a skill
+  that goes away leaves an edited copy behind as the user's own. A server switch pauses the sync so
+  one server's list can never remove another's skills.
+- **Reach.** MCP `list_skills`/`get_skill`/`read_skill_file`, `.zip` download per version, and a
+  GitHub bridge that publishes a Claude plugin marketplace so claude.ai's org sync reaches
+  Chat/Cowork. `/health` advertises `skills`.
+- **Settings.** Vault Settings → Skills (catalog) and Account Settings → AI tools (this machine).

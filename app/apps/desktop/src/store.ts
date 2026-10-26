@@ -50,6 +50,7 @@ import {
 import { readPersonalPins, readPersonalHome, writePersonalPins, writePersonalHome, renamePinnedFolders, togglePinned, effectiveHomeNote, shouldFollowSharedHome, type PinnedItem } from "./lib/pins";
 import { applyEffectiveTheme, type ThemeMode } from "./lib/theme";
 import { syncManager } from "./lib/sync/docSession";
+import { pauseSkillsSync } from "./lib/skills/syncHost";
 import { vaultScopes } from "./lib/sync/vaultScope";
 import { reconcileReport } from "./lib/sync/reconcileReport";
 import { vaultVisibility, type VaultVisibility } from "./lib/sync/vaultVisibility";
@@ -3529,61 +3530,72 @@ export const useStore = create<AppStore>((set, get) => ({
     const gen = ++authInitGen;
     const previousUrl = get().serverUrl;
     const switching = normalizeServerUrl(url) !== normalizeServerUrl(previousUrl);
-    // Persist pending edits before closing the old vault. A failed flush aborts
-    // the switch so the editor still owns the unsaved buffer.
-    await bridgeManager.currentBridge()?.flushEgest();
-    if (authInitGen !== gen) return false;
-    const wasSyncing = get().syncEnabled;
-    // Stop syncing with the old server before the address changes. The folder
-    // itself stays open until the new address is adopted, so a switch that
-    // fails (the address could not be saved) falls back to it intact.
-    leaveVaultSync();
-    set({ syncEnabled: false });
-    let session: SessionInfo | null;
+    // Team skills sync reads the shared API client, which moves to the new
+    // server below before App's effect can stop it: hold it first, or a run
+    // would plan the new server's manifest against the old server's markers.
+    // A switch that lands restarts it for the new server; otherwise resume.
+    const resumeSkills = pauseSkillsSync();
+    let landed = false;
     try {
-      // Clears the old bearer before exposing the new base URL.
-      session = await authManager.setServerUrl(url);
-    } catch (e) {
-      if (authInitGen === gen) await recoverFromFailedServerSwitch(get, set, previousUrl, wasSyncing);
-      throw e;
-    }
-    if (switching) {
-      // The client now talks to the new server: the old folder and its
-      // vault/billing state belong to the previous one, even if another flow
-      // has taken over the session meanwhile.
-      get().closeLocalVault();
+      // Persist pending edits before closing the old vault. A failed flush aborts
+      // the switch so the editor still owns the unsaved buffer.
+      await bridgeManager.currentBridge()?.flushEgest();
+      if (authInitGen !== gen) return false;
+      const wasSyncing = get().syncEnabled;
+      // Stop syncing with the old server before the address changes. The folder
+      // itself stays open until the new address is adopted, so a switch that
+      // fails (the address could not be saved) falls back to it intact.
+      leaveVaultSync();
+      set({ syncEnabled: false });
+      let session: SessionInfo | null;
+      try {
+        // Clears the old bearer before exposing the new base URL.
+        session = await authManager.setServerUrl(url);
+      } catch (e) {
+        if (authInitGen === gen) await recoverFromFailedServerSwitch(get, set, previousUrl, wasSyncing);
+        throw e;
+      }
+      if (switching) {
+        // The client now talks to the new server: the old folder and its
+        // vault/billing state belong to the previous one, even if another flow
+        // has taken over the session meanwhile.
+        get().closeLocalVault();
+        set({
+          organizations: [], members: [], pendingInvitations: [], userInvitations: [],
+          billingConfig: null, orgBilling: null, myBilling: null,
+        });
+      }
+      if (authInitGen !== gen) return false;
       set({
-        organizations: [], members: [], pendingInvitations: [], userInvitations: [],
-        billingConfig: null, orgBilling: null, myBilling: null,
+        serverUrl: authManager.getServerUrl(),
+        session,
+        authStatus: session ? "signed-in" : "signed-out",
       });
+      if (session) {
+        await get().refreshVault();
+        await get().refreshBillingConfig();
+        await get().refreshOrgBilling();
+        // The previous folder belongs to the old server. The vault picker opens
+        // a destination vault explicitly instead of reconciling that folder here.
+        if (!switching) await get().enableSyncForVault();
+        // An invitation link that named THIS server parked itself here waiting
+        // for the user's Connect click (`openInviteLink` step 2). The click has
+        // landed, so pick it back up — otherwise confirming the server silently
+        // drops the invitation that asked for it.
+        if (peekPendingInvite()) await consumeQueuedInvite(get, set);
+      } else {
+        syncManager.disable();
+        set({ syncEnabled: false, billingConfig: null, orgBilling: null, myBilling: null });
+        // Same invitation, no session on the new server: raise the sign-in card
+        // for it rather than leaving the queue to be discovered by the next
+        // unrelated sign-in.
+        if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
+      }
+      landed = true;
+      return true;
+    } finally {
+      if (!(landed && switching)) resumeSkills();
     }
-    if (authInitGen !== gen) return false;
-    set({
-      serverUrl: authManager.getServerUrl(),
-      session,
-      authStatus: session ? "signed-in" : "signed-out",
-    });
-    if (session) {
-      await get().refreshVault();
-      await get().refreshBillingConfig();
-      await get().refreshOrgBilling();
-      // The previous folder belongs to the old server. The vault picker opens
-      // a destination vault explicitly instead of reconciling that folder here.
-      if (!switching) await get().enableSyncForVault();
-      // An invitation link that named THIS server parked itself here waiting
-      // for the user's Connect click (`openInviteLink` step 2). The click has
-      // landed, so pick it back up — otherwise confirming the server silently
-      // drops the invitation that asked for it.
-      if (peekPendingInvite()) await consumeQueuedInvite(get, set);
-    } else {
-      syncManager.disable();
-      set({ syncEnabled: false, billingConfig: null, orgBilling: null, myBilling: null });
-      // Same invitation, no session on the new server: raise the sign-in card
-      // for it rather than leaving the queue to be discovered by the next
-      // unrelated sign-in.
-      if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
-    }
-    return true;
   },
 
   updateProfile: async ({ name, image }) => {

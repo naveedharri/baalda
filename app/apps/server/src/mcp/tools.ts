@@ -1,4 +1,5 @@
 import { listAccessAudit } from "../audit/access.js";
+import { getSkillTool, listSkillsTool, readSkillFileTool } from "./skills.js";
 import {
   McpToolError,
   appendNote,
@@ -734,6 +735,52 @@ export const TOOLS: McpTool[] = [
         name: optStr(a, "name"),
         parentId: optStrOrNull(a, "parentId"),
       }),
+  },
+  {
+    name: "list_skills",
+    annotations: { title: "List team skills", ...READ },
+    description:
+      "List this vault's published team AI skills (name, description, the version members get, whether it is required for everyone, the latest version, and whether an admin pinned an older one).",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: (ctx) => listSkillsTool(ctx),
+  },
+  {
+    name: "get_skill",
+    annotations: { title: "Get team skill", ...READ },
+    description:
+      "Get one published team skill by name: its SKILL.md text, release notes and file list (with whether each file is text). Defaults to the version members get; pass version for an older one.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: S("Skill name from list_skills, e.g. 'release-notes'"),
+        version: { type: "number", description: "Published version number (default: the version members get)" },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    handler: (ctx, a) => getSkillTool(ctx, reqStr(a, "name"), optNum(a, "version")),
+  },
+  {
+    name: "read_skill_file",
+    annotations: { title: "Read team skill file", ...READ },
+    description:
+      "Read one file of a published team skill as text. Binary files return binary: true and text: null.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: S("Skill name from list_skills"),
+        path: S("File path inside the skill, from get_skill, e.g. 'scripts/build.sh'"),
+        version: { type: "number", description: "Published version number (default: the version members get)" },
+        maxChars: {
+          type: "number",
+          description: "Max characters to return (default 50000, max 200000). `truncated` says whether there was more.",
+        },
+      },
+      required: ["name", "path"],
+      additionalProperties: false,
+    },
+    handler: (ctx, a) =>
+      readSkillFileTool(ctx, reqStr(a, "name"), reqStr(a, "path"), optNum(a, "version"), optNum(a, "maxChars")),
   },
 ];
 

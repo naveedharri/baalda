@@ -27,6 +27,7 @@ import { imageFileToSquareDataUrl } from "../lib/squareImage";
 import { InstalledAgentsStatus } from "./DashboardAgentRunner";
 import { AccountPlanTab } from "./AccountPlanTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
+import { AiToolsTab } from "./skills/AiToolsTab";
 import { Avatar } from "./Avatar";
 import { serverFailureMessage } from "./serverFailureMessage";
 import { SettingsModal } from "./SettingsModal";
@@ -118,6 +119,15 @@ const ACCOUNT_TABS: Array<{ id: AccountTab; label: string; icon: React.ReactNode
     ),
   },
   {
+    id: "ai-tools",
+    label: "AI tools",
+    icon: (
+      <Icon>
+        <path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z" />
+      </Icon>
+    ),
+  },
+  {
     id: "connection",
     label: "Connection",
     icon: (
@@ -203,6 +213,8 @@ export function AccountSettings({
             <AppearanceTab />
           ) : tab === "notifications" ? (
             <NotificationsTab />
+          ) : tab === "ai-tools" ? (
+            <AiToolsTab />
           ) : tab === "connection" ? (
             <ConnectionTab />
           ) : (

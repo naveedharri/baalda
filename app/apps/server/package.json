@@ -43,6 +43,7 @@
     "pg": "^8.22.0",
     "standardwebhooks": "^1.0.0",
     "ws": "^8.21.0",
+    "yaml": "^2.9.1",
     "yjs": "catalog:"
   },
   "devDependencies": {
