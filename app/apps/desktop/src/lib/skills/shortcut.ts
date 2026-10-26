@@ -40,32 +40,25 @@ export function shortcutAttention(input: {
   return parts.length ? parts.join(" · ") : null;
 }
 
-// ---- "New" chip: until the shortcut itself is clicked on this computer -------
+// ---- "New" chip: for 14 days from its first showing on this computer ---------
 
-// v2: the chip now clears only on a click of the shortcut (v1 cleared on any
-// open of the Skills tab), so it shows again once for everyone.
-const SEEN_KEY = "context.skills.shortcutSeen.v2";
-const seenListeners = new Set<() => void>();
+// v3: shown for a fixed window rather than until a click (v1: any open of the
+// tab, v2: a click of the shortcut), so it shows again for everyone.
+const NEW_CHIP_KEY = "context.skills.newChip.v3";
+export const NEW_CHIP_MS = 14 * 24 * 60 * 60_000;
 
-/** Has this person clicked the sidebar Skills shortcut on this computer? */
-export function shortcutSeen(): boolean {
+/**
+ * Should the sidebar row wear its "New" chip? The first call on this computer
+ * stamps when it was first shown; it shows until `NEW_CHIP_MS` after that.
+ * No storage: shown for the session.
+ */
+export function showNewChip(now = Date.now()): boolean {
   try {
-    return localStorage.getItem(SEEN_KEY) === "1";
+    const first = Number(localStorage.getItem(NEW_CHIP_KEY));
+    if (first > 0) return now - first < NEW_CHIP_MS;
+    localStorage.setItem(NEW_CHIP_KEY, String(now));
+    return true;
   } catch {
-    return true; // no storage: never nag
+    return true;
   }
-}
-
-/** The shortcut was clicked: it drops its "New" chip (other routes to the tab don't count). */
-export function markShortcutSeen(): void {
-  if (shortcutSeen()) return;
-  try { localStorage.setItem(SEEN_KEY, "1"); } catch { /* storage unavailable */ }
-  for (const l of seenListeners) l();
-}
-
-export function onShortcutSeen(listener: () => void): () => void {
-  seenListeners.add(listener);
-  return () => {
-    seenListeners.delete(listener);
-  };
 }

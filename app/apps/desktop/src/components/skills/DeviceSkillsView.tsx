@@ -2,7 +2,7 @@
 // read by Rust's `skills_scan_device` (read-only), grouped by
 // `lib/skills/deviceGrouping.ts`. Clicking one opens a read-only preview of its
 // SKILL.md; admins can add a personal or plugin skill to the team, which
-// goes through the same folder upload as Upload folder and publishes v1.
+// reads the folder (`skillsReadFolder`), uploads it and publishes v1.
 
 import { useEffect, useState } from "react";
 import { skillErrorCode } from "../../lib/api";
@@ -284,8 +284,8 @@ function DeviceSkillPreview({
 
 
   const share = async () => {
-    // The same reader Upload folder uses (skips dot folders and build output,
-    // refuses symlinks inside, holds the upload caps), on the resolved folder.
+    // Rust's folder reader (skips dot folders and build output, refuses
+    // symlinks inside, holds the upload caps), on the resolved folder.
     let bundle: ipc.SkillBundle;
     try {
       bundle = await ipc.skillsReadFolder(item.realPath);

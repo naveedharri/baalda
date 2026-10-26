@@ -422,7 +422,7 @@ pub struct SkillBundle { suggested_name: String, files: Vec<SkillFilePayload>, s
 | `skills_scan` | `target` | `Vec<InstalledSkill>` | Lists child dirs of the root (skips names starting with `.` and non-dirs; a symlinked child is reported `unmanaged`). For dirs with a valid marker: hash every regular file except the marker (walkdir, no symlink follow; a symlink inside ⇒ `edited` with that path) and compare to `marker.files`. Also deletes leftover `.baalda-staging-*` / `.baalda-old-*` dirs older than 1 h. Missing root ⇒ `[]`. |
 | `skills_install` | `target, name, marker: SkillMarker, files: Vec<SkillFilePayload>, force: bool` | `InstallOutcome` | §4.4 |
 | `skills_remove` | `app, target, name, owner: SkillOwner, mode?: RemoveMode` | `RemoveOutcome` | Dir missing ⇒ `NotFound`. No marker, a marker naming another folder, or another owner ⇒ `Conflict` (untouched). `delete` (default): drifted ⇒ backup first, then remove the dir ⇒ `Removed`. `release`: delete ONLY `.baalda-managed.json`, no backup ⇒ `Released` (`backupPath: null`); the folder stays as the user's own and scans as `unmanaged` from then on. |
-| `skills_read_folder` | `path` | `SkillBundle` | Admin upload from a dialog-picked folder. §4.5 |
+| `skills_read_folder` | `path` | `SkillBundle` | "Add to team" from On this device (reads that skill's folder). §4.5 |
 | `skills_read_zip` | `path` | `SkillBundle` | §4.5; if all entries share one top-level dir, strip it and use it as `suggested_name`, else the zip stem. Refuse entries with `..`/absolute paths and symlink entries (unix mode `0o120000`). Exec bit from unix mode `0o111`. |
 | `skills_export_zip` | `dest, name, files: Vec<SkillFilePayload>` | `()` | `dest` comes from the save dialog (`.zip`). Entries `"<name>/<path>"`, deflate, unix mode 0o755 if executable else 0o644. Verify each sha first. Atomic: write `<dest>.tmp` then rename. |
 | `skills_backups_dir` | `app` | `String` | `app_local_data_dir()/skill-backups` (created). For "Reveal". |
@@ -623,8 +623,9 @@ Reuse `SettingsModal` tab chrome, `ConfirmDialog.tsx`, existing buttons/pills/to
 **Vault Settings → Skills** (`SkillsTab`): server lacks `skills` ⇒ one line "This server needs an
 update to manage skills." and nothing else. Otherwise a list (name, description, `Required`/`Optional`
 pill, version `v4` or "Draft only", pinned marker). Admins: **New skill** (name prompt → create →
-open detail), **Upload folder** / **Upload .zip** (Tauri dialog → `skillsReadFolder`/`skillsReadZip`
-→ create or replace draft of the matching skill name, showing `skipped`). Members: read-only list
+open detail), **Upload .zip** (Tauri dialog → `skillsReadZip` → create or replace draft of the
+matching skill name, showing `skipped`; the Upload folder entry was removed 2026-10-27, and
+`skillsReadFolder` now serves only "Add to team" from On this device). Members: read-only list
 plus an "Use on this device" switch for Optional skills (writes `optIns`, triggers a run).
 
 **SkillDetail**: header (name, description, delivery select Required/Optional, pin select
@@ -669,7 +670,7 @@ through `skills_read_folder` on its `realPath`) with Reveal in Finder; admins ca
 team** (now labelled **Add to team**) a non-managed one: create + publish v1 "Added from <name>'s computer", then land on the Team grid with the card ringed (`useHighlightSkill`), refusing a name the
 vault already uses.
 
-2026-10-27 polish: cards carry a byline under the name ("By Naveed Harri · v1"), no logos. A skill
+2026-10-27 polish: cards carry a byline under the name ("By Sara Lee · v1"), no logos. A skill
 page (team or device) shows a source pill ("Made by your team", "From owner/repo", "Your skill",
 "Claude plugin", "Claude org") and an "Available in" line of AI tools (`installState.ts
 teamAvailability` / `deviceGrouping.ts deviceAvailability`): full when that tool can use the skill
@@ -862,10 +863,11 @@ Command names, argument names and every wire shape in §4.2/§4.6 are unchanged.
   items keep "skill(s)"; identifiers, routes, tab ids and prefs keys stay `skills`.
 - **Sidebar Skills shortcut (experimental, `SHOW_SKILLS_SHORTCUT`):** at the bottom of the sidebar
   just above the profile section (outside the footer and its divider), its box copied from a file
-  tree row (full bleed, 32px, flat hover). Until the shortcut itself is clicked once on this computer
-  (localStorage `context.skills.shortcutSeen.v2`; other routes to the tab don't count) it shows a
-  "✦ New" chip (accent gradient, soft glow, a slow shimmer; static under reduced motion) instead of
-  the count; afterwards the muted team count and the attention dot.
+  tree row (full bleed, 32px, flat hover). A "New" chip shows beside the count for 14 days from its
+  first showing on this computer (localStorage `context.skills.newChip.v3`, a timestamp; no storage
+  ⇒ the session): a frosted accent glass pill with a slowly breathing glow and three tiny sparkles
+  twinkling in turn; static glass and glow under reduced motion. The attention dot and the muted
+  team count show as well.
 
 ## Addendum — Marketplace import (server)
 

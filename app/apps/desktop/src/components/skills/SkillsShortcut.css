@@ -70,58 +70,81 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* "New" until the shortcut is clicked once: an accent gradient with a soft
-   glow and a slow light band sweeping across. Calm under reduced motion. */
+/* "New" for 14 days from its first showing: a frosted accent glass pill with
+   a slowly breathing glow and three tiny sparkles twinkling in turn (one at a
+   time). Sparkles are absolutely placed around the chip, inside the 32px row,
+   so nothing shifts. Reduced motion: the same glass and glow, still. */
 .skills-shortcut-new {
   position: relative;
-  overflow: hidden;
   flex: none;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
   padding: 1px 7px;
   border-radius: 999px;
-  background: linear-gradient(
-    120deg,
-    var(--accent),
-    color-mix(in srgb, var(--accent) 70%, #fff)
-  );
-  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 50%, transparent);
-  color: #fff;
-  font-size: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 45%, transparent);
+  /* The darker accent in light mode, the lighter one in dark mode. */
+  color: var(--accent-hover);
+  font-size: 10.5px;
   font-weight: 600;
   line-height: 14px;
   letter-spacing: 0.02em;
+  animation: skills-chip-breathe 3s ease-in-out infinite;
 }
-.skills-shortcut-new > span {
-  font-size: 9px;
-}
-.skills-shortcut-new::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    100deg,
-    transparent 30%,
-    rgba(255, 255, 255, 0.55) 50%,
-    transparent 70%
-  );
-  transform: translateX(-100%);
-  animation: skills-shortcut-shimmer 2.8s ease-in-out infinite;
-  pointer-events: none;
-}
-@keyframes skills-shortcut-shimmer {
-  0% {
-    transform: translateX(-100%);
-  }
-  60%,
+@keyframes skills-chip-breathe {
+  0%,
   100% {
-    transform: translateX(100%);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+}
+.skills-sparkle {
+  position: absolute;
+  font-size: 7px;
+  line-height: 1;
+  color: var(--accent-hover);
+  opacity: 0;
+  transform: scale(0);
+  pointer-events: none;
+  animation: skills-sparkle 2.4s ease-in-out infinite;
+}
+.skills-sparkle.s1 {
+  top: -4px;
+  left: -3px;
+}
+.skills-sparkle.s2 {
+  top: -5px;
+  right: -2px;
+  animation-delay: 0.8s;
+}
+.skills-sparkle.s3 {
+  bottom: -4px;
+  right: 6px;
+  font-size: 6px;
+  animation-delay: 1.6s;
+}
+@keyframes skills-sparkle {
+  0%,
+  40%,
+  100% {
+    opacity: 0;
+    transform: scale(0) rotate(0deg);
+  }
+  20% {
+    opacity: 1;
+    transform: scale(1) rotate(45deg);
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .skills-shortcut-new::after {
+  .skills-shortcut-new {
     animation: none;
+  }
+  .skills-sparkle {
     display: none;
   }
 }

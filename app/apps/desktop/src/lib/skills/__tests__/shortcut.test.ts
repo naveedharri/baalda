@@ -42,31 +42,32 @@ describe("shortcutAttention", () => {
 });
 
 describe("shortcut New chip", () => {
-  it("shows until the shortcut is clicked once (v2 key), then tells listeners", async () => {
+  const DAY = 24 * 60 * 60_000;
+
+  it("shows for 14 days from its first showing on this computer (v3 key)", async () => {
     const store = new Map<string, string>();
     vi.stubGlobal("localStorage", {
       getItem: (k: string) => store.get(k) ?? null,
       setItem: (k: string, v: string) => void store.set(k, v),
     });
-    // A v1 mark (any open of the Skills tab) no longer hides it.
+    // Earlier rules' marks (a tab open, a click) no longer hide it.
     store.set("context.skills.shortcutSeen", "1");
-    const { markShortcutSeen, onShortcutSeen, shortcutSeen } = await import("../shortcut");
-    expect(shortcutSeen()).toBe(false);
-    const heard = vi.fn();
-    const off = onShortcutSeen(heard);
-    markShortcutSeen();
-    markShortcutSeen();
-    expect(shortcutSeen()).toBe(true);
-    expect(store.get("context.skills.shortcutSeen.v2")).toBe("1");
-    expect(heard).toHaveBeenCalledTimes(1);
-    off();
+    store.set("context.skills.shortcutSeen.v2", "1");
+    const { NEW_CHIP_MS, showNewChip } = await import("../shortcut");
+    expect(NEW_CHIP_MS).toBe(14 * DAY);
+    expect(showNewChip(NOW)).toBe(true);
+    expect(store.get("context.skills.newChip.v3")).toBe(String(NOW));
+    // Later showings keep the first stamp.
+    expect(showNewChip(NOW + 13 * DAY)).toBe(true);
+    expect(store.get("context.skills.newChip.v3")).toBe(String(NOW));
+    expect(showNewChip(NOW + 14 * DAY)).toBe(false);
     vi.unstubAllGlobals();
   });
 
-  it("without storage it never nags", async () => {
+  it("without storage it shows for the session", async () => {
     vi.stubGlobal("localStorage", { getItem: () => { throw new Error("blocked"); }, setItem: () => {} });
-    const { shortcutSeen } = await import("../shortcut");
-    expect(shortcutSeen()).toBe(true);
+    const { showNewChip } = await import("../shortcut");
+    expect(showNewChip(NOW)).toBe(true);
     vi.unstubAllGlobals();
   });
 });

@@ -142,7 +142,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
   const [marketplace, setMarketplace] = useState<{ preload?: string } | null>(null);
   const [scope, setScope] = useState<SkillsScope>(readScope);
   const [loadFailed, setLoadFailed] = useState(false);
-  /** "Reading files…" then "Uploading…" while a folder or .zip goes up. */
+  /** "Reading files…" then "Uploading…" while a .zip goes up. */
   const [uploadPhase, setUploadPhase] = useState<string | null>(null);
   // Started quietly on open, so the toggle can count this computer's skills.
   const deviceScan = useDeviceScan();
@@ -266,18 +266,14 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     }
   };
 
-  const upload = async (kind: "folder" | "zip") => {
+  const uploadZip = async () => {
     setError(null);
-    const picked = await openDialog(
-      kind === "folder"
-        ? { directory: true, multiple: false }
-        : { multiple: false, filters: [{ name: "Zip", extensions: ["zip"] }] },
-    );
+    const picked = await openDialog({ multiple: false, filters: [{ name: "Zip", extensions: ["zip"] }] });
     if (!picked || Array.isArray(picked)) return;
     let bundle: ipc.SkillBundle;
     setUploadPhase("Reading files…");
     try {
-      bundle = kind === "folder" ? await ipc.skillsReadFolder(picked) : await ipc.skillsReadZip(picked);
+      bundle = await ipc.skillsReadZip(picked);
     } catch (e) {
       setUploadPhase(null);
       setError(e instanceof Error ? e.message : String(e));
@@ -289,7 +285,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     const fm = md ? parseSkillFrontmatter(base64ToText(md.contentBase64) ?? "") : null;
     const name = fm?.ok && isValidSkillName(fm.name) ? fm.name : suggestSkillName(bundle.suggestedName);
     if (!isValidSkillName(name)) {
-      setError(`"${bundle.suggestedName}" can't be used as a skill name. Rename the folder or set name in SKILL.md.`);
+      setError(`"${bundle.suggestedName}" can't be used as a skill name. Set name in SKILL.md.`);
       return;
     }
     const files = bundle.files.map((f) => ({
@@ -336,8 +332,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
   const groups = groupSkills(skills, filter);
   const newMenu = [
     { key: "write", label: "Write from scratch", onSelect: () => setCreating(true) },
-    { key: "folder", label: "Upload folder", onSelect: () => upload("folder") },
-    { key: "zip", label: "Upload .zip", onSelect: () => upload("zip") },
+    { key: "zip", label: "Upload .zip", onSelect: () => uploadZip() },
   ];
   const toggleGroup = (key: string) =>
     setCollapsed((c) => {
@@ -386,7 +381,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     return { button };
   };
 
-  /** "By Naveed Harri · v2 · Required" or "anthropics/skills · v1 · Optional". */
+  /** "By Sara Lee · v2 · Required" or "anthropics/skills · v1 · Optional". */
   const metaLine = (s: SkillSummary, withAuthor: boolean) => {
     const author = skillAuthor(s);
     const who = s.source ? s.source.repo : author ? `By ${author.name}` : null;
