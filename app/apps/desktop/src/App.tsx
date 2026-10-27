@@ -20,7 +20,6 @@ import {
   SWITCH_VAULT,
   VaultFolderMissingBannerView,
 } from "./components/VaultFolderMissing";
-import { TalkButton } from "./components/TalkButton";
 import { ActivityBadge, ActivityHost } from "./components/activitySource";
 import { SilentBoundary } from "./components/SilentBoundary";
 import { BacklinksPanel } from "./components/BacklinksPanel";
@@ -43,6 +42,7 @@ import { VirtualTabHost } from "./components/VirtualTabHost";
 import { Toasts } from "./components/Toasts";
 import { toast } from "./lib/toast";
 import { RightPanel } from "./components/RightPanel";
+import { TalkStatus } from "./components/TalkButton";
 import { usePendingReviewCount } from "./components/ReviewTab";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
@@ -1734,8 +1734,9 @@ export default function App() {
                 noteOpen={openNote != null && !isPreview}
                 attachmentLocalOnly={attachmentLocalOnly}
               />
-              {/* Vault-wide, so it sits in the header regardless of the open note. */}
-              <TalkButton />
+              {/* Who is talking, vault-wide; the talk button itself is in the
+                  right panel's tab strip. */}
+              <TalkStatus />
               {/* Same gate as history: a link is a doc_id, so it only exists for a
                   note the server knows about. */}
               {/* Version history straight from the header: the panel's Versions
@@ -1768,7 +1769,7 @@ export default function App() {
                 <GraphButton onClick={() => setGraphOpen(true)} />
               )}
               {/* Far right: the Activity / Versions panel (push-to-talk lives in
-                  its header now). */}
+                  its tab strip). */}
               <button
                 className={`icon-btn panel-btn${rightPanelOpen ? " active" : ""}`}
                 title={pendingReview > 0 ? `Panel (${pendingReview} to review)` : "Panel"}

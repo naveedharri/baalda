@@ -7810,7 +7810,7 @@ button.secondary:active:not(:disabled),
   color: var(--text-secondary);
 }
 
-/* ---- Right panel (RightPanel.tsx): Activity / Versions ----
+/* ---- Right panel (RightPanel.tsx): Activity / Versions / push-to-talk ----
    Same container as the old version panel (`.version-panel`), wider because
    the Activity feed holds Health-style rows with actions. */
 .version-panel.right-panel {
@@ -7831,6 +7831,11 @@ button.secondary:active:not(:disabled),
 }
 .right-panel-tabs {
   align-items: center;
+}
+/* Groups the tab buttons for assistive tech only; push-to-talk sits beside
+   them in the same row without being a tab. */
+.right-panel-tablist {
+  display: contents;
 }
 .right-panel-tab {
   position: relative;

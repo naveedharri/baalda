@@ -91,7 +91,6 @@ export function TalkButton() {
   }, [voiceError, clearVoiceError]);
 
   const speaker = speakers[0];
-  const extra = speakers.length - 1;
   // Someone else is transmitting. The button reacts even though it isn't the
   // control being used — that shake is what tells a listener audio is incoming
   // and where to look, before they've parsed any text.
@@ -102,17 +101,6 @@ export function TalkButton() {
       {voiceError && (
         <span className="talk-note" role="status">
           {voiceError}
-        </span>
-      )}
-
-      {speaker && (
-        <span className="talk-note talking" role="status" aria-live="polite">
-          <span
-            className="talk-dot"
-            style={{ background: speaker.color || "var(--accent)" }}
-            aria-hidden="true"
-          />
-          {extra > 0 ? `${speaker.name} +${extra} talking` : `${speaker.name} is talking`}
         </span>
       )}
 
@@ -151,5 +139,27 @@ export function TalkButton() {
         {MEGAPHONE_ICON}
       </button>
     </>
+  );
+}
+
+/**
+ * Who is talking, in the main header. The talk button lives in the right
+ * panel's tab strip, but a listener must see incoming audio with the panel
+ * closed, so this pill stays in the header. Renders nothing while nobody talks.
+ */
+export function TalkStatus() {
+  const speakers = useStore((s) => s.voiceSpeakers);
+  const speaker = speakers[0];
+  if (!speaker) return null;
+  const extra = speakers.length - 1;
+  return (
+    <span className="talk-note talking" role="status" aria-live="polite">
+      <span
+        className="talk-dot"
+        style={{ background: speaker.color || "var(--accent)" }}
+        aria-hidden="true"
+      />
+      {extra > 0 ? `${speaker.name} +${extra} talking` : `${speaker.name} is talking`}
+    </span>
   );
 }

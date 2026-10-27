@@ -1,4 +1,4 @@
-/* Push-to-talk in the main header. Builds on the shared `.icon-btn` (28px ghost
+/* Push-to-talk in the right panel's tab strip. Builds on the shared `.icon-btn` (28px ghost
    button, 18px glyph) rather than introducing a second button size, and borrows
    the mention toast's soft-accent pill for its transient notices. Tokens only —
    no hardcoded colors, spacing, radii, or shadows. */
