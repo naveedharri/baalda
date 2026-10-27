@@ -8,6 +8,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Changed
+- **Settings polish (0.1.91).** Vault Settings → MCP: new tokens are created in a dialog that shows
+  the token with Claude Code, Codex (`codex mcp add`) and other-app setup, so the page no longer
+  jumps; Revoke asks first; a banner links Baalda's listing in Claude's connector directory on the
+  managed server. Plan & Billing shows people as cards with picture and last active instead of their
+  vaults. Account Settings → Vaults header buttons match the app's other page headers.
 - **Agent Skills (0.1.90).** "Add to team" and marketplace imports (one skill or Import all) start as
   Required, so they install on everyone's computer; a skill new to a device glows for every member,
   not only the admin who added it; the desktop re-checks skills every 2 minutes and when the app

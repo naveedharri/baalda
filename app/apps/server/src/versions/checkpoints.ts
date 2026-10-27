@@ -7,11 +7,13 @@ import { sha256Hex } from "./capture.js";
 import { isSharpShrink } from "./shrink-guard.js";
 import { gcNoteTexts, storeNoteText, VERSION_CONTENT, VERSION_TEXT_JOIN } from "./texts.js";
 import { countRegisteredWithoutState, inc } from "../metrics/sync-metrics.js";
+import { checkpointSchedule, type CheckpointSchedule } from "./checkpoint-plan.js";
 
 /**
  * Vault-wide checkpoints: a snapshot of the folder/note STRUCTURE (JSONB) plus
  * one row per note body, taken automatically once a day and manually by an
- * owner/admin. At most {@link MAX_CHECKPOINTS} are kept.
+ * owner/admin. At most {@link MAX_CHECKPOINTS} are kept. The cadence depends
+ * on the vault's plan (`checkpoint-plan.ts`).
  *
  * Everything that mutates a vault's checkpoint set — auto capture, manual
  * capture, and a vault revert — serializes on ONE Postgres advisory lock per
@@ -697,6 +699,8 @@ export async function maybeDailyCheckpoint(opts: {
   deferMs?: number;
   /** Override {@link CHECKPOINT_MAX_DEFER_MS} (tests). */
   maxDeferMs?: number;
+  /** The vault's checkpoint cadence; defaults to its plan's (`checkpoint-plan.ts`). */
+  schedule?: (vaultId: string) => Promise<Pick<CheckpointSchedule, "auto">>;
 }): Promise<DailyCheckpointOutcome | null> {
   const pool = opts.pool ?? defaultPool;
   const now = opts.now?.() ?? Date.now();
@@ -713,6 +717,14 @@ export async function maybeDailyCheckpoint(opts: {
   };
 
   if (!(await due(pool))) {
+    deferredSince.delete(opts.vaultId);
+    return null;
+  }
+
+  // A vault whose plan takes no automatic checkpoints. Asked only once the
+  // cheap age test says one is due, and cached per vault by the default.
+  const schedule = opts.schedule ?? ((id: string) => checkpointSchedule(pool, id));
+  if (!(await schedule(opts.vaultId)).auto) {
     deferredSince.delete(opts.vaultId);
     return null;
   }

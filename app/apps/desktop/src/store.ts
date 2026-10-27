@@ -31,6 +31,7 @@ import {
   type Organization,
   type SessionInfo,
   type Share,
+  type CheckpointSchedule,
   type VaultCheckpoint,
   type UnsyncResult,
   type VaultDeleteResult,
@@ -521,6 +522,9 @@ interface AppStore {
   /** The active vault's checkpoints, newest first. `null` = unknown (not synced,
    *  or not fetched yet). */
   checkpoints: VaultCheckpoint[] | null;
+  /** The active vault's checkpoint cadence; `null` = unknown or an older
+   *  server (daily automatic checkpoints, unlimited manual ones). */
+  checkpointSchedule: CheckpointSchedule | null;
   /** Live "who's viewing what" roster (teammates only) — drives the sidebar
    *  presence dots on notes/folders. Empty when sync is off or disconnected. */
   vaultPresence: VaultPeer[];
@@ -1935,6 +1939,7 @@ function vaultScopedSyncReset() {
     noteVersions: null,
     versionPreview: null,
     checkpoints: null,
+    checkpointSchedule: null,
     // A latch belongs to the vault it was read from; a local vault has none.
     rootFrozen: false,
     // Tabs are paths, and paths only mean something inside the vault that
@@ -5155,19 +5160,19 @@ export const useStore = create<AppStore>((set, get) => ({
     if (!vaultId || !get().syncEnabled) {
       // `null`, not `[]`: a local vault has no checkpoints to *have*, which the
       // tab renders as a sync gate rather than "no checkpoints yet".
-      set({ checkpoints: null });
+      set({ checkpoints: null, checkpointSchedule: null });
       return;
     }
     try {
-      const checkpoints = await authManager.api.listCheckpoints(vaultId);
+      const { checkpoints, schedule } = await authManager.api.listCheckpoints(vaultId);
       // Checkpoints are per-vault; publishing another vault's set would offer a
       // revert that rewrites the wrong notes.
       if (syncManager.registry.vaultId !== vaultId) return;
-      set({ checkpoints });
+      set({ checkpoints, checkpointSchedule: schedule });
     } catch (e) {
       console.warn("[checkpoints] refresh failed", e);
       if (syncManager.registry.vaultId !== vaultId) return;
-      set({ checkpoints: [] });
+      set({ checkpoints: [], checkpointSchedule: null });
     }
   },
 

@@ -12,7 +12,7 @@ const api = vi.hoisted(() => ({
     ok: true,
     preRevertVersionId: 9,
   })),
-  listCheckpoints: vi.fn(async (_vaultId: string) => [] as unknown[]),
+  listCheckpoints: vi.fn(async (_vaultId: string) => ({ checkpoints: [] as unknown[], schedule: null as unknown })),
   createCheckpoint: vi.fn(async (_vaultId: string, _label?: string) => ({}) as unknown),
   deleteCheckpoint: vi.fn(async (_vaultId: string, _id: string) => {}),
   revertToCheckpoint: vi.fn(async (_vaultId: string, _id: string) => ({
@@ -81,7 +81,7 @@ function synced(): void {
 beforeEach(() => {
   vi.clearAllMocks();
   api.listNoteVersions.mockResolvedValue([]);
-  api.listCheckpoints.mockResolvedValue([]);
+  api.listCheckpoints.mockResolvedValue({ checkpoints: [], schedule: null });
   sync.registry.vaultId = null;
   useStore.setState({
     syncEnabled: false,
@@ -230,17 +230,19 @@ describe("checkpoints", () => {
 
   it("lists the collection's checkpoints", async () => {
     synced();
-    api.listCheckpoints.mockResolvedValue([CHECKPOINT]);
+    const schedule = { auto: false, manualEveryDays: 7, nextManualAt: null };
+    api.listCheckpoints.mockResolvedValue({ checkpoints: [CHECKPOINT], schedule });
     await useStore.getState().refreshCheckpoints();
     expect(api.listCheckpoints).toHaveBeenCalledWith("vault-1");
     expect(useStore.getState().checkpoints).toEqual([CHECKPOINT]);
+    expect(useStore.getState().checkpointSchedule).toEqual(schedule);
   });
 
   it("drops a response for a collection that is no longer the open one", async () => {
     synced();
     api.listCheckpoints.mockImplementation(async () => {
       sync.registry.vaultId = "vault-2";
-      return [CHECKPOINT];
+      return { checkpoints: [CHECKPOINT], schedule: null };
     });
     await useStore.getState().refreshCheckpoints();
     expect(useStore.getState().checkpoints).toBeNull();

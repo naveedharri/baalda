@@ -107,8 +107,15 @@ const CHECKPOINT = {
 describe("ApiClient — vault checkpoints", () => {
   it("lists checkpoints for a note collection", async () => {
     const { api, calls } = client(() => ({ json: { checkpoints: [CHECKPOINT] } }));
-    expect(await api.listCheckpoints("v1")).toEqual([CHECKPOINT]);
+    // An older server sends no schedule.
+    expect(await api.listCheckpoints("v1")).toEqual({ checkpoints: [CHECKPOINT], schedule: null });
     expect(calls[0].url).toBe("http://localhost:3010/api/vaults/v1/checkpoints");
+  });
+
+  it("passes the vault's checkpoint schedule through", async () => {
+    const schedule = { auto: false, manualEveryDays: 7, nextManualAt: "2026-11-03T10:00:00.000Z" };
+    const { api } = client(() => ({ json: { checkpoints: [], schedule } }));
+    expect(await api.listCheckpoints("v1")).toEqual({ checkpoints: [], schedule });
   });
 
   it("creates a checkpoint and reads the summary UNWRAPPED from the 201", async () => {

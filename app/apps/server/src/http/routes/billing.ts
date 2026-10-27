@@ -1699,20 +1699,45 @@ async function readAccountBody(accountId: string, canManage: boolean) {
   const pending = acct.rows[0]?.seats_pending ?? null;
   const purchased = plan.seatsPurchased;
   const pendingDecreaseTo = live && pending != null && purchased != null && pending < purchased ? pending : null;
-  let people: { userId: string; name: string; email: string; vaults: string[] }[] = [];
+  let people: {
+    userId: string;
+    name: string;
+    email: string;
+    vaults: string[];
+    image: string | null;
+    lastSeenAt: string | null;
+  }[] = [];
   if (canManage) {
-    const { rows } = await pool.query<{ user_id: string; name: string; email: string; vaults: string[] }>(
-      `SELECT u.id AS user_id, u.name, u.email, array_agg(o.name ORDER BY o.name) AS vaults
+    // `image` and `lastSeenAt` (newest across the account's vaults) feed the
+    // owner's people grid; `vaults` stays for older desktops.
+    const { rows } = await pool.query<{
+      user_id: string;
+      name: string;
+      email: string;
+      vaults: string[];
+      image: string | null;
+      last_seen_at: Date | null;
+    }>(
+      `SELECT u.id AS user_id, u.name, u.email, u.image,
+              array_agg(o.name ORDER BY o.name) AS vaults,
+              max(m.last_seen_at) AS last_seen_at
          FROM billing_account_orgs bao
          JOIN member m ON m."organizationId" = bao.organization_id
          JOIN "user" u ON u.id = m."userId"
          JOIN organization o ON o.id = bao.organization_id
         WHERE bao.billing_account_id = $1
-        GROUP BY u.id, u.name, u.email
+        GROUP BY u.id, u.name, u.email, u.image
         ORDER BY u.name, u.email`,
       [accountId],
     );
-    people = rows.map((r) => ({ userId: r.user_id, name: r.name, email: r.email, vaults: r.vaults }));
+    people = rows.map((r) => ({
+      userId: r.user_id,
+      name: r.name,
+      email: r.email,
+      vaults: r.vaults,
+      image: r.image ?? null,
+      lastSeenAt: r.last_seen_at ? new Date(r.last_seen_at).toISOString() : null,
+    }));
   }
   const complimentaryUntil = acct.rows[0]?.complimentary_until;
   const isLegacy = legacySub(row);

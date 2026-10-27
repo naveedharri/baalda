@@ -16,6 +16,11 @@ import {
   withVaultCheckpointLock,
 } from "../../versions/checkpoints.js";
 import {
+  checkpointSchedule,
+  nextManualCheckpointAt,
+  plainCheckpointDate,
+} from "../../versions/checkpoint-plan.js";
+import {
   revertVaultToCheckpoint,
   RevertError,
   RevertTooDestructiveError,
@@ -404,7 +409,17 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     const role = await vaultRole(vaultId, session.userId);
     if (role === undefined) return c.json({ error: "Unknown vault" }, 404);
     if (!role) return c.json({ error: "Not a member of this vault" }, 403);
-    return c.json({ checkpoints: await listCheckpoints(pool, vaultId) });
+    const schedule = await checkpointSchedule(pool, vaultId, { fresh: true });
+    const nextAt = await nextManualCheckpointAt(pool, vaultId, schedule);
+    return c.json({
+      checkpoints: await listCheckpoints(pool, vaultId),
+      schedule: {
+        auto: schedule.auto,
+        manualEveryDays:
+          schedule.manualEveryMs === null ? null : Math.round(schedule.manualEveryMs / 86_400_000),
+        nextManualAt: nextAt?.toISOString() ?? null,
+      },
+    });
   });
 
   routes.post("/vaults/:vaultId/checkpoints", async (c) => {
@@ -419,18 +434,33 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     const body = await c.req.json().catch(() => ({}));
     const label = typeof body.label === "string" && body.label.trim() ? body.label.trim() : null;
 
-    const outcome = await withVaultCheckpointLock(vaultId, (db) =>
-      captureCheckpoint({
+    const schedule = await checkpointSchedule(pool, vaultId, { fresh: true });
+    const outcome = await withVaultCheckpointLock(vaultId, async (db) => {
+      // Judged under the lock, so two clicks cannot both pass the window.
+      const nextAt = await nextManualCheckpointAt(db, vaultId, schedule);
+      if (nextAt) return { limited: nextAt } as const;
+      return captureCheckpoint({
         db,
         docWriter: deps.docWriter,
         vaultId,
         kind: "manual",
         label,
         createdBy: session.userId,
-      }),
-    );
+      });
+    });
     // Busy: another checkpoint or a revert is running on this vault right now.
     if (!outcome.acquired) return c.json({ error: "Vault is busy, try again" }, 409);
+    if ("limited" in outcome.value) {
+      const nextAt = outcome.value.limited;
+      return c.json(
+        {
+          error: "checkpoint_limit",
+          message: `This vault can make one checkpoint a week. The next one can be made on ${plainCheckpointDate(nextAt)}.`,
+          nextAt: nextAt.toISOString(),
+        },
+        429,
+      );
+    }
 
     const summary = await getCheckpointSummary(pool, vaultId, outcome.value.id);
     return c.json(summary ?? { id: outcome.value.id }, 201);
