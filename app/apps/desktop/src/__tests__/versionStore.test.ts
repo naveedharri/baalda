@@ -365,7 +365,7 @@ describe("right panel", () => {
     expect(useStore.getState().rightPanel).toEqual({ tab: "versions" });
   });
 
-  it("remembers the last tab when storage is available", () => {
+  it("remembers the last strip tab, never the tab-less Versions view", () => {
     const store = new Map<string, string>();
     const prev = (globalThis as { localStorage?: unknown }).localStorage;
     (globalThis as { localStorage?: unknown }).localStorage = {
@@ -374,10 +374,15 @@ describe("right panel", () => {
       removeItem: (k: string) => void store.delete(k),
     };
     try {
+      useStore.getState().openRightPanel("activity");
+      useStore.getState().closeRightPanel();
+      useStore.getState().openRightPanel();
+      expect(useStore.getState().rightPanel).toEqual({ tab: "activity" });
+      // Versions opens only from the toolbar's clock: the panel toggle reopens Activity.
       useStore.getState().openRightPanel("versions");
       useStore.getState().closeRightPanel();
       useStore.getState().openRightPanel();
-      expect(useStore.getState().rightPanel).toEqual({ tab: "versions" });
+      expect(useStore.getState().rightPanel).toEqual({ tab: "activity" });
       store.set("baalda.rightPanelTab", "bogus");
       useStore.getState().openRightPanel();
       expect(useStore.getState().rightPanel).toEqual({ tab: "activity" });
