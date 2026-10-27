@@ -692,7 +692,7 @@ export function AccountVaultsTab() {
           <>
             <button
               type="button"
-              className="ghost-pill sm vault-tab-add"
+              className="primary vault-hdr-btn"
               onClick={() => setCreating(true)}
             >
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -702,7 +702,7 @@ export function AccountVaultsTab() {
             </button>
             <button
               type="button"
-              className="ghost-pill sm vault-tab-add"
+              className="secondary vault-hdr-btn"
               onClick={() => setJoining(true)}
             >
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -943,7 +943,7 @@ export function AccountVaultsTab() {
             {session && (
               <span className="account-vaults-head-actions">
                 <AsyncButton
-                  className="ghost-pill sm vault-tab-add"
+                  className="secondary vault-hdr-btn"
                   disabled={busy}
                   onClick={openExisting}
                 >

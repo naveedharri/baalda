@@ -817,6 +817,21 @@ export interface VaultCheckpoint {
   noteCount: number;
 }
 
+/** How often this vault takes checkpoints (absent from older servers, which
+ *  means daily automatic ones and unlimited manual ones). */
+export interface CheckpointSchedule {
+  auto: boolean;
+  /** Days between manual checkpoints, or null for no limit. */
+  manualEveryDays: number | null;
+  /** When the next manual checkpoint may be made, or null if it may be now. */
+  nextManualAt: string | null;
+}
+
+export interface CheckpointList {
+  checkpoints: VaultCheckpoint[];
+  schedule: CheckpointSchedule | null;
+}
+
 /** What a whole-vault revert did. Attachments/blobs are never touched. */
 export interface VaultRevertResult {
   ok: true;
@@ -920,7 +935,15 @@ export interface MyBillingAccount {
     /** What the next renewal costs (list once a one-time discount is spent). */
     renewalAmount?: number | null;
   } | null;
-  people: { userId: string; name: string; email: string; vaults: string[] }[];
+  people: {
+    userId: string;
+    name: string;
+    email: string;
+    vaults: string[];
+    /** Newer servers: the person's picture and last activity across the account's vaults. */
+    image?: string | null;
+    lastSeenAt?: string | null;
+  }[];
   vaults: { orgId: string; name: string }[];
   /** Vaults with pending invitations that hold seats; counts sum to
    *  `seats.reserved`. Absent on older servers. */
@@ -3164,17 +3187,18 @@ export class ApiClient {
     return data;
   }
 
-  /** A note collection's checkpoints, newest first (any vault member). */
-  async listCheckpoints(vaultId: string): Promise<VaultCheckpoint[]> {
-    const { data } = await this.request<{ checkpoints: VaultCheckpoint[] }>(
-      "GET",
-      `/api/vaults/${encodeURIComponent(vaultId)}/checkpoints`,
-    );
-    return data.checkpoints ?? [];
+  /** A note collection's checkpoints, newest first, plus its cadence (any vault member). */
+  async listCheckpoints(vaultId: string): Promise<CheckpointList> {
+    const { data } = await this.request<{
+      checkpoints?: VaultCheckpoint[];
+      schedule?: CheckpointSchedule;
+    }>("GET", `/api/vaults/${encodeURIComponent(vaultId)}/checkpoints`);
+    return { checkpoints: data.checkpoints ?? [], schedule: data.schedule ?? null };
   }
 
   /** Take a manual checkpoint (owner/admin). Throws ApiError(409) while another
-   *  checkpoint/revert holds the vault's lock. */
+   *  checkpoint/revert holds the vault's lock, and ApiError(429
+   *  `checkpoint_limit`) when the vault's manual window has not rolled yet. */
   async createCheckpoint(vaultId: string, label?: string): Promise<VaultCheckpoint> {
     const { data } = await this.request<VaultCheckpoint>(
       "POST",

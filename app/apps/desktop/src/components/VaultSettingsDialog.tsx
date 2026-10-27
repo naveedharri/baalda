@@ -6,8 +6,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   type BillingUsage,
-  type McpToolInfo,
-  type McpTokenRow,
   type MyBillingAccount,
   type MyBillingVault,
   type UnsyncPreview,
@@ -33,6 +31,7 @@ import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
 import { MembersAccessTab, prefetchRoster } from "./MembersAccessTab";
 import { AsyncButton } from "./AsyncButton";
+import { McpTab } from "./McpTab";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { useResetLocalCopy } from "./useResetLocalCopy";
 import { AiSettingsTab } from "./AiSettingsTab";
@@ -1719,7 +1718,8 @@ const LINE_FORMAT = {
 
 /**
  * Versioning: the vault-wide safety net. Lists the vault's checkpoints (max 5 —
- * a daily automatic one plus manual ones), and lets an owner OR admin take one
+ * a daily automatic one plus manual ones, or one manual one a week where the
+ * server's `schedule` says so), and lets an owner OR admin take one
  * and roll the whole vault back to it. Per-note history lives in the editor's
  * version panel; this page is for the blast-radius case ("the reorg went wrong,
  * put everything back").
@@ -1730,10 +1730,15 @@ const LINE_FORMAT = {
  */
 function VersioningTab({ canManage }: { canManage: boolean }) {
   const checkpoints = useStore((s) => s.checkpoints);
+  const schedule = useStore((s) => s.checkpointSchedule);
   const [label, setLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<VaultCheckpoint | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  // No schedule (an older server) means today's cadence: daily + unlimited.
+  const auto = schedule?.auto ?? true;
+  const nextManualMs = schedule?.nextManualAt ? Date.parse(schedule.nextManualAt) : NaN;
+  const manualWaiting = Number.isFinite(nextManualMs) && nextManualMs > now;
 
   useEffect(() => {
     void useStore.getState().refreshCheckpoints();
@@ -1748,6 +1753,9 @@ function VersioningTab({ canManage }: { canManage: boolean }) {
       setLabel("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      // A refusal for the weekly window carries the date; re-read the schedule
+      // so Create disables until then.
+      void useStore.getState().refreshCheckpoints();
     }
   };
 
@@ -1778,10 +1786,14 @@ function VersioningTab({ canManage }: { canManage: boolean }) {
   return (
     <div className="versioning-tab">
       <div className="muted">
-        A checkpoint captures every note in this vault, content and folder
-        structure. One is taken automatically each day the vault changes; the
-        vault keeps its 5 most recent. Reverting rolls every member's vault back
-        and broadcasts live.
+        {auto
+          ? "A checkpoint captures every note in this vault, content and folder " +
+            "structure. One is taken automatically each day the vault changes; the " +
+            "vault keeps its 5 most recent. Reverting rolls every member's vault back " +
+            "and broadcasts live."
+          : "A checkpoint captures every note in this vault, content and folder " +
+            "structure. You can create one a week; the vault keeps its 5 most " +
+            "recent. Reverting rolls every member's vault back and broadcasts live."}
       </div>
       <div className="menu-sep" />
       {canManage && (
@@ -1794,10 +1806,21 @@ function VersioningTab({ canManage }: { canManage: boolean }) {
               value={label}
               onChange={(e) => setLabel(e.target.value)}
             />
-            <AsyncButton className="primary" onClick={create}>
+            <AsyncButton className="primary" onClick={create} disabled={manualWaiting}>
               Create
             </AsyncButton>
           </div>
+          {manualWaiting && (
+            <div className="muted checkpoint-note">
+              You can create the next one on{" "}
+              {new Date(nextManualMs).toLocaleDateString(undefined, {
+                weekday: "short",
+                day: "numeric",
+                month: "short",
+              })}
+              .
+            </div>
+          )}
           <div className="menu-sep" />
         </>
       )}
@@ -1807,8 +1830,14 @@ function VersioningTab({ canManage }: { canManage: boolean }) {
         <div className="muted perm-empty">Loading…</div>
       ) : checkpoints.length === 0 ? (
         <div className="muted perm-empty">
-          No checkpoints yet. One is captured automatically within a day of the
-          vault changing{canManage ? ", or create one above" : ""}.
+          {auto ? (
+            <>
+              No checkpoints yet. One is captured automatically within a day of the
+              vault changing{canManage ? ", or create one above" : ""}.
+            </>
+          ) : (
+            <>No checkpoints yet{canManage ? ". Create one above" : ""}.</>
+          )}
         </div>
       ) : (
         <ul className="checkpoint-list">
@@ -1881,315 +1910,6 @@ function VersioningTab({ canManage }: { canManage: boolean }) {
     </div>
   );
 }
-
-/**
- * MCP: expose this vault to AI clients over the Model Context Protocol.
- * The MCP endpoint is part of the same server; a client authenticates with a
- * token minted here and then gets the SAME CRUD access to notes/folders that
- * the signed-in user has (owners/admins see everything; members see what's
- * shared with them). This is where you grab the URL + a token.
- */
-function McpTab() {
-  const session = useStore((s) => s.session);
-  const serverUrl = useStore((s) => s.serverUrl);
-
-  const mcpUrl = `${serverUrl.replace(/\/+$/, "")}/api/mcp`;
-  const hasVault = !!session?.activeOrganizationId;
-
-  const [tokens, setTokens] = useState<McpTokenRow[]>([]);
-  const [tools, setTools] = useState<McpToolInfo[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [justCreated, setJustCreated] = useState<{ name: string; token: string } | null>(
-    null,
-  );
-  const [copied, setCopied] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<string | null>(null);
-  // Bumps every 20s so "connected" dots + relative times stay live while open.
-  const [, setTick] = useState(0);
-
-  useEffect(() => {
-    if (!hasVault) {
-      setLoading(false);
-      return;
-    }
-    let cancelled = false;
-    const load = () =>
-      authManager.api
-        .listMcpConnections()
-        .then(({ tokens, tools }) => {
-          if (cancelled) return;
-          setTokens(tokens);
-          setTools(tools);
-        })
-        .catch(() => {})
-        .finally(() => {
-          if (!cancelled) setLoading(false);
-        });
-    void load();
-    // Poll so a connection that goes active/idle while the panel is open shows it.
-    const poll = window.setInterval(() => void load(), 20_000);
-    const tickle = window.setInterval(() => setTick((n) => n + 1), 20_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(poll);
-      window.clearInterval(tickle);
-    };
-  }, [hasVault]);
-
-  const copy = async (text: string, tag: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(tag);
-      window.setTimeout(() => setCopied((c) => (c === tag ? null : c)), 1500);
-    } catch {
-      /* clipboard unavailable */
-    }
-  };
-
-  const create = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const created = await authManager.api.createMcpToken(name.trim() || "MCP token");
-      setJustCreated({ name: created.name, token: created.token });
-      const { token: _t, ...row } = created;
-      setTokens((prev) => [row, ...prev]);
-      setName("");
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      setError(message);
-      // Otherwise the button just returns to idle and the user clicks again,
-      // minting duplicate tokens on a server that is actually failing (#85).
-      toast(`Couldn't create the MCP token: ${message}`, "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const revoke = async (id: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await authManager.api.revokeMcpToken(id);
-      setTokens((prev) => prev.filter((t) => t.id !== id));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (!hasVault) {
-    return (
-      <div className="muted perm-empty">
-        MCP needs an active vault. Create or switch to one first.
-      </div>
-    );
-  }
-
-  const snippet = justCreated
-    ? `claude mcp add --transport http context ${mcpUrl} \\\n  --header "Authorization: Bearer ${justCreated.token}"`
-    : "";
-  // Codex reads the bearer token from an environment variable, so the token
-  // goes in the shell profile and only the variable's name in config.toml.
-  const codexSnippet = justCreated
-    ? `# In your shell profile\nexport CONTEXT_MCP_TOKEN="${justCreated.token}"\n\n# In ~/.codex/config.toml\n[mcp_servers.context]\nurl = "${mcpUrl}"\nbearer_token_env_var = "CONTEXT_MCP_TOKEN"`
-    : "";
-
-  return (
-    <>
-      <div className="muted">
-        Connect any MCP-compatible AI client to this vault. It gets the same
-        access you do: read, search, create, edit and delete notes and folders.
-        Owners and admins can also manage the team's access from the same chat.
-        Ask Claude or ChatGPT to share a folder with someone, make it view only,
-        or set what new members see.
-      </div>
-
-      <div className="subhead">Endpoint URL</div>
-      <div className="join-code-row">
-        <code className="vault-root-path" title={mcpUrl}>
-          {mcpUrl}
-        </code>
-        <button className="link-btn" onClick={() => void copy(mcpUrl, "url")}>
-          {copied === "url" ? "Copied ✓" : "Copy"}
-        </button>
-      </div>
-
-      <div className="menu-sep" />
-      <div className="subhead">Access tokens</div>
-      <div className="muted">
-        A token authenticates the client and scopes it to you in this vault.
-        Add it as an <code>Authorization: Bearer</code> header. Revoke any time.
-      </div>
-
-      <div className="row invite-bar">
-        <input
-          placeholder="Token name, e.g. Claude Desktop"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void create();
-          }}
-        />
-        <button className="primary" disabled={busy} onClick={() => void create()}>
-          Create token
-        </button>
-      </div>
-
-      {error && <div className="auth-error">{error}</div>}
-
-      {justCreated && (
-        <div className="mcp-new-token">
-          <div className="subhead">Copy your token now. It won't be shown again</div>
-          <div className="join-code-row">
-            <code className="join-code mcp-token-value" title={justCreated.token}>
-              {justCreated.token}
-            </code>
-            <button
-              className="link-btn"
-              onClick={() => void copy(justCreated.token, "token")}
-            >
-              {copied === "token" ? "Copied ✓" : "Copy"}
-            </button>
-          </div>
-          <div className="muted">To add it to Claude Code:</div>
-          <div className="join-code-row">
-            <code className="mcp-snippet">{snippet}</code>
-            <button className="link-btn" onClick={() => void copy(snippet, "snippet")}>
-              {copied === "snippet" ? "Copied ✓" : "Copy"}
-            </button>
-          </div>
-          <div className="muted">Or add it to Codex:</div>
-          <div className="join-code-row">
-            <code className="mcp-snippet">{codexSnippet}</code>
-            <button className="link-btn" onClick={() => void copy(codexSnippet, "codex")}>
-              {copied === "codex" ? "Copied ✓" : "Copy"}
-            </button>
-          </div>
-          <button className="link-btn" onClick={() => setJustCreated(null)}>
-            Done
-          </button>
-        </div>
-      )}
-
-      <div className="menu-sep" />
-      <div className="subhead">Connections</div>
-      <div className="muted">
-        Every token is a connection into this vault. Each reaches the same{" "}
-        {tools.length || ""} tools, gated by your access. Expand one to see them,
-        how active it is, and how much it's been used.
-      </div>
-
-      {loading ? (
-        <div className="muted">Loading…</div>
-      ) : tokens.length === 0 ? (
-        <div className="muted">No connections yet.</div>
-      ) : (
-        <ul className="mcp-conn-list">
-          {tokens.map((t) => {
-            const live = isConnected(t.lastUsedAt);
-            const open = expanded === t.id;
-            return (
-              <li key={t.id} className={`mcp-conn${open ? " open" : ""}`}>
-                <div className="mcp-conn-head">
-                  <span
-                    className={`mcp-dot ${live ? "on" : "off"}`}
-                    title={live ? "Connected" : "Disconnected"}
-                    aria-hidden="true"
-                  />
-                  <div className="mcp-conn-main">
-                    <div className="mcp-conn-title">
-                      {t.name}
-                      <span className={`mcp-status ${live ? "on" : "off"}`}>
-                        {live ? "Connected" : "Disconnected"}
-                      </span>
-                    </div>
-                    <div className="mcp-conn-sub muted">
-                      {clientLabel(t.lastClient)}
-                      {" · "}
-                      {t.tokenPrefix}
-                      {" · "}
-                      {t.useCount} {t.useCount === 1 ? "call" : "calls"}
-                      {" · "}
-                      {t.lastUsedAt ? `last active ${relTime(t.lastUsedAt)}` : "never used"}
-                    </div>
-                  </div>
-                  <button
-                    className="link-btn"
-                    onClick={() => setExpanded((e) => (e === t.id ? null : t.id))}
-                  >
-                    {open ? "Hide tools" : `Tools · ${tools.length}`}
-                  </button>
-                  <AsyncButton
-                    className="link-btn danger"
-                    disabled={busy}
-                    onClick={() => revoke(t.id)}
-                  >
-                    Revoke
-                  </AsyncButton>
-                </div>
-                {open && (
-                  <ul className="mcp-tool-list">
-                    {tools.map((tool) => (
-                      <li key={tool.name} title={tool.description}>
-                        <span className={`mcp-tool-badge ${tool.access}`}>
-                          {tool.access === "read"
-                            ? "read"
-                            : tool.access === "destructive"
-                              ? "delete"
-                              : "write"}
-                        </span>
-                        <code>{tool.name}</code>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </>
-  );
-}
-
-/** A connection is "active" when it made a request in the last few minutes
- *  (MCP here is stateless HTTP — there's no socket to watch, so recency is it). */
-const CONNECTED_WINDOW_MS = 3 * 60 * 1000;
-function isConnected(lastUsedAt: string | null): boolean {
-  if (!lastUsedAt) return false;
-  return Date.now() - new Date(lastUsedAt).getTime() < CONNECTED_WINDOW_MS;
-}
-
-/** Compact relative time: "just now", "5m ago", "3h ago", "2d ago", else a date. */
-function relTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  if (diff < 60_000) return "just now";
-  const m = Math.floor(diff / 60_000);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d ago`;
-  return new Date(iso).toLocaleDateString();
-}
-
-/** Best-effort human name for a client from its User-Agent. */
-function clientLabel(ua: string | null): string {
-  if (!ua) return "Unknown client";
-  const s = ua.toLowerCase();
-  if (s.includes("claude-code") || s.includes("claude code")) return "Claude Code";
-  if (s.includes("claude")) return "Claude";
-  if (s.includes("cursor")) return "Cursor";
-  if (s.includes("node")) return "Node client";
-  // Fall back to the leading token of the UA (e.g. "MyApp/1.2" → "MyApp").
-  return ua.split(/[\s/]/)[0].slice(0, 40) || "Unknown client";
-}
-
 
 function importSummaryText(s: ipc.ImportSummary): string {
   const parts = [`Imported ${s.files} file${s.files === 1 ? "" : "s"}`];

@@ -24,6 +24,7 @@ import * as ipc from "../lib/ipc";
 import { toast } from "../lib/toast";
 import { readOrgVaults, useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
+import { AccountPeopleGrid } from "./AccountPeopleGrid";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ManageSeatsDialog } from "./ManageSeatsDialog";
 import { PlanHeader } from "./PlanHeader";
@@ -429,42 +430,7 @@ export function AccountPlanTab() {
         <>
           <div className="subhead">People on this account</div>
           {peopleCopy.note && <div className="billing-section-note muted">{peopleCopy.note}</div>}
-          <table className="members-table plan-page-people">
-            <thead>
-              <tr>
-                <th>Person</th>
-                <th>Vaults</th>
-                {peopleCopy.seatColumn && <th className="plan-page-seat-col">Seat</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {account.people.map((p) => {
-                return (
-                  <tr key={p.userId}>
-                    <td>
-                      <div className="members-table-names">
-                        <span className="members-table-name">{p.name || p.email}</span>
-                        {p.name && <span className="muted">{p.email}</span>}
-                      </div>
-                    </td>
-                    <td>
-                      <div className="plan-page-vault-chips">
-                        {p.vaults.map((id) => {
-                          const name = account.vaults.find((v) => v.orgId === id)?.name ?? id;
-                          return (
-                            <span key={id} className="plan-page-vault-chip">
-                              {name}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    </td>
-                    {peopleCopy.seatColumn && <td className="muted plan-page-seat-col">1 seat</td>}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <AccountPeopleGrid people={account.people} seatTag={!!peopleCopy.seatColumn} />
         </>
       )}
 
@@ -588,38 +554,7 @@ function SelfHostedPlan({
       {account && people.length > 0 && (
         <>
           <div className="subhead">People on this account</div>
-          <table className="members-table plan-page-people">
-            <thead>
-              <tr>
-                <th>Person</th>
-                <th>Vaults</th>
-              </tr>
-            </thead>
-            <tbody>
-              {people.map((p) => (
-                <tr key={p.userId}>
-                  <td>
-                    <div className="members-table-names">
-                      <span className="members-table-name">{p.name || p.email}</span>
-                      {p.name && <span className="muted">{p.email}</span>}
-                    </div>
-                  </td>
-                  <td>
-                    <div className="plan-page-vault-chips">
-                      {p.vaults.map((id) => {
-                        const name = account.vaults.find((v) => v.orgId === id)?.name ?? id;
-                        return (
-                          <span key={id} className="plan-page-vault-chip">
-                            {name}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <AccountPeopleGrid people={people} />
         </>
       )}
     </>

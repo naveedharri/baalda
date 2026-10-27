@@ -1,0 +1,342 @@
+/* Vault Settings → MCP. Nothing on the page jumps: a new token opens in a
+   dialog (`.mcp-token-dialog`, the skills form-dialog shell), and every copy
+   button flips its glyph inside the same 28px box. */
+
+/* Managed server only: Baalda's listing in Claude's connector directory.
+   Green like the access "Can edit" level. */
+.mcp-directory {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-4) 0 0;
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  border: 1px solid color-mix(in srgb, var(--access-edit-fg) 22%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--access-edit-bg);
+  color: var(--text-primary);
+}
+.mcp-directory .skills-tool {
+  flex: none;
+}
+.mcp-directory-pill {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--access-edit-fg);
+  border: 1px solid color-mix(in srgb, var(--access-edit-fg) 35%, transparent);
+  border-radius: var(--radius-pill);
+  padding: 1px var(--sp-2);
+  white-space: nowrap;
+}
+.mcp-directory-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+button.secondary.mcp-directory-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  background: var(--bg-surface);
+  border-color: color-mix(in srgb, var(--access-edit-fg) 25%, transparent);
+  white-space: nowrap;
+}
+button.secondary.mcp-directory-btn:hover:not(:disabled) {
+  border-color: var(--access-edit-fg);
+  background: var(--bg-surface);
+  color: var(--access-edit-fg);
+}
+.mcp-directory-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Server address: one settings row, label then a read-only field. */
+.mcp-endpoint {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin: var(--sp-6) 0 0;
+}
+.mcp-endpoint-label {
+  flex: none;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* A read-only monospace value with its copy button inside the field. */
+.mcp-field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: 34px;
+  padding: 2px 3px 2px var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+}
+.mcp-field-value {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: all;
+}
+.mcp-field-value.is-wrapped {
+  padding: var(--sp-1) 0;
+  white-space: normal;
+  word-break: break-all;
+  line-height: 1.5;
+}
+.mcp-block {
+  align-items: flex-start;
+  padding: var(--sp-2) 3px var(--sp-2) var(--sp-3);
+}
+.mcp-block .mcp-copy-btn {
+  margin-top: -3px;
+}
+.mcp-block-value {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.icon-btn.mcp-copy-btn {
+  flex: none;
+  width: 28px;
+  height: 28px;
+}
+.icon-btn.mcp-copy-btn:hover {
+  background: var(--bg-hover);
+}
+.icon-btn.mcp-copy-btn svg {
+  width: 15px;
+  height: 15px;
+}
+.icon-btn.mcp-copy-btn.is-copied {
+  color: var(--success);
+}
+
+/* "Access tokens" header: label + hint on the left, New token on the right. */
+.mcp-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin: var(--sp-8) 0 var(--sp-3);
+}
+.mcp-section-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.mcp-section-text .subhead {
+  margin: 0;
+}
+.mcp-section-hint {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: var(--lh-body);
+}
+.mcp-empty {
+  padding: var(--sp-4);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+/* Token list: one bordered list, a hairline between rows. */
+.mcp-conn-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+.mcp-conn + .mcp-conn {
+  border-top: 1px solid var(--border);
+}
+.mcp-conn-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+}
+.mcp-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+.mcp-dot.on {
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-soft);
+}
+.mcp-dot.off {
+  opacity: 0.6;
+}
+.mcp-conn-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mcp-conn-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.mcp-conn-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-status {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  border-radius: var(--radius-pill);
+  padding: 1px var(--sp-2);
+}
+.mcp-status.on {
+  color: var(--access-edit-fg);
+  background: var(--success-soft);
+}
+.mcp-status.off {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+.mcp-conn-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-conn-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  font-size: var(--fs-sm);
+}
+.mcp-tool-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-1) var(--sp-3);
+}
+.mcp-tool-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.mcp-tool-list code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.mcp-tool-badge {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+.mcp-tool-badge.read {
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.12);
+}
+.mcp-tool-badge.write {
+  color: #b45309;
+  background: rgba(217, 119, 6, 0.14);
+}
+.mcp-tool-badge.destructive {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+/* New token dialog. */
+.modal.skills-form-dialog.mcp-token-dialog {
+  width: 480px;
+}
+.mcp-setup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+.mcp-setup-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.member-access-view-btn.mcp-client-tab {
+  width: auto;
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+/* Room for the tallest tab, so switching tabs never resizes the dialog. */
+.mcp-setup-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 150px;
+}
+.mcp-setup-label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.mcp-setup-label + .mcp-field {
+  margin-top: calc(var(--sp-1) * -1);
+}
+.mcp-setup-hint {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}

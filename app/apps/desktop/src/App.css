@@ -4616,7 +4616,7 @@ button.secondary.about-update-btn:disabled {
 
    Only direct children take part — plus `.versioning-tab`, the one tab that
    wraps itself in a plain div. A `.subhead` nested inside a card
-   (`.billing-card`, `.mcp-new-token`) sits in a FLEX
+   (`.billing-card`) sits in a FLEX
    container whose `gap` already spaces it, and a margin there would add to
    the gap rather than collapse with it. The tab's own `<h2>` already carries
    the lead-in, so the first subhead after it takes nothing extra. */
@@ -5786,149 +5786,6 @@ button.secondary.about-update-btn:disabled {
   padding: var(--sp-1) var(--sp-2);
   overflow-x: auto;
   white-space: nowrap;
-}
-
-/* MCP tab: newly-minted token callout + config snippet. */
-.mcp-new-token {
-  padding: var(--sp-3);
-  margin-bottom: var(--sp-3);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-md);
-  background: var(--accent-soft);
-}
-.mcp-token-value {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--fs-sm);
-  letter-spacing: normal;
-  overflow-x: auto;
-}
-.mcp-snippet {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  color: var(--text-primary);
-  background: var(--bg-surface);
-  border-radius: var(--radius-sm);
-  padding: var(--sp-2);
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-/* MCP connections — one card per token: live status, client, usage, tools. */
-.mcp-conn-list {
-  list-style: none;
-  margin: var(--sp-2) 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
-.mcp-conn {
-  border: 1px solid var(--border-subtle, var(--bg-hover));
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
-}
-.mcp-conn.open {
-  border-color: var(--accent);
-}
-.mcp-conn-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-}
-.mcp-dot {
-  flex: none;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--text-secondary);
-}
-.mcp-dot.on {
-  background: #22c55e;
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
-}
-.mcp-dot.off {
-  background: var(--text-secondary);
-  opacity: 0.5;
-}
-.mcp-conn-main {
-  flex: 1;
-  min-width: 0;
-}
-.mcp-conn-title {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.mcp-status {
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  border-radius: var(--radius-pill);
-  padding: 1px var(--sp-2);
-}
-.mcp-status.on {
-  color: #16a34a;
-  background: rgba(34, 197, 94, 0.14);
-}
-.mcp-status.off {
-  color: var(--text-secondary);
-  background: var(--bg-hover);
-}
-.mcp-conn-sub {
-  font-size: var(--fs-xs);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.mcp-tool-list {
-  list-style: none;
-  margin: 0;
-  padding: var(--sp-2) var(--sp-3) var(--sp-3);
-  border-top: 1px solid var(--border-subtle, var(--bg-hover));
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--sp-1) var(--sp-3);
-}
-.mcp-tool-list li {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  font-size: var(--fs-sm);
-  min-width: 0;
-}
-.mcp-tool-list code {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-primary);
-}
-.mcp-tool-badge {
-  flex: none;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  border-radius: var(--radius-sm);
-  padding: 1px 5px;
-  color: var(--text-secondary);
-  background: var(--bg-hover);
-}
-.mcp-tool-badge.read {
-  color: #2563eb;
-  background: rgba(37, 99, 235, 0.12);
-}
-.mcp-tool-badge.write {
-  color: #b45309;
-  background: rgba(217, 119, 6, 0.14);
-}
-.mcp-tool-badge.destructive {
-  color: #dc2626;
-  background: rgba(220, 38, 38, 0.14);
 }
 
 /* "Set up this vault" folder prompt. Sits above the settings modal (200). */
@@ -10835,4 +10692,89 @@ body.access-board-grabbing * {
 }
 .appearance-defaults-head .appearance-tag {
   margin-left: 0;
+}
+
+/* Plan & Billing → People on this account: a grid of person cards. */
+.account-people-grid {
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--sp-3);
+}
+.account-person {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--text-primary) 3.5%, var(--bg-surface));
+}
+.account-person .avatar {
+  flex: none;
+  width: 40px;
+  height: 40px;
+}
+.account-person-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.account-person-name {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-person-email,
+.account-person-active {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-person-active {
+  color: var(--text-secondary);
+}
+.account-person-seat {
+  flex: none;
+  align-self: flex-start;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+
+/* Account Settings → Vaults header actions: the same 34px buttons as the
+   Agent Skills header (primary for the main action, grey with a hairline for
+   the rest), beside the 34px list/grid toggle. */
+.account-vaults-head-actions button.primary.vault-hdr-btn,
+.account-vaults-head-actions button.secondary.vault-hdr-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 1;
+  box-shadow: none;
+}
+.account-vaults-head-actions button.secondary.vault-hdr-btn {
+  border-color: var(--border);
+}
+.account-vaults-head-actions button.secondary.vault-hdr-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+.account-vaults-head-actions .vault-hdr-btn svg {
+  flex: none;
+  color: currentColor;
 }
