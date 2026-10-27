@@ -162,6 +162,17 @@ Then point the desktop app at it — see
 [Point the desktop app at your server](#point-the-desktop-app-at-your-server)
 for the first-run step, Settings → Connection, and the invite link.
 
+### Postgres memory on usage-billed hosts
+
+On a host that bills memory per GB-minute (Railway, for example), the Linux page
+cache of the Postgres service counts toward billed RAM, and it grows toward the
+size of the database over time even though Postgres itself needs little:
+`shared_buffers` plus `work_mem` for each sort or hash running at that moment
+(the server sets `work_mem` per connection from `PG_WORK_MEM`, default `16MB`).
+Setting a memory limit of about 2–3 GB on the Postgres service makes the kernel
+drop cold cache instead of billing for it. On a VM or with Docker Compose this
+does not matter: the cache is freed on demand and costs nothing extra.
+
 ### Option B (one-click)
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/baalda-server?utm_medium=integration&utm_source=button&utm_campaign=baalda)
@@ -358,6 +369,7 @@ confirm `/health` and a real sync round-trip, then promote.
 |---|---|---|---|
 | `DATABASE_URL` | yes | `postgres://context:context@localhost:5439/context` | Postgres connection string. |
 | `PG_POOL_MAX` | no | `30` | Postgres connections this instance pools. Keep the total across all instances under the server's `max_connections`; a pool below `BACKFILL_CONCURRENCY` lets one vault reconnect starve the HTTP routes. |
+| `PG_WORK_MEM` | no | `16MB` | Memory one sort or hash step may use before spilling to disk, set on every connection this server opens. Keep `(PG_POOL_MAX + 10) × this × 3` under the Postgres server's memory. |
 | `JWT_SECRET` | yes | dev-only insecure default | Better Auth crypto **and** sync JWT signing. Generate with `openssl rand -base64 32`. Rotating it invalidates all sessions and sync tokens. |
 | `BETTER_AUTH_URL` | yes | `http://localhost:3010` | Public base URL used for auth links (email verification, invitations). Must match the URL clients actually use. |
 | `PORT` | no | `3010` | HTTP API port. Serves the sync WebSocket at `/sync` too. This is the only port a deployment needs to expose. |

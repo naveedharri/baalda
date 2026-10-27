@@ -5,6 +5,7 @@ import { bearer, mcp, organization } from "better-auth/plugins";
 import { Algorithm, hash as argonHash, verify as argonVerify } from "@node-rs/argon2";
 import pg from "pg";
 import { config } from "../config.js";
+import { workMem } from "../db/pool.js";
 import { BRAND_NAME } from "../brand.js";
 import { canAddMember, canCreateOrganization } from "../billing/entitlements.js";
 import { checkInviteSeat, checkJoinSeat, seatRefusalBody, teamModel, type SeatRefusal } from "../billing/plan.js";
@@ -46,7 +47,13 @@ import { announceInvitation, announceInvitationGone } from "../sync/user-events.
 // the algorithm explicitly to satisfy the spec's mandate.
 const argonOpts = { algorithm: Algorithm.Argon2id } as const;
 
-export const authPool = new pg.Pool({ connectionString: config.databaseUrl });
+// Same `work_mem` as the main pool (see `workMem` in db/pool.ts). No
+// statement_timeout here: Better Auth's queries were never under one.
+export const authPool = new pg.Pool({
+  connectionString: config.databaseUrl,
+  options: `-c work_mem=${workMem()}`,
+  application_name: "baalda-auth",
+});
 
 // Google social sign-in is opt-in: only wired when both creds are present, so a
 // self-hosted server without them just omits the provider (the desktop hides
