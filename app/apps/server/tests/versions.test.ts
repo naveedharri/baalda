@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import {
@@ -47,6 +47,14 @@ function updateFor(text: string): Uint8Array {
   const update = Y.encodeStateAsUpdate(doc);
   doc.destroy();
   return update;
+}
+
+/** A `vi.waitFor` callback: passes once `docId` holds exactly `n` versions. */
+function versionCount(docId: string, n: number) {
+  return async () => {
+    const { rowCount } = await pool.query("SELECT id FROM note_versions WHERE doc_id = $1", [docId]);
+    expect(rowCount).toBe(n);
+  };
 }
 
 function api(user: TestUser | null, path: string, init: RequestInit = {}) {
@@ -322,11 +330,12 @@ describe("per-note versions", () => {
     });
     rec.docWriter.store.set(docId, "rewritten in bulk");
     bulk.touch(vault, docId, user.userId, BULK_ORIGIN);
-    await new Promise((r) => setTimeout(r, 120));
+    // The idle timer fires after 10 ms, but the capture behind it is three
+    // sequential queries; on a slow runner they outlast any fixed sleep, and a
+    // capture still in flight then lands in the NEXT test's freshly reset DB.
+    // Wait for the row itself instead.
+    await vi.waitFor(versionCount(docId, 1), { timeout: 5_000, interval: 20 });
     bulk.stop();
-    expect(
-      (await pool.query("SELECT id FROM note_versions WHERE doc_id = $1", [docId])).rowCount,
-    ).toBe(1);
 
     // A human edit to the same doc still does, so this is a source filter and
     // not a switch that turned versions off.
@@ -337,10 +346,8 @@ describe("per-note versions", () => {
     });
     rec.docWriter.store.set(docId, "and then typed on");
     human.touch(vault, docId, user.userId);
-    await new Promise((r) => setTimeout(r, 120));
+    await vi.waitFor(versionCount(docId, 2), { timeout: 5_000, interval: 20 });
     human.stop();
-    const after = await pool.query("SELECT id FROM note_versions WHERE doc_id = $1", [docId]);
-    expect(after.rowCount).toBe(2);
   });
 
   /**
