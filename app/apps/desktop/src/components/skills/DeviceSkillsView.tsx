@@ -182,7 +182,7 @@ export function DeviceSkillsView({
     return (
       <InstallButton
         kind="share"
-        title="Add to team\nTeammates can install it from Agent Skills"
+        title="Add to team\nInstalls it on everyone's computer"
         onClick={() => void quickAdd(item)}
       />
     );
@@ -292,7 +292,7 @@ function addFailedText(name: string, raw: string): string {
 /**
  * Add a skill on this computer to the team: read its folder (Rust's reader:
  * no dot folders or build output, no symlinks inside, the upload caps), create
- * it under its SKILL.md name and publish v1 as Optional.
+ * it under its SKILL.md name and make it Required and publish v1, so it installs for everyone.
  */
 async function addDeviceSkillToTeam({
   item,
@@ -330,8 +330,10 @@ async function addDeviceSkillToTeam({
     const files = bundle.files.map((f) => ({ path: f.path, contentBase64: f.contentBase64, executable: f.executable, sha256: f.sha256 }));
     const created = await authManager.api.createSkill(orgId, name, files);
     try {
+      // Required before v1 goes out, so it lands on everyone's computer with the publish.
+      await authManager.api.patchSkill(orgId, created.id, { delivery: "required" });
       await authManager.api.publishSkill(orgId, created.id, created.draftRevision, `Added from ${me}'s computer`);
-      toast(`Added ${skillDisplayName(name)} to the team · teammates can install it from Skills`);
+      toast(`Added ${skillDisplayName(name)} to the team · it's installing on everyone's computer`);
     } catch (e) {
       toast(`Added ${skillDisplayName(name)} to the team as a draft: ${message(e)}`, "neutral");
     }
@@ -423,7 +425,7 @@ function DeviceSkillPreview({
               <BusyButton
                 className="primary skills-hdr-btn"
                 busyLabel="Adding…"
-                title="Adds it to your team's skills as Optional. Teammates can install it from Skills."
+                title="Adds it to your team's skills and installs it on everyone's computer. You can make it optional on its page."
                 onClick={share}
               >
                 Add to team

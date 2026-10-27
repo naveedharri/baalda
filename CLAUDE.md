@@ -577,7 +577,7 @@ lost membership, opted out, target switched off) RELEASES an edited/kept copy
 and deletes a clean one; a cross-org name clash goes to the vault already holding the folder,
 else the first by vault name then id. `syncHost.ts` runs it for every vault the user belongs to on
 the current server (`GET /api/skills/manifest`) at sign-in, on `skills-changed` (debounced 500 ms; open Skills pages, the skill page and the sidebar shortcut also reload on it via `useSkillsChanged`, so a teammate's add shows live), every
-15 min and on Check now, one run at a time. The API client is shared and a server switch repoints
+2 min (the frame only covers the OPEN vault), on coming back to the app (≤ every 30 s) and on Check now, one run at a time. Two accounts on ONE computer share the skill folders: the first owner's copy is `other_owner` to the second (by design). The API client is shared and a server switch repoints
 it before App's effect stops the host, so a run halts (plans and acts on nothing) once the client's
 base URL differs from the host's, and `store.setServerUrl` pauses the host first (`pauseSkillsSync`,
 resumed unless a switch to another URL landed). Device prefs (`prefs.ts`, localStorage

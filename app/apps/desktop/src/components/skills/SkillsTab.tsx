@@ -37,7 +37,7 @@ import { downloadSkillZip, SkillDetail } from "./SkillDetail";
 import { RemoveFromTeamDialog } from "./RemoveFromTeamDialog";
 import { RowActionsMenu } from "../RowActionsMenu";
 import { SkillsMenuButton } from "./SkillsMenuButton";
-import { useHighlightSkill } from "./useHighlightSkill";
+import { takeUnseenSkills, useHighlightSkill } from "./useHighlightSkill";
 import { useScrollReset } from "./useScrollReset";
 import "./skills.css";
 
@@ -200,11 +200,14 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
       primeCatalog(orgId, next);
       setError(null);
       setLoadFailed(false);
+      // Everyone, not only whoever added it: a skill new to this device glows.
+      const fresh = takeUnseenSkills(`${serverUrl}|${orgId}`, next.skills.map((k) => k.id));
+      if (fresh.length > 0) highlight(fresh);
     } catch (e) {
       setError(errorText(e));
       setLoadFailed(true);
     }
-  }, [orgId]);
+  }, [orgId, serverUrl, highlight]);
 
   useEffect(() => {
     if (supported) void reload();

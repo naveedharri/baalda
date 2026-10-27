@@ -433,6 +433,8 @@ export function MarketplaceBrowser({
     const files = await fetchSkillFolder(reader, skill);
     const detail = await authManager.api.createSkill(orgId, skill.name, files, originOf(skill));
     try {
+      // Required before v1 goes out, so it lands on everyone's computer with the publish.
+      await authManager.api.patchSkill(orgId, detail.id, { delivery: "required" });
       const v = await authManager.api.publishSkill(orgId, detail.id, detail.draftRevision, importNotes(skill));
       return { id: detail.id, version: v.version, draftError: null };
     } catch (e) {
@@ -772,7 +774,7 @@ export function MarketplaceBrowser({
             <span className="skills-crumb-sep" aria-hidden="true">/</span>
             Marketplaces
           </h2>
-          <p className="skills-intro">Import skills from GitHub. Anything you import starts as Optional.</p>
+          <p className="skills-intro">Import skills from GitHub. Anything you import installs on everyone's computer.</p>
         </div>
         <div className="skills-actions">
           <button type="button" className="primary skills-hdr-btn" onClick={() => setAdding(true)}>
@@ -875,8 +877,8 @@ export function MarketplaceBrowser({
             void importAll(market, skills);
           }}
         >
-          They start as Optional, so they reach someone's AI tools only when that person turns them on.
-          Skills already in this vault are left as they are.
+          They install on everyone's computer, in Claude, Codex and their other AI tools. You can make any of
+          them optional on its page. Skills already in this vault are left as they are.
         </ConfirmDialog>
       )}
 

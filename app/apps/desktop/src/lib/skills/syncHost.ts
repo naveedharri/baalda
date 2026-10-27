@@ -5,7 +5,7 @@
 // `skills`. A run fetches the manifest of EVERY vault the user belongs to on
 // that server (not only the open one), so a teammate's publish in another vault
 // still lands; the open vault's `skills-changed` frame only makes it sooner,
-// and the 15-minute poll covers the rest.
+// and a 2-minute poll plus a check on coming back to the app cover the rest.
 //
 // The device view lives here as a module-level store, like `toast.ts`: AI tools
 // is its only reader and the Zustand store is a vault mirror, not this.
@@ -44,7 +44,14 @@ import type { ManifestSkill, SkillDelivery, SkillsManifest } from "./types";
 import { skillDisplayName } from "./display";
 
 export const SKILLS_FEATURE = "skills";
-export const SKILLS_POLL_MS = 15 * 60 * 1000;
+/**
+ * The live frame only covers the OPEN vault, so a Required skill in another
+ * vault arrives on this poll or when the app comes back to the front. One
+ * metadata-only manifest request (a fixed few queries) every 2 minutes.
+ */
+export const SKILLS_POLL_MS = 2 * 60 * 1000;
+/** Coming back to the app checks again, at most this often. */
+export const SKILLS_FOCUS_MIN_GAP_MS = 30 * 1000;
 export const SKILLS_FRAME_DEBOUNCE_MS = 500;
 /** Open pages coalesce a burst of frames (a marketplace import) into one reload. */
 export const SKILLS_VIEW_DEBOUNCE_MS = 150;
@@ -278,11 +285,24 @@ export function startSkillsSync({
     }, SKILLS_FRAME_DEBOUNCE_MS);
   };
   const poll = setInterval(request, SKILLS_POLL_MS);
+  // Back to the app (focus or the window shown again): check now.
+  let lastFocusRun = 0;
+  const onFocus = () => {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    const now = Date.now();
+    if (now - lastFocusRun < SKILLS_FOCUS_MIN_GAP_MS) return;
+    lastFocusRun = now;
+    request();
+  };
+  if (typeof window !== "undefined") window.addEventListener("focus", onFocus);
+  if (typeof document !== "undefined") document.addEventListener("visibilitychange", onFocus);
   request();
 
   return () => {
     stopped = true;
     clearInterval(poll);
+    if (typeof window !== "undefined") window.removeEventListener("focus", onFocus);
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onFocus);
     if (frameTimer) clearTimeout(frameTimer);
     frameHandler = null;
     if (host === self) {
