@@ -487,7 +487,7 @@ blobRoutes.post(
     const claimedSha = normalizeSha(c.req.header("x-sha256"));
     if (claimedSha) {
       const hit = await findBlob(vaultId, claimedSha, docId);
-      if (hit) return c.json({ ...toMeta(await claimDoc(hit, docId)), deduped: true }, 200);
+      if (hit) return c.json({ ...toMeta(await claimDoc(hit, docId, relPath)), deduped: true }, 200);
     }
     // `x-base-sha256` / `?baseSha=`: the version this edit started from (see
     // `staleBaseConflict`). Judged before the body is read.
@@ -566,7 +566,7 @@ blobRoutes.post(
       // known content never pays the encode/serialize cost at all.
       const existing = await findBlob(vaultId, sha256, docId);
       if (existing) {
-        return c.json({ ...toMeta(await claimDoc(existing, docId)), deduped: true }, 200);
+        return c.json({ ...toMeta(await claimDoc(existing, docId, relPath)), deduped: true }, 200);
       }
 
       const id = randomUUID();
@@ -610,7 +610,7 @@ blobRoutes.post(
           // settles it; the loser returns the winner's row rather than a 500.
           await client.query("ROLLBACK");
           const winner = await findBlob(vaultId, sha256, docId);
-          if (winner) return c.json({ ...toMeta(await claimDoc(winner, docId)), deduped: true }, 200);
+          if (winner) return c.json({ ...toMeta(await claimDoc(winner, docId, relPath)), deduped: true }, 200);
           return c.json({ error: "Upload conflicted. Retry" }, 409);
         }
         await store.put(
@@ -780,8 +780,15 @@ async function retireSupersededDocBlobs(docId: string | null, keepBlobId: string
  * this caller is NOT gone — the check is existence, never permission, so a
  * Private file's blob keeps its owner's row.
  */
-async function claimDoc(row: BlobRow, docId: string | null): Promise<BlobRow> {
+async function claimDoc(
+  row: BlobRow,
+  docId: string | null,
+  relPath: string | null = null,
+): Promise<BlobRow> {
   if (!docId || docId === row.doc_id) return row;
+  if (!row.doc_id && safeAttachmentRelPath(row.rel_path) && relPath && !safeAttachmentRelPath(relPath)) {
+    return copyRowForDoc(row, docId, relPath);
+  }
   if (!row.doc_id) {
     await adoptDocId(row.id, docId);
     return { ...row, doc_id: docId };
@@ -802,6 +809,43 @@ async function claimDoc(row: BlobRow, docId: string | null): Promise<BlobRow> {
   }
   console.info(`[blobs] ${row.id} was bound to the deleted file ${row.doc_id} — rebound to ${docId}`);
   return { ...row, doc_id: docId };
+}
+
+/**
+ * A file OUTSIDE `attachments/` whose bytes equal an `attachments/` drop's
+ * (#343: an attachment copied into a folder) gets a ROW OF ITS OWN on the same
+ * content, never the drop's row. Adopting the drop's row bound the attachment's
+ * fate to the file: superseding or deleting the copy deleted the attachment's
+ * row too, every device holding the attachment saw its hash missing and sent
+ * the bytes again, and the GC deleted the object behind them, forever.
+ *
+ * Zero bytes move. The new row shares the drop's storage object (keys are
+ * content-addressed; the GC keeps an object while ANY row names it, see
+ * `objectStillReferenced`), or on the Postgres provider copies its `data`.
+ * A doc that already has a row for these bytes (23505 on
+ * `blobs_vault_sha_doc_idx`) answers with that row.
+ */
+async function copyRowForDoc(row: BlobRow, docId: string, relPath: string): Promise<BlobRow> {
+  const filename = relPath.split("/").pop() || relPath;
+  const { rows } = await pool.query<BlobRow>(
+    `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, data, rel_path, filename,
+                        storage_provider, storage_key, status, created_by, doc_id)
+     SELECT $2, b.vault_id, b.org_id, b.sha256, b.size, b.mime, b.data, $3, $4,
+            b.storage_provider, b.storage_key, 'ready', b.created_by, $5
+       FROM blobs b WHERE b.id = $1 AND b.status = 'ready'
+     ON CONFLICT DO NOTHING
+     RETURNING ${BLOB_ROW_COLUMNS}`,
+    [row.id, randomUUID(), relPath, filename, docId],
+  );
+  if (rows[0]) return rows[0];
+  const own = await pool.query<BlobRow>(
+    `SELECT ${BLOB_ROW_COLUMNS} FROM blobs
+      WHERE vault_id = (SELECT vault_id FROM blobs WHERE id = $1)
+        AND sha256 = $2 AND doc_id = $3 AND status = 'ready'
+      LIMIT 1`,
+    [row.id, row.sha256, docId],
+  );
+  return own.rows[0] ?? row;
 }
 
 // ── intent → PUT → complete ───────────────────────────────────────────────
@@ -1053,7 +1097,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
    */
   const dedupedAnswer = async (hit: BlobRow): Promise<Response> => {
     if (!pending) {
-      const blob = toMeta(await claimDoc(hit, docId));
+      const blob = toMeta(await claimDoc(hit, docId, relPath));
       return c.json(
         { deduped: true, blob, ...(adoptedFile ? { file: fileInfo("adopted", adoptedFile) } : {}) },
         200,
@@ -1063,7 +1107,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
     const out = await withRegistration(vaultId, session.userId, reg, true, async (o) => o);
     if (out.status === "error") return registerRefusal(c, out, vaultId);
     if (out.wrote) registryChanged(c, vaultId);
-    const blob = toMeta(await claimDoc(hit, out.row.id));
+    const blob = toMeta(await claimDoc(hit, out.row.id, out.row.path));
     return c.json(
       { deduped: true, blob, file: fileInfo(out.status === "created" ? "created" : "adopted", out.row) },
       200,

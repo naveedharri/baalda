@@ -366,12 +366,23 @@ function referenceAnchor(path: string): string | null {
  *       there are only a handful of distinct ones (`attachments/`, mostly);
  *    2. each readable note that contains an anchor is split on it, which yields
  *       the position of every occurrence (anchors cannot overlap themselves);
- *    3. at each occurrence the substring of every candidate path LENGTH is
- *       cut out and hash-joined against the paths.
+ *    3. the text after each occurrence is rebuilt from the following pieces,
+ *       each cut to the longest path first, so a window costs the path length
+ *       and never the note's; distinct windows are cut at every candidate path
+ *       LENGTH and tested against the paths through a hashed `= ANY`.
  *
  *  A path occurs in a text iff it occurs at one of its anchor's occurrences,
  *  so the answer is identical; the work is proportional to the text plus the
- *  number of embeds, not to paths × notes. A path with no `/` has no anchor and
+ *  number of embeds, not to paths × notes. (#343: the first form of step 3
+ *  took a substr() at each occurrence's character offset and carried the note
+ *  text on every occurrence row, so a note with many embeds cost embeds × its
+ *  length; with real file names that still hit the statement timeout.)
+ *
+ *  `blob_refs` would answer this from an index, but it is not the same
+ *  question: it records only markdown link/image targets under
+ *  `attachments/`, lowercased, so it misses `![[wikilinks]]`, bare paths and
+ *  folder-path blobs and over-matches by case. Moving onto it changes who can
+ *  read what (see `blobs/refs.ts`). A path with no `/` has no anchor and
  *  keeps the direct LIKE test (attachment drops always live under a folder, so
  *  this is the rare legacy case). */
 async function filterByNoteReference<T extends BlobAclRow>(
@@ -393,34 +404,48 @@ async function filterByNoteReference<T extends BlobAclRow>(
   if (anchored.length > 0) {
     const { rows } = await db.query<{ rel_path: string }>(
       `WITH needles AS (
-          SELECT * FROM unnest($3::text[], $4::text[]) AS n(rel_path, anchor)
+          SELECT n.anchor, length(n.rel_path) - length(n.anchor) AS len
+            FROM unnest($3::text[], $4::text[]) AS n(rel_path, anchor)
        ),
-       anchors AS (SELECT DISTINCT anchor FROM needles),
-       lens AS (SELECT DISTINCT anchor, length(rel_path) AS len FROM needles),
+       -- Per anchor: r = the longest text a path needs AFTER its anchor, and
+       -- k = how many consecutive pieces are enough to supply it (every anchor
+       -- between two pieces adds length(anchor) characters).
+       anchors AS (
+          SELECT anchor, max(len) AS r, max(len) / length(anchor) + 1 AS k
+            FROM needles GROUP BY anchor
+       ),
+       lens AS (SELECT DISTINCT anchor, len FROM needles),
        docs AS MATERIALIZED (
-          SELECT ni.doc_id, ni.content FROM note_index ni
+          SELECT ni.content FROM note_index ni
            WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
        ),
-       pieces AS (
-          SELECT d.doc_id, d.content, a.anchor, s.o, x.n,
-                 sum(length(s.part)) OVER (PARTITION BY d.doc_id, a.anchor ORDER BY s.o) AS through
+       -- The text after occurrence i of an anchor is piece i+1, the anchor,
+       -- piece i+2, ... Only its first r characters can matter, so every piece
+       -- is cut to r up front (a piece longer than r already fills the window
+       -- on its own) and the window is k cut pieces joined by the anchor.
+       -- Nothing here is proportional to (occurrences × note length): no
+       -- substr() at a deep character offset, no note text copied per row.
+       windows AS (
+          SELECT DISTINCT a.anchor, left(array_to_string(x.lp[i + 1 : i + a.k], a.anchor), a.r) AS win
             FROM docs d
             JOIN anchors a ON strpos(d.content, a.anchor) > 0
             CROSS JOIN LATERAL (
-              SELECT arr, cardinality(arr) AS n
-                FROM (SELECT string_to_array(d.content, a.anchor) AS arr) y
+              SELECT array_agg(left(s.part, a.r) ORDER BY s.o) AS lp
+                FROM unnest(string_to_array(d.content, a.anchor)) WITH ORDINALITY AS s(part, o)
             ) x
-            CROSS JOIN LATERAL unnest(x.arr) WITH ORDINALITY AS s(part, o)
-       ),
-       -- The anchor occurrence after piece o starts right after pieces 1..o
-       -- and the o-1 anchors between them.
-       hits AS (
-          SELECT DISTINCT substr(p.content, (p.through + (p.o - 1) * length(p.anchor) + 1)::int, l.len) AS val
-            FROM pieces p
-            JOIN lens l ON l.anchor = p.anchor
-           WHERE p.o < p.n
+            -- unnest, not generate_series: its row estimate keeps the plan's
+            -- cost honest, and a generate_series guess (1000 rows per note)
+            -- priced this in the millions and bought ~300 ms of JIT compile.
+            CROSS JOIN LATERAL unnest(x.lp[2:]) WITH ORDINALITY AS o(_, i)
        )
-       SELECT n.rel_path FROM needles n JOIN hits h ON h.val = n.rel_path`,
+       -- Each window cut at every candidate path length, tested against the
+       -- paths with "= ANY" on the bound array, which Postgres answers from a
+       -- hash table built once. Joining those cuts to the paths instead let
+       -- the planner sort hundreds of thousands of them, spilling to disk.
+       SELECT DISTINCT c.val AS rel_path
+         FROM (SELECT w.anchor || left(w.win, l.len) AS val
+                 FROM windows w JOIN lens l ON l.anchor = w.anchor) c
+        WHERE c.val = ANY($3::text[])`,
       [vaultId, readableIds, anchored, anchored.map((p) => referenceAnchor(p) as string)],
     );
     for (const r of rows) referenced.add(r.rel_path);

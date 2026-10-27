@@ -7,12 +7,15 @@ import { filterReadableBlobs } from "../src/permissions/http-gates.js";
 import { listReadableDocsInVault } from "../src/permissions/vault-docs.js";
 
 /**
- * The blob list for a member scoped to some folders (#338). A vault of a few
- * thousand notes and a couple of thousand attachments used to run the
+ * The blob list for a member scoped to some folders (#338, #343). A vault of a
+ * few thousand notes and a couple of thousand attachments used to run the
  * attachment reference check as one LIKE per (path, readable note) pair, which
- * blew through the statement timeout. The answer is checked against an
- * independent substring oracle, so speed cannot have been bought by changing
- * who sees what.
+ * blew through the statement timeout; the first rewrite still timed out on a
+ * real vault, because its fixture here had one embed per note and every path
+ * the same length. This one has human-length names (dozens of distinct
+ * lengths, multi-byte), several embeds per note in two syntaxes and a heavy
+ * note every 50. The answer is checked against an independent substring
+ * oracle, so speed cannot have been bought by changing who sees what.
  */
 
 let org: string;
@@ -59,7 +62,13 @@ beforeAll(async () => {
     `INSERT INTO note_index (doc_id, vault_id, title, content)
      SELECT 'n' || i, $1, 'n' || i,
             repeat(md5(i::text) || ' é ', 70)
-              || E'\\n![](attachments/' || md5('a' || (i % 1600)) || E'.png)\\n'
+              || coalesce((
+                   SELECT string_agg(
+                            E'\\n![](attachments/' || substr(md5('a' || j), 1, 4 + j % 40) || ' é ' || j
+                              || E'.png)\\n![[attachments/' || substr(md5('a' || j), 1, 4 + j % 40) || ' é ' || j
+                              || '.png]] ' || md5(k::text), '')
+                     FROM generate_series(1, CASE WHEN i % 50 = 0 THEN 120 ELSE i % 9 END) k,
+                          LATERAL (SELECT (i * 13 + k * 101) % 1600 AS j) jj), '')
               || repeat(md5((i * 7)::text) || ' ', 30)
        FROM generate_series(1, $2) i
      ON CONFLICT (doc_id) DO UPDATE SET vault_id = EXCLUDED.vault_id, content = EXCLUDED.content`,
@@ -91,7 +100,7 @@ beforeAll(async () => {
     `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
                         storage_provider, status, data, doc_id)
      SELECT 'ba' || j, $1, $2, md5('a' || j) || md5('b' || j), 1, 'image/png',
-            'attachments/' || md5('a' || j) || '.png', md5('a' || j) || '.png',
+            'attachments/' || substr(md5('a' || j), 1, 4 + j % 40) || ' é ' || j || '.png', 'a' || j || '.png',
             'postgres', 'ready', '\\x01'::bytea, NULL
        FROM generate_series(0, $3 - 1) j`,
     [vault, org, ATTACHMENTS],

@@ -3,9 +3,13 @@ import { filterReadableBlobs } from "../src/permissions/http-gates.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import {
+  seedBlob,
+  seedFile,
+  seedFolder,
   seedMember,
   seedNote,
   seedOrg,
+  seedShare,
   seedUser,
   seedVault,
   seedVaultGrant,
@@ -170,6 +174,51 @@ describe("filterReadableBlobs (attachment visibility)", () => {
       "loose.png",
       "日本語 before",
     ]);
+  });
+
+  it("scopes a folder-granted member to exactly the right blobs (#343)", async () => {
+    // The member reads one folder by name and nothing else; the vault itself
+    // gives no vault-wide read. Every case is a real blob row, run through the
+    // same `SELECT … ORDER BY rel_path` shape the list route hands in.
+    const shared = await seedFolder(vault, null, "Shared", "Shared", owner);
+    const closed = await seedFolder(vault, null, "Closed", "Closed", owner);
+    await seedShare(org, "folder", shared, member, "view");
+    const readNote = await seedNote(vault, shared, "Shared/Read.md", owner);
+    const hiddenNote = await seedNote(vault, closed, "Closed/Hidden.md", owner);
+    const openFile = await seedFile(vault, shared, "Shared/report.pdf");
+    const closedFile = await seedFile(vault, closed, "Closed/budget.xlsx");
+    await seedBlob(vault, org, "Shared/report.pdf", { docId: openFile });
+    await seedBlob(vault, org, "Closed/budget.xlsx", { docId: closedFile });
+    // Paths of several lengths, embedded more than once and back to back, as a
+    // wikilink and a markdown image; one is a prefix of another, one has the
+    // anchor again inside it, and one appears only in the unreadable note.
+    const visible = [
+      "attachments/a.png",
+      "attachments/a.png.bak",
+      "attachments/Screenshot 2026-10-01 at 12.33.07 é.png",
+      "attachments/sub/attachments/deep.png",
+    ];
+    for (const p of [...visible, "attachments/secret.png", "attachments/orphan.png"]) {
+      await seedBlob(vault, org, p);
+    }
+    await seedIndex(
+      vault,
+      readNote,
+      "Résumé ✓\n![[attachments/a.png]]![](attachments/a.png.bak)\n" +
+        "![](attachments/Screenshot 2026-10-01 at 12.33.07 é.png) and again " +
+        "![[attachments/Screenshot 2026-10-01 at 12.33.07 é.png]]\n" +
+        "see attachments/sub/attachments/deep.png\n",
+    );
+    await seedIndex(vault, hiddenNote, "![](attachments/secret.png) ![](attachments/a.png)");
+
+    const { rows } = await pool.query<{ id: string; rel_path: string; doc_id: string | null }>(
+      "SELECT id, rel_path, doc_id FROM blobs WHERE vault_id = $1 AND status = 'ready' ORDER BY rel_path",
+      [vault],
+    );
+    const out = await filterReadableBlobs(member, vault, rows);
+    expect(out.map((b) => b.rel_path)).toEqual(
+      rows.map((b) => b.rel_path).filter((p) => p === "Shared/report.pdf" || visible.includes(p)),
+    );
   });
 
   it("gives a vault-wide reader every blob, referenced or not", async () => {
