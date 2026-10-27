@@ -30,7 +30,7 @@ import { DeviceSkillFiles } from "./DeviceSkillFiles";
 import { AvailableIn } from "./ToolLogos";
 import { detectedAiTools } from "../../lib/skills/installState";
 import { AsyncButton } from "../AsyncButton";
-import { BusyButton, SkillCard, EmptyState, LoadError, ProgressBar, RefreshIcon, SkillGridSkeleton, SkillIcon, Tag } from "./parts";
+import { BusyButton, SkillCard, EmptyState, LoadError, ProgressBar, RefreshIcon, SkillGridSkeleton, SkillIcon, Tag, withTildes } from "./parts";
 
 
 function message(e: unknown): string {
@@ -54,6 +54,7 @@ export function DeviceSkillsView({
   canShare,
   vaultSkills,
   onShared,
+  onBack,
 }: {
   /** The Skills tab toolbar's search. */
   filter: string;
@@ -65,12 +66,15 @@ export function DeviceSkillsView({
   onShared: (skillId: string) => void;
   /** A skill's page is open (the tab hides its footer there). */
   onPageChange?: (open: boolean) => void;
+  /** Back to the Team grid (the same as the toolbar's Team toggle). */
+  onBack?: () => void;
 }) {
   const device = useSkillsDeviceState();
   // The session's scan (the Skills tab already started it); Refresh rescans.
   const scan = useDeviceScan();
   const [showDisabled, setShowDisabled] = useState(false);
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  /** Groups flipped from their default: the first open, the rest closed. */
+  const [flipped, setFlipped] = useState<ReadonlySet<string>>(new Set());
   const [open, setOpen] = useState<DeviceItem | null>(null);
   useEffect(() => {
     onPageChange?.(open !== null);
@@ -109,7 +113,7 @@ export function DeviceSkillsView({
   const disabled = allItems.filter(isDisabled).length;
   const groups = groupDeviceSkills(entries, filter, showDisabled);
   const toggle = (key: string) =>
-    setCollapsed((c) => {
+    setFlipped((c) => {
       const next = new Set(c);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -145,7 +149,7 @@ export function DeviceSkillsView({
             name={item.name}
             byline={
               <>
-                <span className="skills-meta-line" title={metaText(item)}>{metaText(item)}</span>
+                <span className="skills-meta-line" title={metaText(item)}>{withTildes(metaText(item))}</span>
                 {isDisabled(item) && <Tag>Disabled in Claude</Tag>}
               </>
             }
@@ -159,14 +163,15 @@ export function DeviceSkillsView({
 
   return (
     <>
+      {/* The back link and Refresh share one row; the count is on the toggle already. */}
       <div className="skills-source-bar">
-        <span className="field-hint">
-          {scan.status === "ready"
-            ? `${total} ${total === 1 ? "skill" : "skills"} your AI tools can use on this computer`
-            : scan.status === "loading"
-              ? "Looking through this computer's skill folders…"
-              : ""}
-        </span>
+        {onBack ? (
+          <button type="button" className="link-btn member-profile-back" onClick={onBack}>
+            ← Team skills
+          </button>
+        ) : (
+          <span />
+        )}
         <button
           type="button"
           className={`icon-btn skills-icon-btn${scan.status === "loading" || (scan.status === "ready" && scan.refreshing) ? " is-spinning" : ""}`}
@@ -204,8 +209,9 @@ export function DeviceSkillsView({
       ) : (
         <>
           {groups.length === 0 && <div className="field-hint skills-quiet">No skills match.</div>}
-          {groups.map((g) => {
-            const isCollapsed = collapsed.has(g.key);
+          {groups.map((g, gi) => {
+            // A search shows every match; otherwise only the first group starts open.
+            const isCollapsed = !filter.trim() && (gi > 0) !== flipped.has(g.key);
             return (
               <section key={g.key} className="skills-group">
                 <button
@@ -344,7 +350,7 @@ function DeviceSkillPreview({
             <span className="skills-source-pill">{deviceSourceLabel(item)}</span>
           </div>
           <p className="skills-byline" title={item.paths.map((p) => tildePath(p, home)).join("\n")}>
-            {byline}
+            {withTildes(byline)}
           </p>
         </div>
         <div className="skills-detail-controls">

@@ -17,6 +17,7 @@ import {
   replaceNameTakenSkill,
   setSkillOnThisDevice,
   setSkillTargetEnabled,
+  showDeliveryNow,
   useSkillsDeviceState,
   applyTeamSkillVersion,
 } from "../../lib/skills/syncHost";
@@ -147,7 +148,13 @@ export function AiToolsTab() {
           onMakeOptional={
             canManage
               ? async () => {
-                  await authManager.api.patchSkill(orgId, skill.skillId, { delivery: "optional" });
+                  const undo = showDeliveryNow(orgId, skill.skillId, "optional");
+                  try {
+                    await authManager.api.patchSkill(orgId, skill.skillId, { delivery: "optional" });
+                  } catch (e) {
+                    undo();
+                    throw e;
+                  }
                   toast(`${skillDisplayName(skill.name)} is now optional. People can remove it from their computer.`);
                   checkSkillsNow();
                 }

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  findRepoLogo,
   MarketplaceError,
   browseMarketplace,
   loadOriginSkill,
@@ -545,5 +546,16 @@ describe("createGitHubReader", () => {
       fetchImpl: (async () => new Response("", { status: 404 })) as unknown as typeof fetch,
     });
     await expect(reader.resolveCommit("o/r", null)).rejects.toMatchObject({ code: "not_found" });
+  });
+});
+
+describe("findRepoLogo", () => {
+  const blob = (path: string, size = 100) => ({ path, mode: "100644", type: "blob" as const, sha: `sha-${path}`, size });
+  it("prefers the manifest folder, then the root, matching names case-insensitively", () => {
+    expect(findRepoLogo([blob("logo.png"), blob(".claude-plugin/Logo.svg")])).toEqual({ path: ".claude-plugin/Logo.svg", sha: "sha-.claude-plugin/Logo.svg" });
+    expect(findRepoLogo([blob("docs/icon.png"), blob("icon.png")])?.path).toBe("icon.png");
+  });
+  it("skips oversized and non-image files, and answers null when there is none", () => {
+    expect(findRepoLogo([blob("logo.png", 600 * 1024), blob("logo.txt"), blob("plugins/x/logo.png")])).toBeNull();
   });
 });

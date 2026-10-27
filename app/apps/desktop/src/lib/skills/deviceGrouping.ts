@@ -152,9 +152,12 @@ export function isDisabled(item: Pick<DeviceItem, "enabled">): boolean {
   return item.enabled === false;
 }
 
-/** How many skills the tools can use: disabled plugins don't count. */
+/**
+ * How many skills "On this device" lists: disabled plugins don't count, and
+ * neither do Baalda's copies of team skills (the Team tab shows those).
+ */
 export function countLive(items: readonly DeviceItem[]): number {
-  return items.filter((i) => !isDisabled(i)).length;
+  return items.filter((i) => !isDisabled(i) && !i.managed).length;
 }
 
 /**
@@ -166,6 +169,8 @@ export function groupDeviceSkills(entries: readonly DeviceSkill[], filter = "", 
   const groups = new Map<string, DeviceGroup>();
   for (const item of deviceItems(entries)) {
     if (!showDisabled && isDisabled(item)) continue;
+    // Team skills live on the Team tab; this view is everything else here.
+    if (item.managed) continue;
     if (needle && !`${item.name} ${item.description}`.toLowerCase().includes(needle)) continue;
     const g = groupOf(item);
     let group = groups.get(g.key);

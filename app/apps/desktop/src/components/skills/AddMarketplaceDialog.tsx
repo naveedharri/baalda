@@ -1,6 +1,7 @@
 // "Add a marketplace": the app's form dialog (InvitePeopleDialog's shell:
 // header, body, right-aligned footer), not the confirm dialog. A live check
-// peeks at the repo as you type, so Add only lights up for something real.
+// peeks at the repo as you type and shows what it found in a preview card,
+// so Add only lights up for something real.
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -13,18 +14,29 @@ const CHECK_DELAY_MS = 400;
 type Check =
   | { status: "idle" }
   | { status: "invalid" }
-  | { status: "checking" }
+  | { status: "checking"; repo: string }
   | { status: "ok"; peek: MarketplacePeek; repo: string; ref: string | null }
   | { status: "error"; message: string };
 
+function BranchGlyph() {
+  return (
+    <svg className="skills-gh" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        d="M4.5 2.5v11M4.5 10.5c0-3 7-2 7-5.5M11.5 5a1.5 1.5 0 1 0 0-.01M4.5 13.5a1.5 1.5 0 1 0 0-.01M4.5 2.5a1.5 1.5 0 1 0 0-.01"
+      />
+    </svg>
+  );
+}
+
 export function AddMarketplaceDialog({
-  quickPicks,
   reader,
   onAdd,
   onClose,
 }: {
-  /** Popular repos the vault doesn't have yet. */
-  quickPicks: readonly string[];
   /** Reads GitHub with the admin's token when this computer has one. */
   reader: () => Promise<GitHubReader>;
   /** Saves the source and opens it; resolves to an error message, or null when done. */
@@ -37,6 +49,7 @@ export function AddMarketplaceDialog({
   const [check, setCheck] = useState<Check>({ status: "idle" });
   const [error, setError] = useState<string | null>(null);
   const addRef = useRef<HTMLButtonElement | null>(null);
+  const refInput = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -48,6 +61,10 @@ export function AddMarketplaceDialog({
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose]);
+
+  useEffect(() => {
+    if (showRef) refInput.current?.focus();
+  }, [showRef]);
 
   // Live check: format first, then a cheap peek, ~400ms after typing stops.
   useEffect(() => {
@@ -62,7 +79,7 @@ export function AddMarketplaceDialog({
       return;
     }
     let cancelled = false;
-    setCheck({ status: "checking" });
+    setCheck({ status: "checking", repo: parsed.repo });
     const t = setTimeout(() => {
       void reader()
         .then((r) => peekMarketplace(r, parsed))
@@ -88,6 +105,9 @@ export function AddMarketplaceDialog({
     if (failure) setError(failure);
     else onClose();
   };
+  const enter = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && ready) addRef.current?.click();
+  };
 
   return createPortal(
     <div className="modal-backdrop" onClick={(e) => { e.stopPropagation(); onClose(); }}>
@@ -102,72 +122,103 @@ export function AddMarketplaceDialog({
           <h2 className="confirm-title">Add a marketplace</h2>
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>✕</button>
         </div>
+        <p className="skills-form-intro">
+          Paste a GitHub repository. Claude and Codex plugin marketplaces work, and so does any repo of skills.
+        </p>
 
         <label className="skills-prefix-input">
           <GitHubGlyph />
           <input
             autoFocus
             value={repo}
-            placeholder="owner/repo or github.com link"
+            placeholder="owner/repo or a github.com link"
             aria-label="Repository"
+            spellCheck={false}
             onChange={(e) => setRepo(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && ready) addRef.current?.click();
-            }}
+            onKeyDown={enter}
           />
         </label>
-        <div className="field-hint">Works with Claude and Codex plugin marketplaces, or any repo of skills.</div>
-
-        {quickPicks.length > 0 && !repo && (
-          <div className="skills-chips skills-dialog-chips">
-            {quickPicks.map((p) => (
-              <button key={p} type="button" className="skills-chip" onClick={() => setRepo(p)}>
-                {p}
-              </button>
-            ))}
-          </div>
-        )}
 
         {showRef ? (
-          <input
-            className="skills-dialog-ref"
-            value={ref}
-            placeholder="Branch or tag"
-            aria-label="Branch or tag"
-            onChange={(e) => setRef(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && ready) addRef.current?.click();
-            }}
-          />
+          <label className="skills-prefix-input skills-ref-input">
+            <BranchGlyph />
+            <input
+              ref={refInput}
+              value={ref}
+              placeholder="Branch or tag, e.g. main"
+              aria-label="Branch or tag"
+              spellCheck={false}
+              onChange={(e) => setRef(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && !ref) {
+                  e.stopPropagation();
+                  setShowRef(false);
+                } else enter(e);
+              }}
+            />
+            <button
+              type="button"
+              className="skills-ref-clear"
+              aria-label="Use the default branch"
+              title="Use the default branch"
+              onClick={() => {
+                setRef("");
+                setShowRef(false);
+              }}
+            >
+              ✕
+            </button>
+          </label>
         ) : (
-          <button type="button" className="link-btn skills-dialog-options" onClick={() => setShowRef(true)}>
-            Use a branch or tag
+          <button type="button" className="skills-ref-toggle" onClick={() => setShowRef(true)}>
+            <BranchGlyph />
+            Pick a branch or tag
           </button>
         )}
 
-        <div className="skills-check" aria-live="polite">
+        <div className="skills-preview" aria-live="polite">
           {check.status === "checking" ? (
-            <span className="skills-check-row"><Spinner size="xs" /> Checking…</span>
-          ) : check.status === "ok" ? (
-            check.peek.skills > 0 ? (
-              <span className="skills-check-row is-ok">
-                ✓ {formatLabel(check.peek.format)} · {check.peek.skills} {check.peek.skills === 1 ? "skill" : "skills"}
+            <div className="skills-preview-card">
+              <Spinner size="xs" />
+              <span className="skills-preview-text">
+                <span className="skills-preview-title">{check.repo}</span>
+                <span className="skills-preview-sub">Looking for skills…</span>
               </span>
-            ) : (
-              <span className="skills-check-row is-ok">✓ Found it, but no skills were spotted yet. You can still add it.</span>
-            )
-          ) : check.status === "invalid" ? (
-            <span className="skills-check-row">Use owner/repo, or paste the repository's GitHub link.</span>
+            </div>
+          ) : check.status === "ok" ? (
+            <div className="skills-preview-card is-ok">
+              <span className="skills-preview-mark" aria-hidden="true">✓</span>
+              <span className="skills-preview-text">
+                <span className="skills-preview-title">
+                  {check.repo}
+                  {check.ref ? ` · ${check.ref}` : ""}
+                </span>
+                <span className="skills-preview-sub">
+                  {check.peek.skills > 0
+                    ? `${formatLabel(check.peek.format)} · ${check.peek.skills} ${check.peek.skills === 1 ? "skill" : "skills"}`
+                    : "Found it, but no skills were spotted yet. You can still add it."}
+                </span>
+              </span>
+            </div>
           ) : check.status === "error" ? (
-            <span className="skills-check-row is-bad">{check.message}</span>
-          ) : null}
+            <div className="skills-preview-card is-bad">
+              <span className="skills-preview-mark" aria-hidden="true">!</span>
+              <span className="skills-preview-text">
+                <span className="skills-preview-sub">{check.message}</span>
+              </span>
+            </div>
+          ) : check.status === "invalid" ? (
+            <div className="skills-preview-hint">Use owner/repo, or paste the repository's GitHub link.</div>
+          ) : (
+            <div className="skills-preview-hint">Private repository? Save a GitHub token on the Marketplaces page first.</div>
+          )}
         </div>
         {error && <div className="auth-error">{error}</div>}
 
         <div className="confirm-actions skills-form-actions">
           <button type="button" className="ghost-pill" onClick={onClose}>Cancel</button>
           <BusyButton ref={addRef} className="primary" busyLabel="Adding…" disabled={!ready} onClick={add}>
-            Add
+            Add marketplace
           </BusyButton>
         </div>
       </div>

@@ -8,13 +8,13 @@ export interface SkillGroup {
   /** "team", or `${repo}|${pluginName}` (repo lowercased). */
   key: string;
   kind: "team" | "source";
-  /** "Made by your team", "anthropics/skills", "owner/repo · plugin". */
+  /** "Shared with your team", "anthropics/skills", "owner/repo · plugin". */
   label: string;
   repo: string | null;
   skills: SkillSummary[];
 }
 
-export const TEAM_GROUP_LABEL = "Made by your team";
+export const TEAM_GROUP_LABEL = "Shared with your team";
 
 export function groupSkills(skills: readonly SkillSummary[], filter = ""): SkillGroup[] {
   const needle = filter.trim().toLowerCase();

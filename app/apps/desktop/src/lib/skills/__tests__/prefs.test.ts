@@ -20,7 +20,7 @@ function fakeStorage(): PrefsStorage & { map: Map<string, string> } {
   };
 }
 
-const DEFAULTS = { targets: { claude: true, agents: true }, optIns: {}, keepMine: {}, lastRunAt: null };
+const DEFAULTS = { targets: { claude: true, agents: true }, optIns: {}, optOuts: {}, keepMine: {}, lastRunAt: null };
 
 describe("loadSkillsPrefs", () => {
   it("returns defaults with null storage", () => {

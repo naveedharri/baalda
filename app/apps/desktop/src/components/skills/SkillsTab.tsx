@@ -8,7 +8,7 @@ import { authManager } from "../../lib/auth/authManager";
 import { skillErrorCode } from "../../lib/api";
 import * as ipc from "../../lib/ipc";
 import { serverFeatures } from "../../lib/serverFeatures";
-import { checkSkillsNow, isSkillOnThisDevice, setSkillOnThisDevice, SKILLS_FEATURE, useSkillsDeviceState } from "../../lib/skills/syncHost";
+import { checkSkillsNow, isSkillOnThisDevice, setSkillOnThisDevice, showDeliveryNow, SKILLS_FEATURE, useSkillsChanged, useSkillsDeviceState } from "../../lib/skills/syncHost";
 import { groupSkills, type SkillGroup } from "../../lib/skills/grouping";
 import { countLive, deviceItems } from "../../lib/skills/deviceGrouping";
 import { deviceSeen, useDeviceScan } from "../../lib/skills/deviceScan";
@@ -62,7 +62,7 @@ interface PendingUpload {
 }
 
 /** Popular public sources offered as one-click starts. */
-const POPULAR_SOURCES = ["anthropics/skills", "openai/skills"];
+const POPULAR_SOURCES = ["anthropics/skills", "openai/skills", "BenAIOS/skills"];
 
 /** List or grid, remembered per device (the Members Access tab's toggle). */
 /** Team catalog or this computer's skills, remembered per device. */
@@ -166,7 +166,8 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
   // Each view opens at the top; a grid comes back where it was.
   const viewKey = openId ? `skill:${openId}` : marketplace ? "marketplace" : scope === "device" && devicePage ? "device-page" : `grid:${scope}`;
   const rememberGridScroll = useScrollReset(viewKey, highlightPending);
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  /** Groups the person flipped from their default (team open, import sources closed). */
+  const [flipped, setFlipped] = useState<ReadonlySet<string>>(new Set());
   const device = useSkillsDeviceState();
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -206,6 +207,8 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
   useEffect(() => {
     if (supported) void reload();
   }, [supported, reload]);
+  // A teammate's add, publish or removal shows here as it happens.
+  useSkillsChanged(supported ? orgId : null, () => void reload());
 
   if (!orgId) return <div className="muted perm-empty">Skills need a synced vault.</div>;
   if (supported === false) {
@@ -335,7 +338,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     { key: "zip", label: "Upload .zip", onSelect: () => uploadZip() },
   ];
   const toggleGroup = (key: string) =>
-    setCollapsed((c) => {
+    setFlipped((c) => {
       const next = new Set(c);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -345,9 +348,18 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
   /** This computer's side of one skill: the tool cluster and the install square. */
   /** A Required ✓'s "Make optional" (admins): the same PATCH as the skill page's select. */
   const makeOptional = async (s: SkillSummary) => {
-    await authManager.api.patchSkill(orgId, s.id, { delivery: "optional" });
+    // The card flips now; a refused PATCH puts it back.
+    const undo = showDeliveryNow(orgId, s.id, "optional");
+    setCatalog((c) => (c ? { ...c, skills: c.skills.map((k) => (k.id === s.id ? { ...k, delivery: "optional" } : k)) } : c));
+    try {
+      await authManager.api.patchSkill(orgId, s.id, { delivery: "optional" });
+    } catch (e) {
+      undo();
+      void reload();
+      throw e;
+    }
     toast(`${skillDisplayName(s.name)} is now optional. People can remove it from their computer.`);
-    await reload();
+    void reload();
   };
 
   const install = (s: SkillSummary) => {
@@ -506,6 +518,10 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
       ) : scope === "device" ? (
         <DeviceSkillsView
           onPageChange={setDevicePage}
+          onBack={() => {
+            setScope("team");
+            writeScope("team");
+          }}
           filter={filter}
           orgId={orgId}
           canShare={manage}
@@ -550,7 +566,10 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
         <>
           {groups.length === 0 && <div className="field-hint skills-quiet">No skills match.</div>}
           {groups.map((g) => {
-            const isCollapsed = g.kind === "source" && collapsed.has(g.key);
+            const closedByDefault = g.kind === "source";
+            // A search shows every match, and a just-added skill keeps its group open.
+            const isCollapsed =
+              closedByDefault !== flipped.has(g.key) && !filter.trim() && !g.skills.some((k) => k.id === ringId);
             const label = (
               <>
                 {g.kind === "source" ? <GitHubGlyph /> : null}
@@ -560,21 +579,17 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
             );
             return (
               <section key={g.key} className="skills-group">
-                {g.kind === "source" ? (
-                  <button
-                    type="button"
-                    className="skills-group-head is-toggle"
-                    aria-expanded={!isCollapsed}
-                    onClick={() => toggleGroup(g.key)}
-                  >
-                    <svg className={`skills-caret${isCollapsed ? " is-closed" : ""}`} viewBox="0 0 10 10" aria-hidden="true">
-                      <path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                    {label}
-                  </button>
-                ) : (
-                  <div className="skills-group-head">{label}</div>
-                )}
+                <button
+                  type="button"
+                  className="skills-group-head is-toggle"
+                  aria-expanded={!isCollapsed}
+                  onClick={() => toggleGroup(g.key)}
+                >
+                  <svg className={`skills-caret${isCollapsed ? " is-closed" : ""}`} viewBox="0 0 10 10" aria-hidden="true">
+                    <path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  {label}
+                </button>
                 {!isCollapsed && groupBody(g)}
               </section>
             );

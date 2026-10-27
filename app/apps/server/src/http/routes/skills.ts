@@ -37,9 +37,10 @@ import { getSession } from "../session.js";
 /**
  * Team skills (docs/SKILLS.md §3.3, migration 060). Any member reads the
  * catalog and published versions; owners/admins create, edit the draft,
- * publish, pin and delete. Changes that alter what desktops
- * install (publish, delivery/pin, delete) announce `skills-changed`
- * on the vault channel; draft edits do not, since drafts are never delivered.
+ * publish, pin and delete. Every change to the catalog (create, publish,
+ * delivery/pin, delete, a marketplace source) announces `skills-changed` on the
+ * vault channel so open Skills pages update live; draft edits do not, since
+ * drafts are never delivered and autosave would flood the channel.
  * Marketplace sources (`/skill-sources`) are a list of GitHub repos the
  * desktop imports from; the server never calls GitHub. Free on every plan.
  */
@@ -108,7 +109,7 @@ export function createSkillRoutes(): Hono {
     return c.json({ role: who.role, skills: await listSkills(who.orgId, who.role) });
   });
 
-  // #3 — not published yet, so nothing is announced.
+  // #3 — not published yet, but admins' Skills pages list the new card.
   routes.post("/orgs/:orgId/skills", filesBodyLimit, async (c) => {
     const who = await caller(c, true);
     if (who instanceof Response) return who;
@@ -116,7 +117,9 @@ export function createSkillRoutes(): Hono {
     if (!isValidSkillName(body.name)) return c.json({ error: "invalid_name" }, 400);
     const files = body.files === undefined ? undefined : decodeSkillFiles(body.files);
     const source = body.source === undefined ? null : parseSkillOrigin(body.source);
-    return c.json(await createSkill(who.orgId, who.userId, body.name, files, source), 201);
+    const out = await createSkill(who.orgId, who.userId, body.name, files, source);
+    await announceSkillsChanged(who.orgId);
+    return c.json(out, 201);
   });
 
   // #4
@@ -229,8 +232,8 @@ export function createSkillRoutes(): Hono {
     return c.json(await getVersion(who.orgId, skillId, Number(raw)));
   });
 
-  // ---- marketplace sources (Addendum — Marketplace import). No frame: a
-  // source changes nothing any desktop installs.
+  // ---- marketplace sources (Addendum — Marketplace import). A source changes
+  // nothing any desktop installs; the frame only refreshes open Skills pages.
 
   routes.get("/orgs/:orgId/skill-sources", async (c) => {
     const who = await caller(c, false);
@@ -252,7 +255,9 @@ export function createSkillRoutes(): Hono {
       return c.json({ error: "invalid_label" }, 400);
     }
     const label = rawLabel?.trim() || null;
-    return c.json(await addSkillSource(who.orgId, who.userId, { repo: body.repo, ref, label }), 201);
+    const out = await addSkillSource(who.orgId, who.userId, { repo: body.repo, ref, label });
+    await announceSkillsChanged(who.orgId);
+    return c.json(out, 201);
   });
 
   routes.delete("/orgs/:orgId/skill-sources/:sourceId", async (c) => {
@@ -261,6 +266,7 @@ export function createSkillRoutes(): Hono {
     const id = c.req.param("sourceId");
     if (!ID_RE.test(id)) return c.json({ error: "skill_source_not_found" }, 404);
     await removeSkillSource(who.orgId, id);
+    await announceSkillsChanged(who.orgId);
     return c.json({ ok: true });
   });
 

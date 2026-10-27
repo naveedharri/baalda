@@ -335,7 +335,14 @@ Copy the appearance pipeline exactly:
   (looks up `vaults WHERE organization_id = $1`, publishes per vault, best effort, logs on error).
 - `src/index.ts`: wire `setSkillsChangedPublisher((vaultId, orgId) => void vaultChannel.publishSkillsChanged(vaultId, orgId).catch(broadcastFailed("skills-changed")))`.
 
-Desktops also poll (§5.4), so a missed frame only delays.
+Create (#3) and the marketplace source routes also announce (2026-10-27): the frame refreshes open
+Skills pages live (tab grid, skill page, sidebar shortcut, ~150 ms coalesced), not only installs.
+Draft writes stay silent. Desktops also poll (§5.4), so a missed frame only delays.
+
+**Required → Optional (2026-10-27):** the toast promises "People can remove it from their computer",
+so a device that already holds our copy keeps it: `impliedOptIns` records an opt-in for an Optional
+skill with an owned copy on disk and no explicit choice. Turning a skill off on a device now stores
+an explicit opt-out (`prefs.optOuts`), which is what stops the rule re-adding it.
 
 ### 3.5 MCP (`src/mcp/tools.ts` entries, handlers in `src/mcp/skills.ts`)
 
@@ -597,7 +604,7 @@ Rules:
 `startSkillsSync({ api, getServerUrl, userId }) → () => void`, active only when signed in and the
 server advertises `skills` (an unreadable `/health` skips the run; only a server that answered
 without `skills` is "needs an update"). Runs: at start (launch/sign-in, after `skillsTargets()` re-detect), on any
-`skills-changed` frame (debounced 2 s; the frame only triggers a manifest refetch), every 15 min,
+`skills-changed` frame (debounced 500 ms; the frame only triggers a manifest refetch), every 15 min,
 and on "Check now". One run at a time (a request during a run queues one trailing run). Server or
 account switch: App's effect (keyed on user id + server URL) stops the host and starts a new one.
 
@@ -647,7 +654,7 @@ here` with **Keep mine** / **Use team version**, `Name taken by another skill` f
 yours`), Optional opt-in switch, "Check now", "Open backups folder" (`skillsBackupsDir` + existing
 opener).
 
-Shipped layout (2026-10-26 redesign): the Skills tab groups skills ("Made by your team" first, then
+Shipped layout (2026-10-26 redesign): the Skills tab groups skills ("Shared with your team" first, then
 one collapsible group per import source, `lib/skills/grouping.ts`) and shows them as a grid of cards
 (the list view and its toggle were removed 2026-10-27; search is a toolbar icon). The "Team | On this
 device" toggle counts both sides (the device scan runs once per session, `lib/skills/deviceScan.ts`)
@@ -686,7 +693,7 @@ Account Settings → AI tools, whose "Agent Skills" list is a grid of these card
 "v1 · Optional", with the vault name first only for people in more than one vault; the square
 carries the state with no separate dot, and its amber "!" opens Keep mine / Use team version, the
 name-taken choices, and Check again; the cards there don't open anything). A skill
-page (team or device) shows a source pill ("Made by your team", "From owner/repo", "Your skill",
+page (team or device) shows a source pill ("Shared with your team", "From owner/repo", "Your skill",
 "Claude plugin", "Claude org") and an "Available in" line of AI tools (`installState.ts
 teamAvailability` / `deviceGrouping.ts deviceAvailability`): full when that tool can use the skill
 here, faded with the reason when not. Device skills open in the same page as team skills, read

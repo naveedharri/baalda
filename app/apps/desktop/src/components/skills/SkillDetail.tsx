@@ -20,7 +20,7 @@ import "../editor.css";
 import { AvailableSkeleton, BusyButton, EditorSkeleton, LoadError, SkillByline, SkillHeaderSkeleton, SkillIcon, Tag } from "./parts";
 import { loadErrorText, withTimeout } from "../../lib/skills/loading";
 import { InstallControl, SkillAvailability } from "./SkillAvailability";
-import { useSkillsDeviceState } from "../../lib/skills/syncHost";
+import { showDeliveryNow, useSkillsChanged, useSkillsDeviceState } from "../../lib/skills/syncHost";
 import { SkillEditor } from "./SkillEditor";
 import { SkillSourceRow } from "./SkillSourceRow";
 import { RemoveFromTeamDialog } from "./RemoveFromTeamDialog";
@@ -120,24 +120,39 @@ export function SkillDetail({
   useEffect(() => {
     void load();
   }, [load]);
+  useSkillsChanged(orgId, () => void load());
 
+  /** Shows the change at once, then saves; a refusal puts the page back. */
   const patch = async (change: { delivery?: SkillDelivery; pinnedVersion?: number | null }) => {
     setError(null);
+    const undo = change.delivery ? showDeliveryNow(orgId, skillId, change.delivery) : () => {};
+    setSkill((s) => (s ? { ...s, ...change } : s));
     try {
       await authManager.api.patchSkill(orgId, skillId, change);
-      await load();
-      onChanged();
     } catch (e) {
+      undo();
+      void load();
       setError(e instanceof Error ? e.message : String(e));
+      return;
     }
+    onChanged();
+    void load();
   };
 
   /** The Required badge's "Make optional": same PATCH as the delivery select, errors to the caller's toast. */
   const makeOptional = async () => {
-    await authManager.api.patchSkill(orgId, skillId, { delivery: "optional" });
+    const undo = showDeliveryNow(orgId, skillId, "optional");
+    setSkill((s) => (s ? { ...s, delivery: "optional" } : s));
+    try {
+      await authManager.api.patchSkill(orgId, skillId, { delivery: "optional" });
+    } catch (e) {
+      undo();
+      void load();
+      throw e;
+    }
     toast(`${skillDisplayName(skill?.name ?? "")} is now optional. People can remove it from their computer.`);
-    await load();
     onChanged();
+    void load();
   };
 
   const full = focus && section === "draft" && canManage;
@@ -243,7 +258,7 @@ export function SkillDetail({
         <div className="skills-detail-title">
           <div className="skills-title-row">
             <h2 className="settings-section-title">{skillDisplayName(skill.name)}</h2>
-            <span className="skills-source-pill">{skill.source ? `From ${skill.source.repo}` : "Made by your team"}</span>
+            <span className="skills-source-pill">{skill.source ? `From ${skill.source.repo}` : "Shared with your team"}</span>
           </div>
           <SkillByline skill={skill} />
           {skillNameNeedsWarning(skill.name) && (

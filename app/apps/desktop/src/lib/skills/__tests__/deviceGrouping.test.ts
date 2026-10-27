@@ -91,15 +91,18 @@ describe("groupDeviceSkills", () => {
     entry("builtin", "codexSystem", "/h/.codex/skills/.system/builtin"),
   ];
 
-  it("groups in a fixed order", () => {
+  it("groups in a fixed order, leaving team copies to the Team tab", () => {
     expect(groupDeviceSkills(entries).map((g) => [g.label, g.items.map((i) => i.name)])).toEqual([
-      ["From your team", ["team-one"]],
       ["Your skills", ["alpha", "mine"]],
       ["docs · acme", ["pdf"]],
       ["dev", ["lint"]],
       ["Claude org (claude.ai)", ["org-skill"]],
       ["Codex built-in", ["builtin"]],
     ]);
+  });
+
+  it("counts everything here except team copies", () => {
+    expect(countLive(deviceItems(entries))).toBe(6);
   });
 
   it("filters by name or description", () => {

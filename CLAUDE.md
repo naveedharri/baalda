@@ -576,15 +576,17 @@ overwritten by a run (`edited`, or `keptMine` when Keep mine is set); a removal 
 lost membership, opted out, target switched off) RELEASES an edited/kept copy
 and deletes a clean one; a cross-org name clash goes to the vault already holding the folder,
 else the first by vault name then id. `syncHost.ts` runs it for every vault the user belongs to on
-the current server (`GET /api/skills/manifest`) at sign-in, on `skills-changed` (debounced 2 s), every
+the current server (`GET /api/skills/manifest`) at sign-in, on `skills-changed` (debounced 500 ms; open Skills pages, the skill page and the sidebar shortcut also reload on it via `useSkillsChanged`, so a teammate's add shows live), every
 15 min and on Check now, one run at a time. The API client is shared and a server switch repoints
 it before App's effect stops the host, so a run halts (plans and acts on nothing) once the client's
 base URL differs from the host's, and `store.setServerUrl` pauses the host first (`pauseSkillsSync`,
 resumed unless a switch to another URL landed). Device prefs (`prefs.ts`, localStorage
-`context.skills.device.v1`): target switches, Optional opt-ins and Keep mine keyed by
-server|org|skill(|target). UI: Vault Settings → **Skills** (`components/skills/`; admins edit,
-members read and opt in): a grid of cards (no list view), with a Team | On this device toggle
-(both counted; the read-only device scan runs once per session, `deviceScan.ts`), grouped "Made by your team" first then one collapsible group per import source
+`context.skills.device.v1`): target switches, Optional opt-ins, explicit opt-outs and Keep mine keyed by
+server|org|skill(|target). A skill switched Required → Optional stays on a device that holds our
+copy and never opted out (`syncEngine.ts impliedOptIns`, saved as an opt-in before planning);
+delivery changes show at once (`syncHost.ts showDeliveryNow`, undone on a refused PATCH). UI: Vault Settings → **Skills** (`components/skills/`; admins edit,
+members read and opt in): a grid of cards (no list view), with a Team | On this device toggle (the device side leaves out team copies)
+(both counted; the read-only device scan runs once per session, `deviceScan.ts`), grouped "Shared with your team" first then one group per import source (team open and sources closed by default; every group toggles, and a search opens all)
 (`lib/skills/grouping.ts`); a skill's page has one-click Publish (auto note, `publishNotes.ts`), delivery and version menus, Versions with
 .zip download, and a Draft editor: a file tree (`fileTree.ts`, folders first, SKILL.md pinned)
 beside a standalone CodeMirror 6 view (`SkillCodeEditor.tsx`, NOT the CRDT note editor; one undo
@@ -596,7 +598,11 @@ publishing to GitHub or claude.ai (the "Claude Chat & Cowork" bridge and `skipCl
 removed 2026-10-26); GitHub is an import source only, and the admin's token for it lives only in the
 OS keychain (`baalda.skills.github:<serverUrl>|<orgId>`), managed on the marketplace page.
 - **Marketplace import** (`marketplace.ts` + `components/skills/MarketplaceBrowser.tsx`, Skills →
-  Browse marketplace, admins): a pasted `owner/repo` / GitHub URL / `@ref` is saved as a vault
+  Browse marketplace, admins): an overview of marketplace cards (`anthropics/skills`, `openai/skills` and `BenAIOS/skills` are
+  BUILT IN for every vault, never saved as sources; then the vault's saved sources and an Add card),
+  each opening a grid of skill cards. A card's mark is the repo's own `logo|icon.(svg|png|jpg|webp)`
+  (≤512 KB; `.claude-plugin/`, `.agents/plugins/`, root, `.github/`, `assets/`, `docs/` in that order,
+  `findRepoLogo`), read through the reader as a `blob:` URL, else the owner's GitHub picture. a pasted `owner/repo` / GitHub URL / `@ref` is saved as a vault
   source, then browsed with `commits/{ref ?? HEAD}` + ONE recursive `git/trees` call (a `truncated`
   tree is refused). Detection, first match wins: Claude (`.claude-plugin/marketplace.json`,
   relative sources via `metadata.pluginRoot`, `{source:"github"}` followed into its repo, other
@@ -954,7 +960,7 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   members read, `isSkillAdmin` (owner/admin) writes
   (403 `skills_admin_required`); 500 live skills per org (409 `skill_limit_reached`), 1000 files /
   5 MiB per file / 25 MiB per version (400 `skill_too_many_files`, 413 `skill_file_too_large` /
-  `skill_too_large`, each with `limit` + plain `message`), route body limit 36 MiB. Publish, delivery/pin change and delete
+  `skill_too_large`, each with `limit` + plain `message`), route body limit 36 MiB. Create, publish, delivery/pin change, delete and source add/remove
   call `member-events.ts announceSkillsChanged`, which publishes PS `0x0f` per vault;
   the vault channel sends `{t: "skills-changed", orgId}` org-wide like `appearance-changed` (a hint:
   desktops refetch the manifest). MCP `list_skills`/`get_skill`/`read_skill_file` (read-only, never

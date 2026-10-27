@@ -85,7 +85,8 @@ describe("skill marketplace sources", () => {
     expect((await json(req(admin, "DELETE", `/orgs/${orgId}/skill-sources/${added.body.id}`))).body).toEqual({ ok: true });
     expect((await json(req(admin, "DELETE", `/orgs/${orgId}/skill-sources/${added.body.id}`))).status).toBe(404);
     expect((await json(req(member, "GET", `/orgs/${orgId}/skill-sources`))).body).toEqual({ sources: [] });
-    expect(published).toEqual([]);
+    // One add + one remove refresh open Skills pages; refusals announce nothing.
+    expect(published).toEqual([orgId, orgId]);
   });
 
   it("validates repo, ref and label", async () => {

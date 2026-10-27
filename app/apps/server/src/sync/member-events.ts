@@ -110,8 +110,8 @@ export function setSkillsChangedPublisher(fn: SkillsChangedPublisher | null): vo
 }
 
 /**
- * Tell every live member app that the vault's delivered skills changed (a
- * publish, a delivery/pin change or a delete). A hint only:
+ * Tell every live member app that the vault's skills catalog changed (a
+ * create, publish, delivery/pin change, delete or marketplace source). A hint only:
  * clients refetch the manifest, and their 15-min poll covers a missed frame.
  * Same fan-out and best-effort contract as {@link announceOrgChanged}.
  */

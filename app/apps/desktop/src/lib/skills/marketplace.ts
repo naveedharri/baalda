@@ -690,6 +690,71 @@ export interface MarketplacePeek {
   format: MarketplaceFormat;
   /** Skill folders found from the structure alone (no SKILL.md reads). */
   skills: number;
+  /** The repo's own logo file, when it has one (`findRepoLogo`). */
+  logo?: RepoLogo | null;
+}
+
+export interface RepoLogo {
+  repo: string;
+  commitSha: string;
+  path: string;
+  blobSha: string;
+}
+
+/**
+ * Where a marketplace keeps its logo, first match wins: next to its manifest,
+ * then the usual root and docs spots. A repo with none shows its GitHub owner's
+ * picture (`ownerAvatarUrl`). Images only, at most 512 KB.
+ */
+const LOGO_DIRS = [".claude-plugin/", ".agents/plugins/", "", ".github/", "assets/", "docs/"];
+const LOGO_NAMES = ["logo", "icon"];
+const LOGO_EXTS = ["svg", "png", "jpg", "jpeg", "webp"];
+const LOGO_MAX_BYTES = 512 * 1024;
+
+export function findRepoLogo(tree: readonly TreeEntry[]): { path: string; sha: string } | null {
+  const blobs = new Map<string, TreeEntry>();
+  for (const e of tree) if (e.type === "blob") blobs.set(e.path.toLowerCase(), e);
+  for (const dir of LOGO_DIRS) {
+    for (const name of LOGO_NAMES) {
+      for (const ext of LOGO_EXTS) {
+        const e = blobs.get(`${dir}${name}.${ext}`);
+        if (e && (e.size ?? 0) <= LOGO_MAX_BYTES) return { path: e.path, sha: e.sha };
+      }
+    }
+  }
+  return null;
+}
+
+const LOGO_MIME: Record<string, string> = {
+  svg: "image/svg+xml",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+};
+const logoUrls = new Map<string, Promise<string>>();
+
+/**
+ * The logo as a `blob:` URL, read through the reader (so a private repo works
+ * with the admin's token). Shown only in an <img>, where an SVG's scripts never
+ * run. Cached per file for the session.
+ */
+export function repoLogoUrl(reader: GitHubReader, logo: RepoLogo): Promise<string> {
+  const key = `${logo.repo.toLowerCase()}@${logo.blobSha}`;
+  const hit = logoUrls.get(key);
+  if (hit) return hit;
+  const p = reader.readBytes(logo.repo, logo.commitSha, logo.path, logo.blobSha).then((bytes) => {
+    const ext = logo.path.slice(logo.path.lastIndexOf(".") + 1).toLowerCase();
+    return URL.createObjectURL(new Blob([bytes as BlobPart], { type: LOGO_MIME[ext] ?? "application/octet-stream" }));
+  });
+  logoUrls.set(key, p);
+  p.catch(() => logoUrls.delete(key));
+  return p;
+}
+
+/** The repo owner's GitHub picture (public even for a private repo). */
+export function ownerAvatarUrl(repo: string, size = 80): string {
+  return `https://github.com/${encodeURIComponent(repo.split("/")[0] ?? "")}.png?size=${size}`;
 }
 
 const peekCache = new Map<string, Promise<MarketplacePeek>>();
@@ -706,6 +771,8 @@ export function peekMarketplace(reader: GitHubReader, source: RepoRef): Promise<
   if (hit) return hit;
   const p = (async (): Promise<MarketplacePeek> => {
     const snap = await snapshot(reader, source.repo, source.ref);
+    const found = findRepoLogo(snap.tree);
+    const logo = found ? { repo: snap.repo, commitSha: snap.commitSha, path: found.path, blobSha: found.sha } : null;
     const file = marketplaceFile(snap.tree);
     if (file) {
       const market = readMarketplace(await readJson(reader, snap.repo, snap.commitSha, snap.tree, file.path));
@@ -714,9 +781,9 @@ export function peekMarketplace(reader: GitHubReader, source: RepoRef): Promise<
         if (plugin.kind !== "local") continue;
         for (const f of pluginSkillFolders(snap.tree, plugin.root, plugin.skills)) folders.add(f);
       }
-      if (folders.size > 0) return { format: file.format, skills: folders.size };
+      if (folders.size > 0) return { format: file.format, skills: folders.size, logo };
     }
-    return { format: "skills", skills: scanSkillFolders(snap.tree).length };
+    return { format: "skills", skills: scanSkillFolders(snap.tree).length, logo };
   })();
   peekCache.set(key, p);
   p.catch(() => peekCache.delete(key));

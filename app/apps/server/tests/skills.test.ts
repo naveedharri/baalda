@@ -116,7 +116,9 @@ describe("team skills", () => {
     expect(Buffer.from(d.files[0].contentBase64, "base64").toString()).toBe(
       "---\nname: deploy-notes\ndescription: Describe when to use this skill.\n---\n\n# deploy-notes\n",
     );
-    expect(published).toEqual([]);
+    // A new (unpublished) skill still refreshes open Skills pages.
+    expect(published).toEqual([{ vaultId, orgId }]);
+    published = [];
 
     expect((await create("Bad_Name")).body).toEqual({ error: "invalid_name" });
     expect((await create("con")).status).toBe(400);
@@ -162,6 +164,7 @@ describe("team skills", () => {
 
   it("bumps the draft revision on PUT/PATCH and refuses a stale base", async () => {
     const { body: s } = await create("drafty");
+    published = [];
     const put = await json(req(admin, "PUT", `/orgs/${orgId}/skills/${s.id}/draft`, {
       baseRevision: 1,
       files: [file("SKILL.md", skillMd("drafty", "Put body.")), file("scripts/run.sh", "echo hi", true)],
@@ -277,6 +280,7 @@ describe("team skills", () => {
 
   it("publishes numbered immutable versions and validates SKILL.md", async () => {
     const { body: s } = await create("pub");
+    published = [];
     const v1 = await publish(s.id, "first");
     expect(v1.status).toBe(201);
     expect(v1.body).toMatchObject({ version: 1, notes: "first", fileCount: 1, description: "Describe when to use this skill.",

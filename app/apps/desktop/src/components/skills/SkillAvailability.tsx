@@ -36,7 +36,7 @@ import type { SkillDetail } from "../../lib/skills/types";
 import { toast } from "../../lib/toast";
 import { useStore } from "../../store";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { BusyButton, LockBadge } from "./parts";
+import { BusyButton } from "./parts";
 import { RequiredBadge } from "./SquareTip";
 import { SkillsMenuButton } from "./SkillsMenuButton";
 import { ToolMarks } from "./ToolLogos";
@@ -158,11 +158,11 @@ export function InstallControl({
         canManage={canManage}
         onMakeOptional={canManage ? onMakeOptional : undefined}
       >
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M20 6 9 17l-5-5" />
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="3.75" y="7.25" width="8.5" height="6" rx="1.5" />
+          <path d="M5.5 7.25V5.5a2.5 2.5 0 0 1 5 0v1.75" />
         </svg>
         Installed for everyone
-        <LockBadge />
       </RequiredBadge>
     );
   }

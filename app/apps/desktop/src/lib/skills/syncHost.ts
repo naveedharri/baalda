@@ -10,7 +10,7 @@
 // The device view lives here as a module-level store, like `toast.ts`: AI tools
 // is its only reader and the Zustand store is a vault mirror, not this.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ApiClient } from "../api";
 import * as ipc from "../ipc";
 import type { SkillTarget, SkillTargetInfo } from "../ipc";
@@ -31,6 +31,7 @@ import {
   conflictKindOf,
   type ConflictKind,
   forceInstallSkill,
+  impliedOptIns,
   replaceUnmanagedSkill,
   pendingStates,
   planSkillsSync,
@@ -39,12 +40,14 @@ import {
   type SkillsRunDeps,
   type SkillTargetResult,
 } from "./syncEngine";
-import type { ManifestSkill, SkillsManifest } from "./types";
+import type { ManifestSkill, SkillDelivery, SkillsManifest } from "./types";
 import { skillDisplayName } from "./display";
 
 export const SKILLS_FEATURE = "skills";
 export const SKILLS_POLL_MS = 15 * 60 * 1000;
-export const SKILLS_FRAME_DEBOUNCE_MS = 2000;
+export const SKILLS_FRAME_DEBOUNCE_MS = 500;
+/** Open pages coalesce a burst of frames (a marketplace import) into one reload. */
+export const SKILLS_VIEW_DEBOUNCE_MS = 150;
 
 export interface SkillsDeviceState {
   /** A host is running for a signed-in user. */
@@ -195,6 +198,13 @@ export function startSkillsSync({
       if (!stopped) setState({ running: false });
       return;
     }
+    // A skill switched to Optional stays where it is already installed.
+    const implied = impliedOptIns(serverUrl, userId, manifest, loadSkillsPrefs(), installed);
+    if (implied.length > 0) {
+      updateSkillsPrefs((p) => {
+        for (const k of implied) p.optIns[k] = true;
+      });
+    }
     const prefs = loadSkillsPrefs();
     const plan = planSkillsSync({ serverUrl, userId, manifest, prefs, targets: scanned, installed, knownConflicts });
     setState({ targets, manifest, results: pendingStates(plan), lastError: null });
@@ -300,9 +310,44 @@ export function pauseSkillsSync(): () => void {
   };
 }
 
+const viewListeners = new Set<(orgId: string) => void>();
+const viewTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 /** The vault channel's `skills-changed` frame (any vault): refetch, debounced. */
-export function notifySkillsChanged(_orgId: string): void {
+export function notifySkillsChanged(orgId: string): void {
   frameHandler?.();
+  clearTimeout(viewTimers.get(orgId));
+  viewTimers.set(
+    orgId,
+    setTimeout(() => {
+      viewTimers.delete(orgId);
+      for (const l of viewListeners) l(orgId);
+    }, SKILLS_VIEW_DEBOUNCE_MS),
+  );
+}
+
+/** Run `onChange` when a teammate changes this vault's skills, so an open page reloads live. */
+export function useSkillsChanged(orgId: string | null, onChange: () => void): void {
+  const ref = useRef(onChange);
+  ref.current = onChange;
+  useEffect(() => {
+    if (!orgId) return;
+    const l = (changed: string) => {
+      if (changed === orgId) ref.current();
+    };
+    viewListeners.add(l);
+    return () => {
+      viewListeners.delete(l);
+    };
+  }, [orgId]);
+}
+
+/** Non-React subscription to {@link useSkillsChanged}'s signal. */
+export function onSkillsChanged(listener: (orgId: string) => void): () => void {
+  viewListeners.add(listener);
+  return () => {
+    viewListeners.delete(listener);
+  };
 }
 
 const quietAdds = new Set<string>();
@@ -414,6 +459,29 @@ export function setSkillOnThisDevice(orgId: string, skillId: string, on: boolean
   if (!serverUrl) return;
   setSkillOptIn(serverUrl, orgId, skillId, on);
   host?.request();
+}
+
+/**
+ * Show a delivery change at once, ahead of the server and the next run: the
+ * device view's manifest flips now, and a skill made Optional from this
+ * computer stays on it (opted in). Returns an undo for a refused PATCH.
+ */
+export function showDeliveryNow(orgId: string, skillId: string, delivery: SkillDelivery): () => void {
+  const before = state.manifest;
+  const serverUrl = host?.serverUrl ?? state.serverUrl;
+  if (delivery === "optional" && serverUrl) setSkillOptIn(serverUrl, orgId, skillId, true);
+  if (!before) return () => {};
+  const shown: SkillsManifest = {
+    ...before,
+    orgs: before.orgs.map((o) =>
+      o.orgId !== orgId ? o : { ...o, skills: o.skills.map((k) => (k.skillId === skillId ? { ...k, delivery } : k)) },
+    ),
+  };
+  setState({ manifest: shown });
+  return () => {
+    // A run since then already shows the server's answer.
+    if (state.manifest === shown) setState({ manifest: before });
+  };
 }
 
 /** A tool folder switch in AI tools. Runs at once (turning one off removes our copies). */

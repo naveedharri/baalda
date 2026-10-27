@@ -1048,12 +1048,6 @@ code.skills-target-path {
 }
 
 /* Marketplace page */
-.member-profile-tab.skills-tab-add {
-  color: var(--text-tertiary);
-}
-.member-profile-tab.skills-tab-add:hover {
-  color: var(--text-primary);
-}
 .skills-icon-btn {
   width: 26px;
   height: 26px;
@@ -1063,16 +1057,6 @@ code.skills-target-path {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.skills-dialog-hint {
-  margin: 4px 0 var(--sp-2);
-}
-.link-btn.skills-dialog-options {
-  padding: 0;
-  font-size: var(--fs-sm);
-}
-.modal .skills-dialog-ref {
-  margin-top: var(--sp-1);
 }
 
 /* On this device */
@@ -1159,11 +1143,16 @@ code.skills-target-path {
 .skills-install.is-installed:hover {
   border-color: color-mix(in srgb, var(--access-edit-fg) 55%, transparent);
 }
-/* Required: fixed, not a toggle. A help cursor, a quieter fill and a lock. */
+/* Required: fixed, not a toggle. A help cursor and a padlock in place of the ✓. */
 .skills-install.is-required {
   position: relative;
   cursor: help;
-  background: color-mix(in srgb, var(--access-edit-bg) 55%, var(--bg-surface));
+}
+.skills-install.is-required svg {
+  stroke-width: 1.7;
+}
+.skills-install.is-required:hover {
+  border-color: color-mix(in srgb, var(--access-edit-fg) 55%, transparent);
 }
 .skills-install:focus-visible {
   outline: none;
@@ -1810,26 +1799,6 @@ button.secondary.skills-install-btn {
   background: transparent;
   box-shadow: none;
 }
-.skills-dialog-chips {
-  justify-content: flex-start;
-  margin-top: 2px;
-}
-.skills-check {
-  min-height: 20px;
-}
-.skills-check-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-sm);
-  color: var(--text-secondary);
-}
-.skills-check-row.is-ok {
-  color: var(--access-edit-fg);
-}
-.skills-check-row.is-bad {
-  color: var(--danger, #dc2626);
-}
 .skills-form-actions {
   justify-content: flex-end;
   margin-top: var(--sp-3);
@@ -1917,4 +1886,206 @@ button.secondary.skills-fix-btn {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.02em;
+}
+
+/* ── Marketplaces: an overview of cards, then one marketplace's skills ── */
+.skills-market-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+}
+.skills-market-head .members-access-intro {
+  margin-bottom: 0;
+}
+.skills-market-head .skills-hdr-btn {
+  flex: none;
+}
+/* A market's tile holds a brand mark or the GitHub glyph, not the skill glyph. */
+.skills-icon.skills-market-tile {
+  color: var(--text-primary);
+}
+.skills-icon.skills-market-tile .skills-gh {
+  width: 20px;
+  height: 20px;
+}
+/* A repo's own logo or its owner's picture fills the tile edge to edge. */
+.skills-icon.skills-market-tile.has-image {
+  overflow: hidden;
+  padding: 0;
+}
+.skills-icon.skills-market-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.skills-card.skills-market-card {
+  min-height: 140px;
+}
+.skills-market-card .skills-card-title-row,
+.skills-market-card .skills-card-byline {
+  padding-right: 0;
+}
+.skills-market-card .skills-card-desc {
+  margin-right: 0;
+}
+/* The GitHub token sits apart from the cards, under a hairline with room on both sides. */
+.skills-market-foot {
+  margin-top: var(--sp-8);
+  padding-top: var(--sp-5);
+  border-top: 1px solid var(--border);
+}
+.skills-market-sub {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+}
+.skills-market-sub .skills-gh {
+  width: 13px;
+  height: 13px;
+}
+.skills-market .skills-detail-head {
+  margin-bottom: var(--sp-4);
+}
+.skills-card.is-pending .skills-card-desc {
+  color: var(--text-tertiary);
+}
+
+/* ── Add a marketplace dialog ── */
+.skills-form-head {
+  margin-bottom: 0;
+}
+.skills-form-intro {
+  margin: 0 0 var(--sp-2);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.skills-ref-input {
+  margin-top: 2px;
+}
+.skills-ref-clear {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.skills-ref-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+/* A quiet inline option under the field: hugs its text, never a full-width bar. */
+.skills-ref-toggle {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 3px 8px 3px 6px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition:
+    color var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.skills-ref-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+.skills-ref-toggle .skills-gh,
+.skills-ref-input .skills-gh {
+  width: 13px;
+  height: 13px;
+}
+/* What the live check found, in a fixed-height slot so the dialog never jumps. */
+.skills-preview {
+  min-height: 58px;
+  margin-top: var(--sp-1);
+}
+.skills-preview-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 58px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--text-primary) 3.5%, var(--bg-surface));
+}
+.skills-preview-card.is-bad {
+  background: var(--danger-soft);
+}
+.skills-preview-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 700;
+}
+.skills-preview-card.is-ok .skills-preview-mark {
+  background: var(--access-edit-bg);
+  color: var(--access-edit-fg);
+}
+.skills-preview-card.is-bad .skills-preview-mark {
+  background: var(--danger);
+  color: #fff;
+}
+.skills-preview-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.skills-preview-title {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skills-preview-sub {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.skills-preview-card.is-bad .skills-preview-sub {
+  color: var(--danger);
+}
+.skills-preview-hint {
+  display: flex;
+  align-items: center;
+  min-height: 58px;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+
+/* On this device: the back link sits on the Refresh row, not above it. */
+.skills-source-bar > .member-profile-back {
+  margin-bottom: 0;
+  /* The link's pill padding would indent its arrow past the group chevrons below. */
+  margin-left: calc(-1 * var(--sp-2));
+}
+
+/* A home "~" in a path, lowered from the cap height to sit on the centre line. */
+.skills-tilde {
+  position: relative;
+  top: 0.2em;
 }

@@ -124,7 +124,7 @@ export type InstallKind = "add" | "installed" | "required" | "busy" | "warn" | "
  * green "✓" when it is here, "!" for a problem. Clicks never reach the card
  * underneath. `title` ("Heading\nline…") shows as an instant tooltip
  * (`SquareTip.tsx`), never the OS one. A Required ✓ can't be removed, so it
- * says why: a lock badge, `cursor: help`, and a click (Enter/Space) opens the
+ * says why: a padlock instead of the ✓, `cursor: help`, and a click (Enter/Space) opens the
  * same text as a popover, with "Make optional" when `onMakeOptional` is given
  * (admins) and "Got it" for everyone.
  */
@@ -185,12 +185,17 @@ export function InstallButton({
               <path d="M4.5 8h7" />
             ) : kind === "warn" || kind === "bad" ? (
               <path d="M8 3.5v5.5M8 12.2v.3" />
+            ) : required ? (
+              // One padlock in the green square: on this computer, and fixed by the team.
+              <>
+                <rect x="3.75" y="7.25" width="8.5" height="6" rx="1.5" />
+                <path d="M5.5 7.25V5.5a2.5 2.5 0 0 1 5 0v1.75" />
+              </>
             ) : (
               <path d="m3.5 8.5 3 3 6-7" />
             )}
           </svg>
         )}
-        {required && <LockBadge />}
       </button>
       {tip.pinned ? (
         <TipCard
@@ -645,5 +650,22 @@ export function LoadError({ message, onRetry }: { message: string; onRetry?: () 
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * Path text with each home "~" set on the centre line: fonts draw the tilde
+ * near the cap height, which reads as floating beside "/.claude/skills".
+ */
+export function withTildes(text: string): ReactNode {
+  if (!text.includes("~/")) return text;
+  return text.split(/(~(?=\/))/).map((part, i) =>
+    part === "~" ? (
+      <span key={i} className="skills-tilde">
+        ~
+      </span>
+    ) : (
+      part
+    ),
   );
 }

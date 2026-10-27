@@ -75,6 +75,36 @@ export function isWanted(serverUrl: string, prefs: SkillsDevicePrefs, orgId: str
   return skill.delivery === "required" || prefs.optIns[optInKey(serverUrl, orgId, skill.skillId)] === true;
 }
 
+/**
+ * Optional skills this device should keep because a copy of ours is already
+ * here and it never opted out: a skill switched from Required to Optional
+ * stays on the computers that have it. Returns their `optInKey`s.
+ */
+export function impliedOptIns(
+  serverUrl: string,
+  userId: string,
+  manifest: SkillsManifest,
+  prefs: SkillsDevicePrefs,
+  installed: Partial<Record<SkillTarget, InstalledSkill[]>>,
+): string[] {
+  const here = new Set<string>();
+  for (const list of Object.values(installed)) {
+    for (const e of list ?? []) {
+      if (e.status !== "unmanaged" && isOurMarker(e.marker, serverUrl, userId)) here.add(`${e.marker.orgId}|${e.marker.skillId}`);
+    }
+  }
+  const out: string[] = [];
+  for (const org of manifest.orgs) {
+    for (const skill of org.skills) {
+      if (skill.delivery !== "optional") continue;
+      const k = optInKey(serverUrl, org.orgId, skill.skillId);
+      if (prefs.optIns[k] || prefs.optOuts[k]) continue;
+      if (here.has(`${org.orgId}|${skill.skillId}`)) out.push(k);
+    }
+  }
+  return out;
+}
+
 function sameServer(a: string, b: string): boolean {
   return normalizeServerUrl(a) === normalizeServerUrl(b);
 }

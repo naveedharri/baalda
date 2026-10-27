@@ -14,6 +14,11 @@ export interface SkillsDevicePrefs {
   targets: { claude: boolean; agents: boolean };
   /** key `${serverUrl}|${orgId}|${skillId}` */
   optIns: Record<string, true>;
+  /**
+   * Same key: Optional skills this device explicitly removed. Without one, a
+   * copy already here when a skill turns Optional is kept (an implied opt-in).
+   */
+  optOuts: Record<string, true>;
   /** key `${serverUrl}|${orgId}|${skillId}|${target}` */
   keepMine: Record<string, true>;
   lastRunAt: string | null;
@@ -22,7 +27,7 @@ export interface SkillsDevicePrefs {
 export type PrefsStorage = Pick<Storage, "getItem" | "setItem">;
 
 export function defaultSkillsPrefs(): SkillsDevicePrefs {
-  return { targets: { claude: true, agents: true }, optIns: {}, keepMine: {}, lastRunAt: null };
+  return { targets: { claude: true, agents: true }, optIns: {}, optOuts: {}, keepMine: {}, lastRunAt: null };
 }
 
 /** Same normalization as `serverFeatures.ts urlKey`. */
@@ -77,6 +82,7 @@ export function loadSkillsPrefs(storage: PrefsStorage | null = defaultStorage())
     if (typeof t.agents === "boolean") prefs.targets.agents = t.agents;
   }
   prefs.optIns = trueMap(o.optIns);
+  prefs.optOuts = trueMap(o.optOuts);
   prefs.keepMine = trueMap(o.keepMine);
   if (typeof o.lastRunAt === "string") prefs.lastRunAt = o.lastRunAt;
   return prefs;
@@ -118,8 +124,13 @@ export function onSkillsPrefsChanged(cb: (prefs: SkillsDevicePrefs) => void): ()
 export function setSkillOptIn(serverUrl: string, orgId: string, skillId: string, on: boolean): SkillsDevicePrefs {
   return updateSkillsPrefs((p) => {
     const k = optInKey(serverUrl, orgId, skillId);
-    if (on) p.optIns[k] = true;
-    else delete p.optIns[k];
+    if (on) {
+      p.optIns[k] = true;
+      delete p.optOuts[k];
+    } else {
+      delete p.optIns[k];
+      p.optOuts[k] = true;
+    }
   });
 }
 

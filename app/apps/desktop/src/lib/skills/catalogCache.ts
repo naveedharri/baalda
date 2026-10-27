@@ -1,10 +1,11 @@
 // The vault's skills catalog, shared for the session: the Skills tab primes it
 // on every load, and the sidebar shortcut reads it (fetching once if the tab
-// hasn't been opened yet). No polling: a new answer only arrives when the tab
-// loads or the shortcut first asks.
+// hasn't been opened yet). No polling: a new answer arrives when the tab
+// loads, the shortcut first asks, or a teammate's `skills-changed` frame lands.
 
 import { useEffect, useState } from "react";
 import type { ApiClient } from "../api";
+import { useSkillsChanged } from "./syncHost";
 import type { SkillsCatalog } from "./types";
 
 const cache = new Map<string, SkillsCatalog>();
@@ -34,5 +35,12 @@ export function useCatalog(api: ApiClient, orgId: string | null, enabled: boolea
       () => asked.delete(orgId),
     );
   }, [api, orgId, enabled]);
+  useSkillsChanged(enabled ? orgId : null, () => {
+    if (!orgId) return;
+    api.listSkills(orgId).then(
+      (c) => primeCatalog(orgId, c),
+      () => {},
+    );
+  });
   return orgId ? cache.get(orgId) ?? null : null;
 }

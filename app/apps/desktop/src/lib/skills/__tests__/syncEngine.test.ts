@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   conflictKey,
   forceInstallSkill,
+  impliedOptIns,
   replaceUnmanagedSkill,
   pendingStates,
   planSkillsSync,
@@ -487,5 +488,25 @@ describe("runSkillsPlan: release and stop", () => {
     await runSkillsPlan([installAction("claude", skill("s", "a"))], d);
     expect(calls.fetch).toEqual([]);
     expect(calls.install).toEqual([]);
+  });
+});
+
+describe("impliedOptIns: Required → Optional keeps it where installed", () => {
+  const m = manifest(org("o", "O", [skill("s", "a", { delivery: "optional" }), skill("r", "b")]));
+  const implied = (prefs: SkillsDevicePrefs, installed: Record<string, unknown[]>) =>
+    impliedOptIns(SERVER, ME, m, prefs, installed as never);
+
+  it("opts in an Optional skill with our copy here and no choice made", () => {
+    expect(implied(defaultSkillsPrefs(), { agents: [inst("a", marker("s", "o"))] })).toEqual([optInKey(SERVER, "o", "s")]);
+  });
+
+  it("never for an explicit opt-out, a Required skill, no copy, or another user's copy", () => {
+    const out = defaultSkillsPrefs();
+    out.optOuts[optInKey(SERVER, "o", "s")] = true;
+    expect(implied(out, { claude: [inst("a", marker("s", "o"))] })).toEqual([]);
+    expect(implied(defaultSkillsPrefs(), { claude: [inst("b", marker("r", "o"))] })).toEqual([]);
+    expect(implied(defaultSkillsPrefs(), { claude: [] })).toEqual([]);
+    expect(implied(defaultSkillsPrefs(), { claude: [inst("a", marker("s", "o", { userId: "u-other" }))] })).toEqual([]);
+    expect(implied(defaultSkillsPrefs(), { claude: [inst("a", null, "unmanaged")] })).toEqual([]);
   });
 });
