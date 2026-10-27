@@ -2366,3 +2366,16 @@ button.secondary.skills-hdr-btn.skills-shared-btn:hover:not(:disabled) {
 .skills-page-head button.secondary.skills-hdr-btn:hover:not(:disabled) {
   border-color: var(--border-strong);
 }
+
+/* The AI tools using a team skill on this computer, at the card's foot. */
+.skills-card-foot {
+  display: flex;
+  align-items: center;
+  margin-top: auto;
+  padding-top: 10px;
+}
+.skills-card-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

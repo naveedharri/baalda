@@ -291,6 +291,7 @@ export function SkillCard({
   titleExtra,
   byline,
   description,
+  footer,
   action,
   more,
   className = "",
@@ -300,6 +301,8 @@ export function SkillCard({
   titleExtra?: ReactNode;
   byline: ReactNode;
   description: string;
+  /** Pinned to the card's bottom edge, so a row's footers line up. */
+  footer?: ReactNode;
   action?: ReactNode;
   more?: ReactNode;
   className?: string;
@@ -316,6 +319,7 @@ export function SkillCard({
         </span>
         <span className="skills-card-byline">{byline}</span>
         <CardDescription text={description} />
+        {footer && <span className="skills-card-foot">{footer}</span>}
       </span>
       {(action || more) && (
         <span className="skills-card-action">

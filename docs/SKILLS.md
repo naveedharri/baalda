@@ -604,7 +604,7 @@ Rules:
 `startSkillsSync({ api, getServerUrl, userId }) → () => void`, active only when signed in and the
 server advertises `skills` (an unreadable `/health` skips the run; only a server that answered
 without `skills` is "needs an update"). Runs: at start (launch/sign-in, after `skillsTargets()` re-detect), on any
-`skills-changed` frame (debounced 500 ms; the frame only triggers a manifest refetch), every 15 min,
+`skills-changed` frame (debounced 500 ms; the frame only triggers a manifest refetch), every 2 min (and on coming back to the app),
 and on "Check now". One run at a time (a request during a run queues one trailing run). Server or
 account switch: App's effect (keyed on user id + server URL) stops the host and starts a new one.
 
@@ -777,7 +777,7 @@ Done 2026-10-26: `CLAUDE.md` (Desktop Rust core, sync, settings tabs, server bul
 > one draft per skill and **Publish** it into an immutable numbered version; only published versions
 > are delivered. Effective version = pinned ?? latest. Required skills install for every member;
 > Optional ones are opted into per device. `GET /api/skills/manifest` lists every membership org;
-> the vault channel's `skills-changed` frame (PS 0x0f) and a 15-min poll trigger a desktop run.
+> the vault channel's `skills-changed` frame (PS 0x0f) and a 2-min poll (plus a check when the app comes back to the front) trigger a desktop run.
 > Rust `skills_sync.rs` writes only `<claude config dir>/skills/<name>` and `~/.agents/skills/<name>`
 > (never `~/.codex/skills`), only folders carrying `.baalda-managed.json`, stages then swaps
 > atomically, never overwrites local edits without "Use team version" (backup first, app data

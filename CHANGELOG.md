@@ -7,6 +7,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Changed
+- **Agent Skills (0.1.90).** "Add to team" and marketplace imports (one skill or Import all) start as
+  Required, so they install on everyone's computer; a skill new to a device glows for every member,
+  not only the admin who added it; the desktop re-checks skills every 2 minutes and when the app
+  comes back to the front, since the live frame only covers the open vault.
+
 ### Added
 - **Agent Skills (0.1.89).** Vault Settings → Agent Skills: owners and admins create, upload (.zip),
   import from GitHub marketplaces (Anthropic, OpenAI and BenAI built in) and publish versioned team

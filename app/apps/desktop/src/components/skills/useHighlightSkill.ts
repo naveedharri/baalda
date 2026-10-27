@@ -44,6 +44,44 @@ export function takeReturningNewIds(now = Date.now(), marks: NewMarks = readMark
   return { ids, next };
 }
 
+const SEEN_KEY = "context.skills.seenIds.v1";
+
+/**
+ * The team skills this device hasn't shown yet, for one vault (`scope` =
+ * server|org): new since the last catalog this device loaded, however they
+ * arrived (a teammate's add, an import, while the app was closed). The first
+ * catalog a device ever loads for a vault is recorded, not announced, so a
+ * fresh install doesn't light up every card. localStorage, guarded: without it
+ * nothing glows rather than everything.
+ */
+export function takeUnseenSkills(scope: string, ids: readonly string[], storage: Pick<Storage, "getItem" | "setItem"> | null = safeLocalStorage()): string[] {
+  if (!storage) return [];
+  let all: Record<string, string[]> = {};
+  try {
+    const v = JSON.parse(storage.getItem(SEEN_KEY) ?? "{}") as unknown;
+    if (v && typeof v === "object" && !Array.isArray(v)) all = v as Record<string, string[]>;
+  } catch {
+    all = {};
+  }
+  const known = Array.isArray(all[scope]) ? new Set(all[scope]) : null;
+  const fresh = known ? ids.filter((id) => !known.has(id)) : [];
+  all[scope] = [...ids];
+  try {
+    storage.setItem(SEEN_KEY, JSON.stringify(all));
+  } catch {
+    /* full or blocked: nothing is remembered, nothing breaks */
+  }
+  return fresh;
+}
+
+function safeLocalStorage(): Pick<Storage, "getItem" | "setItem"> | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
 export function useHighlightSkill(gridVisible: boolean) {
   const [target, setTarget] = useState<{ ids: string[]; n: number } | null>(null);
   const handled = useRef(0);
