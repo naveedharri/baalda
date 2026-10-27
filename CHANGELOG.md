@@ -8,6 +8,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Changed
+- **Postgres tuning (0.1.92).** The server sets `work_mem` to 16 MB on its own connections
+  (`PG_WORK_MEM`) so small sorts stop spilling to disk; migration 061 indexes `blobs.org_id` and
+  enables `pg_stat_statements` where the database role allows it; DEPLOY.md notes memory limits
+  for Postgres on usage-billed hosts.
 - **Settings polish (0.1.91).** Vault Settings → MCP: new tokens are created in a dialog that shows
   the token with Claude Code, Codex (`codex mcp add`) and other-app setup, so the page no longer
   jumps; Revoke asks first; a banner links Baalda's listing in Claude's connector directory on the
