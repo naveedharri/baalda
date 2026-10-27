@@ -12,6 +12,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (`PG_WORK_MEM`) so small sorts stop spilling to disk; migration 061 indexes `blobs.org_id` and
   enables `pg_stat_statements` where the database role allows it; DEPLOY.md notes memory limits
   for Postgres on usage-billed hosts.
+- **Scoped members' attachments (0.1.92, #343).** The attachment list for members without vault-wide
+  access no longer times out on large vaults (one set-based text scan instead of per-embed offsets);
+  an attachment copied into a folder now registers as its own file and gets its own server row, so
+  changing or deleting the copy no longer removes the attachment and sets off re-uploads.
 - **Settings polish (0.1.91).** Vault Settings → MCP: new tokens are created in a dialog that shows
   the token with Claude Code, Codex (`codex mcp add`) and other-app setup, so the page no longer
   jumps; Revoke asks first; a banner links Baalda's listing in Claude's connector directory on the

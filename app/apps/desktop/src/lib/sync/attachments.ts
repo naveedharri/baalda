@@ -483,7 +483,16 @@ export function planBinarySync(
 
   for (const a of local) {
     if (decided.has(a.relPath)) continue;
-    if (!serverShas.has(a.sha256)) toUpload.push(a);
+    if (!serverShas.has(a.sha256)) {
+      toUpload.push(a);
+      continue;
+    }
+    // Same bytes as something already on the server, but a tree file with no
+    // `files` id is a file the server does not know yet: an attachment copied
+    // into a folder (#343) used to be skipped here forever. It still goes up,
+    // so it registers; the intent dedupes it, and no bytes move. A true
+    // `attachments/` duplicate stays skipped.
+    if (ctx && !isUnderAttachments(a.relPath) && !ctx.docIdFor(a.relPath)) toUpload.push(a);
   }
   const toDownload = server.filter(
     (b) =>

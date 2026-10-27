@@ -98,6 +98,21 @@ describe("planBinarySync — the decision table", () => {
     expect(plan.toDownload).toEqual([]);
   });
 
+  it("an attachment copied into a folder registers; a true attachments/ duplicate does not (#343)", () => {
+    const plan = planBinarySync(
+      [
+        L("attachments/pic.png", "p"),
+        L("Team/pic.png", "p"), // the copy: same bytes, no `files` id yet
+        L("attachments/pic-2.png", "p"), // another drop of the same bytes
+        L("Team/known.png", "p"), // same bytes, already known by an id
+      ],
+      [S("a", "attachments/pic.png", "p", null)],
+      ctx({ "Team/known.png": "K" }, {}),
+    );
+    expect(plan.toUpload.map((a) => a.relPath)).toEqual(["Team/pic.png"]);
+    expect(plan.toDownload).toEqual([]);
+  });
+
   it("a consumed doc row is never also a plain download at its server path", () => {
     // The server row was renamed elsewhere; the local file is known by id.
     const plan = planBinarySync(
