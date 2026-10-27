@@ -11,6 +11,11 @@ export async function ensureMigrated(): Promise<void> {
 }
 
 const TABLES = [
+  "skill_version_files",
+  "skill_versions",
+  "skill_draft_files",
+  "skills",
+  "skill_sources",
   "note_versions",
   "note_texts",
   "vault_checkpoint_docs",

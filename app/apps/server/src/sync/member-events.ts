@@ -101,6 +101,33 @@ export async function announceAppearanceChanged(change: AppearanceChangedFields)
   }
 }
 
+type SkillsChangedPublisher = (vaultId: string, orgId: string) => void;
+
+let publishSkills: SkillsChangedPublisher | null = null;
+
+export function setSkillsChangedPublisher(fn: SkillsChangedPublisher | null): void {
+  publishSkills = fn;
+}
+
+/**
+ * Tell every live member app that the vault's skills catalog changed (a
+ * create, publish, delivery/pin change, delete or marketplace source). A hint only:
+ * clients refetch the manifest, and their 15-min poll covers a missed frame.
+ * Same fan-out and best-effort contract as {@link announceOrgChanged}.
+ */
+export async function announceSkillsChanged(orgId: string): Promise<void> {
+  if (!publishSkills) return;
+  try {
+    const { rows } = await pool.query<{ id: string }>(
+      "SELECT id FROM vaults WHERE organization_id = $1",
+      [orgId],
+    );
+    for (const { id } of rows) publishSkills(id, orgId);
+  } catch (err) {
+    console.error("announceSkillsChanged failed:", err);
+  }
+}
+
 /** Why a membership ended: an owner/admin removed them, or they left. */
 export type MemberRemovedReason = "removed" | "left";
 type MemberRemovedPublisher = (

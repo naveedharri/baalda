@@ -1,4 +1,17 @@
 import type { PinnedItem } from "./pins";
+import type {
+  SkillDelivery,
+  SkillDetail,
+  SkillDraft,
+  SkillFileInput,
+  SkillOrigin,
+  SkillsCatalog,
+  SkillSource,
+  SkillsManifest,
+  SkillSummary,
+  SkillVersionSummary,
+  SkillVersionWithFiles,
+} from "./skills/types";
 import { parseVaultAppearanceSettings, type VaultAppearanceSettings } from "./appearanceSettings";
 import type { SeedResultFields } from "./sync/seedRegister";
 import { rememberAvatarImage } from "./avatarIdentity";
@@ -3291,6 +3304,114 @@ export class ApiClient {
     };
   }
 
+  // ---- Skills (docs/SKILLS.md §3.3) --------------------------------------
+
+  /** Every vault this user belongs to on this server, with the skills to install. */
+  async getSkillsManifest(): Promise<SkillsManifest> {
+    return (await this.request<SkillsManifest>("GET", "/api/skills/manifest", { timeoutMs: 30_000 })).data;
+  }
+
+  async listSkills(orgId: string): Promise<SkillsCatalog> {
+    return (await this.request<SkillsCatalog>("GET", skillsBase(orgId))).data;
+  }
+
+  /** Owner/admin. Without `files` the server seeds a default SKILL.md. */
+  async createSkill(orgId: string, name: string, files?: SkillFileInput[], source?: SkillOrigin): Promise<SkillDetail> {
+    return (await this.request<SkillDetail>("POST", skillsBase(orgId), {
+      body: { name, ...(files ? { files } : {}), ...(source ? { source } : {}) }, timeoutMs: 60_000,
+    })).data;
+  }
+
+  async getSkill(orgId: string, skillId: string): Promise<SkillDetail> {
+    return (await this.request<SkillDetail>("GET", skillPath(orgId, skillId))).data;
+  }
+
+  async patchSkill(
+    orgId: string,
+    skillId: string,
+    change: { delivery?: SkillDelivery; pinnedVersion?: number | null; source?: SkillOrigin | null },
+  ): Promise<SkillSummary> {
+    return (await this.request<SkillSummary>("PATCH", skillPath(orgId, skillId), { body: change })).data;
+  }
+
+  async deleteSkill(orgId: string, skillId: string): Promise<void> {
+    await this.request("DELETE", skillPath(orgId, skillId));
+  }
+
+  async getSkillDraft(orgId: string, skillId: string): Promise<SkillDraft> {
+    return (await this.request<SkillDraft>("GET", `${skillPath(orgId, skillId)}/draft`, { timeoutMs: 60_000 })).data;
+  }
+
+  /** Replace every draft file. 409 `stale_draft` when `baseRevision` is behind.
+   *  `source` moves with the files (a marketplace "Pull update"); omitted keeps it. */
+  async putSkillDraft(
+    orgId: string,
+    skillId: string,
+    baseRevision: number,
+    files: SkillFileInput[],
+    source?: SkillOrigin | null,
+  ): Promise<SkillDraft> {
+    return (await this.request<SkillDraft>("PUT", `${skillPath(orgId, skillId)}/draft`, {
+      body: { baseRevision, files, ...(source !== undefined ? { source } : {}) }, timeoutMs: 60_000,
+    })).data;
+  }
+
+  async patchSkillDraft(
+    orgId: string,
+    skillId: string,
+    baseRevision: number,
+    change: { upsert?: SkillFileInput[]; remove?: string[] },
+  ): Promise<SkillDraft> {
+    return (await this.request<SkillDraft>("PATCH", `${skillPath(orgId, skillId)}/draft`, {
+      body: { baseRevision, ...change }, timeoutMs: 60_000,
+    })).data;
+  }
+
+  /** Draft := a published version ("Restore to draft"). */
+  async resetSkillDraft(orgId: string, skillId: string, baseRevision: number, version: number): Promise<SkillDraft> {
+    return (await this.request<SkillDraft>("POST", `${skillPath(orgId, skillId)}/draft/reset`, {
+      body: { baseRevision, version },
+    })).data;
+  }
+
+  async publishSkill(orgId: string, skillId: string, baseRevision: number, notes?: string): Promise<SkillVersionSummary> {
+    return (await this.request<SkillVersionSummary>("POST", `${skillPath(orgId, skillId)}/publish`, {
+      body: notes ? { baseRevision, notes } : { baseRevision }, timeoutMs: 60_000,
+    })).data;
+  }
+
+  /** One published version with its files' contents. */
+  async getSkillVersion(orgId: string, skillId: string, version: number): Promise<SkillVersionWithFiles> {
+    return (await this.request<SkillVersionWithFiles>(
+      "GET",
+      `${skillPath(orgId, skillId)}/versions/${encodeURIComponent(String(version))}`,
+      { timeoutMs: 60_000 },
+    )).data;
+  }
+
+  /** GitHub marketplaces this vault imports skills from, oldest first. */
+  async listSkillSources(orgId: string): Promise<SkillSource[]> {
+    const { data } = await this.request<{ sources: SkillSource[] }>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/skill-sources`,
+    );
+    return data?.sources ?? [];
+  }
+
+  /** Owner/admin. 409 `skill_source_exists` for the same repo + ref. */
+  async addSkillSource(orgId: string, repo: string, ref?: string | null, label?: string | null): Promise<SkillSource> {
+    return (await this.request<SkillSource>("POST", `/api/orgs/${encodeURIComponent(orgId)}/skill-sources`, {
+      body: { repo, ...(ref ? { ref } : {}), ...(label ? { label } : {}) },
+    })).data;
+  }
+
+  async removeSkillSource(orgId: string, sourceId: string): Promise<void> {
+    await this.request(
+      "DELETE",
+      `/api/orgs/${encodeURIComponent(orgId)}/skill-sources/${encodeURIComponent(sourceId)}`,
+    );
+  }
+
   /** Members, pending invitations and (for owners/admins) each person's
    * vault-wide access level, in one request. */
   async getMembersOverview(orgId: string): Promise<MembersOverview> {
@@ -3851,6 +3972,22 @@ function stripTrailingSlash(url: string): string {
 }
 
 /** Normalize snake/camel doc-id/vault-id fields the server may return. */
+function skillsBase(orgId: string): string {
+  return `/api/orgs/${encodeURIComponent(orgId)}/skills`;
+}
+function skillPath(orgId: string, skillId: string): string {
+  return `${skillsBase(orgId)}/${encodeURIComponent(skillId)}`;
+}
+
+/** The `error` code of a skills refusal (`stale_draft`, `invalid_skill` …), or null. */
+export function skillErrorCode(e: unknown): string | null {
+  if (!(e instanceof ApiError)) return null;
+  const b = e.body;
+  return b && typeof b === "object" && typeof (b as { error?: unknown }).error === "string"
+    ? (b as { error: string }).error
+    : null;
+}
+
 export function noteDocId(n: RegisteredNote): string {
   return n.docId ?? n.doc_id ?? n.id;
 }

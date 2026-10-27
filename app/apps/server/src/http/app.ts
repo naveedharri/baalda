@@ -21,6 +21,8 @@ import { accountPageRoutes } from "./routes/account-pages.js";
 import { invitationRoutes } from "./routes/invitations.js";
 import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
 import { createAppearanceRoutes } from "./routes/appearance.js";
+import { createSkillRoutes } from "./routes/skills.js";
+import { SKILLS_FEATURE } from "../skills/feature.js";
 import { passwordResetRoutes } from "./routes/password-reset.js";
 import { openLinkRoutes } from "./routes/open-link.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
@@ -226,6 +228,8 @@ export function createApp(deps: AppDeps): Hono {
   // per-item `seeded` flag stays the fallback (absent ⇒ not seeded).
   // `access-board` = `GET /vaults/:id/access-board` answers the member Access
   // tab in one request (desktops fall back to access-tree + summaries).
+  // `skills` = the team skills catalog (`/api/orgs/:orgId/skills`,
+  // `/api/skills/manifest`, docs/SKILLS.md).
   // `version` is this server's package version (read once at startup);
   // `minDesktopVersion` is the floor `client-version.ts` enforces on content
   // writes, read live like the gate itself (null when the floor is off).
@@ -234,7 +238,13 @@ export function createApp(deps: AppDeps): Hono {
       ok: true,
       version: SERVER_VERSION,
       minDesktopVersion: clientVersionPolicy().minRaw,
-      features: [NOTES_WITH_STATE_FEATURE, BOOTSTRAP_ONLY_FEATURE, FILES_WITH_BYTES_FEATURE, ACCESS_BOARD_FEATURE],
+      features: [
+        NOTES_WITH_STATE_FEATURE,
+        BOOTSTRAP_ONLY_FEATURE,
+        FILES_WITH_BYTES_FEATURE,
+        ACCESS_BOARD_FEATURE,
+        SKILLS_FEATURE,
+      ],
     }),
   );
 
@@ -341,6 +351,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api", memberRoutes);
   app.route("/api", accessAuditRoutes);
   app.route("/api", createAppearanceRoutes(deps));
+  app.route("/api", createSkillRoutes());
   app.route(
     "/api",
     createMemberShareRoutes({ disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged }),

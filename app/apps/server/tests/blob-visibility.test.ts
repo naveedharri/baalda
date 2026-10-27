@@ -119,6 +119,59 @@ describe("filterReadableBlobs (attachment visibility)", () => {
     expect(out.map((b) => b.rel_path)).toEqual(["attachments/a\\%b.png"]);
   });
 
+  it("matches a path anywhere in the text: repeated folders, overlaps, multi-byte text, no folder", async () => {
+    // The reference check finds paths by their leading `dir/` and cuts the
+    // candidates out of the text. These are the shapes that could trip that
+    // and must answer exactly as plain substring containment does.
+    await seedIndex(
+      vault,
+      memberNote,
+      [
+        "ünïcödé — 日本語 before ![](attachments/attachments/nested.png)", // anchor twice in a row
+        "x/attachments/inner.png", // occurs after another folder
+        "![](attachments/long-name.png)", // a shorter path is a prefix of this
+        "attachments/attachments/attachments/deep.png",
+        "loose.png in the root", // no folder at all
+        "attachments/",
+      ].join("\n"),
+    );
+    // A path under the same folder that only the owner's note, which the
+    // member cannot read, references.
+    await seedIndex(vault, ownerNote, "![](attachments/owner-only.png)");
+    const candidates = [
+      "attachments/attachments/nested.png", // visible
+      "attachments/nested.png", // visible: it is a substring of the first line
+      "attachments/inner.png", // visible: substring of x/attachments/inner.png
+      "x/attachments/inner.png", // visible
+      "attachments/long", // visible: substring of long-name.png
+      "attachments/long-name.png.bak", // hidden: longer than what is there
+      "attachments/attachments/deep.png", // visible
+      "attachments/deep.png", // visible
+      "loose.png", // visible, no folder
+      "missing.png", // hidden, no folder
+      "attachments/owner-only.png", // hidden: only an unreadable note has it
+      "Attachments/nested.png", // hidden: case-sensitive
+      "日本語 before", // visible: no folder, multi-byte
+    ];
+    const out = await filterReadableBlobs(member, vault, candidates.map(blob));
+    const text = (
+      await pool.query<{ content: string }>("SELECT content FROM note_index WHERE doc_id = $1", [memberNote])
+    ).rows[0].content;
+    // Plain substring containment over the readable note is the oracle.
+    expect(out.map((b) => b.rel_path)).toEqual(candidates.filter((p) => text.includes(p)));
+    expect(out.map((b) => b.rel_path)).toEqual([
+      "attachments/attachments/nested.png",
+      "attachments/nested.png",
+      "attachments/inner.png",
+      "x/attachments/inner.png",
+      "attachments/long",
+      "attachments/attachments/deep.png",
+      "attachments/deep.png",
+      "loose.png",
+      "日本語 before",
+    ]);
+  });
+
   it("gives a vault-wide reader every blob, referenced or not", async () => {
     // "Vault-wide" is the org grant, not the role. The rest of this file keeps
     // the vault Private on purpose — that is what gives the member an empty

@@ -306,6 +306,11 @@ export async function filterReadableBlobs<T extends BlobAclRow>(
   // claim that resolves to nothing is not a tree file, so its blob falls into
   // the path branch below rather than being judged on a doc that isn't there.
   const claimed = [...new Set(blobs.map((b) => b.doc_id).filter((d): d is string => !!d))];
+  // The readable set is asked at most ONCE per list: both branches below need
+  // it for a scoped member, and it used to be computed twice.
+  let readableOnce: Promise<Set<string>> | null = null;
+  const readable = (): Promise<Set<string>> =>
+    (readableOnce ??= listReadableDocsInVault(userId, vaultId, db));
   let readableDocs = new Set<string>();
   let realDocs = new Set<string>();
   if (claimed.length > 0) {
@@ -314,7 +319,7 @@ export async function filterReadableBlobs<T extends BlobAclRow>(
       [vaultId, claimed],
     );
     realDocs = new Set(rows.map((r) => r.id));
-    if (realDocs.size > 0) readableDocs = await listReadableDocsInVault(userId, vaultId, db);
+    if (realDocs.size > 0) readableDocs = await readable();
   }
   const isTreeFile = (b: T): boolean => !!b.doc_id && realDocs.has(b.doc_id);
   const rest = blobs.filter((b) => !isTreeFile(b));
@@ -327,40 +332,115 @@ export async function filterReadableBlobs<T extends BlobAclRow>(
   if (rest.length > 0) {
     const visibleRest = access.vaultWide
       ? rest
-      : await filterByNoteReference(userId, vaultId, rest, db);
+      : await filterByNoteReference(vaultId, rest, await readable(), db);
     for (const b of visibleRest) keep.add(b);
   }
   return blobs.filter((b) => keep.has(b));
 }
 
+/**
+ * The anchor a path is found by in {@link filterByNoteReference}: everything
+ * up to and including its first `/`, or null for a path with no `/`.
+ *
+ * Such an anchor can never overlap a second copy of itself in a text (its only
+ * `/` is its last character, so no proper prefix of it is also a suffix), which
+ * is what lets the query find EVERY occurrence by splitting the text on it.
+ */
+function referenceAnchor(path: string): string | null {
+  const slash = path.indexOf("/");
+  return slash >= 0 ? path.slice(0, slash + 1) : null;
+}
+
 /** The `attachments/` half of {@link filterReadableBlobs}: blobs a scoped
- *  member may see only because a note they can read points at them. */
+ *  member may see only because a note they can read points at them.
+ *
+ *  "Points at" is plain substring containment: some readable note's indexed
+ *  text contains the blob's `rel_path` verbatim (case-sensitive, `%`/`_`/`\`
+ *  literal). That used to be one `LIKE '%path%'` per (path, readable note)
+ *  pair — a few thousand paths against a few thousand notes is millions of
+ *  full-text scans, and a scoped member's attachment list ran into the
+ *  statement timeout (#338). The same question is now answered from the other
+ *  side, in one pass over each readable note:
+ *
+ *    1. every path has an anchor (its leading `dir/`, {@link referenceAnchor});
+ *       there are only a handful of distinct ones (`attachments/`, mostly);
+ *    2. each readable note that contains an anchor is split on it, which yields
+ *       the position of every occurrence (anchors cannot overlap themselves);
+ *    3. at each occurrence the substring of every candidate path LENGTH is
+ *       cut out and hash-joined against the paths.
+ *
+ *  A path occurs in a text iff it occurs at one of its anchor's occurrences,
+ *  so the answer is identical; the work is proportional to the text plus the
+ *  number of embeds, not to paths × notes. A path with no `/` has no anchor and
+ *  keeps the direct LIKE test (attachment drops always live under a folder, so
+ *  this is the rare legacy case). */
 async function filterByNoteReference<T extends BlobAclRow>(
-  userId: string,
   vaultId: string,
   blobs: T[],
+  readable: Set<string>,
   db: Queryable,
 ): Promise<T[]> {
-  const readable = await listReadableDocsInVault(userId, vaultId, db);
   if (readable.size === 0) return [];
   // A falsy rel_path can never match (it has no needle to search for), so it is
   // dropped here exactly as the old `!!b.rel_path` guard dropped it.
   const paths = [...new Set(blobs.map((b) => b.rel_path).filter((p): p is string => !!p))];
   if (paths.length === 0) return [];
+  const anchored = paths.filter((p) => referenceAnchor(p) !== null);
+  const bare = paths.filter((p) => referenceAnchor(p) === null);
+  const readableIds = [...readable];
+  const referenced = new Set<string>();
 
-  // Two parallel arrays, not one: the escaped form is what LIKE matches, the raw
-  // form is what maps the answer back onto the blob rows.
-  const { rows } = await db.query<{ rel_path: string }>(
-    `SELECT p.rel_path
-       FROM unnest($3::text[], $4::text[]) AS p(rel_path, needle)
-      WHERE EXISTS (
-        SELECT 1 FROM note_index ni
-         WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
-           AND ni.content LIKE '%' || p.needle || '%' ESCAPE '\\'
-      )`,
-    [vaultId, [...readable], paths, paths.map(likeEscape)],
-  );
-  const referenced = new Set(rows.map((r) => r.rel_path));
+  if (anchored.length > 0) {
+    const { rows } = await db.query<{ rel_path: string }>(
+      `WITH needles AS (
+          SELECT * FROM unnest($3::text[], $4::text[]) AS n(rel_path, anchor)
+       ),
+       anchors AS (SELECT DISTINCT anchor FROM needles),
+       lens AS (SELECT DISTINCT anchor, length(rel_path) AS len FROM needles),
+       docs AS MATERIALIZED (
+          SELECT ni.doc_id, ni.content FROM note_index ni
+           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
+       ),
+       pieces AS (
+          SELECT d.doc_id, d.content, a.anchor, s.o, x.n,
+                 sum(length(s.part)) OVER (PARTITION BY d.doc_id, a.anchor ORDER BY s.o) AS through
+            FROM docs d
+            JOIN anchors a ON strpos(d.content, a.anchor) > 0
+            CROSS JOIN LATERAL (
+              SELECT arr, cardinality(arr) AS n
+                FROM (SELECT string_to_array(d.content, a.anchor) AS arr) y
+            ) x
+            CROSS JOIN LATERAL unnest(x.arr) WITH ORDINALITY AS s(part, o)
+       ),
+       -- The anchor occurrence after piece o starts right after pieces 1..o
+       -- and the o-1 anchors between them.
+       hits AS (
+          SELECT DISTINCT substr(p.content, (p.through + (p.o - 1) * length(p.anchor) + 1)::int, l.len) AS val
+            FROM pieces p
+            JOIN lens l ON l.anchor = p.anchor
+           WHERE p.o < p.n
+       )
+       SELECT n.rel_path FROM needles n JOIN hits h ON h.val = n.rel_path`,
+      [vaultId, readableIds, anchored, anchored.map((p) => referenceAnchor(p) as string)],
+    );
+    for (const r of rows) referenced.add(r.rel_path);
+  }
+
+  if (bare.length > 0) {
+    // Two parallel arrays, not one: the escaped form is what LIKE matches, the
+    // raw form is what maps the answer back onto the blob rows.
+    const { rows } = await db.query<{ rel_path: string }>(
+      `SELECT p.rel_path
+         FROM unnest($3::text[], $4::text[]) AS p(rel_path, needle)
+        WHERE EXISTS (
+          SELECT 1 FROM note_index ni
+           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
+             AND ni.content LIKE '%' || p.needle || '%' ESCAPE '\\'
+        )`,
+      [vaultId, readableIds, bare, bare.map(likeEscape)],
+    );
+    for (const r of rows) referenced.add(r.rel_path);
+  }
   return blobs.filter((b) => !!b.rel_path && referenced.has(b.rel_path));
 }
 

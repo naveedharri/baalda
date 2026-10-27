@@ -58,6 +58,8 @@ import { visibleFolders } from "../lib/vault/vaultList";
 import { VaultIconSettings } from "./VaultIconSettings";
 import { VaultDashboardsTab } from "./VaultDashboardsTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
+import { SkillsTab } from "./skills/SkillsTab";
+import { AGENT_SKILLS_ICON_PATH } from "./skills/parts";
 
 // Defined in `lib/settingsTabs.ts` so the store can name a tab without importing
 // this component; re-exported here so every existing importer is unchanged.
@@ -76,6 +78,7 @@ import { PlanHeader } from "./PlanHeader";
 const TEAM_TABS = new Set<SettingsTab>([
   "members",
   "mcp",
+  "skills",
   "versioning",
 ]);
 
@@ -131,6 +134,15 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNo
       <MenuIcon>
         <path d="M4 17l6-6-6-6" />
         <path d="M12 19h8" />
+      </MenuIcon>
+    ),
+  },
+  {
+    id: "skills",
+    label: "Agent Skills",
+    icon: (
+      <MenuIcon>
+        <path d={AGENT_SKILLS_ICON_PATH} />
       </MenuIcon>
     ),
   },
@@ -334,9 +346,9 @@ export function VaultSettingsDialog({
         </nav>
 
         <section ref={contentRef} className="settings-content" aria-label={activeTab.label}>
-          {/* Members and access swaps its title for a back link while a profile
-              is open. */}
-          {!(shown === "members" && !lockedTab) && <h2 className="settings-section-title">{activeTab.label}</h2>}
+          {/* Members and access (and Skills) swap the title for a back link
+              while a profile (or a skill) is open. */}
+          {!((shown === "members" || shown === "skills") && !lockedTab) && <h2 className="settings-section-title">{activeTab.label}</h2>}
           {shown === "general" ? (
             <GeneralTab
               isSynced={isSynced}
@@ -364,6 +376,8 @@ export function VaultSettingsDialog({
             <BillingTab canManage={canManage} isSynced={isSynced} />
           ) : shown === "mcp" ? (
             <McpTab />
+          ) : shown === "skills" ? (
+            <SkillsTab canManage={canManage} resetToken={tabReset} />
           ) : shown === "versioning" ? (
             <VersioningTab canManage={canManage} />
           ) : shown === "import-export" ? (

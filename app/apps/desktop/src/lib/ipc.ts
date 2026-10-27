@@ -1272,3 +1272,58 @@ export const readTrashCopy = (stamp: string, relPath: string, expectedEpoch?: Va
 /** Delete one copy (and any stamp directory it leaves empty). */
 export const deleteTrashCopy = (stamp: string, relPath: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("delete_trash_copy", { stamp, relPath, expectedEpoch: expectedEpoch ?? null });
+
+// ---- Skills (skills_sync.rs) ----
+
+export type SkillTarget = "claude" | "agents";
+export interface SkillFilePayload { path: string; contentBase64: string; sha256: string; executable: boolean }
+export interface SkillMarker { skillId: string; orgId: string; serverUrl: string; userId: string | null; name: string;
+  version: number; bundleSha256: string; files: Record<string, string>; installedAt?: string }
+export interface SkillOwner { skillId: string; orgId: string; serverUrl: string; userId: string }
+export type SkillRemoveMode = "delete" | "release";
+export interface SkillTargetInfo { target: SkillTarget; root: string; rootExists: boolean;
+  toolInstalled: boolean; detectedTools: string[] }
+export interface InstalledSkill { name: string; status: "managed" | "edited" | "unmanaged";
+  marker: SkillMarker | null; editedFiles: string[] }
+export interface SkillInstallOutcome { status: "installed" | "unchanged" | "conflict" | "edited" | "adopted";
+  backupPath: string | null; detail: string | null }
+export interface SkillRemoveOutcome { status: "removed" | "released" | "notFound" | "conflict"; backupPath: string | null }
+export interface SkillBundle { suggestedName: string; files: SkillFilePayload[]; skipped: string[] }
+
+export const skillsTargets = () => invoke<SkillTargetInfo[]>("skills_targets");
+export const skillsScan = (target: SkillTarget) => invoke<InstalledSkill[]>("skills_scan", { target });
+/** `replaceUnmanaged`: back up and replace a folder that carries no marker
+ *  (never another owner's copy, never a symlink). An identical unmanaged
+ *  folder is `adopted` (marker written, files untouched) without it. */
+export const skillsInstall = (target: SkillTarget, name: string, marker: SkillMarker,
+  files: SkillFilePayload[], force: boolean, replaceUnmanaged = false) =>
+  invoke<SkillInstallOutcome>("skills_install", { target, name, marker, files, force, replaceUnmanaged });
+export const skillsRemove = (target: SkillTarget, name: string, owner: SkillOwner, mode: SkillRemoveMode = "delete") =>
+  invoke<SkillRemoveOutcome>("skills_remove", { target, name, owner, mode });
+export const skillsReadFolder = (path: string) => invoke<SkillBundle>("skills_read_folder", { path });
+export const skillsReadZip = (path: string) => invoke<SkillBundle>("skills_read_zip", { path });
+export const skillsExportZip = (dest: string, name: string, files: SkillFilePayload[]) =>
+  invoke<void>("skills_export_zip", { dest, name, files });
+export const skillsBackupsDir = () => invoke<string>("skills_backups_dir");
+
+/** Read-only inventory of every skill the AI tools on this machine can see. */
+export type SkillLocation = "claudePersonal" | "claudeSynced" | "agentsPersonal" | "codexPersonal"
+  | "codexSystem" | "claudePlugin" | "codexPlugin";
+export interface DeviceSkill { name: string; description: string; path: string; realPath: string;
+  isSymlink: boolean; fileCount: number; totalBytes: number; truncated: boolean; location: SkillLocation;
+  pluginName: string | null; marketplace: string | null; pluginVersion: string | null;
+  enabled: boolean | null; managed: SkillMarker | null }
+export interface DeviceScanError { root: string; error: string }
+export interface DeviceSkillScan { entries: DeviceSkill[]; errors: DeviceScanError[] }
+export interface DeviceSkillMd { text: string; truncated: boolean }
+export const skillsScanDevice = () => invoke<DeviceSkillScan>("skills_scan_device");
+/** `path` = a `DeviceSkill.path` from the scan (≤256 KiB of its SKILL.md). */
+export const skillsReadDeviceSkillMd = (path: string) =>
+  invoke<DeviceSkillMd>("skills_read_device_skill_md", { path });
+export interface DeviceSkillFile { relPath: string; size: number; isSymlink: boolean; isBinary: boolean | null }
+export interface DeviceSkillFiles { files: DeviceSkillFile[]; truncated: boolean }
+export interface DeviceSkillFileText { text: string | null; truncated: boolean; binary: boolean }
+export const skillsListDeviceSkillFiles = (path: string) =>
+  invoke<DeviceSkillFiles>("skills_list_device_skill_files", { path });
+export const skillsReadDeviceSkillFile = (path: string, relPath: string) =>
+  invoke<DeviceSkillFileText>("skills_read_device_skill_file", { path, relPath });

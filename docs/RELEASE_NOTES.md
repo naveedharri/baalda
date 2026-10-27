@@ -21,6 +21,14 @@
     (every app still installs it). Ask before each release: silent, or notes?
 -->
 
+## 0.1.89
+
+- **Agent Skills: one place for all your AI skills.** Add a skill once and it reaches your whole team's Claude, Codex, Cursor and other AI tools, always up to date. In Vault Settings.
+- **Ready-made skills in one click.** Bring in skills from Anthropic, OpenAI and BenAI, or any GitHub repository, one at a time or all at once.
+- **See what's on your computer.** Agent Skills shows every skill your AI tools already use here, and lets you share your own with the team.
+- **Talk to your team from the side panel.** Push-to-talk now sits next to Activity, and the side panel is tidier.
+- **Smoother and more reliable**, especially for teams with shared folders.
+
 ## 0.1.88
 
 ## 0.1.87

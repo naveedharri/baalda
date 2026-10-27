@@ -133,6 +133,8 @@ export interface VaultSyncEngineOptions {
   onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
   /** Fired when the vault's appearance defaults changed (`appearance-changed`). */
   onAppearanceChanged?: (change: { orgId?: string; settings: VaultAppearanceSettings }) => void;
+  /** Fired when the vault's team skills changed (`skills-changed`). */
+  onSkillsChanged?: (orgId: string) => void;
   /** Fired for each teammate presence update (`presence`): who is now viewing
    *  which note (docId null = they left / closed the note). The sink aggregates
    *  these into the sidebar roster. */
@@ -349,6 +351,7 @@ export class VaultSyncEngine {
   private readonly onMemberRemoved?: (change: { orgId: string; userId: string; reason: "removed" | "left" }) => void;
   private readonly onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
   private readonly onAppearanceChanged?: (change: { orgId?: string; settings: VaultAppearanceSettings }) => void;
+  private readonly onSkillsChanged?: (orgId: string) => void;
   private readonly onPresence?: (peer: VaultPeer) => void;
   private readonly onVoice?: (frame: VoiceFrame) => void;
   private readonly onInboundProgress?: (done: number, total: number) => void;
@@ -457,6 +460,7 @@ export class VaultSyncEngine {
     this.onMemberRemoved = opts.onMemberRemoved;
     this.onOrgChanged = opts.onOrgChanged;
     this.onAppearanceChanged = opts.onAppearanceChanged;
+    this.onSkillsChanged = opts.onSkillsChanged;
     this.onPresence = opts.onPresence;
     this.onVoice = opts.onVoice;
     this.onInboundProgress = opts.onInboundProgress;
@@ -914,6 +918,8 @@ export class VaultSyncEngine {
         this.onOrgChanged?.(change);
       } else if (control.t === "appearance-changed") {
         this.onAppearanceChanged?.({ orgId: control.orgId, settings: control.settings });
+      } else if (control.t === "skills-changed") {
+        this.onSkillsChanged?.(control.orgId);
       } else if (control.t === "presence") {
         // A teammate's viewing state changed — feed the sidebar roster.
         this.onPresence?.({

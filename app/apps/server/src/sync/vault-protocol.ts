@@ -211,6 +211,12 @@ export type ServerControl =
    * client applies it without a GET; old clients ignore an unknown `t`.
    */
   | { t: "appearance-changed"; orgId: string; settings: Record<string, unknown>; updatedAt: string }
+  /**
+   * The vault's delivered team skills changed (publish, delivery/pin change,
+   * delete, skill settings; docs/SKILLS.md). A hint to refetch
+   * `GET /api/skills/manifest`; old clients ignore an unknown `t`.
+   */
+  | { t: "skills-changed"; orgId: string }
   | ({ t: "presence" } & PresenceState) // a teammate's live viewing state changed
   /**
    * A new desktop release exists (`sync/release-watch.ts`, #269). A HINT to run
@@ -484,6 +490,18 @@ export type AppearanceChange = {
   updatedAt: string;
 };
 
+/** The vault's team skills changed — see the `skills-changed` frame. */
+export const PS_SKILLS_CHANGED = 0x0f;
+
+/** JSON body after the type: `{orgId}`. */
+export function encodePubsubSkillsChanged(orgId: string): Uint8Array {
+  const body = enc.encode(JSON.stringify({ orgId }));
+  const out = new Uint8Array(1 + body.length);
+  out[0] = PS_SKILLS_CHANGED;
+  out.set(body, 1);
+  return out;
+}
+
 export function encodePubsubAppearanceChanged(change: AppearanceChange): Uint8Array {
   const body = enc.encode(JSON.stringify(change));
   const out = new Uint8Array(1 + body.length);
@@ -632,6 +650,7 @@ export type PubsubMessage =
   | { type: "member-joined"; name: string }
   | { type: "org-changed"; change: OrgChange }
   | { type: "appearance-changed"; change: AppearanceChange }
+  | { type: "skills-changed"; orgId: string }
   | { type: "presence"; presence: PresenceState }
   | { type: "presence-query" }
   | { type: "voice"; frame: Uint8Array; speakerId: string }
@@ -750,6 +769,15 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
           ...(p.held && typeof p.until === "number" ? { until: p.until } : {}),
           ...(p.held && typeof p.count === "number" ? { count: p.count } : {}),
         };
+      } catch {
+        return null;
+      }
+    }
+    case PS_SKILLS_CHANGED: {
+      try {
+        const p = JSON.parse(dec.decode(bytes.subarray(1))) as { orgId?: unknown };
+        if (typeof p?.orgId !== "string") return null;
+        return { type: "skills-changed", orgId: p.orgId };
       } catch {
         return null;
       }

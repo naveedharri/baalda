@@ -160,6 +160,9 @@ export type ServerControl =
   | { t: "org"; name?: string; logo?: string | null }
   /** The vault's appearance defaults changed: the WHOLE settings object. */
   | { t: "appearance-changed"; orgId?: string; settings: VaultAppearanceSettings; updatedAt?: string }
+  /** The vault's team skills changed (publish, delivery, pin, delete,
+   *  settings): a hint to refetch the skills manifest, nothing more. */
+  | { t: "skills-changed"; orgId: string }
   | ({ t: "presence" } & PresenceState)
   /** A new release exists (#269): a hint to run the normal update check now. */
   | { t: "version-available"; version: string }
@@ -284,6 +287,10 @@ export function parseServerControl(text: string): ServerControl | null {
       settings: parseVaultAppearanceSettings(o.settings),
       ...(typeof o.updatedAt === "string" ? { updatedAt: o.updatedAt } : {}),
     };
+  }
+  if (t === "skills-changed") {
+    const orgId = (v as { orgId?: unknown }).orgId;
+    return typeof orgId === "string" && orgId ? { t: "skills-changed", orgId } : null;
   }
   if (t === "presence") {
     const o = v as Record<string, unknown>;

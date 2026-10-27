@@ -20,7 +20,6 @@ import {
   SWITCH_VAULT,
   VaultFolderMissingBannerView,
 } from "./components/VaultFolderMissing";
-import { TalkButton } from "./components/TalkButton";
 import { ActivityBadge, ActivityHost } from "./components/activitySource";
 import { SilentBoundary } from "./components/SilentBoundary";
 import { BacklinksPanel } from "./components/BacklinksPanel";
@@ -43,6 +42,7 @@ import { VirtualTabHost } from "./components/VirtualTabHost";
 import { Toasts } from "./components/Toasts";
 import { toast } from "./lib/toast";
 import { RightPanel } from "./components/RightPanel";
+import { TalkStatus } from "./components/TalkButton";
 import { usePendingReviewCount } from "./components/ReviewTab";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
@@ -79,6 +79,8 @@ import { viewerFor } from "./lib/formats";
 import { effectiveHomeNote, homeSidebarVisitKey } from "./lib/pins";
 import { lockBlocksCaller, lockScopesByPath } from "./lib/locks";
 import { onOpenFileRequest } from "./lib/openFileRequest";
+import { notifySkillsChanged, startSkillsSync } from "./lib/skills/syncHost";
+import { SHOW_SKILLS_SHORTCUT, SkillsShortcut } from "./components/skills/SkillsShortcut";
 import { editorMeasureStyle } from "./lib/editorMeasure";
 import { noteLabel } from "./lib/notePath";
 import { ShareNoteButton } from "./components/ShareNoteButton";
@@ -1180,6 +1182,24 @@ export default function App() {
     });
   }, [memberPicturesSynced, memberPicturesServer, memberPicturesUser, memberPicturesOrg, memberPicturesVault]);
 
+  // Team skills into this machine's AI tool folders (docs/SKILLS.md §5.4), for
+  // every vault the signed-in user belongs to on this server. A server or
+  // account switch stops the old run and starts a fresh one.
+  const skillsUser = useStore((s) => (s.authStatus === "signed-in" ? s.session?.user.id ?? null : null));
+  useEffect(() => {
+    if (!skillsUser) return;
+    syncManager.setOnSkillsChanged(notifySkillsChanged);
+    const stop = startSkillsSync({
+      api: authManager.api,
+      getServerUrl: () => useStore.getState().serverUrl,
+      userId: skillsUser,
+    });
+    return () => {
+      stop();
+      syncManager.setOnSkillsChanged(undefined);
+    };
+  }, [skillsUser, memberPicturesServer]);
+
   // Auto-reopen the last vault on launch, then restore the session (spec 04 §7)
   // and enable sync. Vault first so `enableSyncForVault` (called inside initAuth)
   // sees the loaded tree.
@@ -1668,6 +1688,9 @@ export default function App() {
           <div className={`sidebar-tree-wrap${switchingVault ? " is-switching" : ""}`}>
             <FileTree />
           </div>
+          {/* Experimental Skills row: the bottom of the sidebar, just above
+              the profile section (outside it, like Home's row). */}
+          {SHOW_SKILLS_SHORTCUT && <SkillsShortcut />}
           <div className="sidebar-footer">
             {/* Capability check against `/health`: shown only when the
                 server is demonstrably older than this app (never on an
@@ -1711,8 +1734,9 @@ export default function App() {
                 noteOpen={openNote != null && !isPreview}
                 attachmentLocalOnly={attachmentLocalOnly}
               />
-              {/* Vault-wide, so it sits in the header regardless of the open note. */}
-              <TalkButton />
+              {/* Who is talking, vault-wide; the talk button itself is in the
+                  right panel's tab strip. */}
+              <TalkStatus />
               {/* Same gate as history: a link is a doc_id, so it only exists for a
                   note the server knows about. */}
               {/* Version history straight from the header: the panel's Versions
@@ -1745,7 +1769,7 @@ export default function App() {
                 <GraphButton onClick={() => setGraphOpen(true)} />
               )}
               {/* Far right: the Activity / Versions panel (push-to-talk lives in
-                  its header now). */}
+                  its tab strip). */}
               <button
                 className={`icon-btn panel-btn${rightPanelOpen ? " active" : ""}`}
                 title={pendingReview > 0 ? `Panel (${pendingReview} to review)` : "Panel"}

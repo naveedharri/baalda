@@ -1,6 +1,7 @@
 /* The right-side pop-out panel: Activity (one feed of reconnect results,
    server Trash and local recovery copies) and Versions (the open note's
-   history). Push-to-talk lives in the main toolbar, not here. One
+   history, reached only from the header's Version history button, so it has
+   no tab here). Push-to-talk sits in the tab strip beside Activity. One
    container, the old version panel's slide-in and close rules: Escape, the ✕,
    or a click outside it (the toolbar toggle and the editor-area virtual tabs
    excepted, so it coexists with "Review changes"). */
@@ -11,8 +12,15 @@ import { useStore } from "../store";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { VersionsTab } from "./VersionPanel";
 import { ActivityFeed } from "./ActivityFeed";
+import { TalkButton } from "./TalkButton";
 import { usePendingReviewCount } from "./ReviewTab";
-import { RIGHT_PANEL_TAB_LABEL, RIGHT_PANEL_TABS, type RightPanelTab } from "./rightPanelTab";
+import {
+  RIGHT_PANEL_STRIP_TABS,
+  RIGHT_PANEL_TAB_LABEL,
+  RIGHT_PANEL_TABS,
+  type RightPanelStripTab,
+  type RightPanelTab,
+} from "./rightPanelTab";
 
 /** The header toggles (`.panel-btn`, the Version history `.history-btn`) and
  *  portaled UI the panel opens: ConfirmDialog (modal), RowActionsMenu
@@ -29,9 +37,9 @@ const ICON_PROPS = {
   "aria-hidden": true,
 };
 
-/** The panel's tab switchers: Version history's clock and Activity's
- *  bulleted log (three bullets, three lines), distinct from the clock beside it. */
-const TAB_ICON: Record<RightPanelTab, React.ReactNode> = {
+/** The panel's tab switchers: Activity's bulleted log (three bullets, three
+ *  lines), distinct from the header's Version history clock. */
+const TAB_ICON: Record<RightPanelStripTab, React.ReactNode> = {
   activity: (
     <svg {...ICON_PROPS}>
       <circle cx="5" cy="6" r="1.4" />
@@ -40,25 +48,16 @@ const TAB_ICON: Record<RightPanelTab, React.ReactNode> = {
       <path d="M10 6h10M10 12h10M10 18h7" />
     </svg>
   ),
-  versions: (
-    <svg {...ICON_PROPS}>
-      <path d="M3 12a9 9 0 1 0 2.6-6.4" />
-      <path d="M3 4v4h4" />
-      <path d="M12 8v4l3 2" />
-    </svg>
-  ),
 };
 
 /** Same titles/labels the header buttons carried. */
-const TAB_TITLE: Record<RightPanelTab, string> = {
+const TAB_TITLE: Record<RightPanelStripTab, string> = {
   activity: "Activity",
-  versions: "Version history",
 };
 
 /** The old buttons' classes, so their active styling carries over. */
-const TAB_CLASS: Record<RightPanelTab, string> = {
+const TAB_CLASS: Record<RightPanelStripTab, string> = {
   activity: "activity-tab-btn",
-  versions: "history-btn",
 };
 
 function PanelBody({ tab }: { tab: RightPanelTab }) {
@@ -107,29 +106,36 @@ function PanelBody({ tab }: { tab: RightPanelTab }) {
       transition={reduceMotion ? { duration: 0.12 } : { duration: 0.28, ease: [0.32, 0.72, 0, 1] }}
     >
       <header className="right-panel-head">
-        <div className="right-panel-tabs" role="tablist" aria-label="Panel">
-          {RIGHT_PANEL_TABS.map((t) => (
-            <button
-              key={t}
-              type="button"
-              role="tab"
-              aria-selected={t === tab}
-              aria-pressed={t === tab}
-              aria-label={
-                t === "activity" && pending > 0 ? `${TAB_TITLE[t]}, ${pending} to review` : TAB_TITLE[t]
-              }
-              title={TAB_TITLE[t]}
-              className={`icon-btn right-panel-tab ${TAB_CLASS[t]}${t === tab ? " active" : ""}`}
-              onClick={() => useStore.getState().setRightPanelTab(t)}
-            >
-              {TAB_ICON[t]}
-              {t === "activity" && pending > 0 && (
-                <span className="right-panel-count" aria-hidden="true">
-                  {pending > 99 ? "99+" : pending}
-                </span>
-              )}
-            </button>
-          ))}
+        <div className="right-panel-tabs">
+          <div className="right-panel-tablist" role="tablist" aria-label="Panel">
+            {RIGHT_PANEL_STRIP_TABS.map((t) => (
+              <button
+                key={t}
+                type="button"
+                role="tab"
+                aria-selected={t === tab}
+                aria-pressed={t === tab}
+                aria-label={
+                  t === "activity" && pending > 0 ? `${TAB_TITLE[t]}, ${pending} to review` : TAB_TITLE[t]
+                }
+                title={TAB_TITLE[t]}
+                className={`icon-btn right-panel-tab ${TAB_CLASS[t]}${t === tab ? " active" : ""}`}
+                onClick={() => useStore.getState().setRightPanelTab(t)}
+              >
+                {TAB_ICON[t]}
+                {t === "activity" && pending > 0 && (
+                  <span className="right-panel-count" aria-hidden="true">
+                    {pending > 99 ? "99+" : pending}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+          {/* Push-to-talk: a press-and-hold action, not a view, so a button
+              beside the tabs rather than a tab of its own. Who is talking shows
+              in the main header (TalkStatus), so listeners see it with the
+              panel closed. */}
+          <TalkButton />
           <span className="right-panel-tab-name">{RIGHT_PANEL_TAB_LABEL[tab]}</span>
         </div>
         <button className="icon-btn" onClick={close} aria-label="Close panel" title="Close (Esc)">

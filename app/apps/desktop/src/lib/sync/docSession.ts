@@ -544,6 +544,7 @@ export class SyncManager implements InboundHost {
   private onMemberRemoved?: (change: { orgId: string; userId: string; reason: "removed" | "left" }) => void;
   private onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
   private onAppearanceChanged?: (change: { orgId?: string; settings: VaultAppearanceSettings }) => void;
+  private onSkillsChanged?: (orgId: string) => void;
   /** Mirrors the registry's {relPath → docId} map to the UI (coalesced). */
   private onRegistryMap?: (map: Record<string, string>) => void;
   /** Mirrors the registry's {docId → last-edit} stamps to the UI. */
@@ -1581,6 +1582,11 @@ export class SyncManager implements InboundHost {
     cb: ((change: { orgId?: string; settings: VaultAppearanceSettings }) => void) | undefined,
   ): void {
     this.onAppearanceChanged = cb;
+  }
+
+  /** The skills sync (`lib/skills/syncHost.ts`) refetches its manifest on this. */
+  setOnSkillsChanged(cb: ((orgId: string) => void) | undefined): void {
+    this.onSkillsChanged = cb;
   }
 
   setOrgChangedListener(
@@ -6940,6 +6946,8 @@ export class SyncManager implements InboundHost {
       onOrgChanged: (change) => this.onOrgChanged?.(change),
       // The vault's appearance defaults changed — same live path as the icon.
       onAppearanceChanged: (change) => this.onAppearanceChanged?.(change),
+      // Team skills changed — the skills sync refetches its manifest.
+      onSkillsChanged: (orgId) => this.onSkillsChanged?.(orgId),
       // A teammate's viewing state changed — update the sidebar presence roster.
       onPresence: (peer) => this.handleVaultPresence(peer),
       // A teammate is talking. Play it as it lands; nothing is kept.

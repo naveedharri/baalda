@@ -1,1 +1,1 @@
-Claude and Codex SVG logos: @lobehub/icons-static-svg 1.95.1, https://github.com/lobehub/lobe-icons (MIT). Brand marks remain the property of their respective owners.
+Claude, Codex, Cursor and Gemini SVG logos: @lobehub/icons-static-svg 1.95.1, https://github.com/lobehub/lobe-icons (MIT). Brand marks remain the property of their respective owners.

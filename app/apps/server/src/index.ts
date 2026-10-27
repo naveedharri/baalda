@@ -16,6 +16,7 @@ import {
   setAppearanceChangedPublisher,
   setMemberJoinedPublisher, setMemberRemovedPublisher,
   setOrgChangedPublisher,
+  setSkillsChangedPublisher,
 } from "./sync/member-events.js";
 import { publishUserEvent, setUserEventPublisher } from "./sync/user-events.js";
 import { backfillIndex, setLiveDocLookup } from "./index/indexer.js";
@@ -131,6 +132,12 @@ async function main() {
     void vaultChannel
       .publishAppearanceChanged(vaultId, change)
       .catch(broadcastFailed("appearance-changed"));
+  });
+  // A skill publish / delivery change reaches every member's desktop skills sync.
+  setSkillsChangedPublisher((vaultId, orgId) => {
+    void vaultChannel
+      .publishSkillsChanged(vaultId, orgId)
+      .catch(broadcastFailed("skills-changed"));
   });
   // Soft delete / restore / purge → open Activity feeds refetch Trash (#260).
   setTrashActivityPublisher((vaultId) => {

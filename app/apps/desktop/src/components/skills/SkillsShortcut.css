@@ -1,0 +1,168 @@
+/* Experimental sidebar Skills row, at the bottom of the sidebar just above the
+   profile section's divider (outside it). Its box is a file tree row's exactly
+   (App.css `.tree-row` + FileTree's inset): the same full-bleed edges, 32px
+   height, 17px glyph inset, flat fill and colours, so its hover reads as one
+   of the tree's. */
+.skills-shortcut {
+  flex: none;
+  /* The tree's bleed (`.filetree`): cancel the sidebar's side padding. */
+  margin: 0 calc(-1 * var(--sp-1)) 0 calc(-1 * var(--sp-2));
+  padding: 2px 0 6px;
+}
+.skills-shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--sp-3) 0 17px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition:
+    background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.skills-shortcut-row:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.skills-shortcut-row:active {
+  background: var(--bg-active);
+}
+.skills-shortcut-row:focus-visible {
+  outline: none;
+  box-shadow: inset var(--focus-ring);
+}
+.skills-shortcut-row svg {
+  flex: none;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  padding: 1.5px;
+  color: var(--text-tertiary);
+}
+/* The label and, while it's new, the inline "New" tag (10px after it) with
+   its sparkles: one flexible block, so the count stays at the row's end. */
+.skills-shortcut-name {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.skills-shortcut-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skills-shortcut-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.skills-shortcut-count {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* "New" for 14 days from its first showing: a flat inline tag that belongs to
+   the row (no halo, no depth), its text with a slow light sweep, and nine tiny
+   sparkles twinkling over the label and tag. Reduced motion: the flat tag. */
+.skills-shortcut-new {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  /* The face's capitals sit above its line box's middle: 1px more room on
+     top centres "New" in the pill, which itself centres on the label. */
+  padding: 1px 7px 0;
+  border-radius: 999px;
+  /* Baalda's logo green (the mark's dot), not the accent: the row's own
+     hover and selection are already the accent tint. */
+  border: 1px solid color-mix(in srgb, var(--brand-green) 40%, transparent);
+  background: color-mix(in srgb, var(--brand-green) 16%, transparent);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 14px;
+  letter-spacing: 0.02em;
+}
+/* The deep green that reads on the tint in either theme (the access
+   board's "Can edit" text), with a brighter band passing through the
+   letters only. */
+.skills-shortcut-new-text {
+  color: var(--access-edit-fg);
+  background: linear-gradient(
+    100deg,
+    var(--access-edit-fg) 0%,
+    var(--access-edit-fg) 40%,
+    var(--brand-green-bright) 50%,
+    var(--access-edit-fg) 60%,
+    var(--access-edit-fg) 100%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: skills-new-sweep 2.8s ease-in-out infinite;
+}
+@keyframes skills-new-sweep {
+  0% {
+    background-position: 100% 0;
+  }
+  60%,
+  100% {
+    background-position: 0% 0;
+  }
+}
+.skills-sparkles {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.skills-sparkle {
+  position: absolute;
+  line-height: 1;
+  color: var(--brand-green);
+  opacity: 0;
+  transform: scale(0);
+  animation-name: skills-sparkle;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+/* Lit for the first 30% of each loop: nine sparkles ⇒ about 2–3 at a time. */
+@keyframes skills-sparkle {
+  0%,
+  30%,
+  100% {
+    opacity: 0;
+    transform: scale(0) rotate(0deg);
+  }
+  15% {
+    opacity: var(--sparkle-peak, 0.8);
+    transform: scale(1) rotate(45deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skills-shortcut-new-text {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+  .skills-sparkles {
+    display: none;
+  }
+}
