@@ -12,7 +12,7 @@ import { checkSkillsNow, isSkillOnThisDevice, setSkillOnThisDevice, showDelivery
 import { groupSkills, type SkillGroup } from "../../lib/skills/grouping";
 import { countLive, deviceItems } from "../../lib/skills/deviceGrouping";
 import { deviceSeen, scanDevice, useDeviceScan } from "../../lib/skills/deviceScan";
-import { overallState, stateLines, targetStates } from "../../lib/skills/installState";
+import { AI_TOOL_NAME, detectedAiTools, overallState, stateLines, targetStates, teamAvailability } from "../../lib/skills/installState";
 import { loadSkillsPrefs } from "../../lib/skills/prefs";
 import { skillDisplayName } from "../../lib/skills/display";
 import type { SkillFileInput, SkillsCatalog, SkillSummary } from "../../lib/skills/types";
@@ -30,7 +30,7 @@ import { RefreshIcon, EmptyState, SkillCard, GitHubGlyph, InstallButton, LoadErr
 import { Spinner } from "../Spinner";
 import { withTimeout } from "../../lib/skills/loading";
 import { primeCatalog } from "../../lib/skills/catalogCache";
-import { WorksWith } from "./ToolLogos";
+import { ToolLogo, WorksWith } from "./ToolLogos";
 import { DeviceSkillsView } from "./DeviceSkillsView";
 import { NewSkillDialog } from "./NewSkillDialog";
 import { downloadSkillZip, SkillDetail } from "./SkillDetail";
@@ -432,6 +432,23 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     );
   };
 
+  /** The AI tools that use this skill on this computer, as small marks (none when it isn't here). */
+  const toolsHere = (s: SkillSummary) => {
+    if (s.effectiveVersion === null) return null;
+    const optedIn = s.delivery === "required" || isSkillOnThisDevice(serverUrl, orgId, s.id);
+    const on = teamAvailability(targetStates(device.results, targetsOn, orgId, s.id), optedIn, detectedAiTools(device.targets)).filter(
+      (t) => t.on,
+    );
+    if (on.length === 0) return null;
+    return (
+      <span className="skills-card-tools" aria-label={`Used by ${on.map((t) => AI_TOOL_NAME[t.tool]).join(", ")} on this computer`}>
+        {on.map((t) => (
+          <ToolLogo key={t.tool} tool={t.tool} size={14} title={`${AI_TOOL_NAME[t.tool]} uses it on this computer`} />
+        ))}
+      </span>
+    );
+  };
+
   const openProps = (s: SkillSummary) => ({
     role: "button" as const,
     tabIndex: 0,
@@ -453,6 +470,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
             titleExtra={newIds.has(s.id) && <span className="skills-new-chip">New</span>}
             byline={metaLine(s, true)}
             description={s.description || "No description yet."}
+            footer={toolsHere(s)}
             action={install(s).button}
             className={`${ringIds.has(s.id) ? "is-highlight" : ""}${leaving.has(s.id) ? " is-leaving" : ""}`.trim()}
             li={{ "data-skill-id": s.id, ...openProps(s) }}

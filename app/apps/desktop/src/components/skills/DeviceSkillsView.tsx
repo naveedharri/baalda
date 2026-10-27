@@ -27,8 +27,8 @@ import { toast } from "../../lib/toast";
 import { useStore } from "../../store";
 import { markDeviceSeen, scanDevice, useDeviceScan } from "../../lib/skills/deviceScan";
 import { DeviceSkillFiles } from "./DeviceSkillFiles";
-import { AvailableIn } from "./ToolLogos";
-import { detectedAiTools } from "../../lib/skills/installState";
+import { AvailableIn, ToolLogo } from "./ToolLogos";
+import { AI_TOOL_NAME, detectedAiTools } from "../../lib/skills/installState";
 import { AsyncButton } from "../AsyncButton";
 import { BusyButton, SkillCard, EmptyState, InstallButton, LoadError, ProgressBar, SkillGridSkeleton, SkillIcon, Tag, withTildes } from "./parts";
 
@@ -88,6 +88,12 @@ export function DeviceSkillsView({
   const me = useStore((s) => s.session?.user.name || s.session?.user.email || "a teammate");
   /** Cards whose quick Add to team is running. */
   const [adding, setAdding] = useState<ReadonlySet<string>>(new Set());
+  // Which AI tools are installed here; signed out (no skills host) asks Rust directly.
+  const [ownTargets, setOwnTargets] = useState<ipc.SkillTargetInfo[]>([]);
+  useEffect(() => {
+    if (device.targets.length === 0) ipc.skillsTargets().then(setOwnTargets, () => {});
+  }, [device.targets.length]);
+  const detected = detectedAiTools(device.targets.length > 0 ? device.targets : ownTargets);
   useEffect(() => {
     onPageChange?.(open !== null);
     return () => onPageChange?.(false);
@@ -132,11 +138,10 @@ export function DeviceSkillsView({
       return next;
     });
 
-  /** "Claude · Codex · 7 files", plus where it lives when the name is shared. */
+  /** "7 files", plus the plugin and where it lives when the name is shared; the tools are logos at the foot. */
   const metaText = (item: DeviceItem) =>
     [
       item.pluginName ? `${item.pluginName}${item.pluginVersion ? ` v${item.pluginVersion}` : ""}` : null,
-      usedByText(item) || null,
       item.hint,
       filesText(item),
     ]
@@ -165,6 +170,19 @@ export function DeviceSkillsView({
       });
     }
   };
+  /** The AI tools that can use this skill here, as small marks at the card's foot. */
+  const toolMarks = (item: DeviceItem) => {
+    const on = deviceAvailability(item, detected).filter((t) => t.on);
+    if (on.length === 0) return null;
+    return (
+      <span className="skills-card-tools" aria-label={`Used by ${on.map((t) => AI_TOOL_NAME[t.tool]).join(", ")} on this computer`}>
+        {on.map((t) => (
+          <ToolLogo key={t.tool} tool={t.tool} size={14} title={`${AI_TOOL_NAME[t.tool]} uses it on this computer`} />
+        ))}
+      </span>
+    );
+  };
+
   /** The card's square: Add to team, busy, or a ✓ once the team has that name. */
   const shareAction = (item: DeviceItem) => {
     if (!canShare) return undefined;
@@ -201,6 +219,7 @@ export function DeviceSkillsView({
               </>
             }
             description={item.description || "No description."}
+            footer={toolMarks(item)}
             action={shareAction(item)}
             className={isDisabled(item) ? "is-disabled" : ""}
             li={itemProps(item)}
