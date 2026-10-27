@@ -383,6 +383,10 @@ export function planBinarySync(
   const localShas = new Set(local.map((a) => a.sha256));
   const localPaths = new Set(local.map((a) => pathKey(a.relPath)));
   const serverShas = new Set(server.map((b) => b.sha256));
+  /** Shas some server row holds as a tree file (anything not an `attachments/` drop). */
+  const treeShas = new Set(
+    server.filter((b) => !b.relPath || !isUnderAttachments(b.relPath)).map((b) => b.sha256),
+  );
 
   const toUpload: PlannedUpload[] = [];
   const toReplace: BinaryReplace[] = [];
@@ -487,12 +491,21 @@ export function planBinarySync(
       toUpload.push(a);
       continue;
     }
-    // Same bytes as something already on the server, but a tree file with no
-    // `files` id is a file the server does not know yet: an attachment copied
-    // into a folder (#343) used to be skipped here forever. It still goes up,
-    // so it registers; the intent dedupes it, and no bytes move. A true
-    // `attachments/` duplicate stays skipped.
-    if (ctx && !isUnderAttachments(a.relPath) && !ctx.docIdFor(a.relPath)) toUpload.push(a);
+    // Same bytes as something already on the server. When the server holds
+    // them ONLY as `attachments/` drops, a tree file with no `files` id is a
+    // file the server does not know yet: an attachment copied into a folder
+    // (#343) used to be skipped here forever. It still goes up, so it
+    // registers; the intent dedupes it, and no bytes move. A sha any tree row
+    // holds (this file seen fresh, or its pre-rename path) stays skipped and
+    // confirms from the listing, and a true `attachments/` duplicate too.
+    if (
+      ctx &&
+      !isUnderAttachments(a.relPath) &&
+      !ctx.docIdFor(a.relPath) &&
+      !treeShas.has(a.sha256)
+    ) {
+      toUpload.push(a);
+    }
   }
   const toDownload = server.filter(
     (b) =>
