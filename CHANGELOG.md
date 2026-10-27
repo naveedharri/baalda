@@ -8,6 +8,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Agent Skills (0.1.89).** Vault Settings → Agent Skills: owners and admins create, upload (.zip),
+  import from GitHub marketplaces (Anthropic, OpenAI and BenAI built in) and publish versioned team
+  skills; Baalda installs them into Claude (`~/.claude/skills`) and Codex, Cursor, Gemini CLI, Copilot
+  and OpenCode (`~/.agents/skills`), Required or Optional per skill, live on every member's app.
+  "On this device" lists the skills already on the computer and adds any to the team. Account Settings
+  → AI tools shows each tool's state. Server: migration 060, `/api/skills`, the `skills-changed` vault
+  frame and MCP `list_skills`/`get_skill`/`read_skill_file`. See `docs/SKILLS.md`.
+- **Push-to-talk in the side panel (0.1.89).** The talk button moved from the toolbar into the side
+  panel's tab strip, replacing the duplicate Versions tab; who is talking still shows in the toolbar.
 - **A version before any large deletion (server).** When one edit removes most of a note, the
   server first keeps the note as it was, shown in Version History as "Before large deletion".
   Owners and admins can also list notes damaged by past sync bugs (emptied, or full of repeated
@@ -22,6 +31,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (#228).
 
 ### Fixed
+- **Attachment list for members with folder access (0.1.89, #338).** The list no longer times out in
+  large vaults for members without vault-wide access; the permission filter is set-based with the
+  same results.
 - Hiding Home unsets the personal Home and disables Home startup/navigation on
   this device. Publishing vault Home adds view access without imposing a lock
   on owners, admins or existing editors; ordinary Access controls remain in charge.
