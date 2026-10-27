@@ -21,6 +21,8 @@
     (every app still installs it). Ask before each release: silent, or notes?
 -->
 
+## 0.1.90
+
 ## 0.1.89
 
 - **Agent Skills: one place for all your AI skills.** Add a skill once and it reaches your whole team's Claude, Codex, Cursor and other AI tools, always up to date. In Vault Settings.
