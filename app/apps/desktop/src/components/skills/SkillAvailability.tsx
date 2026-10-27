@@ -172,8 +172,8 @@ export function InstallControl({
         <SkillsMenuButton
           label={
             <>
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M20 6 9 17l-5-5" />
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 10.5v1.75c0 .55.45 1 1 1h8c.55 0 1-.45 1-1V10.5M5 6.25l2.25 2.25L11.5 4" />
               </svg>
               Installed
             </>

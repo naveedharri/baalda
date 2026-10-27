@@ -4518,7 +4518,6 @@ button.secondary.about-update-btn:disabled {
   color: var(--text-secondary);
   font-size: var(--fs-sm);
   line-height: var(--lh-body);
-  max-width: 46ch;
 }
 /* Gate panel shown when a locked team section is opened on a local vault. */
 .sync-gate {

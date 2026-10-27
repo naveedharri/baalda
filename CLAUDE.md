@@ -585,8 +585,8 @@ resumed unless a switch to another URL landed). Device prefs (`prefs.ts`, localS
 server|org|skill(|target). A skill switched Required → Optional stays on a device that holds our
 copy and never opted out (`syncEngine.ts impliedOptIns`, saved as an opt-in before planning);
 delivery changes show at once (`syncHost.ts showDeliveryNow`, undone on a refused PATCH). UI: Vault Settings → **Skills** (`components/skills/`; admins edit,
-members read and opt in): a grid of cards (no list view), with a Team | On this device toggle (the device side leaves out team copies)
-(both counted; the read-only device scan runs once per session, `deviceScan.ts`), grouped "Shared with your team" first then one group per import source (team open and sources closed by default; every group toggles, and a search opens all)
+members read and opt in): a grid of cards (no list view), with a Team | On this device toggle (the device side leaves out team copies, first group open, and admins get a quick Add to team square per card)
+(both counted; the read-only device scan runs once per session, `deviceScan.ts`), grouped "Shared with your team" first then one group per import source (only the first group open by default; every group toggles, and a search opens all)
 (`lib/skills/grouping.ts`); a skill's page has one-click Publish (auto note, `publishNotes.ts`), delivery and version menus, Versions with
 .zip download, and a Draft editor: a file tree (`fileTree.ts`, folders first, SKILL.md pinned)
 beside a standalone CodeMirror 6 view (`SkillCodeEditor.tsx`, NOT the CRDT note editor; one undo
@@ -602,7 +602,9 @@ OS keychain (`baalda.skills.github:<serverUrl>|<orgId>`), managed on the marketp
   BUILT IN for every vault, never saved as sources; then the vault's saved sources and an Add card),
   each opening a grid of skill cards. A card's mark is the repo's own `logo|icon.(svg|png|jpg|webp)`
   (≤512 KB; `.claude-plugin/`, `.agents/plugins/`, root, `.github/`, `assets/`, `docs/` in that order,
-  `findRepoLogo`), read through the reader as a `blob:` URL, else the owner's GitHub picture. a pasted `owner/repo` / GitHub URL / `@ref` is saved as a vault
+  `findRepoLogo`), read through the reader as a `blob:` URL, else the owner's GitHub picture. A card's + is "Import all": it reads the full listing, confirms the
+  count of new usable skills (one per name; imported, name-taken and refused ones skipped), then imports
+  4 at a time with progress on the card and one summary toast; a ✓ once nothing is left to add, which offers "Remove all" (confirm; deletes every skill imported from that repo+ref, 4 at a time). a pasted `owner/repo` / GitHub URL / `@ref` is saved as a vault
   source, then browsed with `commits/{ref ?? HEAD}` + ONE recursive `git/trees` call (a `truncated`
   tree is refused). Detection, first match wins: Claude (`.claude-plugin/marketplace.json`,
   relative sources via `metadata.pluginRoot`, `{source:"github"}` followed into its repo, other

@@ -30,7 +30,7 @@ import { DeviceSkillFiles } from "./DeviceSkillFiles";
 import { AvailableIn } from "./ToolLogos";
 import { detectedAiTools } from "../../lib/skills/installState";
 import { AsyncButton } from "../AsyncButton";
-import { BusyButton, SkillCard, EmptyState, LoadError, ProgressBar, RefreshIcon, SkillGridSkeleton, SkillIcon, Tag, withTildes } from "./parts";
+import { BusyButton, SkillCard, EmptyState, InstallButton, LoadError, ProgressBar, SkillGridSkeleton, SkillIcon, Tag, withTildes } from "./parts";
 
 
 function message(e: unknown): string {
@@ -54,7 +54,9 @@ export function DeviceSkillsView({
   canShare,
   vaultSkills,
   onShared,
-  onBack,
+  onAddedHere,
+  onOpenTeamSkill,
+  closePage = 0,
 }: {
   /** The Skills tab toolbar's search. */
   filter: string;
@@ -64,10 +66,14 @@ export function DeviceSkillsView({
   vaultSkills: readonly SkillSummary[];
   /** A skill was added to the vault; ring it on the Team grid. */
   onShared: (skillId: string) => void;
+  /** A card's quick Add to team: refresh the catalog but stay on this view. */
+  onAddedHere?: (skillId: string) => void;
+  /** Open a team skill's page (the Team tab's), from a card's "shared" square. */
+  onOpenTeamSkill?: (skillId: string) => void;
+  /** Bumped by the tab's "← On this device" link (above the page title): back to the grid. */
+  closePage?: number;
   /** A skill's page is open (the tab hides its footer there). */
   onPageChange?: (open: boolean) => void;
-  /** Back to the Team grid (the same as the toolbar's Team toggle). */
-  onBack?: () => void;
 }) {
   const device = useSkillsDeviceState();
   // The session's scan (the Skills tab already started it); Refresh rescans.
@@ -76,6 +82,12 @@ export function DeviceSkillsView({
   /** Groups flipped from their default: the first open, the rest closed. */
   const [flipped, setFlipped] = useState<ReadonlySet<string>>(new Set());
   const [open, setOpen] = useState<DeviceItem | null>(null);
+  useEffect(() => {
+    if (closePage > 0) setOpen(null);
+  }, [closePage]);
+  const me = useStore((s) => s.session?.user.name || s.session?.user.email || "a teammate");
+  /** Cards whose quick Add to team is running. */
+  const [adding, setAdding] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
     onPageChange?.(open !== null);
     return () => onPageChange?.(false);
@@ -101,8 +113,8 @@ export function DeviceSkillsView({
         orgId={orgId}
         canShare={canShare && !open.managed}
         vaultSkills={vaultSkills}
-        onBack={() => setOpen(null)}
         onShared={onShared}
+        onOpenTeamSkill={onOpenTeamSkill}
       />
     );
   }
@@ -141,6 +153,41 @@ export function DeviceSkillsView({
     },
   });
 
+  const quickAdd = async (item: DeviceItem) => {
+    setAdding((a) => new Set(a).add(item.realPath));
+    try {
+      await addDeviceSkillToTeam({ item, orgId, vaultSkills, me, onShared: (id) => onAddedHere?.(id) });
+    } finally {
+      setAdding((a) => {
+        const next = new Set(a);
+        next.delete(item.realPath);
+        return next;
+      });
+    }
+  };
+  /** The card's square: Add to team, busy, or a ✓ once the team has that name. */
+  const shareAction = (item: DeviceItem) => {
+    if (!canShare) return undefined;
+    if (adding.has(item.realPath)) return <InstallButton kind="busy" title="Adding to your team…" />;
+    const team = vaultSkills.find((v) => v.name.toLowerCase() === item.name.toLowerCase());
+    if (team) {
+      return (
+        <InstallButton
+          kind="shared"
+          title={`Already shared with your team${onOpenTeamSkill ? "\nClick to open the team's copy" : ""}`}
+          onClick={onOpenTeamSkill ? () => onOpenTeamSkill(team.id) : undefined}
+        />
+      );
+    }
+    return (
+      <InstallButton
+        kind="share"
+        title="Add to team\nTeammates can install it from Agent Skills"
+        onClick={() => void quickAdd(item)}
+      />
+    );
+  };
+
   const body = (g: DeviceGroup) => (
       <ul className="skills-grid">
         {g.items.map((item) => (
@@ -154,6 +201,7 @@ export function DeviceSkillsView({
               </>
             }
             description={item.description || "No description."}
+            action={shareAction(item)}
             className={isDisabled(item) ? "is-disabled" : ""}
             li={itemProps(item)}
           />
@@ -163,27 +211,9 @@ export function DeviceSkillsView({
 
   return (
     <>
-      {/* The back link and Refresh share one row; the count is on the toggle already. */}
-      <div className="skills-source-bar">
-        {onBack ? (
-          <button type="button" className="link-btn member-profile-back" onClick={onBack}>
-            ← Team skills
-          </button>
-        ) : (
-          <span />
-        )}
-        <button
-          type="button"
-          className={`icon-btn skills-icon-btn${scan.status === "loading" || (scan.status === "ready" && scan.refreshing) ? " is-spinning" : ""}`}
-          disabled={scan.status === "loading" || (scan.status === "ready" && !!scan.refreshing)}
-          onClick={() => void refresh()}
-          aria-label="Refresh"
-          title="Refresh"
-        >
-          <RefreshIcon />
-        </button>
-      </div>
-      <ProgressBar active={scan.status === "ready" && !!scan.refreshing} />
+      {/* Refresh is in the tab's header; its bar floats in the gap below it,
+          taking no room, so this tab's content starts where Team's does. */}
+      <ProgressBar floating active={scan.status === "ready" && !!scan.refreshing} />
 
       {scan.status === "ready" && scan.errors.length > 0 && (
         <div className="field-hint skills-quiet-line" title={scan.errors.map((e) => `${e.root}: ${e.error}`).join("\n")}>
@@ -259,6 +289,63 @@ function addFailedText(name: string, raw: string): string {
   return `Couldn't add ${skillDisplayName(name)} to the team: ${limitProblemText(raw) ?? raw}`;
 }
 
+/**
+ * Add a skill on this computer to the team: read its folder (Rust's reader:
+ * no dot folders or build output, no symlinks inside, the upload caps), create
+ * it under its SKILL.md name and publish v1 as Optional.
+ */
+async function addDeviceSkillToTeam({
+  item,
+  orgId,
+  vaultSkills,
+  me,
+  onShared,
+}: {
+  item: DeviceItem;
+  orgId: string;
+  vaultSkills: readonly SkillSummary[];
+  me: string;
+  onShared: (skillId: string) => void;
+}): Promise<void> {
+  let bundle: ipc.SkillBundle;
+  try {
+    bundle = await ipc.skillsReadFolder(item.realPath);
+  } catch (e) {
+    toast(addFailedText(item.name, message(e)), "error");
+    return;
+  }
+  const mdFile = bundle.files.find((f) => f.path === "SKILL.md");
+  const skillMd = mdFile ? base64ToText(mdFile.contentBase64) : null;
+  const fm = skillMd ? parseSkillFrontmatter(skillMd) : null;
+  const name = fm?.ok && isValidSkillName(fm.name) ? fm.name : suggestSkillName(bundle.suggestedName);
+  if (!isValidSkillName(name)) {
+    toast(`"${item.name}" can't be used as a skill name.`, "error");
+    return;
+  }
+  if (vaultSkills.some((s) => s.name === name)) {
+    toast(`A skill named ${skillDisplayName(name)} already exists in this vault.`, "error");
+    return;
+  }
+  try {
+    const files = bundle.files.map((f) => ({ path: f.path, contentBase64: f.contentBase64, executable: f.executable, sha256: f.sha256 }));
+    const created = await authManager.api.createSkill(orgId, name, files);
+    try {
+      await authManager.api.publishSkill(orgId, created.id, created.draftRevision, `Added from ${me}'s computer`);
+      toast(`Added ${skillDisplayName(name)} to the team · teammates can install it from Skills`);
+    } catch (e) {
+      toast(`Added ${skillDisplayName(name)} to the team as a draft: ${message(e)}`, "neutral");
+    }
+    onShared(created.id);
+  } catch (e) {
+    toast(
+      skillErrorCode(e) === "skill_name_taken"
+        ? `A skill named ${skillDisplayName(name)} already exists in this vault.`
+        : addFailedText(name, skillErrorCode(e) ?? message(e)),
+      "error",
+    );
+  }
+}
+
 /** One device skill, read-only: where it lives, its SKILL.md, and Add to team. */
 function DeviceSkillPreview({
   item,
@@ -266,17 +353,19 @@ function DeviceSkillPreview({
   orgId,
   canShare,
   vaultSkills,
-  onBack,
   onShared,
+  onOpenTeamSkill,
 }: {
   item: DeviceItem;
   home: string | null;
   orgId: string;
   canShare: boolean;
   vaultSkills: readonly SkillSummary[];
-  onBack: () => void;
   onShared: (skillId: string) => void;
+  onOpenTeamSkill?: (skillId: string) => void;
 }) {
+  /** The team's skill of the same name: then this page offers it, not Add to team. */
+  const team = vaultSkills.find((v) => v.name.toLowerCase() === item.name.toLowerCase());
   const hostTargets = useSkillsDeviceState().targets;
   const [ownTargets, setOwnTargets] = useState<ipc.SkillTargetInfo[]>([]);
   const targets = hostTargets.length > 0 ? hostTargets : ownTargets;
@@ -287,47 +376,7 @@ function DeviceSkillPreview({
   const me = useStore((s) => s.session?.user.name || s.session?.user.email || "a teammate");
 
 
-  const share = async () => {
-    // Rust's folder reader (skips dot folders and build output, refuses
-    // symlinks inside, holds the upload caps), on the resolved folder.
-    let bundle: ipc.SkillBundle;
-    try {
-      bundle = await ipc.skillsReadFolder(item.realPath);
-    } catch (e) {
-      toast(addFailedText(item.name, message(e)), "error");
-      return;
-    }
-    const mdFile = bundle.files.find((f) => f.path === "SKILL.md");
-    const skillMd = mdFile ? base64ToText(mdFile.contentBase64) : null;
-    const fm = skillMd ? parseSkillFrontmatter(skillMd) : null;
-    const name = fm?.ok && isValidSkillName(fm.name) ? fm.name : suggestSkillName(bundle.suggestedName);
-    if (!isValidSkillName(name)) {
-      toast(`"${item.name}" can't be used as a skill name.`, "error");
-      return;
-    }
-    if (vaultSkills.some((s) => s.name === name)) {
-      toast(`A skill named ${skillDisplayName(name)} already exists in this vault.`, "error");
-      return;
-    }
-    try {
-      const files = bundle.files.map((f) => ({ path: f.path, contentBase64: f.contentBase64, executable: f.executable, sha256: f.sha256 }));
-      const created = await authManager.api.createSkill(orgId, name, files);
-      try {
-        await authManager.api.publishSkill(orgId, created.id, created.draftRevision, `Added from ${me}'s computer`);
-        toast(`Added ${skillDisplayName(name)} to the team · teammates can install it from Skills`);
-      } catch (e) {
-        toast(`Added ${skillDisplayName(name)} to the team as a draft: ${message(e)}`, "neutral");
-      }
-      onShared(created.id);
-    } catch (e) {
-      toast(
-        skillErrorCode(e) === "skill_name_taken"
-          ? `A skill named ${skillDisplayName(name)} already exists in this vault.`
-          : addFailedText(name, skillErrorCode(e) ?? message(e)),
-        "error",
-      );
-    }
-  };
+  const share = () => addDeviceSkillToTeam({ item, orgId, vaultSkills, me, onShared });
 
   const byline = [
     item.pluginName ? `${item.pluginName}${item.marketplace ? ` · ${item.marketplace}` : ""}${item.pluginVersion ? ` · v${item.pluginVersion}` : ""}` : usedByText(item) || null,
@@ -339,9 +388,6 @@ function DeviceSkillPreview({
 
   return (
     <section className="member-profile" aria-label={item.name}>
-      <button type="button" className="link-btn member-profile-back" onClick={onBack}>
-        ← On this device
-      </button>
       <div className="skills-detail-head">
         <SkillIcon large />
         <div className="skills-detail-title">
@@ -357,15 +403,32 @@ function DeviceSkillPreview({
           <AsyncButton className="secondary skills-hdr-btn" onClick={() => ipc.revealInFileManager(item.paths[0])}>
             {ipc.revealLabel()}
           </AsyncButton>
-          {canShare && (
-            <BusyButton
-              className="primary skills-hdr-btn"
-              busyLabel="Adding…"
-              title="Adds it to your team's skills as Optional. Teammates can install it from Skills."
-              onClick={share}
+          {team ? (
+            <button
+              type="button"
+              className="secondary skills-hdr-btn skills-shared-btn"
+              title="Your team already has this skill. Open the team's copy."
+              disabled={!onOpenTeamSkill}
+              onClick={() => onOpenTeamSkill?.(team.id)}
             >
-              Add to team
-            </BusyButton>
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="6.5" cy="5.25" r="2.5" />
+                <path d="M1.75 13.5c0-2.5 2.1-4.25 4.75-4.25 1.2 0 2.3.35 3.1.95" />
+                <path d="m10.5 11.5 1.5 1.5 3-3.25" />
+              </svg>
+              Shared with your team
+            </button>
+          ) : (
+            canShare && (
+              <BusyButton
+                className="primary skills-hdr-btn"
+                busyLabel="Adding…"
+                title="Adds it to your team's skills as Optional. Teammates can install it from Skills."
+                onClick={share}
+              >
+                Add to team
+              </BusyButton>
+            )
           )}
         </div>
       </div>

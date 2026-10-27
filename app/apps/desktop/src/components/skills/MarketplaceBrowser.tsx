@@ -4,7 +4,7 @@
 // upstream change into an imported skill's draft. Every GitHub call runs here,
 // with the admin's own token when this device has one.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { skillErrorCode } from "../../lib/api";
 import { authManager } from "../../lib/auth/authManager";
 import * as ipc from "../../lib/ipc";
@@ -21,6 +21,7 @@ import {
   ownerAvatarUrl,
   peekMarketplace,
   repoLogoUrl,
+  type GitHubReader,
   type MarketplaceListing,
   type MarketplacePeek,
   type MarketplaceSkill,
@@ -211,6 +212,9 @@ function MarketTile({ logo, repo, logoUrl }: { logo: ToolId | null; repo: string
   );
 }
 
+/** Skills imported at once by a card's "Import all". */
+const IMPORT_ALL_CONCURRENCY = 4;
+
 /** How many skills a card shows before it is opened (two cheap GitHub calls each). */
 const PEEK_LIMIT = 12;
 
@@ -253,6 +257,12 @@ export function MarketplaceBrowser({
   /** Each card's own logo file as a `blob:` URL, once read. */
   const [logos, setLogos] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState(false);
+  /** A card's "Import all": reading the listing, or importing with progress. */
+  const [bulk, setBulk] = useState<
+    Record<string, { phase: "reading" } | { phase: "importing" | "removing"; done: number; total: number }>
+  >({});
+  const [confirmAll, setConfirmAll] = useState<{ market: Market; skills: (MarketplaceSkill & { name: string })[] } | null>(null);
+  const [confirmRemoveAll, setConfirmRemoveAll] = useState<{ market: Market; skills: SkillSummary[] } | null>(null);
   const [removing, setRemoving] = useState<Market | null>(null);
   /** Rows whose import or pull is running: their square spins. */
   const [importing, setImporting] = useState<ReadonlySet<string>>(new Set());
@@ -273,28 +283,46 @@ export function MarketplaceBrowser({
   const markets = useMemo(() => marketsOf(sources ?? []), [sources]);
   useScrollReset(selected ?? "overview", false);
 
-  const open = useCallback(
-    async (market: Market, force = false) => {
-      setSelected(market.key);
-      setFilter("");
-      if (!force && browse[market.key] && browse[market.key].status !== "error") return;
+  /** Finished listings per market, so "Import all" and a reopen don't read GitHub twice. */
+  const listings = useRef(new Map<string, Promise<MarketplaceListing>>());
+
+  /** Read a market's whole listing (every SKILL.md), showing rows as they land. */
+  const loadListing = useCallback(
+    (market: Market, force = false): Promise<MarketplaceListing> => {
+      const hit = listings.current.get(market.key);
+      if (hit && !force) return hit;
       setBrowse((b) => ({ ...b, [market.key]: { status: "loading" } }));
-      try {
+      const p = (async () => {
         const reader = await readerFor(serverUrl, orgId);
         // Cards show as soon as the repo's shape is known; descriptions fill in.
-        const listing = await withTimeout(
+        return withTimeout(
           browseMarketplace(reader, { repo: market.repo, ref: market.ref }, (partial) =>
             setBrowse((b) => ({ ...b, [market.key]: { status: "ready", listing: partial } })),
           ),
           120_000,
           "GitHub is taking too long to answer. Try again in a moment.",
         );
-        setBrowse((b) => ({ ...b, [market.key]: { status: "ready", listing } }));
-      } catch (e) {
-        setBrowse((b) => ({ ...b, [market.key]: { status: "error", message: message(e) } }));
-      }
+      })();
+      listings.current.set(market.key, p);
+      p.then(
+        (listing) => setBrowse((b) => ({ ...b, [market.key]: { status: "ready", listing } })),
+        (e) => {
+          listings.current.delete(market.key);
+          setBrowse((b) => ({ ...b, [market.key]: { status: "error", message: message(e) } }));
+        },
+      );
+      return p;
     },
-    [browse, serverUrl, orgId],
+    [serverUrl, orgId],
+  );
+
+  const open = useCallback(
+    async (market: Market, force = false) => {
+      setSelected(market.key);
+      setFilter("");
+      await loadListing(market, force).catch(() => {});
+    },
+    [loadListing],
   );
 
   useEffect(() => {
@@ -351,6 +379,19 @@ export function MarketplaceBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [markets, serverUrl, orgId]);
 
+  // A market the vault already imported from: read its full listing quietly,
+  // so the card can tell "everything is in" (a ✓ that offers Remove all) from
+  // "some is left" (the +). The quick peek counts folders, not importable skills.
+  useEffect(() => {
+    if (sources === null) return;
+    for (const m of markets) {
+      if (browse[m.key] || bulk[m.key]) continue;
+      if (!vaultSkills.some((k) => k.source && sameRepo(k.source.repo, m.repo) && (k.source.ref ?? null) === m.ref)) continue;
+      void loadListing(m).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [markets, vaultSkills, sources]);
+
   /** Open a built-in, or save and open a repo; answers why not, or null when done. */
   async function addSource(repo: string, ref: string | null, known: SkillSource[] | null): Promise<string | null> {
     const builtIn = ref === null ? marketsOf(known ?? []).find((m) => m.builtIn && sameRepo(m.repo, repo)) : undefined;
@@ -384,20 +425,29 @@ export function MarketplaceBrowser({
     toast(`Removed ${market.repo}. Skills you imported stay.`, "neutral");
   };
 
+  /** Create and publish one skill as v1. Throws when it couldn't be created. */
+  const importOne = async (
+    skill: MarketplaceSkill & { name: string },
+    reader: GitHubReader,
+  ): Promise<{ id: string; version: number | null; draftError: string | null }> => {
+    const files = await fetchSkillFolder(reader, skill);
+    const detail = await authManager.api.createSkill(orgId, skill.name, files, originOf(skill));
+    try {
+      const v = await authManager.api.publishSkill(orgId, detail.id, detail.draftRevision, importNotes(skill));
+      return { id: detail.id, version: v.version, draftError: null };
+    } catch (e) {
+      return { id: detail.id, version: null, draftError: message(e) };
+    }
+  };
+
   const importSkill = async (skill: MarketplaceSkill) => {
     if (!skill.name) return;
     const name = skill.name;
     try {
-      const reader = await readerFor(serverUrl, orgId);
-      const files = await fetchSkillFolder(reader, skill);
-      const detail = await authManager.api.createSkill(orgId, name, files, originOf(skill));
-      onImported?.(detail.id);
-      try {
-        const v = await authManager.api.publishSkill(orgId, detail.id, detail.draftRevision, importNotes(skill));
-        toast(`Imported ${skillDisplayName(name)} v${v.version}.`);
-      } catch (e) {
-        toast(`Imported ${skillDisplayName(name)} as a draft: ${message(e)}`, "neutral");
-      }
+      const out = await importOne({ ...skill, name }, await readerFor(serverUrl, orgId));
+      onImported?.(out.id);
+      if (out.version !== null) toast(`Imported ${skillDisplayName(name)} v${out.version}.`);
+      else toast(`Imported ${skillDisplayName(name)} as a draft: ${out.draftError}`, "neutral");
       await onCatalogChanged();
     } catch (e) {
       const code = skillErrorCode(e);
@@ -408,6 +458,81 @@ export function MarketplaceBrowser({
         "error",
       );
     }
+  };
+
+  /** What "Import all" would add: new, usable skills, one per name. */
+  const importable = (listing: MarketplaceListing) => {
+    const seen = new Set<string>();
+    const out: (MarketplaceSkill & { name: string })[] = [];
+    for (const g of listing.groups) {
+      for (const k of g.skills) {
+        if (!k.name || k.problem || k.pending || seen.has(k.name)) continue;
+        if (importStatus(k, vaultSkills).kind !== "new") continue;
+        seen.add(k.name);
+        out.push({ ...k, name: k.name });
+      }
+    }
+    return out;
+  };
+
+  /** The card's +: read the whole marketplace, then confirm how many skills it adds. */
+  const askImportAll = async (market: Market) => {
+    if (bulk[market.key]) return;
+    setBulk((b) => ({ ...b, [market.key]: { phase: "reading" } }));
+    try {
+      const listing = await loadListing(market);
+      const list = importable(listing);
+      if (list.length === 0) {
+        toast(`Everything from ${market.title} is already in this vault.`, "neutral");
+      } else {
+        setConfirmAll({ market, skills: list });
+      }
+    } catch (e) {
+      toast(`Couldn't read ${market.repo}: ${message(e)}`, "error");
+    } finally {
+      setBulk(({ [market.key]: _done, ...rest }) => rest);
+    }
+  };
+
+  /** Import every skill in the list, four at a time, with progress on the card. */
+  const importAll = async (market: Market, list: (MarketplaceSkill & { name: string })[]) => {
+    const total = list.length;
+    let done = 0;
+    let added = 0;
+    let drafts = 0;
+    let skipped = 0;
+    let failed = 0;
+    setBulk((b) => ({ ...b, [market.key]: { phase: "importing", done: 0, total } }));
+    const reader = await readerFor(serverUrl, orgId);
+    let next = 0;
+    const worker = async () => {
+      while (next < list.length) {
+        const skill = list[next++];
+        try {
+          const out = await importOne(skill, reader);
+          onImported?.(out.id);
+          if (out.version !== null) added++;
+          else drafts++;
+        } catch (e) {
+          if (skillErrorCode(e) === "skill_name_taken") skipped++;
+          else failed++;
+        }
+        done++;
+        setBulk((b) => ({ ...b, [market.key]: { phase: "importing", done, total } }));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(IMPORT_ALL_CONCURRENCY, total) }, worker));
+    setBulk(({ [market.key]: _done, ...rest }) => rest);
+    await onCatalogChanged();
+    const parts = [
+      drafts > 0 ? `${drafts} as drafts` : null,
+      skipped > 0 ? `${skipped} skipped (name already used)` : null,
+      failed > 0 ? `${failed} couldn't be imported` : null,
+    ].filter(Boolean);
+    toast(
+      `Imported ${added} ${added === 1 ? "skill" : "skills"} from ${market.title}${parts.length ? `. ${parts.join(", ")}.` : "."}`,
+      failed > 0 ? "error" : undefined,
+    );
   };
 
   const pullUpdate = async (skill: MarketplaceSkill, skillId: string) => {
@@ -448,6 +573,39 @@ export function MarketplaceBrowser({
     [listing, needle],
   );
 
+  /** The vault's skills imported from this market (same repo and ref). */
+  const importedFrom = (m: Market) =>
+    vaultSkills.filter((k) => k.source && sameRepo(k.source.repo, m.repo) && (k.source.ref ?? null) === m.ref);
+
+  /** Remove every skill imported from this market, four at a time, with progress on the card. */
+  const removeAll = async (market: Market, list: SkillSummary[]) => {
+    const total = list.length;
+    let done = 0;
+    let failed = 0;
+    setBulk((b) => ({ ...b, [market.key]: { phase: "removing", done: 0, total } }));
+    let next = 0;
+    const worker = async () => {
+      while (next < list.length) {
+        const skill = list[next++];
+        try {
+          await authManager.api.deleteSkill(orgId, skill.id);
+        } catch {
+          failed++;
+        }
+        done++;
+        setBulk((b) => ({ ...b, [market.key]: { phase: "removing", done, total } }));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(IMPORT_ALL_CONCURRENCY, total) }, worker));
+    setBulk(({ [market.key]: _done, ...rest }) => rest);
+    await onCatalogChanged();
+    const removed = total - failed;
+    toast(
+      `Removed ${removed} ${removed === 1 ? "skill" : "skills"} from the team${failed > 0 ? `. ${failed} couldn't be removed; try again.` : "."}`,
+      failed > 0 ? "error" : undefined,
+    );
+  };
+
   /** A card's count line: the full listing once opened, else the peek. */
   const countOf = (m: Market): string | null => {
     const b = browse[m.key];
@@ -467,7 +625,7 @@ export function MarketplaceBrowser({
     if (busy) {
       side = <InstallButton kind="busy" title="Working…" />;
     } else if (status.kind === "imported") {
-      side = <InstallButton kind="installed" title="In this vault · open" onClick={() => onOpenSkill(status.skillId)} />;
+      side = <InstallButton kind="imported" title="In this vault · open" onClick={() => onOpenSkill(status.skillId)} />;
     } else if (status.kind === "update") {
       side = (
         <InstallButton
@@ -506,7 +664,7 @@ export function MarketplaceBrowser({
 
   if (current) {
     return (
-      <section className="member-profile skills-market" aria-label={current.title}>
+      <section className="member-profile skills-market skills-view-in" aria-label={current.title}>
         <button type="button" className="link-btn member-profile-back" onClick={() => setSelected(null)}>
           ← Marketplaces
         </button>
@@ -602,18 +760,25 @@ export function MarketplaceBrowser({
   }
 
   return (
-    <section className="member-profile skills-market" aria-label="Marketplaces">
-      <button type="button" className="link-btn member-profile-back" onClick={onBack}>
-        ← Agent Skills
-      </button>
-      <div className="skills-market-head">
+    <section className="member-profile skills-market skills-view-in" aria-label="Marketplaces">
+      {/* The Agent Skills header's exact shape, so the title, subtitle and
+          content don't move on the way in; "Agent Skills" is the way back. */}
+      <div className="members-access-header skills-page-head">
         <div>
-          <h2 className="settings-section-title">Marketplaces</h2>
-          <p className="members-access-intro">Import skills from GitHub. Anything you import starts as Optional.</p>
+          <h2 className="settings-section-title skills-crumbs">
+            <button type="button" className="skills-crumb-link" onClick={onBack}>
+              Agent Skills
+            </button>
+            <span className="skills-crumb-sep" aria-hidden="true">/</span>
+            Marketplaces
+          </h2>
+          <p className="skills-intro">Import skills from GitHub. Anything you import starts as Optional.</p>
         </div>
-        <button type="button" className="primary skills-hdr-btn" onClick={() => setAdding(true)}>
-          Add marketplace
-        </button>
+        <div className="skills-actions">
+          <button type="button" className="primary skills-hdr-btn" onClick={() => setAdding(true)}>
+            Add marketplace
+          </button>
+        </div>
       </div>
 
       {error && <div className="auth-error">{error}</div>}
@@ -625,6 +790,16 @@ export function MarketplaceBrowser({
           <ul className="skills-grid skills-market-grid">
             {markets.map((m) => {
               const count = countOf(m);
+              const job = bulk[m.key];
+              const ready = browse[m.key];
+              // Fully read and nothing left to add: a ✓ instead of the +.
+              const mine = importedFrom(m);
+              // Decided only from the full listing: the peek counts folders, and
+              // some folders can't be imported (a shared name, a bad SKILL.md).
+              const listed =
+                ready?.status === "ready" && !ready.listing.groups.some((g) => g.skills.some((k) => k.pending));
+              const allIn = mine.length > 0 && listed && importable(ready.listing).length === 0;
+              const checking = mine.length > 0 && !listed && ready?.status !== "error";
               return (
                 <li
                   key={m.key}
@@ -646,11 +821,36 @@ export function MarketplaceBrowser({
                     </span>
                     <span className="skills-card-byline">
                       <span className="skills-meta-line">
-                        {m.builtIn ? "Built in" : m.source?.addedBy ? `Added by ${m.source.addedBy.name}` : "Added by your team"}
-                        {count ? ` · ${count}` : ""}
+                        {job && job.phase !== "reading"
+                          ? `${job.phase === "importing" ? "Importing" : "Removing"} ${job.done} of ${job.total}…`
+                          : job?.phase === "reading"
+                            ? "Reading every skill…"
+                            : `${m.builtIn ? "Built in" : m.source?.addedBy ? `Added by ${m.source.addedBy.name}` : "Added by your team"}${count ? ` · ${count}` : ""}`}
                       </span>
                     </span>
                     <CardDescription text={m.description} />
+                  </span>
+                  <span className="skills-card-action">
+                    {job ? (
+                      <InstallButton
+                        kind="busy"
+                        title={
+                          job.phase === "reading"
+                            ? "Reading every skill…"
+                            : `${job.phase === "importing" ? "Importing" : "Removing"} ${job.done} of ${job.total}…`
+                        }
+                      />
+                    ) : checking ? (
+                      <InstallButton kind="busy" title="Checking what's already in this vault…" />
+                    ) : allIn ? (
+                      <InstallButton
+                        kind="imported"
+                        title={`Everything from ${m.title} is in this vault\nClick to remove them all`}
+                        onClick={() => setConfirmRemoveAll({ market: m, skills: mine })}
+                      />
+                    ) : (
+                      <InstallButton kind="add" title={`Import every skill from ${m.title}`} onClick={() => void askImportAll(m)} />
+                    )}
                   </span>
                 </li>
               );
@@ -662,6 +862,39 @@ export function MarketplaceBrowser({
       <div className="skills-market-foot">
         <GitHubTokenRow serverUrl={serverUrl} orgId={orgId} />
       </div>
+
+      {confirmAll && (
+        <ConfirmDialog
+          title={`Import ${confirmAll.skills.length} ${confirmAll.skills.length === 1 ? "skill" : "skills"} from ${confirmAll.market.title}?`}
+          confirmLabel="Import all"
+          tone="accent"
+          onCancel={() => setConfirmAll(null)}
+          onConfirm={async () => {
+            const { market, skills } = confirmAll;
+            setConfirmAll(null);
+            void importAll(market, skills);
+          }}
+        >
+          They start as Optional, so they reach someone's AI tools only when that person turns them on.
+          Skills already in this vault are left as they are.
+        </ConfirmDialog>
+      )}
+
+      {confirmRemoveAll && (
+        <ConfirmDialog
+          title={`Remove ${confirmRemoveAll.skills.length} ${confirmRemoveAll.skills.length === 1 ? "skill" : "skills"} from the team?`}
+          confirmLabel="Remove all"
+          onCancel={() => setConfirmRemoveAll(null)}
+          onConfirm={async () => {
+            const { market, skills } = confirmRemoveAll;
+            setConfirmRemoveAll(null);
+            void removeAll(market, skills);
+          }}
+        >
+          Everything imported from {confirmRemoveAll.market.title} leaves the team and everyone's AI tools. A copy
+          someone edited stays on their computer. You can import them again any time.
+        </ConfirmDialog>
+      )}
 
       {adding && (
         <AddMarketplaceDialog

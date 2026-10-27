@@ -916,7 +916,7 @@ code.skills-target-path {
   grid-template-columns: 40px minmax(0, 1fr);
   align-items: start;
   gap: var(--sp-3);
-  min-height: 168px;
+  min-height: 0;
   padding: 18px;
   border: 0;
   border-radius: 12px;
@@ -1129,18 +1129,53 @@ code.skills-target-path {
   cursor: pointer;
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
 }
-.skills-install.is-add:hover {
+/* Add to team: an accent-tinted square, so it reads as an action. */
+.skills-install.is-share {
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.skills-install.is-share:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft-hover);
+  color: var(--accent-hover);
+}
+/* Already shared: the access green, like an installed ✓. */
+.skills-install.is-shared {
+  border-color: color-mix(in srgb, var(--access-edit-fg) 30%, transparent);
+  background: var(--access-edit-bg);
+  color: var(--access-edit-fg);
+}
+.skills-install.is-shared:hover {
+  border-color: color-mix(in srgb, var(--access-edit-fg) 55%, transparent);
+}
+.skills-install.is-shared svg,
+.skills-install.is-share svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.6;
+}
+.skills-install.is-installed svg,
+.skills-install.is-install svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 1.7;
+}
+.skills-install.is-add:hover,
+.skills-install.is-install:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
   border-color: var(--border-strong, var(--border));
 }
 .skills-install.is-installed,
+.skills-install.is-imported,
 .skills-install.is-required {
   border-color: color-mix(in srgb, var(--access-edit-fg) 30%, transparent);
   background: var(--access-edit-bg);
   color: var(--access-edit-fg);
 }
-.skills-install.is-installed:hover {
+.skills-install.is-installed:hover,
+.skills-install.is-imported:hover {
   border-color: color-mix(in srgb, var(--access-edit-fg) 55%, transparent);
 }
 /* Required: fixed, not a toggle. A help cursor and a padlock in place of the ✓. */
@@ -1701,6 +1736,10 @@ button.secondary.skills-install-btn {
   border-radius: 2px;
   background: transparent;
 }
+/* Takes no layout room: drawn in the gap above the next row. */
+.skills-progress.is-floating {
+  margin: -6px 0 4px;
+}
 .skills-progress.is-active {
   background: var(--accent-soft);
 }
@@ -1889,19 +1928,6 @@ button.secondary.skills-fix-btn {
 }
 
 /* ── Marketplaces: an overview of cards, then one marketplace's skills ── */
-.skills-market-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  margin-bottom: var(--sp-4);
-}
-.skills-market-head .members-access-intro {
-  margin-bottom: 0;
-}
-.skills-market-head .skills-hdr-btn {
-  flex: none;
-}
 /* A market's tile holds a brand mark or the GitHub glyph, not the skill glyph. */
 .skills-icon.skills-market-tile {
   color: var(--text-primary);
@@ -1920,12 +1946,10 @@ button.secondary.skills-fix-btn {
   height: 100%;
   object-fit: cover;
 }
-.skills-card.skills-market-card {
-  min-height: 140px;
-}
+/* Title and byline keep clear of the "Import all" square at the top right. */
 .skills-market-card .skills-card-title-row,
 .skills-market-card .skills-card-byline {
-  padding-right: 0;
+  padding-right: 36px;
 }
 .skills-market-card .skills-card-desc {
   margin-right: 0;
@@ -2077,15 +2101,268 @@ button.secondary.skills-fix-btn {
   color: var(--text-tertiary);
 }
 
-/* On this device: the back link sits on the Refresh row, not above it. */
-.skills-source-bar > .member-profile-back {
-  margin-bottom: 0;
-  /* The link's pill padding would indent its arrow past the group chevrons below. */
-  margin-left: calc(-1 * var(--sp-2));
-}
-
 /* A home "~" in a path, lowered from the cap height to sit on the centre line. */
 .skills-tilde {
   position: relative;
   top: 0.2em;
+}
+
+/* An empty Team tab: the message sits in the middle of the space under the
+   header, a little above true centre so it reads as centred. */
+.skills-scroll:has(> .skills-empty.is-page) {
+  display: flex;
+  flex-direction: column;
+}
+.skills-empty.is-page {
+  flex: 1;
+  justify-content: center;
+  padding-bottom: calc(var(--sp-8) * 2);
+}
+
+/* Cards: a bigger tile and a bigger action square, like Claude's skills
+   directory (48px tile, 28px button with a 16px glyph). */
+.skills-card {
+  grid-template-columns: 48px minmax(0, 1fr);
+}
+.skills-card .skills-icon.is-lg {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+}
+.skills-card .skills-icon.is-lg svg {
+  width: 22px;
+  height: 22px;
+}
+.skills-card .skills-icon.skills-market-tile:not(.has-image) svg,
+.skills-card .skills-icon.skills-market-tile .skills-tool,
+.skills-card .skills-icon.skills-market-tile .skills-tool img {
+  width: 24px;
+  height: 24px;
+}
+.skills-card .skills-install {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+.skills-card .skills-install svg {
+  width: 16px;
+  height: 16px;
+}
+.skills-card .skills-install .spinner {
+  width: 14px;
+  height: 14px;
+}
+/* Title and byline keep clear of the larger square (30px + gap). */
+.skills-card .skills-card-title-row,
+.skills-card .skills-card-byline {
+  padding-right: 40px;
+}
+.skills-card.has-more .skills-card-title-row,
+.skills-card.has-more .skills-card-byline {
+  padding-right: 72px;
+}
+.skills-card .skills-card-desc {
+  margin-right: 0;
+}
+.skills-card .skills-skel-icon.is-lg {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+}
+
+/* A device skill the team already has: a green "Shared with your team" that opens the team's copy. */
+button.secondary.skills-hdr-btn.skills-shared-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: color-mix(in srgb, var(--access-edit-fg) 30%, transparent);
+  background: var(--access-edit-bg);
+  color: var(--access-edit-fg);
+}
+button.secondary.skills-hdr-btn.skills-shared-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--access-edit-fg) 55%, transparent);
+}
+
+/* A tab's own header buttons (Team: Browse marketplace + New skill at the end;
+   On this device: Refresh at the start). They stay mounted: folding one
+   shrinks its width to nothing while it fades, so search and the toggle glide
+   over instead of jumping. The 3px inset keeps focus rings unclipped; the
+   negative margin cancels the row's gap beside a folded slot. */
+.skills-hdr-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: 360px;
+  padding: 3px;
+  margin: -3px;
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 1;
+  transition:
+    max-width 280ms var(--ease),
+    opacity 200ms var(--ease),
+    margin 280ms var(--ease);
+}
+.skills-hdr-slot.is-folded {
+  max-width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.skills-hdr-slot.is-start.is-folded {
+  margin-right: calc(-3px - var(--sp-2));
+}
+.skills-hdr-slot.is-end.is-folded {
+  margin-left: calc(-3px - var(--sp-2));
+}
+@media (prefers-reduced-motion: reduce) {
+  .skills-hdr-slot {
+    transition: none;
+  }
+}
+
+/* Refresh in the header on "On this device", in the search button's frame. */
+.skills-refresh-btn.is-spinning svg {
+  animation: skills-spin 0.9s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .skills-refresh-btn.is-spinning svg {
+    animation: none;
+  }
+}
+
+/* ── New skill dialog ── */
+.modal.skills-new-dialog {
+  width: 480px;
+}
+.skills-field-label {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.skills-field-optional {
+  margin-left: 4px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+/* The slash command as teammates will type it: "/" then the name. */
+.skills-slash {
+  flex: none;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-tertiary);
+}
+.skills-name-status {
+  min-height: 18px;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.skills-name-status.is-ok {
+  color: var(--access-edit-fg);
+}
+.skills-name-status.is-bad {
+  color: var(--danger);
+}
+/* The same filled well as the dialog's inputs (App.css `.modal input`). */
+.modal textarea.skills-desc-input {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+  transition:
+    border-color var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.modal textarea.skills-desc-input:hover {
+  border-color: var(--border-strong);
+}
+.modal textarea.skills-desc-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+  background: var(--bg-surface);
+}
+.modal textarea.skills-desc-input::placeholder {
+  color: var(--text-tertiary);
+}
+.skills-desc-count {
+  min-height: 14px;
+  text-align: right;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+
+/* Moving between the grid, Marketplaces and a marketplace: the new view fades
+   in with a 4px rise instead of snapping, and the shared header shape means
+   nothing above the content moves. */
+.skills-view-in {
+  animation: skills-view-in 200ms var(--ease) both;
+}
+@keyframes skills-view-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skills-view-in {
+    animation: none;
+  }
+}
+/* "Agent Skills / Marketplaces": the first part is the way back. */
+.skills-crumbs {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+/* The app's link colour (the other back links' accent), underlined on hover. */
+.skills-crumb-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1.5px;
+  transition:
+    color var(--t-fast) var(--ease),
+    text-decoration-color var(--t-fast) var(--ease);
+}
+.skills-crumb-link:hover {
+  color: var(--accent-hover);
+  text-decoration-color: currentColor;
+}
+.skills-crumb-link:focus-visible {
+  outline: none;
+  border-radius: 4px;
+  box-shadow: var(--focus-ring);
+}
+.skills-crumb-sep {
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+/* The grey header button's edge melts into the white panel and reads smaller
+   than the solid "New skill" beside it (both are 34px): a hairline like the
+   search button's and the toggle's gives it the same visible edge. */
+.skills-page-head button.secondary.skills-hdr-btn {
+  border-color: var(--border);
+}
+.skills-page-head button.secondary.skills-hdr-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
 }

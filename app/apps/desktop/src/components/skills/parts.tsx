@@ -117,7 +117,7 @@ export function WarnMark() {
   );
 }
 
-export type InstallKind = "add" | "installed" | "required" | "busy" | "warn" | "bad" | "update" | "blocked";
+export type InstallKind = "add" | "install" | "share" | "shared" | "installed" | "imported" | "required" | "busy" | "warn" | "bad" | "update" | "blocked";
 
 /**
  * Claude Desktop's install square: "+" to use a skill on this computer, a
@@ -179,6 +179,26 @@ export function InstallButton({
           <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             {kind === "add" ? (
               <path d="M8 3v10M3 8h10" />
+            ) : kind === "installed" ? (
+              // The install tray with a tick: it's on this computer.
+              <path d="M3 10.5v1.75c0 .55.45 1 1 1h8c.55 0 1-.45 1-1V10.5M5 6.25l2.25 2.25L11.5 4" />
+            ) : kind === "install" ? (
+              // Download into a tray: put it on this computer.
+              <path d="M8 2.75v7M5 7l3 3 3-3M3 10.5v1.75c0 .55.45 1 1 1h8c.55 0 1-.45 1-1V10.5" />
+            ) : kind === "share" ? (
+              // A person with a +: add this to the team.
+              <>
+                <circle cx="6.5" cy="5.25" r="2.5" />
+                <path d="M1.75 13.5c0-2.5 2.1-4.25 4.75-4.25 1.2 0 2.3.35 3.1.95" />
+                <path d="M12.75 8.75v4.5M10.5 11h4.5" />
+              </>
+            ) : kind === "shared" ? (
+              // The same person, with a tick: already on the team.
+              <>
+                <circle cx="6.5" cy="5.25" r="2.5" />
+                <path d="M1.75 13.5c0-2.5 2.1-4.25 4.75-4.25 1.2 0 2.3.35 3.1.95" />
+                <path d="m10.5 11.5 1.5 1.5 3-3.25" />
+              </>
             ) : kind === "update" ? (
               <path d="M8 13V3.5M4 7l4-4 4 4" />
             ) : kind === "blocked" ? (
@@ -352,13 +372,16 @@ export function EmptyState({
   title,
   children,
   actions,
+  page = false,
 }: {
   title: string;
   children?: ReactNode;
   actions?: ReactNode;
+  /** The whole view is empty: centre it in the space under the header. */
+  page?: boolean;
 }) {
   return (
-    <div className="skills-empty">
+    <div className={`skills-empty${page ? " is-page" : ""}`}>
       <span className="skills-empty-icon" aria-hidden="true">
         <SkillGlyph size={22} />
       </span>
@@ -635,8 +658,14 @@ export function ToolRowSkeleton() {
 }
 
 /** A thin bar over content that is refreshing: the old content stays put. */
-export function ProgressBar({ active }: { active: boolean }) {
-  return <div className={`skills-progress${active ? " is-active" : ""}`} role={active ? "progressbar" : undefined} aria-hidden={!active} />;
+export function ProgressBar({ active, floating = false }: { active: boolean; floating?: boolean }) {
+  return (
+    <div
+      className={`skills-progress${floating ? " is-floating" : ""}${active ? " is-active" : ""}`}
+      role={active ? "progressbar" : undefined}
+      aria-hidden={!active}
+    />
+  );
 }
 
 /** A calm inline failure with Try again: never a stuck skeleton. */

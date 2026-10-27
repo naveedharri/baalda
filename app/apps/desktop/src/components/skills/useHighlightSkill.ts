@@ -1,5 +1,6 @@
-// "Look, it's here": after a skill is added (Add to team, a marketplace import,
-// New skill), the Skills grid scrolls its card into view, glows its border once
+// "Look, it's here": after skills are added (Add to team, a marketplace import
+// or Import all, New skill), the Skills grid scrolls the first card into view,
+// glows every new card's border once
 // (dim → bright → dim over 5s, no pulsing) and shows a "New" chip for at least
 // 8s or until the card is clicked. The look is CSS
 // (`.skills-card.is-highlight`); this hook decides which card,
@@ -44,9 +45,9 @@ export function takeReturningNewIds(now = Date.now(), marks: NewMarks = readMark
 }
 
 export function useHighlightSkill(gridVisible: boolean) {
-  const [target, setTarget] = useState<{ id: string; n: number } | null>(null);
+  const [target, setTarget] = useState<{ ids: string[]; n: number } | null>(null);
   const handled = useRef(0);
-  const [ring, setRing] = useState<string | null>(null);
+  const [ring, setRing] = useState<ReadonlySet<string>>(new Set());
   const [newIds, setNewIds] = useState<ReadonlySet<string>>(() => {
     // Returning to the tab: show recent marks once more (no glow, just the chip).
     const { ids, next } = takeReturningNewIds();
@@ -54,12 +55,21 @@ export function useHighlightSkill(gridVisible: boolean) {
     return new Set(ids);
   });
 
-  /** Highlight this skill now, or as soon as the grid is showing again. */
-  const highlight = useCallback((skillId: string) => {
+  /**
+   * Highlight these skills now, or as soon as the grid is showing again. Calls
+   * made while one is still waiting for the grid add to it (a run of quick
+   * adds, an Import all), so every new card glows together.
+   */
+  const highlight = useCallback((skillIds: string | readonly string[]) => {
+    const ids = typeof skillIds === "string" ? [skillIds] : [...skillIds];
+    if (ids.length === 0) return;
     const marks = readMarks();
-    marks[skillId] = { at: Date.now() };
+    for (const id of ids) marks[id] = { at: Date.now() };
     writeMarks(marks);
-    setTarget((t) => ({ id: skillId, n: (t?.n ?? 0) + 1 }));
+    setTarget((t) => {
+      const waiting = t && handled.current !== t.n ? t.ids : [];
+      return { ids: [...waiting, ...ids.filter((id) => !waiting.includes(id))], n: (t?.n ?? 0) + 1 };
+    });
   }, []);
 
   /** The card was opened: its chip has done its job. */
@@ -75,14 +85,14 @@ export function useHighlightSkill(gridVisible: boolean) {
   useEffect(() => {
     if (!target || !gridVisible || handled.current === target.n) return;
     handled.current = target.n;
-    setRing(target.id);
-    setNewIds((s) => new Set(s).add(target.id));
+    setRing(new Set(target.ids));
+    setNewIds((s) => new Set([...s, ...target.ids]));
     const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
     // The card may land a moment later (the catalog reloads): look for a few frames.
     let frames = 0;
     let raf = 0;
     const find = () => {
-      const el = document.querySelector(`[data-skill-id="${CSS.escape(target.id)}"]`);
+      const el = document.querySelector(`[data-skill-id="${CSS.escape(target.ids[0])}"]`);
       if (el) el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
       else if (frames++ < FIND_FRAMES) raf = requestAnimationFrame(find);
     };
@@ -91,8 +101,8 @@ export function useHighlightSkill(gridVisible: boolean) {
   }, [target, gridVisible]);
 
   useEffect(() => {
-    if (!ring) return;
-    const t = setTimeout(() => setRing(null), RING_MS);
+    if (ring.size === 0) return;
+    const t = setTimeout(() => setRing(new Set()), RING_MS);
     return () => clearTimeout(t);
   }, [ring]);
 
@@ -104,5 +114,5 @@ export function useHighlightSkill(gridVisible: boolean) {
 
   /** A highlight is waiting for the grid (it will scroll the card itself). */
   const pending = !!target && handled.current !== target.n;
-  return { highlight, seen, ringId: ring, newIds, pending };
+  return { highlight, seen, ringIds: ring, newIds, pending };
 }

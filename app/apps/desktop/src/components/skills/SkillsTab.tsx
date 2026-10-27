@@ -11,7 +11,7 @@ import { serverFeatures } from "../../lib/serverFeatures";
 import { checkSkillsNow, isSkillOnThisDevice, setSkillOnThisDevice, showDeliveryNow, SKILLS_FEATURE, useSkillsChanged, useSkillsDeviceState } from "../../lib/skills/syncHost";
 import { groupSkills, type SkillGroup } from "../../lib/skills/grouping";
 import { countLive, deviceItems } from "../../lib/skills/deviceGrouping";
-import { deviceSeen, useDeviceScan } from "../../lib/skills/deviceScan";
+import { deviceSeen, scanDevice, useDeviceScan } from "../../lib/skills/deviceScan";
 import { overallState, stateLines, targetStates } from "../../lib/skills/installState";
 import { loadSkillsPrefs } from "../../lib/skills/prefs";
 import { skillDisplayName } from "../../lib/skills/display";
@@ -20,18 +20,19 @@ import {
   base64ToText,
   isValidSkillName,
   parseSkillFrontmatter,
-  skillNameNeedsWarning,
+  textToBase64,
   suggestSkillName, CAP_RULE_TEXT } from "../../lib/skills/validate";
 import { toast } from "../../lib/toast";
 import { useStore } from "../../store";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { MarketplaceBrowser } from "./MarketplaceBrowser";
-import { EmptyState, SkillCard, GitHubGlyph, InstallButton, LoadError, SearchToggle, SkillGridSkeleton, skillAuthor } from "./parts";
+import { RefreshIcon, EmptyState, SkillCard, GitHubGlyph, InstallButton, LoadError, SearchToggle, SkillGridSkeleton, skillAuthor } from "./parts";
 import { Spinner } from "../Spinner";
 import { withTimeout } from "../../lib/skills/loading";
 import { primeCatalog } from "../../lib/skills/catalogCache";
 import { WorksWith } from "./ToolLogos";
 import { DeviceSkillsView } from "./DeviceSkillsView";
+import { NewSkillDialog } from "./NewSkillDialog";
 import { downloadSkillZip, SkillDetail } from "./SkillDetail";
 import { RemoveFromTeamDialog } from "./RemoveFromTeamDialog";
 import { RowActionsMenu } from "../RowActionsMenu";
@@ -160,16 +161,17 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
   const [filter, setFilter] = useState("");
 
   // Ring and tag a just-added skill once the Team grid is showing.
-  const { highlight, seen: seenNew, ringId, newIds, pending: highlightPending } = useHighlightSkill(!openId && !marketplace && scope === "team" && !!catalog);
+  const { highlight, seen: seenNew, ringIds, newIds, pending: highlightPending } = useHighlightSkill(!openId && !marketplace && scope === "team" && !!catalog);
   /** A device skill's page is open inside "On this device" (no footer there). */
   const [devicePage, setDevicePage] = useState(false);
+  /** Bumped by the top "← On this device" link to close a device skill's page. */
+  const [closePage, setClosePage] = useState(0);
   // Each view opens at the top; a grid comes back where it was.
   const viewKey = openId ? `skill:${openId}` : marketplace ? "marketplace" : scope === "device" && devicePage ? "device-page" : `grid:${scope}`;
   const rememberGridScroll = useScrollReset(viewKey, highlightPending);
-  /** Groups the person flipped from their default (team open, import sources closed). */
+  /** Groups the person flipped from their default (the first open, the rest closed). */
   const [flipped, setFlipped] = useState<ReadonlySet<string>>(new Set());
   const device = useSkillsDeviceState();
-  const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [pending, setPending] = useState<PendingUpload | null>(null);
   const [, setPrefsTick] = useState(0);
@@ -251,21 +253,22 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     );
   }
 
-  const create = async () => {
-    const name = newName.trim();
-    if (!isValidSkillName(name)) {
-      setError(ERROR_TEXT.invalid_name);
-      return;
-    }
+  /** New skill: a SKILL.md with the given description (or the server's starter), then its page. */
+  const create = async (name: string, description: string): Promise<string | null> => {
+    if (!isValidSkillName(name)) return ERROR_TEXT.invalid_name;
+    // A double-quoted YAML scalar is a JSON string, so any description is safe here.
+    const files = description
+      ? [{ path: "SKILL.md", contentBase64: textToBase64(`---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n\n# ${name}\n`) }]
+      : undefined;
     try {
-      const created = await authManager.api.createSkill(orgId, name);
-      setNewName("");
+      const created = await authManager.api.createSkill(orgId, name, files);
       setCreating(false);
       await reload();
       highlight(created.id);
       setOpenId(created.id);
+      return null;
     } catch (e) {
-      setError(errorText(e));
+      return errorText(e);
     }
   };
 
@@ -389,7 +392,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     } else {
       button = (
         <InstallButton
-          kind="add"
+          kind="install"
           title="Use on this computer"
           onClick={() => {
             setInstalling((p) => new Set(p).add(s.id));
@@ -448,7 +451,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
             byline={metaLine(s, true)}
             description={s.description || "No description yet."}
             action={install(s).button}
-            className={`${ringId === s.id ? "is-highlight" : ""}${leaving.has(s.id) ? " is-leaving" : ""}`.trim()}
+            className={`${ringIds.has(s.id) ? "is-highlight" : ""}${leaving.has(s.id) ? " is-leaving" : ""}`.trim()}
             li={{ "data-skill-id": s.id, ...openProps(s) }}
             more={
               manage && (
@@ -471,7 +474,14 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
 
   return (
     <>
-      <div className="skills-scroll" onScroll={(e) => rememberGridScroll(viewKey, e.currentTarget.scrollTop)}>
+      {/* Fades in whenever it mounts again: back from the marketplace or a skill's page. */}
+      <div className="skills-scroll skills-view-in" onScroll={(e) => rememberGridScroll(viewKey, e.currentTarget.scrollTop)}>
+      {scope === "device" && devicePage && (
+        // A device skill's page is a sub-page: its way back comes first, like a member's page.
+        <button type="button" className="link-btn member-profile-back" onClick={() => setClosePage((n) => n + 1)}>
+          ← On this device
+        </button>
+      )}
       <div className="members-access-header skills-page-head">
         <div>
           <h2 className="settings-section-title">Agent Skills</h2>
@@ -484,6 +494,23 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
                 <Spinner size="xs" /> {uploadPhase}
               </span>
             )}
+            {/* Each tab's own buttons stay mounted and fold in or out, so on a
+                switch they fade while search and the toggle glide aside. */}
+            <span className={`skills-hdr-slot is-start${scope === "device" && !devicePage ? "" : " is-folded"}`} aria-hidden={scope !== "device" || undefined}>
+              <span className="member-access-view">
+                <button
+                  type="button"
+                  className={`member-access-view-btn skills-refresh-btn${deviceScan.status === "loading" || (deviceScan.status === "ready" && deviceScan.refreshing) ? " is-spinning" : ""}`}
+                  disabled={scope !== "device" || deviceScan.status === "loading" || (deviceScan.status === "ready" && !!deviceScan.refreshing)}
+                  tabIndex={scope === "device" ? undefined : -1}
+                  onClick={() => void scanDevice(true)}
+                  aria-label="Look through this computer's skills again"
+                  title="Refresh"
+                >
+                  <RefreshIcon />
+                </button>
+              </span>
+            </span>
             <SearchToggle
               value={filter}
               onChange={setFilter}
@@ -501,11 +528,13 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
               deviceCount={deviceScan.status === "ready" ? countLive(deviceItems(deviceScan.entries)) : deviceScan.status === "error" ? 0 : null}
               showDot={!seen && scope !== "device"}
             />
-            {manage && skills.length > 0 && scope === "team" && (
-              <>
-                <button className="secondary skills-hdr-btn" onClick={() => setMarketplace({})}>Browse marketplace</button>
+            {manage && skills.length > 0 && (
+              <span className={`skills-hdr-slot is-end${scope === "team" ? "" : " is-folded"}`} aria-hidden={scope !== "team" || undefined}>
+                <button className="secondary skills-hdr-btn" tabIndex={scope === "team" ? undefined : -1} onClick={() => setMarketplace({})}>
+                  Browse marketplace
+                </button>
                 <SkillsMenuButton label="New skill" className="primary skills-hdr-btn" actions={newMenu} />
-              </>
+              </span>
             )}
           </div>
         )}
@@ -518,9 +547,17 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
       ) : scope === "device" ? (
         <DeviceSkillsView
           onPageChange={setDevicePage}
-          onBack={() => {
+          closePage={closePage}
+          onOpenTeamSkill={(id) => {
             setScope("team");
             writeScope("team");
+            setOpenId(id);
+          }}
+          onAddedHere={(id) => {
+            void reload();
+            checkSkillsNow();
+            // Glows on the Team grid when they go back to it.
+            highlight(id);
           }}
           filter={filter}
           orgId={orgId}
@@ -543,6 +580,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
         manage ? (
           <EmptyState
             title="No skills yet"
+            page
             actions={
               <>
                 <button className="primary" onClick={() => setMarketplace({})}>Browse marketplace</button>
@@ -560,16 +598,18 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
             </span>
           </EmptyState>
         ) : (
-          <EmptyState title="No skills yet">Your admins haven't published any skills.</EmptyState>
+          <EmptyState title="No skills yet" page>Your admins haven't published any skills.</EmptyState>
         )
       ) : (
         <>
           {groups.length === 0 && <div className="field-hint skills-quiet">No skills match.</div>}
-          {groups.map((g) => {
-            const closedByDefault = g.kind === "source";
+          {groups.map((g, gi) => {
+            // Only the first group starts open: "Shared with your team" when
+            // there is one, else the first import source.
+            const closedByDefault = gi > 0;
             // A search shows every match, and a just-added skill keeps its group open.
             const isCollapsed =
-              closedByDefault !== flipped.has(g.key) && !filter.trim() && !g.skills.some((k) => k.id === ringId);
+              closedByDefault !== flipped.has(g.key) && !filter.trim() && !g.skills.some((k) => ringIds.has(k.id));
             const label = (
               <>
                 {g.kind === "source" ? <GitHubGlyph /> : null}
@@ -639,33 +679,11 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
       )}
 
       {creating && (
-        <ConfirmDialog
-          title="New skill"
-          confirmLabel="Create"
-          tone="accent"
-          confirmDisabled={!isValidSkillName(newName.trim())}
-          onCancel={() => {
-            setCreating(false);
-            setNewName("");
-          }}
-          onConfirm={create}
-        >
-          <input
-            autoFocus
-            className="skills-name-input"
-            placeholder="skill-name"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value.toLowerCase())}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && isValidSkillName(newName.trim())) void create();
-            }}
-          />
-          <div className="field-hint">Lowercase letters, digits and hyphens. Can't be changed later.</div>
-          {skillNameNeedsWarning(newName) && (
-            <div className="skills-warning">claude.ai refuses names with "claude" or "anthropic".</div>
-          )}
-          {error && <div className="auth-error">{error}</div>}
-        </ConfirmDialog>
+        <NewSkillDialog
+          takenNames={new Set(skills.map((k) => k.name.toLowerCase()))}
+          onCreate={create}
+          onClose={() => setCreating(false)}
+        />
       )}
 
       {pending && (

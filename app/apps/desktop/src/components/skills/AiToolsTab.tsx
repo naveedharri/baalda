@@ -172,7 +172,7 @@ export function AiToolsTab() {
         />
       );
     }
-    return <InstallButton kind="add" title="Use on this computer" onClick={() => setSkillOnThisDevice(orgId, skill.skillId, true)} />;
+    return <InstallButton kind="install" title="Use on this computer" onClick={() => setSkillOnThisDevice(orgId, skill.skillId, true)} />;
   };
 
   const openBackups = async () => {
