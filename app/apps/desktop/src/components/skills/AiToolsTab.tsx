@@ -121,7 +121,10 @@ export function AiToolsTab() {
                 { key: `nt-team-${t}`, label: which(t, conflict.length > 1, "Use team version"), hint: "Your copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.skillId, t) },
                 { key: `nt-keep-${t}`, label: which(t, conflict.length > 1, "Keep my own"), hint: "Leave your folder as it is on this computer", onSelect: () => keepMySkill(orgId, skill.skillId, t) },
               ]
-            : [];
+            : [
+                // Another vault's, server's or account's copy: backed up, then replaced.
+                { key: `nt-team-${t}`, label: which(t, conflict.length > 1, "Use team version"), hint: "The other copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.skillId, t) },
+              ];
         }),
         { key: "check", label: "Check again", onSelect: () => checkSkillsNow() },
       ];

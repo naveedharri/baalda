@@ -4,6 +4,7 @@ import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { loadDocState } from "../yjs/persistence.js";
 import { purgeBlobRefs, replaceBlobRefs } from "../blobs/refs.js";
+import { cachedRefHeads, refText } from "../blobs/ref-windows.js";
 import { cosineSimilarity, embed, tokenize } from "./embedder.js";
 
 /**
@@ -138,16 +139,21 @@ export async function indexDoc(
   // Embed title + body so a query matching the title still ranks the note.
   const vector = embed(`${title ?? ""}\n${content}`);
 
+  // The excerpts the scoped attachment list reads instead of `content` (#343).
+  const heads = await cachedRefHeads(note.vault_id, db);
+
   await db.query(
-    `INSERT INTO note_index (doc_id, vault_id, title, content, vector, updated_at)
-     VALUES ($1, $2, $3, $4, $5::jsonb, now())
+    `INSERT INTO note_index (doc_id, vault_id, title, content, vector, updated_at, ref_text, ref_heads)
+     VALUES ($1, $2, $3, $4, $5::jsonb, now(), $6, $7::text[])
      ON CONFLICT (doc_id) DO UPDATE
        SET vault_id = EXCLUDED.vault_id,
            title = EXCLUDED.title,
            content = EXCLUDED.content,
            vector = EXCLUDED.vector,
-           updated_at = now()`,
-    [docId, note.vault_id, title, content, JSON.stringify(vector)],
+           updated_at = now(),
+           ref_text = EXCLUDED.ref_text,
+           ref_heads = EXCLUDED.ref_heads`,
+    [docId, note.vault_id, title, content, JSON.stringify(vector), refText(content, heads), heads],
   );
 
   // Which attachments this note points at (migration 027). Derived from the

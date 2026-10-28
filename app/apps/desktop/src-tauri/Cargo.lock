@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.1.93"
+version = "0.1.94"
 dependencies = [
  "arboard",
  "base64 0.22.1",

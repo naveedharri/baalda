@@ -18,6 +18,7 @@ import {
 } from "./resolver.js";
 import { listReadableDocsInVault, vaultAccess } from "./vault-docs.js";
 import { isAccountReadOnly } from "../billing/lapse.js";
+import { REF_WINDOW_CHARS, scheduleRefWindowRefresh } from "../blobs/ref-windows.js";
 
 /** The refusal a billing-lapsed vault answers every write with (HTTP 402),
  *  ahead of `no_write_access` / `root_frozen`. */
@@ -396,10 +397,30 @@ async function filterByNoteReference<T extends BlobAclRow>(
   // dropped here exactly as the old `!!b.rel_path` guard dropped it.
   const paths = [...new Set(blobs.map((b) => b.rel_path).filter((p): p is string => !!p))];
   if (paths.length === 0) return [];
-  const anchored = paths.filter((p) => referenceAnchor(p) !== null);
+  // Anchored paths short enough to sit whole in a note's reference excerpt
+  // (`note_index.ref_text`, migration 063) are matched there; a longer one
+  // is matched on full text, but only in notes whose excerpt holds its start.
+  const fits = (p: string) => p.length - (referenceAnchor(p) as string).length <= REF_WINDOW_CHARS;
+  const anchored = paths.filter((p) => referenceAnchor(p) !== null && fits(p));
+  const long = paths.filter((p) => referenceAnchor(p) !== null && !fits(p));
   const bare = paths.filter((p) => referenceAnchor(p) === null);
   const readableIds = [...readable];
   const referenced = new Set<string>();
+  // A note answers from its excerpt only when its heads cover every anchor
+  // asked about; any other is read in full (always correct) and the vault's
+  // excerpts are refreshed in the background, so the next list is cheap.
+  const needed = [...new Set([...anchored, ...long].map((p) => referenceAnchor(p) as string))];
+  if (needed.length > 0) {
+    const { rows: stale } = await db.query<{ stale: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM note_index
+          WHERE vault_id = $1 AND doc_id = ANY($2::text[])
+            AND (ref_heads IS NULL OR NOT (ref_heads @> $3::text[]))
+       ) AS stale`,
+      [vaultId, readableIds, needed],
+    );
+    if (stale[0]?.stale) scheduleRefWindowRefresh(vaultId);
+  }
 
   if (anchored.length > 0) {
     const { rows } = await db.query<{ rel_path: string }>(
@@ -415,8 +436,12 @@ async function filterByNoteReference<T extends BlobAclRow>(
             FROM needles GROUP BY anchor
        ),
        lens AS (SELECT DISTINCT anchor, len FROM needles),
+       -- The excerpt when it covers the anchors asked about, else the text.
+       -- The excerpt holds every occurrence of those anchors with the next
+       -- ${REF_WINDOW_CHARS} characters, so it gives the same answer.
        docs AS MATERIALIZED (
-          SELECT ni.content FROM note_index ni
+          SELECT CASE WHEN ni.ref_heads @> $5::text[] THEN ni.ref_text ELSE ni.content END AS content
+            FROM note_index ni
            WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
        ),
        -- The text after occurrence i of an anchor is piece i+1, the anchor,
@@ -446,7 +471,35 @@ async function filterByNoteReference<T extends BlobAclRow>(
          FROM (SELECT w.anchor || left(w.win, l.len) AS val
                  FROM windows w JOIN lens l ON l.anchor = w.anchor) c
         WHERE c.val = ANY($3::text[])`,
-      [vaultId, readableIds, anchored, anchored.map((p) => referenceAnchor(p) as string)],
+      [vaultId, readableIds, anchored, anchored.map((p) => referenceAnchor(p) as string), needed],
+    );
+    for (const r of rows) referenced.add(r.rel_path);
+  }
+
+  if (long.length > 0) {
+    // Every occurrence of a long path starts with its anchor plus the first
+    // window of characters, which a covering excerpt holds verbatim: only a
+    // note whose excerpt has that prefix can contain the path, and only those
+    // notes' text is read. The CASE fixes that order.
+    const { rows } = await db.query<{ rel_path: string }>(
+      `SELECT p.rel_path
+         FROM unnest($3::text[], $4::text[], $5::text[]) AS p(rel_path, needle, prefix)
+        WHERE EXISTS (
+          SELECT 1 FROM note_index ni
+           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
+             AND CASE
+                   WHEN ni.ref_heads @> $6::text[] AND NOT (ni.ref_text LIKE '%' || p.prefix || '%' ESCAPE '\\') THEN false
+                   ELSE ni.content LIKE '%' || p.needle || '%' ESCAPE '\\'
+                 END
+        )`,
+      [
+        vaultId,
+        readableIds,
+        long,
+        long.map(likeEscape),
+        long.map((p) => likeEscape(p.slice(0, (referenceAnchor(p) as string).length + REF_WINDOW_CHARS))),
+        needed,
+      ],
     );
     for (const r of rows) referenced.add(r.rel_path);
   }

@@ -40,6 +40,7 @@ import { BusyButton } from "./parts";
 import { RequiredBadge } from "./SquareTip";
 import { SkillsMenuButton } from "./SkillsMenuButton";
 import { ToolMarks } from "./ToolLogos";
+import { myAccessOf } from "../../lib/skills/access";
 
 const INSTALL_WAIT_MS = 20_000;
 
@@ -72,12 +73,15 @@ function useSkillHere(orgId: string, skill: SkillDetail) {
   const serverUrl = useStore((s) => s.serverUrl);
   const [prefs, setPrefs] = useState(loadSkillsPrefs);
   useEffect(() => onSkillsPrefsChanged(setPrefs), []);
-  const optional = skill.delivery === "optional";
-  const optedIn = !optional || isSkillOnThisDevice(serverUrl, orgId, skill.id);
+  // This person's own level (an owner/admin may see a skill not shared with them).
+  const mine = myAccessOf(skill);
+  const optional = mine === "optional";
+  const optedIn = mine === "required" || (optional && isSkillOnThisDevice(serverUrl, orgId, skill.id));
   const states = targetStates(device.results, prefs.targets, orgId, skill.id);
   const detected = detectedAiTools(device.targets);
   const tools = teamAvailability(states, optedIn, detected);
   return {
+    notMine: mine === "none",
     optional,
     optedIn,
     states,
@@ -129,6 +133,7 @@ export function InstallControl({
     }
   };
 
+  if (here.notMine) return <span className="skills-not-yours">Not shared with you</span>;
   if (here.optedIn && (here.edited || here.conflict || here.failed)) {
     const actions = here.edited
       ? [
@@ -137,11 +142,14 @@ export function InstallControl({
         ]
       : here.conflict
         ? [
-            // Only the person's own real folder can be backed up and replaced:
-            // never another skill's, vault's or user's, and never a symlink.
-            ...(here.conflictKind === "unmanaged" && !isLinkedFolder(scan, here.conflict, skill.name)
-              ? [{ key: "team", label: "Use team version", hint: "Your copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.id, here.conflict!) }]
-              : []),
+            // The folder holding the name is backed up and replaced: the
+            // person's own, or another vault's, server's or account's copy.
+            // Never a symlink (Rust refuses one either way).
+            ...(here.conflictKind !== "unmanaged"
+              ? [{ key: "team", label: "Use team version", hint: "The other copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.id, here.conflict!) }]
+              : !isLinkedFolder(scan, here.conflict, skill.name)
+                ? [{ key: "team", label: "Use team version", hint: "Your copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.id, here.conflict!) }]
+                : []),
             ...(here.conflictKind === "unmanaged"
               ? [{ key: "keep", label: "Keep my own", hint: "Leave your folder as it is on this computer", onSelect: () => keepMySkill(orgId, skill.id, here.conflict!) }]
               : []),
@@ -217,14 +225,16 @@ export function SkillAvailability({ orgId, skill }: { orgId: string; skill: Skil
   const name = skillDisplayName(skill.name);
 
   let body: React.ReactNode;
-  if (here.optedIn && here.edited) {
+  if (here.notMine) {
+    body = <span className="skills-available-text">Not shared with you, so it isn't on this computer. You see it because you manage skills.</span>;
+  } else if (here.optedIn && here.edited) {
     body = <span className="skills-available-text is-warn">Edited here: you changed this copy. Use Fix… to keep it or take the team's.</span>;
   } else if (here.optedIn && here.conflict) {
     body = (
       <span className="skills-available-text is-warn">
         {here.conflictKind === "unmanaged"
           ? "Name taken by a folder of yours on this computer. Use Fix… to choose which one to keep."
-          : "Name taken by another skill on this computer. Rename or remove that folder to use this one."}
+          : "Name taken by another skill on this computer. Use Fix… to replace it with the team version."}
       </span>
     );
   } else if (here.optedIn && here.failed) {

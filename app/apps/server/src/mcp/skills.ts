@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 import { McpToolError, type McpContext } from "./service.js";
-import { listPublishedSkills, readPublishedVersion } from "../skills/store.js";
+import { orgRole } from "../permissions/lookup.js";
+import type { SkillViewer } from "../skills/access.js";
+import { asSkillRole, listPublishedSkills, readPublishedVersion } from "../skills/store.js";
 import { SKILL_MD } from "../skills/validate.js";
 
 /**
  * Read-only MCP access to the token vault's team skills (docs/SKILLS.md §3.5).
- * Only live skills with a published effective version are visible, to members
- * and admins alike; drafts never reach MCP. Membership is already proven by the
- * token (`verifyMcpToken` re-checks it on every call).
+ * Only live skills with a published effective version are visible; drafts
+ * never reach MCP. A member sees only skills shared with them (migration 062);
+ * owners and admins see every one. Membership is already proven by the token
+ * (`verifyMcpToken` re-checks it on every call).
  */
 
 const READ_SKILL_FILE_DEFAULT_CHARS = 50_000;
@@ -30,8 +33,14 @@ function versionArg(version: number | undefined): number | undefined {
   return version;
 }
 
+/** The token's person, with their current role in its vault. */
+async function viewerOf(ctx: McpContext): Promise<SkillViewer> {
+  const role = await orgRole(ctx.auth.organizationId, ctx.auth.userId);
+  return { userId: ctx.auth.userId, role: asSkillRole(role ?? "member") };
+}
+
 async function published(ctx: McpContext, name: string, version: number | undefined) {
-  const found = await readPublishedVersion(ctx.auth.organizationId, name, versionArg(version));
+  const found = await readPublishedVersion(ctx.auth.organizationId, name, versionArg(version), await viewerOf(ctx));
   if (found === "skill_not_found") throw new McpToolError(`Skill not found: ${name}`, "skill_not_found");
   if (found === "version_not_found") {
     throw new McpToolError(`Version ${version} of ${name} not found`, "version_not_found");
@@ -40,7 +49,7 @@ async function published(ctx: McpContext, name: string, version: number | undefi
 }
 
 export async function listSkillsTool(ctx: McpContext) {
-  const skills = await listPublishedSkills(ctx.auth.organizationId);
+  const skills = await listPublishedSkills(ctx.auth.organizationId, await viewerOf(ctx));
   return {
     skills: skills.map((s) => ({
       name: s.name,

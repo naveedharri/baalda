@@ -8,7 +8,9 @@ import { Spinner } from "../Spinner";
 import * as ipc from "../../lib/ipc";
 import { skillDisplayName } from "../../lib/skills/display";
 import { RequiredActions, requiredTip, TipCard, tipFromTitle, tipText, useAnchoredTip, type TipContent } from "./SquareTip";
-import type { SkillDetail, SkillSummary } from "../../lib/skills/types";
+import type { SkillAudience, SkillDetail, SkillSummary } from "../../lib/skills/types";
+import { audienceLine } from "../../lib/skills/access";
+import { Avatar } from "../Avatar";
 import type { SkillTarget } from "../../lib/ipc";
 
 /**
@@ -73,6 +75,17 @@ export function RefreshIcon() {
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M21 12a9 9 0 1 1-2.64-6.36" />
       <path d="M21 4v5h-5" />
+    </svg>
+  );
+}
+
+/** An arrow into a tray: the empty Team grid's "drop a file here" line. */
+export function UploadGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 15V4" />
+      <path d="m7 9 5-5 5 5" />
+      <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
     </svg>
   );
 }
@@ -337,6 +350,42 @@ export function SkillCard({
   );
 }
 
+/**
+ * Who has a skill: up to three faces (or a group mark when it is everyone)
+ * and a few words. On cards and the skill page header.
+ */
+export function AudienceStack({ audience, viewerIn }: { audience: SkillAudience; viewerIn: boolean }) {
+  const names = audience.people.map((p) => p.name).filter(Boolean);
+  const more = audience.count - names.length;
+  const title = audience.everyone
+    ? `Everyone in this vault has it (${audience.total})`
+    : names.length
+      ? `Shared with ${names.join(", ")}${more > 0 ? ` and ${more} more` : ""}`
+      : "Not shared with anyone yet";
+  return (
+    <span className="skills-audience" title={title}>
+      {audience.everyone ? (
+        <span className="skills-audience-all" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+            <circle cx="9" cy="7" r="4" />
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+          </svg>
+        </span>
+      ) : (
+        audience.people.length > 0 && (
+          <span className="skills-audience-faces" aria-hidden="true">
+            {audience.people.slice(0, 3).map((p) => (
+              <Avatar key={p.id} label={p.name || "?"} image={p.image} userId={p.id} />
+            ))}
+          </span>
+        )
+      )}
+      <span className="skills-audience-text">{audienceLine(audience, viewerIn)}</span>
+    </span>
+  );
+}
+
 /** Placeholder cards matching `.skills-grid` cards (neutral, no tile colour): title, byline, three description lines. */
 export function SkeletonCards({ count = 3, label = "Loading" }: { count?: number; label?: string }) {
   return (
@@ -377,21 +426,25 @@ export function EmptyState({
   children,
   actions,
   page = false,
+  dropHint,
 }: {
   title: string;
   children?: ReactNode;
   actions?: ReactNode;
   /** The whole view is empty: centre it in the space under the header. */
   page?: boolean;
+  /** The view takes dropped files: a dashed frame and this line under the actions. */
+  dropHint?: ReactNode;
 }) {
   return (
-    <div className={`skills-empty${page ? " is-page" : ""}`}>
+    <div className={`skills-empty${page ? " is-page" : ""}${dropHint ? " is-drop" : ""}`}>
       <span className="skills-empty-icon" aria-hidden="true">
         <SkillGlyph size={22} />
       </span>
       <h3>{title}</h3>
       {children && <p>{children}</p>}
       {actions && <div className="skills-empty-actions">{actions}</div>}
+      {dropHint && <span className="skills-empty-drop">{dropHint}</span>}
     </div>
   );
 }

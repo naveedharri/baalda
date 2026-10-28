@@ -20,6 +20,7 @@ import {
 } from "./sync/member-events.js";
 import { publishUserEvent, setUserEventPublisher } from "./sync/user-events.js";
 import { backfillIndex, setLiveDocLookup } from "./index/indexer.js";
+import { backfillRefWindows } from "./blobs/ref-windows.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
 import { setLapseNotifier, startLapseScheduler, stopLapseScheduler } from "./billing/lapse.js";
@@ -379,7 +380,10 @@ async function main() {
   // Index any pre-existing notes missing from note_index (best-effort, async).
   backfillIndex()
     .then((n) => n > 0 && console.log(`Indexer: backfilled ${n} note(s).`))
-    .catch((err) => console.error("Indexer backfill failed:", err));
+    .catch((err) => console.error("Indexer backfill failed:", err))
+    // Reference excerpts for notes indexed before migration 063 (#343).
+    .then(() => backfillRefWindows())
+    .catch((err) => console.error("Reference excerpt backfill failed:", err));
 
   // Attachment lifecycle. Three sweeps on one `unref`ed timer, each serialized
   // across instances by its own advisory lock:

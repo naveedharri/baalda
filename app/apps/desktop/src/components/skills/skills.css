@@ -2118,6 +2118,26 @@ button.secondary.skills-fix-btn {
   justify-content: center;
   padding-bottom: calc(var(--sp-8) * 2);
 }
+/* An admin's empty Team grid takes a dropped .zip or .skill: the empty area
+   wears the same dashed light-blue frame the drop overlay uses, quieter. */
+.skills-empty.is-page.is-drop {
+  margin-top: var(--sp-2);
+  border: 1.5px dashed color-mix(in srgb, var(--link) 45%, transparent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--bg-surface) 97%, var(--link));
+  padding-bottom: var(--sp-8);
+}
+.skills-empty-drop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+}
+.skills-empty-drop svg {
+  color: var(--link);
+}
 
 /* Cards: a bigger tile and a bigger action square, like Claude's skills
    directory (48px tile, 28px button with a 16px glyph). */
@@ -2378,4 +2398,198 @@ button.secondary.skills-hdr-btn.skills-shared-btn:hover:not(:disabled) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+/* A .zip or .skill held over the Team grid lights the whole panel up in a
+   dashed blue frame; any other file gets the same frame in red, refused. */
+.settings-content:has(> .skills-scroll) {
+  position: relative;
+}
+.skills-drop-overlay {
+  position: absolute;
+  inset: var(--sp-2);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  border: 2px dashed var(--link);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--bg-surface) 88%, var(--link));
+  box-shadow: inset 0 0 0 4px color-mix(in srgb, var(--link) 12%, transparent);
+  text-align: center;
+  pointer-events: none;
+  animation: skills-drop-in 120ms ease-out;
+}
+.skills-drop-overlay .skills-empty-icon {
+  background: color-mix(in srgb, var(--bg-surface) 80%, var(--link));
+  color: var(--link);
+}
+.skills-drop-overlay.is-refused {
+  border-color: color-mix(in srgb, var(--danger) 60%, transparent);
+  background: color-mix(in srgb, var(--bg-surface) 92%, var(--danger));
+}
+.skills-drop-overlay.is-refused .skills-empty-icon {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.skills-drop-overlay strong {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.skills-drop-overlay > span:last-child {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+@keyframes skills-drop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skills-drop-overlay {
+    animation: none;
+  }
+}
+
+/* Under a populated Team grid (admins): the empty state's dashed frame as a
+   drop zone of its own, so a full grid still says it takes a dropped file. */
+.skills-drop-strip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 100%;
+  min-height: 120px;
+  margin-top: var(--sp-5);
+  padding: var(--sp-5) var(--sp-4);
+  border: 1.5px dashed color-mix(in srgb, var(--link) 28%, transparent);
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  opacity: 0.85;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease, opacity 120ms ease;
+}
+.skills-drop-strip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-bottom: var(--sp-1);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-surface) 93%, var(--link));
+  color: color-mix(in srgb, var(--link) 75%, var(--text-tertiary));
+}
+.skills-drop-strip-icon svg {
+  width: 16px;
+  height: 16px;
+}
+.skills-drop-strip strong {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.skills-drop-strip:hover {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--link) 55%, transparent);
+  background: color-mix(in srgb, var(--bg-surface) 96%, var(--link));
+}
+
+/* Who has a skill (cards and the page header): overlapping faces, or a group
+   mark when it is everyone, then a few quiet words. */
+.skills-audience {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.skills-audience-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.skills-audience-faces {
+  display: inline-flex;
+  align-items: center;
+}
+.skills-audience-faces .avatar {
+  width: 20px;
+  height: 20px;
+  font-size: 9px;
+  box-shadow: 0 0 0 2px var(--skills-card-bg, var(--bg-card));
+}
+.skills-audience-faces .avatar + .avatar {
+  margin-left: -6px;
+}
+.skills-audience-all {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+}
+/* A card's footer: the AI tools here on the left, who has it on the right. */
+.skills-card-foot {
+  gap: var(--sp-2);
+}
+.skills-card-foot .skills-audience {
+  margin-left: auto;
+}
+
+/* The Shared with tab: the Everyone row, then one row per person. */
+.skills-access {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.skills-access-people {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.skills-access-person {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: 10px var(--sp-4);
+}
+.skills-access-person + .skills-access-person {
+  border-top: 1px solid var(--border);
+}
+.skills-access-note {
+  margin: 0;
+}
+.skills-access-skel {
+  height: 220px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-subtle);
+}
+/* An owner/admin looking at a skill that isn't shared with them. */
+.skills-not-yours {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.link-btn.skills-audience-btn {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 0;
+}
+.link-btn.skills-audience-btn:hover .skills-audience-text {
+  color: var(--text-secondary);
+  text-decoration: underline;
 }

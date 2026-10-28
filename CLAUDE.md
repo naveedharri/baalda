@@ -171,8 +171,10 @@ Errors: single `AppError(String)` (`error.rs`).
   Rust, never trusted from the webview; a symlinked root/ancestor is refused. A folder is ours only
   when its `.baalda-managed.json` matches the owner = skillId + orgId + serverUrl + userId (a marker
   with no `userId` is legacy and matches any user); a marker naming another folder counts as none.
-  Anything else (unmanaged, another server/vault/user) is never written or removed: install
-  `conflict` (`unmanaged`/`other_owner`), remove `conflict`. Install = validate shas → stage in
+  Anything else (unmanaged, another server/vault/user) is never written or removed by a sync run:
+  install `conflict` (`unmanaged`/`other_owner`), remove `conflict`. Only the person's explicit
+  "Use team version" (`replaceUnmanaged`) backs such a folder up to `skill-backups/` and replaces it,
+  another owner's copy included (2026-10-28); a symlinked folder is never replaced. Install = validate shas → stage in
   `.baalda-staging-<uuid>` → write the marker last → re-verify staged hashes → rename the old dir
   aside, rename staging in, roll back on failure (never rename over a dir). A drifted (edited) copy
   is `edited` unless `force` ("Use team version"), which copies it to app data `skill-backups/`
@@ -577,7 +579,7 @@ lost membership, opted out, target switched off) RELEASES an edited/kept copy
 and deletes a clean one; a cross-org name clash goes to the vault already holding the folder,
 else the first by vault name then id. `syncHost.ts` runs it for every vault the user belongs to on
 the current server (`GET /api/skills/manifest`) at sign-in, on `skills-changed` (debounced 500 ms; open Skills pages, the skill page and the sidebar shortcut also reload on it via `useSkillsChanged`, so a teammate's add shows live), every
-2 min (the frame only covers the OPEN vault), on coming back to the app (≤ every 30 s) and on Check now, one run at a time. Two accounts on ONE computer share the skill folders: the first owner's copy is `other_owner` to the second (by design). The API client is shared and a server switch repoints
+2 min (the frame only covers the OPEN vault), on coming back to the app (≤ every 30 s) and on Check now, one run at a time; a failed install waits 10 min between tries and stops after 3 retries for that version (Check now or a restart starts over). Two accounts on ONE computer share the skill folders: the first owner's copy is `other_owner` to the second (by design). The API client is shared and a server switch repoints
 it before App's effect stops the host, so a run halts (plans and acts on nothing) once the client's
 base URL differs from the host's, and `store.setServerUrl` pauses the host first (`pauseSkillsSync`,
 resumed unless a switch to another URL landed). Device prefs (`prefs.ts`, localStorage
@@ -793,7 +795,9 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `doc_id` is judged by this same resolver (`canReadAttachment` / `canWriteBlob` in
   `permissions/http-gates.ts`), so a folder share reaches the FILES in it and not only the notes;
   a hash-named `attachments/` blob has no doc to resolve and keeps the older heuristic — vault-wide
-  readers see all, a scoped member only what a readable note references. **New
+  readers see all, a scoped member only what a readable note references (matched on each note's
+  reference excerpt `note_index.ref_text` when its `ref_heads` cover the anchors, else its full text;
+  `blobs/ref-windows.ts`, migration 063, #343). **New
   vaults are shared with their team by default** — `POST /api/vaults` creates the org-wide `edit`
   grant, but only alongside the org's *first* collection, so re-running it can't resurrect a grant an
   owner revoked via Access → Private. (This reverses the private-by-default posture of 2026-07-21,
@@ -950,7 +954,11 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   Token = `mcp_…` minted from desktop Vault Settings → MCP; scoped to one (user, vault), gated by
   the **same** per-file ACL. Only a sha256 hash is stored.
 - `skills/` + `http/routes/skills.ts` + `mcp/skills.ts` — team AI skills (`docs/SKILLS.md`), free on
-  every plan, stored in their own tables (`bytea`), never blobs or notes. Owners/admins edit one draft
+  every plan, stored in their own tables (`bytea`), never blobs or notes. Who gets a skill (migration 062,
+  `skills/access.ts`): the Everyone row (`delivery` + `everyone_access`) plus per-person
+  `skill_member_access` rows (Required/Optional/No access, person wins either way) filter the
+  manifest, catalog, skill page, versions and MCP; owners/admins see every skill but install only
+  at their own level (`docs/SKILLS.md` addendum "Who gets a skill"). Owners/admins edit one draft
   per skill (`baseRevision`, 409 `stale_draft`) and Publish it into an immutable numbered version
   (409 `nothing_to_publish` when the bundle hash equals the latest); only published versions are
   delivered; effective = pinned ?? latest; Required installs for every member, Optional per device

@@ -55,6 +55,21 @@ export const SKILLS_FOCUS_MIN_GAP_MS = 30 * 1000;
 export const SKILLS_FRAME_DEBOUNCE_MS = 500;
 /** Open pages coalesce a burst of frames (a marketplace import) into one reload. */
 export const SKILLS_VIEW_DEBOUNCE_MS = 150;
+/** A failed install waits this long before the next run tries it again. */
+export const SKILLS_INSTALL_RETRY_MS = 10 * 60 * 1000;
+/** The first try plus 3 retries; then that version stays failed until Check now or a restart. */
+export const SKILLS_INSTALL_MAX_FAILURES = 4;
+
+export interface InstallFailure {
+  failures: number;
+  lastAt: number;
+  error?: string;
+}
+
+/** Whether a run may try a failed install again (`conflictKey` per target and version). */
+export function installRetryDue(f: InstallFailure, now: number): boolean {
+  return f.failures < SKILLS_INSTALL_MAX_FAILURES && now - f.lastAt >= SKILLS_INSTALL_RETRY_MS;
+}
 
 export interface SkillsDeviceState {
   /** A host is running for a signed-in user. */
@@ -120,6 +135,8 @@ interface Host {
   api: ApiClient;
   deps: SkillsRunDeps;
   request: () => void;
+  /** Forget failed installs so the next run tries them at once. */
+  clearFailures: () => void;
   /** While a server switch is under way no run starts, plans or acts. */
   setPaused: (paused: boolean) => void;
 }
@@ -162,6 +179,8 @@ export function startSkillsSync({
   };
 
   const knownConflicts = new Map<string, ConflictKind>();
+  // Installs that failed this session, by `conflictKey` (a new version starts fresh).
+  const installFailures = new Map<string, InstallFailure>();
 
   const runOnce = async () => {
     if (halted()) return;
@@ -213,9 +232,33 @@ export function startSkillsSync({
       });
     }
     const prefs = loadSkillsPrefs();
-    const plan = planSkillsSync({ serverUrl, userId, manifest, prefs, targets: scanned, installed, knownConflicts });
-    setState({ targets, manifest, results: pendingStates(plan), lastError: null });
+    const fullPlan = planSkillsSync({ serverUrl, userId, manifest, prefs, targets: scanned, installed, knownConflicts });
+    // A failed install waits 10 minutes between tries and stops after 3 retries;
+    // until then it stays listed as failed and this run leaves it alone.
+    const now = Date.now();
+    const held: SkillTargetResult[] = [];
+    const plan = fullPlan.filter((a) => {
+      if (a.kind !== "install") return true;
+      const f = installFailures.get(conflictKey(a.target, a.skill));
+      if (!f || installRetryDue(f, now)) return true;
+      held.push({
+        orgId: a.orgId, skillId: a.skill.skillId, name: a.skill.name, target: a.target,
+        state: "failed", version: a.skill.version, ...(f.error ? { error: f.error } : {}),
+      });
+      return false;
+    });
+    setState({ targets, manifest, results: [...pendingStates(plan), ...held], lastError: null });
     const result = await runSkillsPlan(plan, deps);
+    for (const a of plan) {
+      if (a.kind !== "install") continue;
+      const key = conflictKey(a.target, a.skill);
+      const r = result.results.find((x) => x.skillId === a.skill.skillId && x.target === a.target);
+      if (r?.state === "failed") {
+        installFailures.set(key, { failures: (installFailures.get(key)?.failures ?? 0) + 1, lastAt: Date.now(), error: r.error });
+      } else if (r) {
+        installFailures.delete(key);
+      }
+    }
     // A folder of ours by name that refused adoption: don't fetch and ask again
     // for the same version this session.
     for (const a of plan) {
@@ -236,7 +279,7 @@ export function startSkillsSync({
     const landed = result.updated.map((u) => ({ orgId: byId.get(u.skillId) ?? "", skillId: u.skillId, at }));
     setState({
       running: false,
-      results: result.results,
+      results: [...result.results, ...held],
       lastRunAt: at,
       recentUpdates: [...state.recentUpdates.filter((r) => !landed.some((l) => l.skillId === r.skillId)), ...landed],
     });
@@ -271,6 +314,7 @@ export function startSkillsSync({
     api,
     deps,
     request,
+    clearFailures: () => installFailures.clear(),
     setPaused: (p) => {
       paused = p;
     },
@@ -379,6 +423,7 @@ export function quietNextAdd(skillId: string): void {
 
 /** "Check now" in AI tools. */
 export function checkSkillsNow(): void {
+  host?.clearFailures();
   host?.request();
 }
 
@@ -424,8 +469,10 @@ export async function applyTeamSkillVersion(orgId: string, skillId: string, targ
 }
 
 /**
- * "Use team version" on a name taken by the person's own folder (no marker):
- * Rust backs that folder up, then installs the team version in its place.
+ * "Use team version" on a name taken by another folder: the person's own (no
+ * marker) or another vault's, server's or account's copy. Rust backs that
+ * folder up, then installs the team version in its place. Only this click
+ * replaces another owner's copy; a sync run never does.
  */
 export async function replaceNameTakenSkill(orgId: string, skillId: string, target: SkillTarget): Promise<void> {
   const h = host;
@@ -446,8 +493,8 @@ export async function replaceNameTakenSkill(orgId: string, skillId: string, targ
         r.orgId === orgId && r.skillId === skillId && r.target === target ? { ...r, conflict: kind } : r,
       ),
     });
-    // With the flag, Rust still refuses a symlinked folder ("unmanaged") and
-    // anyone else's marker ("other_owner"); neither is touched.
+    // With the flag, Rust still refuses a symlinked folder ("unmanaged"),
+    // which is left untouched.
     toast(
       kind === "unmanaged"
         ? `Couldn't replace ${name}: that folder is a link to another place, so it was left as it is.`

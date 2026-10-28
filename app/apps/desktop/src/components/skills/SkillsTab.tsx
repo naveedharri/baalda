@@ -2,7 +2,7 @@
 // Owners and admins create, upload, edit and publish; members see what is
 // published and turn Optional skills on for their own computer.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { authManager } from "../../lib/auth/authManager";
 import { skillErrorCode } from "../../lib/api";
@@ -26,7 +26,7 @@ import { toast } from "../../lib/toast";
 import { useStore } from "../../store";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { MarketplaceBrowser } from "./MarketplaceBrowser";
-import { RefreshIcon, EmptyState, SkillCard, GitHubGlyph, InstallButton, LoadError, SearchToggle, SkillGridSkeleton, skillAuthor } from "./parts";
+import { AudienceStack, RefreshIcon, EmptyState, SkillCard, SkillGlyph, UploadGlyph, GitHubGlyph, InstallButton, LoadError, SearchToggle, SkillGridSkeleton, skillAuthor } from "./parts";
 import { Spinner } from "../Spinner";
 import { withTimeout } from "../../lib/skills/loading";
 import { primeCatalog } from "../../lib/skills/catalogCache";
@@ -39,6 +39,9 @@ import { RowActionsMenu } from "../RowActionsMenu";
 import { SkillsMenuButton } from "./SkillsMenuButton";
 import { takeUnseenSkills, useHighlightSkill } from "./useHighlightSkill";
 import { useScrollReset } from "./useScrollReset";
+import { SKILL_FILE_EXTS, useSkillFileDrop } from "./useSkillFileDrop";
+import { claimFileDrops } from "../../lib/dropClaim";
+import { myAccessOf } from "../../lib/skills/access";
 import "./skills.css";
 
 const ERROR_TEXT: Record<string, string> = {
@@ -110,10 +113,11 @@ function ScopeToggle({
       onClick={() => { if (value !== scope) onChange(scope); }}
     >
       {label}
+      {/* Distinct keys: reused in place, WebKit kept spinning the number. */}
       {count === null ? (
-        <span className="spinner spinner-xs spinner-inherit skills-scope-spin" aria-label="Counting" />
+        <span key="spin" className="spinner spinner-xs spinner-inherit skills-scope-spin" aria-label="Counting" />
       ) : (
-        <span className="skills-chip-count">{count}</span>
+        <span key="count" className="skills-chip-count">{count}</span>
       )}
       {extra}
     </button>
@@ -215,6 +219,23 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
   // A teammate's add, publish or removal shows here as it happens.
   useSkillsChanged(supported ? orgId : null, () => void reload());
 
+  // No file dropped anywhere in Skills reaches the vault: the file tree
+  // stands aside while this tab is open, whatever page of it is showing.
+  useEffect(() => claimFileDrops(), []);
+  // Dropping a .zip or .skill on the Team grid uploads it (admins only).
+  const dropFile = useRef<(path: string) => void>(() => {});
+  const canDrop =
+    !!orgId && !!supported && !!catalog && (canManage || catalog.role === "owner" || catalog.role === "admin") &&
+    scope === "team" && !openId && !marketplace && !creating && !pending && !uploadPhase;
+  const dragging = useSkillFileDrop(
+    canDrop,
+    (path) => dropFile.current(path),
+    (paths) => {
+      const name = paths[0].split(/[\\/]/).pop() ?? "That file";
+      toast(`${paths.length > 1 ? "Those files aren't" : `${name} isn't`} a skill. Drop a .zip or .skill file.`, "error");
+    },
+  );
+
   if (!orgId) return <div className="muted perm-empty">Skills need a synced vault.</div>;
   if (supported === false) {
     return (
@@ -256,6 +277,19 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     );
   }
 
+  /**
+   * A new team skill starts Required, like shared and imported ones: set on the
+   * draft, so its first publish installs it for everyone. A refusal leaves it
+   * Optional, which the skill's page can still change.
+   */
+  const startRequired = async (skillId: string) => {
+    try {
+      await authManager.api.patchSkill(orgId, skillId, { delivery: "required" });
+    } catch {
+      /* stays Optional */
+    }
+  };
+
   /** New skill: a SKILL.md with the given description (or the server's starter), then its page. */
   const create = async (name: string, description: string): Promise<string | null> => {
     if (!isValidSkillName(name)) return ERROR_TEXT.invalid_name;
@@ -265,6 +299,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
       : undefined;
     try {
       const created = await authManager.api.createSkill(orgId, name, files);
+      await startRequired(created.id);
       setCreating(false);
       await reload();
       highlight(created.id);
@@ -276,9 +311,14 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
   };
 
   const uploadZip = async () => {
-    setError(null);
-    const picked = await openDialog({ multiple: false, filters: [{ name: "Zip", extensions: ["zip"] }] });
+    const picked = await openDialog({ multiple: false, filters: [{ name: "Skill", extensions: SKILL_FILE_EXTS }] });
     if (!picked || Array.isArray(picked)) return;
+    await uploadZipAt(picked);
+  };
+
+  /** A .zip or .skill (picked, or dropped on the page) becomes a new skill or a draft. */
+  const uploadZipAt = async (picked: string) => {
+    setError(null);
     let bundle: ipc.SkillBundle;
     setUploadPhase("Reading files…");
     try {
@@ -309,6 +349,8 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     else await applyUpload(next);
   };
 
+  dropFile.current = (path) => void uploadZipAt(path);
+
   const applyUpload = async (u: PendingUpload) => {
     setUploadPhase("Uploading…");
     try {
@@ -319,6 +361,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
         id = u.existing.id;
       } else {
         id = (await authManager.api.createSkill(orgId, u.name, u.files)).id;
+        await startRequired(id);
       }
       toast(
         u.skipped.length
@@ -341,7 +384,7 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
   const groups = groupSkills(skills, filter);
   const newMenu = [
     { key: "write", label: "Write from scratch", onSelect: () => setCreating(true) },
-    { key: "zip", label: "Upload .zip", onSelect: () => uploadZip() },
+    { key: "zip", label: "Upload .zip or .skill", onSelect: () => uploadZip() },
   ];
   const toggleGroup = (key: string) =>
     setFlipped((c) => {
@@ -373,7 +416,12 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
     const states = targetStates(device.results, targetsOn, orgId, s.id);
     const overall = overallState(states);
     const lines = stateLines(states, s.effectiveVersion).join("\n");
-    const optional = s.delivery === "optional";
+    // An owner/admin sees every skill, but only one shared with them installs here.
+    const mine = myAccessOf(s);
+    if (mine === "none") {
+      return { button: <InstallButton kind="blocked" title={"Not shared with you\nYou see it because you manage skills"} /> };
+    }
+    const optional = mine === "optional";
     const optedIn = !optional || isSkillOnThisDevice(serverUrl, orgId, s.id);
     let button: React.ReactNode;
     if (installing.has(s.id) && overall === "none") {
@@ -435,7 +483,9 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
   /** The AI tools that use this skill on this computer, as small marks (none when it isn't here). */
   const toolsHere = (s: SkillSummary) => {
     if (s.effectiveVersion === null) return null;
-    const optedIn = s.delivery === "required" || isSkillOnThisDevice(serverUrl, orgId, s.id);
+    const mine = myAccessOf(s);
+    if (mine === "none") return null;
+    const optedIn = mine === "required" || isSkillOnThisDevice(serverUrl, orgId, s.id);
     const on = teamAvailability(targetStates(device.results, targetsOn, orgId, s.id), optedIn, detectedAiTools(device.targets)).filter(
       (t) => t.on,
     );
@@ -470,7 +520,12 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
             titleExtra={newIds.has(s.id) && <span className="skills-new-chip">New</span>}
             byline={metaLine(s, true)}
             description={s.description || "No description yet."}
-            footer={toolsHere(s)}
+            footer={
+              <>
+                {toolsHere(s)}
+                {s.sharedWith && <AudienceStack audience={s.sharedWith} viewerIn={myAccessOf(s) !== "none"} />}
+              </>
+            }
             action={install(s).button}
             className={`${ringIds.has(s.id) ? "is-highlight" : ""}${leaving.has(s.id) ? " is-leaving" : ""}`.trim()}
             li={{ "data-skill-id": s.id, ...openProps(s) }}
@@ -602,6 +657,11 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
           <EmptyState
             title="No skills yet"
             page
+            dropHint={
+              <>
+                <UploadGlyph /> or drop a .zip or .skill file here
+              </>
+            }
             actions={
               <>
                 <button className="primary" onClick={() => setMarketplace({})}>Browse marketplace</button>
@@ -655,11 +715,31 @@ export function SkillsTab({ canManage, resetToken }: { canManage: boolean; reset
               </section>
             );
           })}
+          {manage && !filter.trim() && (
+            // Says the grid takes a dropped file; a click picks one instead.
+            <button type="button" className="skills-drop-strip" onClick={() => void uploadZip()}>
+              <span className="skills-drop-strip-icon">
+                <UploadGlyph />
+              </span>
+              <strong>Drop a .zip or .skill here</strong>
+              <span>or click to choose a file · it becomes a draft you can publish</span>
+            </button>
+          )}
         </>
       )}
 
       </div>
       {catalog && !(scope === "device" && devicePage) && <WorksWith />}
+
+      {dragging && (
+        <div className={`skills-drop-overlay${dragging === "refused" ? " is-refused" : ""}`} aria-hidden="true">
+          <span className="skills-empty-icon">
+            <SkillGlyph size={22} />
+          </span>
+          <strong>{dragging === "skill" ? "Drop to add this skill" : "Only .zip or .skill files"}</strong>
+          <span>{dragging === "skill" ? "It becomes a draft you can review and publish." : "This file can't be added as a skill."}</span>
+        </div>
+      )}
 
       {teamRemoving && (
         <RemoveFromTeamDialog

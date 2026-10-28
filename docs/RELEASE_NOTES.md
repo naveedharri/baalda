@@ -21,6 +21,12 @@
     (every app still installs it). Ask before each release: silent, or notes?
 -->
 
+## 0.1.94
+
+- **Choose who gets each skill.** Share an Agent Skill with your whole team, or only with the people you pick. You can see who has it on every skill, and each person's skills on their profile.
+- **Drop to add a skill.** Drag a .zip or .skill file onto Agent Skills to add it for your team.
+- **Smoother and more reliable**, with faster attachments in large vaults and skills that keep trying until they install.
+
 ## 0.1.93
 
 ## 0.1.92

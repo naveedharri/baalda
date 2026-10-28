@@ -816,8 +816,11 @@ fn install_into(
 
 /// §4.4, plus two answers for a folder that is not ours: one that already
 /// holds exactly these files is ADOPTED (only the marker is written), and with
-/// `replace_unmanaged` any other one is backed up and replaced. Neither ever
-/// applies to a symlink or to a copy marked for another owner.
+/// `replace_unmanaged` (the person's own "Use team version") any other one is
+/// backed up and replaced, a copy marked for another owner included (another
+/// vault, server or account). Only that explicit click replaces another
+/// owner's copy, never a sync run, so two owners cannot keep swapping it.
+/// A symlink is never adopted or replaced.
 #[allow(clippy::too_many_arguments)]
 fn install_skill(
     root: &Path,
@@ -869,10 +872,15 @@ fn install_skill(
             // Any marker naming another owner wins, even one copied under another name.
             let raw = read_marker(&dir);
             if raw.as_ref().is_some_and(|m| !same_owner(m, &owner)) {
-                return Ok(install_outcome(
-                    InstallStatus::Conflict,
-                    Some("other_owner"),
-                ));
+                if !replace_unmanaged {
+                    return Ok(install_outcome(
+                        InstallStatus::Conflict,
+                        Some("other_owner"),
+                    ));
+                }
+                let saved = backup_dir(&dir, backups, name, now)?;
+                backup_path = Some(saved.display().to_string());
+                return finish_install(root, &dir, &decoded, marker, now, true, backup_path);
             }
             let Some(old) = raw.filter(|m| m.name == name) else {
                 if folder_as_read(&dir).as_ref() == Some(&marker.files) {
@@ -2774,7 +2782,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_unmanaged_never_touches_another_owners_copy() {
+    fn replace_unmanaged_backs_up_another_owners_copy_then_installs() {
         let e = env();
         let files = skill_files("v1");
         let mut theirs = marker_for(&files, 1);
@@ -2789,27 +2797,39 @@ mod tests {
             SystemTime::now(),
         )
         .unwrap();
-        let out = install_replacing(&e, &skill_files("v2"), marker_for(&skill_files("v2"), 2));
+        // A sync run (no replace flag) still leaves another owner's copy alone.
+        let out = install_into(
+            &e.root,
+            &e.backups,
+            "demo",
+            marker_for(&skill_files("v2"), 2),
+            &skill_files("v2"),
+            true,
+            SystemTime::now(),
+        )
+        .unwrap();
         assert_eq!(
             (out.status, out.detail.as_deref()),
             (InstallStatus::Conflict, Some("other_owner"))
-        );
-
-        // Even renamed (marker naming another folder), another owner's copy stays theirs.
-        let renamed = e.root.join("demo");
-        let mut m = theirs;
-        m.name = "elsewhere".into();
-        fs::write(renamed.join(MARKER), serde_json::to_vec(&m).unwrap()).unwrap();
-        let out = install_replacing(&e, &files, marker_for(&files, 1));
-        assert_eq!(
-            (out.status, out.detail.as_deref()),
-            (InstallStatus::Conflict, Some("other_owner"))
-        );
-        assert_eq!(
-            read_marker(&renamed).unwrap().user_id.as_deref(),
-            Some("u2")
         );
         assert_eq!(backup_count(&e), 0);
+
+        // "Use team version": theirs is backed up, then ours takes the folder.
+        let out = install_replacing(&e, &skill_files("v2"), marker_for(&skill_files("v2"), 2));
+        assert_eq!(out.status, InstallStatus::Installed);
+        assert!(out.backup_path.is_some());
+        assert_eq!(backup_count(&e), 1);
+        let dir = e.root.join("demo");
+        assert_eq!(read_marker(&dir).unwrap().user_id, marker_for(&files, 1).user_id);
+        assert_eq!(read_marker(&dir).unwrap().version, 2);
+
+        // Renamed (a marker naming another folder) is still another owner's: same answer.
+        let mut m = theirs;
+        m.name = "elsewhere".into();
+        fs::write(dir.join(MARKER), serde_json::to_vec(&m).unwrap()).unwrap();
+        let out = install_replacing(&e, &files, marker_for(&files, 1));
+        assert_eq!(out.status, InstallStatus::Installed);
+        assert_eq!(backup_count(&e), 2);
     }
 
     #[cfg(unix)]
