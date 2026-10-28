@@ -22,7 +22,7 @@ describe("skill access helpers", () => {
   it("offers Same as everyone only to someone with their own setting, naming the level", () => {
     expect(personAccessOptions(false, "required").map((o) => o.value)).toEqual(["required", "optional", "none"]);
     const own = personAccessOptions(true, "optional");
-    expect(own.at(-1)).toMatchObject({ value: "everyone", label: "Same as everyone (Optional)" });
+    expect(own[own.length - 1]).toMatchObject({ value: "everyone", label: "Same as everyone (Optional)" });
   });
 
   it("colours levels like vault access", () => {
