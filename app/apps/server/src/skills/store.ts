@@ -15,8 +15,19 @@ import {
   sha256Hex,
   type DecodedSkillFile,
 } from "./validate.js";
+import {
+  MY_LEVEL_SQL,
+  audienceOf,
+  everyoneLevel,
+  myLevelJoin,
+  orgMembers,
+  personalLevels,
+  type SkillViewer,
+} from "./access.js";
 import type {
   ManifestOrg,
+  SkillAccessLevel,
+  SkillAudience,
   SkillDelivery,
   SkillDetail,
   SkillDraft,
@@ -69,16 +80,27 @@ type SkillRow = {
   latest_published_by: string | null;
   latest_publisher_name: string | null;
   source: SkillOrigin | null;
+  everyone_access: string;
+  /** The viewer's effective level (the Everyone row when there is no viewer). */
+  my_level: SkillAccessLevel;
 };
 
 const SKILL_COLUMNS = `s.id, s.organization_id, s.name, s.delivery, s.pinned_version, s.latest_version,
-  s.draft_revision, s.draft_description, s.created_at, s.updated_at, s.source,
+  s.draft_revision, s.draft_description, s.created_at, s.updated_at, s.source, s.everyone_access,
+  ${MY_LEVEL_SQL} AS my_level,
   lv.description AS latest_description, lv.bundle_sha256 AS latest_bundle,
   lv.published_at AS latest_published_at, lv.published_by AS latest_published_by,
   lu.name AS latest_publisher_name`;
-const SKILL_FROM = `skills s
+/** `userParam` is the viewer's user id placeholder (null: no viewer). */
+function skillFrom(userParam: string): string {
+  return `skills s
   LEFT JOIN skill_versions lv ON lv.skill_id = s.id AND lv.version = s.latest_version
-  LEFT JOIN "user" lu ON lu.id = lv.published_by`;
+  LEFT JOIN "user" lu ON lu.id = lv.published_by
+  ${myLevelJoin(userParam)}`;
+}
+
+/** Admin calls made without a person (tests, internal writes) see the Everyone row. */
+const NO_VIEWER: SkillViewer = { userId: "", role: "owner" };
 
 type MetaRow = { skill_id: string; path: string; sha256: string; size: number; executable: boolean };
 
@@ -99,15 +121,17 @@ async function draftMetas(db: pg.Pool | pg.PoolClient, skillIds: string[]): Prom
   return out;
 }
 
-function summary(row: SkillRow, draft: SkillFileMeta[], role: SkillRole): SkillSummary {
+function summary(row: SkillRow, draft: SkillFileMeta[], role: SkillRole, sharedWith: SkillAudience): SkillSummary {
   const draftBundle = bundleSha256(draft);
+  const admin = isSkillAdmin(role);
   return {
     id: row.id,
     orgId: row.organization_id,
     name: row.name,
     source: row.source ?? null,
     description: row.latest_description ?? (isSkillAdmin(role) ? row.draft_description : ""),
-    delivery: row.delivery,
+    // Members: their own level (a member never receives a skill at "none").
+    delivery: admin || row.my_level === "none" ? row.delivery : row.my_level,
     pinnedVersion: row.pinned_version,
     latestVersion: row.latest_version,
     latestPublishedBy: person(row.latest_published_by, row.latest_publisher_name),
@@ -117,38 +141,63 @@ function summary(row: SkillRow, draft: SkillFileMeta[], role: SkillRole): SkillS
     draftDiffers: row.latest_bundle === null || row.latest_bundle !== draftBundle,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+    myAccess: row.my_level,
+    everyone: admin ? everyoneLevel(row) : null,
+    sharedWith,
   };
 }
 
-/** Live skills of an org; members see only published ones. */
-export async function listSkills(orgId: string, role: SkillRole): Promise<SkillSummary[]> {
-  const { rows } = await pool.query<SkillRow>(
-    `SELECT ${SKILL_COLUMNS} FROM ${SKILL_FROM}
-      WHERE s.organization_id = $1 AND s.deleted_at IS NULL
-        AND ($2 OR s.latest_version IS NOT NULL)
-      ORDER BY s.name`,
-    [orgId, isSkillAdmin(role)],
-  );
-  const metas = await draftMetas(pool, rows.map((r) => r.id));
-  return rows.map((r) => summary(r, metas.get(r.id) ?? [], role));
+/** Who gets each of these skills, two queries for any number of them. */
+async function audiences(db: pg.Pool | pg.PoolClient, orgId: string, rows: SkillRow[]): Promise<Map<string, SkillAudience>> {
+  const out = new Map<string, SkillAudience>();
+  if (rows.length === 0) return out;
+  const members = await orgMembers(db, orgId);
+  const own = await personalLevels(db, rows.map((r) => r.id));
+  for (const r of rows) out.set(r.id, audienceOf(everyoneLevel(r), members, own.get(r.id)));
+  return out;
 }
 
-/** A live skill of this org, else 404 `skill_not_found` (members: published only). */
+async function summaries(db: pg.Pool | pg.PoolClient, orgId: string, rows: SkillRow[], role: SkillRole): Promise<SkillSummary[]> {
+  const metas = await draftMetas(db, rows.map((r) => r.id));
+  const who = await audiences(db, orgId, rows);
+  return rows.map((r) => summary(r, metas.get(r.id) ?? [], role, who.get(r.id)!));
+}
+
+/**
+ * Live skills of an org. Members see only published ones they have access
+ * to; owners and admins see every skill (their own level rides on `myAccess`).
+ */
+export async function listSkills(orgId: string, viewer: SkillViewer): Promise<SkillSummary[]> {
+  const { rows } = await pool.query<SkillRow>(
+    `SELECT ${SKILL_COLUMNS} FROM ${skillFrom("$3")}
+      WHERE s.organization_id = $1 AND s.deleted_at IS NULL
+        AND ($2 OR (s.latest_version IS NOT NULL AND ${MY_LEVEL_SQL} <> 'none'))
+      ORDER BY s.name`,
+    [orgId, isSkillAdmin(viewer.role), viewer.userId || null],
+  );
+  return summaries(pool, orgId, rows, viewer.role);
+}
+
+/**
+ * A live skill of this org, else 404 `skill_not_found`. Members: published
+ * only, and only at a level other than "none" (a hidden skill does not exist
+ * for them, name included).
+ */
 async function loadSkill(
   db: pg.Pool | pg.PoolClient,
   orgId: string,
   skillId: string,
-  role: SkillRole,
+  viewer: SkillViewer,
   lock = false,
 ): Promise<SkillRow> {
   const { rows } = await db.query<SkillRow>(
-    `SELECT ${SKILL_COLUMNS} FROM ${SKILL_FROM}
+    `SELECT ${SKILL_COLUMNS} FROM ${skillFrom("$3")}
       WHERE s.id = $1 AND s.organization_id = $2 AND s.deleted_at IS NULL
       ${lock ? "FOR UPDATE OF s" : ""}`,
-    [skillId, orgId],
+    [skillId, orgId, viewer.userId || null],
   );
   const row = rows[0];
-  if (!row || (!isSkillAdmin(role) && row.latest_version === null)) {
+  if (!row || (!isSkillAdmin(viewer.role) && (row.latest_version === null || row.my_level === "none"))) {
     throw new SkillError(404, { error: "skill_not_found" });
   }
   return row;
@@ -182,9 +231,9 @@ function versionSummary(v: VersionRow): SkillVersionSummary {
   };
 }
 
-export async function getSkillDetail(orgId: string, skillId: string, role: SkillRole): Promise<SkillDetail> {
-  const row = await loadSkill(pool, orgId, skillId, role);
-  return detail(pool, row, role);
+export async function getSkillDetail(orgId: string, skillId: string, viewer: SkillViewer): Promise<SkillDetail> {
+  const row = await loadSkill(pool, orgId, skillId, viewer);
+  return detail(pool, row, viewer.role);
 }
 
 async function detail(db: pg.Pool | pg.PoolClient, row: SkillRow, role: SkillRole): Promise<SkillDetail> {
@@ -194,8 +243,9 @@ async function detail(db: pg.Pool | pg.PoolClient, row: SkillRow, role: SkillRol
     [row.id],
   );
   const draft = (await draftMetas(db, [row.id])).get(row.id) ?? [];
+  const who = await audiences(db, row.organization_id, [row]);
   return {
-    ...summary(row, draft, role),
+    ...summary(row, draft, role, who.get(row.id)!),
     versions: versions.map(versionSummary),
     draftFiles: isSkillAdmin(role) ? draft : null,
   };
@@ -273,7 +323,8 @@ export async function createSkill(
       throw new SkillError(409, { error: "skill_name_taken" });
     }
     await insertDraftFiles(db, id, draft);
-    return detail(db, await loadSkill(db, orgId, id, "owner"), "owner");
+    // Only owners/admins create skills, so the creator sees it as one.
+    return detail(db, await loadSkill(db, orgId, id, { userId, role: "owner" }), "owner");
   });
 }
 
@@ -282,9 +333,10 @@ export async function patchSkill(
   orgId: string,
   skillId: string,
   patch: { delivery?: SkillDelivery; pinnedVersion?: number | null; source?: SkillOrigin | null },
+  viewer: SkillViewer = NO_VIEWER,
 ): Promise<SkillSummary> {
   return tx(async (db) => {
-    await loadSkill(db, orgId, skillId, "owner", true);
+    await loadSkill(db, orgId, skillId, viewer, true);
     if (typeof patch.pinnedVersion === "number") {
       const { rows } = await db.query(
         "SELECT 1 FROM skill_versions WHERE skill_id = $1 AND version = $2",
@@ -308,9 +360,8 @@ export async function patchSkill(
         patch.source ? JSON.stringify(patch.source) : null,
       ],
     );
-    const row = await loadSkill(db, orgId, skillId, "owner");
-    const metas = await draftMetas(db, [skillId]);
-    return summary(row, metas.get(skillId) ?? [], "owner");
+    const row = await loadSkill(db, orgId, skillId, viewer);
+    return (await summaries(db, orgId, [row], viewer.role))[0];
   });
 }
 
@@ -362,7 +413,7 @@ async function readDraft(db: pg.Pool | pg.PoolClient, skillId: string): Promise<
 
 /** #7 */
 export async function getDraft(orgId: string, skillId: string): Promise<SkillDraft> {
-  await loadSkill(pool, orgId, skillId, "owner");
+  await loadSkill(pool, orgId, skillId, NO_VIEWER);
   return readDraft(pool, skillId);
 }
 
@@ -393,7 +444,7 @@ export async function writeDraft(
   write: DraftWrite,
 ): Promise<SkillDraft> {
   return tx(async (db) => {
-    const row = await loadSkill(db, orgId, skillId, "owner", true);
+    const row = await loadSkill(db, orgId, skillId, NO_VIEWER, true);
     checkRevision(row, baseRevision);
     if (write.kind === "replace") {
       checkSkillCaps(write.files);
@@ -453,7 +504,7 @@ export async function publishSkill(
 ): Promise<SkillVersionSummary> {
   if (notes.length > MAX_NOTES_CHARS) throw new SkillError(400, { error: "invalid_notes" });
   return tx(async (db) => {
-    const row = await loadSkill(db, orgId, skillId, "owner", true);
+    const row = await loadSkill(db, orgId, skillId, NO_VIEWER, true);
     checkRevision(row, baseRevision);
     const { rows: files } = await db.query<MetaRow>(
       "SELECT skill_id, path, sha256, size, executable FROM skill_draft_files WHERE skill_id = $1",
@@ -500,8 +551,9 @@ export async function getVersion(
   orgId: string,
   skillId: string,
   version: number,
+  viewer: SkillViewer,
 ): Promise<SkillVersionSummary & { files: SkillFile[] }> {
-  await loadSkill(pool, orgId, skillId, "member");
+  await loadSkill(pool, orgId, skillId, viewer);
   const { rows } = await pool.query<VersionRow>(
     `SELECT ${VERSION_COLUMNS} FROM skill_versions v LEFT JOIN "user" u ON u.id = v.published_by
       WHERE v.skill_id = $1 AND v.version = $2`,
@@ -519,7 +571,10 @@ export async function getVersion(
 
 /**
  * Every org the user belongs to (even with zero skills) with the effective
- * version of each live skill and its file metadata. Three queries whatever the
+ * version of each live skill this user gets and its file metadata, `delivery`
+ * being THIS user's level (their own row, else the Everyone row). A skill at
+ * "none" is left out, so a desktop removes it like a deleted one. Owners and
+ * admins too: the manifest is what installs. Three queries whatever the
  * number of orgs or skills.
  */
 export async function skillsManifest(userId: string): Promise<SkillsManifest> {
@@ -547,12 +602,13 @@ export async function skillsManifest(userId: string): Promise<SkillsManifest> {
     bundle_sha256: string;
     source: SkillOrigin | null;
   }>(
-    `SELECT s.id, s.organization_id, s.name, s.delivery, v.id AS version_id, v.version,
+    `SELECT s.id, s.organization_id, s.name, ${MY_LEVEL_SQL} AS delivery, v.id AS version_id, v.version,
             v.description, v.bundle_sha256, s.source
        FROM skills s
        JOIN member m ON m."organizationId" = s.organization_id AND m."userId" = $1
        JOIN skill_versions v ON v.skill_id = s.id AND v.version = COALESCE(s.pinned_version, s.latest_version)
-      WHERE s.deleted_at IS NULL
+       ${myLevelJoin("$1")}
+      WHERE s.deleted_at IS NULL AND ${MY_LEVEL_SQL} <> 'none'
       ORDER BY s.name`,
     [userId],
   );
@@ -608,8 +664,12 @@ export type PublishedSkill = {
   description: string;
 };
 
-/** Live skills with an effective version, described by that version. */
-export async function listPublishedSkills(orgId: string): Promise<PublishedSkill[]> {
+/**
+ * Live skills with an effective version, described by that version. With a
+ * viewer: members only get skills at a level other than "none" (`delivery`
+ * their own); owners and admins get every one.
+ */
+export async function listPublishedSkills(orgId: string, viewer: SkillViewer = NO_VIEWER): Promise<PublishedSkill[]> {
   const { rows } = await pool.query<{
     id: string;
     name: string;
@@ -618,12 +678,16 @@ export async function listPublishedSkills(orgId: string): Promise<PublishedSkill
     latest_version: number;
     description: string;
   }>(
-    `SELECT s.id, s.name, s.delivery, s.pinned_version, s.latest_version, v.description
+    `SELECT s.id, s.name,
+            CASE WHEN $2 OR ${MY_LEVEL_SQL} = 'none' THEN s.delivery ELSE ${MY_LEVEL_SQL} END AS delivery,
+            s.pinned_version, s.latest_version, v.description
        FROM skills s
        JOIN skill_versions v ON v.skill_id = s.id AND v.version = COALESCE(s.pinned_version, s.latest_version)
+       ${myLevelJoin("$3")}
       WHERE s.organization_id = $1 AND s.deleted_at IS NULL
+        AND ($2 OR ${MY_LEVEL_SQL} <> 'none')
       ORDER BY s.name`,
-    [orgId],
+    [orgId, isSkillAdmin(viewer.role), viewer.userId || null],
   );
   return rows.map((r) => ({
     id: r.id,
@@ -641,8 +705,9 @@ export async function readPublishedVersion(
   orgId: string,
   name: string,
   version: number | undefined,
+  viewer: SkillViewer = NO_VIEWER,
 ): Promise<{ version: VersionRow; files: FileRow[] } | "skill_not_found" | "version_not_found"> {
-  const skill = (await listPublishedSkills(orgId)).find((s) => s.name === name);
+  const skill = (await listPublishedSkills(orgId, viewer)).find((s) => s.name === name);
   if (!skill) return "skill_not_found";
   const { rows } = await pool.query<VersionRow>(
     `SELECT ${VERSION_COLUMNS} FROM skill_versions v LEFT JOIN "user" u ON u.id = v.published_by

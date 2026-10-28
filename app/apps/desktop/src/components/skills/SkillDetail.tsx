@@ -8,7 +8,7 @@ import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { ApiError, skillErrorCode } from "../../lib/api";
 import { authManager } from "../../lib/auth/authManager";
 import * as ipc from "../../lib/ipc";
-import type { SkillDelivery, SkillDetail as SkillDetailData, SkillVersionSummary } from "../../lib/skills/types";
+import type { SkillAccessLevel, SkillDelivery, SkillDetail as SkillDetailData, SkillVersionSummary } from "../../lib/skills/types";
 import { skillMdProblemText, skillNameNeedsWarning, type SkillMdReason, CAP_RULE_TEXT } from "../../lib/skills/validate";
 import { publishNotes } from "../../lib/skills/publishNotes";
 import { skillDisplayName } from "../../lib/skills/display";
@@ -24,8 +24,16 @@ import { showDeliveryNow, useSkillsChanged, useSkillsDeviceState } from "../../l
 import { SkillEditor } from "./SkillEditor";
 import { SkillSourceRow } from "./SkillSourceRow";
 import { RemoveFromTeamDialog } from "./RemoveFromTeamDialog";
+import { SkillSharedWith } from "./SkillSharedWith";
+import { AudienceStack } from "./parts";
+import { EVERYONE_ACCESS_OPTIONS, hasSkillAccess, myAccessOf } from "../../lib/skills/access";
+import { checkSkillsNow } from "../../lib/skills/syncHost";
 
-type Section = "draft" | "versions";
+type Section = "draft" | "access" | "versions";
+
+/** The header's Everyone menu, in its own words (No access = only the people chosen). */
+const EVERYONE_HEADER_OPTIONS = EVERYONE_ACCESS_OPTIONS.map((o) => (o.value === "none" ? { ...o, label: "Specific people" } : o));
+const EVERYONE_HEADER_LABEL: Record<SkillAccessLevel, string> = { required: "Required", optional: "Optional", none: "Specific people" };
 
 const DELIVERY_OPTIONS = [
   { value: "required" as const, label: "Required", hint: "Installed for everyone" },
@@ -102,8 +110,11 @@ export function SkillDetail({
   const [focus, setFocus] = useState(false);
   /** Bumped when the draft is replaced from outside the editor (restore). */
   const [draftEpoch, setDraftEpoch] = useState(0);
+  /** Bumped when the header changes the Everyone row, so the Shared with tab reloads. */
+  const [accessEpoch, setAccessEpoch] = useState(0);
   const [confirm, setConfirm] = useState<
     | { kind: "delete" }
+    | { kind: "everyoneNone" }
     | { kind: "restore"; version: SkillVersionSummary }
     | null
   >(null);
@@ -136,6 +147,21 @@ export function SkillDetail({
       return;
     }
     onChanged();
+    void load();
+  };
+
+  /** The header's Everyone menu: the same write as the Shared with tab's Everyone row. */
+  const setEveryone = async (level: SkillAccessLevel) => {
+    setError(null);
+    try {
+      await authManager.api.putSkillAccess(orgId, skillId, { everyone: level });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    setAccessEpoch((n) => n + 1);
+    onChanged();
+    checkSkillsNow();
     void load();
   };
 
@@ -261,6 +287,15 @@ export function SkillDetail({
             <span className="skills-source-pill">{skill.source ? `From ${skill.source.repo}` : "Shared with your team"}</span>
           </div>
           <SkillByline skill={skill} />
+          {skill.sharedWith && (
+            canManage ? (
+              <button type="button" className="link-btn skills-audience-btn" onClick={() => setSection("access")} aria-label="See who has this skill">
+                <AudienceStack audience={skill.sharedWith} viewerIn={myAccessOf(skill) !== "none"} />
+              </button>
+            ) : (
+              <AudienceStack audience={skill.sharedWith} viewerIn />
+            )
+          )}
           {skillNameNeedsWarning(skill.name) && (
             <span className="skills-warning">claude.ai refuses names with "claude" or "anthropic".</span>
           )}
@@ -271,15 +306,27 @@ export function SkillDetail({
           )}
           {canManage ? (
             <>
-              <MenuSelect
-                value={skill.delivery}
-                options={DELIVERY_OPTIONS}
-                onSelect={(delivery) => patch({ delivery })}
-                ariaLabel="Who gets this skill"
-                caret={false}
-                triggerClassName="secondary skills-hdr-btn skills-ctl"
-                triggerContent={<>{skill.delivery === "required" ? "Required" : "Optional"}<Chevron /></>}
-              />
+              {hasSkillAccess(skill) && skill.everyone ? (
+                <MenuSelect
+                  value={skill.everyone}
+                  options={EVERYONE_HEADER_OPTIONS}
+                  onSelect={(level) => (level === "none" ? setConfirm({ kind: "everyoneNone" }) : void setEveryone(level))}
+                  ariaLabel="Who gets this skill"
+                  caret={false}
+                  triggerClassName="secondary skills-hdr-btn skills-ctl"
+                  triggerContent={<>{EVERYONE_HEADER_LABEL[skill.everyone]}<Chevron /></>}
+                />
+              ) : (
+                <MenuSelect
+                  value={skill.delivery}
+                  options={DELIVERY_OPTIONS}
+                  onSelect={(delivery) => patch({ delivery })}
+                  ariaLabel="Who gets this skill"
+                  caret={false}
+                  triggerClassName="secondary skills-hdr-btn skills-ctl"
+                  triggerContent={<>{skill.delivery === "required" ? "Required" : "Optional"}<Chevron /></>}
+                />
+              )}
               {skill.versions.length > 0 && (
                 <MenuSelect
                   value={skill.pinnedVersion === null ? "latest" : String(skill.pinnedVersion)}
@@ -357,7 +404,7 @@ export function SkillDetail({
 
       {canManage && (
         <div className="member-profile-tabs" role="tablist" aria-label="Skill">
-          {(["draft", "versions"] as const).map((s) => (
+          {(hasSkillAccess(skill) ? (["draft", "access", "versions"] as const) : (["draft", "versions"] as const)).map((s) => (
             <button
               key={s}
               type="button"
@@ -366,7 +413,11 @@ export function SkillDetail({
               className={`member-profile-tab${s === section ? " active" : ""}`}
               onClick={() => setSection(s)}
             >
-              {s === "draft" ? "Overview" : `Versions${skill.versions.length ? ` · ${skill.versions.length}` : ""}`}
+              {s === "draft"
+                ? "Overview"
+                : s === "access"
+                  ? `Shared with${skill.sharedWith ? ` · ${skill.sharedWith.count}` : ""}`
+                  : `Versions${skill.versions.length ? ` · ${skill.versions.length}` : ""}`}
             </button>
           ))}
         </div>
@@ -376,7 +427,18 @@ export function SkillDetail({
 
       {error && <div className="auth-error">{error}</div>}
 
-      {section === "draft" && canManage ? (
+      {section === "access" && canManage ? (
+        <SkillSharedWith
+          key={accessEpoch}
+          orgId={orgId}
+          skillId={skill.id}
+          skillName={skill.name}
+          onChanged={() => {
+            onChanged();
+            void load();
+          }}
+        />
+      ) : section === "draft" && canManage ? (
         <SkillEditor
           key={draftEpoch}
           orgId={orgId}
@@ -435,6 +497,22 @@ export function SkillDetail({
             onBack();
           }}
         />
+      )}
+
+      {confirm?.kind === "everyoneNone" && (
+        <ConfirmDialog
+          title={`Take ${skillDisplayName(skill.name)} away from everyone?`}
+          confirmLabel="Take away"
+          onCancel={() => setConfirm(null)}
+          onConfirm={async () => {
+            setConfirm(null);
+            await setEveryone("none");
+            setSection("access");
+          }}
+        >
+          Only people you add in Shared with will get it. An untouched copy is removed from everyone else's computer; one
+          they edited stays as their own skill.
+        </ConfirmDialog>
       )}
 
       {confirm?.kind === "restore" && (

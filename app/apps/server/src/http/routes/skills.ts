@@ -31,8 +31,9 @@ import {
   softDeleteSkill,
   writeDraft,
 } from "../../skills/store.js";
-import type { SkillDelivery, SkillOrigin, SkillRole } from "../../skills/types.js";
+import type { SkillAccessLevel, SkillDelivery, SkillOrigin, SkillRole } from "../../skills/types.js";
 import { getSession } from "../session.js";
+import { getSkillAccess, isAccessLevel, memberSkillAccess, setSkillAccess, type SkillAccessChange } from "../../skills/access.js";
 
 /**
  * Team skills (docs/SKILLS.md §3.3, migration 060). Any member reads the
@@ -106,7 +107,7 @@ export function createSkillRoutes(): Hono {
   routes.get("/orgs/:orgId/skills", async (c) => {
     const who = await caller(c, false);
     if (who instanceof Response) return who;
-    return c.json({ role: who.role, skills: await listSkills(who.orgId, who.role) });
+    return c.json({ role: who.role, skills: await listSkills(who.orgId, who) });
   });
 
   // #3 — not published yet, but admins' Skills pages list the new card.
@@ -126,7 +127,7 @@ export function createSkillRoutes(): Hono {
   routes.get("/orgs/:orgId/skills/:skillId", async (c) => {
     const who = await caller(c, false);
     if (who instanceof Response) return who;
-    return c.json(await getSkillDetail(who.orgId, skillIdParam(c), who.role));
+    return c.json(await getSkillDetail(who.orgId, skillIdParam(c), who));
   });
 
   // #5
@@ -150,7 +151,7 @@ export function createSkillRoutes(): Hono {
       patch.pinnedVersion = v;
     }
     if (body.source !== undefined) patch.source = parseSkillOrigin(body.source);
-    const out = await patchSkill(who.orgId, skillId, patch);
+    const out = await patchSkill(who.orgId, skillId, patch, who);
     await announceSkillsChanged(who.orgId);
     return c.json(out);
   });
@@ -229,7 +230,62 @@ export function createSkillRoutes(): Hono {
     const skillId = skillIdParam(c);
     const raw = c.req.param("version");
     if (!VERSION_RE.test(raw)) return c.json({ error: "version_not_found" }, 404);
-    return c.json(await getVersion(who.orgId, skillId, Number(raw)));
+    return c.json(await getVersion(who.orgId, skillId, Number(raw), who));
+  });
+
+  // ---- who gets a skill (migration 062). Owners/admins read and change it;
+  // a change announces skills-changed, so every desktop refetches its manifest
+  // and installs or removes the skill for the people it now reaches.
+
+  routes.get("/orgs/:orgId/skills/:skillId/access", async (c) => {
+    const who = await caller(c, true);
+    if (who instanceof Response) return who;
+    return c.json(await getSkillAccess(who.orgId, skillIdParam(c)));
+  });
+
+  // `everyone`: the Everyone row; `people`: per-person levels, `level: null`
+  // to go back to the Everyone row. One transaction.
+  routes.put("/orgs/:orgId/skills/:skillId/access", async (c) => {
+    const who = await caller(c, true);
+    if (who instanceof Response) return who;
+    const skillId = skillIdParam(c);
+    const body = await jsonBody(c);
+    const change: SkillAccessChange = {};
+    if (body.everyone !== undefined) {
+      if (!isAccessLevel(body.everyone)) return c.json({ error: "invalid_request" }, 400);
+      change.everyone = body.everyone;
+    }
+    if (body.people !== undefined) {
+      const people = body.people;
+      if (!Array.isArray(people) || people.length > 500) return c.json({ error: "invalid_request" }, 400);
+      const parsed: NonNullable<SkillAccessChange["people"]> = [];
+      for (const p of people as unknown[]) {
+        const row = p as { userId?: unknown; level?: unknown } | null;
+        if (!row || typeof row.userId !== "string" || !ID_RE.test(row.userId)) {
+          return c.json({ error: "invalid_request" }, 400);
+        }
+        if (row.level !== null && !isAccessLevel(row.level)) return c.json({ error: "invalid_request" }, 400);
+        parsed.push({ userId: row.userId, level: row.level === null ? null : (row.level as SkillAccessLevel) });
+      }
+      change.people = parsed;
+    }
+    const out = await setSkillAccess(who.orgId, skillId, who.userId, change);
+    await announceSkillsChanged(who.orgId);
+    return c.json(out);
+  });
+
+  // One person's level for every skill: their profile's Skills tab.
+  // Owners/admins for anyone; a member for themselves.
+  routes.get("/orgs/:orgId/members/:userId/skills", async (c) => {
+    const who = await caller(c, false);
+    if (who instanceof Response) return who;
+    const userId = c.req.param("userId") ?? "";
+    if (!ID_RE.test(userId)) return c.json({ error: "not_member" }, 404);
+    if (userId !== who.userId && !isSkillAdmin(who.role)) return c.json({ error: "skills_admin_required" }, 403);
+    if (!(await orgRole(who.orgId, userId))) return c.json({ error: "not_member" }, 404);
+    const skills = await memberSkillAccess(who.orgId, userId);
+    // A member's own list leaves out what is hidden from them.
+    return c.json({ skills: isSkillAdmin(who.role) ? skills : skills.filter((s) => s.level !== "none" && s.latestVersion !== null) });
   });
 
   // ---- marketplace sources (Addendum — Marketplace import). A source changes

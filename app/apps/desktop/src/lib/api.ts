@@ -1,5 +1,8 @@
 import type { PinnedItem } from "./pins";
 import type {
+  MemberSkillAccess,
+  SkillAccessLevel,
+  SkillAccessList,
   SkillDelivery,
   SkillDetail,
   SkillDraft,
@@ -3356,6 +3359,26 @@ export class ApiClient {
     change: { delivery?: SkillDelivery; pinnedVersion?: number | null; source?: SkillOrigin | null },
   ): Promise<SkillSummary> {
     return (await this.request<SkillSummary>("PATCH", skillPath(orgId, skillId), { body: change })).data;
+  }
+
+  /** A skill's Shared with list: the Everyone row and every member's level (owners/admins). */
+  async getSkillAccess(orgId: string, skillId: string): Promise<SkillAccessList> {
+    return (await this.request<SkillAccessList>("GET", `${skillPath(orgId, skillId)}/access`)).data;
+  }
+
+  /** The Everyone row and/or per-person levels in one write; `level: null` = back to Everyone. */
+  async putSkillAccess(
+    orgId: string,
+    skillId: string,
+    change: { everyone?: SkillAccessLevel; people?: { userId: string; level: SkillAccessLevel | null }[] },
+  ): Promise<SkillAccessList> {
+    return (await this.request<SkillAccessList>("PUT", `${skillPath(orgId, skillId)}/access`, { body: change })).data;
+  }
+
+  /** One person's level for every skill (their profile's Skills tab). */
+  async getMemberSkills(orgId: string, userId: string): Promise<MemberSkillAccess[]> {
+    const path = `/api/orgs/${encodeURIComponent(orgId)}/members/${encodeURIComponent(userId)}/skills`;
+    return (await this.request<{ skills: MemberSkillAccess[] }>("GET", path)).data.skills;
   }
 
   async deleteSkill(orgId: string, skillId: string): Promise<void> {

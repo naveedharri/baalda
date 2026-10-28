@@ -5,6 +5,8 @@
  */
 export type SkillDelivery = "required" | "optional";
 export type SkillRole = "owner" | "admin" | "member";
+/** One person's level for a skill: Required or Optional installs it; none hides it (migration 062). */
+export type SkillAccessLevel = "required" | "optional" | "none";
 
 /** A file with content, base64 of the raw bytes. */
 export interface SkillFile {
@@ -75,6 +77,48 @@ export interface SkillSummary {
   draftDiffers: boolean;             // draft bundle hash != latest version's (true when never published)
   createdAt: string;
   updatedAt: string;
+  /** The caller's own level: what installs on their computer ("none" only reaches owners/admins). */
+  myAccess: SkillAccessLevel;
+  /** The Everyone row; owners/admins only, null for members. */
+  everyone: SkillAccessLevel | null;
+  /** Who gets it: members whose level is not "none". */
+  sharedWith: SkillAudience;
+}
+
+export interface SkillAudience {
+  /** Every member of the vault gets it. */
+  everyone: boolean;
+  count: number;
+  total: number;
+  /** The first few of them, by name. */
+  people: { id: string; name: string; image: string | null }[];
+}
+
+/** A skill's Shared with list (owners/admins). */
+export interface SkillAccessList {
+  everyone: SkillAccessLevel;
+  people: {
+    userId: string;
+    name: string;
+    email: string;
+    image: string | null;
+    role: SkillRole;
+    level: SkillAccessLevel;
+    /** Their own row, rather than the Everyone row. */
+    own: boolean;
+  }[];
+}
+
+/** One person's level for one skill (their profile's Skills tab). */
+export interface MemberSkillAccess {
+  skillId: string;
+  name: string;
+  description: string;
+  latestVersion: number | null;
+  level: SkillAccessLevel;
+  own: boolean;
+  /** The Everyone row, what "Same as everyone" goes back to. */
+  everyone: SkillAccessLevel;
 }
 
 export interface SkillDetail extends SkillSummary {

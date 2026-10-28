@@ -14,6 +14,9 @@ import { relativeTime } from "../lib/health/format";
 import { toast } from "../lib/toast";
 import { useStore } from "../store";
 import { Avatar } from "./Avatar";
+import { MemberSkillsTab } from "./skills/MemberSkillsTab";
+import { serverFeatures } from "../lib/serverFeatures";
+import { SKILL_ACCESS_FEATURE } from "../lib/skills/access";
 import { MemberAccessBoard } from "./MemberAccessBoard";
 import { useAccessMap, type AccessMap } from "./useAccessMap";
 import { ACCESS_MAP_REREAD_MAX } from "../lib/accessBoardLoad";
@@ -40,7 +43,7 @@ const summaries = createAccessSummaryBatcher({
  * created, edited and were given, newest first). Every change in the Access
  * tab is applied immediately through the bulk route scoped to this one user.
  */
-export type ProfileTab = "info" | "access" | "activity";
+export type ProfileTab = "info" | "access" | "skills" | "activity";
 
 /** How the Access tab lays out one person's access; remembered per device. */
 export type AccessView = "list" | "board";
@@ -108,9 +111,22 @@ export function MemberProfilePage({
       : initialTab,
   );
   const name = member.name || member.email || member.userId;
+  const serverUrl = useStore((s) => s.serverUrl);
+  const [skillAccess, setSkillAccess] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void serverFeatures(serverUrl, () => authManager.api.getHealth(serverUrl)).then((f) => {
+      if (live) setSkillAccess(f.has(SKILL_ACCESS_FEATURE));
+    });
+    return () => {
+      live = false;
+    };
+  }, [serverUrl]);
   const tabs: readonly ProfileTab[] = [
     "info",
     ...(showAccessTab ? (["access"] as const) : []),
+    // Which team skills reach them (owners/admins, like Access; needs migration 062).
+    ...(showAccessTab && skillAccess ? (["skills"] as const) : []),
     ...(showActivityTab ? (["activity"] as const) : []),
   ];
   const level = member.access?.level ?? null;
@@ -204,6 +220,8 @@ export function MemberProfilePage({
               />
             )}
           />
+        ) : tab === "skills" ? (
+          <MemberSkillsTab orgId={orgId} userId={member.userId} name={member.name || member.email || "This person"} />
         ) : (
           <PersonActivity orgId={orgId} member={member} vaultName={vaultName} isSelf={isSelf} onOpenNote={onOpenNote} />
         )}
@@ -211,7 +229,7 @@ export function MemberProfilePage({
   );
 }
 
-const TAB_LABEL: Record<ProfileTab, string> = { info: "Personal info", access: "Access", activity: "Activity" };
+const TAB_LABEL: Record<ProfileTab, string> = { info: "Personal info", access: "Access", skills: "Skills", activity: "Activity" };
 
 /** List (checkbox tree) or Board (three columns): two 28px icon buttons. */
 function AccessViewToggle({ value, onChange }: { value: AccessView; onChange: (view: AccessView) => void }) {

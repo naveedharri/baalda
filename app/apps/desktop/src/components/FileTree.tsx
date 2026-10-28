@@ -89,6 +89,7 @@ const ShareDialog = lazy(() =>
   import("./ShareDialog").then((m) => ({ default: m.ShareDialog })),
 );
 import { placeMenu, type Placement } from "../lib/menuPlacement";
+import { fileDropsClaimed } from "../lib/dropClaim";
 
 /** A refusal reason carrying the creator-rule sentence (`registry.deletePath`). */
 const isNotCreatorReason = (reason: unknown) =>
@@ -880,6 +881,11 @@ export function FileTree() {
         // outright — including the `drop`, whose `paths` are empty anyway, so
         // reacting could only ever mean flashing the frame or a stray import.
         if (rowDrag.current) return;
+        // A page on top takes this drop itself (Skills: a .zip or .skill).
+        if (fileDropsClaimed()) {
+          setDropActive(false);
+          return;
+        }
         const p = event.payload;
         if (p.type === "enter" || p.type === "over") {
           setDropActive(insideTree(p.position.x, p.position.y) !== null);

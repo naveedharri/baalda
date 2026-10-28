@@ -22,7 +22,7 @@ import { invitationRoutes } from "./routes/invitations.js";
 import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
 import { createAppearanceRoutes } from "./routes/appearance.js";
 import { createSkillRoutes } from "./routes/skills.js";
-import { SKILLS_FEATURE } from "../skills/feature.js";
+import { SKILL_ACCESS_FEATURE, SKILLS_FEATURE } from "../skills/feature.js";
 import { passwordResetRoutes } from "./routes/password-reset.js";
 import { openLinkRoutes } from "./routes/open-link.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
@@ -244,6 +244,7 @@ export function createApp(deps: AppDeps): Hono {
         FILES_WITH_BYTES_FEATURE,
         ACCESS_BOARD_FEATURE,
         SKILLS_FEATURE,
+        SKILL_ACCESS_FEATURE,
       ],
     }),
   );

@@ -604,7 +604,7 @@ Rules:
 `startSkillsSync({ api, getServerUrl, userId }) → () => void`, active only when signed in and the
 server advertises `skills` (an unreadable `/health` skips the run; only a server that answered
 without `skills` is "needs an update"). Runs: at start (launch/sign-in, after `skillsTargets()` re-detect), on any
-`skills-changed` frame (debounced 500 ms; the frame only triggers a manifest refetch), every 2 min (and on coming back to the app),
+`skills-changed` frame (debounced 500 ms; the frame only triggers a manifest refetch), every 2 min (and on coming back to the app); a failed install is held for 10 min between tries and given up after 3 retries for that version (until Check now or a restart),
 and on "Check now". One run at a time (a request during a run queues one trailing run). Server or
 account switch: App's effect (keyed on user id + server URL) stops the host and starts a new one.
 
@@ -630,9 +630,17 @@ Reuse `SettingsModal` tab chrome, `ConfirmDialog.tsx`, existing buttons/pills/to
 **Vault Settings → Skills** (`SkillsTab`): server lacks `skills` ⇒ one line "This server needs an
 update to manage skills." and nothing else. Otherwise a list (name, description, `Required`/`Optional`
 pill, version `v4` or "Draft only", pinned marker). Admins: **New skill** (name prompt → create →
-open detail), **Upload .zip** (Tauri dialog → `skillsReadZip` → create or replace draft of the
-matching skill name, showing `skipped`; the Upload folder entry was removed 2026-10-27, and
-`skillsReadFolder` now serves only "Add to team" from On this device). Members: read-only list
+open detail), **Upload .zip or .skill** (Tauri dialog, or a `.zip`/`.skill` dropped on the Team
+grid → `skillsReadZip` → create or replace draft of the matching skill name, showing `skipped`; the
+Upload folder entry was removed 2026-10-27, and `skillsReadFolder` now serves only "Add to team"
+from On this device). A dropped file arrives through Tauri's `onDragDropEvent`; the whole Skills tab
+holds `lib/dropClaim.ts` while it is open (any page of it), so the file tree never imports a drop
+made there. A `.zip`/`.skill` held over the Team grid lights it up in a dashed blue frame; any other
+file gets the frame in red ("Only .zip or .skill files") and dropping it only toasts a refusal.
+An admin's empty Team grid wears a dashed light-blue frame with an "or drop a .zip or .skill file
+here" line; a populated one ends in a dashed strip saying the same (a click opens the picker). A new skill (upload or written from scratch) starts **Required**
+like shared and imported ones: set on the draft, so its first publish installs it for everyone; a
+re-upload over an existing skill keeps its delivery. Members: read-only list
 plus an "Use on this device" switch for Optional skills (writes `optIns`, triggers a run).
 
 **SkillDetail**: header (name, description, delivery select Required/Optional, pin select
@@ -878,8 +886,9 @@ Command names, argument names and every wire shape in §4.2/§4.6 are unchanged.
   **Reveal in Finder** (Explorer/file manager elsewhere). "Add to team" from On this device runs a
   sync at once so the original folder is adopted right away. Each conflict carries why
   (`ConflictKind`: `unmanaged` from Rust's `detail`, or `other_owner` for another skill, vault,
-  server or user); Use team version and Keep my own appear only for `unmanaged`, and never for a
-  symlinked folder (from the device scan). The line under the header says which it is.
+  server or user); Keep my own appears only for `unmanaged`; Use team version appears for both
+  (2026-10-28: it backs up and replaces another owner's copy too), never for a symlinked folder
+  (from the device scan). The line under the header says which it is.
 - **Name (2026-10-27):** the feature is called **Agent Skills** in the UI (sidebar shortcut, Vault
   Settings tab, page title, "← Agent Skills" back links, the AI tools section). Sentences about the
   items keep "skill(s)"; identifiers, routes, tab ids and prefs keys stay `skills`.
@@ -1084,7 +1093,9 @@ Changes to §4.2/§4.3/§4.6:
 - **`SkillOwner` gains `userId: string`.** Ownership = same `skillId` + `orgId` + `serverUrl`, and the
   existing marker's `userId` is `null` (legacy, treated as matching; a reinstall writes the user) or
   equal. Otherwise install ⇒ `Conflict` detail `other_owner`, remove (either mode) ⇒ `conflict`;
-  the folder is never touched.
+  a sync run never touches the folder. The person's explicit "Use team version" (`replaceUnmanaged`)
+  backs it up and replaces it (2026-10-28); only that click does, so two owners never swap it back
+  and forth.
 - **`skills_remove` takes `mode?: "delete" | "release"`** (Rust `Option<RemoveMode>`, default
   `delete`). `release` runs the same checks (missing ⇒ `notFound`; no/foreign marker or other
   owner ⇒ `conflict`), then deletes ONLY `.baalda-managed.json` — no backup, files untouched — and
@@ -1166,3 +1177,37 @@ another folder name, is `conflict`/`other_owner`; a symlinked folder is `conflic
 flag never applies to either. Drift detection (scan, install, remove) now ignores `.DS_Store`,
 `Thumbs.db` and `__pycache__/`, so an adopted folder (or a managed one Finder browsed) is not
 "edited" for OS/Python droppings; an update replaces them without a backup.
+
+## Addendum — Who gets a skill (2026-10-28, migration 062)
+
+A skill reaches people through **the Everyone row plus per-person levels**, the same shape as vault
+access ("person wins either way"). Levels: **Required** (installs), **Optional** (they turn it on),
+**No access** (hidden: no name, no count, no install, no MCP).
+
+- **Schema:** `skills.everyone_access` (`on` | `none`) beside the existing `delivery`; the Everyone
+  level is `none` when `everyone_access = 'none'`, else `delivery` (kept while hidden, so reopening
+  restores it). `skill_member_access (skill_id, user_id, level required|optional|none, set_by,
+  set_at)`. Effective level = the person's row, else the Everyone level
+  (`skills/access.ts MY_LEVEL_SQL`). Existing skills: everyone at their delivery, unchanged.
+- **Every read path filters** by the effective level: `/skills/manifest` (what installs; `delivery`
+  is the person's own level, `none` left out, so a desktop removes it like a deleted skill: an
+  untouched copy goes, an edited one is released as theirs), `GET /orgs/:orgId/skills`, a skill's
+  page and `versions/:v` (404 `skill_not_found` for a member without access), and MCP
+  `list_skills`/`get_skill`/`read_skill_file`. **Owners and admins see every skill** to manage it;
+  their own level still decides what installs on their computer (`myAccess: "none"` ⇒ the card's
+  square is blocked, the page says "Not shared with you").
+- **Summary fields:** `myAccess`, `everyone` (owners/admins; null for members), `sharedWith`
+  (`{everyone, count, total, people[≤5]}`). A member's `delivery` is their own level.
+- **Routes:** `GET|PUT /api/orgs/:orgId/skills/:skillId/access` (owner/admin; PUT `{everyone?,
+  people?: [{userId, level | null}]}` in one transaction, `null` = back to the Everyone row,
+  non-members 400 `not_member`; announces `skills-changed`). `GET
+  /api/orgs/:orgId/members/:userId/skills` (owner/admin for anyone, a member for themselves without
+  hidden ones) → `{skills: [{skillId, name, description, latestVersion, level, own, everyone}]}`.
+  `/health` advertises `skill-access`.
+- **Desktop:** the skill page header's menu is the Everyone row (Required / Optional / Specific
+  people), with a clickable avatar stack; a **Shared with** tab (`SkillSharedWith.tsx`) lists the
+  Everyone row and every member with their level (Members and access rows and pills; Required
+  green, Optional amber, No access grey). A member's profile gains a **Skills** tab
+  (`MemberSkillsTab.tsx`, shown when the server has `skill-access`). Team grid cards show who has
+  each skill (`AudienceStack`). Taking a skill away (No access) confirms first; widening never does.
+- **Not yet:** groups (a later row kind), an access audit entry for skill changes.
