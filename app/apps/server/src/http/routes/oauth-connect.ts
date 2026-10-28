@@ -34,6 +34,92 @@ async function clientName(clientId: string | undefined): Promise<string> {
   return rows[0]?.name?.trim() || "An application";
 }
 
+/** A soft pastel tile (fill + deeper letter of the same hue) that stays the same for a vault. */
+function monogramStyle(id: string): string {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  return `background:hsl(${hue} 80% 93%);color:hsl(${hue} 45% 34%)`;
+}
+
+/** The vault picker: a wide grid so a person in many vaults sees them at a glance. */
+export function consentPage(opts: {
+  app: string;
+  email: string;
+  consentCode: string;
+  clientId: string;
+  vaults: { id: string; name: string; role: string }[];
+  preselect: string;
+}): string {
+  const { app, email, consentCode, clientId, vaults, preselect } = opts;
+  const options = vaults
+    .map((w) => {
+      const initial = (w.name.trim().match(/\p{L}|\p{N}/u)?.[0] ?? "?").toUpperCase();
+      return `
+      <label class="ws" data-name="${esc(w.name.toLowerCase())}">
+        <input type="radio" name="organization_id" value="${esc(w.id)}" ${
+          w.id === preselect ? "checked" : ""
+        } required />
+        <span class="ws-mono" style="${monogramStyle(w.id)}">${esc(initial)}</span>
+        <span class="ws-meta"><span class="ws-name" title="${esc(w.name)}">${esc(
+          w.name,
+        )}</span><span class="ws-role">${esc(w.role)}</span></span>
+        <span class="ws-check" aria-hidden="true"></span>
+      </label>`;
+    })
+    .join("");
+
+  // A filter only earns its place once the grid no longer fits at a glance.
+  const search =
+    vaults.length > 8
+      ? `<input type="search" class="ws-search" id="ws-search" placeholder="Search vaults" autocomplete="off" />`
+      : "";
+
+  const body = `
+    <h1><b>${esc(app)}</b> wants access</h1>
+    <p class="sub">Signed in as <b>${esc(email)}</b></p>
+    <form method="POST" action="/oauth/consent">
+      <input type="hidden" name="consent_code" value="${esc(consentCode)}" />
+      <input type="hidden" name="client_id" value="${esc(clientId)}" />
+      <div class="ws-head">
+        <label>Choose a vault to connect<span class="count">${vaults.length}</span></label>
+        ${search}
+      </div>
+      <div class="ws-grid" id="ws-grid">
+        ${options}
+        <p class="ws-empty" id="ws-empty" hidden>No vaults match.</p>
+      </div>
+      <div class="consent-foot">
+        <div class="scopes"><ul>
+          <li>Read and search notes you can access</li>
+          <li>Create, edit and organize notes on your behalf</li>
+          <li>Only within your existing sharing permissions</li>
+        </ul></div>
+        <div class="row">
+          <button type="submit" name="decision" value="deny" class="ghost">Deny</button>
+          <button type="submit" name="decision" value="allow" class="primary">Allow access</button>
+        </div>
+      </div>
+    </form>
+    <p class="foot">You can revoke this anytime in ${esc(BRAND_NAME)} vault settings.</p>
+    <script>
+      const checked = document.querySelector('.ws input:checked');
+      if (checked) checked.closest('.ws').scrollIntoView({ block: 'nearest' });
+      const q = document.getElementById('ws-search');
+      if (q) q.addEventListener('input', () => {
+        const term = q.value.trim().toLowerCase();
+        let shown = 0;
+        document.querySelectorAll('#ws-grid .ws').forEach((el) => {
+          const hit = !term || el.dataset.name.includes(term);
+          el.hidden = !hit;
+          if (hit) shown++;
+        });
+        document.getElementById('ws-empty').hidden = shown > 0;
+      });
+    </script>`;
+  return page({ title: "Authorize", body, wide: true });
+}
+
 export const oauthConnectRoutes = new Hono();
 
 // ── Force the vault picker on every authorize (issue #211) ──────────────────
@@ -178,41 +264,16 @@ oauthConnectRoutes.get("/oauth/consent", async (c) => {
     );
   }
 
-  const preselect = session.activeOrganizationId ?? vaults[0].id;
-  const options = vaults
-    .map(
-      (w) => `
-      <label class="ws">
-        <input type="radio" name="organization_id" value="${esc(w.id)}" ${
-          w.id === preselect ? "checked" : ""
-        } required />
-        <span class="ws-meta"><span class="ws-name">${esc(w.name)}</span><span class="ws-role">${esc(
-          w.role,
-        )}</span></span>
-      </label>`,
-    )
-    .join("");
-
-  const body = `
-    <h1><b>${esc(app)}</b> wants access</h1>
-    <p class="sub">Signed in as <b>${esc(session.email)}</b></p>
-    <form method="POST" action="/oauth/consent">
-      <input type="hidden" name="consent_code" value="${esc(consentCode)}" />
-      <input type="hidden" name="client_id" value="${esc(clientId)}" />
-      <label>Choose a vault to connect</label>
-      ${options}
-      <div class="scopes"><ul>
-        <li>Read and search notes you can access</li>
-        <li>Create, edit and organize notes on your behalf</li>
-        <li>Only within your existing sharing permissions</li>
-      </ul></div>
-      <div class="row">
-        <button type="submit" name="decision" value="deny" class="ghost">Deny</button>
-        <button type="submit" name="decision" value="allow" class="primary">Allow access</button>
-      </div>
-    </form>
-    <p class="foot">You can revoke this anytime in ${esc(BRAND_NAME)} vault settings.</p>`;
-  return c.html(page({ title: "Authorize", body }));
+  return c.html(
+    consentPage({
+      app,
+      email: session.email,
+      consentCode,
+      clientId,
+      vaults,
+      preselect: session.activeOrganizationId ?? vaults[0].id,
+    }),
+  );
 });
 
 oauthConnectRoutes.post("/oauth/consent", async (c) => {
