@@ -8,6 +8,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Changed
+- **Security (0.1.93).** Desktop `rustls` 0.23.45 → 0.23.46 (Dependabot alerts on session debug output, brotli
+  certificate decompression, ServerHello key-exchange poisoning, ECH rejection).
 - **Postgres tuning (0.1.92).** The server sets `work_mem` to 16 MB on its own connections
   (`PG_WORK_MEM`) so small sorts stop spilling to disk; migration 061 indexes `blobs.org_id` and
   enables `pg_stat_statements` where the database role allows it; DEPLOY.md notes memory limits
