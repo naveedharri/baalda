@@ -8,6 +8,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Changed
+- **Scoped members' attachments, again (#343).** The attachment list for members without vault-wide
+  access no longer reads the full text of every note they can read: each note keeps a small
+  reference excerpt (`note_index.ref_text`, migration 063, the text after each place a path can
+  start), so a vault of multi-megabyte HTML notes costs its references, not its text. Same answer;
+  notes not yet excerpted are read in full and backfilled in the background. Migration 063 also
+  splits attachment rows that a copied file adopted before 0.1.92, which kept the re-upload loop
+  going for those objects.
+- **Agent Skills.** Share a skill with specific people (Everyone row plus per-person Required /
+  Optional / No access, migration 062; hidden skills leave the list, page, manifest and MCP);
+  drop a `.zip` or `.skill` on the Team grid to upload; new skills start Required; failed installs
+  retry every 10 minutes up to 3 times; Use team version can replace another owner's folder (backed
+  up first).
 - **Security (0.1.93).** Desktop `rustls` 0.23.45 → 0.23.46 (Dependabot alerts on session debug output, brotli
   certificate decompression, ServerHello key-exchange poisoning, ECH rejection).
 - **Postgres tuning (0.1.92).** The server sets `work_mem` to 16 MB on its own connections

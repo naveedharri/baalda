@@ -795,7 +795,9 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `doc_id` is judged by this same resolver (`canReadAttachment` / `canWriteBlob` in
   `permissions/http-gates.ts`), so a folder share reaches the FILES in it and not only the notes;
   a hash-named `attachments/` blob has no doc to resolve and keeps the older heuristic — vault-wide
-  readers see all, a scoped member only what a readable note references. **New
+  readers see all, a scoped member only what a readable note references (matched on each note's
+  reference excerpt `note_index.ref_text` when its `ref_heads` cover the anchors, else its full text;
+  `blobs/ref-windows.ts`, migration 063, #343). **New
   vaults are shared with their team by default** — `POST /api/vaults` creates the org-wide `edit`
   grant, but only alongside the org's *first* collection, so re-running it can't resurrect a grant an
   owner revoked via Access → Private. (This reverses the private-by-default posture of 2026-07-21,
