@@ -28,7 +28,7 @@ import {
   vaultLimitReason,
 } from "../lib/billing";
 import * as ipc from "../lib/ipc";
-import { useStore } from "../store";
+import { requestTurnOnSyncAfterAuth, useStore } from "../store";
 import { MembersAccessTab, prefetchRoster } from "./MembersAccessTab";
 import { AsyncButton } from "./AsyncButton";
 import { McpTab } from "./McpTab";
@@ -361,7 +361,7 @@ export function VaultSettingsDialog({
           ) : shown === "ai" ? (
             <AiSettingsTab onClose={onClose} onGoToGeneral={() => setTab("general")} />
           ) : lockedTab ? (
-            <SyncGate label={activeTab.label} onGoToSync={() => setTab("general")} />
+            <SyncGate label={activeTab.label} onRequestSignIn={onRequestSignIn} />
           ) : shown === "vaults" ? (
             <AccountVaultsTab />
           ) : shown === "members" ? (
@@ -892,8 +892,22 @@ function FreezeRootRow({ canManage }: { canManage: boolean }) {
   );
 }
 
-/** Locked-section gate shown for a team tab on a local vault. */
-function SyncGate({ label, onGoToSync }: { label: string; onGoToSync: () => void }) {
+/**
+ * Locked-section gate shown for a team tab on a local vault. Its button turns
+ * sync on in one click and the tab unlocks in place; signed out it raises
+ * sign-in first, which turns sync on once the account is loaded.
+ */
+function SyncGate({ label, onRequestSignIn }: { label: string; onRequestSignIn?: () => void }) {
+  const authStatus = useStore((s) => s.authStatus);
+  const turningOnSync = useStore((s) => s.turningOnSync);
+  const turnOn = () => {
+    if (authStatus === "signed-in") {
+      void useStore.getState().turnOnSyncNow();
+    } else if (onRequestSignIn) {
+      requestTurnOnSyncAfterAuth(true);
+      onRequestSignIn();
+    }
+  };
   return (
     <div className="sync-gate">
       <svg
@@ -914,8 +928,12 @@ function SyncGate({ label, onGoToSync }: { label: string; onGoToSync: () => void
         Turn on sync for this vault to invite people, set sharing and
         permissions, and connect AI clients.
       </p>
-      <button className="primary" onClick={onGoToSync}>
-        Turn on sync &amp; sharing →
+      <button
+        className="primary"
+        disabled={turningOnSync || authStatus === "unknown"}
+        onClick={turnOn}
+      >
+        {turningOnSync ? "Turning on sync…" : <>Turn on sync &amp; sharing →</>}
       </button>
     </div>
   );

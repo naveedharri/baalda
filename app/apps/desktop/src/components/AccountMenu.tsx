@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import * as ipc from "../lib/ipc";
-import { useStore } from "../store";
+import { requestTurnOnSyncAfterAuth, useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
 import { statusTone } from "../lib/presence/color";
 import {
@@ -47,14 +47,16 @@ const AuthDialogLazy = lazy(() =>
  * `.context` stamp names no vault (`openFolderIsSynced === false`; null means
  * the peek hasn't landed, and a synced vault reconciling at boot also has
  * `syncEnabled` false for a moment, so the stamp is what keeps it from
- * flashing there). Signed in, the button opens Vault Settings → General, whose
- * "Turn on sync & sharing" promo does the work; signed out it raises sign-in.
+ * flashing there). One click: signed in, the button turns sync on right here
+ * (`turnOnSyncNow`); signed out it raises sign-in, which turns sync on as soon
+ * as the account is loaded.
  */
 function LocalVaultSyncRow({ onTurnOnSync }: { onTurnOnSync: () => void }) {
   const vault = useStore((s) => s.vault);
   const authStatus = useStore((s) => s.authStatus);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const openFolderIsSynced = useStore((s) => s.openFolderIsSynced);
+  const turningOnSync = useStore((s) => s.turningOnSync);
   if (!vault || authStatus === "unknown" || syncEnabled || openFolderIsSynced !== false) {
     return null;
   }
@@ -76,8 +78,13 @@ function LocalVaultSyncRow({ onTurnOnSync }: { onTurnOnSync: () => void }) {
       <span className="local-sync-label" title="This vault lives only on this computer">
         On this device only
       </span>
-      <button type="button" className="link-btn local-sync-btn" onClick={onTurnOnSync}>
-        Turn on sync
+      <button
+        type="button"
+        className="link-btn local-sync-btn"
+        disabled={turningOnSync}
+        onClick={onTurnOnSync}
+      >
+        {turningOnSync ? "Turning on…" : "Turn on sync"}
       </button>
     </div>
   );
@@ -287,7 +294,12 @@ export function AccountMenu() {
     // state: the name only, until the restore says who is signed in.
     return (
       <div className="account-menu" ref={rootRef}>
-        <LocalVaultSyncRow onTurnOnSync={() => setAuthOpen(true)} />
+        <LocalVaultSyncRow
+          onTurnOnSync={() => {
+            requestTurnOnSyncAfterAuth(true);
+            setAuthOpen(true);
+          }}
+        />
         {/* Vault switching moved to the sidebar header, leaving signing in as
             the only thing a signed-out account menu could offer — so the bar
             does it directly instead of opening a one-item menu. */}
@@ -347,7 +359,15 @@ export function AccountMenu() {
             The prompted one wins while it is up; this one comes back after. */}
         {authOpen && !authPrompt && (
           <Suspense fallback={null}>
-            <AuthDialogLazy onClose={() => setAuthOpen(false)} />
+            {/* Closed without signing in: a "Turn on sync" that raised this
+                card is cancelled with it, so a later sign-in doesn't sync. */}
+            <AuthDialogLazy
+              onClose={() => {
+                requestTurnOnSyncAfterAuth(false);
+                setAuthOpen(false);
+              }}
+              onSignedIn={() => setAuthOpen(false)}
+            />
           </Suspense>
         )}
         {membersOpen && (
@@ -401,7 +421,7 @@ export function AccountMenu() {
 
   return (
     <div className="account-menu" ref={rootRef}>
-      <LocalVaultSyncRow onTurnOnSync={() => useStore.getState().requestSettings("general")} />
+      <LocalVaultSyncRow onTurnOnSync={() => void useStore.getState().turnOnSyncNow()} />
       <div className="identity-row">
         <button
           className={`identity-bar ${open ? "open" : ""}`}
