@@ -126,7 +126,10 @@ export async function serverFeatures(
   const key = urlKey(serverUrl);
   let p = featureCache.get(key);
   if (!p) {
-    p = fetchHealth().catch(() => null);
+    // A health call that throws, or answers nothing, is "unknown" like an unreachable server.
+    p = Promise.resolve()
+      .then(fetchHealth)
+      .catch(() => null);
     featureCache.set(key, p);
   }
   const health = await p;
