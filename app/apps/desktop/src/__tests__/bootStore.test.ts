@@ -27,12 +27,14 @@ const api = vi.hoisted(() => ({
   getMyBilling: vi.fn(async () => ({ vaults: [] })),
   listVaults: vi.fn(async () => [] as unknown[]),
   listVaultLocks: vi.fn(async () => [] as unknown[]),
+  getAuthMethods: vi.fn(async () => ({ passwordReset: false })),
 }));
 
 const authManager = vi.hoisted(() => ({
   api: {} as Record<string, unknown>,
   init: vi.fn(async () => null as unknown),
   currentSession: vi.fn(async () => null as unknown),
+  signUp: vi.fn(async () => {}),
   signOut: vi.fn(async () => {}),
   getServerUrl: () => "http://localhost:3010",
 }));
@@ -125,7 +127,8 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 import type { VaultInfo } from "../lib/ipc";
-import { useStore } from "../store";
+import { ApiError } from "../lib/api";
+import { requestJoinWithCode, useStore } from "../store";
 
 const ORG = "org-a";
 
@@ -396,5 +399,58 @@ describe("openNoteByPath — the gate that keeps a first click safe", () => {
     await useStore.getState().openNoteByPath("a.md");
 
     expect(useStore.getState().openNote?.path).toBe("a.md");
+  });
+});
+
+describe("signUp — a brand-new account is pushed to naming its first vault", () => {
+  beforeEach(() => {
+    authManager.currentSession.mockResolvedValue(session(null));
+    useStore.setState({ newVaultPrompt: false });
+  });
+
+  it("asks the welcome screen to open the naming step when nothing is open", async () => {
+    await useStore.getState().signUp("Ann", "ann@example.com", "secret-pass");
+    expect(useStore.getState().authStatus).toBe("signed-in");
+    expect(useStore.getState().newVaultPrompt).toBe(true);
+  });
+
+  it("leaves a join-with-code sign-up waiting for its code", async () => {
+    requestJoinWithCode(true);
+    try {
+      await useStore.getState().signUp("Ann", "ann@example.com", "secret-pass");
+    } finally {
+      requestJoinWithCode(false);
+    }
+    expect(useStore.getState().newVaultPrompt).toBe(false);
+  });
+});
+
+describe("turnOnSyncNow — one click, with feedback", () => {
+  it("opens the upgrade dialog on a vault limit and settles the busy flag", async () => {
+    const refused = new ApiError(402, "vault_limit_reached", { code: "vault_limit_reached", limit: 1 });
+    useStore.setState({
+      vault: vault(),
+      upgradeDialogRequest: null,
+      turnOnSyncForCurrentVault: vi.fn(async () => {
+        throw refused;
+      }),
+    });
+    expect(await useStore.getState().turnOnSyncNow()).toBe(false);
+    expect(useStore.getState().upgradeDialogRequest?.reason).toMatch(/Free includes/);
+    expect(useStore.getState().turningOnSync).toBe(false);
+  });
+
+  it("ignores a second click while the first is still running", async () => {
+    const held = gate();
+    const turnOn = vi.fn(async () => {
+      await held.waited;
+      useStore.setState({ syncEnabled: true });
+    });
+    useStore.setState({ vault: vault(), turnOnSyncForCurrentVault: turnOn });
+    const first = useStore.getState().turnOnSyncNow("a");
+    expect(await useStore.getState().turnOnSyncNow("a")).toBe(false);
+    held.open();
+    expect(await first).toBe(true);
+    expect(turnOn).toHaveBeenCalledTimes(1);
   });
 });

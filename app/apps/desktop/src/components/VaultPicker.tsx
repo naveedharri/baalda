@@ -140,6 +140,10 @@ export function VaultPicker() {
   // New-vault flow: null = idle; a string = chosen parent, awaiting a name.
   const [newParent, setNewParent] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
+  // The naming step was opened for a brand-new account (sign-up), so the vault
+  // it creates turns sync on as well: one step, not create-then-"Turn on sync".
+  const [syncNewVault, setSyncNewVault] = useState(false);
+  const newVaultPrompt = useStore((s) => s.newVaultPrompt);
   // Which recent-vault card is being opened, by its key. A single boolean would
   // only tell the list to grey out; the point is to mark the row you clicked.
   const [opening, setOpening] = useState<string | null>(null);
@@ -255,15 +259,24 @@ export function VaultPicker() {
   // anyway, so choosing its parent was ceremony. Adopting a folder you already
   // have is what "Open existing" is for, and that one keeps the folder exactly
   // where you picked it.
-  async function startNewVault() {
+  async function startNewVault(opts?: { sync?: boolean }) {
     setError(null);
     try {
       setNewParent(await ipc.getVaultsRoot());
       setNewName("");
+      setSyncNewVault(opts?.sync === true);
     } catch (e) {
       setError(String(e));
     }
   }
+
+  // Sign-up just made an account with no vault: go straight to naming it.
+  useEffect(() => {
+    if (!newVaultPrompt) return;
+    useStore.getState().clearNewVaultPrompt();
+    if (newParent === null && !joining) void startNewVault({ sync: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newVaultPrompt]);
 
   // "New vault" step 2: create <vaults root>/<name> and open it.
   async function confirmNewVault() {
@@ -275,6 +288,10 @@ export function VaultPicker() {
       // Creating a vault is the one flow that seeds starter content; "Open
       // existing" above adopts the picked folder untouched.
       await openVault(vault, { seed: true });
+      // A new account's first vault syncs as it is made. A refusal (plan limit,
+      // offline) is reported by `turnOnSyncNow` and leaves the vault local.
+      const st = useStore.getState();
+      if (syncNewVault && st.authStatus === "signed-in") await st.turnOnSyncNow(newName.trim());
     } catch (e) {
       setError(String(e));
     } finally {
@@ -285,6 +302,7 @@ export function VaultPicker() {
   function cancelNewVault() {
     setNewParent(null);
     setNewName("");
+    setSyncNewVault(false);
     setError(null);
   }
 
@@ -695,6 +713,7 @@ export function VaultPicker() {
                 />
                 <p className="new-vault-loc" title={newParent ?? undefined}>
                   in <code>{tidyPath(newParent ?? "")}</code>
+                  {syncNewVault && ", synced to your account"}
                 </p>
                 <div className="new-vault-buttons">
                   <button
@@ -734,7 +753,7 @@ export function VaultPicker() {
                 <motion.button
                   className="primary hero"
                   disabled={busy}
-                  onClick={startNewVault}
+                  onClick={() => void startNewVault()}
                   whileHover={reduceMotion ? undefined : { scale: 1.04, y: -1 }}
                   whileTap={reduceMotion ? undefined : { scale: 0.96 }}
                   transition={SPRING}

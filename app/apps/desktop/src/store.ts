@@ -125,6 +125,7 @@ import {
 } from "./lib/vault/missingFolder";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { dismissToast, toast } from "./lib/toast";
+import { classifyLimitError, limitFromError, vaultLimitReason } from "./lib/billing";
 import { isEditorNote } from "./lib/notePath";
 import { isNoteExt } from "./lib/formats";
 import { parseNoteLink } from "./lib/shareLink";
@@ -367,6 +368,15 @@ interface AppStore {
    * sign-in did nothing.
    */
   landingVault: boolean;
+  /**
+   * A brand-new account (sign-up) landed with no vault at all. The welcome
+   * screen reads this to open its "Name your vault" step at once, instead of
+   * leaving the person to find "New vault", and clears it when it does.
+   */
+  newVaultPrompt: boolean;
+  clearNewVaultPrompt: () => void;
+  /** `turnOnSyncNow` is running, so every "Turn on sync" button can say so. */
+  turningOnSync: boolean;
   /**
    * A vault switch is in flight, with the vault we're heading TO. Set before the
    * first await of `setActiveOrganization` and cleared when it settles, so the
@@ -838,6 +848,12 @@ interface AppStore {
   /** Promote the currently-open local folder into a synced vault, adopting
    *  the files already in it (no new empty folder). This is "Turn on sync". */
   turnOnSyncForCurrentVault: (name?: string) => Promise<void>;
+  /**
+   * One-click "Turn on sync" for the open local vault: `turnOnSyncForCurrentVault`
+   * plus the feedback the buttons need (a plan limit opens the upgrade dialog,
+   * anything else is an error toast). Resolves true once the vault syncs.
+   */
+  turnOnSyncNow: (name?: string) => Promise<boolean>;
   /** `seedIfEmpty` marks a switch into a vault the user JUST created, the only
    *  case where an empty vault should receive first-run starter content. */
   setActiveOrganization: (
@@ -1371,6 +1387,19 @@ function takePendingOpenVault(): string | null {
 let joiningWithCode = false;
 export function requestJoinWithCode(on: boolean): void {
   joiningWithCode = on;
+}
+
+// "Turn on sync" pressed while signed out: it raises sign-in first, and the
+// sign-in/sign-up flow finishes the job once the account is loaded (the open
+// local folder stays put through the landing, so it is the one that syncs).
+let turnOnSyncAfterAuth = false;
+export function requestTurnOnSyncAfterAuth(on: boolean): void {
+  turnOnSyncAfterAuth = on;
+}
+async function consumeTurnOnSyncAfterAuth(get: () => AppStore): Promise<void> {
+  if (!turnOnSyncAfterAuth) return;
+  turnOnSyncAfterAuth = false;
+  if (get().vault && !get().syncEnabled) await get().turnOnSyncNow();
 }
 
 // The vault the user was last actually working in (folder + org resolved
@@ -2135,6 +2164,9 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ invitePrompt: null });
   },
   landingVault: false,
+  newVaultPrompt: false,
+  clearNewVaultPrompt: () => set({ newVaultPrompt: false }),
+  turningOnSync: false,
   switchingVault: null,
   organizations: [],
   members: [],
@@ -3360,6 +3392,7 @@ export const useStore = create<AppStore>((set, get) => ({
         // A shared link queued while signed out supersedes Welcome — the
         // landing already switched into its vault via requestOpenVault.
         await consumeQueuedNoteLink(get);
+        if (!joined) await consumeTurnOnSyncAfterAuth(get);
       }
     } catch (e) {
       set({ authError: errMsg(e) });
@@ -3388,6 +3421,7 @@ export const useStore = create<AppStore>((set, get) => ({
       await get().refreshOrgBilling();
       if (!joined) await get().openWelcomeIfPresent();
       await consumeQueuedNoteLink(get);
+      if (!joined) await consumeTurnOnSyncAfterAuth(get);
     }
   },
 
@@ -3418,6 +3452,13 @@ export const useStore = create<AppStore>((set, get) => ({
         await get().refreshOrgBilling();
         if (!joined) await get().openWelcomeIfPresent();
         await consumeQueuedNoteLink(get);
+        if (!joined) await consumeTurnOnSyncAfterAuth(get);
+        // A brand-new account with nothing open lands on the welcome screen
+        // (the landing never invents a vault). Push it straight to naming its
+        // first one; a join-with-code sign-up is waiting for its code instead.
+        if (!joined && !joiningWithCode && !get().vault && get().organizations.length === 0) {
+          set({ newVaultPrompt: true });
+        }
         // The dialog closes the instant the session lands, so this is the only
         // place the person hears that a confirmation email went out. Raised
         // AFTER landing, because <Toasts /> only mounts once a vault is open —
@@ -3957,6 +3998,33 @@ export const useStore = create<AppStore>((set, get) => ({
     await get().enableSyncForVault();
     if (stale()) return;
     await get().refreshOrgBilling();
+  },
+
+  turnOnSyncNow: async (name) => {
+    if (get().turningOnSync) return false;
+    set({ turningOnSync: true });
+    try {
+      await get().turnOnSyncForCurrentVault(name);
+      return get().syncEnabled;
+    } catch (e) {
+      // A plan limit IS the upgrade moment: open the plan comparison with the
+      // reason, as the General page does.
+      const kind = classifyLimitError(e);
+      if (kind) {
+        const limit = limitFromError(e);
+        get().requestUpgradeDialog({
+          reason:
+            kind === "vault_limit"
+              ? vaultLimitReason(limit ?? get().billingConfig?.freeLimits?.vaultsPerUser ?? 1)
+              : undefined,
+        });
+      } else {
+        toast(`Couldn't turn on sync: ${errMsg(e)}`, "error");
+      }
+      return false;
+    } finally {
+      set({ turningOnSync: false });
+    }
   },
 
   setActiveOrganization: async (organizationId, opts = {}) => {
