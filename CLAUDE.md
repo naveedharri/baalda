@@ -1037,7 +1037,12 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   timestamps, membership and ACL rows.
 - **Rule 1:** every request/socket that reads or writes content presents VK itself, checked against
   `vk_check`. `key-cache.ts` serves ONLY server-internal background work (index, compaction,
-  checkpoints, backfill), never a user request; `get()` returns a copy the caller zeroes.
+  checkpoints, backfill), never a user request; `get()` returns a copy the caller zeroes. It is FILLED by a
+  vault channel (while connected + 10 min) and, one-way, by any request whose key the server verified
+  (`holdForRequest`, 15 min after the last one): verified `X-Baalda-VK`, an MCP/OAuth write's unwrapped key
+  (checked against `vk_check` first), `keys/init`. Read-only public-link views never fill it. Keyed writes
+  index with the request's own key (debounced copy, zeroed after); otherwise `index_pending`, drained whole
+  (batches of 500) on any key arrival and by the tick while a key is held.
 - **Rule 2:** only a member's device seals VK to a new member or device; the server only queues the
   request. Devices pin each member's key fingerprint on first seal (TOFU) and refuse a changed key until
   a person approves it.

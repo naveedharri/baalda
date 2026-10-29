@@ -28,6 +28,7 @@ import {
   resolveParentFolder,
 } from "../registry/tree-ops.js";
 import { indexDoc, purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
+import { vaultKeyCache } from "../crypto/key-cache.js";
 import type { McpAuth } from "./tokens.js";
 import {
   NoteTooLargeError,
@@ -53,6 +54,7 @@ import { deleteRegisteredFile } from "../http/routes/registry.js";
 import { registerCtx, registerFile } from "../registry/batch-ops.js";
 import { vaultKeysEnabled } from "../crypto/config.js";
 import { KeyRequiredError, KEY_REQUIRED_CODE, loadVkCheck } from "../crypto/transport.js";
+import { verifyVk } from "../crypto/vk-check.js";
 import type { DocCrypto } from "../crypto/doc-crypto.js";
 import { openBlobTextRow } from "../index/sealed-index.js";
 
@@ -125,6 +127,19 @@ async function vaultCrypto(auth: McpAuth, vaultId: string): Promise<DocCrypto | 
  */
 async function indexWithCallKey(docId: string, crypto: DocCrypto | undefined): Promise<void> {
   if (!crypto) return;
+  // A write with a key unwrapped from this token/grant keeps the vault keyed
+  // for background work (idle versions ~10 min later, the index queue), as a
+  // connected member would. One-way: the call itself never reads the cache.
+  // Verified against the vault's check first: a wrong key in the cache would
+  // seal background writes the members could not open.
+  try {
+    const state = await loadVkCheck(crypto.vaultId);
+    if (state && state.generation === crypto.generation && verifyVk(crypto.key, crypto.vaultId, state.vkCheck)) {
+      vaultKeyCache.holdForRequest(crypto.vaultId, crypto.key, crypto.generation);
+    }
+  } catch (err) {
+    console.warn("[mcp] could not hold the call's key for background work:", (err as Error).message);
+  }
   try {
     await indexDoc(docId, pool, crypto);
   } catch (err) {

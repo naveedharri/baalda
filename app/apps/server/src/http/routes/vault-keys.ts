@@ -17,7 +17,9 @@ import { Hono } from "hono";
 import type pg from "pg";
 import { pool } from "../../db/pool.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
-import { requireVaultKey } from "../../crypto/transport.js";
+import { VK_HEADER, decodeVk, requireVaultKey } from "../../crypto/transport.js";
+import { vaultKeyCache } from "../../crypto/key-cache.js";
+import { verifyVk } from "../../crypto/vk-check.js";
 import { ENCRYPTION_NOT_REQUESTED, initGate, lockGateRows } from "../../crypto/conversion.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
@@ -151,6 +153,12 @@ export function createVaultKeyRoutes(): Hono {
     } finally {
       client.release();
     }
+    // The converting device presents the key it just set: warm the cache so
+    // notes written around the conversion (queued in index_pending while the
+    // key lived only in the pending cache) are drained now, not when a vault
+    // channel next connects. Verified against the check this request stored.
+    const vk = (c.get("presentedVk" as never) as Buffer | undefined) ?? decodeVk(c.req.header(VK_HEADER));
+    if (vk && verifyVk(vk, vaultId, vkCheck)) vaultKeyCache.holdForRequest(vaultId, vk, generation);
     return c.json({ keyed: true, generation }, 201);
   });
 

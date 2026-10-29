@@ -720,6 +720,7 @@ const kicked = new Set<string>();
 const rearm = new Set<string>();
 /** Set on shutdown: a running drain stops at its next batch boundary. */
 let stopping = false;
+let unsubscribeAcquire: (() => void) | null = null;
 
 /**
  * A key arrival is worth a run only when there is work: deferred notes queued
@@ -767,6 +768,9 @@ export function startCryptoBackfill(): void {
   // A note deferred while this process holds the vault's key (it raced the
   // key's arrival) is drained now rather than at the next tick.
   setIndexDeferredHook((vaultId) => void kickVaultBackfill(vaultId));
+  // Any key arrival (a vault channel, or a verified request key warming the
+  // cache) drains what was deferred while no key was held.
+  unsubscribeAcquire = vaultKeyCache.onAcquire((vaultId) => void kickVaultBackfill(vaultId));
   timer = setInterval(() => void backfillTick(), BACKFILL_TICK_MS);
   if (typeof timer.unref === "function") timer.unref();
 }
@@ -776,4 +780,6 @@ export function stopCryptoBackfill(): void {
   timer = null;
   stopping = true;
   setIndexDeferredHook(null);
+  unsubscribeAcquire?.();
+  unsubscribeAcquire = null;
 }
