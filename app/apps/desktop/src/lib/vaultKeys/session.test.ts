@@ -7,6 +7,7 @@ import {
   makeVkCheck,
   openSealedVk,
   sealVkTo,
+  shortFingerprint,
   toBase64,
   unwrapPrivateKeyWithPhrase,
 } from "./crypto";
@@ -69,11 +70,17 @@ function fakeKeys() {
   };
 }
 
+function memPins() {
+  const m = new Map<string, string>();
+  return { m, get: async (u: string) => m.get(u) ?? null, set: async (u: string, f: string) => void m.set(u, f) };
+}
+
 function session(over: Partial<VaultKeySessionDeps> & Pick<VaultKeySessionDeps, "api" | "keys">) {
   return createVaultKeySession({
     features: async () => new Set(["vault-keys"]),
     keysAllowed: () => true,
     isMember: async () => true,
+    pins: memPins(),
     argon2: FAST,
     ...over,
   });
@@ -156,7 +163,10 @@ describe("vault key session", () => {
       { userId: "u9", publicKey: toBase64(outsider.publicKey), requestedAt: "" },
     ]);
     srv.as("u1");
-    expect(await owner.serviceKeyRequests("v1")).toEqual({ sealed: ["u2"], refused: ["u9"] });
+    const res = await owner.serviceKeyRequests("v1");
+    expect(res.sealed).toEqual([{ userId: "u2", fingerprint: shortFingerprint(memberPair.publicKey) }]);
+    expect(res.sealed[0].fingerprint).toMatch(/^[0-9a-f]{4}( [0-9a-f]{4}){3}$/);
+    expect(res.refused).toEqual(["u9"]);
     expect(srv.posted).toEqual([{ vaultId: "v1", userId: "u2", header: toBase64(ownerKeys.vks.get("v1")!) }]);
     expect(srv.vaults.get("v1")!.wraps.has("u9")).toBe(false);
 
@@ -185,6 +195,36 @@ describe("vault key session", () => {
     // Never "repaired" by writing the wrong key back.
     expect(keys.setVaultKey).toHaveBeenCalledTimes(1);
     expect(openSealedVk(pair.privateKey, fromBase64(srv.vaults.get("v1")!.wraps.get("u1")!))).toEqual(wrong);
+  });
+
+  it("refuses to seal when a member's pinned key changed", async () => {
+    const srv = fakeServer();
+    const pins = memPins();
+    const owner = session({ api: srv.api, keys: fakeKeys(), pins });
+    await owner.ensureAccountKeys();
+    await owner.ensureVaultKey("v1");
+    const first = generateAccountKeypair();
+    srv.requests.set("v1", [{ userId: "u2", publicKey: toBase64(first.publicKey), requestedAt: "" }]);
+    expect((await owner.serviceKeyRequests("v1")).sealed).toHaveLength(1);
+    // The server now offers a different key for the same person.
+    const swapped = generateAccountKeypair();
+    srv.requests.set("v1", [{ userId: "u2", publicKey: toBase64(swapped.publicKey), requestedAt: "" }]);
+    const res = await owner.serviceKeyRequests("v1");
+    expect(res.sealed).toEqual([]);
+    expect(res.keyChanged).toEqual([{ userId: "u2", fingerprint: shortFingerprint(swapped.publicKey) }]);
+    expect(srv.api.postVaultKeyWrap).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses keys when the server's account key is not this device's", async () => {
+    const srv = fakeServer();
+    const keys = fakeKeys();
+    const s = session({ api: srv.api, keys });
+    await s.ensureAccountKeys();
+    srv.setMe({ publicKey: toBase64(generateAccountKeypair().publicKey), privWrappedRecovery: "AA==" });
+    expect(await s.ensureAccountKeys()).toEqual({ state: "security-warning" });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "security-warning" });
+    expect(srv.api.getMyVaultKeys).not.toHaveBeenCalled();
+    expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
   });
 
   it("sign-out clears every verified key", async () => {

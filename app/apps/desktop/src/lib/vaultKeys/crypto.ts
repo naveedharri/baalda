@@ -182,6 +182,16 @@ export function generateAccountKeypair(): AccountKeypair {
   return { publicKey, privateKey: secretKey };
 }
 
+/** Full fingerprint of a public key: lowercase hex SHA-256 (what pins store). */
+export function keyFingerprint(publicKey: Uint8Array): string {
+  return Array.from(sha256(publicKey), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Short form for people to compare: 4 groups of 4 hex, e.g. "1a2b 3c4d 5e6f 7a8b". */
+export function shortFingerprint(publicKey: Uint8Array): string {
+  return keyFingerprint(publicKey).slice(0, 16).match(/.{4}/g)!.join(" ");
+}
+
 export function publicKeyFromPrivate(privateKey: Uint8Array): Uint8Array {
   return x25519.getPublicKey(privateKey);
 }

@@ -9,6 +9,9 @@
 // - Only devices seal: a key holder seals the VK to a requester's public key,
 //   and only after the membership check confirms the requester is a current
 //   member. The server never opens a sealed box.
+// - Trust on first use: the first seal to a member pins their key fingerprint
+//   (keychain); a later different key is refused and reported, never sealed.
+// - Every launch checks the server's public key for this account is ours.
 // - Without the server's `vault-keys` feature every step is a no-op.
 
 import type {
@@ -24,11 +27,13 @@ import {
   fromBase64,
   generateAccountKeypair,
   generateVaultKey,
+  keyFingerprint,
   makeVkCheck,
   newRecoveryPhrase,
   openSealedVk,
   publicKeyFromPrivate,
   sealVkTo,
+  shortFingerprint,
   toBase64,
   unwrapPrivateKeyWithPhrase,
   verifyVk,
@@ -54,9 +59,16 @@ export interface VaultKeyStore {
   clearCache(): void;
 }
 
+/** Trust-on-first-use pins of members' public-key fingerprints (keychain). */
+export interface KeyPinStore {
+  get(userId: string): Promise<string | null>;
+  set(userId: string, fingerprint: string): Promise<void>;
+}
+
 export interface VaultKeySessionDeps {
   api: VaultKeysApi;
   keys: VaultKeyStore;
+  pins: KeyPinStore;
   /** The server's `/health` features (`cachedServerFeatures`). */
   features(): Promise<ReadonlySet<string>>;
   /** May this device key an unkeyed vault? (owner/admin + product flag) */
@@ -72,10 +84,13 @@ export type AccountKeysState =
   | { state: "ready"; isNew: false }
   /** First run: show the recovery kit ONCE, then drop the phrase. */
   | { state: "ready"; isNew: true; phrase: string }
-  | { state: "needs-recovery-or-approval" };
+  | { state: "needs-recovery-or-approval" }
+  /** The server's public key for this account is not this device's: refuse keys. */
+  | { state: "security-warning" };
 
 export type VaultKeyState =
   | { state: "disabled" }
+  | { state: "security-warning" }
   | { state: "ready"; generation: number }
   | { state: "waiting-for-teammate" }
   | { state: "unkeyed" }
@@ -83,7 +98,15 @@ export type VaultKeyState =
   /** The only key on offer does not open `vk_check`: never used. */
   | { state: "key-mismatch" };
 
-export type ServiceResult = { sealed: string[]; refused: string[] };
+export type SealedFor = { userId: string; fingerprint: string };
+export type ServiceResult = {
+  /** Sealed: the toast shows `fingerprint` (short form). */
+  sealed: SealedFor[];
+  /** Not a current member, or a malformed key. */
+  refused: string[];
+  /** Pinned key differs: "<name>'s security key changed". Never auto-sealed. */
+  keyChanged: SealedFor[];
+};
 
 const sessions = new Set<{ clear(): void }>();
 
@@ -97,6 +120,8 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
   /** vaultId → verified VK (+ generation). The only source for the header. */
   const verified = new Map<string, { vk: Uint8Array; b64: string; generation: number }>();
 
+  /** Set when the server's account key is not ours: every key step refuses. */
+  let accountMismatch = false;
   const enabled = async () => (await deps.features()).has(VAULT_KEYS);
 
   async function ensureAccountKeys(): Promise<AccountKeysState> {
@@ -104,9 +129,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const local = await keys.getAccountPrivateKey();
     const remote = await api.getMyKeys();
     if (local && remote) {
-      return sameKey(publicKeyFromPrivate(local), remote.publicKey)
-        ? { state: "ready", isNew: false }
-        : { state: "needs-recovery-or-approval" };
+      // Checked on every launch: a server that swaps our public key must not
+      // get vault keys sealed to it, nor see us proceed as if nothing happened.
+      accountMismatch = !sameKey(publicKeyFromPrivate(local), remote.publicKey);
+      return accountMismatch ? { state: "security-warning" } : { state: "ready", isNew: false };
     }
     if (!local && remote) return { state: "needs-recovery-or-approval" };
     // No server keys: publish (a fresh keypair, or the one this device holds).
@@ -139,6 +165,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
 
   async function ensureVaultKey(vaultId: string): Promise<VaultKeyState> {
     if (!(await enabled())) return { state: "disabled" };
+    if (accountMismatch) return { state: "security-warning" };
     let mine: MyVaultKeys | null;
     try {
       mine = await api.getMyVaultKeys(vaultId);
@@ -199,8 +226,8 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
 
   /** Key holder: seal the VK for each requester who is a current member. */
   async function serviceKeyRequests(vaultId: string): Promise<ServiceResult> {
-    const out: ServiceResult = { sealed: [], refused: [] };
-    if (!(await enabled())) return out;
+    const out: ServiceResult = { sealed: [], refused: [], keyChanged: [] };
+    if (!(await enabled()) || accountMismatch) return out;
     const held = verified.get(vaultId);
     if (!held) return out;
     for (const r of await api.listVaultKeyRequests(vaultId)) {
@@ -215,12 +242,19 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
         out.refused.push(r.userId);
         continue;
       }
+      const fp = keyFingerprint(pub);
+      const pinned = await deps.pins.get(r.userId);
+      if (pinned && pinned !== fp) {
+        out.keyChanged.push({ userId: r.userId, fingerprint: shortFingerprint(pub) });
+        continue;
+      }
       await api.postVaultKeyWrap(
         vaultId,
         { userId: r.userId, generation: held.generation, sealedVk: toBase64(sealVkTo(pub, held.vk)) },
         held.b64,
       );
-      out.sealed.push(r.userId);
+      if (!pinned) await deps.pins.set(r.userId, fp);
+      out.sealed.push({ userId: r.userId, fingerprint: shortFingerprint(pub) });
     }
     return out;
   }
@@ -238,6 +272,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     headerFor,
     clear() {
       verified.clear();
+      accountMismatch = false;
       keys.clearCache();
     },
     dispose() {

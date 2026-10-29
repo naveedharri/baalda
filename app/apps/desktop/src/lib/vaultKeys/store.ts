@@ -85,3 +85,14 @@ export function keychainVaultKeyStore(serverUrl: string, userId: string) {
     clearCache: clearVaultKeyCache,
   };
 }
+
+/** TOFU pins, one keychain entry per member, under the account-key prefix. */
+export const pinKeyName = (serverUrl: string, myUserId: string, theirUserId: string) =>
+  `baalda.keys:pin|${serverUrl}|${myUserId}|${theirUserId}`;
+
+export function keychainPinStore(serverUrl: string, myUserId: string) {
+  return {
+    get: (userId: string) => io.get(pinKeyName(serverUrl, myUserId, userId)),
+    set: (userId: string, fingerprint: string) => io.set(pinKeyName(serverUrl, myUserId, userId), fingerprint),
+  };
+}
