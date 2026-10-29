@@ -8,7 +8,7 @@ import {
   loadBootstrapPage,
 } from "../../yjs/bootstrap.js";
 import { getSession } from "../session.js";
-import { docCryptoOf, requireVaultKey } from "../../crypto/transport.js";
+import { docCryptoOf, refuseKeyIncapableClient, requireVaultKey } from "../../crypto/transport.js";
 
 /**
  * Whole-vault bootstrap download.
@@ -50,6 +50,10 @@ export const bootstrapRoutes = new Hono();
 bootstrapRoutes.post("/vaults/:vaultId/bootstrap", async (c) => {
   const auth = await gate(c);
   if (auth instanceof Response) return auth;
+  // No session for a build without vault keys on a keyed vault (426 now,
+  // rather than a session whose first page it could not read).
+  const outdated = await refuseKeyIncapableClient(c, auth.vaultId);
+  if (outdated) return outdated;
   const body = await c.req.json().catch(() => ({}));
   const rawHave = (body as { have?: unknown }).have;
   // `have` is what the client already holds CRDT state for. Unknown ids are

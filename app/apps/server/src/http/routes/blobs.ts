@@ -1,5 +1,5 @@
 import { sealBlobTextRow } from "../../index/sealed-index.js";
-import { docCryptoOf, requireVaultKey } from "../../crypto/transport.js";
+import { docCryptoOf, refuseKeyIncapableClient, requireVaultKey } from "../../crypto/transport.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Readable, Transform } from "node:stream";
 import { Hono } from "hono";
@@ -437,6 +437,9 @@ blobRoutes.post(
     if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
+    // Keyed vault + a build without vault keys: 426, nothing stored.
+    const outdated = await refuseKeyIncapableClient(c, vaultId);
+    if (outdated) return outdated;
     // ── validation, all of it before a single byte of body is read ──────────
     const filename = c.req.header("x-file-name") ?? c.req.query("filename") ?? null;
     // `x-doc-id`: these bytes are a registered tree file, not an anonymous
@@ -990,6 +993,9 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   if (!(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
+  // Keyed vault + a build without vault keys: 426, no intent, no row.
+  const outdated = await refuseKeyIncapableClient(c, vaultId);
+  if (outdated) return outdated;
 
   let body: Record<string, unknown>;
   try {
@@ -1615,6 +1621,11 @@ blobRoutes.post("/blobs/:id/complete", async (c) => {
   const org = row.vault_id ? await vaultOrg(row.vault_id) : row.org_id;
   if (!org || !(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
+  }
+  // Keyed vault + a build without vault keys: 426, the row stays pending.
+  if (row.vault_id) {
+    const outdated = await refuseKeyIncapableClient(c, row.vault_id);
+    if (outdated) return outdated;
   }
   // A one-step upload's registration (migration 048). Its `files` row does not
   // exist yet, so `canWriteBlob` has nothing to resolve: the CREATE gate runs

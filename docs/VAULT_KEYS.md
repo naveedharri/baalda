@@ -94,6 +94,16 @@ ciphertext cannot be moved to another row.
   vault is keyed only when nothing used in the last 30 days still lacks its own wrap; until then everything
   works exactly as before. A connection idle for more than 30 days needs one reconnect after conversion.
 
+## Older desktops
+
+A desktop released before vault keys (0.1.97 and older) never sees a vault-key refusal it does not
+understand. On a keyed vault, every request it makes that leads to content (sync and vault-channel
+tokens, registration, bootstrap, pushes, uploads, search, versions) is answered `426 client_outdated`,
+the "update required" refusal those builds already handle: they stop syncing, keep every local file
+as it is, and install the update. Nothing is written on the server. A desktop counts as supporting
+vault keys when it reports version 0.1.98 or later, or presents the vault's verified key. Unkeyed
+vaults work for every version exactly as before.
+
 ## Zero data loss
 
 - Plaintext is never removed before a per-row decrypt-and-compare check passes; removal is a separate,
