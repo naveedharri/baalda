@@ -1472,6 +1472,13 @@ export interface VaultKeyRequest {
 export interface VaultKeyWrapPost extends VaultKeyWrap {
   userId: string;
 }
+export interface PendingDevice {
+  deviceId: string;
+  publicKey: string;
+  requestedAt?: string;
+  /** e.g. "MacBook Pro", when the server knows. */
+  name?: string | null;
+}
 export interface AccountKeysBody {
   publicKey: string;
   /** Optional since the owner decision: the VAULT key is the recovery path. */
@@ -1652,8 +1659,37 @@ export class ApiClient {
     }
   }
 
+  /** Approve a pending device: the account private key sealed to its key. */
   async putDeviceKey(deviceId: string, privWrapped: string): Promise<void> {
     await this.request("PUT", `/api/me/devices/${encodeURIComponent(deviceId)}/key`, { body: { privWrapped } });
+  }
+
+  /** Link-a-device: publish this device's ephemeral public key as pending. */
+  async registerPendingDevice(deviceId: string, publicKey: string): Promise<void> {
+    await this.request("POST", "/api/me/devices", { body: { deviceId, publicKey } });
+  }
+
+  async listPendingDevices(): Promise<PendingDevice[]> {
+    const { data } = await this.request<PendingDevice[]>("GET", "/api/me/devices/pending");
+    return Array.isArray(data) ? data : [];
+  }
+
+  /** The approval for this device, or null while none exists (404). */
+  async getDeviceKey(deviceId: string): Promise<string | null> {
+    try {
+      const { data } = await this.request<{ privWrapped?: string }>(
+        "GET",
+        `/api/me/devices/${encodeURIComponent(deviceId)}/key`,
+      );
+      return data?.privWrapped ?? null;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  async denyDevice(deviceId: string): Promise<void> {
+    await this.request("DELETE", `/api/me/devices/${encodeURIComponent(deviceId)}`);
   }
 
   // ---- low-level request --------------------------------------------------

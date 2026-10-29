@@ -6,6 +6,8 @@ import {
   generateVaultKey,
   makeVkCheck,
   openSealedVk,
+  keyFingerprint,
+  sealTo,
   sealVkTo,
   shortFingerprint,
   toBase64,
@@ -20,6 +22,8 @@ function fakeServer() {
   const vaults = new Map<string, { vkCheck: string; generation: number; wraps: Map<string, string> }>();
   const requests = new Map<string, VaultKeyRequest[]>();
   const posted: { vaultId: string; userId: string; header: string }[] = [];
+  let pendingDevices: { deviceId: string; publicKey: string }[] = [];
+  const deviceKeys = new Map<string, string>();
   let caller = "u1";
   const api = {
     initVaultKeys: vi.fn(async (vaultId: string, b: VaultKeyInit) => {
@@ -45,10 +49,23 @@ function fakeServer() {
     }),
     putMyKeys: vi.fn(async (b: AccountKeysBody) => void (me = b)),
     getMyKeys: vi.fn(async () => me),
+    registerPendingDevice: vi.fn(async (deviceId: string, publicKey: string) => {
+      if (!pendingDevices.some((d) => d.deviceId === deviceId)) pendingDevices.push({ deviceId, publicKey });
+    }),
+    listPendingDevices: vi.fn(async () => pendingDevices.slice()),
+    getDeviceKey: vi.fn(async (deviceId: string) => deviceKeys.get(deviceId) ?? null),
+    putDeviceKey: vi.fn(async (deviceId: string, w: string) => {
+      deviceKeys.set(deviceId, w);
+      pendingDevices = pendingDevices.filter((d) => d.deviceId !== deviceId);
+    }),
+    denyDevice: vi.fn(async (deviceId: string) => {
+      pendingDevices = pendingDevices.filter((d) => d.deviceId !== deviceId);
+    }),
   };
   return {
     api,
     vaults,
+    deviceKeys,
     requests,
     posted,
     as: (u: string) => void (caller = u),
@@ -59,8 +76,12 @@ function fakeServer() {
 function fakeKeys() {
   let account: Uint8Array | null = null;
   const vks = new Map<string, Uint8Array>();
+  let link: Uint8Array | null = null;
   return {
     vks,
+    getDeviceLinkKey: vi.fn(async () => link),
+    setDeviceLinkKey: vi.fn(async (k: Uint8Array) => void (link = k)),
+    deleteDeviceLinkKey: vi.fn(async () => void (link = null)),
     getAccountPrivateKey: vi.fn(async () => account),
     setAccountPrivateKey: vi.fn(async (k: Uint8Array) => void (account = k)),
     getVaultKey: vi.fn(async (id: string) => vks.get(id) ?? null),
@@ -81,6 +102,7 @@ function session(over: Partial<VaultKeySessionDeps> & Pick<VaultKeySessionDeps, 
     isMember: async () => true,
     pins: memPins(),
     selfUserId: () => "u1",
+    deviceId: () => "d1",
     ...over,
   });
 }
@@ -134,7 +156,7 @@ describe("vault key session", () => {
     // The same account on a new device: server has keys, device has none.
     const keys = fakeKeys();
     const device = session({ api: srv.api, keys });
-    expect(await device.ensureAccountKeys()).toEqual({ state: "needs-recovery-or-approval" });
+    expect((await device.ensureAccountKeys()).state).toBe("awaiting-device-approval");
     expect(await device.restoreWithVaultKey("v1", "abandon ".repeat(23) + "zoo")).toBe("invalid-words");
     expect(await device.restoreWithVaultKey("v1", vaultKeyToWords(generateVaultKey()))).toBe("wrong-key");
     expect(keys.setVaultKey).not.toHaveBeenCalled();
@@ -239,7 +261,9 @@ describe("vault key session", () => {
     srv.requests.set("v1", [{ userId: "u2", publicKey: toBase64(swapped.publicKey), requestedAt: "" }]);
     const res = await owner.serviceKeyRequests("v1");
     expect(res.sealed).toEqual([]);
-    expect(res.keyChanged).toEqual([{ userId: "u2", fingerprint: shortFingerprint(swapped.publicKey) }]);
+    expect(res.keyChanged).toEqual([
+      { userId: "u2", fingerprint: shortFingerprint(swapped.publicKey), publicKey: toBase64(swapped.publicKey) },
+    ]);
     expect(srv.api.postVaultKeyWrap).toHaveBeenCalledTimes(1);
   });
 
@@ -282,6 +306,89 @@ describe("vault key session", () => {
     srv.vaults.set("v1", { vkCheck: toBase64(await makeVkCheck(generateVaultKey(), "v1", 1)), generation: 1, wraps: new Map() });
     expect(await s.ensureVaultKey("v1")).toEqual({ state: "waiting-for-teammate" });
     expect(keys.setVaultKey).not.toHaveBeenCalled();
+  });
+
+  it("links a new device only after another device approves its code", async () => {
+    const srv = fakeServer();
+    const oldKeys = fakeKeys();
+    const old = session({ api: srv.api, keys: oldKeys, deviceId: () => "d-old" });
+    await old.ensureAccountKeys();
+
+    const newKeys = fakeKeys();
+    const fresh = session({ api: srv.api, keys: newKeys, deviceId: () => "d-new" });
+    const waiting = await fresh.ensureAccountKeys();
+    if (waiting.state !== "awaiting-device-approval") throw new Error("expected pending");
+    expect(waiting.code).toMatch(/^[0-9a-f]{4} [0-9a-f]{4}$/);
+    // A logged-in session alone yields nothing: still pending on retry.
+    expect(await fresh.ensureAccountKeys()).toEqual(waiting);
+    expect(newKeys.setAccountPrivateKey).not.toHaveBeenCalled();
+
+    const pending = await old.pendingDevices();
+    expect(pending.map((d) => [d.deviceId, d.code])).toEqual([["d-new", waiting.code]]);
+    expect(await old.approveDevice(pending[0])).toBe(true);
+
+    expect(await fresh.ensureAccountKeys()).toEqual({ state: "ready", isNew: false });
+    expect(await newKeys.getAccountPrivateKey()).toEqual(await oldKeys.getAccountPrivateKey());
+    expect(await newKeys.getDeviceLinkKey()).toBeNull();
+  });
+
+  it("never adopts a device approval that is not the account key", async () => {
+    const srv = fakeServer();
+    const old = session({ api: srv.api, keys: fakeKeys(), deviceId: () => "d-old" });
+    await old.ensureAccountKeys();
+    const newKeys = fakeKeys();
+    const fresh = session({ api: srv.api, keys: newKeys, deviceId: () => "d-new" });
+    await fresh.ensureAccountKeys();
+    // A server-forged approval: some other key sealed to the new device.
+    const link = (await newKeys.getDeviceLinkKey())!;
+    srv.deviceKeys.set("d-new", toBase64(sealTo(generateAccountKeypairPub(link), generateAccountKeypair().privateKey)));
+    expect((await fresh.ensureAccountKeys()).state).toBe("awaiting-device-approval");
+    expect(newKeys.setAccountPrivateKey).not.toHaveBeenCalled();
+  });
+
+  it("an approval with a mismatched code is refused, deny removes the request", async () => {
+    const srv = fakeServer();
+    const old = session({ api: srv.api, keys: fakeKeys(), deviceId: () => "d-old" });
+    await old.ensureAccountKeys();
+    const fresh = session({ api: srv.api, keys: fakeKeys(), deviceId: () => "d-new" });
+    await fresh.ensureAccountKeys();
+    const [d] = await old.pendingDevices();
+    expect(await old.approveDevice({ ...d, code: "0000 0000" })).toBe(false);
+    expect(srv.api.putDeviceKey).not.toHaveBeenCalled();
+    await old.denyDevice(d.deviceId);
+    expect(await old.pendingDevices()).toEqual([]);
+  });
+
+  it("lost every device: a fresh account key, and a teammate approves the changed key by code", async () => {
+    const srv = fakeServer();
+    const pins = memPins();
+    const owner = session({ api: srv.api, keys: fakeKeys(), pins, isMember: async () => true });
+    await owner.ensureAccountKeys();
+    await owner.ensureVaultKey("v1");
+    const first = generateAccountKeypair();
+    srv.requests.set("v1", [{ userId: "u2", publicKey: toBase64(first.publicKey), requestedAt: "" }]);
+    await owner.serviceKeyRequests("v1");
+
+    // u2 lost every device and starts over (explicit choice, no local key).
+    srv.as("u2");
+    srv.setMe({ publicKey: toBase64(first.publicKey) });
+    const keys = fakeKeys();
+    const member = session({ api: srv.api, keys, selfUserId: () => "u2", keysAllowed: () => false });
+    expect(await member.startFreshAccountKey()).toBe(true);
+    expect(await member.startFreshAccountKey()).toBe(false); // never replaces a held key
+    const freshPub = fromBase64((await srv.api.getMyKeys())!.publicKey);
+
+    srv.as("u1");
+    srv.requests.set("v1", [{ userId: "u2", publicKey: toBase64(freshPub), requestedAt: "" }]);
+    const res = await owner.serviceKeyRequests("v1");
+    expect(res.sealed).toEqual([]);
+    const change = res.keyChanged[0];
+    expect(await owner.approveChangedKey("v1", { ...change, fingerprint: "0000 0000 0000 0000" })).toBe(false);
+    expect(await owner.approveChangedKey("v1", change)).toBe(true);
+    expect(pins.m.get("u2")).toBe(keyFingerprint(freshPub));
+
+    srv.as("u2");
+    expect((await member.ensureVaultKey("v1")).state).toBe("ready");
   });
 
   it("sign-out clears every verified key", async () => {

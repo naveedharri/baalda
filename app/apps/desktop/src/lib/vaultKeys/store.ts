@@ -81,10 +81,16 @@ export function keychainVaultKeyStore(serverUrl: string, userId: string) {
     getAccountPrivateKey: () => getAccountPrivateKey(serverUrl, userId),
     setAccountPrivateKey: (key: Uint8Array) => setAccountPrivateKey(serverUrl, userId, key),
     getVaultKey: (vaultId: string) => getVaultKey(serverUrl, vaultId),
+    getDeviceLinkKey: () => getBytes(deviceLinkKeyName(serverUrl, userId)),
+    setDeviceLinkKey: (key: Uint8Array) => setBytes(deviceLinkKeyName(serverUrl, userId), key),
+    deleteDeviceLinkKey: () => remove(deviceLinkKeyName(serverUrl, userId)),
     setVaultKey: (vaultId: string, vk: Uint8Array) => setVaultKey(serverUrl, vaultId, vk),
     clearCache: clearVaultKeyCache,
   };
 }
+
+/** The ephemeral link-a-device key (deleted once the account key is adopted). */
+export const deviceLinkKeyName = (serverUrl: string, userId: string) => `baalda.keys:link|${serverUrl}|${userId}`;
 
 /** TOFU pins, one keychain entry per member, under the account-key prefix. */
 export const pinKeyName = (serverUrl: string, myUserId: string, theirUserId: string) =>

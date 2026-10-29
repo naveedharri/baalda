@@ -17,6 +17,7 @@
 import type {
   AccountKeysBody,
   MyVaultKeys,
+  PendingDevice,
   VaultKeyInit,
   VaultKeyRequest,
   VaultKeyWrapPost,
@@ -25,12 +26,15 @@ import { ApiError } from "../api";
 import { VAULT_KEYS } from "../serverFeatures";
 import {
   fromBase64,
+  deviceCode,
   generateAccountKeypair,
   generateVaultKey,
   keyFingerprint,
   makeVkCheck,
+  openSealed,
   openSealedVk,
   publicKeyFromPrivate,
+  sealTo,
   sealVkTo,
   shortFingerprint,
   toBase64,
@@ -46,11 +50,20 @@ export interface VaultKeysApi {
   postVaultKeyWrap(vaultId: string, wrap: VaultKeyWrapPost, vkBase64: string): Promise<void>;
   putMyKeys(body: AccountKeysBody): Promise<void>;
   getMyKeys(): Promise<AccountKeysBody | null>;
+  registerPendingDevice(deviceId: string, publicKey: string): Promise<void>;
+  listPendingDevices(): Promise<PendingDevice[]>;
+  getDeviceKey(deviceId: string): Promise<string | null>;
+  putDeviceKey(deviceId: string, privWrapped: string): Promise<void>;
+  denyDevice(deviceId: string): Promise<void>;
 }
 
 /** The keychain store, scoped to the current server + user by the caller. */
 export interface VaultKeyStore {
   getAccountPrivateKey(): Promise<Uint8Array | null>;
+  /** The ephemeral link-a-device key while this device waits for approval. */
+  getDeviceLinkKey(): Promise<Uint8Array | null>;
+  setDeviceLinkKey(key: Uint8Array): Promise<void>;
+  deleteDeviceLinkKey(): Promise<void>;
   setAccountPrivateKey(key: Uint8Array): Promise<void>;
   getVaultKey(vaultId: string): Promise<Uint8Array | null>;
   setVaultKey(vaultId: string, vk: Uint8Array): Promise<void>;
@@ -75,12 +88,15 @@ export interface VaultKeySessionDeps {
   isMember(vaultId: string, userId: string): Promise<boolean>;
   /** The signed-in user's id (to seal a restored key to ourselves). */
   selfUserId(): string | null;
+  /** Stable id of this app install (not secret). */
+  deviceId(): string;
 }
 
 export type AccountKeysState =
   | { state: "disabled" }
   | { state: "ready"; isNew: boolean }
-  | { state: "needs-recovery-or-approval" }
+  /** Link-a-device: approve from another computer showing the same code. */
+  | { state: "awaiting-device-approval"; code: string }
   /** The server's public key for this account is not this device's: refuse keys. */
   | { state: "security-warning" };
 
@@ -103,14 +119,17 @@ export type RestoreResult =
   | "disabled"
   | "security-warning";
 
+export type PendingDeviceView = PendingDevice & { code: string };
+
 export type SealedFor = { userId: string; fingerprint: string };
 export type ServiceResult = {
   /** Sealed: the toast shows `fingerprint` (short form). */
   sealed: SealedFor[];
   /** Not a current member, or a malformed key. */
   refused: string[];
-  /** Pinned key differs: "<name>'s security key changed". Never auto-sealed. */
-  keyChanged: SealedFor[];
+  /** Pinned key differs: "<name>'s security key changed". Never auto-sealed;
+   *  only `approveChangedKey` after the person confirms the code. */
+  keyChanged: (SealedFor & { publicKey: string })[];
 };
 
 const sessions = new Set<{ clear(): void }>();
@@ -139,13 +158,109 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       accountMismatch = !sameKey(publicKeyFromPrivate(local), remote.publicKey);
       return accountMismatch ? { state: "security-warning" } : { state: "ready", isNew: false };
     }
-    if (!local && remote) return { state: "needs-recovery-or-approval" };
+    // No local key but the server has one: link this device. A session alone
+    // never yields keys: another of OUR devices must approve the code.
+    if (!local && remote) return linkThisDevice(remote.publicKey);
     // No server keys: publish (a fresh keypair, or the one this device holds).
     const privateKey = local ?? generateAccountKeypair().privateKey;
     // Keychain first: a failed PUT retries next run with the same key.
     if (!local) await keys.setAccountPrivateKey(privateKey);
     await api.putMyKeys({ publicKey: toBase64(publicKeyFromPrivate(privateKey)) });
     return { state: "ready", isNew: true };
+  }
+
+  async function linkThisDevice(accountPublicKey: string): Promise<AccountKeysState> {
+    let linkKey = await keys.getDeviceLinkKey();
+    if (!linkKey) {
+      linkKey = generateAccountKeypair().privateKey;
+      await keys.setDeviceLinkKey(linkKey);
+    }
+    const linkPub = publicKeyFromPrivate(linkKey);
+    const wrapped = await api.getDeviceKey(deps.deviceId());
+    if (wrapped) {
+      let priv: Uint8Array | null = null;
+      try {
+        priv = openSealed(linkKey, fromBase64(wrapped));
+      } catch {
+        priv = null;
+      }
+      // Adopted only when it IS the account key the server names.
+      if (priv && priv.length === 32 && sameKey(publicKeyFromPrivate(priv), accountPublicKey)) {
+        if (!(await keys.getAccountPrivateKey())) await keys.setAccountPrivateKey(priv);
+        await keys.deleteDeviceLinkKey();
+        return { state: "ready", isNew: false };
+      }
+    }
+    await api.registerPendingDevice(deps.deviceId(), toBase64(linkPub)); // idempotent
+    return { state: "awaiting-device-approval", code: deviceCode(linkPub) };
+  }
+
+  /** Existing device: devices waiting for approval, each with its code. */
+  async function pendingDevices(): Promise<PendingDeviceView[]> {
+    if (!(await enabled()) || accountMismatch) return [];
+    if (!(await keys.getAccountPrivateKey())) return [];
+    const out: PendingDeviceView[] = [];
+    for (const d of await api.listPendingDevices()) {
+      if (d.deviceId === deps.deviceId()) continue;
+      try {
+        const pub = fromBase64(d.publicKey);
+        if (pub.length === 32) out.push({ ...d, code: deviceCode(pub) });
+      } catch {
+        /* malformed: never offered */
+      }
+    }
+    return out;
+  }
+
+  /** The person approved `device` (codes matched): seal our account key to it. */
+  async function approveDevice(device: PendingDeviceView): Promise<boolean> {
+    if (!(await enabled()) || accountMismatch) return false;
+    const priv = await keys.getAccountPrivateKey();
+    const remote = await api.getMyKeys();
+    if (!priv || !remote || !sameKey(publicKeyFromPrivate(priv), remote.publicKey)) return false;
+    const pub = fromBase64(device.publicKey);
+    if (pub.length !== 32 || deviceCode(pub) !== device.code) return false;
+    await api.putDeviceKey(device.deviceId, toBase64(sealTo(pub, priv)));
+    return true;
+  }
+
+  async function denyDevice(deviceId: string): Promise<void> {
+    await api.denyDevice(deviceId);
+  }
+
+  /**
+   * Lost every device: a NEW account keypair, explicitly chosen by the person.
+   * Only when this device holds no account key (never replaces one). Old seals
+   * to the previous key stop opening; owners restore with the vault key,
+   * members are re-approved by teammates who confirm the new code.
+   */
+  async function startFreshAccountKey(): Promise<boolean> {
+    if (!(await enabled()) || accountMismatch) return false;
+    if (await keys.getAccountPrivateKey()) return false;
+    const { privateKey, publicKey } = generateAccountKeypair();
+    await keys.setAccountPrivateKey(privateKey);
+    await api.putMyKeys({ publicKey: toBase64(publicKey) });
+    await keys.deleteDeviceLinkKey();
+    return true;
+  }
+
+  /**
+   * "<name>'s security key changed": the ONE human override of a pin, after
+   * the person confirmed the code with them. Updates the pin, then seals.
+   */
+  async function approveChangedKey(vaultId: string, change: SealedFor & { publicKey: string }): Promise<boolean> {
+    const held = verified.get(vaultId);
+    if (!held || accountMismatch) return false;
+    const pub = fromBase64(change.publicKey);
+    if (pub.length !== 32 || shortFingerprint(pub) !== change.fingerprint) return false;
+    if (!(await deps.isMember(vaultId, change.userId))) return false;
+    await deps.pins.set(change.userId, keyFingerprint(pub));
+    await api.postVaultKeyWrap(
+      vaultId,
+      { userId: change.userId, generation: held.generation, sealedVk: toBase64(sealVkTo(pub, held.vk)) },
+      held.b64,
+    );
+    return true;
   }
 
   /**
@@ -276,7 +391,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       const fp = keyFingerprint(pub);
       const pinned = await deps.pins.get(r.userId);
       if (pinned && pinned !== fp) {
-        out.keyChanged.push({ userId: r.userId, fingerprint: shortFingerprint(pub) });
+        out.keyChanged.push({ userId: r.userId, fingerprint: shortFingerprint(pub), publicKey: r.publicKey });
         continue;
       }
       await api.postVaultKeyWrap(
@@ -299,6 +414,11 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     ensureAccountKeys,
     restoreWithVaultKey,
     revealVaultKey,
+    pendingDevices,
+    approveDevice,
+    denyDevice,
+    startFreshAccountKey,
+    approveChangedKey,
     ensureVaultKey,
     serviceKeyRequests,
     headerFor,

@@ -11,6 +11,7 @@ import { serverFeatures } from "../serverFeatures";
 import {
   createVaultKeySession,
   type AccountKeysState,
+  type PendingDeviceView,
   type ServiceResult,
   type VaultKeySession,
   type VaultKeyState,
@@ -19,10 +20,27 @@ import { keychainPinStore, keychainVaultKeyStore } from "./store";
 
 export const SERVICE_INTERVAL_MS = 2 * 60 * 1000;
 
+const DEVICE_ID_KEY = "context.vaultKeys.deviceId";
+/** Stable, non-secret id of this install (a pending device is keyed by it). */
+function installDeviceId(): string {
+  try {
+    const have = localStorage.getItem(DEVICE_ID_KEY);
+    if (have) return have;
+    const id = crypto.randomUUID();
+    localStorage.setItem(DEVICE_ID_KEY, id);
+    return id;
+  } catch {
+    return (memoDeviceId ??= crypto.randomUUID());
+  }
+}
+let memoDeviceId: string | null = null;
+
 export type VaultKeyEvent =
   | { kind: "account"; state: AccountKeysState }
   | { kind: "vault"; vaultId: string; state: VaultKeyState }
-  | { kind: "serviced"; vaultId: string; result: ServiceResult };
+  | { kind: "serviced"; vaultId: string; result: ServiceResult }
+  /** Another device asks to sign in as us: "Approve?" with its code. */
+  | { kind: "pending-devices"; devices: PendingDeviceView[] };
 
 const listeners = new Set<(e: VaultKeyEvent) => void>();
 /** UI: recovery kit, "<name>'s security key changed", the "given access" toast. */
@@ -63,6 +81,7 @@ function sessionFor(userId: string) {
     features: () => serverFeatures(serverUrl, () => api.getHealth()),
     keysAllowed: () => keysAllowed,
     selfUserId: () => userId,
+    deviceId: installDeviceId,
     isMember: async (_vaultId, memberId) => {
       const orgId = current?.orgId;
       if (!orgId) return false;
@@ -83,6 +102,8 @@ async function runOnce(): Promise<void> {
   const account = await c.session.ensureAccountKeys();
   emit({ kind: "account", state: account });
   if (account.state !== "ready") return;
+  const devices = await c.session.pendingDevices();
+  if (devices.length) emit({ kind: "pending-devices", devices });
   const state = await c.session.ensureVaultKey(vaultId);
   emit({ kind: "vault", vaultId, state });
   if (state.state !== "ready") return;
@@ -134,4 +155,9 @@ export async function vaultKeysEnsure(vaultId: string): Promise<boolean> {
   const state = await c.session.ensureVaultKey(vaultId);
   emit({ kind: "vault", vaultId, state });
   return state.state === "ready";
+}
+
+/** The open session, for the approval/restore screens. */
+export function currentVaultKeySession(): VaultKeySession | null {
+  return current?.session ?? null;
 }

@@ -189,6 +189,11 @@ export function keyFingerprint(publicKey: Uint8Array): string {
   return Array.from(sha256(publicKey), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** Device-link code both computers show: "xxxx xxxx" from the device key. */
+export function deviceCode(publicKey: Uint8Array): string {
+  return keyFingerprint(publicKey).slice(0, 8).replace(/^(.{4})/, "$1 ");
+}
+
 /** Short form for people to compare: 4 groups of 4 hex, e.g. "1a2b 3c4d 5e6f 7a8b". */
 export function shortFingerprint(publicKey: Uint8Array): string {
   return keyFingerprint(publicKey).slice(0, 16).match(/.{4}/g)!.join(" ");
