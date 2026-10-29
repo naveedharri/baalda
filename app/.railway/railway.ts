@@ -39,6 +39,8 @@ const SERVER_ENV = [
   "HOCUSPOCUS_PORT",
   "NODE_ENV",
   "BAALDA_DEPLOYMENT",
+  // Client-held vault keys (W3); unset/off = today's behaviour.
+  "BAALDA_VAULT_KEYS",
   "NODE_OPTIONS",
   "SYNC_TOKEN_TTL_SECONDS",
   "COMPACTION_THRESHOLD",
