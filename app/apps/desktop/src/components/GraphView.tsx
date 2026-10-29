@@ -117,15 +117,42 @@ const REHEAT_REFRESH = 0.1;
 // quadrature by the shader (see webglRenderer's VERT), so it is a lift for the
 // leaves rather than a ceiling everything piles up against.
 const MIN_NODE_PX = 2.1;
-// Baseline strength of the additive halo around each node, before the
-// node-count falloff applied at draw time.
-const GLOW_BASE = 1.3;
 
 // Fallback cap for the global scope on the 2D canvas, which only stays smooth
 // up to a few hundred nodes. The GPU (WebGL) renderer draws the whole vault, so
 // this cap only applies when WebGL is unavailable.
 const GLOBAL_2D_CAP = 600;
 const WEBGL_ENABLED = true;
+
+/**
+ * Redesign: the graph's backdrop and edge colours follow the page theme (warm
+ * charcoal in dark, cream in light), cached per theme so a frame never reads
+ * computed styles.
+ */
+type GraphTheme = Parameters<WebGLGraphRenderer["setTheme"]>[0];
+let graphThemeCache: { key: string; value: GraphTheme } | null = null;
+function graphTheme(): GraphTheme {
+  const key = document.documentElement.dataset.theme ?? "light";
+  if (graphThemeCache?.key === key) return graphThemeCache.value;
+  const dark = key === "dark";
+  const value: GraphTheme = dark
+    ? {
+        core: [0.106, 0.1, 0.094], // #1b1a18
+        mid: [0.09, 0.086, 0.078],
+        rim: [0.071, 0.067, 0.062],
+        line: [1, 0.97, 0.925, 0.17],
+        hl: [0.65, 0.59, 1, 0.85],
+      }
+    : {
+        core: [1, 1, 1],
+        mid: [0.992, 0.984, 0.969],
+        rim: [0.976, 0.965, 0.945],
+        line: [0.043, 0.039, 0.063, 0.14],
+        hl: [0.486, 0.361, 1, 0.75],
+      };
+  graphThemeCache = { key, value };
+  return value;
+}
 
 // Above this node count, the global graph runs its force layout in a Web Worker
 // (see simWorker.ts) so a huge vault (50k+) can settle without freezing the UI
@@ -369,8 +396,9 @@ function readColors(el: Element): Colors {
     // Labels sit on the always-dark void, so they use fixed light-on-dark tones
     // (not theme text vars, which are dark in light mode → invisible). Resting
     // labels stay muted; the open/hover label brightens to full.
-    label: "rgba(205, 210, 224, 0.6)",
-    labelActive: "#f2f4fb",
+    // Redesign: the canvas follows the theme now (cream in light), so labels do too.
+    label: document.documentElement.dataset.theme === "dark" ? "rgba(231, 226, 217, 0.55)" : "rgba(26, 25, 32, 0.55)",
+    labelActive: document.documentElement.dataset.theme === "dark" ? "#f3eee6" : "#1a1920",
   };
 }
 
@@ -1300,6 +1328,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // Same transform as the 2D path: screen_css = width/2 + cam.x + world·cam.k,
       // then scaled by dpr into the device-pixel drawing buffer.
       const cam = S.camera;
+      webgl.setTheme(graphTheme());
       webgl.draw(
         cam.k * dpr,
         (width / 2 + cam.x) * dpr,
@@ -1318,13 +1347,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // The entrance rides on top: the whole field brightens on each beat and
         // the swell fades out with the extra motion, so the light and the
         // movement are one heartbeat rather than two effects.
-        clamp(
-          GLOW_BASE *
-            (60 / Math.sqrt(Math.max(1, S.visNodes.length))) *
-            (1 + 0.5 * introStrength(introSeconds()) * heartbeatEnvelope(beatPhase(introSeconds()))),
-          0.3,
-          2.2,
-        ),
+        // Redesign: no halos. A calm, matte field reads cleaner and skips a pass.
+        0,
         dpr,
       );
       if (showDiag) diagRef.current =
@@ -1655,6 +1679,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         )}
         {showDiag && WEBGL_ENABLED && settings.scope === "global" && diag && (
           <div
+            className="graph-diag"
             style={{
               position: "absolute",
               bottom: 8,

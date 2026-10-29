@@ -93,7 +93,8 @@ function assignByFolder(nodes: GraphNode[]): ColorResult {
   // Stable colors: sort distinct folders alphabetically, then index into PALETTE.
   const folders = Array.from(new Set(nodes.map((n) => topFolder(n.path)))).sort();
   const folderColor = new Map<string, string>();
-  folders.forEach((f, i) => folderColor.set(f, PALETTE[i % PALETTE.length]));
+  const pal = redesignDark() ? RD_PALETTE_DARK : redesignLight() ? RD_PALETTE_LIGHT : PALETTE;
+  folders.forEach((f, i) => folderColor.set(f, pal[i % pal.length]));
 
   const colorById = new Map<string, string>();
   const counts = new Map<string, number>();
@@ -134,8 +135,21 @@ const DEGREE_RAMP = [
   "#fdca26", // plasma 0.85 — gold
 ];
 
+// Redesign: one violet in four steps (quiet to strong) instead of the
+// magenta-to-gold plasma ramp, and soft inks for folders, per theme. Node
+// size already says "this one has many links"; colour only needs to agree.
+const RD_DEGREE_DARK = ["#5d566f", "#7f72cc", "#a597ff", "#d6ceff"];
+const RD_DEGREE_LIGHT = ["#cdc7dd", "#a998f5", "#7c5cff", "#4a2fc7"];
+export const RD_PALETTE_DARK = ["#a597ff", "#e3c17a", "#ee9a8f", "#8fcbd6", "#86cf9e", "#e3a6e6", "#9db4ff", "#e8a578", "#c9d98a", "#b8adff", "#f0b3c4", "#a9b6c9"];
+export const RD_PALETTE_LIGHT = ["#7c5cff", "#c9971a", "#d9604f", "#2f8fa0", "#3f9a5e", "#b24fb6", "#4b68c3", "#c4621f", "#7f9a1e", "#6a4fe0", "#d1577a", "#5f6b7a"];
+function redesignTheme(): string | null {
+  return typeof document === "undefined" ? null : (document.documentElement.dataset.theme ?? "light");
+}
+const redesignDark = () => redesignTheme() === "dark";
+const redesignLight = () => redesignTheme() === "light";
+
 function assignByDegree(nodes: GraphNode[]): ColorResult {
-  const shades = DEGREE_RAMP;
+  const shades = redesignDark() ? RD_DEGREE_DARK : redesignLight() ? RD_DEGREE_LIGHT : DEGREE_RAMP;
 
   const maxDeg = nodes.reduce((m, n) => Math.max(m, n.linkCount), 0);
 
