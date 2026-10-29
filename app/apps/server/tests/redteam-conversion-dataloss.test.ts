@@ -429,7 +429,7 @@ describe("red team: no data loss across vault-key conversion", () => {
     expect(undo.acquired).toBe(true);
     expect(textOf(await loadDocState(docIds[0], pool, c))).toContain("edited after keying 0");
     // Without the key, a sealed version is key_required, never "".
-    expect(() => versionTexts(vaultId, undefined)).rejects.toThrow();
+    await expect(versionTexts(vaultId, undefined)).rejects.toThrow();
   });
 
   it("a note trashed before conversion restores readable after backfill + null-out; a purged one stays refused without a key", async () => {
