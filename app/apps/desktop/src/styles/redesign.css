@@ -1679,3 +1679,79 @@ html:not([data-theme="dark"]) button.secondary:hover:not(:disabled) { background
 html:not([data-theme="dark"]) .skills-hdr-btn { height: 36px; border-radius: 10px; font-weight: 500; }
 html:not([data-theme="dark"]) .settings-page-header .icon-btn:focus,
 html:not([data-theme="dark"]) .settings-page-header .icon-btn:focus-visible { outline: none; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.12), 0 0 0 4px var(--accent-soft); }
+
+/* ---- Agent Skills cards ---- */
+html:not([data-theme="dark"]) .skills-works-with { background: var(--bg-app); }
+html:not([data-theme="dark"]) .skills-works-with::before { background: linear-gradient(to bottom, transparent, var(--bg-app)); }
+html:not([data-theme="dark"]) .skills-works-coin { background: #fff; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.08); }
+html:not([data-theme="dark"]) .skills-grid { gap: 12px; }
+html:not([data-theme="dark"]) .skills-card {
+  --skills-card-bg: #fff; --skills-card-bg-hover: #fff; --skills-tile-bg: #f6f3ff;
+  border-radius: 14px; padding: 16px;
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.04);
+  transition: box-shadow 140ms ease, transform 140ms ease;
+}
+html:not([data-theme="dark"]) .skills-card:not(.is-static):hover {
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1), 0 12px 26px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px);
+}
+html:not([data-theme="dark"]) .skills-card .skills-icon.is-lg { border: 0; background: #f1edff; color: #6a4fe0; border-radius: 10px; }
+html:not([data-theme="dark"]) .skills-card .skills-row-name { font-size: 14px; }
+html:not([data-theme="dark"]) .skills-card-byline { font-size: 11.5px; color: var(--text-tertiary); }
+html:not([data-theme="dark"]) .skills-card-desc { font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+html:not([data-theme="dark"]) .skills-card-action {
+  border: 0 !important; background: transparent !important; color: var(--text-tertiary) !important;
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1) !important; border-radius: 9px !important;
+}
+html:not([data-theme="dark"]) .skills-card-action:hover { color: #4a2fc7 !important; box-shadow: 0 0 0 1px #c9bcf6 !important; background: #f6f3ff !important; }
+html:not([data-theme="dark"]) .skills-group-head { font-size: 13.5px; font-weight: 600; }
+html:not([data-theme="dark"]) .skills-chip { background: #fff; border: 0; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1); color: var(--text-secondary); font-size: 11.5px; }
+
+/* ---- Activity panel ---- */
+html:not([data-theme="dark"]) .right-panel-head { border-bottom: 1px solid rgba(11, 10, 16, 0.06); }
+html:not([data-theme="dark"]) .right-panel-tab { border-radius: 9px; }
+html:not([data-theme="dark"]) .activity-clear { font-size: 12px; color: var(--text-tertiary); }
+html:not([data-theme="dark"]) .activity-list { padding: 0 8px; }
+html:not([data-theme="dark"]) .activity-row { border: 0 !important; border-radius: 12px; padding: 10px 10px; }
+html:not([data-theme="dark"]) .activity-row:hover { background: rgba(11, 10, 16, 0.03); }
+html:not([data-theme="dark"]) .activity-row-head { align-items: flex-start; gap: 10px; }
+
+/* Kind as a soft coloured pill instead of a bold black word. */
+html:not([data-theme="dark"]) .activity-row-chip {
+  flex: none; min-width: 0; height: 22px; padding: 0 9px; border-radius: 99px; border: 0;
+  display: inline-flex; align-items: center; font: 600 11px var(--font-body); letter-spacing: 0.01em;
+  background: #ece6ff; color: #5b3fd6;
+}
+html:not([data-theme="dark"]) .activity-row-chip[data-tone="trash"],
+html:not([data-theme="dark"]) .activity-row-chip[data-tone="failed"] { background: #fdecea; color: #b8473a; }
+html:not([data-theme="dark"]) .activity-row-chip[data-tone="warn"],
+html:not([data-theme="dark"]) .activity-row-chip[data-tone="held"],
+html:not([data-theme="dark"]) .activity-row-chip[data-tone="paused"],
+html:not([data-theme="dark"]) .activity-row-chip[data-tone="shrunk"] { background: #fff1c9; color: #7a5a00; }
+html:not([data-theme="dark"]) .activity-row-chip[data-tone="invitation"] { background: #dff3e5; color: #2f7044; }
+html:not([data-theme="dark"]) .activity-row-chip[data-tone="none"],
+html:not([data-theme="dark"]) .activity-row-chip[data-tone="round"] { background: #eef0f3; color: #4a5361; }
+
+html:not([data-theme="dark"]) .activity-row-message { font-size: 13.5px; font-weight: 500; color: var(--text-primary); }
+html:not([data-theme="dark"]) .activity-row-path,
+html:not([data-theme="dark"]) .activity-row-paths { font-size: 11.5px; color: var(--text-tertiary); }
+html:not([data-theme="dark"]) .activity-row-time { font-size: 11.5px; color: var(--text-tertiary); white-space: nowrap; }
+
+/* Expanded detail: an inset cream panel with neat small buttons. */
+html:not([data-theme="dark"]) .activity-row-detail {
+  margin-top: 8px; padding: 10px 12px; border-radius: 10px; background: var(--bg-app);
+  font-size: 12.5px; color: var(--text-secondary); line-height: 1.55;
+}
+html:not([data-theme="dark"]) .activity-row-explain { font-size: 13px; color: var(--text-primary); margin-bottom: 4px; }
+html:not([data-theme="dark"]) .activity-row-fact { font-size: 12px; color: var(--text-tertiary); }
+html:not([data-theme="dark"]) .activity-row-actions { gap: 6px; margin-top: 8px; }
+html:not([data-theme="dark"]) .activity-row-actions button {
+  height: 28px; padding: 0 12px; border-radius: 8px; font: 500 12.5px var(--font-body);
+  background: #fff !important; border: 0 !important; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.12) !important; color: var(--text-primary);
+}
+html:not([data-theme="dark"]) .activity-row-actions button:last-child { background: var(--accent) !important; color: #fff !important; box-shadow: none !important; }
+/* Chip colour by kind: deletes red, access/copies violet, warnings amber. */
+html:not([data-theme="dark"]) .activity-row-chip[data-kind="trash"],
+html:not([data-theme="dark"]) .activity-row-chip[data-kind="deleted"],
+html:not([data-theme="dark"]) .activity-row-chip[data-kind="failed"] { background: #fdecea; color: #b8473a; }
+html:not([data-theme="dark"]) .activity-row-chip[data-kind="invitation"] { background: #dff3e5; color: #2f7044; }
+html:not([data-theme="dark"]) .activity-row-chip[data-tone="warn"]:not([data-kind="trash"]):not([data-kind="failed"]):not([data-kind="invitation"]) { background: #fff1c9; color: #7a5a00; }
