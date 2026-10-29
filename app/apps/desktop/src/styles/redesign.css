@@ -577,21 +577,21 @@ html:not(.rd-off) .settings-tabs .menu-icon {
   padding: 7.5px;
   border-radius: 9px;
   flex: none;
-  color: var(--rd-ink, var(--rdc-6a4fe0, #6a4fe0));
+  color: var(--rd-icon-ink, var(--rdc-6a4fe0, #6a4fe0));
   background: var(--rd-tint, rgba(124, 92, 255, 0.12));
 }
 /* A pastel per row, cycling through the site's palette. */
 .account-popover > .menu-item:nth-of-type(5n + 1) .menu-icon,
-.settings-tab:nth-of-type(5n + 1) .menu-icon { --rd-tint: var(--rdc-b8caf566, #b8caf566); --rd-ink: var(--rdc-4b68c3, #4b68c3); }
+.settings-tab:nth-of-type(5n + 1) .menu-icon { --rd-tint: var(--rdc-b8caf566, #b8caf566); --rd-icon-ink: var(--rdc-4b68c3, #4b68c3); }
 .account-popover > .menu-item:nth-of-type(5n + 2) .menu-icon,
-.settings-tab:nth-of-type(5n + 2) .menu-icon { --rd-tint: var(--rdc-fde99baa, #fde99baa); --rd-ink: var(--rdc-987e1b, #987e1b); }
+.settings-tab:nth-of-type(5n + 2) .menu-icon { --rd-tint: var(--rdc-fde99baa, #fde99baa); --rd-icon-ink: var(--rdc-987e1b, #987e1b); }
 .account-popover > .menu-item:nth-of-type(5n + 3) .menu-icon,
-.settings-tab:nth-of-type(5n + 3) .menu-icon { --rd-tint: var(--rdc-9ed4ef77, #9ed4ef77); --rd-ink: var(--rdc-427e8a, #427e8a); }
+.settings-tab:nth-of-type(5n + 3) .menu-icon { --rd-tint: var(--rdc-9ed4ef77, #9ed4ef77); --rd-icon-ink: var(--rdc-427e8a, #427e8a); }
 .account-popover > .menu-item:nth-of-type(5n + 4) .menu-icon,
-.settings-tab:nth-of-type(5n + 4) .menu-icon { --rd-tint: var(--rdc-9bd8a966, #9bd8a966); --rd-ink: var(--rdc-3f8850, #3f8850); }
+.settings-tab:nth-of-type(5n + 4) .menu-icon { --rd-tint: var(--rdc-9bd8a966, #9bd8a966); --rd-icon-ink: var(--rdc-3f8850, #3f8850); }
 .account-popover > .menu-item:nth-of-type(5n + 5) .menu-icon,
-.settings-tab:nth-of-type(5n + 5) .menu-icon { --rd-tint: var(--rdc-f3c4ec88, #f3c4ec88); --rd-ink: var(--rdc-a549ab, #a549ab); }
-.account-popover > .menu-item.danger .menu-icon { --rd-tint: var(--rdc-f4c5c066, #f4c5c066); --rd-ink: var(--rdc-bb433a, #bb433a); }
+.settings-tab:nth-of-type(5n + 5) .menu-icon { --rd-tint: var(--rdc-f3c4ec88, #f3c4ec88); --rd-icon-ink: var(--rdc-a549ab, #a549ab); }
+.account-popover > .menu-item.danger .menu-icon { --rd-tint: var(--rdc-f4c5c066, #f4c5c066); --rd-icon-ink: var(--rdc-bb433a, #bb433a); }
 html:not(.rd-off) .account-popover .menu-sep { margin: 6px 8px; }
 
 /* ---- Vault switcher ---- */
@@ -826,11 +826,11 @@ html:not(.rd-off) .settings-body { padding-top: var(--sp-3); }
 html:not(.rd-off) .settings-nav { width: 220px; }
 html:not(.rd-off) .settings-nav .menu-item { min-height: 36px; border-radius: var(--radius-md); font-size: var(--fs-md); gap: var(--sp-2); }
 html:not(.rd-off) .settings-nav .menu-item.active { background: var(--rd-surface); box-shadow: var(--rd-card-shadow); color: var(--text-primary); }
-.settings-nav .menu-item:nth-of-type(5n + 1) .menu-icon { --rd-tint: var(--rdc-cfc4ff66, #cfc4ff66); --rd-ink: var(--rdc-6a4fe0, #6a4fe0); }
-.settings-nav .menu-item:nth-of-type(5n + 2) .menu-icon { --rd-tint: var(--rdc-9bd8a966, #9bd8a966); --rd-ink: var(--rdc-3f8850, #3f8850); }
-.settings-nav .menu-item:nth-of-type(5n + 3) .menu-icon { --rd-tint: var(--rdc-9ed4ef77, #9ed4ef77); --rd-ink: var(--rdc-427e8a, #427e8a); }
-.settings-nav .menu-item:nth-of-type(5n + 4) .menu-icon { --rd-tint: var(--rdc-fde99baa, #fde99baa); --rd-ink: var(--rdc-987e1b, #987e1b); }
-.settings-nav .menu-item:nth-of-type(5n + 5) .menu-icon { --rd-tint: var(--rdc-f3c4ec88, #f3c4ec88); --rd-ink: var(--rdc-a549ab, #a549ab); }
+.settings-nav .menu-item:nth-of-type(5n + 1) .menu-icon { --rd-tint: var(--rdc-cfc4ff66, #cfc4ff66); --rd-icon-ink: var(--rdc-6a4fe0, #6a4fe0); }
+.settings-nav .menu-item:nth-of-type(5n + 2) .menu-icon { --rd-tint: var(--rdc-9bd8a966, #9bd8a966); --rd-icon-ink: var(--rdc-3f8850, #3f8850); }
+.settings-nav .menu-item:nth-of-type(5n + 3) .menu-icon { --rd-tint: var(--rdc-9ed4ef77, #9ed4ef77); --rd-icon-ink: var(--rdc-427e8a, #427e8a); }
+.settings-nav .menu-item:nth-of-type(5n + 4) .menu-icon { --rd-tint: var(--rdc-fde99baa, #fde99baa); --rd-icon-ink: var(--rdc-987e1b, #987e1b); }
+.settings-nav .menu-item:nth-of-type(5n + 5) .menu-icon { --rd-tint: var(--rdc-f3c4ec88, #f3c4ec88); --rd-icon-ink: var(--rdc-a549ab, #a549ab); }
 
 /* The content pane is the cream ground; each block is its own white card. */
 html:not(.rd-off) .settings-content {
@@ -862,7 +862,7 @@ html:not(.rd-off) .settings-content > .subhead {
 html:not(.rd-off) .settings-content .vault-root-path { background: var(--bg-app); border-radius: var(--radius-md); }
 html:not(.rd-off) .vault-icon-option { border-radius: 10px; }
 html:not(.rd-off) .vault-local-only-card {
-  background: linear-gradient(180deg, #fff, var(--rdc-fff8f7, #fff8f7));
+  background: linear-gradient(180deg, var(--rd-surface), var(--rdc-fff8f7, #fff8f7));
   box-shadow: 0 0 0 1px rgba(187, 67, 58, 0.16), var(--rd-card-shadow);
   border: 0;
   border-radius: var(--radius-xl);
@@ -1217,7 +1217,7 @@ html:not(.rd-off) .mcp-token-dialog { width: 520px; padding: 0; overflow: hidden
 html:not(.rd-off) .mcp-token-dialog .skills-form-head {
   display: flex; align-items: center; gap: 12px;
   padding: var(--sp-5) var(--sp-5) var(--sp-4);
-  background: linear-gradient(180deg, var(--rdc-f6f3ff, #f6f3ff), #fff);
+  background: linear-gradient(180deg, var(--rdc-f6f3ff, #f6f3ff), var(--rd-surface));
   border-bottom: 1px solid rgba(var(--rd-ink), 0.05);
 }
 html:not(.rd-off) .mcp-token-dialog .skills-form-head::before {
@@ -2134,4 +2134,27 @@ html[data-theme="dark"]:not(.rd-off) .vault-switch-tile { filter: brightness(0.6
 html[data-theme="dark"]:not(.rd-off) :is(.account-popover, .vault-popover, .vault-switcher, .context-menu, .home-sidebar-menu-items, .menu-select-list) {
   background: #262421 !important;
   box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.08), 0 18px 40px -14px rgba(0, 0, 0, 0.7) !important;
+}
+
+/* ---- Dark: icons carry the colour so the room feels alive ---- */
+/* Folder squares: the pastel itself as the line, a soft wash behind it. */
+html[data-theme="dark"]:not(.rd-off) .tree-row.is-dir .tree-glyph,
+html[data-theme="dark"]:not(.rd-off) .pinned-row .tree-glyph {
+  background: color-mix(in srgb, currentColor 24%, transparent) !important;
+}
+html[data-theme="dark"]:not(.rd-off) .tree-row.is-dir .tree-glyph.colored svg,
+html[data-theme="dark"]:not(.rd-off) .pinned-row .tree-glyph svg {
+  color: color-mix(in srgb, currentColor 62%, #fff4e6) !important;
+}
+/* Note icons and toolbar icons: a touch brighter so they don't sink. */
+html[data-theme="dark"]:not(.rd-off) .tree-row:not(.is-dir) .tree-glyph { color: #a7a196; }
+html[data-theme="dark"]:not(.rd-off) .tree-row.selected:not(.is-dir) .tree-glyph { color: var(--accent); }
+html[data-theme="dark"]:not(.rd-off) :is(.header-actions, .notes-header, .sidebar-header, .titlebar-tools) .icon-btn { color: #b5afa4; }
+html[data-theme="dark"]:not(.rd-off) :is(.header-actions, .notes-header, .sidebar-header, .titlebar-tools) .icon-btn:hover { color: var(--text-primary); }
+/* Home row icon in violet, the way Set a home reads in light. */
+html[data-theme="dark"]:not(.rd-off) .home-sidebar-row svg { color: var(--accent); }
+/* Highlights: a warm marker, not a yellow block. */
+html[data-theme="dark"]:not(.rd-off) .cm-editor .cm-highlight,
+html[data-theme="dark"]:not(.rd-off) .cm-editor mark {
+  background: linear-gradient(transparent 55%, rgba(229, 182, 90, 0.32) 55%) !important;
 }
