@@ -15,7 +15,7 @@ import {
   revokeMcpToken,
   verifyMcpToken,
 } from "../../mcp/tokens.js";
-import { TOOLS } from "../../mcp/tools.js";
+import { TOOLS, TOOLS_BY_NAME } from "../../mcp/tools.js";
 import { mcpBuckets, rateLimitKey, toolCallCost } from "../../mcp/rate-limit.js";
 import { inc } from "../../metrics/sync-metrics.js";
 
@@ -252,6 +252,11 @@ export function createMcpRoutes(deps: McpDeps): Hono {
         : mcpBuckets.take(rateLimitKey(auth), cost);
       if (!taken.ok) {
         inc("mcp.ratelimited");
+        // Per tool too, so a client dashboard's error rate can be matched to it.
+        for (const m of calls) {
+          const name = ((m as JsonRpcRequest).params as { name?: unknown } | undefined)?.name;
+          if (typeof name === "string" && TOOLS_BY_NAME.has(name)) inc(`mcp.tool.${name}.ratelimited`);
+        }
         c.header("Retry-After", String(taken.retryAfterSeconds));
         const isBatch = Array.isArray(body);
         const message =

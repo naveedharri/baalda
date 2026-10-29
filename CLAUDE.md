@@ -939,7 +939,14 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   NFC/NFD under the same once-only rule, and `find`/`anchor`, `replace`/`text` are interchangeable —
   the 7.4% error rate was mostly anchors that differed from the note by exactly those; refusals
   carry `anchor_not_found`/`anchor_ambiguous`/`stale_revision`/`bad_edit`/`note_too_large` codes and
-  every tool counts `mcp.tool.<name>.ok|refused[.<code>]|internal` in the sync metrics), `update_note` sends only the changed span, and
+  every tool counts `mcp.tool.<name>.ok|refused[.<code>]|internal|ratelimited` in the sync metrics). EVERY
+  refusal carries a code (`not_found`, `no_access`, `read_only`, `invalid_argument`, `invalid_target`,
+  `folder_not_empty`, `root_frozen`, `unknown_tool`, …) so a client dashboard's error rate can be split.
+  Inputs whose meaning is not in doubt are accepted rather than refused: numbers/booleans as strings,
+  `edits` as a JSON string or one bare object, a typeless find + replace, and a `vaultId` given as the
+  token's org id or the vault's name (an unknown one is refused with the ids the token can use).
+  `delete_note`/`delete_folder`/`delete_file` of an item already deleted in the token's vault answer
+  `alreadyDeleted: true`, never "Unknown". `update_note` sends only the changed span, and
   `append_note` accepts an `idempotencyKey` so a retried call cannot append twice.
   Structural tools (create/move/delete of folders and notes) broadcast `registry-changed` with a
   `null` origin, and content writes fan out through `createDocWriter`, so an AI edit lands live on

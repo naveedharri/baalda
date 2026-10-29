@@ -154,6 +154,16 @@ describe("parseEdits", () => {
     expect(() => parseEdits([{ type: "replace", find: "a" }])).toThrowError(/replace must be a string/);
     expect(() => parseEdits([])).toThrowError(/non-empty/);
   });
+
+  it("accepts edits as a JSON string, a single object, or a typeless find + replace", () => {
+    const replace = { type: "replace", find: "a", replace: "b" };
+    expect(parseEdits(JSON.stringify([replace]))).toEqual([replace]);
+    expect(parseEdits(replace)).toEqual([replace]);
+    expect(parseEdits([{ find: "a", replace: "b" }])).toEqual([replace]);
+    // A bare find could be a delete or a typo; that one still needs a type.
+    expect(() => parseEdits([{ find: "a" }])).toThrowError(/type must be one of/);
+    expect(() => parseEdits("not json")).toThrowError(/array of edit objects/);
+  });
 });
 
 describe("replacementOp", () => {

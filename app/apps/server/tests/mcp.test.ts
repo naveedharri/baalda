@@ -689,6 +689,84 @@ describe("MCP server", () => {
     expect(res.text).toMatch(/outside the scope of this token/i);
   });
 
+  // The refusals that made up most of the error rate clients see were inputs
+  // whose meaning was never in doubt, and retried deletes of things already gone.
+  describe("forgiving inputs and repeat deletes", () => {
+    let token: string;
+    let org: string;
+    let vault: string;
+    beforeEach(async () => {
+      const owner = await seedUser("owner@mcp-forgive.com");
+      org = await seedOrg("Forgive", "forgive-mcp");
+      await seedMember(org, owner, "owner");
+      vault = await seedVault(org, "Team Notes");
+      token = await tokenFor(owner, org);
+    });
+
+    it("resolves a vault named by its name or by the token's org id", async () => {
+      expect((await call(token, "list_folders", { vaultId: "team notes" })).isError).toBe(false);
+      expect((await call(token, "list_folders", { vaultId: org })).isError).toBe(false);
+    });
+
+    it("refuses an unknown vault with a code and the ids it can use", async () => {
+      const wrong = await call(token, "search_notes", { vaultId: "nope", query: "x" });
+      expect(wrong.isError).toBe(true);
+      expect(wrong.data.code).toBe("not_found");
+      expect(wrong.text).toContain(vault);
+    });
+
+    it("accepts numbers and booleans spelled as strings", async () => {
+      expect((await call(token, "search_notes", { vaultId: vault, query: "x", k: "5" })).isError).toBe(false);
+      expect(
+        (await call(token, "search_notes", { vaultId: vault, query: "x", includeFiles: "false" })).isError,
+      ).toBe(false);
+    });
+
+    it("edit_note accepts edits sent as a JSON string", async () => {
+      const created = await call(token, "create_note", { vaultId: vault, relPath: "a.md", content: "hello world" });
+      const docId = created.data.docId as string;
+      const edited = await call(token, "edit_note", {
+        docId,
+        edits: JSON.stringify([{ type: "replace", find: "world", replace: "there" }]),
+      });
+      expect(edited.isError).toBe(false);
+      expect(mem.store.get(docId)).toBe("hello there");
+    });
+
+    it("a repeated delete_note answers alreadyDeleted, an unknown id is still not found", async () => {
+      const created = await call(token, "create_note", { vaultId: vault, relPath: "gone.md", content: "x" });
+      const docId = created.data.docId as string;
+      expect((await call(token, "delete_note", { docId })).isError).toBe(false);
+      const again = await call(token, "delete_note", { docId });
+      expect(again.isError).toBe(false);
+      expect(again.data).toMatchObject({ deleted: docId, alreadyDeleted: true });
+      const unknown = await call(token, "delete_note", { docId: randomUUID() });
+      expect(unknown.isError).toBe(true);
+      expect(unknown.data.code).toBe("not_found");
+    });
+
+    it("a repeated delete_folder answers alreadyDeleted", async () => {
+      const folder = await call(token, "create_folder", { vaultId: vault, name: "Old", path: "Old" });
+      const folderId = folder.data.folderId as string;
+      expect((await call(token, "delete_folder", { folderId })).isError).toBe(false);
+      const again = await call(token, "delete_folder", { folderId });
+      expect(again.isError).toBe(false);
+      expect(again.data).toMatchObject({ deleted: folderId, alreadyDeleted: true });
+    });
+
+    it("a repeated delete is not alreadyDeleted for another vault's token", async () => {
+      const created = await call(token, "create_note", { vaultId: vault, relPath: "mine.md", content: "x" });
+      const docId = created.data.docId as string;
+      await call(token, "delete_note", { docId });
+      const other = await seedUser("other@mcp-forgive.com");
+      const otherOrg = await seedOrg("Other", "other-forgive-mcp");
+      await seedMember(otherOrg, other, "owner");
+      const foreign = await call(await tokenFor(other, otherOrg), "delete_note", { docId });
+      expect(foreign.isError).toBe(true);
+      expect(foreign.data.code).toBe("not_found");
+    });
+  });
+
   it("tracks per-connection usage: tool calls, last-used, and client", async () => {
     const owner = await seedUser("owner@mcp6.com");
     const org = await seedOrg("Acme", "acme-mcp6");

@@ -123,7 +123,9 @@ export async function handleMcpMessage(
       }
       const tool = TOOLS_BY_NAME.get(params.name);
       if (!tool) {
-        return ok(msg.id, toolError(`Unknown tool: ${params.name}`));
+        // Counted without the name: it is caller-chosen text, not one of ours.
+        inc("mcp.tool.unknown");
+        return ok(msg.id, toolError(`Unknown tool: ${params.name}`, "unknown_tool"));
       }
       const args =
         params.arguments && typeof params.arguments === "object"

@@ -125,7 +125,7 @@ async function requireDeletable(
 }
 
 function accessToolError(error: unknown): never {
-  if (error instanceof AccessManagementError) throw new McpToolError(error.message);
+  if (error instanceof AccessManagementError) throw new McpToolError(error.message, error.code);
   throw error;
 }
 
@@ -176,10 +176,10 @@ export async function listResourceAccessTool(
     await requireAccessManager(ctx.auth.organizationId, ctx.auth.userId);
     const resource = await resolveResource(resourceType, resourceId);
     if (!resource || resource.organizationId !== ctx.auth.organizationId) {
-      throw new McpToolError("Unknown resource or outside this token's vault");
+      throw new McpToolError("Unknown resource or outside this token's vault", "not_found");
     }
     const accessContext = await buildAccessContext(resourceType, resourceId);
-    if (!accessContext) throw new McpToolError("Unknown resource");
+    if (!accessContext) throw new McpToolError("Unknown resource", "not_found");
     const { rows } = await pool.query<{
       user_id: string;
       role: string;
@@ -213,22 +213,37 @@ function relPathStem(relPath: string): string {
 // ── scope + permission guards ───────────────────────────────────────────────
 
 /** Confirm a vault (a `vaults` note-collection row) exists and is in scope —
- *  i.e. it belongs to the token's vault (the organization). */
-async function requireVaultInScope(auth: McpAuth, vaultId: string): Promise<void> {
-  const { rows } = await pool.query<{ organization_id: string }>(
-    "SELECT organization_id FROM vaults WHERE id = $1",
-    [vaultId],
+ *  i.e. it belongs to the token's vault (the organization) — and return its id.
+ *
+ *  Agents often pass what they were shown instead of the collection id: the
+ *  organization id the token is bound to, or the vault's name from
+ *  `list_vaults`. Both name exactly one collection when they match, so they
+ *  resolve to it rather than failing; anything else is refused with the ids
+ *  this token CAN use, so the retry is one step. Only this token's own vaults
+ *  are ever listed or matched. */
+async function requireVaultInScope(auth: McpAuth, vaultId: string): Promise<string> {
+  const { rows } = await pool.query<{ id: string; name: string }>(
+    "SELECT id, name FROM vaults WHERE organization_id = $1 ORDER BY created_at ASC",
+    [auth.organizationId],
   );
+  if (rows.some((r) => r.id === vaultId)) return vaultId;
+  if (vaultId === auth.organizationId && rows.length === 1) return rows[0].id;
+  const byName = rows.filter((r) => r.name.trim().toLowerCase() === vaultId.trim().toLowerCase());
+  if (byName.length === 1) return byName[0].id;
   // One answer for "no such id" and "another team's id": a differing message
   // would let a token probe which ids exist outside its vault.
-  if (rows[0]?.organization_id !== auth.organizationId) {
-    throw new McpToolError(outOfScope("vault", vaultId));
-  }
+  const valid = rows.map((r) => `${r.id} (${r.name})`).join(", ");
+  throw notFound("vault", vaultId, valid ? `. Use a vaultId from list_vaults: ${valid}` : "");
 }
 
 /** The refusal for an id that does not exist OR lives outside the token's vault. */
 function outOfScope(kind: "vault" | "folder" | "note" | "file", id: string): string {
   return `Unknown ${kind}, or it is outside the scope of this token: ${id}`;
+}
+
+/** {@link outOfScope} as a tool error, coded so the metrics can count it. */
+function notFound(kind: "vault" | "folder" | "note" | "file", id: string, hint = ""): McpToolError {
+  return new McpToolError(outOfScope(kind, id) + hint, "not_found");
 }
 
 /** {@link requireVaultInScope} for an item lookup: refuse with the ITEM's
@@ -246,7 +261,39 @@ async function requireItemVaultInScope(
     );
     if (rows[0]?.organization_id === auth.organizationId) return vaultId;
   }
-  throw new McpToolError(outOfScope(kind, id));
+  throw notFound(kind, id);
+}
+
+/**
+ * Deleting something that is already deleted: the end state the caller asked
+ * for already holds, so the delete tools answer success with `alreadyDeleted`
+ * instead of "Unknown …". Agents retry deletes (a lost response, a note that
+ * went with its folder) and each retry used to count as a failed call. Only
+ * this token's own vault is consulted, so it reveals nothing outside it.
+ */
+async function tombstonedInScope(
+  auth: McpAuth,
+  table: "folder_tombstones" | "file_tombstones",
+  id: string,
+): Promise<boolean> {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM ${table} t JOIN vaults v ON v.id = t.vault_id
+      WHERE t.id = $1 AND v.organization_id = $2`,
+    [id, auth.organizationId],
+  );
+  return rows.length > 0;
+}
+
+/** A soft-deleted note in this token's vault that the caller could read. */
+async function noteAlreadyDeleted(auth: McpAuth, docId: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM notes n JOIN vaults v ON v.id = n.vault_id
+      WHERE n.id = $1 AND n.deleted_at IS NOT NULL AND v.organization_id = $2`,
+    [docId, auth.organizationId],
+  );
+  if (rows.length === 0) return false;
+  const perm = await effectivePermission(auth.userId, docId, pool, undefined, { includeDeleted: true });
+  return perm !== "none";
 }
 
 async function isAdmin(auth: McpAuth): Promise<boolean> {
@@ -302,7 +349,7 @@ export async function listVaults(ctx: McpContext) {
 }
 
 export async function listFolders(ctx: McpContext, vaultId: string) {
-  await requireVaultInScope(ctx.auth, vaultId);
+  vaultId = await requireVaultInScope(ctx.auth, vaultId);
   const rows = await listVisibleFolders(ctx.auth.userId, vaultId);
   return rows.map((r) => ({
     folderId: r.id,
@@ -332,6 +379,7 @@ async function assertRootNotFrozen(
   if (rows[0]?.root_frozen) {
     throw new McpToolError(
       `This vault's root is frozen. ${action === "move" ? "Move" : "Create"} this inside a folder instead.`,
+      "root_frozen",
     );
   }
 }
@@ -340,7 +388,7 @@ export async function createFolder(
   ctx: McpContext,
   input: { vaultId: string; name: string; path: string; parentId?: string | null },
 ) {
-  await requireVaultInScope(ctx.auth, input.vaultId);
+  input = { ...input, vaultId: await requireVaultInScope(ctx.auth, input.vaultId) };
   // `path` is authoritative; `parentId` must be the folder at its dirname or is
   // resolved from it. Done before the permission check so the check judges the
   // real parent (see `resolveParentFolder`).
@@ -351,11 +399,11 @@ export async function createFolder(
     parentId = loc.folderId;
     storedPath = loc.relPath;
   } catch (err) {
-    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    if (err instanceof TreeOpError) throw new McpToolError(err.message, "invalid_target");
     throw err;
   }
   if ((await folderWritePermission(ctx.auth, parentId)) !== "edit") {
-    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to create a folder here");
+    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to create a folder here", "no_access");
   }
   // Adopt an existing row at this path instead of inserting a duplicate, exactly
   // as `POST /api/folders` does. Matched case-insensitively and echoing the
@@ -427,9 +475,12 @@ export async function deleteFolder(
     "SELECT vault_id FROM folders WHERE id = $1",
     [folderId],
   );
+  if (!rows[0] && (await tombstonedInScope(ctx.auth, "folder_tombstones", folderId))) {
+    return { deleted: folderId, deletedNotes: 0, alreadyDeleted: true };
+  }
   const vaultId = await requireItemVaultInScope(ctx.auth, "folder", folderId, rows[0]?.vault_id);
   if ((await folderWritePermission(ctx.auth, folderId)) !== "edit") {
-    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to delete this folder");
+    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to delete this folder", "no_access");
   }
   await requireDeletable(ctx, "folder", folderId);
   if (!opts.recursive) {
@@ -440,6 +491,7 @@ export async function deleteFolder(
     if (!(await folderIsEmpty(pool, folderId)) || (files[0]?.n ?? 0) > 0) {
       throw new McpToolError(
         "Folder is not empty. Move its contents first, or pass recursive: true to delete them with it",
+        "folder_not_empty",
       );
     }
   }
@@ -462,9 +514,9 @@ export async function moveFolderTool(
 ) {
   const folder = await findFolder(pool, input.folderId);
   await requireItemVaultInScope(ctx.auth, "folder", input.folderId, folder?.vault_id);
-  if (!folder) throw new McpToolError(outOfScope("folder", input.folderId));
+  if (!folder) throw notFound("folder", input.folderId);
   if ((await folderWritePermission(ctx.auth, input.folderId)) !== "edit") {
-    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to move this folder");
+    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to move this folder", "no_access");
   }
   // Re-parenting must not be a way to change inherited access, so edit on the
   // destination is required too — but only for a real folder. `parentId: null`
@@ -477,7 +529,7 @@ export async function moveFolderTool(
   try {
     plan = await planFolderMove(pool, folder, moveInput);
   } catch (err) {
-    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    if (err instanceof TreeOpError) throw new McpToolError(err.message, "invalid_target");
     throw err;
   }
   if (
@@ -485,7 +537,7 @@ export async function moveFolderTool(
     plan.parentId !== folder.parent_id &&
     (await folderWritePermission(ctx.auth, plan.parentId)) !== "edit"
   ) {
-    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to the destination folder");
+    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to the destination folder", "no_access");
   }
   // Moving a folder OUT to the root is a root creation by another name — the
   // same latch the HTTP registry honours (a rename in place at root is fine).
@@ -497,7 +549,7 @@ export async function moveFolderTool(
     ctx.onRegistryChanged?.(moved.vaultId);
     return { folderId: moved.id, name: moved.name, path: moved.path };
   } catch (err) {
-    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    if (err instanceof TreeOpError) throw new McpToolError(err.message, "invalid_target");
     throw err;
   }
 }
@@ -516,7 +568,7 @@ export async function moveNoteTool(
   try {
     plan = await planNoteMove(pool, row, moveInput);
   } catch (err) {
-    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    if (err instanceof TreeOpError) throw new McpToolError(err.message, "invalid_target");
     throw err;
   }
   // Moving a note INTO a folder inherits that folder's grants, so it needs edit
@@ -527,7 +579,7 @@ export async function moveNoteTool(
     plan.folderId !== note.folder_id &&
     (await folderWritePermission(ctx.auth, plan.folderId)) !== "edit"
   ) {
-    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to the destination folder");
+    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to the destination folder", "no_access");
   }
   // Same root-freeze latch as HTTP's PATCH /api/notes/:id: dragging a note out
   // to a frozen root is refused; a rename in place at root is allowed.
@@ -544,7 +596,7 @@ export async function moveNoteTool(
       folderId: moved.folderId,
     };
   } catch (err) {
-    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    if (err instanceof TreeOpError) throw new McpToolError(err.message, "invalid_target");
     throw err;
   }
 }
@@ -579,7 +631,7 @@ function decodeNotesCursor(cursor: string): [string, string] {
   } catch {
     // fall through to the refusal
   }
-  throw new McpToolError("Invalid cursor: pass the nextCursor from a previous list_notes call");
+  throw new McpToolError("Invalid cursor: pass the nextCursor from a previous list_notes call", "invalid_argument");
 }
 
 /**
@@ -598,13 +650,13 @@ export async function listNotes(
   folderId?: string | null,
   opts: { limit?: number; cursor?: string; pathPrefix?: string } = {},
 ): Promise<ListedNote[] | { results: ListedNote[]; nextCursor: string | null }> {
-  await requireVaultInScope(ctx.auth, vaultId);
+  vaultId = await requireVaultInScope(ctx.auth, vaultId);
   const paged = opts.limit !== undefined || opts.cursor !== undefined;
   let pageSize = Number.POSITIVE_INFINITY;
   if (paged) {
     const raw = opts.limit ?? LIST_NOTES_DEFAULT_PAGE;
     if (!Number.isInteger(raw) || raw < 1) {
-      throw new McpToolError("limit must be a positive integer");
+      throw new McpToolError("limit must be a positive integer", "invalid_argument");
     }
     pageSize = Math.min(raw, LIST_NOTES_MAX_PAGE);
   }
@@ -693,7 +745,7 @@ async function locateNote(auth: McpAuth, docId: string) {
   const note = rows[0];
   // Same answer for missing and foreign, so a token cannot probe other vaults.
   if (!note || note.organization_id !== auth.organizationId) {
-    throw new McpToolError(outOfScope("note", docId));
+    throw notFound("note", docId);
   }
   return note;
 }
@@ -701,7 +753,7 @@ async function locateNote(auth: McpAuth, docId: string) {
 export async function readNote(ctx: McpContext, docId: string) {
   const note = await locateNote(ctx.auth, docId);
   const perm = await effectivePermission(ctx.auth.userId, docId);
-  if (perm === "none") throw new McpToolError("You do not have access to this note");
+  if (perm === "none") throw new McpToolError("You do not have access to this note", "no_access");
   const content = await ctx.docWriter.readContent(note.vault_id, docId);
   return {
     docId,
@@ -727,7 +779,7 @@ export async function createNote(
     content?: string;
   },
 ) {
-  await requireVaultInScope(ctx.auth, input.vaultId);
+  input = { ...input, vaultId: await requireVaultInScope(ctx.auth, input.vaultId) };
   // `relPath` is authoritative; `folderId` must be the folder at its dirname or
   // is resolved from it. An assistant that computes the two inconsistently
   // (the 2026-08-27 phantom-root-folder: `folderId` of `Team/BenAI/…/Daily`,
@@ -740,11 +792,11 @@ export async function createNote(
     folderId = loc.folderId;
     storedRelPath = loc.relPath;
   } catch (err) {
-    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    if (err instanceof TreeOpError) throw new McpToolError(err.message, "invalid_target");
     throw err;
   }
   if ((await folderWritePermission(ctx.auth, folderId)) !== "edit") {
-    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to create a note here");
+    throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to create a note here", "no_access");
   }
   // Adopt the live note already at this path instead of inserting a second row,
   // exactly as `createFolder` does. A vault-relative path addresses ONE note —
@@ -829,6 +881,7 @@ async function requireEditableNote(auth: McpAuth, docId: string) {
       perm === "view"
         ? "This note is read-only for you (view access or locked)"
         : "You do not have access to this note",
+      perm === "view" ? "read_only" : "no_access",
     );
   }
   return note;
@@ -1226,6 +1279,7 @@ export async function editNote(
 
 /** Soft-delete a note (matches the app: sets deleted_at, keeps CRDT history). */
 export async function deleteNote(ctx: McpContext, docId: string) {
+  if (await noteAlreadyDeleted(ctx.auth, docId)) return { deleted: docId, alreadyDeleted: true };
   const note = await requireEditableNote(ctx.auth, docId);
   await requireDeletable(ctx, "note", docId);
   await pool.query(`UPDATE notes SET ${softDeleteSet("$2")} WHERE id = $1`, [
@@ -1246,11 +1300,14 @@ export async function deleteNote(ctx: McpContext, docId: string) {
 /** Delete a tree file through the SAME gate as `DELETE /api/files/:id`. */
 export async function deleteFileTool(ctx: McpContext, fileId: string) {
   const out = await deleteRegisteredFile(ctx.auth.userId, fileId, ctx.auth.organizationId);
+  if (out.status === "gone" && (await tombstonedInScope(ctx.auth, "file_tombstones", fileId))) {
+    return { deleted: fileId, alreadyDeleted: true };
+  }
   if (out.status === "gone" || out.status === "not_member") {
-    throw new McpToolError(outOfScope("file", fileId));
+    throw notFound("file", fileId);
   }
   if (out.status === "account_read_only") throw new McpToolError(ACCOUNT_READ_ONLY_MESSAGE, ACCOUNT_READ_ONLY.code);
-  if (out.status === "forbidden") throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to this file");
+  if (out.status === "forbidden") throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to this file", "no_access");
   if (out.status === "not_creator") {
     throw new McpToolError(
       "Only the person who created this, or an owner or admin, can delete it.",
@@ -1273,13 +1330,13 @@ export async function moveFileTool(ctx: McpContext, fileId: string, path: string
   );
   const row = rows[0];
   await requireItemVaultInScope(ctx.auth, "file", fileId, row?.vault_id);
-  if (!row) throw new McpToolError(outOfScope("file", fileId));
+  if (!row) throw notFound("file", fileId);
   const out = await registerFile(registerCtx(row.vault_id, ctx.auth.userId), {
     path,
     docId: fileId,
     folderId: null,
   });
-  if (out.status === "error") throw new McpToolError(out.message ?? "move refused");
+  if (out.status === "error") throw new McpToolError(out.message ?? "move refused", "invalid_target");
   if (out.wrote) ctx.onRegistryChanged?.(row.vault_id);
   return { fileId: out.row.id, path: out.row.path, folderId: out.row.folderId };
 }
@@ -1293,7 +1350,7 @@ export async function searchNotes(
   k = 10,
   includeFiles = true,
 ) {
-  await requireVaultInScope(ctx.auth, vaultId);
+  vaultId = await requireVaultInScope(ctx.auth, vaultId);
   const limit = Number.isFinite(k) && k > 0 ? Math.min(Math.trunc(k), 50) : 10;
 
   // Two changes, neither of which alters the result shape or the ranking:
@@ -1349,7 +1406,7 @@ export async function listAttachments(
   vaultId: string,
   opts: { folder?: string; limit?: number } = {},
 ) {
-  await requireVaultInScope(ctx.auth, vaultId);
+  vaultId = await requireVaultInScope(ctx.auth, vaultId);
   const limit = Number.isFinite(opts.limit) && (opts.limit as number) > 0
     ? Math.min(Math.trunc(opts.limit as number), 200)
     : 50;
@@ -1411,9 +1468,9 @@ export async function readAttachmentText(
   ref: { relPath?: string; blobId?: string },
   maxChars?: number,
 ) {
-  await requireVaultInScope(ctx.auth, vaultId);
+  vaultId = await requireVaultInScope(ctx.auth, vaultId);
   if (!ref.relPath && !ref.blobId) {
-    throw new McpToolError("read_attachment_text needs either relPath or blobId");
+    throw new McpToolError("read_attachment_text needs either relPath or blobId", "invalid_argument");
   }
   const cap = Number.isFinite(maxChars) && (maxChars as number) > 0
     ? Math.min(Math.trunc(maxChars as number), ATTACHMENT_TEXT_MAX_CHARS)
@@ -1437,9 +1494,9 @@ export async function readAttachmentText(
     [vaultId, ref.blobId ?? null, ref.relPath ?? null],
   );
   const row = rows[0];
-  if (!row) throw new McpToolError("No such file in this vault");
+  if (!row) throw new McpToolError("No such file in this vault", "not_found");
   if (!(await canReadAttachment(ctx.auth.userId, vaultId, row.rel_path, row.doc_id))) {
-    throw new McpToolError("You do not have access to this file");
+    throw new McpToolError("You do not have access to this file", "no_access");
   }
 
   const full = row.content ?? "";
