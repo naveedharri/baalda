@@ -20,6 +20,8 @@ import { pool } from "../../db/pool.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
 import {
   conversionBlockers,
+  ENCRYPTION_NOT_REQUESTED,
+  encryptionRequested,
   isReady,
   loadPendingCheck,
   vaultCheckState,
@@ -110,6 +112,8 @@ export function createMcpKeyRoutes(): Hono {
     if (await loadVkCheck(m.vaultId, pool)) {
       return c.json({ error: "This vault already has a key", code: "already_keyed" }, 409);
     }
+    // Opt-in: nothing is stored for a vault nobody asked to encrypt.
+    if (!(await encryptionRequested(m.vaultId, pool))) return c.json(ENCRYPTION_NOT_REQUESTED, 409);
     await pool.query(
       `INSERT INTO vault_pending_keys (vault_id, vk_check, generation, created_by) VALUES ($1, $2, $3, $4)
        ON CONFLICT (vault_id) DO NOTHING`,

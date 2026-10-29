@@ -1057,7 +1057,8 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   also needs `vaults.encryption_requested_at`. `POST /api/vaults` sets it while `BAALDA_VAULT_KEYS` is on
   (new vaults encrypt automatically); an existing vault gets it only from an owner/admin's
   "Encrypt this vault" (`POST …/keys/request-encryption`, idempotent, one-way, no undo route, one
-  `access_audit` row `vault`/`encryption_requested`). Desktop: `VaultKeySection` (shown to owners and
+  `access_audit` row `vault`/`encryption_requested`). Enforced server-side: `keys/pending` and `keys/init` answer
+  409 `encryption_not_requested` and store nothing until it is set (`crypto/conversion.ts`). Desktop: `VaultKeySection` (shown to owners and
   admins; key reveal/restore stay owner-only), view logic in `lib/vaultKeys/sectionView.ts`.
 - **Zero data loss:** plaintext is never removed before a per-row decrypt-and-compare check (a separate,
   delayed, reversible step); `key_required` changes nothing server-side and never drops local edits;

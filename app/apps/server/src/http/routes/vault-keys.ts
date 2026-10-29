@@ -18,7 +18,7 @@ import type pg from "pg";
 import { pool } from "../../db/pool.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
 import { requireVaultKey } from "../../crypto/transport.js";
-import { initGate, lockGateRows } from "../../crypto/conversion.js";
+import { ENCRYPTION_NOT_REQUESTED, initGate, lockGateRows } from "../../crypto/conversion.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
 import { CLIENT_VERSION_HEADER, CLIENT_VERSION_PARAM, clientVersionPolicy, judgeClientVersion } from "../client-version.js";
@@ -98,8 +98,8 @@ export function createVaultKeyRoutes(): Hono {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const { rows } = await client.query<{ vk_check: Buffer | null }>(
-        "SELECT vk_check FROM vaults WHERE id = $1 FOR UPDATE",
+      const { rows } = await client.query<{ vk_check: Buffer | null; encryption_requested_at: Date | null }>(
+        "SELECT vk_check, encryption_requested_at FROM vaults WHERE id = $1 FOR UPDATE",
         [vaultId],
       );
       if (!rows[0]) {
@@ -109,6 +109,12 @@ export function createVaultKeyRoutes(): Hono {
       if (rows[0].vk_check) {
         await client.query("ROLLBACK");
         return c.json({ error: "This vault already has a key", code: "already_keyed" }, 409);
+      }
+      // Opt-in (migration 081): never key a vault nobody asked to encrypt,
+      // whatever the client. Read under the vault row lock.
+      if (!rows[0].encryption_requested_at) {
+        await client.query("ROLLBACK");
+        return c.json(ENCRYPTION_NOT_REQUESTED, 409);
       }
       // MCP/links conversion gate (crypto/conversion.ts): no active token,
       // link or OAuth grant may be cut off by keying the vault. It runs INSIDE

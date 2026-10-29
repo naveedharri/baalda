@@ -27,7 +27,9 @@ exactly as they are until an owner or admin clicks **Encrypt this vault** in Vau
 (`POST /api/vaults/:vaultId/keys/request-encryption`: owner/admin only, idempotent, one-way; there is no
 undo, and the first request is recorded in the access history). `GET …/keys/mine` on an unkeyed vault
 answers `encryptionRequested` and `conversionAllowed`, which is the rollout gate above AND a recorded
-request. Plain members see nothing until the vault is keyed.
+request. The server enforces it: `keys/pending` and `keys/init` refuse an unrequested vault with 409
+`encryption_not_requested` and store nothing, whatever the client. Plain members see nothing until the
+vault is keyed.
 
 ## What is encrypted
 

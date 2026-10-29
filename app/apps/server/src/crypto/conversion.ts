@@ -160,6 +160,27 @@ export function isReady(b: ConversionBlockers): boolean {
 }
 
 /**
+ * Opt-in (migration 081): an existing vault is keyed only after an owner/admin
+ * asked for it (`keys/request-encryption`), or it was created with vault keys
+ * on. `keys/pending` and `keys/init` refuse otherwise, whatever the client, so
+ * an old, buggy or hostile desktop cannot encrypt a vault nobody opted in. The
+ * request is one-way (never cleared), so a check outside the init lock cannot
+ * be invalidated by a later write.
+ */
+export const ENCRYPTION_NOT_REQUESTED = {
+  error: "Nobody has asked to encrypt this vault yet. An owner or admin can turn it on in Vault Settings.",
+  code: "encryption_not_requested",
+} as const;
+
+export async function encryptionRequested(vaultId: string, db: Queryable): Promise<boolean> {
+  const { rows } = await db.query<{ requested: boolean }>(
+    "SELECT encryption_requested_at IS NOT NULL AS requested FROM vaults WHERE id = $1",
+    [vaultId],
+  );
+  return rows[0]?.requested === true;
+}
+
+/**
  * Lock what the `keys/init` gate reads, inside the init transaction (after the
  * vault row's FOR UPDATE): the pending row and every token/link row whose
  * `last_used_at` / `last_viewed_at` / wrap the gate judges. A concurrent

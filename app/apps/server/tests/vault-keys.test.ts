@@ -9,7 +9,7 @@ import { redactToken, requireVaultKey, splitSyncToken } from "../src/crypto/tran
 import { testAppDeps } from "./helpers/app.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { seedMember, seedVault } from "./helpers/seed.js";
+import { markEncryptionRequested, seedMember, seedVault } from "./helpers/seed.js";
 
 const app = createApp(testAppDeps());
 const b64 = (b: Buffer) => b.toString("base64");
@@ -26,13 +26,15 @@ function call(user: TestUser, method: string, path: string, body?: unknown, vk?:
   });
 }
 
-async function setup() {
+/** `requested`: the vault was opted in ("Encrypt this vault"); default on. */
+async function setup({ requested = true }: { requested?: boolean } = {}) {
   const owner = await signUp("owner@keys.test");
   const member = await signUp("member@keys.test");
   const outsider = await signUp("outsider@keys.test");
   const org = await createOrg(owner, "Keys", `keys-${Date.now()}`);
   await seedMember(org.id, member.userId, "member");
   const vaultId = await seedVault(org.id);
+  if (requested) await markEncryptionRequested(vaultId, owner.userId);
   const vk = randomBytes(32);
   return { owner, member, outsider, orgId: org.id, vaultId, vk };
 }
@@ -222,7 +224,7 @@ describe("vault key routes", () => {
   });
 
   it("keys/mine on an unkeyed vault reports the conversion gate (default off)", async () => {
-    const s = await setup();
+    const s = await setup({ requested: false });
     const res = await call(s.owner, "GET", `/vaults/${s.vaultId}/keys/mine`);
     expect(await res.json()).toEqual({ keyed: false, conversionAllowed: false, encryptionRequested: false });
     vi.stubEnv("VAULT_KEY_CONVERSION", "on");
@@ -243,7 +245,7 @@ describe("vault key routes", () => {
   });
 
   it("request-encryption: owner/admin only, idempotent, one-way, audited", async () => {
-    const s = await setup();
+    const s = await setup({ requested: false });
     const admin = await signUp("admin@keys.test");
     await seedMember(s.orgId, admin.userId, "admin");
     const path = `/vaults/${s.vaultId}/keys/request-encryption`;
@@ -279,8 +281,42 @@ describe("vault key routes", () => {
     expect((await (await call(s.member, "GET", `/vaults/${s.vaultId}/keys/mine`)).json()).encryptionRequested).toBe(true);
   });
 
+  it("pending and init refuse a vault nobody opted in; both work once requested", async () => {
+    const s = await setup({ requested: false });
+    const vkCheck = b64(makeVkCheck(s.vk, s.vaultId));
+    const pending = () =>
+      call(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck, generation: 1, deviceId: "d1" }, s.vk);
+    const unchanged = async () => {
+      const v = await pool.query("SELECT vk_check FROM vaults WHERE id = $1", [s.vaultId]);
+      expect(v.rows[0].vk_check).toBeNull();
+      for (const t of ["vault_pending_keys", "vault_key_wraps", "vault_crypto_state"]) {
+        expect((await pool.query(`SELECT 1 FROM ${t} WHERE vault_id = $1`, [s.vaultId])).rowCount).toBe(0);
+      }
+    };
+
+    const p = await pending();
+    expect(p.status).toBe(409);
+    expect((await p.json()).code).toBe("encryption_not_requested");
+    const i = await init(s);
+    expect(i.status).toBe(409);
+    expect((await i.json()).code).toBe("encryption_not_requested");
+    await unchanged();
+
+    expect((await call(s.owner, "POST", `/vaults/${s.vaultId}/keys/request-encryption`)).status).toBe(201);
+    expect((await pending()).status).toBe(200);
+    // Init must present the SAME check bytes as the pending row.
+    const done = await call(s.owner, "POST", `/vaults/${s.vaultId}/keys/init`, {
+      vkCheck,
+      generation: 1,
+      sealedVkForSelf: b64(randomBytes(80)),
+    });
+    expect(done.status).toBe(201);
+    const v = await pool.query("SELECT vk_check FROM vaults WHERE id = $1", [s.vaultId]);
+    expect(v.rows[0].vk_check).not.toBeNull();
+  });
+
   it("request-encryption is not there with the flag off", async () => {
-    const s = await setup();
+    const s = await setup({ requested: false });
     vi.stubEnv("BAALDA_VAULT_KEYS", "off");
     expect((await call(s.owner, "POST", `/vaults/${s.vaultId}/keys/request-encryption`)).status).toBe(404);
   });
