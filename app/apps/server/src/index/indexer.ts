@@ -6,6 +6,7 @@ import { loadDocState } from "../yjs/persistence.js";
 import { purgeBlobRefs, replaceBlobRefs } from "../blobs/refs.js";
 import { cachedRefHeads, refText } from "../blobs/ref-windows.js";
 import { cosineSimilarity, embed, tokenize } from "./embedder.js";
+import { keywordMatchCount, searchTokenSet } from "./search-tokens.js";
 
 /**
  * Note indexing engine (spec: links + vectors).
@@ -143,8 +144,8 @@ export async function indexDoc(
   const heads = await cachedRefHeads(note.vault_id, db);
 
   await db.query(
-    `INSERT INTO note_index (doc_id, vault_id, title, content, vector, updated_at, ref_text, ref_heads)
-     VALUES ($1, $2, $3, $4, $5::jsonb, now(), $6, $7::text[])
+    `INSERT INTO note_index (doc_id, vault_id, title, content, vector, updated_at, ref_text, ref_heads, search_tokens)
+     VALUES ($1, $2, $3, $4, $5::jsonb, now(), $6, $7::text[], $8)
      ON CONFLICT (doc_id) DO UPDATE
        SET vault_id = EXCLUDED.vault_id,
            title = EXCLUDED.title,
@@ -152,8 +153,19 @@ export async function indexDoc(
            vector = EXCLUDED.vector,
            updated_at = now(),
            ref_text = EXCLUDED.ref_text,
-           ref_heads = EXCLUDED.ref_heads`,
-    [docId, note.vault_id, title, content, JSON.stringify(vector), refText(content, heads), heads],
+           ref_heads = EXCLUDED.ref_heads,
+           search_tokens = EXCLUDED.search_tokens`,
+    [
+      docId,
+      note.vault_id,
+      title,
+      content,
+      JSON.stringify(vector),
+      refText(content, heads),
+      heads,
+      // Same string the old SQL matched against: title, a space, the body.
+      searchTokenSet(`${title ?? ""} ${content}`),
+    ],
   );
 
   // Which attachments this note points at (migration 027). Derived from the
@@ -386,6 +398,12 @@ export async function searchNoteIndex(opts: {
    * whole candidate set is not something a request path can afford.
    */
   vaultWideReader?: boolean;
+  /**
+   * `"sql"` forces the pre-068 keyword count computed in Postgres from the
+   * note text (parity tests and benchmarks only). Default: score in the app
+   * from `search_tokens`, falling back to SQL only for rows not yet re-indexed.
+   */
+  keywordMode?: "app" | "sql";
   db?: Queryable;
 }): Promise<NoteSearchHit[]> {
   const db = opts.db ?? defaultPool;
@@ -398,6 +416,7 @@ export async function searchNoteIndex(opts: {
 
   const qVec = embed(opts.query);
   const qTokens = Array.from(new Set(tokenize(opts.query)));
+  const legacySql = opts.keywordMode === "sql";
 
   // Phase 1: score every candidate, retaining only id + score per note.
   const scored: Array<{ docId: string; score: number }> = [];
@@ -406,14 +425,16 @@ export async function searchNoteIndex(opts: {
     const { rows } = await db.query<{
       doc_id: string;
       vector: number[] | null;
-      matched: number;
+      search_tokens: string | null;
+      matched_legacy: number | null;
     }>(
       `SELECT ni.doc_id,
               ni.vector,
-              (
+              CASE WHEN $6::boolean THEN NULL ELSE ni.search_tokens END AS search_tokens,
+              CASE WHEN ni.search_tokens IS NULL OR $6::boolean THEN (
                 SELECT count(*) FROM unnest($4::text[]) AS t(tok)
                  WHERE position(t.tok IN lower(coalesce(ni.title, '') || ' ' || ni.content)) > 0
-              )::int AS matched
+              )::int END AS matched_legacy
          FROM note_index ni
          JOIN notes n ON n.id = ni.doc_id AND n.deleted_at IS NULL
         WHERE ni.vault_id = $1
@@ -421,12 +442,14 @@ export async function searchNoteIndex(opts: {
           AND ni.doc_id > $3
         ORDER BY ni.doc_id
         LIMIT $5`,
-      [opts.vaultId, docIds, after, qTokens, SEARCH_BATCH],
+      [opts.vaultId, docIds, after, qTokens, SEARCH_BATCH, legacySql],
     );
     if (rows.length === 0) break;
     for (const r of rows) {
       const sim = r.vector ? cosineSimilarity(qVec, r.vector) : 0;
-      const boost = qTokens.length > 0 ? 0.1 * (r.matched / qTokens.length) : 0;
+      const matched =
+        r.search_tokens !== null ? keywordMatchCount(qTokens, r.search_tokens) : (r.matched_legacy ?? 0);
+      const boost = qTokens.length > 0 ? 0.1 * (matched / qTokens.length) : 0;
       scored.push({ docId: r.doc_id, score: sim + boost });
     }
     after = rows[rows.length - 1].doc_id;
@@ -442,6 +465,7 @@ export async function searchNoteIndex(opts: {
         k: opts.k,
         readableDocIds: docIds,
         vaultWideReader: opts.vaultWideReader === true,
+        legacySql,
       })
     : [];
 
@@ -517,6 +541,7 @@ async function searchBlobText(opts: {
   k: number;
   readableDocIds: string[];
   vaultWideReader: boolean;
+  legacySql: boolean;
 }): Promise<NoteSearchHit[]> {
   const { rows } = await opts.db.query<{
     blob_id: string;
@@ -524,17 +549,19 @@ async function searchBlobText(opts: {
     rel_path: string | null;
     filename: string | null;
     vector: number[] | null;
-    matched: number;
+    search_tokens: string | null;
+    matched_legacy: number | null;
   }>(
     `SELECT bt.blob_id,
             b.doc_id,
             b.rel_path,
             b.filename,
             bt.vector,
-            (
+            CASE WHEN $6::boolean THEN NULL ELSE bt.search_tokens END AS search_tokens,
+            CASE WHEN bt.search_tokens IS NULL OR $6::boolean THEN (
               SELECT count(*) FROM unnest($3::text[]) AS t(tok)
                WHERE position(t.tok IN lower(coalesce(b.rel_path, '') || ' ' || bt.content)) > 0
-            )::int AS matched
+            )::int END AS matched_legacy
        FROM blob_text bt
        JOIN blobs b ON b.id = bt.blob_id AND b.status = 'ready'
       WHERE bt.vault_id = $1
@@ -544,13 +571,21 @@ async function searchBlobText(opts: {
         )
       ORDER BY bt.blob_id
       LIMIT $5`,
-    [opts.vaultId, opts.readableDocIds, opts.qTokens, opts.vaultWideReader, FILE_SEARCH_CAP],
+    [opts.vaultId, opts.readableDocIds, opts.qTokens, opts.vaultWideReader, FILE_SEARCH_CAP, opts.legacySql],
   );
 
   const scored = rows.map((r) => {
     const sim = r.vector ? cosineSimilarity(opts.qVec, r.vector) : 0;
-    const boost = opts.qTokens.length > 0 ? 0.1 * (r.matched / opts.qTokens.length) : 0;
     const relPath = r.rel_path ?? "";
+    // rel_path is file metadata, not content: its tokens are matched live, the
+    // extracted text through the stored set. Union of the two = the old
+    // `position(tok IN lower(rel_path || ' ' || content))` (the space is outside
+    // the token alphabet, so no match can straddle it).
+    const matched =
+      r.search_tokens !== null
+        ? keywordMatchCount(opts.qTokens, `${searchTokenSet(relPath)} ${r.search_tokens}`)
+        : (r.matched_legacy ?? 0);
+    const boost = opts.qTokens.length > 0 ? 0.1 * (matched / opts.qTokens.length) : 0;
     return {
       docId: r.doc_id,
       blobId: r.blob_id,
