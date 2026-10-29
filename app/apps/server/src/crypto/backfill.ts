@@ -32,6 +32,7 @@ import { pool as defaultPool } from "../db/pool.js";
 import { inc } from "../metrics/sync-metrics.js";
 import { openBlobTextRow, openSearchRow, sealBlobTextRow, sealSearchRow } from "../index/sealed-index.js";
 import { openNoteTextBytes, sealNoteText } from "../versions/texts.js";
+import { indexDoc } from "../index/indexer.js";
 import { vaultKeysEnabled } from "./config.js";
 import { openDocBytes, sealDocBytes, type DocCrypto } from "./doc-crypto.js";
 import { vaultKeyCache, type VaultKeyCache } from "./key-cache.js";
@@ -428,6 +429,44 @@ async function heldCrypto(vaultId: string, cache: VaultKeyCache, db: Queryable):
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Notes re-indexed per catch-up run (the rest wait for the next run). */
+export const INDEX_CATCHUP_LIMIT = 500;
+
+/**
+ * Live notes of a vault whose search row is missing or older than the note's
+ * latest content change. A keyed vault's indexer DEFERS (writes nothing) while
+ * no member holds the key, so a note written then — by MCP, or a socket that
+ * closed before its debounce fired — would otherwise stay unsearchable.
+ */
+export async function staleIndexDocs(vaultId: string, db: Queryable, limit = INDEX_CATCHUP_LIMIT): Promise<string[]> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT n.id FROM notes n
+       LEFT JOIN note_index ni ON ni.doc_id = n.id
+      WHERE n.vault_id = $1 AND n.deleted_at IS NULL
+        AND (ni.doc_id IS NULL
+             OR ni.updated_at < n.updated_at
+             OR ni.updated_at < (SELECT max(u.created_at) FROM doc_updates u WHERE u.doc_id = n.id))
+      ORDER BY n.id
+      LIMIT $2`,
+    [vaultId, limit],
+  );
+  return rows.map((r) => r.id);
+}
+
+/** Index what the keyed vault's indexer had to skip; returns how many were indexed. */
+export async function catchUpIndex(vaultId: string, db: Queryable = defaultPool): Promise<number> {
+  let n = 0;
+  for (const docId of await staleIndexDocs(vaultId, db)) {
+    try {
+      if (await indexDoc(docId, db)) n += 1;
+    } catch (err) {
+      console.error(`[backfill] index catch-up failed for ${docId}:`, err);
+    }
+  }
+  if (n > 0) inc("backfill.index_catchup", n);
+  return n;
+}
+
 /**
  * Seal one vault's plaintext rows, resuming from its persisted cursors. Takes a
  * session advisory lock so only one instance works on a vault; returns
@@ -454,6 +493,11 @@ export async function backfillVault(vaultId: string, opts: BackfillOptions = {})
 
     const cursors = await loadCursors(vaultId, db);
     if (!cursors) return "not_keyed";
+    // Notes the indexer skipped while no key was held (it uses the same cache).
+    const probe = await heldCrypto(vaultId, cache, db);
+    if (!probe) return "no_key";
+    probe.key.fill(0);
+    await catchUpIndex(vaultId, db);
     if (cursors.completedAt) {
       const checked = Date.parse(cursors.checkedAt ?? cursors.completedAt);
       if (Number.isFinite(checked) && Date.now() - checked < BACKFILL_RECHECK_MS) return "complete";
@@ -551,6 +595,22 @@ export async function backfillTick(opts: BackfillOptions = {}): Promise<void> {
   } finally {
     running = false;
   }
+}
+
+const kicked = new Set<string>();
+
+/**
+ * A member's key for `vaultId` just reached the cache (vault channel hello):
+ * run the worker for that vault now instead of waiting for the next tick, so
+ * notes indexed-while-keyless become searchable at once. Deduplicated per vault.
+ */
+export function kickVaultBackfill(vaultId: string, opts: BackfillOptions = {}): Promise<void> {
+  if (kicked.has(vaultId) || !vaultKeysEnabled()) return Promise.resolve();
+  kicked.add(vaultId);
+  return backfillVault(vaultId, { maxBatches: BACKFILL_BATCHES_PER_TICK, ...opts })
+    .then(() => undefined)
+    .catch((err) => console.error(`[backfill] vault ${vaultId} failed:`, err))
+    .finally(() => kicked.delete(vaultId));
 }
 
 /** Started only from `index.ts`. */

@@ -12,6 +12,7 @@ import {
   backfillTick,
   backfillVault,
   encryptionStatus,
+  kickVaultBackfill,
 } from "../src/crypto/backfill.js";
 import { indexDoc, searchNoteIndex } from "../src/index/indexer.js";
 import { openBlobTextRow, openSearchRow, sealSearchRow } from "../src/index/sealed-index.js";
@@ -313,6 +314,36 @@ describe("vault crypto backfill (W3)", () => {
     const { rows: snap } = await pool.query("SELECT snapshot FROM doc_snapshots WHERE doc_id = $1", [target]);
     expect(snap[0].snapshot).not.toBeNull();
     live.destroy();
+  });
+
+  it("indexes notes the keyed indexer skipped while no key was held", async () => {
+    const orgId = await seedOrg("Keyless", `keyless-${Date.now()}`);
+    const vaultId = await seedVault(orgId);
+    const c = await keyVault(vaultId, false);
+    const docId = await seedNote(vaultId, null, "written-keyless.md");
+    const doc = new Y.Doc();
+    await appendUpdate(docId, edit(doc, "zebra migration notes\n"), pool, 1000, c);
+    doc.destroy();
+    // No key cached: the indexer defers and writes nothing.
+    expect(await indexDoc(docId, pool)).toBe(false);
+    expect((await pool.query("SELECT 1 FROM note_index WHERE doc_id = $1", [docId])).rowCount).toBe(0);
+    // A member connects: the key reaches the cache, the vault is kicked.
+    vaultKeyCache.acquire(vaultId, c.key, 1);
+    await kickVaultBackfill(vaultId, FAST);
+    const { rows } = await pool.query("SELECT content, search_enc FROM note_index WHERE doc_id = $1", [docId]);
+    expect(rows.length).toBe(1);
+    expect(rows[0].search_enc).not.toBeNull();
+    expect(rows[0].content).toBe("");
+    expect(openSearchRow(c, docId, rows[0].search_enc).body).toContain("zebra migration");
+    const hits = await searchNoteIndex({
+      vaultId,
+      query: "zebra",
+      k: 5,
+      readableDocIds: [docId],
+      vaultWideReader: true,
+      crypto: c,
+    } as Parameters<typeof searchNoteIndex>[0]);
+    expect(hits.map((h) => h.docId)).toContain(docId);
   });
 
   it("one runner per vault: a held lock answers 'locked'", async () => {
