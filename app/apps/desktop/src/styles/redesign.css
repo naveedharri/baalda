@@ -1572,3 +1572,6 @@ html:not([data-theme="dark"]) .account-popover .menu-hint { display: inline !imp
 }
 .rd-status-quick svg { width: 16px; height: 16px; }
 .rd-status-quick:hover { background: var(--accent-soft); color: var(--accent-hover); }
+/* Synced badge: same breathing room on the left as above and below. */
+html:not([data-theme="dark"]) .header-actions { padding-left: 8px !important; }
+html:not([data-theme="dark"]) .header-actions .sync-badge { padding-left: 11px; padding-right: 12px; gap: 6px; }
