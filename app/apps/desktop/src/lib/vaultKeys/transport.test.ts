@@ -1,7 +1,7 @@
 // W3 transport: the vault key rides `hello.vk` and the per-doc token, and a
 // `key_required` refusal is NEVER read as lost access or an empty server.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../api";
 import { isKeyRequired, withVaultKey } from "../sync/syncManager";
 import {
@@ -216,5 +216,28 @@ describe("startup ordering: the channel opens early only on a known key state", 
     expect(earlyVaultChannelAllowed({ state: "unkeyed" }, false)).toBe(true);
     expect(earlyVaultChannelAllowed({ state: "disabled" }, false)).toBe(true);
     expect(earlyVaultChannelAllowed(null, true)).toBe(true);
+  });
+
+  it("vaultKeysEarlyChannel: no `vault-keys` opens; unknown or a vault-keys server waits", async () => {
+    const { vaultKeysEarlyChannel } = await import("./runtime");
+    const { api } = await import("../auth/authManager");
+    const health = vi.spyOn(api, "getHealth");
+    const base = vi.spyOn(api, "getBaseUrl");
+    try {
+      base.mockReturnValue("http://no-keys.test");
+      health.mockResolvedValue({ ok: true, version: "x", features: ["notes-with-state"] });
+      expect(await vaultKeysEarlyChannel("v-a")).toBe(true);
+      base.mockReturnValue("http://unknown.test");
+      health.mockResolvedValue(null);
+      expect(await vaultKeysEarlyChannel("v-a")).toBe(false);
+      health.mockRejectedValue(new Error("offline"));
+      expect(await vaultKeysEarlyChannel("v-a")).toBe(false);
+      base.mockReturnValue("http://keys.test");
+      health.mockResolvedValue({ ok: true, version: "x", features: ["vault-keys"] });
+      expect(await vaultKeysEarlyChannel("v-a")).toBe(false);
+    } finally {
+      health.mockRestore();
+      base.mockRestore();
+    }
   });
 });

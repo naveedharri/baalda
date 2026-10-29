@@ -31,14 +31,12 @@ import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
 import {
-  earlyVaultChannelAllowed,
   isVaultKeyBlocked,
   onVaultKeyEvent,
   VAULT_KEY_PAUSE_REASON,
   vaultKeysClosed,
   vaultKeysNudge,
   vaultKeysOpened,
-  vaultKeyStateFor,
 } from "../vaultKeys/runtime";
 import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
@@ -3416,6 +3414,47 @@ export class SyncManager implements InboundHost {
     this.vaultKeyGateFn = fn;
   }
 
+  /**
+   * May the vault channel open in the prime window, before the gate? Injected
+   * with the gate (`vaultKeysEarlyChannel`); without one (tests, no key wiring)
+   * the channel opens early exactly as it did before vault keys.
+   */
+  private earlyChannelFn: ((vaultId: string) => boolean | Promise<boolean>) | null = null;
+  setEarlyVaultChannelCheck(fn: typeof this.earlyChannelFn): void {
+    this.earlyChannelFn = fn;
+  }
+
+  /** The prime window's early channel start (see `enable`, PHASE A). */
+  private earlyChannelOpen(scope: VaultScope, registry: VaultRegistry): void {
+    const check = this.earlyChannelFn;
+    const vaultId = registry.vaultId;
+    if (!check || !vaultId) {
+      this.startVaultEngine(scope);
+      return;
+    }
+    let verdict: boolean | Promise<boolean>;
+    try {
+      verdict = check(vaultId);
+    } catch {
+      return; // unknown: the reconcile starts the channel after the gate
+    }
+    if (verdict === true) {
+      this.startVaultEngine(scope);
+      return;
+    }
+    if (verdict === false) return;
+    void verdict.then(
+      (ok) => {
+        // Only while this prime window is still open: once the reconcile ends
+        // (or the vault changes) the enable path owns the channel start.
+        if (ok && this.primed && scope.isCurrent() && this.registry === registry && registry.vaultId === vaultId) {
+          this.startVaultEngine(scope);
+        }
+      },
+      () => undefined,
+    );
+  }
+
   /** The server collection id this vault opens with, for the key gate. */
   private async vaultKeyGate(session: SessionInfo, orgId: string): Promise<"proceed" | "paused"> {
     const gate = this.vaultKeyGateFn;
@@ -5175,15 +5214,10 @@ export class SyncManager implements InboundHost {
         //
         // NOT for a vault whose key state is unknown or keyed without the key:
         // the server closes that hello with 4409 `key_required`, which used to
-        // loop at startup. The gate below starts the channel once it proceeds.
-        if (
-          earlyVaultChannelAllowed(
-            vaultKeyStateFor(registry.vaultId),
-            !!registry.vaultId && !!api.vaultKeyFor(registry.vaultId),
-          )
-        ) {
-          this.startVaultEngine(scope);
-        }
+        // loop at startup. The reconcile below starts the channel once the gate
+        // proceeds. A server known to lack `vault-keys` (or an unkeyed vault, or
+        // a held key) opens early exactly as before; see `earlyChannelOpen`.
+        this.earlyChannelOpen(scope, registry);
       }
     } catch (e) {
       console.warn("[sync] local prime failed; falling back to reconcile-first", e);

@@ -335,6 +335,32 @@ describe("SyncManager.enable — the prime window", () => {
     expect(storeHooks.suppressed).toBe(MAPPED_DOC);
   });
 
+  type EarlyCheck = () => boolean | Promise<boolean>;
+  const earlyCases: Array<[string, EarlyCheck, number]> = [
+    ["a server without vault keys (async yes)", () => Promise.resolve(true), 1],
+    ["a held key or unkeyed vault (sync yes)", () => true, 1],
+    ["unknown features or keyed without the key (async no)", () => Promise.resolve(false), 0],
+    ["a known keyed vault without the key (sync no)", () => false, 0],
+  ];
+  it.each(earlyCases)("early channel check: %s", async (_name, check, inWindow) => {
+    const held = gate();
+    fakeRegistry.reconcile.mockImplementation(async () => {
+      await held.waited;
+      return { seeded: false };
+    });
+    const sm = new SyncManager();
+    sm.setEarlyVaultChannelCheck(check);
+    const enabling = sm.enable(session(), { orgId: "org-a", name: "a", path: "/vaults/a", epoch: 1 });
+    await flush();
+    // Opens in the prime window only on a known-safe answer; otherwise the
+    // reconcile starts it after the gate (never a 4409 hello at startup).
+    expect(storeHooks.created).toBe(inWindow);
+    held.open();
+    await enabling;
+    await flush();
+    expect(storeHooks.created).toBe(1);
+  });
+
   it("finishes the run when the channel settled BEFORE the reconcile returned", async () => {
     // The channel starts in the prime window, so on a small vault its `ready`
     // and idle edge both land while the reconcile is still running. The download
