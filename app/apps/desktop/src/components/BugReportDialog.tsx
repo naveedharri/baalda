@@ -4,6 +4,7 @@ import { ApiError, type BugReportDetails } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import { CLIENT_VERSION } from "../lib/clientVersion";
 import { platformClass } from "../lib/platform";
+import { containsVaultKey, VAULT_KEY_LEAK_MESSAGE } from "../lib/vaultKeys/leakGuard";
 import { useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
 
@@ -16,7 +17,9 @@ const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 const ALLOWED_EXTS = [
   "png", "jpg", "jpeg", "gif", "webp", "heic", "pdf", "txt", "log", "md", "csv", "json", "zip", "mp4", "mov", "webm",
 ];
-const ACCEPT = ALLOWED_EXTS.map((e) => `.${e}`).join(",");
+/** Attachments read as text for the vault-key check before sending. */
+const TEXT_ATTACHMENT_EXTS = new Set(["txt", "log", "md", "csv", "json"]);
+const ACCEPT =ALLOWED_EXTS.map((e) => `.${e}`).join(",");
 
 interface Picked {
   id: number;
@@ -173,6 +176,18 @@ export function BugReportDialog({ onClose }: { onClose: () => void }) {
 
   const send = async () => {
     setError(null);
+    // A vault key never leaves in a bug report, typed or attached.
+    if (containsVaultKey(message)) {
+      setError(VAULT_KEY_LEAK_MESSAGE);
+      return;
+    }
+    for (const f of files) {
+      if (!TEXT_ATTACHMENT_EXTS.has(extOf(f.file.name))) continue;
+      if (containsVaultKey(await f.file.text().catch(() => ""))) {
+        setError(VAULT_KEY_LEAK_MESSAGE);
+        return;
+      }
+    }
     try {
       const attachments = await Promise.all(
         files.map(async (f) => ({ name: f.file.name, data: await toBase64(f.file) })),
