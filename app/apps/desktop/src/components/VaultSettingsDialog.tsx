@@ -2,7 +2,7 @@
    the app, split out of `AccountMenu.tsx` so it can load on demand. Nothing
    here is on the first screen: the sidebar footer (identity bar + popovers)
    stays eager, and this chunk lands when someone actually opens settings. */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   type BillingUsage,
@@ -55,6 +55,7 @@ import { formatPrice, perLabel, UpgradeDialog } from "./UpgradeDialog";
 import { useLocalFolderClasses, useLocalVaults } from "./useVaultLists";
 import { visibleFolders } from "../lib/vault/vaultList";
 import { VaultIconSettings } from "./VaultIconSettings";
+import { useSwitcherRows, VaultTile } from "./VaultSwitcher";
 import { VaultDashboardsTab } from "./VaultDashboardsTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
 import { SkillsTab } from "./skills/SkillsTab";
@@ -197,6 +198,34 @@ const BILLING_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
  * here. Members (roster + join code + invites), Permissions (RBAC locks), and
  * Appearance (the vault's appearance defaults).
  */
+/** Redesign preview: plain-word names, the group each tab sits in, and a one-line subtitle. */
+const RD_LABEL: Partial<Record<string, string>> = {
+  members: "People and access",
+  versioning: "Version history",
+  "import-export": "Import and export",
+  mcp: "Connect AI apps",
+  billing: "Plan and usage",
+};
+const RD_GROUP: Record<string, string> = {
+  general: "Vault", members: "Vault", appearance: "Vault", vaults: "Vault",
+  dashboards: "Content", versioning: "Content", "import-export": "Content",
+  ai: "AI", mcp: "AI", skills: "AI",
+  billing: "Plan",
+};
+const RD_GROUP_ORDER = ["Vault", "Content", "AI", "Plan"];
+const RD_SUB: Partial<Record<string, string>> = {
+  general: "The basics of this vault.",
+  members: "Who is in this vault and what they can open.",
+  appearance: "How this vault looks for everyone.",
+  dashboards: "Pages that show your notes as a visual overview.",
+  versioning: "Daily snapshots you can go back to.",
+  "import-export": "Bring notes in, or take a copy out.",
+  mcp: "Let Claude, ChatGPT and other AI apps work in this vault.",
+  skills: "Instructions your AI follows in this vault.",
+  billing: "Your plan and what this vault uses.",
+};
+const rdLabel = (t: { id: string; label: string }) => RD_LABEL[t.id] && !(t.id === "billing" && t.label === "Usage") ? RD_LABEL[t.id]! : t.label;
+
 export function VaultSettingsDialog({
   onClose,
   onRequestSignIn,
@@ -213,6 +242,7 @@ export function VaultSettingsDialog({
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locals = useLocalVaults();
+  const switcherRows = useSwitcherRows();
 
   const visibleTab = (t: SettingsTab): SettingsTab =>
     (!SHOW_AI_TAB && t === "ai") || (t === "vaults" && session) ? "general" : t;
@@ -286,27 +316,27 @@ export function VaultSettingsDialog({
       label={isSynced ? "Vault settings" : "Local vault settings"}
       onClose={onClose}
     >
-      <header className="settings-page-header">
-        <div className="settings-title">
-          <span className="settings-eyebrow">
-            {isSynced ? "Vault settings" : "Local vault"}
-          </span>
-          {/* The session's active org outlives a switch to a local folder, so
-              its name only titles the dialog while that vault is the synced one. */}
-          <h1>{(isSynced ? activeOrg?.name : null) ?? vault?.name ?? "Vault"}</h1>
-        </div>
-        <button className="icon-btn" onClick={onClose} aria-label="Close settings" title="Close (Esc)">
-          ✕
-        </button>
-      </header>
+      <button className="icon-btn rd-settings-close" onClick={onClose} aria-label="Close settings" title="Close (Esc)">
+        ✕
+      </button>
 
       <div className="settings-body">
         <nav className="settings-nav" aria-label="Settings sections">
-          {tabs.map((t) => {
+          <div className="rd-settings-id">
+            {vault && <VaultTile identity={switcherRows.find((r) => r.current)?.key ?? `local:${vault.path}`} name={vault.name} />}
+            <div className="settings-title">
+              <span className="settings-eyebrow">{isSynced ? "Settings" : "Local vault"}</span>
+              <h1>{(isSynced ? activeOrg?.name : null) ?? vault?.name ?? "Vault"}</h1>
+            </div>
+          </div>
+          {[...tabs].sort((a, b) => RD_GROUP_ORDER.indexOf(RD_GROUP[a.id] ?? "Plan") - RD_GROUP_ORDER.indexOf(RD_GROUP[b.id] ?? "Plan")).map((t, i, sorted) => {
+            const group = RD_GROUP[t.id] ?? "Plan";
+            const groupStart = i === 0 || (RD_GROUP[sorted[i - 1].id] ?? "Plan") !== group;
             const locked = TEAM_TABS.has(t.id) && !isSynced;
             return (
+              <Fragment key={t.id}>
+              {groupStart && <div className="rd-settings-group">{group}</div>}
               <button
-                key={t.id}
                 type="button"
                 className={`menu-item${t.id === "ai" ? " settings-ai-item" : ""}${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
                 onClick={() => {
@@ -317,7 +347,7 @@ export function VaultSettingsDialog({
                 title={locked ? "Turn on sync to unlock" : undefined}
               >
                 {t.icon}
-                <span className="menu-item-label">{t.id === "ai" ? "AI (Beta)" : t.label}</span>
+                <span className="menu-item-label">{t.id === "ai" ? "AI (Beta)" : rdLabel(t)}</span>
                 {locked && (
                   <svg
                     className="nav-lock"
@@ -334,6 +364,7 @@ export function VaultSettingsDialog({
                   </svg>
                 )}
               </button>
+              </Fragment>
             );
           })}
           {session && (
@@ -347,7 +378,7 @@ export function VaultSettingsDialog({
         <section ref={contentRef} className="settings-content" aria-label={activeTab.label}>
           {/* Members and access (and Skills) swap the title for a back link
               while a profile (or a skill) is open. */}
-          {!((shown === "members" || shown === "skills") && !lockedTab) && <h2 className="settings-section-title">{activeTab.label}</h2>}
+          {!((shown === "members" || shown === "skills") && !lockedTab) && <div className="rd-settings-head"><h2 className="settings-section-title">{rdLabel(activeTab)}</h2>{RD_SUB[shown] && <p>{RD_SUB[shown]}</p>}</div>}
           {shown === "general" ? (
             <GeneralTab
               isSynced={isSynced}

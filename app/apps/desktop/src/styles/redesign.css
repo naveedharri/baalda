@@ -784,3 +784,43 @@ html:not([data-theme="dark"]) .settings-content .subhead {
 }
 html:not([data-theme="dark"]) .settings-content .subhead button,
 html:not([data-theme="dark"]) .settings-content .subhead * { font-family: var(--font-body); letter-spacing: normal; }
+
+/* ---- Vault settings, mockup layout ---- */
+html:not([data-theme="dark"]) .settings-page.settings-modal { position: relative; }
+html:not([data-theme="dark"]) .settings-body { padding: var(--sp-6) var(--sp-6) var(--sp-6) var(--sp-5); gap: var(--sp-6); }
+.rd-settings-close {
+  position: absolute; top: var(--sp-5); right: var(--sp-5); z-index: 3;
+  width: 34px; height: 34px; display: grid; place-items: center;
+  background: #fff !important; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
+}
+.rd-settings-id { display: flex; align-items: center; gap: var(--sp-3); padding: 0 var(--sp-1) var(--sp-4); }
+.rd-settings-id .vault-tile { width: 40px; height: 40px; border-radius: 11px; flex: none; }
+.rd-settings-id .settings-title h1 { font-size: var(--fs-md); font-weight: 600; }
+.rd-settings-group {
+  padding: var(--sp-3) var(--sp-2) var(--sp-1);
+  font: 500 10px var(--font-mono); letter-spacing: 0.7px; text-transform: uppercase; color: #0b0a1088;
+}
+.rd-settings-head { margin-bottom: var(--sp-2); padding-right: 48px; }
+.rd-settings-head p { margin: 4px 0 0; font-size: var(--fs-sm); color: var(--text-secondary); }
+html:not([data-theme="dark"]) .settings-section-title { margin: 0; }
+
+/* Name and icon card: a large preview on the left, controls on the right. */
+html:not([data-theme="dark"]) .settings-content > .vault-icon-settings {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  column-gap: var(--sp-5);
+  row-gap: var(--sp-3);
+}
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head { display: contents; }
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-preview {
+  grid-row: 1 / span 2; grid-column: 1;
+  display: grid; place-items: center; align-self: stretch; min-height: 180px;
+  border-radius: var(--radius-lg); background: var(--bg-app); box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.05);
+}
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-preview .vault-tile { width: 76px; height: 76px; border-radius: 20px; box-shadow: 0 12px 24px -10px rgba(11, 10, 16, 0.35); }
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-text { grid-column: 2; grid-row: 1; }
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-actions { grid-column: 2; grid-row: 1; justify-self: end; align-self: start; }
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-customise { grid-column: 2; grid-row: 2; }
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-actions button.secondary { background: var(--text-primary); color: #fff; border: 0; }
+html:not([data-theme="dark"]) .vault-icon-option { background: rgba(124, 92, 255, 0.07); border: 0; color: #4a2fc7; }
+html:not([data-theme="dark"]) .vault-icon-option.active { background: var(--accent); color: #fff; }
