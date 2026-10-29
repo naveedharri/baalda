@@ -75,6 +75,8 @@ export interface ConsentView {
   app: string;
   organizationId: string;
   vaultName: string;
+  /** The org's note collections (`vaults.id`) the desktop must present keys for. */
+  vaultIds: string[];
   approved: boolean;
 }
 
@@ -87,8 +89,10 @@ export async function consentFor(id: string, userId: string, db: Queryable = def
     approved_at: Date | null;
     app: string | null;
     vault_name: string | null;
+    vault_ids: string[] | null;
   }>(
-    `SELECT c.id, c.client_id, c.organization_id, c.approved_at, a.name AS app, o.name AS vault_name
+    `SELECT c.id, c.client_id, c.organization_id, c.approved_at, a.name AS app, o.name AS vault_name,
+            (SELECT array_agg(v.id ORDER BY v.id) FROM vaults v WHERE v.organization_id = c.organization_id) AS vault_ids
        FROM oauth_consents c
        LEFT JOIN "oauthApplication" a ON a."clientId" = c.client_id
        LEFT JOIN organization o ON o.id = c.organization_id
@@ -103,6 +107,7 @@ export async function consentFor(id: string, userId: string, db: Queryable = def
     app: r.app?.trim() || "An application",
     organizationId: r.organization_id,
     vaultName: r.vault_name ?? "",
+    vaultIds: r.vault_ids ?? [],
     approved: !!r.approved_at && hasConsentKeys(r.id),
   };
 }

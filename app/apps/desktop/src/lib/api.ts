@@ -1134,6 +1134,19 @@ export type OrgStatus =
   | { kind: "unknown" };
 
 /** A rejected server response — carries the HTTP status for callers to branch on. */
+/** `GET /api/oauth/consents/:id`: a claude.ai / ChatGPT connection to finish. */
+export interface OAuthConsentRequest {
+  id: string;
+  clientId: string;
+  /** The connector's display name ("Claude"). */
+  app: string;
+  organizationId: string;
+  vaultName: string;
+  /** The vault's collections this device must present keys for. */
+  vaultIds: string[];
+  approved: boolean;
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -2475,6 +2488,24 @@ export class ApiClient {
       { body: { name }, vaultScope: vaultId },
     );
     return data;
+  }
+
+  /** A connector consent waiting for this app (W3): who asks, for which vault. */
+  async getOAuthConsent(id: string): Promise<OAuthConsentRequest> {
+    const { data } = await this.request<OAuthConsentRequest>(
+      "GET",
+      `/api/oauth/consents/${encodeURIComponent(id)}`,
+    );
+    return data;
+  }
+
+  /** Finish a connector consent: `vkHeader` (`vaultId=<b64>` pairs) is sent
+   *  only as `X-Baalda-VK` and never logged. */
+  async completeOAuthConsent(id: string, vkHeader: string): Promise<void> {
+    await this.request("POST", `/api/oauth/consents/${encodeURIComponent(id)}/complete`, {
+      body: {},
+      headers: { [VAULT_KEY_HEADER]: vkHeader },
+    });
   }
 
   async revokeMcpToken(id: string): Promise<void> {

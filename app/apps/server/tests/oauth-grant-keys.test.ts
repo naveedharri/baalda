@@ -245,6 +245,7 @@ describe("OAuth connector tokens: hashed storage + vault keys", () => {
     expect(await (await api(s.owner, "GET", `/oauth/consents/${id}`)).json()).toMatchObject({
       app: "Claude",
       organizationId: s.orgId,
+      vaultIds: [s.vaultId],
       approved: false,
     });
 
