@@ -1347,3 +1347,4 @@ html:not([data-theme="dark"]) .rd-prof { padding: 8px; gap: 10px; margin: 0 0 6p
 html:not([data-theme="dark"]) .account-popover > .menu-item { padding: 4px 8px; gap: 10px; min-height: 32px; }
 html:not([data-theme="dark"]) .account-popover > .menu-item .menu-icon { width: 16px !important; height: 16px !important; padding: 0 !important; margin: 0 12px; }
 html:not([data-theme="dark"]) .account-popover .menu-sep { margin: 4px 8px; }
+html:not([data-theme="dark"]) .vault-switcher .vault-card.current { background: rgba(11, 10, 16, 0.06) !important; }
