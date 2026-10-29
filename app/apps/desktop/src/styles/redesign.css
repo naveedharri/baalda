@@ -751,3 +751,24 @@ html:not([data-theme="dark"]) .sidebar .tree-row { height: 30px; }
 html:not([data-theme="dark"]) .vault-name { font-size: 13px; }
 html:not([data-theme="dark"]) .rd-new-note { font-size: var(--fs-sm); }
 html:not([data-theme="dark"]) .identity-line1 { font-size: var(--fs-sm); }
+
+/* ============================================================
+   Round 6: the old full-height page, in the new look.
+   The white page fills the window again; tabs and the toolbar
+   sit in its top row. No floating card, no cream strip.
+   ============================================================ */
+html:not([data-theme="dark"]) .main {
+  background: #fff;
+  border-top-left-radius: var(--radius-xl);
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.06), 0 8px 24px rgba(20, 20, 40, 0.06);
+}
+html:not([data-theme="dark"]) .editor-wrap {
+  margin: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+html:not([data-theme="dark"]) .header-actions { position: static; }
+html:not([data-theme="dark"]) .tab-active-bg { background: var(--bg-app); box-shadow: none; }
+.rd-crumbs { display: none; }
+html:not([data-theme="dark"]) .editor-wrap .cm-scroller { padding-top: 0; }
