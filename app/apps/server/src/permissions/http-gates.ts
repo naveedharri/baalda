@@ -1,3 +1,5 @@
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { sealedReferencedPaths, vaultIsKeyed } from "./sealed-refs.js";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { orgRole, vaultOrg } from "./lookup.js";
@@ -255,6 +257,7 @@ export async function canReadAttachment(
   relPath: string | null,
   docId: string | null = null,
   db: Queryable = defaultPool,
+  crypto?: DocCrypto,
 ): Promise<boolean> {
   if (docId && (await fileDoc(db, vaultId, docId))) {
     return (await effectivePermission(userId, docId, db)) !== "none";
@@ -269,14 +272,19 @@ export async function canReadAttachment(
   const mode = attachmentAclMode();
   const byRefs = async () => (await referencedByRefs(vaultId, [relPath], readable, db)).size > 0;
   if (mode === "refs") return byRefs();
+  // W3: a keyed vault's sealed rows are judged in memory (same predicate).
+  const keyed = await vaultIsKeyed(vaultId, db);
   const { rows } = await db.query<{ ok: number }>(
     `SELECT 1 AS ok FROM note_index
       WHERE vault_id = $1 AND doc_id = ANY($2::text[])
-        AND content LIKE '%' || $3 || '%' ESCAPE '\\'
+        AND content LIKE '%' || $3 || '%' ESCAPE '\\'${keyed ? " AND search_enc IS NULL" : ""}
       LIMIT 1`,
     [vaultId, [...readable], likeEscape(relPath)],
   );
-  const old = rows.length > 0;
+  let old = rows.length > 0;
+  if (!old && keyed) {
+    old = (await sealedReferencedPaths(vaultId, [...readable], [relPath], crypto, db)).size > 0;
+  }
   if (mode === "shadow") {
     const viaRefs = await byRefs();
     recordAclShadow("single", vaultId, userId, 1, old && !viaRefs ? 1 : 0, !old && viaRefs ? 1 : 0);
@@ -377,6 +385,7 @@ export async function filterReadableBlobs<T extends BlobAclRow>(
   vaultId: string,
   blobs: T[],
   db: Queryable = defaultPool,
+  crypto?: DocCrypto,
 ): Promise<T[]> {
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return [];
@@ -411,7 +420,7 @@ export async function filterReadableBlobs<T extends BlobAclRow>(
   if (rest.length > 0) {
     const visibleRest = access.vaultWide
       ? rest
-      : await filterByNoteReferenceMode(userId, vaultId, rest, await readable(), db);
+      : await filterByNoteReferenceMode(userId, vaultId, rest, await readable(), db, crypto);
     for (const b of visibleRest) keep.add(b);
   }
   return blobs.filter((b) => keep.has(b));
@@ -471,6 +480,7 @@ async function filterByNoteReferenceMode<T extends BlobAclRow>(
   blobs: T[],
   readable: Set<string>,
   db: Queryable,
+  crypto?: DocCrypto,
 ): Promise<T[]> {
   const mode = attachmentAclMode();
   const byRefs = async () => {
@@ -479,7 +489,7 @@ async function filterByNoteReferenceMode<T extends BlobAclRow>(
     return blobs.filter((b) => !!b.rel_path && hit.has(b.rel_path));
   };
   if (mode === "refs") return byRefs();
-  const old = await filterByNoteReference(vaultId, blobs, readable, db);
+  const old = await filterByNoteReference(vaultId, blobs, readable, db, crypto);
   if (mode === "shadow") {
     const viaRefs = new Set(await byRefs());
     const viaText = new Set(old);
@@ -497,8 +507,13 @@ async function filterByNoteReference<T extends BlobAclRow>(
   blobs: T[],
   readable: Set<string>,
   db: Queryable,
+  crypto?: DocCrypto,
 ): Promise<T[]> {
   if (readable.size === 0) return [];
+  // W3: in a keyed vault, sealed rows leave the SQL (their plaintext columns
+  // may be stale) and are judged in memory below with the same predicate.
+  const keyed = await vaultIsKeyed(vaultId, db);
+  const plainOnly = keyed ? " AND ni.search_enc IS NULL" : "";
   // A falsy rel_path can never match (it has no needle to search for), so it is
   // dropped here exactly as the old `!!b.rel_path` guard dropped it.
   const paths = [...new Set(blobs.map((b) => b.rel_path).filter((p): p is string => !!p))];
@@ -548,7 +563,7 @@ async function filterByNoteReference<T extends BlobAclRow>(
        docs AS MATERIALIZED (
           SELECT CASE WHEN ni.ref_heads @> $5::text[] THEN ni.ref_text ELSE ni.content END AS content
             FROM note_index ni
-           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
+           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])${plainOnly}
        ),
        -- The text after occurrence i of an anchor is piece i+1, the anchor,
        -- piece i+2, ... Only its first r characters can matter, so every piece
@@ -592,7 +607,7 @@ async function filterByNoteReference<T extends BlobAclRow>(
          FROM unnest($3::text[], $4::text[], $5::text[]) AS p(rel_path, needle, prefix)
         WHERE EXISTS (
           SELECT 1 FROM note_index ni
-           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
+           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])${plainOnly}
              AND CASE
                    WHEN ni.ref_heads @> $6::text[] AND NOT (ni.ref_text LIKE '%' || p.prefix || '%' ESCAPE '\\') THEN false
                    ELSE ni.content LIKE '%' || p.needle || '%' ESCAPE '\\'
@@ -618,12 +633,16 @@ async function filterByNoteReference<T extends BlobAclRow>(
          FROM unnest($3::text[], $4::text[]) AS p(rel_path, needle)
         WHERE EXISTS (
           SELECT 1 FROM note_index ni
-           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
+           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])${plainOnly}
              AND ni.content LIKE '%' || p.needle || '%' ESCAPE '\\'
         )`,
       [vaultId, readableIds, bare, bare.map(likeEscape)],
     );
     for (const r of rows) referenced.add(r.rel_path);
+  }
+  if (keyed) {
+    const remaining = paths.filter((p) => !referenced.has(p));
+    for (const p of await sealedReferencedPaths(vaultId, readableIds, remaining, crypto, db)) referenced.add(p);
   }
   return blobs.filter((b) => !!b.rel_path && referenced.has(b.rel_path));
 }

@@ -1,3 +1,5 @@
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { resolveText } from "./texts.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
@@ -79,6 +81,8 @@ export interface VaultRevertOutcome {
 
 export interface VaultRevertDeps {
   docWriter: Pick<DocWriter, "peekContent" | "setContent">;
+  /** W3: the request's vault key for a keyed vault (sealed texts + log). */
+  crypto?: DocCrypto;
   onRegistryChanged?: (vaultId: string, originId: string | null) => void;
   pool?: pg.Pool;
 }
@@ -97,7 +101,7 @@ export async function revertVaultToCheckpoint(
   } & VaultRevertDeps,
 ): Promise<{ acquired: false } | { acquired: true; result: VaultRevertOutcome }> {
   const pool = opts.pool ?? defaultPool;
-  const { vaultId, checkpointId, userId, docWriter } = opts;
+  const { vaultId, checkpointId, userId, docWriter, crypto } = opts;
 
   // Content writes commit through the GLOBAL pool (`docWriter.setContent`), not
   // through this transaction, so running them inline mixed two things that
@@ -124,17 +128,26 @@ export async function revertVaultToCheckpoint(
       // content-addressed in `note_texts` after it (#264). A row whose text
       // cannot be resolved is left out, i.e. treated like a structure-only
       // note: the revert leaves that note's current content alone.
-      const { rows: docRows } = await db.query<{
+      const { rows: rawDocRows } = await db.query<{
         doc_id: string;
         sha256: string;
         content: string;
+        content_enc: Buffer | null;
       }>(
-        `SELECT d.doc_id, d.sha256, COALESCE(d.content, t.content) AS content
+        `SELECT d.doc_id, d.sha256, COALESCE(d.content, t.content) AS content,
+                CASE WHEN d.content IS NULL THEN t.content_enc END AS content_enc
            FROM vault_checkpoint_docs d
            LEFT JOIN note_texts t ON t.doc_id = d.doc_id AND t.sha256 = d.sha256
           WHERE d.checkpoint_id = $1 AND COALESCE(d.content, t.content) IS NOT NULL`,
         [checkpointId],
       );
+      // W3: a sealed text opens with the request's key (key_required without
+      // it, before anything has moved); never read as the '' stored beside it.
+      const docRows = rawDocRows.map((r) => ({
+        doc_id: r.doc_id,
+        sha256: r.sha256,
+        content: resolveText(r, { vaultId, docId: r.doc_id, sha: r.sha256 }, crypto) as string,
+      }));
       const contentByDoc = new Map(docRows.map((r) => [r.doc_id, r]));
 
       // The undo for this whole operation, taken BEFORE anything moves. Excluded
@@ -142,6 +155,7 @@ export async function revertVaultToCheckpoint(
       const preRevert = await captureCheckpoint({
         db,
         docWriter,
+        crypto,
         vaultId,
         kind: "auto",
         label: "Before revert",
@@ -271,7 +285,7 @@ export async function revertVaultToCheckpoint(
 
         const snapshot = contentByDoc.get(note.id);
         if (!snapshot) continue; // structure-only (doc skipped at capture time)
-        const current = (await docWriter.peekContent(vaultId, note.id)) ?? "";
+        const current = (await docWriter.peekContent(vaultId, note.id, crypto)) ?? "";
         if (sha256Hex(current) === snapshot.sha256) continue;
         // The data-loss firewall (same philosophy as the bridge's everHadContent
         // guard): a revert may rewrite text, but it must never bulldoze a note
@@ -350,7 +364,7 @@ export async function revertVaultToCheckpoint(
   let docsChanged = 0;
   for (const write of pendingWrites) {
     try {
-      await docWriter.setContent(vaultId, write.docId, write.content, { userId });
+      await docWriter.setContent(vaultId, write.docId, write.content, { userId, crypto });
       await stampLastEdited(write.docId, userId, pool);
       docsChanged++;
     } catch (err) {

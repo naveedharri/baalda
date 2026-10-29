@@ -60,6 +60,9 @@ const TABLES = [
   "vault_key_wraps",
   "vault_key_requests",
   "vault_crypto_state",
+  "user_device_registrations",
+  "user_key_history",
+  "vault_key_wrap_history",
   '"user"',
 ];
 

@@ -1484,7 +1484,8 @@ export async function readAttachmentText(
     chars: number | null;
     content: string | null;
   }>(
-    `SELECT b.id, b.doc_id, b.rel_path, b.sha256, bt.chars, bt.content
+    `SELECT b.id, b.doc_id, b.rel_path, b.sha256, bt.chars, bt.content,
+            (bt.search_enc IS NOT NULL) AS sealed
        FROM blobs b
        LEFT JOIN blob_text bt ON bt.blob_id = b.id
       WHERE b.vault_id = $1 AND b.status = 'ready'
@@ -1499,6 +1500,10 @@ export async function readAttachmentText(
     throw new McpToolError("You do not have access to this file", "no_access");
   }
 
+  // W3: sealed text needs the vault key, which MCP cannot present yet.
+  if ((row as { sealed?: boolean }).sealed) {
+    throw new McpToolError("This vault's file text needs its key; open it in Baalda.", "key_required");
+  }
   const full = row.content ?? "";
   const text = full.length > cap ? full.slice(0, cap) : full;
   return {

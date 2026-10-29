@@ -41,6 +41,7 @@ import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
 import { createVaultKeyRoutes } from "./routes/vault-keys.js";
 import { vaultKeyHeader } from "../crypto/transport.js";
+import { vaultKeysEnabled, VAULT_KEYS_FEATURE } from "../crypto/config.js";
 import { graphRoutes } from "./routes/graph.js";
 import { createMcpRoutes } from "./routes/mcp.js";
 import { createRepairRoutes } from "./routes/repair.js";
@@ -261,6 +262,8 @@ export function createApp(deps: AppDeps): Hono {
         ACCESS_BOARD_FEATURE,
         SKILLS_FEATURE,
         SKILL_ACCESS_FEATURE,
+        // Client-held vault keys (W3), only while BAALDA_VAULT_KEYS is on.
+        ...(vaultKeysEnabled() ? [VAULT_KEYS_FEATURE] : []),
       ],
     }),
   );
