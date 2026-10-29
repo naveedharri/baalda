@@ -21,6 +21,7 @@ import { accountPageRoutes } from "./routes/account-pages.js";
 import { invitationRoutes } from "./routes/invitations.js";
 import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
 import { createAppearanceRoutes } from "./routes/appearance.js";
+import { createFontRoutes } from "./fonts.js";
 import { createSkillRoutes } from "./routes/skills.js";
 import { SKILL_ACCESS_FEATURE, SKILLS_FEATURE } from "../skills/feature.js";
 import { passwordResetRoutes } from "./routes/password-reset.js";
@@ -147,6 +148,20 @@ function allowedOrigins(): string[] {
  *  - /api/vaults/:id/graph, /api/vaults/:id/search → note index (links+vectors)
  *  - /api/mcp → Model Context Protocol endpoint (AI clients); /api/mcp/tokens → token mgmt
  */
+/** RFC 9116 body for `contact`, or null when no contact is configured. */
+export function securityTxt(contact: string | undefined, now: Date = new Date()): string | null {
+  const value = contact?.trim();
+  if (!value) return null;
+  const expires = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString();
+  return [
+    `Contact: ${value}`,
+    `Expires: ${expires}`,
+    "Policy: https://github.com/naveedharri/baalda/blob/main/SECURITY.md",
+    "Preferred-Languages: en",
+    "",
+  ].join("\n");
+}
+
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
 
@@ -278,6 +293,15 @@ export function createApp(deps: AppDeps): Hono {
 </html>`),
   );
 
+  // RFC 9116 security.txt, read per request from SECURITY_CONTACT (e.g.
+  // `mailto:security@example.com`). Unset ⇒ 404, so a self-hosted server never
+  // advertises someone else's contact.
+  app.get("/.well-known/security.txt", (c) => {
+    const body = securityTxt(process.env.SECURITY_CONTACT);
+    if (!body) return c.notFound();
+    return c.body(body, 200, { "content-type": "text/plain; charset=utf-8" });
+  });
+
   // ── MCP OAuth discovery (RFC 8414 / RFC 9728) ─────────────────────────────
   // These MUST sit at the origin root: our protected-resource metadata names
   // the origin as the authorization server, so an MCP client (e.g. a Claude
@@ -308,6 +332,8 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/.well-known/oauth-authorization-server/api/mcp", (c) =>
     oAuthDiscoveryMetadata(auth)(c.req.raw),
   );
+  // Self-hosted woff2 fonts for the pages below and the public link page.
+  app.route("/", createFontRoutes());
   // The human-facing login + consent screens of that OAuth flow.
   app.route("/", oauthConnectRoutes);
   // Account pages the emails link to: forgot/reset password, email verified,
