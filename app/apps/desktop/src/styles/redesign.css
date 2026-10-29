@@ -1135,3 +1135,25 @@ html:not([data-theme="dark"]) .mcp-token-dialog .confirm-actions {
 html:not([data-theme="dark"]) .mcp-token-dialog > .confirm-actions { margin-left: 0; margin-right: 0; }
 html:not([data-theme="dark"]) .mcp-token-dialog input { margin-top: var(--sp-3); }
 html:not([data-theme="dark"]) .mcp-token-dialog .mcp-block-value { padding-right: 40px; }
+
+/* View-only banner: a slim, quiet pill instead of a full-width yellow block. */
+html:not([data-theme="dark"]) .editor-lockbanner {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 10px;
+  width: auto !important;
+  max-width: 100%;
+  padding: 6px 14px 6px 6px !important;
+  background: #fff !important;
+  border: 0 !important;
+  border-radius: 999px !important;
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 4px 14px -6px rgba(11, 10, 16, 0.15) !important;
+}
+html:not([data-theme="dark"]) .editor-lockbanner-icon {
+  width: 28px !important; height: 28px !important; border-radius: 50% !important;
+  background: #fde99b !important; color: #987e1b !important; flex: none;
+}
+html:not([data-theme="dark"]) .editor-lockbanner-icon svg { width: 14px !important; height: 14px !important; }
+html:not([data-theme="dark"]) .editor-lockbanner-text { display: flex !important; flex-direction: row !important; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+html:not([data-theme="dark"]) .editor-lockbanner-text strong { font-size: var(--fs-sm) !important; font-weight: 600; }
+html:not([data-theme="dark"]) .editor-lockbanner-sub { font-size: var(--fs-sm) !important; color: var(--text-secondary) !important; }
