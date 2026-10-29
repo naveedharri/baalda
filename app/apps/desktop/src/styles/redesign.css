@@ -1043,3 +1043,4 @@ html:not([data-theme="dark"]) .vault-icon-option svg > g > g [stroke]:not([strok
 html:not([data-theme="dark"]) .vault-icon-option svg > g > g [fill]:not([fill="none"]) { fill: currentColor !important; }
 html:not([data-theme="dark"]) .vault-icon-option .vault-icon-svg,
 html:not([data-theme="dark"]) .vault-icon-option svg { width: 22px !important; height: 22px !important; }
+.rd-settings-id .avatar { width: 40px; height: 40px; flex: none; }
