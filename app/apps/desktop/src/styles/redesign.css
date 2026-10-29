@@ -775,3 +775,12 @@ html:not([data-theme="dark"]) .editor-wrap .cm-scroller { padding-top: 0; }
 html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row { height: 34px; margin-top: 2px; margin-bottom: 2px; }
 html:not([data-theme="dark"]) .pinned-section .pinned-row,
 html:not([data-theme="dark"]) .home-sidebar-row { min-height: 34px; margin-top: 2px; margin-bottom: 2px; }
+
+/* Section labels and the buttons in their rows use the app's own font. */
+html:not([data-theme="dark"]) .settings-content .subhead {
+  font-family: var(--font-body);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+}
+html:not([data-theme="dark"]) .settings-content .subhead button,
+html:not([data-theme="dark"]) .settings-content .subhead * { font-family: var(--font-body); letter-spacing: normal; }
