@@ -123,6 +123,26 @@ const AuthDialog = lazy(() =>
  * rather than implying the app lost track of the file — and it still only offers
  * to close, because the editor may hold text the user has not saved anywhere.
  */
+/** Folder path chips at the top-left of the note page (mockup v4). */
+function NoteBreadcrumb() {
+  const path = useStore((s) => s.openNote?.path ?? null);
+  if (!path) return null;
+  const parts = path.split("/");
+  const folders = parts.slice(0, -1);
+  return (
+    <nav className="rd-crumbs" aria-label="Note location">
+      {folders.map((f, i) => (
+        <span key={i} className="rd-crumb">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2h8.4A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" /></svg>
+          {f}
+        </span>
+      ))}
+      {folders.length > 0 && <span className="rd-crumb-sep">/</span>}
+      <span className="rd-crumb">{noteLabel(path)}</span>
+    </nav>
+  );
+}
+
 /** Sidebar's primary action: a full-width New note button under the vault card. */
 function NewNoteButton() {
   const rootFrozen = useStore((s) => s.rootFrozen);
@@ -1842,6 +1862,7 @@ export default function App() {
           <RemovedBanner />
           {attachmentLocalOnly && <AttachmentSyncNotice />}
           <div className="editor-wrap">
+            {!activeVirtual && <NoteBreadcrumb />}
             {activeVirtual && <VirtualTabHost tab={activeVirtual} />}
             {/* Stays MOUNTED under a virtual tab (display toggles, the tree does
                 not), so the note's live editor is still there for the
