@@ -250,7 +250,6 @@ html:not([data-theme="dark"]) .home-section,
 html:not([data-theme="dark"]) .pinned-section { padding-left: 4px; padding-right: 4px; }
 
 /* No green dot on every synced row: only rows that need attention show one. */
-.tree-sync.synced { visibility: hidden; }
 
 /* Folders: the coloured glyph sits in a soft tinted square. */
 html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph,
@@ -1298,3 +1297,53 @@ html:not([data-theme="dark"]) .rd-prof .sm-host .avatar, html:not([data-theme="d
 .rd-status-chip:hover { background: var(--accent-soft-hover); }
 .rd-status.is-open .rd-status-row { margin-top: 6px; }
 html:not([data-theme="dark"]) .account-popover > .menu-item .menu-icon { background: none !important; color: var(--text-primary) !important; padding: 2px; }
+
+/* ---- Round: neutral selection, bigger vault icon, aligned columns ---- */
+/* Selection is a warm neutral, not purple. */
+html:not([data-theme="dark"]) .tree-row.selected,
+html:not([data-theme="dark"]) .tree-row.selected:hover,
+html:not([data-theme="dark"]) .home-sidebar-row.selected { background: rgba(11, 10, 16, 0.06) !important; }
+html:not([data-theme="dark"]) .tree-row:hover { background: rgba(11, 10, 16, 0.035); }
+html:not([data-theme="dark"]) .tree-row.selected .tree-glyph { color: var(--text-primary); }
+
+/* Vault header: a 40px icon, name and path centred against it, on the
+   same left edge (12px) as the section labels and tree glyphs. */
+html:not([data-theme="dark"]) .sidebar-header { padding-left: 8px; padding-right: 8px; }
+html:not([data-theme="dark"]) .sidebar-header-id { padding: 4px; gap: 12px; align-items: center; }
+html:not([data-theme="dark"]) .sidebar-header-id .vault-tile { width: 40px !important; height: 40px !important; border-radius: 10px !important; }
+html:not([data-theme="dark"]) .sidebar-header-text { transform: none; gap: 1px; }
+html:not([data-theme="dark"]) .vault-name { font-size: 16px; line-height: 20px; }
+html:not([data-theme="dark"]) .vault-path { font-size: 12px; line-height: 16px; }
+
+/* Pixel grid: every icon starts at x=20, every label at x=50. */
+html:not([data-theme="dark"]) .pinned-label { padding-left: 8px; padding-right: 8px; }
+html:not([data-theme="dark"]) .home-sidebar-row { padding-left: 2px; gap: 10px; }
+html:not([data-theme="dark"]) .home-sidebar-row svg { width: 20px; height: 20px; }
+html:not([data-theme="dark"]) .pinned-section .pinned-row { padding-left: 2px; }
+html:not([data-theme="dark"]) .pinned-open { gap: 10px; }
+html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row { margin-left: 3px; gap: 10px; }
+html:not([data-theme="dark"]) .sidebar .tree-glyph { width: 20px; }
+html:not([data-theme="dark"]) .sidebar-footer .identity-bar { padding-left: 4px; }
+html:not([data-theme="dark"]) .home-sidebar-row { margin-left: -2px !important; padding-left: 0 !important; }
+html:not([data-theme="dark"]) .sidebar-footer .identity-bar { padding-left: 12px; }
+/* No grey behind the vault header, at rest, on hover or while open. */
+html:not([data-theme="dark"]) .sidebar-header-id,
+html:not([data-theme="dark"]) .sidebar-header-id:hover,
+html:not([data-theme="dark"]) .vault-switch-tile,
+html:not([data-theme="dark"]) .vault-switch-btn,
+html:not([data-theme="dark"]) .vault-switch-btn.open,
+html:not([data-theme="dark"]) .vault-switch-btn:hover { background: transparent !important; box-shadow: none !important; }
+html:not([data-theme="dark"]) .sidebar-header-id .vault-tile { background: var(--tile-fill) !important; }
+
+html:not([data-theme="dark"]) .home-sidebar-row { margin-left: 0 !important; }
+
+/* Account menu grid: avatar, status icon and row icons start 14px in;
+   names and labels share one text column. */
+html:not([data-theme="dark"]) .account-popover { padding: 6px; }
+html:not([data-theme="dark"]) .rd-prof { padding: 8px; gap: 10px; margin: 0 0 6px; }
+.rd-status { padding: 0 0 6px; }
+.rd-status-chip { padding: 8px 10px 8px 8px; gap: 10px; }
+.rd-status-chip svg { width: 40px; height: 18px; }
+html:not([data-theme="dark"]) .account-popover > .menu-item { padding: 4px 8px; gap: 10px; min-height: 32px; }
+html:not([data-theme="dark"]) .account-popover > .menu-item .menu-icon { width: 16px !important; height: 16px !important; padding: 0 !important; margin: 0 12px; }
+html:not([data-theme="dark"]) .account-popover .menu-sep { margin: 4px 8px; }

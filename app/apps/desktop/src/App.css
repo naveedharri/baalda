@@ -736,7 +736,7 @@ button.primary.hero:hover:not(:disabled) {
   display: grid;
   /* Width is user-set (see SidebarResizer); the fallback is the default so the
      layout is correct for one paint before React sets the variable. */
-  --sidebar-layout-w: var(--sidebar-w, 264px);
+  --sidebar-layout-w: var(--sidebar-w, 300px);
   grid-template-columns: var(--sidebar-layout-w) minmax(0, 1fr);
   height: 100%;
   background: var(--bg-app);

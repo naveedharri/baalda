@@ -35,7 +35,7 @@ export function StatusPicker() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: ICONS[isOnline ? "online" : status] ?? ICONS.online }} />
         <span className="rd-status-chip-text">
           <b>{isOnline ? "Set a status" : current!.label}</b>
-          <small>{isOnline ? "Let your team know what you are up to" : left !== null ? `Clears in ${left >= 60 ? `${Math.round(left / 60)} h` : `${left} min`}` : "Until you change it"}</small>
+          <small>{isOnline ? "Tell your team where you are" : left !== null ? `Clears in ${left >= 60 ? `${Math.round(left / 60)} h` : `${left} min`}` : "Until you change it"}</small>
         </span>
         <em>{open ? "Done" : "Change"}</em>
       </button>
