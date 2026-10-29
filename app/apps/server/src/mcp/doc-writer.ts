@@ -205,7 +205,10 @@ export function createDocWriter(
         context: {
           source: MCP_ORIGIN,
           userId,
-          ...(actor?.crypto ? { vaultKey: actor.crypto.key, vaultKeyGeneration: actor.crypto.generation } : {}),
+          // A COPY: `onChange` runs later on Hocuspocus' hook chain, and the
+          // request zeroes its own key when it ends; a zeroed key would refuse
+          // (or, before the zero-key guard, poison) this already-applied edit.
+          ...(actor?.crypto ? { vaultKey: Buffer.from(actor.crypto.key), vaultKeyGeneration: actor.crypto.generation } : {}),
         },
       } satisfies LocalTransactionOrigin);
       return;

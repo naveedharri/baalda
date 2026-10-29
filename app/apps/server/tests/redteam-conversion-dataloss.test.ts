@@ -243,6 +243,21 @@ describe("red team: no data loss across vault-key conversion", () => {
     }
   });
 
+  it("an MCP write to a LIVE doc hands onChange its own key copy, not the request buffer it zeroes", async () => {
+    const live = new Y.Doc();
+    const origins: unknown[] = [];
+    live.on("afterTransaction", (tr) => origins.push(tr.origin));
+    const fake = { hocuspocus: { documents: new Map([["vault:v1/note:d1", live]]) } } as unknown as Server<SyncContext>;
+    const writer = createDocWriter(fake);
+    const key = randomBytes(32);
+    const crypto: DocCrypto = { vaultId: "v1", key, generation: 1 };
+    await writer.appendContent("v1", "d1", "hello\n", { userId: "u1", crypto });
+    key.fill(0); // the request ends and zeroes its key before onChange ran
+    const ctx = (origins.at(-1) as { context: { vaultKey: Buffer } }).context;
+    expect(ctx.vaultKey.equals(Buffer.alloc(32))).toBe(false);
+    live.destroy();
+  });
+
   // ── 1. conversion while edits stream in ───────────────────────────────────
 
   it("backfill + converting compaction + socket appends + docs/batch + MCP + index catch-up concurrently lose nothing", async () => {
