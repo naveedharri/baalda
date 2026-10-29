@@ -910,3 +910,19 @@ html:not([data-theme="dark"]) .vault-icon-colors .swatch { width: 16px; height: 
 html:not([data-theme="dark"]) .vault-icon-grid { grid-template-columns: repeat(auto-fill, 30px); gap: 5px; }
 html:not([data-theme="dark"]) .vault-icon-option { width: 30px; height: 30px; border-radius: 8px; }
 html:not([data-theme="dark"]) .vault-icon-option svg { width: 15px; height: 15px; }
+html:not([data-theme="dark"]) .vault-icon-option {
+  box-sizing: border-box; padding: 0 !important; min-width: 0; aspect-ratio: auto;
+  display: grid !important; place-items: center;
+}
+html:not([data-theme="dark"]) .vault-icon-option svg { width: 16px !important; height: 16px !important; }
+html:not([data-theme="dark"]) .vault-icon-option { color: #4a2fc7; background: rgba(124, 92, 255, 0.07) !important; }
+html:not([data-theme="dark"]) .vault-icon-option.active { color: #fff; background: var(--accent) !important; }
+html:not([data-theme="dark"]) .vault-icon-option svg { stroke: currentColor; opacity: 1; }
+html:not([data-theme="dark"]) .vault-icon-option .vault-tile {
+  width: 100% !important; height: 100% !important; margin: 0 !important;
+  display: grid !important; place-items: center; border-radius: inherit;
+  background: transparent !important; box-shadow: none !important; color: inherit !important;
+  --tile-fill: transparent; --tile-ink: currentColor;
+}
+html:not([data-theme="dark"]) .vault-icon-option .vault-icon-svg { width: 16px; height: 16px; display: grid; place-items: center; }
+html:not([data-theme="dark"]) .vault-icon-option .vault-icon-svg svg * { stroke: currentColor; }
