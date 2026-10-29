@@ -74,3 +74,14 @@ export async function setVaultKey(serverUrl: string, vaultId: string, vk: Uint8A
   await setBytes(vaultKeyName(serverUrl, vaultId), vk);
 }
 export const deleteVaultKey = (serverUrl: string, vaultId: string) => remove(vaultKeyName(serverUrl, vaultId));
+
+/** The session's `VaultKeyStore`, scoped to one server + user. */
+export function keychainVaultKeyStore(serverUrl: string, userId: string) {
+  return {
+    getAccountPrivateKey: () => getAccountPrivateKey(serverUrl, userId),
+    setAccountPrivateKey: (key: Uint8Array) => setAccountPrivateKey(serverUrl, userId, key),
+    getVaultKey: (vaultId: string) => getVaultKey(serverUrl, vaultId),
+    setVaultKey: (vaultId: string, vk: Uint8Array) => setVaultKey(serverUrl, vaultId, vk),
+    clearCache: clearVaultKeyCache,
+  };
+}

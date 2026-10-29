@@ -1419,6 +1419,50 @@ function newClientId(): string {
  * Stateful client: holds the base URL + bearer token in memory. The auth
  * manager owns persistence (keychain) and calls `setToken`.
  */
+// ---- Client-held vault keys (W3) -------------------------------------------
+
+/** Carries the base64 vault key on every content request for a keyed vault. */
+export const VAULT_KEY_HEADER = "X-Baalda-VK";
+
+/** The collection id of a `/api/vaults/:vaultId/...` path, else null. */
+export function vaultIdFromPath(path: string): string | null {
+  const m = /^\/api\/vaults\/([^/?#]+)\//.exec(path);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return null;
+  }
+}
+
+export interface VaultKeyInit {
+  vkCheck: string;
+  generation: number;
+  sealedVkForSelf: string;
+}
+export interface VaultKeyWrap {
+  generation: number;
+  sealedVk: string;
+}
+interface MyVaultKeysBody {
+  vkCheck: string;
+  generation: number;
+  wraps: VaultKeyWrap[];
+}
+export type MyVaultKeys = { pending: true } | ({ pending: false } & MyVaultKeysBody);
+export interface VaultKeyRequest {
+  userId: string;
+  publicKey: string;
+  requestedAt: string;
+}
+export interface VaultKeyWrapPost extends VaultKeyWrap {
+  userId: string;
+}
+export interface AccountKeysBody {
+  publicKey: string;
+  privWrappedRecovery: string;
+}
+
 export class ApiClient {
   async housekeeperDiagnose(vaultId: string, diagnostics: DiagnosticInput, provider?: AssistantProvider): Promise<DiagnosticReview> {
     return (await this.request<DiagnosticReview>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/diagnose`, {
@@ -1515,6 +1559,78 @@ export class ApiClient {
     this.token = token;
   }
 
+  /**
+   * Client-held vault keys (W3): returns the base64 VK for a keyed vault whose
+   * key this device holds, else null. Synchronous (reads the session cache).
+   * The header value is a secret: never log request headers.
+   */
+  private vaultKeyResolver: ((vaultId: string) => string | null) | null = null;
+  setVaultKeyResolver(fn: ((vaultId: string) => string | null) | null): void {
+    this.vaultKeyResolver = fn;
+  }
+  /** `X-Baalda-VK` for a vault-scoped path, or nothing. */
+  private vaultKeyHeaders(path: string): Record<string, string> {
+    const id = vaultIdFromPath(path);
+    const vk = id && this.vaultKeyResolver ? this.vaultKeyResolver(id) : null;
+    return vk ? { [VAULT_KEY_HEADER]: vk } : {};
+  }
+
+  // ---- Client-held vault keys (W3) ----------------------------------------
+
+  /** 200 = keyed now; 409 = already keyed (caller falls through to `mine`). */
+  async initVaultKeys(vaultId: string, body: VaultKeyInit): Promise<"created" | "already-keyed"> {
+    try {
+      await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/init`, { body });
+      return "created";
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) return "already-keyed";
+      throw e;
+    }
+  }
+
+  async getMyVaultKeys(vaultId: string): Promise<MyVaultKeys> {
+    const { data, status } = await this.request<MyVaultKeysBody | { pending: true }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/mine`,
+    );
+    if (status === 202 || (data as { pending?: boolean })?.pending) return { pending: true };
+    return { pending: false, ...(data as MyVaultKeysBody) };
+  }
+
+  async listVaultKeyRequests(vaultId: string): Promise<VaultKeyRequest[]> {
+    const { data } = await this.request<VaultKeyRequest[]>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/requests`,
+    );
+    return Array.isArray(data) ? data : [];
+  }
+
+  /** `vkBase64` proves we hold the key; sent only as `X-Baalda-VK`. */
+  async postVaultKeyWrap(vaultId: string, wrap: VaultKeyWrapPost, vkBase64: string): Promise<void> {
+    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/wraps`, {
+      body: wrap,
+      headers: { [VAULT_KEY_HEADER]: vkBase64 },
+    });
+  }
+
+  async putMyKeys(body: AccountKeysBody): Promise<void> {
+    await this.request("PUT", "/api/me/keys", { body });
+  }
+
+  /** null when this account has no keys yet (404). */
+  async getMyKeys(): Promise<AccountKeysBody | null> {
+    try {
+      return (await this.request<AccountKeysBody>("GET", "/api/me/keys")).data;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  async putDeviceKey(deviceId: string, privWrapped: string): Promise<void> {
+    await this.request("PUT", `/api/me/devices/${encodeURIComponent(deviceId)}/key`, { body: { privWrapped } });
+  }
+
   // ---- low-level request --------------------------------------------------
 
   private async request<T>(
@@ -1535,6 +1651,8 @@ export class ApiClient {
        * that never finishes deciding whether to delete files.
        */
       timeoutMs?: number;
+      /** Extra headers (never logged). */
+      headers?: Record<string, string>;
     } = {},
   ): Promise<{ data: T; authToken: string | null; status: number }> {
     const url = new URL(this.baseUrl + path);
@@ -1558,6 +1676,7 @@ export class ApiClient {
       /* leave unset */
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    Object.assign(headers, this.vaultKeyHeaders(path), opts.headers);
     let bodyInit: string | undefined;
     if (opts.body !== undefined) {
       headers["Content-Type"] = "application/json";

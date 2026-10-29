@@ -50,15 +50,29 @@ describe("vk_check", () => {
     expect(check.length).toBe(1 + 2 + 12 + "baalda-vk-check-v1".length + 16);
   });
 
-  it("matches the server's construction (AES-256-GCM, AAD bd1|vaults|vk_check|id|id)", async () => {
+  it("matches the server's fixed vector byte for byte", async () => {
+    const vk = new Uint8Array(32).fill(1);
+    const check = await makeVkCheck(vk, "vault-test", 1, new Uint8Array(12).fill(2));
+    const hex = Array.from(check, (b) => b.toString(16).padStart(2, "0")).join("");
+    expect(hex).toBe(
+      "01000102020202020202020202020265b7a8252e36ec8bb8e1dfa039c4a99fd4848d5c82188690770e1fd0970fb3d74f7a",
+    );
+    expect(await verifyVk(vk, "vault-test", check)).toBe(true);
+  });
+
+  it("binds the header into the GCM additional data", async () => {
     const vk = new Uint8Array(32).fill(9);
     const check = await makeVkCheck(vk, "abc", 1);
+    const relabelled = check.slice();
+    relabelled[2] = 2; // claim generation 2
+    expect(await verifyVk(vk, "abc", relabelled)).toBe(false);
     const key = await crypto.subtle.importKey("raw", vk, "AES-GCM", false, ["decrypt"]);
+    const aad = new Uint8Array([...check.slice(0, 15), ...new TextEncoder().encode("bd1|vaults|vk_check|abc|abc")]);
     const plain = await crypto.subtle.decrypt(
       {
         name: "AES-GCM",
         iv: check.slice(3, 15),
-        additionalData: new TextEncoder().encode("bd1|vaults|vk_check|abc|abc"),
+        additionalData: aad,
       },
       key,
       check.slice(15),

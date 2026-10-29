@@ -8,6 +8,8 @@ import { create } from "zustand";
 import * as ipc from "./lib/ipc";
 import { DOCUMENTS_BLOCKED_TEXT, isDocumentsDenied } from "./lib/vault/folderErrors";
 import { bridgeManager } from "./lib/bridge";
+import { resetVaultKeySessions } from "./lib/vaultKeys/session";
+import { clearVaultKeyCache } from "./lib/vaultKeys/store";
 import {
   colorsAdopted,
   markColorsAdopted,
@@ -3494,6 +3496,9 @@ export const useStore = create<AppStore>((set, get) => ({
     // reconcile/pull with a token that is about to be revoked.
     leaveVaultSync();
     await authManager.signOut();
+    // Vault keys belong to the account: drop every in-memory copy.
+    resetVaultKeySessions();
+    clearVaultKeyCache();
     // A queued shared link belongs to the account that clicked it.
     clearPendingNoteLink();
     // Ditto a queued invitation and the card describing it: an invitation is
@@ -3593,6 +3598,9 @@ export const useStore = create<AppStore>((set, get) => ({
       // fails (the address could not be saved) falls back to it intact.
       leaveVaultSync();
       set({ syncEnabled: false });
+      // Vault keys are per server: drop every in-memory copy before switching.
+      resetVaultKeySessions();
+      clearVaultKeyCache();
       let session: SessionInfo | null;
       try {
         // Clears the old bearer before exposing the new base URL.

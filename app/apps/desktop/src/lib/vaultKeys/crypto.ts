@@ -7,9 +7,11 @@
 //   keychain on each device and, wrapped by the recovery phrase, on the server.
 //
 // vk_check (must stay byte-compatible with the server's format)
-//   AES-256-GCM (WebCrypto) under VK, plaintext = ASCII "baalda-vk-check-v1",
-//   AAD = "bd1|vaults|vk_check|<vaultId>|<vaultId>".
+//   AES-256-GCM (WebCrypto) under VK, plaintext = ASCII "baalda-vk-check-v1".
 //   Layout: 0x01 | u16 BE generation | 12-byte nonce | ciphertext | 16-byte tag.
+//   GCM additional data = the 15 header bytes (0x01 | generation | nonce)
+//   followed by the ASCII "bd1|vaults|vk_check|<vaultId>|<vaultId>", one buffer.
+//   Pinned by a fixed vector shared with the server (crypto.test.ts).
 //
 // sealedVk (desktop↔desktop only; the server never opens it)
 //   An anonymous sealed box in the spirit of libsodium's crypto_box_seal, built
@@ -119,28 +121,27 @@ async function aesKey(vk: Uint8Array, usage: KeyUsage): Promise<CryptoKey> {
 }
 
 /** Seal the check constant under VK (the server's `vk_check`). */
+/** `nonce` is for the fixed test vector only; production always draws one. */
 export async function makeVkCheck(
   vk: Uint8Array,
   vaultId: string,
   generation: number,
+  nonce: Uint8Array = randomBytes(GCM_NONCE),
 ): Promise<Uint8Array> {
   if (!Number.isInteger(generation) || generation < 0 || generation > 0xffff) {
     throw new Error("generation must be a u16");
   }
-  const nonce = randomBytes(GCM_NONCE);
+  if (nonce.length !== GCM_NONCE) throw new Error("nonce must be 12 bytes");
+  const header = concat(Uint8Array.of(VERSION, (generation >> 8) & 0xff, generation & 0xff), nonce);
   const key = await aesKey(vk, "encrypt");
   const sealed = new Uint8Array(
     await globalThis.crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: buf(nonce), additionalData: buf(vkCheckAad(vaultId)), tagLength: 128 },
+      { name: "AES-GCM", iv: buf(nonce), additionalData: buf(concat(header, vkCheckAad(vaultId))), tagLength: 128 },
       key,
       buf(enc.encode(VK_CHECK_PLAINTEXT)),
     ),
   );
-  const header = new Uint8Array(3);
-  header[0] = VERSION;
-  header[1] = (generation >> 8) & 0xff;
-  header[2] = generation & 0xff;
-  return concat(header, nonce, sealed);
+  return concat(header, sealed);
 }
 
 /** The generation a `vk_check` was made for, or null when it is malformed. */
@@ -159,7 +160,7 @@ export async function verifyVk(vk: Uint8Array, vaultId: string, check: Uint8Arra
         {
           name: "AES-GCM",
           iv: buf(check.subarray(3, VK_CHECK_HEADER)),
-          additionalData: buf(vkCheckAad(vaultId)),
+          additionalData: buf(concat(check.subarray(0, VK_CHECK_HEADER), vkCheckAad(vaultId))),
           tagLength: 128,
         },
         key,
