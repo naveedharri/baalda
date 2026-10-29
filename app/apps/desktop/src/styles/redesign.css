@@ -392,3 +392,12 @@ html:not([data-theme="dark"]) .editor-wrap .cm-scroller { padding-top: 40px; }
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'%3E%3Cpath d='M7 3h7l4 4v14H7z'/%3E%3Cpath d='M14 3v4h4'/%3E%3C/svg%3E") center / contain no-repeat;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'%3E%3Cpath d='M7 3h7l4 4v14H7z'/%3E%3Cpath d='M14 3v4h4'/%3E%3C/svg%3E") center / contain no-repeat;
 }
+
+/* The header row is a containment box, so its pill would paint under the
+   later white page in WebKit. Lift the whole row above it. */
+html:not([data-theme="dark"]) .main-header { position: relative; z-index: 10; }
+/* [[links]] carry an inner highlight span too. */
+html:not([data-theme="dark"]) .cm-editor .cm-wikilink * {
+  color: inherit !important;
+  text-decoration: none !important;
+}
