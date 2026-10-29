@@ -1609,3 +1609,18 @@ html:not([data-theme="dark"]) .rd-prof .sm-host .avatar,
 html:not([data-theme="dark"]) .rd-prof .avatar { width: 28px !important; height: 28px !important; }
 html:not([data-theme="dark"]) .account-popover > .rd-prof { padding: 8px 6px 8px 6px; }
 html:not([data-theme="dark"]) .account-popover > .rd-prof { padding-top: 15px; padding-bottom: 1px; gap: 8px; }
+
+/* One colour per status, used on every status icon. */
+.s-online { --st: #3f8850; --st-bg: #dff3e5; }
+.s-smoke { --st: #5f6b7a; --st-bg: #e7eaee; }
+.s-coffee { --st: #8e6347; --st-bg: #f1e3d6; }
+.s-lunch { --st: #c4621f; --st-bg: #fde6d6; }
+.s-meeting { --st: #3b5fc7; --st-bg: #e3e8fb; }
+.s-focus { --st: #6a4fe0; --st-bg: #ece6ff; }
+.s-brb { --st: #b07a10; --st-bg: #fff1c9; }
+.rd-status-quick[class*="s-"] { color: var(--st); }
+.rd-status-quick[class*="s-"]:hover { background: var(--st-bg); color: var(--st); }
+.rd-status-set-icon[class*="s-"] { color: var(--st) !important; }
+.rd-status-btn[class*="s-"] { color: var(--st); }
+.rd-status-btn[class*="s-"]:hover { background: var(--st-bg); color: var(--st); }
+.rd-status-btn[class*="s-"].on { background: var(--st); color: #fff; }

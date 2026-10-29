@@ -40,7 +40,7 @@ export function StatusPicker() {
             Update your status
           </button>
           {(["smoke", "coffee", "focus"] as const).map((id) => (
-            <button key={id} type="button" className="rd-status-quick" title={items.find((i) => i.id === id)?.label} onClick={() => set(id, clearAfter)}>
+            <button key={id} type="button" className={`rd-status-quick s-${id}`} title={items.find((i) => i.id === id)?.label} onClick={() => set(id, clearAfter)}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: ICONS[id] }} />
             </button>
           ))}
@@ -48,7 +48,7 @@ export function StatusPicker() {
       ) : (
         <div className="rd-status-field is-set">
           <button type="button" className="rd-status-field-main" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-            <svg className="rd-status-set-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: ICONS[status] ?? ICONS.online }} />
+            <svg className={`rd-status-set-icon s-${status}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: ICONS[status] ?? ICONS.online }} />
             <span className="rd-status-set-text">
               <b>{current!.label}</b>
               {left !== null && <small> · {left >= 60 ? `${Math.round(left / 60)} h` : `${left} min`}</small>}
