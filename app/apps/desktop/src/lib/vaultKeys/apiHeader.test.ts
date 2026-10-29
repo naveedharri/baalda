@@ -70,3 +70,24 @@ describe("409 key_required", () => {
     );
   });
 });
+
+describe("vault-scoped calls whose path does not name the vault", () => {
+  it("MCP token mint and public links carry the open vault's key", async () => {
+    const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+    const api = new ApiClient({
+      baseUrl: "http://s",
+      token: "t",
+      fetchImpl: async (url, init) => {
+        seen.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
+        return new Response(JSON.stringify({ id: "x", token: "mcp_1", link: null }), { status: 200 });
+      },
+    });
+    api.setVaultKeyResolver((id) => (id === "v1" ? "S0VZ" : null));
+    await api.createMcpToken("n", "v1");
+    await api.createPublicLink("d1", "v1");
+    await api.getPublicLink("d1", "v1");
+    await api.createMcpToken("n"); // no vault: no key
+    expect(seen.slice(0, 3).map((s) => s.headers[VAULT_KEY_HEADER])).toEqual(["S0VZ", "S0VZ", "S0VZ"]);
+    expect(seen[3].headers[VAULT_KEY_HEADER]).toBeUndefined();
+  });
+});

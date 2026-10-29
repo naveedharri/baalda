@@ -18,6 +18,8 @@ import { publicKeyFromPrivate as generateAccountKeypairPub } from "./crypto";
 import { createVaultKeySession, resetVaultKeySessions, type VaultKeySessionDeps } from "./session";
 
 /** A fake server that holds only what the real one would: blobs, never keys. */
+type InitAnswer = "created" | "already-keyed" | "not-ready" | "pending-mismatch";
+
 function fakeServer() {
   let me: AccountKeysBody | null = null;
   const vaults = new Map<string, { vkCheck: string; generation: number; wraps: Map<string, string> }>();
@@ -35,7 +37,7 @@ function fakeServer() {
   const deviceKeys = new Map<string, string>();
   let caller = "u1";
   const api = {
-    initVaultKeys: vi.fn(async (vaultId: string, b: VaultKeyInit) => {
+    initVaultKeys: vi.fn(async (vaultId: string, b: VaultKeyInit): Promise<InitAnswer> => {
       if (vaults.has(vaultId)) return "already-keyed" as const;
       vaults.set(vaultId, {
         vkCheck: b.vkCheck,
@@ -77,7 +79,7 @@ function fakeServer() {
       pendingDevices = pendingDevices.filter((d) => d.deviceId !== deviceId);
     }),
     registerPendingVaultKey: vi.fn(
-      async (vaultId: string, b: { vkCheck: string; generation: number; deviceId: string }) => {
+      async (vaultId: string, b: { vkCheck: string; generation: number; deviceId: string }, _vk: string) => {
         const have = conv.claims.get(vaultId);
         // Idempotent for the same check; any other check is a second claimer.
         if (have && have.vkCheck !== b.vkCheck) return "claimed" as const;
@@ -88,6 +90,7 @@ function fakeServer() {
     getAllowlistCandidates: vi.fn(async () => conv.candidates.slice()),
     postAllowlist: vi.fn(async (vaultId: string, entries: { kind: string; id: string; mac: string }[], header: string) => {
       conv.allowlists.push({ vaultId, entries, header });
+      return { rejected: [] as string[] };
     }),
     getConversionReady: vi.fn(async (_vaultId: string, header: string) => {
       conv.readyPolls.push(header);
@@ -524,6 +527,20 @@ describe("converting an existing vault", () => {
     const vk = keys.vks.get("v1")!;
     expect(await s.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
     expect(keys.vks.get("v1")).toBe(vk);
+  });
+
+  it("init refused as not ready keeps waiting; a pending mismatch adopts nothing", async () => {
+    const { srv, keys, s } = await ownerSetup();
+    srv.conv.allowed = true;
+    srv.conv.ready = true;
+    srv.api.initVaultKeys.mockResolvedValueOnce("not-ready");
+    expect(await s.convertVault("v1")).toBe("waiting-ready");
+    srv.api.initVaultKeys.mockResolvedValueOnce("pending-mismatch");
+    expect(await s.convertVault("v1")).toBe("claimed-elsewhere");
+    expect(s.headerFor("v1")).toBeNull();
+    expect(keys.setVaultKey).toHaveBeenCalledTimes(1); // the one key, kept
+    // Every conversion call carried the key.
+    for (const call of srv.api.registerPendingVaultKey.mock.calls) expect(call[2]).toBe(toBase64(keys.vks.get("v1")!));
   });
 
   it("another device holds the claim (409): adopt nothing, never init", async () => {

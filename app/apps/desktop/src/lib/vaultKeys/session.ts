@@ -47,7 +47,10 @@ import {
 } from "./crypto";
 
 export interface VaultKeysApi {
-  initVaultKeys(vaultId: string, body: VaultKeyInit): Promise<"created" | "already-keyed">;
+  initVaultKeys(
+    vaultId: string,
+    body: VaultKeyInit,
+  ): Promise<"created" | "already-keyed" | "not-ready" | "pending-mismatch">;
   getMyVaultKeys(vaultId: string): Promise<MyVaultKeys>;
   listVaultKeyRequests(vaultId: string): Promise<VaultKeyRequest[]>;
   postVaultKeyWrap(vaultId: string, wrap: VaultKeyWrapPost, vkBase64: string): Promise<void>;
@@ -61,9 +64,10 @@ export interface VaultKeysApi {
   registerPendingVaultKey(
     vaultId: string,
     body: { vkCheck: string; generation: number; deviceId: string },
+    vkBase64: string,
   ): Promise<"registered" | "claimed">;
-  getAllowlistCandidates(vaultId: string): Promise<AllowlistCandidate[]>;
-  postAllowlist(vaultId: string, entries: AllowlistEntry[], vkBase64: string): Promise<void>;
+  getAllowlistCandidates(vaultId: string, vkBase64: string): Promise<AllowlistCandidate[]>;
+  postAllowlist(vaultId: string, entries: AllowlistEntry[], vkBase64: string): Promise<{ rejected: string[] }>;
   getConversionReady(vaultId: string, vkBase64: string): Promise<boolean>;
 }
 
@@ -344,16 +348,20 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const generation = 1;
     const vkCheck = toBase64(await makeStableVkCheck(vk, vaultId, generation));
     const vkB64 = toBase64(vk);
-    const claim = await api.registerPendingVaultKey(vaultId, { vkCheck, generation, deviceId: deps.deviceId() });
+    const claim = await api.registerPendingVaultKey(vaultId, { vkCheck, generation, deviceId: deps.deviceId() }, vkB64);
     if (claim === "claimed") return "claimed-elsewhere";
 
-    const candidates = await api.getAllowlistCandidates(vaultId);
+    // Re-run on every poll: credentials minted while pending must be listed too.
+    const candidates = await api.getAllowlistCandidates(vaultId, vkB64);
     const entries: AllowlistEntry[] = candidates.map((c) => ({
       kind: c.kind,
       id: c.id,
       mac: toBase64(allowlistMac(vk!, c.id, c.hash)),
     }));
-    await api.postAllowlist(vaultId, entries, vkB64);
+    if (entries.length) {
+      const { rejected } = await api.postAllowlist(vaultId, entries, vkB64);
+      if (rejected.length) console.warn(`[vault-keys] ${rejected.length} allowlist entr(y/ies) rejected; retrying next poll`);
+    }
     if (!(await api.getConversionReady(vaultId, vkB64))) return "waiting-ready";
 
     const result = await api.initVaultKeys(vaultId, {
@@ -361,6 +369,9 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       generation,
       sealedVkForSelf: toBase64(sealVkTo(publicKeyFromPrivate(priv), vk)),
     });
+    if (result === "not-ready") return "waiting-ready";
+    // Our check is not the pending one: another device's claim stands.
+    if (result === "pending-mismatch") return "claimed-elsewhere";
     if (result === "already-keyed") {
       // Our own earlier init (lost answer) verifies with our key; anyone
       // else's does not, and then their wrap arrives through `keys/mine`.
