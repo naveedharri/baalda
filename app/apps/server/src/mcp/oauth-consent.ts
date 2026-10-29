@@ -100,7 +100,9 @@ export async function consentFor(id: string, userId: string, db: Queryable = def
     [id, userId],
   );
   const r = rows[0];
-  if (!r) return null;
+  // Approved but the keys are gone (server restarted): nothing can finish it,
+  // so it reads as expired and the page tells the person to start again.
+  if (!r || (r.approved_at && !hasConsentKeys(r.id))) return null;
   return {
     id: r.id,
     clientId: r.client_id,
