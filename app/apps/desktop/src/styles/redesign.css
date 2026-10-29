@@ -1189,3 +1189,32 @@ html:not([data-theme="dark"]) .identity-line1 { font-size: var(--fs-md); }
 /* Tree performance: rows repaint on every expand/collapse, so keep them cheap. */
 html:not([data-theme="dark"]) .filetree-scroll .tree-row { transition: background 90ms linear; }
 html:not([data-theme="dark"]) .filetree-scroll .tree-row .tree-glyph { transition: none; }
+
+/* ============================================================
+   Sidebar blends in (Slack-style): the vault is a plain title,
+   rows are flat with a soft tint, nothing floats as a card.
+   ============================================================ */
+html:not([data-theme="dark"]) .sidebar-header-id {
+  background: transparent;
+  box-shadow: none;
+  padding: 2px 4px;
+  border-radius: var(--radius-md);
+}
+html:not([data-theme="dark"]) .sidebar-header-id:hover { background: rgba(11, 10, 16, 0.04); }
+html:not([data-theme="dark"]) .sidebar-header-id .vault-tile { width: 30px !important; height: 30px !important; border-radius: 8px !important; }
+html:not([data-theme="dark"]) .vault-name { font-size: var(--fs-lg); font-weight: 700; }
+html:not([data-theme="dark"]) .vault-path { font-size: var(--fs-xs); }
+
+/* Rows: flat, a soft tint when open, no white card or shadow. */
+html:not([data-theme="dark"]) .tree-row.selected,
+html:not([data-theme="dark"]) .tree-row.selected:hover {
+  background: var(--accent-soft) !important;
+  box-shadow: none !important;
+  color: var(--text-primary);
+}
+html:not([data-theme="dark"]) .tree-row.selected::before { display: none; }
+html:not([data-theme="dark"]) .home-sidebar-row.selected { background: var(--accent-soft); box-shadow: none; }
+
+/* Account row and Set a home: flat too. */
+html:not([data-theme="dark"]) .acct, html:not([data-theme="dark"]) .identity-bar { background: transparent; box-shadow: none; }
+html:not([data-theme="dark"]) .home-sidebar-row.is-unset { outline-width: 1px; }
