@@ -463,6 +463,21 @@ export function createSyncServer(
           `[sync] failed to persist an update for ${data.documentName}; the client stays ahead and will re-push:`,
           err,
         );
+        // W3: a doc loaded BEFORE its vault was keyed has no key to seal with,
+        // so every later edit is refused here — yet it already sits in this
+        // in-memory doc and was broadcast. Left loaded, a keyed teammate would
+        // attach to text storage never got, and the author would never re-send
+        // it (the server's in-memory state vector already covers it). Drop the
+        // doc: every client reconnects (presenting the key), the doc reloads
+        // from storage, and each client's sync re-pushes what storage lacks.
+        if (err instanceof KeyRequiredError && !docCrypto.get(data.document)) {
+          try {
+            data.instance.closeConnections(data.documentName);
+            void Promise.resolve(data.instance.unloadDocument(data.document)).catch(() => {});
+          } catch (resetErr) {
+            console.error(`[sync] could not reset ${data.documentName} after key_required:`, resetErr);
+          }
+        }
         return;
       }
       // Re-derive links + embedding for this note (debounced, best-effort).

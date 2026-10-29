@@ -3,7 +3,8 @@ import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { config } from "../config.js";
 import { vaultKeyCache } from "../crypto/key-cache.js";
-import { KeyRequiredError } from "../crypto/transport.js";
+import { KeyRequiredError, loadVkCheck } from "../crypto/transport.js";
+import { verifyVk } from "../crypto/vk-check.js";
 import { inc } from "../metrics/sync-metrics.js";
 import {
   assertWritableWithoutKey,
@@ -705,6 +706,15 @@ async function compactOnce(docId: string, db: Queryable, given?: DocCrypto): Pro
       const vaultId = await vaultOfDoc(docId, db);
       const held = vaultId ? vaultKeyCache.get(vaultId) : null;
       if (!vaultId || !held) return;
+      // The cache copy must still be the vault's CURRENT key (check and
+      // generation), exactly as the backfill's `heldCrypto` demands: after a
+      // generation bump a stale cached key would seal a new snapshot nobody
+      // holding only the new key can open. Defer instead (log left as is).
+      const state = await loadVkCheck(vaultId, db);
+      if (!state || state.generation !== held.generation || !verifyVk(held.key, vaultId, state.vkCheck)) {
+        held.key.fill(0);
+        return;
+      }
       cachedCopy = held.key;
       crypto = { vaultId, key: held.key, generation: held.generation };
     }

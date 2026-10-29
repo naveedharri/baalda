@@ -50,7 +50,13 @@ async function getBytes(name: string): Promise<Uint8Array | null> {
 }
 
 async function setBytes(name: string, bytes: Uint8Array): Promise<void> {
-  await io.set(name, toBase64(bytes));
+  const b64 = toBase64(bytes);
+  await io.set(name, b64);
+  // Read back PAST the cache: a keychain that reports success but kept nothing
+  // (or something else) must fail here, before a caller registers this key
+  // with the server. Otherwise a conversion could claim a key no device holds,
+  // and the next run's fresh key would be refused by that claim forever.
+  if ((await io.get(name)) !== b64) throw new Error("the keychain did not keep the key");
   cache.set(name, bytes);
 }
 

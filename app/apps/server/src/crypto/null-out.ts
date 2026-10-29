@@ -180,10 +180,13 @@ async function batch(
   switch (table) {
     case "doc_updates": {
       const { rows } = await db.query<{ id: string; doc_id: string; update: Buffer; update_enc: Buffer }>(
-        `SELECT id::text AS id, doc_id, update, update_enc FROM doc_updates
-          WHERE doc_id IN ${VAULT_DOCS} AND id > $2::bigint
-            AND update IS NOT NULL AND update_enc IS NOT NULL
-          ORDER BY id LIMIT $3`,
+        // ORDER BY the bigint COLUMN (qualified): a bare `id` would sort by the
+        // text alias ("10" < "9"), and the numeric keyset cursor then skipped
+        // every row numerically below a batch's lexicographic last id.
+        `SELECT u.id::text AS id, u.doc_id, u.update, u.update_enc FROM doc_updates u
+          WHERE u.doc_id IN ${VAULT_DOCS} AND u.id > $2::bigint
+            AND u.update IS NOT NULL AND u.update_enc IS NOT NULL
+          ORDER BY u.id LIMIT $3`,
         [c.vaultId, after ?? "0", limit],
       );
       for (const r of rows) {

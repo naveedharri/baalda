@@ -35,6 +35,13 @@ export function aadFor(table: string, column: string, vaultId: string, rowKey: s
 
 function checkKey(key: Buffer): void {
   if (key.length !== KEY_BYTES) throw new Error(`vault key must be ${KEY_BYTES} bytes`);
+  // An all-zero key is a buffer some caller already zeroed (`fill(0)`) while
+  // a write still held it. Sealing under it would round-trip (every verifier
+  // here opens with the same buffer) yet no real key could ever open the row:
+  // a whole note made unreadable. Refuse it; the caller fails closed.
+  let any = 0;
+  for (let i = 0; i < key.length; i++) any |= key[i]!;
+  if (any === 0) throw new Error("vault key is all zeros (a zeroed buffer); refusing to use it");
 }
 
 /**
