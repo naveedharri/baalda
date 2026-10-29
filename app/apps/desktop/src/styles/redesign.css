@@ -2315,3 +2315,13 @@ html[data-theme="dark"] .modal.auth-dialog {
   border-color: rgba(255, 248, 236, 0.08) !important;
   box-shadow: 0 1px 0 rgba(255, 248, 236, 0.05) inset, 0 30px 70px -24px rgba(0, 0, 0, 0.7) !important;
 }
+
+/* ---- Welcome to workspace: a crossfade, not a cut ---- */
+@keyframes rd-ghost-out { to { opacity: 0; transform: scale(1.015); } }
+@keyframes rd-app-in { from { opacity: 0; transform: scale(0.992); } to { opacity: 1; transform: none; } }
+@keyframes rd-side-in { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: no-preference) {
+  .rd-ghost { animation: rd-ghost-out 380ms var(--ease) both; }
+  body:has(.rd-ghost) .app .sidebar { animation: rd-side-in 420ms var(--ease) both; }
+  body:has(.rd-ghost) .app .main { animation: rd-fade 420ms var(--ease) both; }
+}
