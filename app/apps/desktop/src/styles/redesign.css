@@ -1486,10 +1486,10 @@ html:not([data-theme="dark"]) .local-sync-label { display: flex; min-width: 0; l
 html:not([data-theme="dark"]) .local-sync-label b { font-weight: 500; font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 html:not([data-theme="dark"]) .local-sync-label small { display: none; }
 html:not([data-theme="dark"]) .local-sync-btn {
-  margin-left: auto; flex: none; height: 22px; padding: 0 8px; border-radius: 6px;
-  background: var(--accent) !important; color: #fff !important; font: 500 11.5px var(--font-body); text-decoration: none !important;
+  margin: 0 0 0 auto !important; flex: none; height: 20px; padding: 0 6px !important; border-radius: 5px;
+  background: transparent !important; color: var(--accent) !important; font: 600 11px var(--font-body) !important; text-decoration: none !important;
 }
-html:not([data-theme="dark"]) .local-sync-btn:hover:not(:disabled) { background: var(--accent-hover) !important; }
+html:not([data-theme="dark"]) .local-sync-btn:hover:not(:disabled) { background: rgba(124, 92, 255, 0.1) !important; }
 
 .rd-viewonly { padding: 8px 8px 8px 16px; gap: 12px; font-size: 13.5px; }
 .rd-viewonly:not(:has(.rd-viewonly-ask)) { padding-right: 16px; }
