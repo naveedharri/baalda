@@ -1134,3 +1134,4 @@ html:not([data-theme="dark"]) .mcp-token-dialog .confirm-actions {
 }
 html:not([data-theme="dark"]) .mcp-token-dialog > .confirm-actions { margin-left: 0; margin-right: 0; }
 html:not([data-theme="dark"]) .mcp-token-dialog input { margin-top: var(--sp-3); }
+html:not([data-theme="dark"]) .mcp-token-dialog .mcp-block-value { padding-right: 40px; }
