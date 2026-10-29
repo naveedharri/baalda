@@ -1348,3 +1348,92 @@ html:not([data-theme="dark"]) .account-popover > .menu-item { padding: 4px 8px; 
 html:not([data-theme="dark"]) .account-popover > .menu-item .menu-icon { width: 16px !important; height: 16px !important; padding: 0 !important; margin: 0 12px; }
 html:not([data-theme="dark"]) .account-popover .menu-sep { margin: 4px 8px; }
 html:not([data-theme="dark"]) .vault-switcher .vault-card.current { background: rgba(11, 10, 16, 0.06) !important; }
+
+/* ============================================================
+   Professional pass: inline forms in the switcher, Vaults page
+   ============================================================ */
+
+/* Switcher "Vault name / Create" and "Join code / Join": one field with the
+   button inside it, a calm focus ring, no browser-green outline. */
+html:not([data-theme="dark"]) .menu-create-org {
+  position: relative; display: flex; align-items: center; gap: 0;
+  margin: 2px 4px; padding: 3px; border-radius: 10px;
+  background: var(--bg-subtle); box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.08);
+  transition: box-shadow 120ms ease, background 120ms ease;
+}
+html:not([data-theme="dark"]) .menu-create-org:focus-within {
+  background: #fff; box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft);
+}
+html:not([data-theme="dark"]) .menu-create-org input {
+  flex: 1; min-width: 0; height: 30px; padding: 0 8px;
+  border: 0 !important; outline: none !important; box-shadow: none !important;
+  background: transparent !important; font: 13px var(--font-body); color: var(--text-primary);
+}
+html:not([data-theme="dark"]) .menu-create-org input::placeholder { color: #0b0a1066; }
+html:not([data-theme="dark"]) .menu-create-org button.primary.sm {
+  height: 28px; padding: 0 12px; border-radius: 8px; font-size: 12.5px; font-weight: 500;
+  box-shadow: none; flex: none;
+}
+html:not([data-theme="dark"]) .menu-create-org button.primary.sm:disabled { background: #0b0a1014; color: #0b0a1066; opacity: 1; }
+
+/* ---- Account settings → Vaults ---- */
+html:not([data-theme="dark"]) .account-vaults-head,
+html:not([data-theme="dark"]) .settings-content .subhead {
+  font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: #0b0a1088;
+  display: flex; align-items: center;
+}
+html:not([data-theme="dark"]) .vault-hdr-btn,
+html:not([data-theme="dark"]) .account-vaults-head-actions button,
+html:not([data-theme="dark"]) .settings-content .subhead button {
+  height: 32px; padding: 0 12px; border-radius: 9px; font: 500 13px var(--font-body);
+  text-transform: none; letter-spacing: 0; box-shadow: none;
+}
+html:not([data-theme="dark"]) .vault-hdr-btn.secondary,
+html:not([data-theme="dark"]) .settings-content .subhead .ghost-pill,
+html:not([data-theme="dark"]) .settings-content .subhead button.secondary {
+  background: #fff; color: var(--text-primary); border: 0; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1);
+}
+
+/* Vault cards: a clean tile with the icon, name and one status line. */
+html:not([data-theme="dark"]) .vault-grid { gap: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+html:not([data-theme="dark"]) .vault-grid-card {
+  background: #fff; border: 0; border-radius: 14px; padding: 14px;
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.04);
+  transition: box-shadow 140ms ease, transform 140ms ease; min-height: 0;
+}
+html:not([data-theme="dark"]) .vault-grid-card:hover { box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1), 0 10px 24px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px); }
+html:not([data-theme="dark"]) .vault-grid-card.current { box-shadow: 0 0 0 1.5px var(--text-primary), 0 1px 2px rgba(11, 10, 16, 0.04); }
+html:not([data-theme="dark"]) .vault-grid-card .vault-tile { width: 36px !important; height: 36px !important; border-radius: 9px !important; }
+html:not([data-theme="dark"]) .vault-grid-name { font: 600 14px var(--font-body); margin-top: 12px; }
+html:not([data-theme="dark"]) .vault-grid-foot { margin-top: 8px; }
+html:not([data-theme="dark"]) .vault-switch-chip {
+  font: 500 11.5px var(--font-body); padding: 3px 8px; border-radius: 99px;
+  background: var(--bg-subtle); color: var(--text-secondary); border: 0;
+}
+html:not([data-theme="dark"]) .vault-grid-card:not(.current) .vault-switch-chip { background: var(--accent-soft); color: #4a2fc7; }
+
+/* Folder location: one field with its actions inside. */
+html:not([data-theme="dark"]) .join-code-row {
+  background: #fff; border-radius: 12px; padding: 6px 6px 6px 14px; gap: 6px;
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.08);
+}
+html:not([data-theme="dark"]) .join-code-row .vault-root-path { background: transparent !important; padding: 0; font-size: 12.5px; flex: 1; }
+html:not([data-theme="dark"]) .join-code-row .link-btn { height: 30px; padding: 0 10px; border-radius: 8px; font-size: 12.5px; }
+html:not([data-theme="dark"]) .join-code-row .link-btn:hover { background: var(--bg-subtle); }
+html:not([data-theme="dark"]) .settings-content .subhead .member-access-view-btn { height: 26px; width: 30px; padding: 0; box-shadow: none; background: transparent; display: grid; place-items: center; }
+html:not([data-theme="dark"]) .settings-content .subhead .member-access-view-btn.is-active { background: #fff; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1); }
+html:not([data-theme="dark"]) .settings-content .subhead .member-access-view-btn svg { width: 15px; height: 15px; }
+html:not([data-theme="dark"]) .rd-settings-close:focus:not(:focus-visible) { outline: none; box-shadow: var(--rd-card-shadow); }
+
+/* View-only banner: reads as a warning. Soft amber, a strong amber edge,
+   amber lock, still slim. */
+html:not([data-theme="dark"]) .editor-lockbanner {
+  display: flex !important; width: auto !important;
+  padding: 8px 14px 8px 8px !important;
+  background: #fff7e6 !important;
+  border-radius: 12px !important;
+  box-shadow: inset 0 0 0 1px #f1d79a, inset 3px 0 0 #e0a21a !important;
+}
+html:not([data-theme="dark"]) .editor-lockbanner-icon { background: #fde6a8 !important; color: #8a5a00 !important; }
+html:not([data-theme="dark"]) .editor-lockbanner-text strong { color: #6b4500; }
+html:not([data-theme="dark"]) .editor-lockbanner-sub { color: #8a6a2a !important; }
