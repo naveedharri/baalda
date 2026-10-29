@@ -35,6 +35,16 @@ function textAad(vaultId: string, docId: string, sha: string): Buffer {
   return aadFor("note_texts", "content", vaultId, `${docId}:${sha}`);
 }
 
+/** Seal one stored text (backfill; `storeNoteText` seals the same way). */
+export function sealNoteText(c: DocCrypto, docId: string, sha: string, content: string): Buffer {
+  return seal(c.key, textAad(c.vaultId, docId, sha), Buffer.from(content, "utf8"), c.generation);
+}
+
+/** Open a sealed stored text to its raw bytes (backfill verification). */
+export function openNoteTextBytes(c: DocCrypto, docId: string, sha: string, sealed: Buffer): Buffer {
+  return open(c.key, textAad(c.vaultId, docId, sha), sealed);
+}
+
 /** The sealed text of a `note_versions v` row (null for plaintext/inline rows). */
 export const VERSION_CONTENT_ENC = "CASE WHEN v.content IS NULL THEN t.content_enc END";
 /** Byte size of a `note_versions v` row's text, sealed or not, without the key. */

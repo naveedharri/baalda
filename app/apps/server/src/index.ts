@@ -23,6 +23,7 @@ import { backfillIndex, setLiveDocLookup } from "./index/indexer.js";
 import { backfillRefWindows } from "./blobs/ref-windows.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
+import { startCryptoBackfill, stopCryptoBackfill } from "./crypto/backfill.js";
 import { setLapseNotifier, startLapseScheduler, stopLapseScheduler } from "./billing/lapse.js";
 import { formatDocName } from "./sync/doc-name.js";
 import { setTrashActivityPublisher } from "./trash/activity.js";
@@ -396,6 +397,9 @@ async function main() {
   startBlobGc();
   // Trash retention: notes past `purge_after` lose their CRDT, versions and row.
   startTrashPurge();
+  // W3: seals a keyed vault's pre-existing plaintext rows while a member's
+  // key is held. No-op with BAALDA_VAULT_KEYS off.
+  startCryptoBackfill();
   // Billing lapse (account read-only): on a flip, the same ACL fan-out as
   // PUT team-access, and close the collection's live sockets so
   // `onAuthenticate` re-admits them with the new readOnly.
@@ -418,6 +422,7 @@ async function main() {
     versionCapture?.stop();
     stopBlobGc();
     stopTrashPurge();
+    stopCryptoBackfill();
     stopLapseScheduler();
     stopInvitationSweep();
     syncWss.close();

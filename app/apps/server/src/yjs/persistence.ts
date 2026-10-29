@@ -776,12 +776,14 @@ async function compactLocked(docId: string, db: Queryable, crypto: DocCrypto | u
     // W3 data-loss rule: a keyed compaction never deletes PLAINTEXT rows.
     // Folding a legacy plaintext row into a sealed snapshot would null the
     // plaintext, which is a separate, delayed, reversible step (not built).
-    // Mixed logs therefore stay as they are; reads still work.
+    // Mixed logs therefore stay as they are; reads still work. A row the
+    // backfill (`crypto/backfill.ts`) has DUAL-written (plaintext kept beside
+    // its verified sealed copy) still counts as plaintext: compacting it would
+    // write `snapshot = NULL` and delete the row, i.e. a null-out.
     if (crypto) {
       const snapRow = snap.rows[0];
       const plaintextLeft =
-        (snapRow && snapRow.snapshot !== null && !snapRow.snapshot_enc) ||
-        raw.rows.some((r) => !r.update_enc);
+        (snapRow && snapRow.snapshot !== null) || raw.rows.some((r) => r.update !== null);
       if (plaintextLeft) return;
     }
     const opened = openParts(docId, crypto, snap.rows[0], raw.rows);
