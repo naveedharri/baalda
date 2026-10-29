@@ -10,6 +10,11 @@
 import type { Context, MiddlewareHandler } from "hono";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
+import {
+  isVaultKeyCapableVersion,
+  reportedClientVersion,
+  vaultKeysOutdatedBody,
+} from "../http/client-version.js";
 import { vaultKeysEnabled } from "./config.js";
 import { KEY_BYTES } from "./envelope.js";
 import { verifyVk } from "./vk-check.js";
@@ -112,6 +117,11 @@ export async function requireVaultKey(
   if (vk && verifyVk(vk, vaultId, state.vkCheck)) {
     return { ok: true, key: vk, keyed: true, generation: state.generation };
   }
+  // A build that predates vault keys never sees `key_required` (it has never
+  // handled it): it gets the 426 it already treats as "stop and update".
+  if (!isVaultKeyCapableVersion(reportedClientVersion(c))) {
+    return { ok: false, response: c.json(vaultKeysOutdatedBody(), 426) };
+  }
   return {
     ok: false,
     response: c.json(
@@ -119,6 +129,30 @@ export async function requireVaultKey(
       409,
     ),
   };
+}
+
+/**
+ * For the routes that do not read the key themselves but lead to content of a
+ * keyed vault (the sync and vault-channel token mints, registration without
+ * state, bootstrap session create, blob intent/complete): a 426
+ * `client_outdated` response when `vaultId` is keyed and this request comes
+ * from a build without vault keys, else null. "Capable" = a verified
+ * `X-Baalda-VK` OR a reported version >= `VAULT_KEYS_MIN_DESKTOP`; a missing
+ * version is old. Unkeyed vault or flag off: null, at the cost of nothing
+ * (unkeyed vaults behave exactly as before for every client).
+ */
+export async function refuseKeyIncapableClient(
+  c: Context,
+  vaultId: string,
+  db: Queryable = defaultPool,
+): Promise<Response | null> {
+  if (!vaultKeysEnabled()) return null;
+  if (isVaultKeyCapableVersion(reportedClientVersion(c))) return null;
+  const state = await loadVkCheck(vaultId, db);
+  if (!state) return null;
+  const vk = (c.get("presentedVk" as never) as Buffer | undefined) ?? decodeVk(c.req.header(VK_HEADER));
+  if (vk && verifyVk(vk, vaultId, state.vkCheck)) return null;
+  return c.json(vaultKeysOutdatedBody(), 426);
 }
 
 /** The request's verified key as a persistence `DocCrypto`, or undefined (unkeyed). */

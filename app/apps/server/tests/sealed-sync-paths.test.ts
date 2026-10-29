@@ -7,6 +7,7 @@ import { pool } from "../src/db/pool.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import type { DocCrypto } from "../src/crypto/doc-crypto.js";
 import { appendUpdate, compact, loadDocState, sealVerifyHooks } from "../src/yjs/persistence.js";
+import { VAULT_KEYS_MIN_DESKTOP } from "../src/http/client-version.js";
 import { testAppDeps } from "./helpers/app.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
@@ -57,7 +58,13 @@ async function setup(keyed: boolean) {
 function post(user: TestUser, path: string, body: unknown, vk?: Buffer) {
   return app.request(`/api${path}`, {
     method: "POST",
-    headers: { ...authHeaders(user), "content-type": "application/json", ...(vk ? { "x-baalda-vk": b64(vk) } : {}) },
+    headers: {
+      ...authHeaders(user),
+      "content-type": "application/json",
+      // A vault-key build reports its version (`VAULT_KEYS_MIN_DESKTOP`).
+      "x-baalda-version": VAULT_KEYS_MIN_DESKTOP,
+      ...(vk ? { "x-baalda-vk": b64(vk) } : {}),
+    },
     body: JSON.stringify(body),
   });
 }
@@ -116,7 +123,9 @@ describe("sealed sync paths (W3)", () => {
 
   it("bootstrap page: keyed without key is 409 key_required", async () => {
     const s = await setup(true);
-    const res = await app.request(`/api/vaults/${s.vaultId}/bootstrap/whatever`, { headers: authHeaders(s.owner) });
+    const res = await app.request(`/api/vaults/${s.vaultId}/bootstrap/whatever`, {
+      headers: { ...authHeaders(s.owner), "x-baalda-version": VAULT_KEYS_MIN_DESKTOP },
+    });
     expect(res.status).toBe(409);
   });
 

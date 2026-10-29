@@ -9,6 +9,7 @@ import { revertVaultToCheckpoint } from "../src/versions/revert.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { vaultKeyCache } from "../src/crypto/key-cache.js";
 import { KeyRequiredError } from "../src/crypto/transport.js";
+import { VAULT_KEYS_MIN_DESKTOP } from "../src/http/client-version.js";
 import type { DocCrypto } from "../src/crypto/doc-crypto.js";
 import { memoryDocWriter, testAppDeps } from "./helpers/app.js";
 import { resetDb } from "./helpers/db.js";
@@ -50,7 +51,11 @@ describe("sealed versions and checkpoints (W3)", () => {
     await pool.end();
   });
 
-  const hdr = (withKey: boolean) => ({ ...authHeaders(owner), ...(withKey ? { "x-baalda-vk": vk.toString("base64") } : {}) });
+  const hdr = (withKey: boolean) => ({
+    ...authHeaders(owner),
+    "x-baalda-version": VAULT_KEYS_MIN_DESKTOP,
+    ...(withKey ? { "x-baalda-vk": vk.toString("base64") } : {}),
+  });
 
   it("versions: sealed at rest; list without key, read/revert need the key", async () => {
     const v1 = await recordVersion({ vaultId, docId, content: SECRET_V1, cause: "idle", authorId: owner.userId, crypto });

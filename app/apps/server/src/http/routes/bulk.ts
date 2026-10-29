@@ -23,7 +23,7 @@ import {
   type DocApplyItem,
 } from "../../sync/doc-batch.js";
 import { getSession } from "../session.js";
-import { docCryptoOf, requireVaultKey } from "../../crypto/transport.js";
+import { docCryptoOf, refuseKeyIncapableClient, requireVaultKey } from "../../crypto/transport.js";
 import type { DocCrypto } from "../../crypto/doc-crypto.js";
 import { ACCOUNT_READ_ONLY_BODY, ACCOUNT_READ_ONLY_MESSAGE, refusedForBilling } from "../../permissions/http-gates.js";
 import { ORIGIN_HEADER } from "./registry.js";
@@ -331,6 +331,9 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
   routes.post("/vaults/:vaultId/notes/batch", bodyLimit({ maxSize: 16 * 1024 * 1024 }), async (c) => {
     const auth = await gate(c);
     if (auth instanceof Response) return auth;
+    // A build without vault keys registers nothing in a keyed vault (426).
+    const outdated = await refuseKeyIncapableClient(c, auth.vaultId);
+    if (outdated) return outdated;
     const body = await c.req.json().catch(() => null);
     const items = readItems(body, config.batchMaxNotes);
     if (!Array.isArray(items)) return c.json(items, 400);
