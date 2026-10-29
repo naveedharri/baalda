@@ -49,6 +49,7 @@ import { vaultKeysEnabled } from "./config.js";
 import { openDocBytes, type DocCrypto } from "./doc-crypto.js";
 import { vaultKeyCache, type VaultKeyCache } from "./key-cache.js";
 import { encryptionStatus, heldCrypto, type BackfillCursors } from "./backfill.js";
+import { withDocWriteLock } from "../yjs/persistence.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 type ClientSource = Queryable & { connect: () => Promise<pg.PoolClient> };
@@ -89,7 +90,9 @@ export function plaintextRetentionMs(): number {
 export const nullOutHooks: {
   /** Runs after the compare passed, right before the guarded clearing write. */
   beforeWrite: (table: NullOutTable, rowKey: string) => Promise<void> | void;
-} = { beforeWrite: () => {} };
+  /** doc_updates / doc_snapshots only: runs holding the doc's write lock, right before the clear. */
+  whileDocLocked: (table: NullOutTable, rowKey: string) => Promise<void> | void;
+} = { beforeWrite: () => {}, whileDocLocked: () => {} };
 
 export interface NullOutCounts {
   cleared: number;
@@ -122,9 +125,21 @@ async function clear(
   params: unknown[],
   db: Queryable,
   counts: NullOutCounts,
+  docId?: string,
 ): Promise<void> {
   await nullOutHooks.beforeWrite(table, key);
-  const { rowCount } = await db.query(sql, params);
+  // A CRDT row is cleared under the doc's EXCLUSIVE lock, the one a compaction
+  // holds from its first read to its commit: a converting compaction that read
+  // this plaintext would otherwise fold it into its new dual row AFTER we
+  // cleared it (plaintext written back). Under the lock either the compaction
+  // committed first (the row is gone: 0 rows, its dual row is cleared on a
+  // later pass) or it starts after us and reads the cleared row.
+  const { rowCount } = docId
+    ? await withDocWriteLock(docId, db, async (q) => {
+        await nullOutHooks.whileDocLocked(table, key);
+        return q.query(sql, params);
+      })
+    : await db.query(sql, params);
   if (rowCount) {
     counts.cleared += rowCount;
     inc(`nullout.${table}.cleared`, rowCount);
@@ -203,6 +218,7 @@ async function batch(
           [r.id, r.update, r.update_enc],
           db,
           counts,
+          r.doc_id,
         );
       }
       return { rows: rows.length, last: rows.at(-1)?.id ?? after };
@@ -231,6 +247,7 @@ async function batch(
           [r.doc_id, r.snapshot, r.snapshot_enc, r.seq],
           db,
           counts,
+          r.doc_id,
         );
       }
       return { rows: rows.length, last: rows.at(-1)?.doc_id ?? after };
