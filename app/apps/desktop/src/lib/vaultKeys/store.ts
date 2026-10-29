@@ -16,10 +16,11 @@ export type SecretIo = {
   delete: (key: string) => Promise<void>;
 };
 
+// Resolved at call time, so importing this module never touches IPC.
 const tauriIo: SecretIo = {
-  get: ipc.vaultSecretGet,
-  set: ipc.vaultSecretSet,
-  delete: ipc.vaultSecretDelete,
+  get: (key) => ipc.vaultSecretGet(key),
+  set: (key, value) => ipc.vaultSecretSet(key, value),
+  delete: (key) => ipc.vaultSecretDelete(key),
 };
 
 let io: SecretIo = tauriIo;

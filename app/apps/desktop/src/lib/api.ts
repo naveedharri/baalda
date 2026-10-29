@@ -1564,6 +1564,16 @@ export class ApiClient {
   setKeyRequiredHandler(fn: ((vaultId: string) => Promise<boolean>) | null): void {
     this.keyRequiredHandler = fn;
   }
+  /** The verified base64 VK for a vault (vault channel `hello.vk`, per-doc
+   *  token suffix), or null. A secret: never log it. */
+  vaultKeyFor(vaultId: string): string | null {
+    return this.vaultKeyResolver ? this.vaultKeyResolver(vaultId) : null;
+  }
+  /** Ask the key session to make a vault's key ready (a socket `key_required`). */
+  async ensureVaultKeyFor(vaultId: string): Promise<boolean> {
+    return this.keyRequiredHandler ? this.keyRequiredHandler(vaultId).catch(() => false) : false;
+  }
+
   /** `X-Baalda-VK` for a vault-scoped path, or nothing. */
   private vaultKeyHeaders(path: string): Record<string, string> {
     const id = vaultIdFromPath(path);

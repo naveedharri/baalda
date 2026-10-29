@@ -52,6 +52,43 @@ const emit = (e: VaultKeyEvent) => {
   for (const cb of listeners) cb(e);
 };
 
+/**
+ * Vaults whose key this device KNOWS it lacks. While a vault is here every
+ * structural sync step pauses (`InboundHost.structurePaused`), exactly like a
+ * missing vault root: nothing is materialized, registered, moved or deleted
+ * until the key arrives. Local files and edits stay as they are.
+ */
+const blockedVaults = new Set<string>();
+const blockListeners = new Set<(vaultId: string, blocked: boolean) => void>();
+
+/** The states in which the vault is keyed but this device cannot use it. */
+export function blocksStructure(state: VaultKeyState): boolean {
+  return (
+    state.state === "waiting-for-teammate" ||
+    state.state === "needs-account-key" ||
+    state.state === "key-mismatch" ||
+    state.state === "security-warning"
+  );
+}
+
+export function isVaultKeyBlocked(vaultId: string | null | undefined): boolean {
+  return !!vaultId && blockedVaults.has(vaultId);
+}
+
+export function onVaultKeyBlockChange(cb: (vaultId: string, blocked: boolean) => void): () => void {
+  blockListeners.add(cb);
+  return () => blockListeners.delete(cb);
+}
+
+/** Record a vault's key state (exported for tests). */
+export function noteVaultKeyState(vaultId: string, state: VaultKeyState): void {
+  const was = blockedVaults.has(vaultId);
+  const now = blocksStructure(state);
+  if (now) blockedVaults.add(vaultId);
+  else blockedVaults.delete(vaultId);
+  if (was !== now) for (const cb of blockListeners) cb(vaultId, now);
+}
+
 /** Product switch for keying an UNKEYED vault (off until the rollout). */
 let keysAllowed = false;
 export function setVaultKeysAllowed(on: boolean): void {
@@ -105,6 +142,7 @@ async function runOnce(): Promise<void> {
   const devices = await c.session.pendingDevices();
   if (devices.length) emit({ kind: "pending-devices", devices });
   const state = await c.session.ensureVaultKey(vaultId);
+  noteVaultKeyState(vaultId, state);
   emit({ kind: "vault", vaultId, state });
   if (state.state !== "ready") return;
   const result = await c.session.serviceKeyRequests(vaultId);
@@ -141,6 +179,7 @@ export function vaultKeysOpened(opts: { userId: string; vaultId: string; orgId: 
 }
 
 export function vaultKeysClosed(): void {
+  blockedVaults.clear();
   if (!current) return;
   if (current.timer) clearInterval(current.timer);
   current.timer = null;
@@ -153,6 +192,7 @@ export async function vaultKeysEnsure(vaultId: string): Promise<boolean> {
   const c = current;
   if (!c) return false;
   const state = await c.session.ensureVaultKey(vaultId);
+  noteVaultKeyState(vaultId, state);
   emit({ kind: "vault", vaultId, state });
   return state.state === "ready";
 }

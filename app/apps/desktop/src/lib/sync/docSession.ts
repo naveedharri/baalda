@@ -30,7 +30,7 @@ import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
-import { vaultKeysClosed, vaultKeysNudge, vaultKeysOpened } from "../vaultKeys/runtime";
+import { isVaultKeyBlocked, vaultKeysClosed, vaultKeysNudge, vaultKeysOpened } from "../vaultKeys/runtime";
 import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
 import type { ActivityStatus } from "../prefs";
@@ -1691,7 +1691,7 @@ export class SyncManager implements InboundHost {
       this.registryPullBurstAt = now;
       this.registryPullGapOnly = gapDelayed;
     }
-    if (this.rootMissing) return;
+    if (this.rootMissing || isVaultKeyBlocked(this.registry.vaultId)) return;
     this.registryPullDueAt = dueAt;
     this.registryPullTimer = setTimeout(() => {
       const gapOnly = this.registryPullGapOnly;
@@ -1699,7 +1699,7 @@ export class SyncManager implements InboundHost {
       this.registryPullBurstAt = 0;
       this.registryPullDueAt = 0;
       this.registryPullGapOnly = false;
-      if (!scope.isCurrent() || this.rootMissing) return;
+      if (!scope.isCurrent() || this.structurePaused()) return;
       // Only teammates' frames asked, and a pull is already running: it may
       // have started before their change, so one more is owed — but after it
       // ends (plus the gap), never queued behind it back to back.
@@ -1966,7 +1966,7 @@ export class SyncManager implements InboundHost {
    */
   /** {@link InboundHost.mayRemoveRefusedEmptyFolders}: live, root present. */
   mayRemoveRefusedEmptyFolders(): boolean {
-    return this.isLive() && !this.rootMissing;
+    return this.isLive() && !this.structurePaused();
   }
 
   revocationAuthority(): boolean {
@@ -3380,9 +3380,10 @@ export class SyncManager implements InboundHost {
     return this.rootMissing;
   }
 
-  /** `InboundHost.structurePaused`: the registry's stop signal. */
+  /** `InboundHost.structurePaused`: the registry's stop signal. Also held
+   *  while this device knows it lacks the open (keyed) vault's key. */
   structurePaused(): boolean {
-    return this.rootMissing;
+    return this.rootMissing || isVaultKeyBlocked(this.registry.vaultId);
   }
 
   /** `InboundHost.confirmVaultRoot`. */
@@ -6758,8 +6759,13 @@ export class SyncManager implements InboundHost {
     this.vaultEngineId = vaultId;
     markOnce("channel-start");
     // Client-held vault keys (no-op unless the server has `vault-keys`).
+    // Never allowed to break the channel start.
     if (this.presence?.id && scope.orgId) {
-      vaultKeysOpened({ userId: this.presence.id, vaultId, orgId: scope.orgId });
+      try {
+        vaultKeysOpened({ userId: this.presence.id, vaultId, orgId: scope.orgId });
+      } catch (e) {
+        console.warn("[vault-keys] could not start", e instanceof Error ? e.message : e);
+      }
     }
     // Reflect "connecting" the moment we switch into a vault, so the light
     // moves off a stale value before the socket reports back.
