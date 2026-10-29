@@ -40,6 +40,8 @@ describe("vault key store", () => {
     expect([...map.keys()].sort()).toEqual(["baalda.keys:https://s|u1", "vk:https://s:v1"]);
 
     clearVaultKeyCache();
+    // Each write read itself back once (past the cache); count reads from here.
+    vi.mocked(io.get).mockClear();
     expect(await getVaultKey("https://s", "v1")).toEqual(vk);
     expect(await getVaultKey("https://s", "v1")).toEqual(vk);
     expect(io.get).toHaveBeenCalledTimes(1);
