@@ -117,5 +117,8 @@ vaults work for every version exactly as before.
 ## Limits
 
 - One key per vault. Per-note and per-folder access is still enforced by the server, not by separate keys.
-- Removing a member does not rotate the key.
+- Removing a member does not rotate the key. Their wraps are deleted on the server, and their desktop deletes
+  its copy of that vault's key from the keychain once the server confirms the membership ended or the vault
+  is gone (a network error never counts; the account key stays). What happens to their local files is
+  unchanged by vault keys.
 - A solo owner who never saved the vault key and loses every device cannot recover the server copy.

@@ -95,6 +95,8 @@ export function keychainVaultKeyStore(serverUrl: string, userId: string) {
     setDeviceLinkKey: (key: Uint8Array) => setBytes(deviceLinkKeyName(serverUrl, userId), key),
     deleteDeviceLinkKey: () => remove(deviceLinkKeyName(serverUrl, userId)),
     setVaultKey: (vaultId: string, vk: Uint8Array) => setVaultKey(serverUrl, vaultId, vk),
+    /** Membership ended / vault gone only (`forget.ts`); never the account key. */
+    deleteVaultKey: (vaultId: string) => deleteVaultKey(serverUrl, vaultId),
     // Through the same session cache as the keys (no extra keychain prompts).
     isVaultKeyProvisional: async (vaultId: string) =>
       (await getBytes(provisionalVaultKeyName(serverUrl, vaultId)))?.[0] === 1,

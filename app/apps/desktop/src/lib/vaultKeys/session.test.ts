@@ -16,6 +16,7 @@ import {
 } from "./crypto";
 import { publicKeyFromPrivate as generateAccountKeypairPub } from "./crypto";
 import { createVaultKeySession, resetVaultKeySessions, type VaultKeySessionDeps } from "./session";
+import { forgetVaultKeyMaterial } from "./forget";
 
 /** A fake server that holds only what the real one would: blobs, never keys. */
 type InitAnswer = "created" | "already-keyed" | "not-ready" | "pending-mismatch";
@@ -123,6 +124,7 @@ function fakeKeys() {
     setAccountPrivateKey: vi.fn(async (k: Uint8Array) => void (account = k)),
     getVaultKey: vi.fn(async (id: string) => vks.get(id) ?? null),
     setVaultKey: vi.fn(async (id: string, vk: Uint8Array) => void vks.set(id, vk)),
+    deleteVaultKey: vi.fn(async (id: string) => void vks.delete(id)),
     provisional,
     isVaultKeyProvisional: vi.fn(async (id: string) => provisional.has(id)),
     setVaultKeyProvisional: vi.fn(async (id: string, on: boolean) => void (on ? provisional.add(id) : provisional.delete(id))),
@@ -718,5 +720,39 @@ describe("database attacker (no vault key)", () => {
     });
     expect(await s.ensureVaultKey("v1")).toEqual({ state: "key-mismatch" });
     expect(keys.vks.get("v1")).toEqual(theirs);
+  });
+});
+
+describe("membership ended: forgetting a vault key", () => {
+  it("drops the verified key and the keychain copy + marker; the account key and other vaults stay", async () => {
+    const srv = fakeServer();
+    const keys = fakeKeys();
+    const s = session({ api: srv.api, keys });
+    await s.ensureAccountKeys();
+    await s.ensureVaultKey("v1");
+    await s.ensureVaultKey("v2");
+    keys.provisional.add("v1");
+    const account = await keys.getAccountPrivateKey();
+
+    s.forgetVerified("v1");
+    expect(await forgetVaultKeyMaterial(keys, ["v1"])).toEqual(["v1"]);
+    expect(s.headerFor("v1")).toBeNull();
+    expect(keys.vks.has("v1")).toBe(false);
+    expect(keys.provisional.has("v1")).toBe(false);
+    expect(s.headerFor("v2")).not.toBeNull();
+    expect(keys.vks.has("v2")).toBe(true);
+    expect(await keys.getAccountPrivateKey()).toBe(account);
+
+    // Re-invited later: the wrap on the server opens again (nothing lost).
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
+  });
+
+  it("one keychain failure never stops the others", async () => {
+    const keys = fakeKeys();
+    keys.vks.set("a", new Uint8Array(32));
+    keys.vks.set("b", new Uint8Array(32));
+    keys.deleteVaultKey.mockRejectedValueOnce(new Error("keychain locked"));
+    expect(await forgetVaultKeyMaterial(keys, ["a", "b"])).toEqual(["b"]);
+    expect(keys.vks.has("a")).toBe(true);
   });
 });

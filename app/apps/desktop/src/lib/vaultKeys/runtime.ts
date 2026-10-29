@@ -15,6 +15,7 @@ import {
   type VaultKeySession,
   type VaultKeyState,
 } from "./session";
+import { forgetOrgVaultIds, forgetVaultKeyMaterial, rememberOrgVault, vaultIdsForOrg } from "./forget";
 import { keychainPinStore, keychainVaultKeyStore } from "./store";
 
 export const SERVICE_INTERVAL_MS = 2 * 60 * 1000;
@@ -220,6 +221,7 @@ export function vaultKeysNudge(): void {
 /** The vault's sync channel started: key it, then keep servicing requests. */
 export function vaultKeysOpened(opts: { userId: string; vaultId: string; orgId: string }): void {
   const c = sessionFor(opts.userId);
+  rememberOrgVault(api.getBaseUrl(), opts.userId, opts.orgId, opts.vaultId);
   if (c.timer) clearInterval(c.timer);
   c.vaultId = opts.vaultId;
   c.orgId = opts.orgId;
@@ -261,6 +263,7 @@ export async function vaultKeysGate(opts: {
     if (!features.has("vault-keys")) return "proceed";
     const c = sessionFor(opts.userId);
     c.orgId = opts.orgId;
+    rememberOrgVault(api.getBaseUrl(), opts.userId, opts.orgId, opts.vaultId);
     return c.session.gateVaultOpen(opts.vaultId);
   };
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -308,4 +311,34 @@ export async function vaultKeysEnsure(vaultId: string): Promise<boolean> {
 /** The open session, for the approval/restore screens. */
 export function currentVaultKeySession(): VaultKeySession | null {
   return current?.session ?? null;
+}
+
+/**
+ * Membership of `orgId` ended, or the vault is gone, per a DEFINITIVE server
+ * answer (callers: `handleMembershipLost`, `deleteRemoteVault`,
+ * `unsyncLocalTeardown`; never a network error). Deletes this device's key and
+ * provisional marker for every collection id known for the org (+ the folder
+ * stamp's `vaultIdHint`) and forgets the in-memory verified key and state. The
+ * account key, device-link key and teammate pins are never touched. Local files
+ * are not this function's business: their fate is the caller's, unchanged.
+ */
+export async function vaultKeysMembershipEnded(opts: {
+  /** Default: the shared API client's server (the one the session keys use). */
+  serverUrl?: string;
+  userId: string;
+  orgId: string;
+  vaultIdHint?: string | null;
+}): Promise<string[]> {
+  const serverUrl = opts.serverUrl ?? api.getBaseUrl();
+  const ids = new Set(vaultIdsForOrg(serverUrl, opts.userId, opts.orgId));
+  if (opts.vaultIdHint) ids.add(opts.vaultIdHint);
+  const sameScope = current?.key === `${serverUrl}|${opts.userId}`;
+  for (const id of ids) {
+    if (sameScope) current?.session.forgetVerified(id);
+    lastStates.delete(id);
+    // A blocked vault STAYS blocked: an unblock would re-run its sync pass.
+  }
+  const done = await forgetVaultKeyMaterial(keychainVaultKeyStore(serverUrl, opts.userId), ids);
+  if (done.length === ids.size) forgetOrgVaultIds(serverUrl, opts.userId, opts.orgId);
+  return done;
 }

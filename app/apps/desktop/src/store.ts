@@ -9,7 +9,12 @@ import * as ipc from "./lib/ipc";
 import { DOCUMENTS_BLOCKED_TEXT, isDocumentsDenied } from "./lib/vault/folderErrors";
 import { bridgeManager } from "./lib/bridge";
 import { resetVaultKeySessions } from "./lib/vaultKeys/session";
-import { onVaultKeyBlockChange, VAULT_KEY_PAUSE_REASON, vaultKeysGate } from "./lib/vaultKeys/runtime";
+import {
+  onVaultKeyBlockChange,
+  VAULT_KEY_PAUSE_REASON,
+  vaultKeysGate,
+  vaultKeysMembershipEnded,
+} from "./lib/vaultKeys/runtime";
 import { clearVaultKeyCache } from "./lib/vaultKeys/store";
 import {
   colorsAdopted,
@@ -1242,6 +1247,29 @@ async function peekStampedOrgId(path: string): Promise<string | null> {
   return stamp?.organizationId ?? null;
 }
 
+/** The collection id `path`'s stamp names for `orgId` (else null). */
+async function stampedVaultIdFor(path: string | null, orgId: string): Promise<string | null> {
+  if (!path) return null;
+  const stamp = await ipc.peekVaultStamp(path).catch(() => null);
+  return stamp?.organizationId === orgId ? (stamp.serverVaultId ?? null) : null;
+}
+
+/**
+ * Membership of `orgId` ended or the vault is gone, per a definitive server
+ * answer the CALLER already has: forget this device's key for it (never the
+ * account key). Never throws; local files are untouched here.
+ */
+async function forgetVaultKeysForOrg(
+  userId: string | null | undefined,
+  orgId: string,
+  vaultIdHint: string | null,
+): Promise<void> {
+  if (!userId) return;
+  await vaultKeysMembershipEnded({ userId, orgId, vaultIdHint }).catch((e: unknown) =>
+    console.warn("[vault-keys] could not forget the vault key", e instanceof Error ? e.message : e),
+  );
+}
+
 /**
  * Wipe the open folder's sync identity out of `.context/config.json`.
  *
@@ -2037,11 +2065,15 @@ async function unsyncLocalTeardown(
 ): Promise<void> {
   const vault = get().vault;
   const isOpenFolder = vault != null && folderPath != null && vault.path === folderPath;
+  // Read BEFORE the stamp is cleared below. Every caller holds a definitive
+  // answer (the server confirmed the unsync, or `vault_not_found`).
+  const keyHint = await stampedVaultIdFor(folderPath, organizationId);
 
   if (isOpenFolder) {
     leaveVaultSync();
     await clearVaultStamp(vault, organizationId);
   }
+  await forgetVaultKeysForOrg(get().session?.user.id, organizationId, keyHint);
   forgetOrgVault(organizationId);
   forgetLastVault(organizationId);
   forgetTeamAccessCache(get().serverUrl, organizationId);
@@ -4599,6 +4631,8 @@ export const useStore = create<AppStore>((set, get) => ({
       .refreshVault()
       .catch((e: unknown) => console.warn("[vault] refresh before membership cleanup failed", e));
     if (get().organizations.some((o) => o.id === organizationId)) return;
+    // Read before the folder (and its stamp) is deleted below.
+    const keyHint = await stampedVaultIdFor(path, organizationId);
 
     const vault = get().vault;
     const isOpen =
@@ -4624,6 +4658,9 @@ export const useStore = create<AppStore>((set, get) => ({
     forgetTeamAccessCache(get().serverUrl, organizationId);
     const userId = get().session?.user.id;
     if (userId) forgetMembership(get().serverUrl, userId, organizationId);
+    // The membership is confirmed gone (re-listed above): this device's key for
+    // the vault goes too. Wraps are deleted server-side; the account key stays.
+    await forgetVaultKeysForOrg(userId, organizationId, keyHint);
 
     if (path) {
       // Rust refuses links, roots, the home and vaults folders, and any folder
@@ -4689,6 +4726,12 @@ export const useStore = create<AppStore>((set, get) => ({
     const result = await authManager.api.deleteRemoteVault(organizationId);
     // This device's folder, captured BEFORE the teardown forgets the binding.
     const folderPath = readOrgVaults()[organizationId] ?? null;
+    // The vault is gone for everyone (server confirmed): forget its key here.
+    await forgetVaultKeysForOrg(
+      get().session?.user.id,
+      organizationId,
+      await stampedVaultIdFor(folderPath, organizationId),
+    );
     // Then tear down the same local state as a device-level removal.
     await get().removeVaultLocally(organizationId);
     // The vault is gone for everyone, so this device's copy goes to the Trash

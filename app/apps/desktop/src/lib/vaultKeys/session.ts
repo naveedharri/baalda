@@ -572,6 +572,11 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     ensureVaultKey,
     serviceKeyRequests,
     headerFor,
+    /** Membership ended / vault gone: stop serving this vault's key (memory only;
+     *  the keychain copy goes through `forget.ts`). */
+    forgetVerified(vaultId: string) {
+      verified.delete(vaultId);
+    },
     clear() {
       verified.clear();
       accountMismatch = false;
