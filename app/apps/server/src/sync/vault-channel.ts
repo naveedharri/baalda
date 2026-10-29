@@ -125,6 +125,8 @@ export interface VaultChannelDeps {
  * Mirrored in `desktop/src/lib/sync/vaultSyncEngine.ts` as `WS_CLOSE_*`.
  */
 export const WS_CLOSE_UNAUTHORIZED = 4401;
+/** Live updates held per connection while its first ACL read is in flight. */
+export const PRE_ACL_UPDATES_MAX = 256;
 export const WS_CLOSE_PROTOCOL = 4400;
 
 export const REGISTRY_COALESCE_MS = 120;
@@ -536,6 +538,24 @@ class VaultConnection {
    *  clients would misparse as doc updates (see {@link HelloFrame.caps}). */
   private caps = new Set<string>();
   private readable = new Set<string>();
+  /**
+   * ACL refreshes run concurrently (registry-changed, acl-changed, reauth each
+   * start one) and resolve out of order. Only a result at least as new as the
+   * last one applied may replace `readable`: an older read finishing last would
+   * otherwise re-admit a doc a newer refresh just dropped, and backfill it.
+   */
+  private aclRefreshStarted = 0;
+  private aclRefreshApplied = 0;
+  /**
+   * The connect-time readable set is read AFTER subscribing to the vault topic,
+   * so an ACL change committed while the hello was in flight is never missed.
+   * A refresh that lands before that first read finishes only marks the set
+   * dirty; it is read once more right after.
+   */
+  private aclLoaded = false;
+  private aclDirty = false;
+  /** Live updates heard before that first read lands; replayed through the ACL gate (bounded). */
+  private preAclUpdates: Array<{ docId: string; update: Uint8Array }> | null = [];
   private unsubscribe: (() => void) | null = null;
   /** The user-addressed topic (`invitations` cap only, sync/user-events.ts). */
   private unsubscribeUser: (() => void) | null = null;
@@ -701,13 +721,6 @@ class VaultConnection {
       }
     }
 
-    try {
-      this.readable = await this.deps.listReadableDocs(this.userId, this.vaultId);
-    } catch (err) {
-      console.error("Vault channel ACL resolve failed:", err);
-      return this.fail("acl resolve failed");
-    }
-
     // Subscribe BEFORE backfill so no live update is missed during the drain;
     // Yjs updates are idempotent/commutative, so overlap with the snapshot is
     // harmless (both apply, the client converges).
@@ -724,6 +737,33 @@ class VaultConnection {
       return;
     }
     this.unsubscribe = off;
+
+    // The readable set is read only now, AFTER subscribing: an access change
+    // that commits during the auth I/O above is either seen by this read or
+    // arrives as a pubsub message (which marks the set dirty until the read
+    // lands, and forces one more). Read first, it could be missed for good and
+    // the backfill would hand over a doc access was just removed from.
+    try {
+      for (;;) {
+        this.aclDirty = false;
+        const seq = ++this.aclRefreshStarted;
+        const read = await this.deps.listReadableDocs(this.userId, this.vaultId);
+        if (seq >= this.aclRefreshApplied) {
+          this.aclRefreshApplied = seq;
+          this.readable = read;
+        }
+        if (!this.aclDirty) break;
+      }
+      this.aclLoaded = true;
+    } catch (err) {
+      this.preAclUpdates = null;
+      console.error("Vault channel ACL resolve failed:", err);
+      return this.fail("acl resolve failed");
+    }
+    const held = this.preAclUpdates;
+    this.preAclUpdates = null;
+    if (this.closed || this.ws.readyState !== this.ws.OPEN) return;
+    for (const u of held ?? []) if (this.readable.has(u.docId)) this.forwardLive(u.docId, u.update);
 
     // Events addressed to this USER (an invitation to another vault) ride
     // whichever vault channel they have open. Opt-in by cap: an old client
@@ -1119,6 +1159,10 @@ class VaultConnection {
       else this.coveredTruncated = true;
     }
     if (!diff || diff.upToDate) return; // nothing new for this client
+    // ...and again AFTER the read: access can be removed while `loadDiff` runs
+    // (a large doc takes a while), and a frame sent after the `drop` would hand
+    // a now-restricted doc's content to a member who lost it.
+    if (this.closed || !this.readable.has(docId)) return;
     this.sendBinary(encodeWsUpdate(docId, diff.update));
   }
 
@@ -1151,6 +1195,16 @@ class VaultConnection {
     const msg = decodePubsub(payload);
     if (!msg) return;
     if (msg.type === "update") {
+      if (!this.aclLoaded) {
+        // Subscribed, but the readable set is not read yet: hold it (a
+        // live-only client has no backfill to cover it) and judge it after.
+        if (this.preAclUpdates && this.preAclUpdates.length < PRE_ACL_UPDATES_MAX) {
+          this.preAclUpdates.push({ docId: msg.docId, update: msg.update });
+        } else {
+          this.preAclUpdates = null; // overflow: the backfill / next connect re-sends
+        }
+        return;
+      }
       if (this.readable.has(msg.docId)) this.forwardLive(msg.docId, msg.update);
       return;
     }
@@ -1321,6 +1375,11 @@ class VaultConnection {
     opts: { reauth?: "always" | "if-changed" | "never"; trigger?: object } = {},
   ): Promise<void> {
     if (!this.userId || !this.vaultId) return;
+    if (!this.aclLoaded) {
+      this.aclDirty = true;
+      return;
+    }
+    const seq = ++this.aclRefreshStarted;
     let next: Set<string>;
     try {
       next = await this.readableFor(opts.trigger);
@@ -1328,6 +1387,9 @@ class VaultConnection {
       console.error("Vault channel ACL refresh failed:", err);
       return;
     }
+    // A newer refresh already applied a fresher read: this one is stale.
+    if (seq < this.aclRefreshApplied || this.closed) return;
+    this.aclRefreshApplied = seq;
     const prev = this.readable;
     this.readable = next;
     // A doc that fell out because it was DELETED is not a revocation: the

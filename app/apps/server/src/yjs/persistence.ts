@@ -99,6 +99,21 @@ async function withDocLock<T>(
 }
 
 /**
+ * Run `fn` holding the doc's EXCLUSIVE advisory lock in one transaction, the
+ * lock every compaction holds from its first read to its commit. The crypto
+ * null-out clears a plaintext log/snapshot row under it, so a compaction that
+ * read that plaintext can never re-insert it after the clear (and a compaction
+ * that starts later reads the cleared row).
+ */
+export function withDocWriteLock<T>(
+  docId: string,
+  db: Queryable,
+  fn: (q: Queryable) => Promise<T>,
+): Promise<T> {
+  return withDocLock(docId, db, "exclusive", (q) => fn(q));
+}
+
+/**
  * Run a best-effort write inside a transaction WITHOUT risking the transaction.
  *
  * A failed statement poisons a Postgres transaction: everything after it, COMMIT

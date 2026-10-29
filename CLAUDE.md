@@ -1051,6 +1051,11 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   after the request. MCP and links work with no desktop online.
 - **Device linking:** a new device of the same account shows a code that an existing device approves;
   a session alone never yields keys. There is no account recovery kit.
+- **Churn brakes** (`crypto/key-churn.ts`): ≤3 account-key replacements per user per 24 h (counted from
+  `user_key_history.replaced_at` under the `user_keys` row lock; first create and same-key re-PUT free),
+  ≤10 new device registrations and ≤10 new approvals per user per hour (in process). 429
+  `rate_limited` + Retry-After + plain message, nothing stored; desktop toasts it (`rateLimitedMessage`,
+  runtime `startFreshAccountKey`).
 - **Owner vault key:** owners reveal it in Vault Settings → General ("Show vault key"); no popup, never
   emailed. "Restore with vault key" verifies against `vk_check`.
 - **Conversion gate + MCP upgrade** (`crypto/conversion.ts`): a device registers a pending key,
@@ -1086,7 +1091,9 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   is kept in place. `crypto/null-out.ts` (run from the backfill tick after `complete`) clears plaintext
   only when the backfill is complete, a fresh `encryptionStatus` is 0 and `VAULT_PLAINTEXT_RETENTION_DAYS`
   have passed: per row, open the sealed copy, compare byte for byte, clear under `WHERE plaintext =
-  original AND sealed = compared`; a mismatch keeps both (ids logged). Inline pre-038 version/checkpoint
+  original AND sealed = compared`; a mismatch keeps both (ids logged). `doc_updates`/`doc_snapshots`
+  clears run under the doc's EXCLUSIVE advisory lock (`withDocWriteLock`, the one compaction holds), so
+  a converting compaction can never fold a just-cleared row's plaintext back into its dual row. Inline pre-038 version/checkpoint
   texts are first sealed into `note_texts` by the backfill. At zero plaintext `phase = 'sealed'`;
   `keys/mine` reports `fullyEncrypted`/`plaintextRemaining` as last recorded (never counted per request).
   A keyed re-index leaves stale `note_index`/`blob_text` plaintext that never byte-matches; it is derived,

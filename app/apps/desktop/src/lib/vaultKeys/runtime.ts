@@ -7,6 +7,7 @@
 // server without the `vault-keys` feature.
 
 import { api } from "../auth/authManager";
+import { rateLimitedMessage } from "../api";
 import {
   createVaultKeySession,
   type AccountKeysState,
@@ -55,7 +56,9 @@ export type VaultKeyEvent =
   | { kind: "vault"; vaultId: string; state: VaultKeyState }
   | { kind: "serviced"; vaultId: string; result: ServiceResult }
   /** Another device asks to sign in as us: "Approve?" with its code. */
-  | { kind: "pending-devices"; devices: PendingDeviceView[] };
+  | { kind: "pending-devices"; devices: PendingDeviceView[] }
+  /** The server's churn brake refused a key step (429 rate_limited): its plain message. */
+  | { kind: "rate-limited"; message: string };
 
 const listeners = new Set<(e: VaultKeyEvent) => void>();
 /** UI: recovery kit, "<name>'s security key changed", the "given access" toast. */
@@ -208,7 +211,13 @@ export function vaultKeysNudge(): void {
     return;
   }
   c.running = runOnce()
-    .catch((e) => console.warn("[vault-keys] run failed", e instanceof Error ? e.message : e))
+    .catch((e) => {
+      // A linking device's registration hit the hourly brake: say so once
+      // per run; the next run retries (nothing was stored either side).
+      const limited = rateLimitedMessage(e);
+      if (limited) emit({ kind: "rate-limited", message: limited });
+      console.warn("[vault-keys] run failed", e instanceof Error ? e.message : e);
+    })
     .finally(() => {
       c.running = null;
       if (c.again && current === c) {
@@ -327,6 +336,26 @@ export async function vaultKeysEnsure(vaultId: string): Promise<boolean> {
 /** The open session, for the approval/restore screens. */
 export function currentVaultKeySession(): VaultKeySession | null {
   return current?.session ?? null;
+}
+
+/**
+ * Lost every device: start a new account key (`session.startFreshAccountKey`).
+ * The server is asked first, so a churn-brake refusal (429 rate_limited)
+ * changes nothing locally; its plain message goes to the toast.
+ */
+export async function startFreshAccountKey(): Promise<boolean> {
+  const session = current?.session;
+  if (!session) return false;
+  try {
+    return await session.startFreshAccountKey();
+  } catch (e) {
+    const limited = rateLimitedMessage(e);
+    if (limited) {
+      emit({ kind: "rate-limited", message: limited });
+      return false;
+    }
+    throw e;
+  }
 }
 
 /**

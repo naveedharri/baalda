@@ -45,6 +45,8 @@ export function VaultKeyPrompts() {
         push({ kind: "awaiting-device", code: e.state.code });
       } else if (e.kind === "account" && e.state.state === "security-warning") {
         toast("Your security key on the server does not match this computer. Vault keys are paused.", "error");
+      } else if (e.kind === "rate-limited") {
+        toast(e.message, "error");
       } else if (e.kind === "pending-devices") {
         for (const device of e.devices) push({ kind: "approve-device", device });
       } else if (e.kind === "serviced") {

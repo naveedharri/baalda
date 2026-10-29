@@ -30,6 +30,13 @@ import {
 } from "../../crypto/conversion.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
+import {
+  KEY_REPLACEMENT_WINDOW_MS,
+  MAX_KEY_REPLACEMENTS,
+  RATE_LIMITED,
+  plainWait,
+  takeKeyChurn,
+} from "../../crypto/key-churn.js";
 import { CLIENT_VERSION_HEADER, CLIENT_VERSION_PARAM, clientVersionPolicy, judgeClientVersion } from "../client-version.js";
 
 type Queryable = Pick<pg.Pool, "query">;
@@ -425,6 +432,7 @@ export function createVaultKeyRoutes(): Hono {
     // deleted), `key_changed_at` tells teammates, and their devices re-seal.
     const client = await pool.connect();
     let replaced = false;
+    let refusedFor = 0;
     try {
       await client.query("BEGIN");
       const { rows: cur } = await client.query<{ public_key: Buffer; priv_wrapped_recovery: Buffer | null; created_at: Date }>(
@@ -437,24 +445,49 @@ export function createVaultKeyRoutes(): Hono {
           [session.userId, publicKey, recovery],
         );
       } else if (!cur[0].public_key.equals(publicKey)) {
-        await client.query(
-          `INSERT INTO user_key_history (user_id, public_key, priv_wrapped_recovery, created_at)
-           VALUES ($1, $2, $3, $4)`,
-          [session.userId, cur[0].public_key, cur[0].priv_wrapped_recovery, cur[0].created_at],
+        // Churn brake (`crypto/key-churn.ts`): counted under the row lock taken
+        // above, so two racing replacements cannot both pass the last slot.
+        const { rows: recent } = await client.query<{ n: number; retry: number | null }>(
+          `SELECT count(*)::int AS n,
+                  ceil(extract(epoch FROM min(replaced_at) + make_interval(secs => $2::double precision) - now()))::int AS retry
+             FROM user_key_history
+            WHERE user_id = $1 AND replaced_at > now() - make_interval(secs => $2::double precision)`,
+          [session.userId, KEY_REPLACEMENT_WINDOW_MS / 1000],
         );
-        await client.query(
-          `UPDATE user_keys SET public_key = $2, priv_wrapped_recovery = $3, created_at = now(), key_changed_at = now()
-            WHERE user_id = $1`,
-          [session.userId, publicKey, recovery],
-        );
-        replaced = true;
+        if ((recent[0]?.n ?? 0) >= MAX_KEY_REPLACEMENTS) {
+          refusedFor = Math.max(1, recent[0]?.retry ?? 1);
+          await client.query("ROLLBACK");
+        } else {
+          await client.query(
+            `INSERT INTO user_key_history (user_id, public_key, priv_wrapped_recovery, created_at)
+             VALUES ($1, $2, $3, $4)`,
+            [session.userId, cur[0].public_key, cur[0].priv_wrapped_recovery, cur[0].created_at],
+          );
+          await client.query(
+            `UPDATE user_keys SET public_key = $2, priv_wrapped_recovery = $3, created_at = now(), key_changed_at = now()
+              WHERE user_id = $1`,
+            [session.userId, publicKey, recovery],
+          );
+          replaced = true;
+        }
       }
-      await client.query("COMMIT");
+      if (!refusedFor) await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK");
       throw err;
     } finally {
       client.release();
+    }
+    if (refusedFor) {
+      c.header("Retry-After", String(refusedFor));
+      return c.json(
+        {
+          error: `Your security key was replaced ${MAX_KEY_REPLACEMENTS} times in the last day. Try again in ${plainWait(refusedFor)}.`,
+          code: RATE_LIMITED,
+          retryAfter: refusedFor,
+        },
+        429,
+      );
     }
     return c.json({ saved: true, replaced });
   });
@@ -490,6 +523,20 @@ export function createVaultKeyRoutes(): Hono {
     );
     if ((pending[0]?.n ?? 0) >= MAX_PENDING_DEVICES) {
       return c.json({ error: "Too many devices waiting for approval", code: "too_many_pending" }, 429);
+    }
+    // Hourly brake on NEW registrations (an idempotent repeat answered above):
+    // denying and re-registering must not loop approval prompts at the person.
+    const budget = takeKeyChurn("device-register", session.userId);
+    if (!budget.ok) {
+      c.header("Retry-After", String(budget.retryAfter));
+      return c.json(
+        {
+          error: `Too many computers asked to sign in as you this hour. Try again in ${plainWait(budget.retryAfter)}.`,
+          code: RATE_LIMITED,
+          retryAfter: budget.retryAfter,
+        },
+        429,
+      );
     }
     await pool.query(
       `INSERT INTO user_device_registrations (user_id, device_id, public_key, name) VALUES ($1, $2, $3, $4)
@@ -535,6 +582,25 @@ export function createVaultKeyRoutes(): Hono {
       [session.userId, deviceId],
     );
     if (!reg[0]) return c.json({ error: "No such device waiting for approval", code: "unknown_device" }, 404);
+    // Hourly brake on NEW approvals; a repeat of an existing wrap is answered below unspent.
+    const { rows: had } = await pool.query(
+      "SELECT 1 FROM user_device_keys WHERE user_id = $1 AND device_id = $2",
+      [session.userId, deviceId],
+    );
+    if (!had[0]) {
+      const budget = takeKeyChurn("device-approve", session.userId);
+      if (!budget.ok) {
+        c.header("Retry-After", String(budget.retryAfter));
+        return c.json(
+          {
+            error: `Too many computers approved this hour. Try again in ${plainWait(budget.retryAfter)}.`,
+            code: RATE_LIMITED,
+            retryAfter: budget.retryAfter,
+          },
+          429,
+        );
+      }
+    }
     await pool.query(
       `INSERT INTO user_device_keys (user_id, device_id, priv_wrapped) VALUES ($1, $2, $3)
        ON CONFLICT (user_id, device_id) DO NOTHING`,
