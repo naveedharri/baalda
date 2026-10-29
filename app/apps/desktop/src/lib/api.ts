@@ -1588,8 +1588,8 @@ export class ApiClient {
   }
 
   /** `X-Baalda-VK` for a vault-scoped path, or nothing. */
-  private vaultKeyHeaders(path: string): Record<string, string> {
-    const id = vaultIdFromPath(path);
+  private vaultKeyHeaders(path: string, scope?: string | null): Record<string, string> {
+    const id = scope ?? vaultIdFromPath(path);
     const vk = id && this.vaultKeyResolver ? this.vaultKeyResolver(id) : null;
     return vk ? { [VAULT_KEY_HEADER]: vk } : {};
   }
@@ -1597,14 +1597,18 @@ export class ApiClient {
   // ---- Client-held vault keys (W3) ----------------------------------------
 
   /** 200 = keyed now; 409 = already keyed (caller falls through to `mine`). */
-  async initVaultKeys(vaultId: string, body: VaultKeyInit): Promise<"created" | "already-keyed"> {
+  async initVaultKeys(
+    vaultId: string,
+    body: VaultKeyInit,
+  ): Promise<"created" | "already-keyed" | "not-ready" | "pending-mismatch"> {
     try {
       await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/init`, { body });
       return "created";
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409 && (e.body as { code?: string })?.code === "already_keyed") {
-        return "already-keyed";
-      }
+      const code = e instanceof ApiError && e.status === 409 ? (e.body as { code?: string })?.code : undefined;
+      if (code === "already_keyed") return "already-keyed";
+      if (code === "conversion_not_ready") return "not-ready";
+      if (code === "pending_mismatch") return "pending-mismatch";
       throw e;
     }
   }
@@ -1670,9 +1674,13 @@ export class ApiClient {
   async registerPendingVaultKey(
     vaultId: string,
     body: { vkCheck: string; generation: number; deviceId: string },
+    vkBase64: string,
   ): Promise<"registered" | "claimed"> {
     try {
-      await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/pending`, { body });
+      await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/pending`, {
+        body,
+        headers: { [VAULT_KEY_HEADER]: vkBase64 },
+      });
       return "registered";
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) return "claimed";
@@ -1680,20 +1688,24 @@ export class ApiClient {
     }
   }
 
-  async getAllowlistCandidates(vaultId: string): Promise<AllowlistCandidate[]> {
+  async getAllowlistCandidates(vaultId: string, vkBase64: string): Promise<AllowlistCandidate[]> {
     const { data } = await this.request<AllowlistCandidate[] | { candidates?: AllowlistCandidate[] }>(
       "GET",
       `/api/vaults/${encodeURIComponent(vaultId)}/keys/allowlist-candidates`,
+      { headers: { [VAULT_KEY_HEADER]: vkBase64 } },
     );
     const list = Array.isArray(data) ? data : (data?.candidates ?? []);
     return list.filter((c) => typeof c?.id === "string" && typeof c?.hash === "string");
   }
 
-  async postAllowlist(vaultId: string, entries: AllowlistEntry[], vkBase64: string): Promise<void> {
-    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/allowlist`, {
-      body: { entries },
-      headers: { [VAULT_KEY_HEADER]: vkBase64 },
-    });
+  /** `rejected`: ids whose MAC the server could not verify (logged, retried next poll). */
+  async postAllowlist(vaultId: string, entries: AllowlistEntry[], vkBase64: string): Promise<{ rejected: string[] }> {
+    const { data } = await this.request<{ accepted?: number; rejected?: string[] }>(
+      "POST",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/allowlist`,
+      { body: { entries }, headers: { [VAULT_KEY_HEADER]: vkBase64 } },
+    );
+    return { rejected: Array.isArray(data?.rejected) ? data.rejected : [] };
   }
 
   /** Keeps the pending key warm on the server and asks whether init may run. */
@@ -1758,6 +1770,9 @@ export class ApiClient {
       headers?: Record<string, string>;
       /** Internal: this is the one retry after a `key_required` refusal. */
       keyRetry?: boolean;
+      /** The keyed vault this request belongs to when the path does not say
+       *  (MCP token mint, a note's public link): carries `X-Baalda-VK`. */
+      vaultScope?: string | null;
     } = {},
   ): Promise<{ data: T; authToken: string | null; status: number }> {
     const url = new URL(this.baseUrl + path);
@@ -1781,7 +1796,7 @@ export class ApiClient {
       /* leave unset */
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
-    Object.assign(headers, this.vaultKeyHeaders(path), opts.headers);
+    Object.assign(headers, this.vaultKeyHeaders(path, opts.vaultScope), opts.headers);
     let bodyInit: string | undefined;
     if (opts.body !== undefined) {
       headers["Content-Type"] = "application/json";
@@ -1840,7 +1855,7 @@ export class ApiClient {
         !opts.keyRetry &&
         (parsed as { code?: unknown } | undefined)?.code === KEY_REQUIRED_CODE
       ) {
-        const id = vaultIdFromPath(path);
+        const id = opts.vaultScope ?? vaultIdFromPath(path);
         const handler = this.keyRequiredHandler;
         if (id && handler && (await handler(id).catch(() => false))) {
           return this.request<T>(method, path, { ...opts, keyRetry: true });
@@ -2448,11 +2463,12 @@ export class ApiClient {
   }
 
   /** Mint a new MCP token. The `token` field is the plaintext — shown once. */
-  async createMcpToken(name: string): Promise<McpTokenRow & { token: string }> {
+  /** `vaultId`: the open keyed vault, so the token is wrapped from birth. */
+  async createMcpToken(name: string, vaultId?: string | null): Promise<McpTokenRow & { token: string }> {
     const { data } = await this.request<McpTokenRow & { token: string }>(
       "POST",
       "/api/mcp/tokens",
-      { body: { name } },
+      { body: { name }, vaultScope: vaultId },
     );
     return data;
   }
@@ -2480,19 +2496,21 @@ export class ApiClient {
     await this.request<unknown>("POST", "/api/bug-reports", { body: input });
   }
 
-  async createPublicLink(docId: string): Promise<PublicLink> {
+  async createPublicLink(docId: string, vaultId?: string | null): Promise<PublicLink> {
     const { data } = await this.request<PublicLink>(
       "POST",
       `/api/notes/${encodeURIComponent(docId)}/public-link`,
+      { vaultScope: vaultId },
     );
     return data;
   }
 
   /** The note's public link if one exists, else null. */
-  async getPublicLink(docId: string): Promise<PublicLink | null> {
+  async getPublicLink(docId: string, vaultId?: string | null): Promise<PublicLink | null> {
     const { data } = await this.request<{ link: PublicLink | null }>(
       "GET",
       `/api/notes/${encodeURIComponent(docId)}/public-link`,
+      { vaultScope: vaultId },
     );
     return data.link ?? null;
   }

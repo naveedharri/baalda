@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { syncManager } from "../lib/sync/docSession";
 import { createPortal } from "react-dom";
 import type { McpToolInfo, McpTokenRow } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
@@ -289,7 +290,7 @@ function NewMcpTokenDialog({
   const create = async () => {
     setError(null);
     try {
-      const minted = await authManager.api.createMcpToken(name.trim() || "MCP token");
+      const minted = await authManager.api.createMcpToken(name.trim() || "MCP token", syncManager.registry.vaultId);
       const { token, ...row } = minted;
       setCreated({ name: minted.name, token });
       onCreated(row);
