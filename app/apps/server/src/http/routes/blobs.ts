@@ -1,3 +1,4 @@
+import { sealBlobTextRow } from "../../index/sealed-index.js";
 import { docCryptoOf, requireVaultKey } from "../../crypto/transport.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Readable, Transform } from "node:stream";
@@ -1869,6 +1870,39 @@ blobRoutes.put("/vaults/:vaultId/blobs/:blobId/text", async (c) => {
     ? (body.chars as number)
     : stored.length;
   const source = typeof body.source === "string" && body.source ? body.source : "client";
+
+  // W3: a keyed vault's text is sealed with THIS request's key (409
+  // key_required without it; nothing stored). Only `search_enc` is written:
+  // an existing row's plaintext columns are left exactly as they were.
+  const vkr = await requireVaultKey(c, vaultId);
+  if (!vkr.ok) return vkr.response;
+  const textCrypto = docCryptoOf(vaultId, vkr);
+  if (textCrypto) {
+    await pool.query(
+      `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, source, updated_at, search_enc)
+       VALUES ($1, $2, $3, $4, '', $5, now(), $6)
+       ON CONFLICT (blob_id) DO UPDATE
+         SET vault_id = EXCLUDED.vault_id,
+             doc_id = EXCLUDED.doc_id,
+             chars = EXCLUDED.chars,
+             source = EXCLUDED.source,
+             updated_at = now(),
+             search_enc = EXCLUDED.search_enc`,
+      [
+        row.id,
+        vaultId,
+        row.doc_id,
+        chars,
+        source,
+        sealBlobTextRow(textCrypto, row.id, {
+          body: stored,
+          vector: embed(stored),
+          tokens: searchTokenSet(stored) ?? null,
+        }),
+      ],
+    );
+    return c.body(null, 204);
+  }
 
   await pool.query(
     `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, vector, source, updated_at, search_tokens)

@@ -33,6 +33,19 @@ export function openSearchRow(c: DocCrypto, docId: string, sealed: Buffer): Seal
   return JSON.parse(open(c.key, aad(c.vaultId, docId), sealed).toString("utf8")) as SealedSearchRow;
 }
 
+function blobAad(vaultId: string, blobId: string): Buffer {
+  return aadFor("blob_text", "search_enc", vaultId, blobId);
+}
+
+/** A file's extracted text, sealed the same way (row key = blob id). */
+export function sealBlobTextRow(c: DocCrypto, blobId: string, row: SealedSearchRow): Buffer {
+  return seal(c.key, blobAad(c.vaultId, blobId), Buffer.from(JSON.stringify(row), "utf8"), c.generation);
+}
+
+export function openBlobTextRow(c: DocCrypto, blobId: string, sealed: Buffer): SealedSearchRow {
+  return JSON.parse(open(c.key, blobAad(c.vaultId, blobId), sealed).toString("utf8")) as SealedSearchRow;
+}
+
 /**
  * Background indexing's view of a vault's key: `undefined` = unkeyed (today's
  * plaintext path), `null` = keyed but no member connected (defer: write

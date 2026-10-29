@@ -1,5 +1,5 @@
 import type { DocCrypto } from "../crypto/doc-crypto.js";
-import { indexCryptoFor, openSearchRow, sealSearchRow } from "./sealed-index.js";
+import { indexCryptoFor, openBlobTextRow, openSearchRow, sealSearchRow } from "./sealed-index.js";
 import { KeyRequiredError } from "../crypto/transport.js";
 import * as Y from "yjs";
 import { pgText } from "../db/text.js";
@@ -540,6 +540,7 @@ export async function searchNoteIndex(opts: {
         readableDocIds: docIds,
         vaultWideReader: opts.vaultWideReader === true,
         legacySql,
+        crypto: opts.crypto,
       })
     : [];
 
@@ -624,8 +625,10 @@ async function searchBlobText(opts: {
   readableDocIds: string[];
   vaultWideReader: boolean;
   legacySql: boolean;
+  crypto?: DocCrypto;
 }): Promise<NoteSearchHit[]> {
   const { rows } = await opts.db.query<{
+    search_enc: Buffer | null;
     blob_id: string;
     doc_id: string | null;
     rel_path: string | null;
@@ -635,6 +638,7 @@ async function searchBlobText(opts: {
     matched_legacy: number | null;
   }>(
     `SELECT bt.blob_id,
+            bt.search_enc,
             b.doc_id,
             b.rel_path,
             b.filename,
@@ -657,8 +661,22 @@ async function searchBlobText(opts: {
   );
 
   const scored = rows.map((r) => {
-    const sim = r.vector ? cosineSimilarity(opts.qVec, r.vector) : 0;
     const relPath = r.rel_path ?? "";
+    let vector = r.vector;
+    let matchedSealed: number | null = null;
+    if (r.search_enc) {
+      // W3 sealed row: the same formula over the decrypted fields. The SQL
+      // count (no stored set, a non-ASCII rel_path, or legacy mode) becomes the
+      // identical substring count over lower(rel_path || ' ' || body).
+      if (!opts.crypto) throw new KeyRequiredError();
+      const sealed = openBlobTextRow(opts.crypto, r.blob_id, r.search_enc);
+      vector = sealed.vector;
+      matchedSealed =
+        sealed.tokens === null || opts.legacySql || /[^\x01-\x7f]/.test(relPath)
+          ? legacySubstringCount(opts.qTokens, `${relPath} ${sealed.body}`)
+          : keywordMatchCount(opts.qTokens, `${searchTokenSet(relPath) ?? ""} ${sealed.tokens}`);
+    }
+    const sim = vector ? cosineSimilarity(opts.qVec, vector) : 0;
     // rel_path is file metadata, not content: its tokens are matched live, the
     // extracted text through the stored set. Union of the two = the old
     // `position(tok IN lower(rel_path || ' ' || content))` (the space is outside
@@ -666,7 +684,9 @@ async function searchBlobText(opts: {
     // Any row the SQL counted (no stored set, or a non-ASCII rel_path) keeps
     // that count; otherwise both halves here are pure ASCII.
     const matched =
-      r.matched_legacy !== null || r.search_tokens === null
+      matchedSealed !== null
+        ? matchedSealed
+        : r.matched_legacy !== null || r.search_tokens === null
         ? (r.matched_legacy ?? 0)
         : keywordMatchCount(opts.qTokens, `${searchTokenSet(relPath) ?? ""} ${r.search_tokens}`);
     const boost = opts.qTokens.length > 0 ? 0.1 * (matched / opts.qTokens.length) : 0;
