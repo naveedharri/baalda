@@ -267,7 +267,6 @@ html:not([data-theme="dark"]) .tree-row.is-dir:hover .tree-glyph { transform: no
 html:not([data-theme="dark"]) .sidebar-footer { border-top: 0; }
 
 /* Note column: narrower and centred, like the mockup. */
-html:not([data-theme="dark"]) .editor-column { --editor-measure: 68ch; }
 
 /* Markdown links: violet with a thin underline, same family as [[links]]. */
 html:not([data-theme="dark"]) .cm-editor .cm-md-link {
@@ -336,7 +335,6 @@ html:not([data-theme="dark"]) .cm-editor .cm-md-link * {
   text-decoration: none !important;
 }
 /* Preview: hold the calm reading width even if Content width is set wider. */
-html:not([data-theme="dark"]) .editor-column { --editor-measure: 68ch !important; }
 html:not([data-theme="dark"]) .cm-editor .cm-bullet { margin-right: 0.35em; }
 
 /* ============================================================
