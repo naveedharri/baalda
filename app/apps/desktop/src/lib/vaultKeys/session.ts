@@ -453,6 +453,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
   }
 
   async function keyUnkeyedVault(vaultId: string): Promise<VaultKeyState> {
+    // NOTE: does not check the owner/admin opt-in (`encryptionRequested`);
+    // `keysAllowed` is off in production and all keying goes through
+    // `convertVault`, which honours `conversionAllowed`. Check it here before
+    // ever turning that switch on.
     if (!deps.keysAllowed(vaultId)) return { state: "unkeyed" };
     // A key this device already holds for the vault is never replaced by a
     // fresh one: the server's "unkeyed" may be wrong, the local key is not lost.

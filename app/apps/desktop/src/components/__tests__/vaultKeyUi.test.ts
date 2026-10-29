@@ -30,6 +30,8 @@ describe("vault key UI", () => {
     expect(view(requested, "member")).toBe("hidden");
     // An older server that converts on its own never gets a button.
     expect(view({ state: "unkeyed", conversionAllowed: true }, "admin")).toBe("setting-up");
+    // A server without opt-in (no encryptionRequested) has no request route: no button.
+    expect(view({ state: "unkeyed", conversionAllowed: false }, "owner")).toBe("hidden");
     // Unknown state: nothing.
     expect(view(null, "owner")).toBe("hidden");
     // The key itself stays owner-only.

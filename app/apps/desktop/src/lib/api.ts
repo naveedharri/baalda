@@ -1476,8 +1476,9 @@ interface MyVaultKeysBody {
 export type MyVaultKeys =
   /** The server's DEFINITIVE "this vault has no key" (`{keyed: false}`). */
   /** `encryptionRequested`: an owner/admin opted this vault in (or it was created
-   * with vault keys on). `conversionAllowed` already includes it. */
-  | { keyed: false; pending: false; conversionAllowed: boolean; encryptionRequested: boolean }
+   * with vault keys on). `conversionAllowed` already includes it. Undefined: the
+   * server predates opt-in (no request route). */
+  | { keyed: false; pending: false; conversionAllowed: boolean; encryptionRequested?: boolean }
   | { keyed: true; pending: true; vkCheck?: string; generation?: number }
   | ({ keyed: true; pending: false } & MyVaultKeysBody);
 export interface VaultKeyRequest {
@@ -1637,14 +1638,15 @@ export class ApiClient {
     // Only an explicit `keyed: false` means unkeyed; anything unexpected throws
     // (the caller then does nothing rather than keying a vault that has a key).
     if (data?.keyed === false && status === 200) {
-      // Rollout gate for converting an existing vault: absent ⇒ false. Both
-      // fields fail closed: an older server without opt-in reports neither.
+      // Rollout gate for converting an existing vault: absent ⇒ false.
+      // `encryptionRequested` absent ⇒ undefined: a server without opt-in
+      // (no migration 081) has no request route, so the UI offers nothing.
       const d = data as { conversionAllowed?: unknown; encryptionRequested?: unknown };
       return {
         keyed: false,
         pending: false,
         conversionAllowed: d.conversionAllowed === true,
-        encryptionRequested: d.encryptionRequested === true,
+        encryptionRequested: typeof d.encryptionRequested === "boolean" ? d.encryptionRequested : undefined,
       };
     }
     if (status === 202 || data?.pending) {

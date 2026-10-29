@@ -24,7 +24,9 @@ export function vaultKeySectionView(opts: {
   if (state?.state === "unkeyed") {
     // `conversionAllowed` alone means the server already decided to key it (an
     // older server converts every vault): never offer a button there.
-    return state.encryptionRequested || state.conversionAllowed ? "setting-up" : "encrypt-offer";
+    if (state.encryptionRequested || state.conversionAllowed) return "setting-up";
+    // Undefined: the server predates opt-in and has no request route.
+    return state.encryptionRequested === false ? "encrypt-offer" : "hidden";
   }
   // Keyed, but this computer cannot open it (`blocksStructure` in runtime.ts
   // minus the security warning, which has its own notice). Not imported from
