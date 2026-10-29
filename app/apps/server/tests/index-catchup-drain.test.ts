@@ -9,6 +9,7 @@ import { pool } from "../src/db/pool.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { VaultKeyCache, vaultKeyCache } from "../src/crypto/key-cache.js";
 import { backfillVault, catchUpIndex } from "../src/crypto/backfill.js";
+import { backfillIndex } from "../src/index/indexer.js";
 import { resetDb } from "./helpers/db.js";
 import { seedNote, seedOrg, seedVault } from "./helpers/seed.js";
 
@@ -115,5 +116,14 @@ describe("keyed index catch-up drain", () => {
     const fresh = await import("../src/crypto/backfill.js");
     expect(await fresh.backfillVault(vaultId, opts)).toBe("complete");
     expect(seen.filter((s) => /max\(u\.created_at\)/.test(s)).length).toBe(0);
+  });
+
+  it("the boot backfill does not re-defer notes already queued (was 20k upserts per restart)", async () => {
+    const { vaultId } = await keyedVaultWithQueue(5);
+    const snap = () => pool.query("SELECT doc_id, queued_at::text AS q FROM index_pending ORDER BY doc_id");
+    const before = await snap();
+    expect(await backfillIndex(pool)).toBe(0);
+    expect((await snap()).rows).toEqual(before.rows);
+    expect(await pendingCount(vaultId)).toBe(5);
   });
 });

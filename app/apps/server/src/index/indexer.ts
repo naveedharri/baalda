@@ -390,7 +390,10 @@ export async function backfillIndex(db: Queryable = defaultPool): Promise<number
     `SELECT n.id FROM notes n
        LEFT JOIN note_index ni ON ni.doc_id = n.id
       WHERE n.deleted_at IS NULL
-        AND (ni.doc_id IS NULL OR ni.updated_at < n.updated_at)`,
+        AND (ni.doc_id IS NULL OR ni.updated_at < n.updated_at)
+        -- Already queued for a keyed vault's catch-up: re-deferring it here
+        -- only rewrote the same row, ~20k upserts on every boot of a 20k vault.
+        AND NOT EXISTS (SELECT 1 FROM index_pending p WHERE p.doc_id = n.id)`,
   );
   let count = 0;
   for (const { id } of rows) {
