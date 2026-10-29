@@ -9,7 +9,9 @@
 // An EXISTING vault is encrypted only when an owner/admin clicks "Encrypt this
 // vault" (one-way, confirmed); new vaults are requested at creation. Once
 // requested but not keyed yet it shows one line. What to show is decided by
-// `vaultKeySectionView`; an unknown state shows nothing.
+// `vaultKeySectionView`; an unknown state shows nothing. While a keyed vault's
+// older content is still being converted (the server's `fullyEncrypted:
+// false`), one more line says so (`conversionLine`); once sealed, none.
 
 import { useEffect, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -18,7 +20,7 @@ import { toast } from "../lib/toast";
 import { syncManager } from "../lib/sync/docSession";
 import { api } from "../lib/auth/authManager";
 import { currentVaultKeySession, onVaultKeyEvent, vaultKeysNudge, vaultKeyStateFor } from "../lib/vaultKeys/runtime";
-import { vaultKeySectionView } from "../lib/vaultKeys/sectionView";
+import { conversionLine, vaultKeySectionView } from "../lib/vaultKeys/sectionView";
 import { vaultKeyFileText, wordsToVaultKey } from "../lib/vaultKeys/crypto";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -48,6 +50,7 @@ export function VaultKeySection({
   const [restoring, setRestoring] = useState(false);
   const [restoreText, setRestoreText] = useState("");
   const [confirmEncrypt, setConfirmEncrypt] = useState(false);
+  const [fullyEncrypted, setFullyEncrypted] = useState<boolean | undefined>(undefined);
   const [, bump] = useState(0);
   useEffect(() => {
     const off = onVaultKeyEvent((e) => {
@@ -55,12 +58,37 @@ export function VaultKeySection({
     });
     return () => void off();
   }, []);
+  const keyedState = vaultId ? vaultKeyStateFor(vaultId)?.state : undefined;
+  useEffect(() => {
+    // Conversion progress, read once per open of this section (the server
+    // reports what its background worker last recorded).
+    setFullyEncrypted(undefined);
+    if (!vaultId || !keyedState || keyedState === "unkeyed" || keyedState === "disabled") return;
+    let live = true;
+    api
+      .getMyVaultKeys(vaultId)
+      .then((mine) => {
+        if (live && mine.keyed && !mine.pending) setFullyEncrypted(mine.fullyEncrypted);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [vaultId, keyedState]);
   if (!vaultId || !session) return null;
   const words = isOwner ? session.revealVaultKey(vaultId) : null;
   const state = vaultKeyStateFor(vaultId);
   const view = vaultKeySectionView({ hasWords: !!words, state, isOwner, canManage });
+  const converting = conversionLine({ state, isOwner, canManage, fullyEncrypted });
 
-  if (view === "hidden") return null;
+  if (view === "hidden") {
+    return converting ? (
+      <>
+        <div className="menu-sep" />
+        <div className="muted">{converting}</div>
+      </>
+    ) : null;
+  }
   if (view === "setting-up") {
     return (
       <>
@@ -109,6 +137,10 @@ export function VaultKeySection({
               team&apos;s devices hold. Everything keeps working as it does today.
             </p>
             <p>
+              New edits are encrypted right away. Older content is encrypted in the background, and its earlier
+              unencrypted copies are removed only after each one has been checked.
+            </p>
+            <p>
               <strong>This is one-way.</strong> Once a vault is encrypted it can&apos;t be turned back off.
             </p>
           </ConfirmDialog>
@@ -127,6 +159,7 @@ export function VaultKeySection({
             {words
               ? "The 24 words that unlock this vault. Keep them somewhere safe; anyone with them can read it."
               : "This computer doesn't have this vault's key yet. A teammate's computer usually shares it automatically."}
+            {converting && <> {converting}</>}
           </span>
         </span>
         {words && !shown && (

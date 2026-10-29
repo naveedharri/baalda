@@ -1016,7 +1016,7 @@ billing (managed/Polar only; self-hosters leave all unset ⇒ unlimited): `POLAR
 `TEAM_PRICE_YEARLY_CENTS` (11000) · `TEAM_MIN_SEATS` (3) · `ABUSE_MAX_NOTES` (100000) ·
 `ABUSE_MAX_STORAGE_MB` (10240) · `FREE_MAX_VAULTS`/`FREE_MAX_MEMBERS`/`FREE_MAX_STORAGE_MB`
 (per-vault model only) ·
-vault keys: `BAALDA_VAULT_KEYS` (off) · `VAULT_KEY_CONVERSION` (off) — see "Vault keys" below.
+vault keys: `BAALDA_VAULT_KEYS` (off) · `VAULT_KEY_CONVERSION` (off) · `VAULT_PLAINTEXT_RETENTION_DAYS` (30; 0 allowed) — see "Vault keys" below.
 
 ## Vault keys (`src/crypto/`, `docs/VAULT_KEYS.md`)
 
@@ -1069,6 +1069,17 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   delayed, reversible step); `key_required` changes nothing server-side and never drops local edits;
   compaction verifies the sealed snapshot first; key generations are never destroyed; when in doubt,
   refuse and let the client retry.
+- **Converting docs and the null-out.** A keyed doc that still holds pre-keying plaintext is compacted by
+  `persistence.ts compactConverting`: sealed-only snapshot of everything + ONE dual log row holding
+  `Y.mergeUpdates` of exactly the old plaintext parts (verified, never post-keying edits); a lone dual row
+  is kept in place. `crypto/null-out.ts` (run from the backfill tick after `complete`) clears plaintext
+  only when the backfill is complete, a fresh `encryptionStatus` is 0 and `VAULT_PLAINTEXT_RETENTION_DAYS`
+  have passed: per row, open the sealed copy, compare byte for byte, clear under `WHERE plaintext =
+  original AND sealed = compared`; a mismatch keeps both (ids logged). Inline pre-038 version/checkpoint
+  texts are first sealed into `note_texts` by the backfill. At zero plaintext `phase = 'sealed'`;
+  `keys/mine` reports `fullyEncrypted`/`plaintextRemaining` as last recorded (never counted per request).
+  A keyed re-index leaves stale `note_index`/`blob_text` plaintext that never byte-matches: it stays
+  until a decision on derived rows is made, so an edited vault does not reach `sealed` yet.
 
 ## Conventions & gotchas
 

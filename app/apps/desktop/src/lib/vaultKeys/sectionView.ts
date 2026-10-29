@@ -9,6 +9,26 @@
 // - `hidden`: everything else, including every plain member and any unknown state.
 import type { VaultKeyState } from "./session";
 
+/** Shown while a keyed vault's older content is still being converted. */
+export const CONVERTING_LINE = "Older content is being encrypted; new edits are already encrypted.";
+
+/**
+ * The conversion line for owners/admins of a KEYED vault: only on the server's
+ * explicit `fullyEncrypted: false`. Fully encrypted, unknown (older server) or
+ * any non-keyed state: no line.
+ */
+export function conversionLine(opts: {
+  state: VaultKeyState | null;
+  isOwner: boolean;
+  canManage: boolean;
+  fullyEncrypted: boolean | undefined;
+}): string | null {
+  if (!(opts.canManage || opts.isOwner)) return null;
+  const s = opts.state?.state;
+  if (!s || s === "disabled" || s === "unkeyed" || s === "security-warning") return null;
+  return opts.fullyEncrypted === false ? CONVERTING_LINE : null;
+}
+
 export type VaultKeySectionView = "hidden" | "encrypt-offer" | "setting-up" | "reveal" | "restore";
 
 export function vaultKeySectionView(opts: {

@@ -1471,6 +1471,9 @@ interface MyVaultKeysBody {
   vkCheck: string;
   generation: number;
   wraps: VaultKeyWrap[];
+  /** Every older plaintext copy has been checked and removed on the server.
+   * Undefined: the server does not report it (older server). */
+  fullyEncrypted?: boolean;
 }
 /** A pending answer may still carry `vkCheck`, so a restore can verify a typed key. */
 export type MyVaultKeys =
@@ -1655,7 +1658,14 @@ export class ApiClient {
     if (typeof data?.vkCheck !== "string" || typeof data.generation !== "number" || !Array.isArray(data.wraps)) {
       throw new ApiError(status, "Unexpected vault key answer", data);
     }
-    return { keyed: true, pending: false, vkCheck: data.vkCheck, generation: data.generation, wraps: data.wraps };
+    return {
+      keyed: true,
+      pending: false,
+      vkCheck: data.vkCheck,
+      generation: data.generation,
+      wraps: data.wraps,
+      fullyEncrypted: typeof data.fullyEncrypted === "boolean" ? data.fullyEncrypted : undefined,
+    };
   }
 
   /** "Encrypt this vault" (owner/admin, one-way, idempotent). Only records the

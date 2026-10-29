@@ -55,6 +55,17 @@ ciphertext cannot be moved to another row.
 - Rows written before a vault was keyed stay as they were until a separate, delayed null-out step has checked
   every row. Database backups taken before then keep the plaintext until they age out under your retention.
 
+## Removing the old plaintext
+
+Once every older row has a verified sealed copy, the server waits `VAULT_PLAINTEXT_RETENTION_DAYS` (default
+30; `0` is allowed, for testing) and then, only while a member's key is held, opens each sealed copy and
+compares it byte for byte with the plaintext. Only an exact match clears the plaintext, in a statement that
+also checks the row has not changed since. A row that does not match keeps both copies and is logged by id.
+Until then, compaction of a converting note keeps exactly its old plaintext in one checked row and stores
+everything newer encrypted only. Vault Settings shows "Older content is being encrypted; new edits are
+already encrypted." until no plaintext is left. Search rows re-indexed after keying keep their older
+plaintext beside the newer sealed copy; those are not removed yet.
+
 ## How it works
 
 - **Who holds keys.** Members' devices only. Each user has an X25519 key pair; the vault key is sealed to each
