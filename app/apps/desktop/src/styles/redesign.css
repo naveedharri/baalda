@@ -1076,3 +1076,4 @@ html:not([data-theme="dark"]) .vault-icon-option:hover { background: rgba(11, 10
 html:not([data-theme="dark"]) .settings-content .vault-root-path { background: var(--bg-subtle); padding: 10px 12px; }
 
 /* Danger zone keeps its soft red cards. */
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-actions button.secondary { background: var(--bg-subtle); color: var(--text-primary); height: 34px; font-size: var(--fs-md); }
