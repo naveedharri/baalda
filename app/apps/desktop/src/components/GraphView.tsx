@@ -103,6 +103,9 @@ const PRESETTLE_TARGET_ALPHA = 0.04;
 // bounding box and the whole viewport breathes its zoom by a percent or two,
 // which reads as the picture wobbling rather than the nodes drifting.
 const FIT_LOCK_ALPHA = 0.02;
+// Redesign: below this the layout's motion is invisible, so the graph rests
+// (no ticks, no frames) until something wakes it.
+const REST_ALPHA = 0.025;
 
 // How hard a *data refresh* re-energizes the layout. The first build needs real
 // energy to find a shape from seeded positions; later rebuilds already have a
@@ -563,6 +566,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     drag: null as Drag | null,
     rafId: null as number | null,
     needsDraw: true,
+    restFrames: 0,
+    idleTimer: 0,
     // Large global graphs offload the force sim to a Web Worker so the UI thread
     // never blocks. `useWorker` is set per-rebuild; `workerActive` mirrors the
     // worker's "still settling" state (drives redraws); `workerGen` drops stale
@@ -1378,9 +1383,17 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // Only the worker path (8k+ nodes) still settles and stops: perpetually
         // re-uploading an instance buffer that large every frame is exactly the
         // cost the worker exists to avoid.
-        active = true;
-        flow.energy(introEnergy(introSeconds()));
-        sim.tick();
+        // Redesign: let a settled graph rest. Once the layout has cooled to the
+        // idle floor with nothing dragged and the intro over, stop ticking and
+        // repainting; a drag, reheat or hover wakes it (see the idle check below).
+        const settled =
+          !S.drag && !introActive && sim.alpha() <= REST_ALPHA;
+        S.restFrames = settled ? (S.restFrames ?? 0) + 1 : 0;
+        active = S.restFrames < 45;
+        if (active) {
+          flow.energy(introEnergy(introSeconds()));
+          sim.tick();
+        }
         // Once the layout stops visibly moving into place, stop chasing it with
         // the camera — otherwise the drift breathes the bounding box and the
         // auto-fit turns that into a wobble of the whole view.
@@ -1394,15 +1407,30 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // ~zero — this is what keeps the app responsive instead of re-uploading
         // every node every frame forever.
         if (active || S.needsDraw) drawWebGL();
-      } else {
+      } else if (active || S.needsDraw) {
         draw();
       }
       S.needsDraw = false;
-      S.rafId = requestAnimationFrame(loop);
+      if (active) {
+        S.rafId = requestAnimationFrame(loop);
+      } else {
+        // Resting: no frames at all. A cheap check four times a second notices
+        // a reheat (data refresh, rearrange) that didn't come with a draw request.
+        window.clearTimeout(S.idleTimer);
+        S.idleTimer = window.setTimeout(() => {
+          if (S.rafId == null && (sim.alpha() > REST_ALPHA || S.drag)) {
+            S.restFrames = 0;
+            S.rafId = requestAnimationFrame(loop);
+          } else if (S.rafId == null) {
+            loop();
+          }
+        }, 250);
+      }
     }
 
     function requestDraw() {
       S.needsDraw = true;
+      S.restFrames = 0;
       if (S.rafId == null) S.rafId = requestAnimationFrame(loop);
     }
     requestDrawRef.current = requestDraw;
@@ -1560,6 +1588,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     return () => {
       ro.disconnect();
       themeObserver.disconnect();
+      window.clearTimeout(S.idleTimer);
       if (S.rafId != null) {
         cancelAnimationFrame(S.rafId);
       }
