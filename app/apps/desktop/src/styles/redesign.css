@@ -278,27 +278,6 @@ html:not([data-theme="dark"]) .cm-editor .cm-md-link {
 html:not([data-theme="dark"]) .cm-editor .cm-md-link:hover { border-bottom-color: var(--accent); }
 
 /* ---- Welcome screen: flat cream, a calm centred card ---- */
-html:not([data-theme="dark"]) .vault-picker { background: var(--bg-app); }
-html:not([data-theme="dark"]) .vault-picker::before,
-html:not([data-theme="dark"]) .vault-picker .aurora { display: none; }
-html:not([data-theme="dark"]) .vault-picker-card {
-  width: min(560px, calc(100% - 48px));
-  padding: 56px 48px 44px;
-  background: #fff;
-  border-radius: 28px;
-  box-shadow: var(--rd-card-shadow);
-}
-html:not([data-theme="dark"]) .vault-picker-card .product-name { margin-bottom: 40px; }
-html:not([data-theme="dark"]) .vault-picker-card .wordmark { width: min(300px, 70%); }
-html:not([data-theme="dark"]) .vault-picker-card .ghost-pill {
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1);
-  border: 0;
-  color: var(--text-primary);
-  font-weight: 500;
-}
-html:not([data-theme="dark"]) .vault-picker-card button.primary { font-weight: 500; box-shadow: 0 8px 18px -8px rgba(124, 92, 255, 0.65); }
-html:not([data-theme="dark"]) .vault-picker-card .hint { color: var(--text-secondary); }
-
 /* ---- Sign-in dialog ---- */
 html:not([data-theme="dark"]) .modal {
   border-radius: 24px;
@@ -349,8 +328,6 @@ html:not([data-theme="dark"]) .modal-backdrop {
   .tab { transition: color var(--t-fast) var(--ease); }
   .header-actions .icon-btn:hover { background: var(--bg-subtle); }
 
-  /* Welcome card rises in. */
-  .vault-picker-card { animation: rd-rise 320ms var(--ease) both; }
 }
 
 /* The link text inside .cm-md-link carries its own highlight colour. */
