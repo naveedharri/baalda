@@ -457,6 +457,8 @@ interface PublicNoteRow {
   wrapped_vk: Buffer | null;
   wrap_generation: number | null;
   allow_mac: Buffer | null;
+  /** Who minted the link (null once that account is deleted). */
+  created_by: string | null;
 }
 
 /** Found by the token's sha256 (migration 076 backfilled every existing row). */
@@ -464,7 +466,7 @@ async function noteForToken(token: string): Promise<PublicNoteRow | null> {
   if (!TOKEN_RE.test(token)) return null;
   const { rows } = await pool.query<PublicNoteRow>(
     `SELECT pl.id, pl.doc_id, pl.vault_id, pl.org_id, n.title, n.rel_path,
-            pl.token_enc, pl.wrapped_vk, pl.wrap_generation, pl.allow_mac
+            pl.token_enc, pl.wrapped_vk, pl.wrap_generation, pl.allow_mac, pl.created_by
        FROM public_links pl
        JOIN notes n ON n.id = pl.doc_id AND n.deleted_at IS NULL
       WHERE pl.token_hash = $1
@@ -613,14 +615,25 @@ export function createPublicPageRoutes(deps: PublicPageDeps): Hono {
       filename: string | null;
       storage_provider: string | null;
       storage_key: string | null;
+      doc_id: string | null;
     }>(
-      `SELECT id, mime, filename, storage_provider, storage_key
+      `SELECT id, mime, filename, storage_provider, storage_key, doc_id
          FROM blobs
         WHERE vault_id = $1 AND rel_path = $2 AND status = 'ready'`,
       [row.vault_id, relPath],
     );
     const blob = rows[0];
     if (!blob) return miss(c);
+    // A tree file (a `files` row with its own doc id and ACL) is served only
+    // while the person who published the link may still read it. Without this
+    // a member denied folder X could write "X/plan.pdf" into a note they may
+    // edit, publish that note, and fetch the file through the link; and a
+    // removed member's link would keep serving files. Hash-named
+    // `attachments/` drops (no doc id) keep the containment rule above.
+    if (blob.doc_id) {
+      if (!row.created_by) return miss(c);
+      if ((await effectivePermission(row.created_by, blob.doc_id)) === "none") return miss(c);
+    }
 
     // The stored mime is uploader-controlled, so it decides only HOW the bytes
     // are served, never whether they are trusted:
