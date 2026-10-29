@@ -5,4 +5,6 @@
 -- Additive only: no plaintext column is dropped, rewritten or nulled here. A
 -- keyed write leaves an existing row's plaintext columns as they were; nulling
 -- them is a later, separate, reversible step.
+SET LOCAL lock_timeout = '10s';
+
 ALTER TABLE blob_text ADD COLUMN IF NOT EXISTS search_enc BYTEA;

@@ -14,6 +14,8 @@
 -- last_viewed_at / view_tracking_since: the conversion gate counts a link
 -- viewed in the last 30 days. Views before this migration are unknown, so
 -- existing rows count as recently viewed for 30 days (view_tracking_since).
+SET LOCAL lock_timeout = '10s';
+
 ALTER TABLE public_links
   ALTER COLUMN token DROP NOT NULL,
   ADD COLUMN token_hash TEXT,
