@@ -1755,3 +1755,18 @@ html:not([data-theme="dark"]) .activity-row-chip[data-kind="deleted"],
 html:not([data-theme="dark"]) .activity-row-chip[data-kind="failed"] { background: #fdecea; color: #b8473a; }
 html:not([data-theme="dark"]) .activity-row-chip[data-kind="invitation"] { background: #dff3e5; color: #2f7044; }
 html:not([data-theme="dark"]) .activity-row-chip[data-tone="warn"]:not([data-kind="trash"]):not([data-kind="failed"]):not([data-kind="invitation"]) { background: #fff1c9; color: #7a5a00; }
+
+/* Search icon back beside the sidebar toggle. */
+.titlebar-search { display: inline-flex !important; }
+
+/* Skill detail header: title and meta get the full width, buttons wrap
+   underneath instead of crushing the name into a narrow column. */
+html:not([data-theme="dark"]) .skills-detail-head { flex-wrap: wrap; align-items: flex-start; row-gap: 12px; }
+html:not([data-theme="dark"]) .skills-detail-title { flex: 1 1 260px; }
+html:not([data-theme="dark"]) .skills-detail-head .settings-section-title { font-size: 20px; white-space: normal; }
+html:not([data-theme="dark"]) .skills-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+html:not([data-theme="dark"]) .skills-meta-line,
+html:not([data-theme="dark"]) .skills-byline { white-space: normal; word-break: normal; overflow-wrap: anywhere; font-size: 12.5px; color: var(--text-tertiary); }
+html:not([data-theme="dark"]) .skills-detail-controls { flex-wrap: wrap; }
+html:not([data-theme="dark"]) .skills-detail-controls .skills-hdr-btn { height: 34px; }
+html:not([data-theme="dark"]) .member-profile-back { display: inline-flex !important; margin-bottom: 8px; }
