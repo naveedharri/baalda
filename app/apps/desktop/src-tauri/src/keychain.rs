@@ -123,6 +123,72 @@ pub async fn keychain_delete(service_key: String) -> AppResult<()> {
     OsKeychain.delete(&service_key)
 }
 
+// ---- Vault key secrets (client-held vault keys, W3) ----------------------
+// Account private keys and per-vault keys get their own commands, scoped to
+// two prefixes validated HERE (never trusted from the webview) and gated on
+// the trusted main window, so a dashboard or remote view can never read them.
+
+/// Account X25519 private key: `baalda.keys:<serverUrl>|<userId>`.
+pub const ACCOUNT_KEY_PREFIX: &str = "baalda.keys:";
+/// Per-vault key: `vk:<serverUrl>:<vaultId>`.
+pub const VAULT_KEY_PREFIX: &str = "vk:";
+const MAX_SECRET_KEY_LEN: usize = 1024;
+const MAX_SECRET_VALUE_LEN: usize = 8192;
+
+/// Accept only a `baalda.keys:` or `vk:` key with a non-empty, control-free
+/// remainder of bounded length.
+pub fn validate_vault_secret_key(key: &str) -> AppResult<()> {
+    let rest = key
+        .strip_prefix(ACCOUNT_KEY_PREFIX)
+        .or_else(|| key.strip_prefix(VAULT_KEY_PREFIX));
+    match rest {
+        Some(r)
+            if !r.is_empty()
+                && key.len() <= MAX_SECRET_KEY_LEN
+                && !key.chars().any(|c| c.is_control()) =>
+        {
+            Ok(())
+        }
+        _ => Err(AppError::new("vault secret key must start with baalda.keys: or vk:")),
+    }
+}
+
+pub fn vault_secret_set_in(store: &dyn SecretStore, key: &str, value: &str) -> AppResult<()> {
+    validate_vault_secret_key(key)?;
+    if value.is_empty() || value.len() > MAX_SECRET_VALUE_LEN {
+        return Err(AppError::new("vault secret value has an invalid length"));
+    }
+    store.set(key, value)
+}
+
+pub fn vault_secret_get_in(store: &dyn SecretStore, key: &str) -> AppResult<Option<String>> {
+    validate_vault_secret_key(key)?;
+    store.get(key)
+}
+
+pub fn vault_secret_delete_in(store: &dyn SecretStore, key: &str) -> AppResult<()> {
+    validate_vault_secret_key(key)?;
+    store.delete(key)
+}
+
+#[tauri::command]
+pub async fn vault_secret_set(window: tauri::Webview, key: String, value: String) -> AppResult<()> {
+    crate::agent_runner::trusted_window(&window)?;
+    vault_secret_set_in(&OsKeychain, &key, &value)
+}
+
+#[tauri::command]
+pub async fn vault_secret_get(window: tauri::Webview, key: String) -> AppResult<Option<String>> {
+    crate::agent_runner::trusted_window(&window)?;
+    vault_secret_get_in(&OsKeychain, &key)
+}
+
+#[tauri::command]
+pub async fn vault_secret_delete(window: tauri::Webview, key: String) -> AppResult<()> {
+    crate::agent_runner::trusted_window(&window)?;
+    vault_secret_delete_in(&OsKeychain, &key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +228,39 @@ mod tests {
 
         store.delete("session").unwrap();
         assert_eq!(store.get("session").unwrap(), None);
+    }
+
+    #[test]
+    fn vault_secret_prefixes_are_enforced() {
+        let store = MemStore::default();
+        let acct = "baalda.keys:https://api.example.com|user-1";
+        let vk = "vk:https://api.example.com:vault-1";
+        vault_secret_set_in(&store, acct, "priv").unwrap();
+        vault_secret_set_in(&store, vk, "key").unwrap();
+        assert_eq!(vault_secret_get_in(&store, acct).unwrap(), Some("priv".into()));
+        assert_eq!(vault_secret_get_in(&store, vk).unwrap(), Some("key".into()));
+        vault_secret_delete_in(&store, vk).unwrap();
+        assert_eq!(vault_secret_get_in(&store, vk).unwrap(), None);
+
+        // Session tokens and anything else stay out of reach.
+        store.set("session:https://api.example.com", "tok").unwrap();
+        for bad in [
+            "session:https://api.example.com",
+            "",
+            "vk:",
+            "baalda.keys:",
+            "VK:x",
+            "xvk:a",
+            "vk:a\nb",
+        ] {
+            assert!(vault_secret_get_in(&store, bad).is_err(), "{bad:?} must be refused");
+            assert!(vault_secret_set_in(&store, bad, "v").is_err(), "{bad:?} must be refused");
+            assert!(vault_secret_delete_in(&store, bad).is_err(), "{bad:?} must be refused");
+        }
+        assert_eq!(store.get("session:https://api.example.com").unwrap(), Some("tok".into()));
+        let long = format!("vk:{}", "a".repeat(2000));
+        assert!(vault_secret_get_in(&store, &long).is_err());
+        assert!(vault_secret_set_in(&store, vk, "").is_err());
     }
 
     #[test]
