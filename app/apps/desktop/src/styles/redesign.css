@@ -4,7 +4,7 @@
    App.css; nothing else in the app is edited for the look.
    ============================================================ */
 
-html:not([data-theme="dark"]) {
+html:not(.rd-off) {
   /* Very light cream canvas, white cards. */
   --bg-app: #fcfaf6;
   --bg-card: #fcfaf6;
@@ -25,13 +25,13 @@ html:not([data-theme="dark"]) {
 }
 
 /* ---- Shell: tabs on the canvas, the note on a floating white card ---- */
-html:not([data-theme="dark"]) .main {
+html:not(.rd-off) .main {
   background: transparent;
   box-shadow: none;
   border-radius: 0;
   overflow: visible;
 }
-html:not([data-theme="dark"]) .editor-wrap {
+html:not(.rd-off) .editor-wrap {
   background: #fff;
   border-radius: 22px;
   box-shadow: var(--rd-card-shadow);
@@ -39,16 +39,16 @@ html:not([data-theme="dark"]) .editor-wrap {
 }
 
 /* ---- Tabs ---- */
-html:not([data-theme="dark"]) .tab-active-bg {
+html:not(.rd-off) .tab-active-bg {
   background: #fff;
   box-shadow: var(--rd-card-shadow);
 }
-html:not([data-theme="dark"]) .tab {
+html:not(.rd-off) .tab {
   color: #0b0a10a8;
 }
 
 /* ---- Right-hand controls pill ---- */
-html:not([data-theme="dark"]) .header-actions {
+html:not(.rd-off) .header-actions {
   border: 0;
   background: #fff;
   box-shadow: var(--rd-card-shadow);
@@ -56,54 +56,54 @@ html:not([data-theme="dark"]) .header-actions {
 }
 
 /* ---- Sidebar ---- */
-html:not([data-theme="dark"]) .sidebar-header-id {
+html:not(.rd-off) .sidebar-header-id {
   background: #fff;
   border-radius: 18px;
   box-shadow: var(--rd-card-shadow);
   padding: 10px 12px 10px 10px;
 }
-html:not([data-theme="dark"]) .vault-name {
+html:not(.rd-off) .vault-name {
   font-size: 15px;
   font-weight: 600;
 }
-html:not([data-theme="dark"]) .pinned-label,
-html:not([data-theme="dark"]) .filetree-head .section-label {
+html:not(.rd-off) .pinned-label,
+html:not(.rd-off) .filetree-head .section-label {
   font-family: var(--font-mono);
   font-size: 10.5px;
   letter-spacing: 0.7px;
   text-transform: uppercase;
   color: #0b0a1099;
 }
-html:not([data-theme="dark"]) .pinned-section {
+html:not(.rd-off) .pinned-section {
   border-bottom: 0;
 }
-html:not([data-theme="dark"]) .home-sidebar-row {
+html:not(.rd-off) .home-sidebar-row {
   min-height: 40px;
   border-radius: 12px;
 }
-html:not([data-theme="dark"]) .home-sidebar-row.is-unset {
+html:not(.rd-off) .home-sidebar-row.is-unset {
   outline: 1.5px dashed color-mix(in srgb, var(--accent) 45%, transparent);
   background: color-mix(in srgb, var(--accent) 4%, transparent);
   font-weight: 500;
 }
 
 /* Tree rows: soft rounded rows, the open note lifts as a white pill. */
-html:not([data-theme="dark"]) .tree-row {
+html:not(.rd-off) .tree-row {
   border-radius: 10px;
   min-height: 32px;
   color: #2e2d36;
 }
-html:not([data-theme="dark"]) .tree-row:hover {
+html:not(.rd-off) .tree-row:hover {
   background: rgba(11, 10, 16, 0.04);
 }
-html:not([data-theme="dark"]) .tree-row.selected,
-html:not([data-theme="dark"]) .tree-row.selected:hover {
+html:not(.rd-off) .tree-row.selected,
+html:not(.rd-off) .tree-row.selected:hover {
   background: #fff;
   box-shadow: var(--rd-card-shadow);
   color: var(--text-primary);
   position: relative;
 }
-html:not([data-theme="dark"]) .tree-row.selected::before {
+html:not(.rd-off) .tree-row.selected::before {
   content: "";
   position: absolute;
   left: 0;
@@ -115,20 +115,20 @@ html:not([data-theme="dark"]) .tree-row.selected::before {
 }
 
 /* ---- Editor writing styles ---- */
-html:not([data-theme="dark"]) .cm-editor .cm-content {
+html:not(.rd-off) .cm-editor .cm-content {
   color: #26252d;
 }
-html:not([data-theme="dark"]) .cm-editor .cm-line {
+html:not(.rd-off) .cm-editor .cm-line {
   line-height: 1.75;
 }
 
 /* Bullets: a short violet dash in place of the dot. */
-html:not([data-theme="dark"]) .cm-editor .cm-bullet {
+html:not(.rd-off) .cm-editor .cm-bullet {
   color: transparent !important;
   position: relative;
   display: inline-block;
 }
-html:not([data-theme="dark"]) .cm-editor .cm-bullet::after {
+html:not(.rd-off) .cm-editor .cm-bullet::after {
   content: "";
   position: absolute;
   left: 50%;
@@ -142,20 +142,20 @@ html:not([data-theme="dark"]) .cm-editor .cm-bullet::after {
 }
 
 /* [[links]]: violet text with a thin underline, no chip. */
-html:not([data-theme="dark"]) .cm-editor .cm-wikilink {
+html:not(.rd-off) .cm-editor .cm-wikilink {
   color: #4a2fc7 !important;
   font-weight: 500;
   text-decoration: none;
   border-bottom: 1px solid rgba(124, 92, 255, 0.4);
   border-radius: 0 !important;
 }
-html:not([data-theme="dark"]) .cm-editor .cm-wikilink:hover {
+html:not(.rd-off) .cm-editor .cm-wikilink:hover {
   background: transparent !important;
   border-bottom-color: var(--accent);
 }
 
 /* #tags: a small soft tag, not a loud pill. */
-html:not([data-theme="dark"]) .cm-editor .cm-hashtag {
+html:not(.rd-off) .cm-editor .cm-hashtag {
   background: rgba(124, 92, 255, 0.08) !important;
   color: #4a2fc7;
   font-weight: 500;
@@ -165,22 +165,22 @@ html:not([data-theme="dark"]) .cm-editor .cm-hashtag {
 }
 
 /* > quotes: a thin violet bar and calm grey text. */
-html:not([data-theme="dark"]) .cm-editor .cm-blockquote {
+html:not(.rd-off) .cm-editor .cm-blockquote {
   color: #55545e !important;
 }
-html:not([data-theme="dark"]) .cm-editor .cm-blockquote::before {
+html:not(.rd-off) .cm-editor .cm-blockquote::before {
   width: 2px !important;
   background-color: var(--accent) !important;
 }
 
 /* ==highlight==: a marker stroke under the words. */
-html:not([data-theme="dark"]) .cm-editor .cm-highlight,
-html:not([data-theme="dark"]) .cm-editor .cm-hl {
+html:not(.rd-off) .cm-editor .cm-highlight,
+html:not(.rd-off) .cm-editor .cm-hl {
   background: linear-gradient(transparent 55%, rgba(253, 233, 155, 0.9) 55%) !important;
 }
 
 /* - [ ] tasks: a rounded square that fills violet when done. */
-html:not([data-theme="dark"]) .cm-editor .cm-task-checkbox {
+html:not(.rd-off) .cm-editor .cm-task-checkbox {
   appearance: none;
   -webkit-appearance: none;
   width: 17px !important;
@@ -191,11 +191,11 @@ html:not([data-theme="dark"]) .cm-editor .cm-task-checkbox {
   position: relative;
   vertical-align: -3px !important;
 }
-html:not([data-theme="dark"]) .cm-editor .cm-task-checkbox:checked {
+html:not(.rd-off) .cm-editor .cm-task-checkbox:checked {
   background: var(--accent);
   box-shadow: none;
 }
-html:not([data-theme="dark"]) .cm-editor .cm-task-checkbox:checked::after {
+html:not(.rd-off) .cm-editor .cm-task-checkbox:checked::after {
   content: "";
   position: absolute;
   left: 4px;
@@ -240,49 +240,49 @@ html:not([data-theme="dark"]) .cm-editor .cm-task-checkbox:checked::after {
 .rd-new-note:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 /* Rows sit inside the sidebar, not edge to edge. */
-html:not([data-theme="dark"]) .sidebar .tree-row,
-html:not([data-theme="dark"]) .home-sidebar-row {
+html:not(.rd-off) .sidebar .tree-row,
+html:not(.rd-off) .home-sidebar-row {
   margin-left: 6px;
   margin-right: 6px;
   width: auto;
 }
-html:not([data-theme="dark"]) .home-section,
-html:not([data-theme="dark"]) .pinned-section { padding-left: 4px; padding-right: 4px; }
+html:not(.rd-off) .home-section,
+html:not(.rd-off) .pinned-section { padding-left: 4px; padding-right: 4px; }
 
 /* No green dot on every synced row: only rows that need attention show one. */
 
 /* Folders: the coloured glyph sits in a soft tinted square. */
-html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph,
-html:not([data-theme="dark"]) .pinned-row.is-dir .tree-glyph {
+html:not(.rd-off) .tree-row.is-dir .tree-glyph,
+html:not(.rd-off) .pinned-row.is-dir .tree-glyph {
   width: 26px;
   height: 26px;
   border-radius: 8px;
   background: color-mix(in srgb, currentColor 13%, transparent);
 }
-html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph svg { width: 14px; height: 14px; }
-html:not([data-theme="dark"]) .tree-row.is-dir:hover .tree-glyph { transform: none; }
+html:not(.rd-off) .tree-row.is-dir .tree-glyph svg { width: 14px; height: 14px; }
+html:not(.rd-off) .tree-row.is-dir:hover .tree-glyph { transform: none; }
 
 /* No rule above the account row. */
-html:not([data-theme="dark"]) .sidebar-footer { border-top: 0; }
+html:not(.rd-off) .sidebar-footer { border-top: 0; }
 
 /* Note column: narrower and centred, like the mockup. */
 
 /* Markdown links: violet with a thin underline, same family as [[links]]. */
-html:not([data-theme="dark"]) .cm-editor .cm-md-link {
+html:not(.rd-off) .cm-editor .cm-md-link {
   color: #4a2fc7 !important;
   text-decoration: none !important;
   border-bottom: 1px solid rgba(124, 92, 255, 0.4);
 }
-html:not([data-theme="dark"]) .cm-editor .cm-md-link:hover { border-bottom-color: var(--accent); }
+html:not(.rd-off) .cm-editor .cm-md-link:hover { border-bottom-color: var(--accent); }
 
 /* ---- Welcome screen: flat cream, a calm centred card ---- */
 /* ---- Sign-in dialog ---- */
-html:not([data-theme="dark"]) .modal {
+html:not(.rd-off) .modal {
   border-radius: 24px;
   border: 0;
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.06), 0 30px 70px -20px rgba(11, 10, 16, 0.35);
 }
-html:not([data-theme="dark"]) .modal-backdrop {
+html:not(.rd-off) .modal-backdrop {
   background: rgba(11, 10, 16, 0.22);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
@@ -327,27 +327,27 @@ html:not([data-theme="dark"]) .modal-backdrop {
 }
 
 /* The link text inside .cm-md-link carries its own highlight colour. */
-html:not([data-theme="dark"]) .cm-editor .cm-md-link * {
+html:not(.rd-off) .cm-editor .cm-md-link * {
   color: inherit !important;
   text-decoration: none !important;
 }
 /* Preview: hold the calm reading width even if Content width is set wider. */
-html:not([data-theme="dark"]) .cm-editor .cm-bullet { margin-right: 0.35em; }
+html:not(.rd-off) .cm-editor .cm-bullet { margin-right: 0.35em; }
 
 /* ============================================================
    Round 3: the page's own top row, as in the mockup.
    Path chips top-left and the Synced toolbar top-right, both
    inside the white page; tabs alone on the cream strip.
    ============================================================ */
-html:not([data-theme="dark"]) .main { position: relative; }
-html:not([data-theme="dark"]) .editor-wrap { position: relative; }
-html:not([data-theme="dark"]) .header-actions {
+html:not(.rd-off) .main { position: relative; }
+html:not(.rd-off) .editor-wrap { position: relative; }
+html:not(.rd-off) .header-actions {
   position: absolute;
   top: calc(var(--chrome-row-h) + 14px);
   right: 30px;
   z-index: 6;
 }
-html:not([data-theme="dark"]) .main-header { padding-right: var(--sp-4); }
+html:not(.rd-off) .main-header { padding-right: var(--sp-4); }
 .rd-crumbs {
   position: absolute;
   top: 16px;
@@ -372,7 +372,7 @@ html:not([data-theme="dark"]) .main-header { padding-right: var(--sp-4); }
 .rd-crumb svg { width: 15px; height: 15px; fill: #9bd8a9; stroke: #3f8850; stroke-width: 1.5; }
 .rd-crumb-sep { color: var(--text-tertiary); font-size: 13px; }
 /* Room for that row above the title. */
-html:not([data-theme="dark"]) .editor-wrap .cm-scroller { padding-top: 40px; }
+html:not(.rd-off) .editor-wrap .cm-scroller { padding-top: 40px; }
 
 /* Tabs: a small page icon before each name. */
 .tab-label::before {
@@ -390,9 +390,9 @@ html:not([data-theme="dark"]) .editor-wrap .cm-scroller { padding-top: 40px; }
 
 /* The header row is a containment box, so its pill would paint under the
    later white page in WebKit. Lift the whole row above it. */
-html:not([data-theme="dark"]) .main-header { position: relative; z-index: 10; }
+html:not(.rd-off) .main-header { position: relative; z-index: 10; }
 /* [[links]] carry an inner highlight span too. */
-html:not([data-theme="dark"]) .cm-editor .cm-wikilink * {
+html:not(.rd-off) .cm-editor .cm-wikilink * {
   color: inherit !important;
   text-decoration: none !important;
 }
@@ -402,8 +402,8 @@ html:not([data-theme="dark"]) .cm-editor .cm-wikilink * {
    ============================================================ */
 
 /* Popovers: white, 20px corners, soft deep shadow. */
-html:not([data-theme="dark"]) .account-popover,
-html:not([data-theme="dark"]) .vault-popover {
+html:not(.rd-off) .account-popover,
+html:not(.rd-off) .vault-popover {
   border: 0;
   border-radius: 20px;
   padding: 8px;
@@ -426,18 +426,18 @@ html:not([data-theme="dark"]) .vault-popover {
 .rd-prof-text small { font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; }
 
 /* Menu rows: taller, roomier, the icon in a pastel square. */
-html:not([data-theme="dark"]) .account-popover .menu-item,
-html:not([data-theme="dark"]) .vault-switcher .menu-item {
+html:not(.rd-off) .account-popover .menu-item,
+html:not(.rd-off) .vault-switcher .menu-item {
   min-height: 44px;
   padding: 0 10px;
   gap: 12px;
   border-radius: 12px;
   font-size: 14px;
 }
-html:not([data-theme="dark"]) .account-popover .menu-hint { font-size: 12px; color: #0b0a1099; }
-html:not([data-theme="dark"]) .account-popover .menu-icon,
-html:not([data-theme="dark"]) .settings-nav .menu-icon,
-html:not([data-theme="dark"]) .settings-tabs .menu-icon {
+html:not(.rd-off) .account-popover .menu-hint { font-size: 12px; color: #0b0a1099; }
+html:not(.rd-off) .account-popover .menu-icon,
+html:not(.rd-off) .settings-nav .menu-icon,
+html:not(.rd-off) .settings-tabs .menu-icon {
   box-sizing: content-box;
   width: 15px !important;
   height: 15px !important;
@@ -459,10 +459,10 @@ html:not([data-theme="dark"]) .settings-tabs .menu-icon {
 .account-popover > .menu-item:nth-of-type(5n + 5) .menu-icon,
 .settings-tab:nth-of-type(5n + 5) .menu-icon { --rd-tint: #f3c4ec88; --rd-ink: #a549ab; }
 .account-popover > .menu-item.danger .menu-icon { --rd-tint: #f4c5c066; --rd-ink: #bb433a; }
-html:not([data-theme="dark"]) .account-popover .menu-sep { margin: 6px 8px; }
+html:not(.rd-off) .account-popover .menu-sep { margin: 6px 8px; }
 
 /* ---- Vault switcher ---- */
-html:not([data-theme="dark"]) .vault-switcher {
+html:not(.rd-off) .vault-switcher {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 2px 8px;
@@ -470,8 +470,8 @@ html:not([data-theme="dark"]) .vault-switcher {
   width: 360px;
   max-height: none;
 }
-html:not([data-theme="dark"]) .vault-switcher > * { grid-column: 1 / -1; }
-html:not([data-theme="dark"]) .vault-switcher::before {
+html:not(.rd-off) .vault-switcher > * { grid-column: 1 / -1; }
+html:not(.rd-off) .vault-switcher::before {
   content: "Your vaults";
   grid-column: 1 / -1;
   padding: 8px 10px 6px;
@@ -480,20 +480,20 @@ html:not([data-theme="dark"]) .vault-switcher::before {
   text-transform: uppercase;
   color: #0b0a1099;
 }
-html:not([data-theme="dark"]) .vault-switcher .vault-card {
+html:not(.rd-off) .vault-switcher .vault-card {
   min-height: 58px;
   padding: 0 10px;
   gap: 12px;
   border-radius: 12px;
 }
-html:not([data-theme="dark"]) .vault-switcher .vault-card .vault-tile {
+html:not(.rd-off) .vault-switcher .vault-card .vault-tile {
   width: 38px;
   height: 38px;
   border-radius: 11px;
 }
-html:not([data-theme="dark"]) .vault-switcher .vault-card-name { font-size: 14px; font-weight: 500; }
-html:not([data-theme="dark"]) .vault-switcher .vault-card-sub { font-size: 11.5px; color: var(--text-secondary); }
-html:not([data-theme="dark"]) .vault-switcher .vault-card-sub::before {
+html:not(.rd-off) .vault-switcher .vault-card-name { font-size: 14px; font-weight: 500; }
+html:not(.rd-off) .vault-switcher .vault-card-sub { font-size: 11.5px; color: var(--text-secondary); }
+html:not(.rd-off) .vault-switcher .vault-card-sub::before {
   content: "";
   display: inline-block;
   width: 6px;
@@ -503,11 +503,11 @@ html:not([data-theme="dark"]) .vault-switcher .vault-card-sub::before {
   background: #3f8850;
   vertical-align: 1px;
 }
-html:not([data-theme="dark"]) .vault-switcher .vault-card.current {
+html:not(.rd-off) .vault-switcher .vault-card.current {
   background: var(--accent-soft);
   box-shadow: inset 0 0 0 1px rgba(124, 92, 255, 0.2);
 }
-html:not([data-theme="dark"]) .vault-switcher .vault-card-kbd {
+html:not(.rd-off) .vault-switcher .vault-card-kbd {
   font: 11px var(--font-mono);
   color: #0b0a1070;
   background: var(--bg-subtle);
@@ -515,12 +515,12 @@ html:not([data-theme="dark"]) .vault-switcher .vault-card-kbd {
   border-radius: 6px;
   border: 0;
 }
-html:not([data-theme="dark"]) .vault-switcher .menu-sep { margin: 6px 8px; }
+html:not(.rd-off) .vault-switcher .menu-sep { margin: 6px 8px; }
 
 /* New vault · Join with code · Manage: three tiles in a row. */
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
   grid-column: auto;
   flex-direction: column;
   justify-content: center;
@@ -532,9 +532,9 @@ html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-
   font-size: 12px;
   text-align: center;
 }
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
   box-sizing: content-box;
   width: 16px !important;
   height: 16px !important;
@@ -544,59 +544,59 @@ html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-
 .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon { background: #cfc4ff66; color: #6a4fe0; }
 .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon { background: #9bd8a966; color: #3f8850; }
 .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon { background: #9ed4ef77; color: #427e8a; }
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: 0; }
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { content: "Manage"; font-size: 12px; }
-html:not([data-theme="dark"]) .vault-switcher .menu-item:hover { background: var(--bg-hover); }
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: 0; }
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { content: "Manage"; font-size: 12px; }
+html:not(.rd-off) .vault-switcher .menu-item:hover { background: var(--bg-hover); }
 
 /* ============================================================
    Sizes follow the app's global scale (tokens.css), not the
    enlarged mockup render. Overrides the bigger values above.
    ============================================================ */
-html:not([data-theme="dark"]) {
+html:not(.rd-off) {
   --editor-font-size: var(--fs-lg);
   --inline-title-size: 1.75em;
   --inline-title-weight: 700;
 }
-html:not([data-theme="dark"]) .cm-editor .cm-line { line-height: var(--lh-body); }
+html:not(.rd-off) .cm-editor .cm-line { line-height: var(--lh-body); }
 
 /* Sidebar */
 .rd-new-note { height: 32px; margin: 0 var(--sp-3) var(--sp-2); padding: 0 var(--sp-3); border-radius: var(--radius-md); font-size: var(--fs-md); }
 .rd-new-note svg { width: 14px; height: 14px; }
-html:not([data-theme="dark"]) .sidebar-header-id { padding: 8px 10px 8px 8px; border-radius: var(--radius-lg); }
-html:not([data-theme="dark"]) .vault-name { font-size: var(--fs-md); }
-html:not([data-theme="dark"]) .home-sidebar-row { min-height: 30px; border-radius: var(--radius-md); }
-html:not([data-theme="dark"]) .tree-row { min-height: 0; border-radius: var(--radius-sm); }
-html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph,
-html:not([data-theme="dark"]) .pinned-row.is-dir .tree-glyph { width: 20px; height: 20px; border-radius: 6px; }
-html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph svg { width: 12px; height: 12px; }
-html:not([data-theme="dark"]) .tree-row.selected::before { top: 6px; bottom: 6px; }
+html:not(.rd-off) .sidebar-header-id { padding: 8px 10px 8px 8px; border-radius: var(--radius-lg); }
+html:not(.rd-off) .vault-name { font-size: var(--fs-md); }
+html:not(.rd-off) .home-sidebar-row { min-height: 30px; border-radius: var(--radius-md); }
+html:not(.rd-off) .tree-row { min-height: 0; border-radius: var(--radius-sm); }
+html:not(.rd-off) .tree-row.is-dir .tree-glyph,
+html:not(.rd-off) .pinned-row.is-dir .tree-glyph { width: 20px; height: 20px; border-radius: 6px; }
+html:not(.rd-off) .tree-row.is-dir .tree-glyph svg { width: 12px; height: 12px; }
+html:not(.rd-off) .tree-row.selected::before { top: 6px; bottom: 6px; }
 
 /* Page top row */
 .rd-crumb { height: 24px; padding: 0 var(--sp-2); font-size: var(--fs-sm); gap: 5px; }
 .rd-crumb svg { width: 13px; height: 13px; }
-html:not([data-theme="dark"]) .editor-wrap .cm-scroller { padding-top: 28px; }
-html:not([data-theme="dark"]) .header-actions { top: calc(var(--chrome-row-h) + 10px); right: 24px; }
+html:not(.rd-off) .editor-wrap .cm-scroller { padding-top: 28px; }
+html:not(.rd-off) .header-actions { top: calc(var(--chrome-row-h) + 10px); right: 24px; }
 .tab-label::before { width: 12px; height: 12px; margin-right: 6px; }
-html:not([data-theme="dark"]) .editor-wrap { border-radius: var(--radius-xl); }
+html:not(.rd-off) .editor-wrap { border-radius: var(--radius-xl); }
 
 /* Account menu */
 .rd-prof { padding: 8px; gap: var(--sp-2); border-radius: var(--radius-md); }
 .rd-prof .avatar { width: 32px !important; height: 32px !important; font-size: var(--fs-xs); }
 .rd-prof-text b { font-size: var(--fs-md); }
 .rd-prof-text small { font-size: var(--fs-xs); }
-html:not([data-theme="dark"]) .account-popover,
-html:not([data-theme="dark"]) .vault-popover { border-radius: var(--radius-lg); padding: var(--sp-2); }
-html:not([data-theme="dark"]) .account-popover .menu-item,
-html:not([data-theme="dark"]) .vault-switcher .menu-item {
+html:not(.rd-off) .account-popover,
+html:not(.rd-off) .vault-popover { border-radius: var(--radius-lg); padding: var(--sp-2); }
+html:not(.rd-off) .account-popover .menu-item,
+html:not(.rd-off) .vault-switcher .menu-item {
   min-height: 32px;
   padding: 4px var(--sp-2);
   gap: var(--sp-2);
   border-radius: var(--radius-sm);
   font-size: var(--fs-sm);
 }
-html:not([data-theme="dark"]) .account-popover .menu-hint { font-size: var(--fs-xs); }
-html:not([data-theme="dark"]) .account-popover .menu-icon,
-html:not([data-theme="dark"]) .settings-nav .menu-icon {
+html:not(.rd-off) .account-popover .menu-hint { font-size: var(--fs-xs); }
+html:not(.rd-off) .account-popover .menu-icon,
+html:not(.rd-off) .settings-nav .menu-icon {
   width: 13px !important;
   height: 13px !important;
   padding: 5px;
@@ -604,38 +604,38 @@ html:not([data-theme="dark"]) .settings-nav .menu-icon {
 }
 
 /* Vault switcher */
-html:not([data-theme="dark"]) .vault-switcher { width: 300px; gap: 2px 6px; }
-html:not([data-theme="dark"]) .vault-switcher::before { padding: 4px 8px; font-size: 10px; }
-html:not([data-theme="dark"]) .vault-switcher .vault-card { min-height: 44px; padding: 0 var(--sp-2); gap: var(--sp-2); border-radius: var(--radius-md); }
-html:not([data-theme="dark"]) .vault-switcher .vault-card .vault-tile { width: 28px; height: 28px; border-radius: 8px; }
-html:not([data-theme="dark"]) .vault-switcher .vault-card-name { font-size: var(--fs-sm); }
-html:not([data-theme="dark"]) .vault-switcher .vault-card-sub { font-size: var(--fs-xs); }
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
+html:not(.rd-off) .vault-switcher { width: 300px; gap: 2px 6px; }
+html:not(.rd-off) .vault-switcher::before { padding: 4px 8px; font-size: 10px; }
+html:not(.rd-off) .vault-switcher .vault-card { min-height: 44px; padding: 0 var(--sp-2); gap: var(--sp-2); border-radius: var(--radius-md); }
+html:not(.rd-off) .vault-switcher .vault-card .vault-tile { width: 28px; height: 28px; border-radius: 8px; }
+html:not(.rd-off) .vault-switcher .vault-card-name { font-size: var(--fs-sm); }
+html:not(.rd-off) .vault-switcher .vault-card-sub { font-size: var(--fs-xs); }
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
   padding: 8px 4px 7px;
   gap: 5px;
   border-radius: var(--radius-md);
   font-size: var(--fs-xs);
 }
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
   width: 13px !important;
   height: 13px !important;
   padding: 6px;
   border-radius: 7px;
 }
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { font-size: var(--fs-xs); }
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { font-size: var(--fs-xs); }
 
 /* Folder icons as in the mockup: a thin outline in the deep tone on a soft
    pastel square, instead of a filled folder shape. */
-html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph,
-html:not([data-theme="dark"]) .pinned-row.is-dir .tree-glyph {
+html:not(.rd-off) .tree-row.is-dir .tree-glyph,
+html:not(.rd-off) .pinned-row.is-dir .tree-glyph {
   background: color-mix(in srgb, var(--glyph-fill, currentColor) 60%, transparent);
 }
-html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph.colored svg,
-html:not([data-theme="dark"]) .pinned-row.is-dir .tree-glyph.colored svg {
+html:not(.rd-off) .tree-row.is-dir .tree-glyph.colored svg,
+html:not(.rd-off) .pinned-row.is-dir .tree-glyph.colored svg {
   fill: none !important;
   stroke-width: 2;
 }
@@ -647,52 +647,52 @@ html:not([data-theme="dark"]) .pinned-row.is-dir .tree-glyph.colored svg {
 /* Account row vanished when a note opened: an unclipped .main plus transform
    animations hit the WKWebView compositing bug App.css warns about. Keep .main
    clipped and animate opacity only. */
-html:not([data-theme="dark"]) .main { overflow: hidden; }
+html:not(.rd-off) .main { overflow: hidden; }
 @media (prefers-reduced-motion: no-preference) {
   .editor-wrap .cm-editor { animation: rd-fade 160ms var(--ease) both; }
   .tree-row.selected { animation: none; }
 }
 
 /* ---- Editor: calmer type, tighter paragraph gaps ---- */
-html:not([data-theme="dark"]) { --inline-title-weight: 600; }
-html:not([data-theme="dark"]) .cm-editor .cm-content { color: #2e2d36; }
+html:not(.rd-off) { --inline-title-weight: 600; }
+html:not(.rd-off) .cm-editor .cm-content { color: #2e2d36; }
 
 /* ---- Tree: children indent under the folder name, like the mockup ---- */
-html:not([data-theme="dark"]) .filetree-scroll .tree-row:not(.is-dir) .tree-glyph { color: #0b0a1066; }
-html:not([data-theme="dark"]) .filetree-scroll .tree-row.selected .tree-glyph { color: var(--accent); }
-html:not([data-theme="dark"]) .sidebar .tree-row { height: 32px; }
+html:not(.rd-off) .filetree-scroll .tree-row:not(.is-dir) .tree-glyph { color: #0b0a1066; }
+html:not(.rd-off) .filetree-scroll .tree-row.selected .tree-glyph { color: var(--accent); }
+html:not(.rd-off) .sidebar .tree-row { height: 32px; }
 
 /* ---- Pinned: yellow star squares ---- */
-html:not([data-theme="dark"]) .pinned-row:not(.is-dir) .tree-glyph {
+html:not(.rd-off) .pinned-row:not(.is-dir) .tree-glyph {
   width: 20px; height: 20px; border-radius: 6px;
   background: #fde99baa; color: #987e1b !important;
 }
-html:not([data-theme="dark"]) .pinned-row:not(.is-dir) .tree-glyph svg { display: none; }
-html:not([data-theme="dark"]) .pinned-row:not(.is-dir) .tree-glyph::after {
+html:not(.rd-off) .pinned-row:not(.is-dir) .tree-glyph svg { display: none; }
+html:not(.rd-off) .pinned-row:not(.is-dir) .tree-glyph::after {
   content: ""; width: 12px; height: 12px; background: currentColor;
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='m12 4 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.6-4.8 2.6.9-5.4-3.9-3.8 5.4-.8z'/%3E%3C/svg%3E") center / contain no-repeat;
 }
-html:not([data-theme="dark"]) .pinned-shared { font-size: var(--fs-xs); color: var(--text-tertiary); }
+html:not(.rd-off) .pinned-shared { font-size: var(--fs-xs); color: var(--text-tertiary); }
 
 /* ---- Vault settings: cream window, white cards, title top-left ---- */
-html:not([data-theme="dark"]) .settings-page.settings-modal {
+html:not(.rd-off) .settings-page.settings-modal {
   background: var(--bg-app);
   border: 0;
   border-radius: 24px;
   box-shadow: 0 50px 100px -24px rgba(11, 10, 16, 0.45);
 }
-html:not([data-theme="dark"]) .settings-page-header {
+html:not(.rd-off) .settings-page-header {
   border-bottom: 0;
   padding: var(--sp-5) var(--sp-6) var(--sp-2);
 }
-html:not([data-theme="dark"]) .settings-eyebrow { font-family: var(--font-mono); font-weight: 500; letter-spacing: 0.7px; color: #0b0a1099; }
-html:not([data-theme="dark"]) .settings-page-header .icon-btn {
+html:not(.rd-off) .settings-eyebrow { font-family: var(--font-mono); font-weight: 500; letter-spacing: 0.7px; color: #0b0a1099; }
+html:not(.rd-off) .settings-page-header .icon-btn {
   background: #fff; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
 }
-html:not([data-theme="dark"]) .settings-body { padding-top: var(--sp-3); }
-html:not([data-theme="dark"]) .settings-nav { width: 220px; }
-html:not([data-theme="dark"]) .settings-nav .menu-item { min-height: 36px; border-radius: var(--radius-md); font-size: var(--fs-md); gap: var(--sp-2); }
-html:not([data-theme="dark"]) .settings-nav .menu-item.active { background: #fff; box-shadow: var(--rd-card-shadow); color: var(--text-primary); }
+html:not(.rd-off) .settings-body { padding-top: var(--sp-3); }
+html:not(.rd-off) .settings-nav { width: 220px; }
+html:not(.rd-off) .settings-nav .menu-item { min-height: 36px; border-radius: var(--radius-md); font-size: var(--fs-md); gap: var(--sp-2); }
+html:not(.rd-off) .settings-nav .menu-item.active { background: #fff; box-shadow: var(--rd-card-shadow); color: var(--text-primary); }
 .settings-nav .menu-item:nth-of-type(5n + 1) .menu-icon { --rd-tint: #cfc4ff66; --rd-ink: #6a4fe0; }
 .settings-nav .menu-item:nth-of-type(5n + 2) .menu-icon { --rd-tint: #9bd8a966; --rd-ink: #3f8850; }
 .settings-nav .menu-item:nth-of-type(5n + 3) .menu-icon { --rd-tint: #9ed4ef77; --rd-ink: #427e8a; }
@@ -700,7 +700,7 @@ html:not([data-theme="dark"]) .settings-nav .menu-item.active { background: #fff
 .settings-nav .menu-item:nth-of-type(5n + 5) .menu-icon { --rd-tint: #f3c4ec88; --rd-ink: #a549ab; }
 
 /* The content pane is the cream ground; each block is its own white card. */
-html:not([data-theme="dark"]) .settings-content {
+html:not(.rd-off) .settings-content {
   background: transparent;
   box-shadow: none;
   padding: 0 var(--sp-1) var(--sp-8);
@@ -708,82 +708,82 @@ html:not([data-theme="dark"]) .settings-content {
   flex-direction: column;
   gap: var(--sp-3);
 }
-html:not([data-theme="dark"]) .settings-section-title { font-size: var(--fs-2xl); font-weight: 600; letter-spacing: -0.02em; margin: 0 0 var(--sp-2); }
-html:not([data-theme="dark"]) .settings-content > .menu-sep { display: none; }
-html:not([data-theme="dark"]) .settings-content > .vault-icon-settings,
-html:not([data-theme="dark"]) .settings-content > .toggle-row,
-html:not([data-theme="dark"]) .settings-content > .join-code-row {
+html:not(.rd-off) .settings-section-title { font-size: var(--fs-2xl); font-weight: 600; letter-spacing: -0.02em; margin: 0 0 var(--sp-2); }
+html:not(.rd-off) .settings-content > .menu-sep { display: none; }
+html:not(.rd-off) .settings-content > .vault-icon-settings,
+html:not(.rd-off) .settings-content > .toggle-row,
+html:not(.rd-off) .settings-content > .join-code-row {
   background: #fff;
   border-radius: var(--radius-xl);
   box-shadow: var(--rd-card-shadow);
   padding: var(--sp-5);
   margin: 0;
 }
-html:not([data-theme="dark"]) .settings-content > .subhead {
+html:not(.rd-off) .settings-content > .subhead {
   margin: var(--sp-3) 0 calc(-1 * var(--sp-1)) var(--sp-1);
   font-family: var(--font-mono);
   font-size: 10.5px;
   letter-spacing: 0.7px;
   color: #0b0a1099;
 }
-html:not([data-theme="dark"]) .settings-content .vault-root-path { background: var(--bg-app); border-radius: var(--radius-md); }
-html:not([data-theme="dark"]) .vault-icon-option { border-radius: 10px; }
-html:not([data-theme="dark"]) .vault-local-only-card {
+html:not(.rd-off) .settings-content .vault-root-path { background: var(--bg-app); border-radius: var(--radius-md); }
+html:not(.rd-off) .vault-icon-option { border-radius: 10px; }
+html:not(.rd-off) .vault-local-only-card {
   background: linear-gradient(180deg, #fff, #fff8f7);
   box-shadow: 0 0 0 1px rgba(187, 67, 58, 0.16), var(--rd-card-shadow);
   border: 0;
   border-radius: var(--radius-xl);
 }
-html:not([data-theme="dark"]) .settings-content > .toggle-row { height: auto; min-height: 0; flex-shrink: 0; align-items: center; overflow: visible; }
-html:not([data-theme="dark"]) .settings-content > * { flex-shrink: 0; }
+html:not(.rd-off) .settings-content > .toggle-row { height: auto; min-height: 0; flex-shrink: 0; align-items: center; overflow: visible; }
+html:not(.rd-off) .settings-content > * { flex-shrink: 0; }
 
 /* Sidebar text on the small step of the scale. */
-html:not([data-theme="dark"]) .sidebar .tree-row,
-html:not([data-theme="dark"]) .home-sidebar-row,
-html:not([data-theme="dark"]) .pinned-name { font-size: var(--fs-sm); }
-html:not([data-theme="dark"]) .sidebar .tree-row { height: 30px; }
-html:not([data-theme="dark"]) .vault-name { font-size: 13px; }
-html:not([data-theme="dark"]) .rd-new-note { font-size: var(--fs-sm); }
-html:not([data-theme="dark"]) .identity-line1 { font-size: var(--fs-sm); }
+html:not(.rd-off) .sidebar .tree-row,
+html:not(.rd-off) .home-sidebar-row,
+html:not(.rd-off) .pinned-name { font-size: var(--fs-sm); }
+html:not(.rd-off) .sidebar .tree-row { height: 30px; }
+html:not(.rd-off) .vault-name { font-size: 13px; }
+html:not(.rd-off) .rd-new-note { font-size: var(--fs-sm); }
+html:not(.rd-off) .identity-line1 { font-size: var(--fs-sm); }
 
 /* ============================================================
    Round 6: the old full-height page, in the new look.
    The white page fills the window again; tabs and the toolbar
    sit in its top row. No floating card, no cream strip.
    ============================================================ */
-html:not([data-theme="dark"]) .main {
+html:not(.rd-off) .main {
   background: #fff;
   border-top-left-radius: var(--radius-xl);
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.06), 0 8px 24px rgba(20, 20, 40, 0.06);
 }
-html:not([data-theme="dark"]) .editor-wrap {
+html:not(.rd-off) .editor-wrap {
   margin: 0;
   border-radius: 0;
   box-shadow: none;
   background: transparent;
 }
-html:not([data-theme="dark"]) .header-actions { position: static; }
-html:not([data-theme="dark"]) .tab-active-bg { background: var(--bg-app); box-shadow: none; }
+html:not(.rd-off) .header-actions { position: static; }
+html:not(.rd-off) .tab-active-bg { background: var(--bg-app); box-shadow: none; }
 .rd-crumbs { display: none; }
-html:not([data-theme="dark"]) .editor-wrap .cm-scroller { padding-top: 0; }
+html:not(.rd-off) .editor-wrap .cm-scroller { padding-top: 0; }
 
 /* Tree rows: 38px slots with a 4px breathing gap between rows. */
-html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row { height: 34px; margin-top: 2px; margin-bottom: 2px; }
-html:not([data-theme="dark"]) .pinned-section .pinned-row,
-html:not([data-theme="dark"]) .home-sidebar-row { min-height: 34px; margin-top: 2px; margin-bottom: 2px; }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-row { height: 34px; margin-top: 2px; margin-bottom: 2px; }
+html:not(.rd-off) .pinned-section .pinned-row,
+html:not(.rd-off) .home-sidebar-row { min-height: 34px; margin-top: 2px; margin-bottom: 2px; }
 
 /* Section labels and the buttons in their rows use the app's own font. */
-html:not([data-theme="dark"]) .settings-content .subhead {
+html:not(.rd-off) .settings-content .subhead {
   font-family: var(--font-body);
   font-size: var(--fs-xs);
   letter-spacing: 0.06em;
 }
-html:not([data-theme="dark"]) .settings-content .subhead button,
-html:not([data-theme="dark"]) .settings-content .subhead * { font-family: var(--font-body); letter-spacing: normal; }
+html:not(.rd-off) .settings-content .subhead button,
+html:not(.rd-off) .settings-content .subhead * { font-family: var(--font-body); letter-spacing: normal; }
 
 /* ---- Vault settings, mockup layout ---- */
-html:not([data-theme="dark"]) .settings-page.settings-modal { position: relative; }
-html:not([data-theme="dark"]) .settings-body { padding: var(--sp-6) var(--sp-6) var(--sp-6) var(--sp-5); gap: var(--sp-6); }
+html:not(.rd-off) .settings-page.settings-modal { position: relative; }
+html:not(.rd-off) .settings-body { padding: var(--sp-6) var(--sp-6) var(--sp-6) var(--sp-5); gap: var(--sp-6); }
 .rd-settings-close {
   position: absolute; top: var(--sp-5); right: var(--sp-5); z-index: 3;
   width: 34px; height: 34px; display: grid; place-items: center;
@@ -798,152 +798,152 @@ html:not([data-theme="dark"]) .settings-body { padding: var(--sp-6) var(--sp-6) 
 }
 .rd-settings-head { margin-bottom: var(--sp-2); padding-right: 48px; }
 .rd-settings-head p { margin: 4px 0 0; font-size: var(--fs-sm); color: var(--text-secondary); }
-html:not([data-theme="dark"]) .settings-section-title { margin: 0; }
+html:not(.rd-off) .settings-section-title { margin: 0; }
 
 /* Name and icon card: a large preview on the left, controls on the right. */
-html:not([data-theme="dark"]) .settings-content > .vault-icon-settings {
+html:not(.rd-off) .settings-content > .vault-icon-settings {
   display: grid;
   grid-template-columns: 200px 1fr;
   column-gap: var(--sp-5);
   row-gap: var(--sp-3);
 }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head { display: contents; }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-preview {
+html:not(.rd-off) .vault-icon-settings .vault-icon-head { display: contents; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-preview {
   grid-row: 1 / span 2; grid-column: 1;
   display: grid; place-items: center; align-self: stretch; min-height: 180px;
   border-radius: var(--radius-lg); background: var(--bg-app); box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.05);
 }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-preview .vault-tile { width: 76px; height: 76px; border-radius: 20px; box-shadow: 0 12px 24px -10px rgba(11, 10, 16, 0.35); }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-text { grid-column: 2; grid-row: 1; }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-actions { grid-column: 2; grid-row: 1; justify-self: end; align-self: start; }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-customise { grid-column: 2; grid-row: 2; }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-actions button.secondary { background: var(--text-primary); color: #fff; border: 0; }
-html:not([data-theme="dark"]) .vault-icon-option { background: rgba(124, 92, 255, 0.07); border: 0; color: #4a2fc7; }
-html:not([data-theme="dark"]) .vault-icon-option.active { background: var(--accent); color: #fff; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-preview .vault-tile { width: 76px; height: 76px; border-radius: 20px; box-shadow: 0 12px 24px -10px rgba(11, 10, 16, 0.35); }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-text { grid-column: 2; grid-row: 1; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-actions { grid-column: 2; grid-row: 1; justify-self: end; align-self: start; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-customise { grid-column: 2; grid-row: 2; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-actions button.secondary { background: var(--text-primary); color: #fff; border: 0; }
+html:not(.rd-off) .vault-icon-option { background: rgba(124, 92, 255, 0.07); border: 0; color: #4a2fc7; }
+html:not(.rd-off) .vault-icon-option.active { background: var(--accent); color: #fff; }
 
 /* Settings menu: the selected pill stays inside the menu column. */
-html:not([data-theme="dark"]) .settings-nav { padding: 2px 8px 2px 2px; overflow-x: hidden; }
-html:not([data-theme="dark"]) .settings-nav .menu-item { width: 100%; box-sizing: border-box; }
-html:not([data-theme="dark"]) .settings-nav .menu-item.active { box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 2px 6px -2px rgba(11, 10, 16, 0.1); }
+html:not(.rd-off) .settings-nav { padding: 2px 8px 2px 2px; overflow-x: hidden; }
+html:not(.rd-off) .settings-nav .menu-item { width: 100%; box-sizing: border-box; }
+html:not(.rd-off) .settings-nav .menu-item.active { box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 2px 6px -2px rgba(11, 10, 16, 0.1); }
 
 /* ---- Inner settings pages ---- */
 /* Header actions clear the close button. */
-html:not([data-theme="dark"]) .members-access-header { padding-right: 48px; }
-html:not([data-theme="dark"]) .members-access-intro { color: var(--text-secondary); font-size: var(--fs-sm); }
+html:not(.rd-off) .members-access-header { padding-right: 48px; }
+html:not(.rd-off) .members-access-intro { color: var(--text-secondary); font-size: var(--fs-sm); }
 
 /* Everyone / New members rows: one white card. */
-html:not([data-theme="dark"]) .members-access-rows {
+html:not(.rd-off) .members-access-rows {
   background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow);
   padding: 4px var(--sp-4);
 }
-html:not([data-theme="dark"]) .members-access-row-icon {
+html:not(.rd-off) .members-access-row-icon {
   width: 30px; height: 30px; border-radius: 9px; background: #cfc4ff55; color: #6a4fe0; display: grid; place-items: center;
 }
-html:not([data-theme="dark"]) .members-access-row + .members-access-row .members-access-row-icon { background: #fde99baa; color: #987e1b; }
+html:not(.rd-off) .members-access-row + .members-access-row .members-access-row-icon { background: #fde99baa; color: #987e1b; }
 
 /* People table: a white card with a quiet header row. */
-html:not([data-theme="dark"]) .members-table {
+html:not(.rd-off) .members-table {
   background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow);
   border: 0 !important; overflow: hidden; border-collapse: separate; border-spacing: 0;
 }
-html:not([data-theme="dark"]) .members-table th {
+html:not(.rd-off) .members-table th {
   background: var(--bg-app) !important; font: 500 10.5px var(--font-mono); letter-spacing: 0.6px; text-transform: uppercase; color: #0b0a1088;
 }
-html:not([data-theme="dark"]) .members-table td,
-html:not([data-theme="dark"]) .members-table th { border-color: rgba(11, 10, 16, 0.06) !important; }
-html:not([data-theme="dark"]) .members-table tr.is-clickable:hover td { background: var(--bg-app); }
-html:not([data-theme="dark"]) .members-access-search {
+html:not(.rd-off) .members-table td,
+html:not(.rd-off) .members-table th { border-color: rgba(11, 10, 16, 0.06) !important; }
+html:not(.rd-off) .members-table tr.is-clickable:hover td { background: var(--bg-app); }
+html:not(.rd-off) .members-access-search {
   background: #fff; border: 0; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
 }
-html:not([data-theme="dark"]) .members-access-mcp-hint { color: var(--text-tertiary); }
+html:not(.rd-off) .members-access-mcp-hint { color: var(--text-tertiary); }
 
 /* Profile: name card and segmented tabs. */
-html:not([data-theme="dark"]) .member-profile-head {
+html:not(.rd-off) .member-profile-head {
   background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); padding: var(--sp-4);
 }
-html:not([data-theme="dark"]) .member-profile-head .avatar { width: 40px; height: 40px; }
-html:not([data-theme="dark"]) .member-profile-name { font: 600 var(--fs-lg) var(--font-display); }
-html:not([data-theme="dark"]) .member-profile-tabs {
+html:not(.rd-off) .member-profile-head .avatar { width: 40px; height: 40px; }
+html:not(.rd-off) .member-profile-name { font: 600 var(--fs-lg) var(--font-display); }
+html:not(.rd-off) .member-profile-tabs {
   display: inline-flex; gap: 2px; padding: 3px; border: 0 !important;
   background: rgba(11, 10, 16, 0.05); border-radius: var(--radius-md); align-self: flex-start;
 }
-html:not([data-theme="dark"]) .member-profile-tab {
+html:not(.rd-off) .member-profile-tab {
   border: 0 !important; border-radius: 8px; padding: 6px 14px; font-size: var(--fs-sm); color: var(--text-secondary);
 }
-html:not([data-theme="dark"]) .member-profile-tab::after { display: none !important; }
-html:not([data-theme="dark"]) .member-profile-tab.active {
+html:not(.rd-off) .member-profile-tab::after { display: none !important; }
+html:not(.rd-off) .member-profile-tab.active {
   background: #fff; color: var(--text-primary); font-weight: 500; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1);
 }
-html:not([data-theme="dark"]) .member-profile-access > .members-access-row {
+html:not(.rd-off) .member-profile-access > .members-access-row {
   background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); padding: var(--sp-3) var(--sp-4); border: 0;
 }
 
 /* Access board: white column cards with a soft tinted header. */
-html:not([data-theme="dark"]) .access-board-column {
+html:not(.rd-off) .access-board-column {
   background: #fff; border: 0 !important; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); overflow: hidden;
 }
-html:not([data-theme="dark"]) .access-board-column-head { border-bottom: 1px solid rgba(11, 10, 16, 0.05); }
-html:not([data-theme="dark"]) .access-board-row { border-radius: var(--radius-sm); margin: 1px 6px; font-size: var(--fs-sm); }
-html:not([data-theme="dark"]) .access-board-row:hover { background: var(--bg-app); }
-html:not([data-theme="dark"]) .access-board-icon { color: #0b0a1070; }
-html:not([data-theme="dark"]) .access-board-empty { border-radius: var(--radius-lg); }
-html:not([data-theme="dark"]) .member-access-view { background: rgba(11, 10, 16, 0.05); border: 0; border-radius: var(--radius-md); padding: 3px; }
-html:not([data-theme="dark"]) .member-access-view-btn.is-active { background: #fff; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1); }
+html:not(.rd-off) .access-board-column-head { border-bottom: 1px solid rgba(11, 10, 16, 0.05); }
+html:not(.rd-off) .access-board-row { border-radius: var(--radius-sm); margin: 1px 6px; font-size: var(--fs-sm); }
+html:not(.rd-off) .access-board-row:hover { background: var(--bg-app); }
+html:not(.rd-off) .access-board-icon { color: #0b0a1070; }
+html:not(.rd-off) .access-board-empty { border-radius: var(--radius-lg); }
+html:not(.rd-off) .member-access-view { background: rgba(11, 10, 16, 0.05); border: 0; border-radius: var(--radius-md); padding: 3px; }
+html:not(.rd-off) .member-access-view-btn.is-active { background: #fff; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1); }
 
 /* Name and icon card, lighter: small preview inline, compact picker. */
-html:not([data-theme="dark"]) .settings-content > .vault-icon-settings { display: block; padding: var(--sp-4); }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head { display: flex; align-items: center; gap: var(--sp-3); }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-preview {
+html:not(.rd-off) .settings-content > .vault-icon-settings { display: block; padding: var(--sp-4); }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head { display: flex; align-items: center; gap: var(--sp-3); }
+html:not(.rd-off) .vault-icon-settings .vault-icon-preview {
   min-height: 0; background: none; box-shadow: none; border-radius: 0; display: block;
 }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-preview .vault-tile { width: 40px; height: 40px; border-radius: 11px; box-shadow: none; }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-text { flex: 1; }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-actions { margin-left: auto; align-self: center; }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-actions button { height: 30px; padding: 0 12px; font-size: var(--fs-sm); }
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-customise { margin-top: var(--sp-3); }
-html:not([data-theme="dark"]) .vault-icon-colors { gap: 6px; }
-html:not([data-theme="dark"]) .vault-icon-colors .swatch { width: 16px; height: 16px; }
-html:not([data-theme="dark"]) .vault-icon-grid { grid-template-columns: repeat(auto-fill, 30px); gap: 5px; }
-html:not([data-theme="dark"]) .vault-icon-option { width: 30px; height: 30px; border-radius: 8px; }
-html:not([data-theme="dark"]) .vault-icon-option svg { width: 15px; height: 15px; }
-html:not([data-theme="dark"]) .vault-icon-option {
+html:not(.rd-off) .vault-icon-settings .vault-icon-preview .vault-tile { width: 40px; height: 40px; border-radius: 11px; box-shadow: none; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-text { flex: 1; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-actions { margin-left: auto; align-self: center; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-actions button { height: 30px; padding: 0 12px; font-size: var(--fs-sm); }
+html:not(.rd-off) .vault-icon-settings .vault-icon-customise { margin-top: var(--sp-3); }
+html:not(.rd-off) .vault-icon-colors { gap: 6px; }
+html:not(.rd-off) .vault-icon-colors .swatch { width: 16px; height: 16px; }
+html:not(.rd-off) .vault-icon-grid { grid-template-columns: repeat(auto-fill, 30px); gap: 5px; }
+html:not(.rd-off) .vault-icon-option { width: 30px; height: 30px; border-radius: 8px; }
+html:not(.rd-off) .vault-icon-option svg { width: 15px; height: 15px; }
+html:not(.rd-off) .vault-icon-option {
   box-sizing: border-box; padding: 0 !important; min-width: 0; aspect-ratio: auto;
   display: grid !important; place-items: center;
 }
-html:not([data-theme="dark"]) .vault-icon-option svg { width: 16px !important; height: 16px !important; }
-html:not([data-theme="dark"]) .vault-icon-option { color: #4a2fc7; background: rgba(124, 92, 255, 0.07) !important; }
-html:not([data-theme="dark"]) .vault-icon-option.active { color: #fff; background: var(--accent) !important; }
-html:not([data-theme="dark"]) .vault-icon-option svg { stroke: currentColor; opacity: 1; }
-html:not([data-theme="dark"]) .vault-icon-option .vault-tile {
+html:not(.rd-off) .vault-icon-option svg { width: 16px !important; height: 16px !important; }
+html:not(.rd-off) .vault-icon-option { color: #4a2fc7; background: rgba(124, 92, 255, 0.07) !important; }
+html:not(.rd-off) .vault-icon-option.active { color: #fff; background: var(--accent) !important; }
+html:not(.rd-off) .vault-icon-option svg { stroke: currentColor; opacity: 1; }
+html:not(.rd-off) .vault-icon-option .vault-tile {
   width: 100% !important; height: 100% !important; margin: 0 !important;
   display: grid !important; place-items: center; border-radius: inherit;
   background: transparent !important; box-shadow: none !important; color: inherit !important;
   --tile-fill: transparent; --tile-ink: currentColor;
 }
-html:not([data-theme="dark"]) .vault-icon-option .vault-icon-svg { width: 16px; height: 16px; display: grid; place-items: center; }
+html:not(.rd-off) .vault-icon-option .vault-icon-svg { width: 16px; height: 16px; display: grid; place-items: center; }
 
 /* ============================================================
    Small dialogs (Invite people, confirms, prompts)
    ============================================================ */
-html:not([data-theme="dark"]) .modal {
+html:not(.rd-off) .modal {
   padding: var(--sp-6);
   background: #fff;
 }
-html:not([data-theme="dark"]) .modal .confirm-title,
-html:not([data-theme="dark"]) .modal .modal-header h2 {
+html:not(.rd-off) .modal .confirm-title,
+html:not(.rd-off) .modal .modal-header h2 {
   font: 600 var(--fs-xl) var(--font-display);
   letter-spacing: -0.01em;
   margin: 0 0 var(--sp-4);
 }
-html:not([data-theme="dark"]) .modal .confirm-body { color: var(--text-secondary); font-size: var(--fs-md); line-height: 1.55; }
+html:not(.rd-off) .modal .confirm-body { color: var(--text-secondary); font-size: var(--fs-md); line-height: 1.55; }
 
 /* Inputs: soft cream fill, no hard border, violet focus ring. */
-html:not([data-theme="dark"]) .modal input[type="text"],
-html:not([data-theme="dark"]) .modal input[type="email"],
-html:not([data-theme="dark"]) .modal input[type="password"],
-html:not([data-theme="dark"]) .modal input:not([type]),
-html:not([data-theme="dark"]) .modal textarea,
-html:not([data-theme="dark"]) .invite-chips {
+html:not(.rd-off) .modal input[type="text"],
+html:not(.rd-off) .modal input[type="email"],
+html:not(.rd-off) .modal input[type="password"],
+html:not(.rd-off) .modal input:not([type]),
+html:not(.rd-off) .modal textarea,
+html:not(.rd-off) .invite-chips {
   background: var(--bg-app) !important;
   border: 0 !important;
   box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06) !important;
@@ -951,17 +951,17 @@ html:not([data-theme="dark"]) .invite-chips {
   min-height: 42px;
   font-size: var(--fs-md);
 }
-html:not([data-theme="dark"]) .modal input:focus,
-html:not([data-theme="dark"]) .modal textarea:focus,
-html:not([data-theme="dark"]) .invite-chips:focus-within {
+html:not(.rd-off) .modal input:focus,
+html:not(.rd-off) .modal textarea:focus,
+html:not(.rd-off) .invite-chips:focus-within {
   background: #fff !important;
   box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft) !important;
   outline: none;
 }
 
 /* Role / Access pickers: two soft tiles, text never spills out. */
-html:not([data-theme="dark"]) .invite-people-fields { gap: var(--sp-2); }
-html:not([data-theme="dark"]) .invite-field {
+html:not(.rd-off) .invite-people-fields { gap: var(--sp-2); }
+html:not(.rd-off) .invite-field {
   background: var(--bg-app);
   border: 0 !important;
   box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06);
@@ -969,13 +969,13 @@ html:not([data-theme="dark"]) .invite-field {
   min-width: 0;
   overflow: hidden;
 }
-html:not([data-theme="dark"]) .invite-field > *:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-html:not([data-theme="dark"]) .invite-field-label {
+html:not(.rd-off) .invite-field > *:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html:not(.rd-off) .invite-field-label {
   font: 500 10px var(--font-mono); letter-spacing: 0.6px; text-transform: uppercase; color: #0b0a1088;
 }
 
 /* Join code: a quiet panel with the code in mono. */
-html:not([data-theme="dark"]) .invite-people-code {
+html:not(.rd-off) .invite-people-code {
   margin-top: var(--sp-4);
   padding: 10px var(--sp-3);
   border: 0 !important;
@@ -984,159 +984,159 @@ html:not([data-theme="dark"]) .invite-people-code {
   font-size: var(--fs-sm);
   color: var(--text-secondary);
 }
-html:not([data-theme="dark"]) .invite-people-code-value { font-family: var(--font-mono); letter-spacing: 2px; color: #4a2fc7; font-weight: 500; }
+html:not(.rd-off) .invite-people-code-value { font-family: var(--font-mono); letter-spacing: 2px; color: #4a2fc7; font-weight: 500; }
 
 /* Footer buttons: a quiet Cancel and a solid primary. */
-html:not([data-theme="dark"]) .confirm-actions { margin-top: var(--sp-5); gap: var(--sp-2); }
-html:not([data-theme="dark"]) .confirm-actions .ghost-pill,
-html:not([data-theme="dark"]) .confirm-actions button.primary {
+html:not(.rd-off) .confirm-actions { margin-top: var(--sp-5); gap: var(--sp-2); }
+html:not(.rd-off) .confirm-actions .ghost-pill,
+html:not(.rd-off) .confirm-actions button.primary {
   height: 36px; padding: 0 var(--sp-4); border-radius: var(--radius-md); font-weight: 500; font-size: var(--fs-sm);
 }
-html:not([data-theme="dark"]) .confirm-actions .ghost-pill { border: 0; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.1); background: #fff; color: var(--text-primary); }
-html:not([data-theme="dark"]) .confirm-actions button.primary { box-shadow: 0 8px 18px -8px rgba(124, 92, 255, 0.6); }
-html:not([data-theme="dark"]) .confirm-actions button.primary:disabled { background: var(--accent); opacity: 0.4; box-shadow: none; }
-html:not([data-theme="dark"]) .confirm-actions button.danger,
-html:not([data-theme="dark"]) .confirm-actions button.primary.danger { background: #bb433a; box-shadow: 0 8px 18px -8px rgba(187, 67, 58, 0.55); }
-html:not([data-theme="dark"]) .invite-chips input,
-html:not([data-theme="dark"]) .invite-chips input:focus {
+html:not(.rd-off) .confirm-actions .ghost-pill { border: 0; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.1); background: #fff; color: var(--text-primary); }
+html:not(.rd-off) .confirm-actions button.primary { box-shadow: 0 8px 18px -8px rgba(124, 92, 255, 0.6); }
+html:not(.rd-off) .confirm-actions button.primary:disabled { background: var(--accent); opacity: 0.4; box-shadow: none; }
+html:not(.rd-off) .confirm-actions button.danger,
+html:not(.rd-off) .confirm-actions button.primary.danger { background: #bb433a; box-shadow: 0 8px 18px -8px rgba(187, 67, 58, 0.55); }
+html:not(.rd-off) .invite-chips input,
+html:not(.rd-off) .invite-chips input:focus {
   background: transparent !important; box-shadow: none !important; min-height: 0;
 }
-html:not([data-theme="dark"]) .confirm-actions button.primary:disabled {
+html:not(.rd-off) .confirm-actions button.primary:disabled {
   opacity: 1; background: #d9d0ff; color: #fff !important;
 }
-html:not([data-theme="dark"]) .confirm-actions button.primary:disabled * { color: #fff !important; opacity: 1 !important; }
-html:not([data-theme="dark"]) .modal .invite-chips input:not([type]),
-html:not([data-theme="dark"]) .modal .invite-chips input:not([type]):focus,
-html:not([data-theme="dark"]) .modal .skills-prefix-input input,
-html:not([data-theme="dark"]) .modal .skills-prefix-input input:focus {
+html:not(.rd-off) .confirm-actions button.primary:disabled * { color: #fff !important; opacity: 1 !important; }
+html:not(.rd-off) .modal .invite-chips input:not([type]),
+html:not(.rd-off) .modal .invite-chips input:not([type]):focus,
+html:not(.rd-off) .modal .skills-prefix-input input,
+html:not(.rd-off) .modal .skills-prefix-input input:focus {
   background: transparent !important; box-shadow: none !important; min-height: 0;
   border: 0 !important; outline: none; padding-left: 0; padding-right: 0;
 }
 
 /* Icon picker, clean: plain grey line icons, light hover, violet ring when chosen. */
-html:not([data-theme="dark"]) .vault-icon-grid { gap: 2px; }
-html:not([data-theme="dark"]) .vault-icon-option,
-html:not([data-theme="dark"]) .vault-icon-option.active {
+html:not(.rd-off) .vault-icon-grid { gap: 2px; }
+html:not(.rd-off) .vault-icon-option,
+html:not(.rd-off) .vault-icon-option.active {
   background: transparent !important;
   color: #0b0a1099 !important;
   border: 0 !important;
   box-shadow: none !important;
   border-radius: 8px;
 }
-html:not([data-theme="dark"]) .vault-icon-option:hover { background: rgba(11, 10, 16, 0.05) !important; color: var(--text-primary) !important; }
-html:not([data-theme="dark"]) .vault-icon-option.active {
+html:not(.rd-off) .vault-icon-option:hover { background: rgba(11, 10, 16, 0.05) !important; color: var(--text-primary) !important; }
+html:not(.rd-off) .vault-icon-option.active {
   background: var(--accent-soft) !important;
   color: #4a2fc7 !important;
   box-shadow: inset 0 0 0 1.5px var(--accent) !important;
 }
-html:not([data-theme="dark"]) .vault-icon-option .vault-tile,
-html:not([data-theme="dark"]) .vault-icon-option .vault-tile * {
+html:not(.rd-off) .vault-icon-option .vault-tile,
+html:not(.rd-off) .vault-icon-option .vault-tile * {
   --tile-fill: transparent !important;
   --tile-ink: currentColor !important;
   background: transparent !important;
   box-shadow: none !important;
 }
 /* The picker icons are SVGs with a baked-in tile rect and colours. */
-html:not([data-theme="dark"]) .vault-icon-option svg > g > rect:first-child { fill: transparent !important; }
-html:not([data-theme="dark"]) .vault-icon-option svg > g > g [stroke]:not([stroke="none"]) { stroke: currentColor !important; }
-html:not([data-theme="dark"]) .vault-icon-option svg > g > g [fill]:not([fill="none"]) { fill: currentColor !important; }
-html:not([data-theme="dark"]) .vault-icon-option .vault-icon-svg,
-html:not([data-theme="dark"]) .vault-icon-option svg { width: 22px !important; height: 22px !important; }
+html:not(.rd-off) .vault-icon-option svg > g > rect:first-child { fill: transparent !important; }
+html:not(.rd-off) .vault-icon-option svg > g > g [stroke]:not([stroke="none"]) { stroke: currentColor !important; }
+html:not(.rd-off) .vault-icon-option svg > g > g [fill]:not([fill="none"]) { fill: currentColor !important; }
+html:not(.rd-off) .vault-icon-option .vault-icon-svg,
+html:not(.rd-off) .vault-icon-option svg { width: 22px !important; height: 22px !important; }
 .rd-settings-id .avatar { width: 40px; height: 40px; flex: none; }
 
 /* ============================================================
    Vault settings follows the Account settings Profile page:
    open content on the cream ground, no stacked cards.
    ============================================================ */
-html:not([data-theme="dark"]) .settings-content > .vault-icon-settings,
-html:not([data-theme="dark"]) .settings-content > .toggle-row,
-html:not([data-theme="dark"]) .settings-content > .join-code-row {
+html:not(.rd-off) .settings-content > .vault-icon-settings,
+html:not(.rd-off) .settings-content > .toggle-row,
+html:not(.rd-off) .settings-content > .join-code-row {
   background: transparent;
   box-shadow: none;
   border-radius: 0;
   padding: 0;
 }
-html:not([data-theme="dark"]) .settings-content { gap: var(--sp-4); }
-html:not([data-theme="dark"]) .settings-section-title { font-size: var(--fs-2xl); margin-bottom: var(--sp-1); }
+html:not(.rd-off) .settings-content { gap: var(--sp-4); }
+html:not(.rd-off) .settings-section-title { font-size: var(--fs-2xl); margin-bottom: var(--sp-1); }
 
 /* Icon row like the avatar row: big icon, name, buttons on the right. */
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-preview .vault-tile { width: 56px; height: 56px; border-radius: 15px; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-preview .vault-tile { width: 56px; height: 56px; border-radius: 15px; }
 /* The picker sits in a soft panel, like "Or pick a character". */
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-customise {
+html:not(.rd-off) .vault-icon-settings .vault-icon-customise {
   margin-top: var(--sp-4);
   padding: var(--sp-3) var(--sp-4) var(--sp-4);
   border-radius: var(--radius-lg);
   background: var(--bg-subtle);
   box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06);
 }
-html:not([data-theme="dark"]) .vault-icon-option:hover { background: rgba(11, 10, 16, 0.06) !important; }
+html:not(.rd-off) .vault-icon-option:hover { background: rgba(11, 10, 16, 0.06) !important; }
 
 /* Path field like the Profile inputs. */
-html:not([data-theme="dark"]) .settings-content .vault-root-path { background: var(--bg-subtle); padding: 10px 12px; }
+html:not(.rd-off) .settings-content .vault-root-path { background: var(--bg-subtle); padding: 10px 12px; }
 
 /* Danger zone keeps its soft red cards. */
-html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-actions button.secondary { background: var(--bg-subtle); color: var(--text-primary); height: 34px; font-size: var(--fs-md); }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-actions button.secondary { background: var(--bg-subtle); color: var(--text-primary); height: 34px; font-size: var(--fs-md); }
 
 /* ============================================================
    Token dialog: premium
    ============================================================ */
-html:not([data-theme="dark"]) .mcp-token-dialog { width: 520px; padding: 0; overflow: hidden; }
-html:not([data-theme="dark"]) .mcp-token-dialog .skills-form-head {
+html:not(.rd-off) .mcp-token-dialog { width: 520px; padding: 0; overflow: hidden; }
+html:not(.rd-off) .mcp-token-dialog .skills-form-head {
   display: flex; align-items: center; gap: 12px;
   padding: var(--sp-5) var(--sp-5) var(--sp-4);
   background: linear-gradient(180deg, #f6f3ff, #fff);
   border-bottom: 1px solid rgba(11, 10, 16, 0.05);
 }
-html:not([data-theme="dark"]) .mcp-token-dialog .skills-form-head::before {
+html:not(.rd-off) .mcp-token-dialog .skills-form-head::before {
   content: ""; width: 38px; height: 38px; flex: none; border-radius: 11px;
   background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='15' r='4'/%3E%3Cpath d='m11 12 9-9M17 6l3 3M15 8l2 2'/%3E%3C/svg%3E") center / 18px no-repeat;
   box-shadow: 0 8px 18px -8px rgba(124, 92, 255, 0.7);
 }
-html:not([data-theme="dark"]) .mcp-token-dialog .skills-form-head .confirm-title { margin: 0; flex: 1; font-size: var(--fs-lg); }
-html:not([data-theme="dark"]) .mcp-token-dialog .skills-form-head .icon-btn {
+html:not(.rd-off) .mcp-token-dialog .skills-form-head .confirm-title { margin: 0; flex: 1; font-size: var(--fs-lg); }
+html:not(.rd-off) .mcp-token-dialog .skills-form-head .icon-btn {
   width: 30px; height: 30px; border-radius: 9px; background: #fff; box-shadow: var(--rd-card-shadow); display: grid; place-items: center; font-size: 12px;
 }
-html:not([data-theme="dark"]) .mcp-token-dialog > :not(.skills-form-head) { margin-left: var(--sp-5); margin-right: var(--sp-5); }
-html:not([data-theme="dark"]) .mcp-token-dialog .skills-form-intro {
+html:not(.rd-off) .mcp-token-dialog > :not(.skills-form-head) { margin-left: var(--sp-5); margin-right: var(--sp-5); }
+html:not(.rd-off) .mcp-token-dialog .skills-form-intro {
   margin-top: var(--sp-4); font-size: var(--fs-sm); color: #8a5a00;
   background: #fff6e0; border-radius: var(--radius-md); padding: 8px 12px;
 }
 /* Token: a clean mono chip. */
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-field {
+html:not(.rd-off) .mcp-token-dialog .mcp-field {
   margin-top: var(--sp-3);
   background: #fff; border: 0; border-radius: var(--radius-md);
   box-shadow: 0 0 0 1px rgba(124, 92, 255, 0.35), 0 0 0 4px rgba(124, 92, 255, 0.08);
 }
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-field-value { font-size: 13px; letter-spacing: 0.2px; color: #2a1a7a; }
+html:not(.rd-off) .mcp-token-dialog .mcp-field-value { font-size: 13px; letter-spacing: 0.2px; color: #2a1a7a; }
 /* Setup header and app switcher. */
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-setup-head { margin-top: var(--sp-5); }
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-setup-title { font: 500 10.5px var(--font-mono); letter-spacing: 0.7px; text-transform: uppercase; color: #0b0a1088; }
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-client-tab { font-size: var(--fs-sm); padding: 5px 12px; border-radius: 8px; color: var(--text-secondary); }
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-client-tab.is-active { color: var(--text-primary); font-weight: 500; }
+html:not(.rd-off) .mcp-token-dialog .mcp-setup-head { margin-top: var(--sp-5); }
+html:not(.rd-off) .mcp-token-dialog .mcp-setup-title { font: 500 10.5px var(--font-mono); letter-spacing: 0.7px; text-transform: uppercase; color: #0b0a1088; }
+html:not(.rd-off) .mcp-token-dialog .mcp-client-tab { font-size: var(--fs-sm); padding: 5px 12px; border-radius: 8px; color: var(--text-secondary); }
+html:not(.rd-off) .mcp-token-dialog .mcp-client-tab.is-active { color: var(--text-primary); font-weight: 500; }
 /* Command: a dark terminal block. */
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-block {
+html:not(.rd-off) .mcp-token-dialog .mcp-block {
   margin-top: var(--sp-2);
   background: #16151c; border: 0; border-radius: var(--radius-lg);
   box-shadow: 0 12px 28px -14px rgba(11, 10, 16, 0.6);
   padding-top: 30px; position: relative;
 }
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-block::before {
+html:not(.rd-off) .mcp-token-dialog .mcp-block::before {
   content: ""; position: absolute; left: 14px; top: 12px; width: 8px; height: 8px; border-radius: 50%;
   background: #ff5f57; box-shadow: 14px 0 0 #febc2e, 28px 0 0 #28c840;
 }
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-block-value { color: #e9e6ff; font-size: 12.5px; line-height: 1.7; }
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-block button { color: #b9b4d6; }
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-block button:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-setup-hint { margin-top: 8px; font-size: var(--fs-xs); color: var(--text-tertiary); }
-html:not([data-theme="dark"]) .mcp-token-dialog .confirm-actions {
+html:not(.rd-off) .mcp-token-dialog .mcp-block-value { color: #e9e6ff; font-size: 12.5px; line-height: 1.7; }
+html:not(.rd-off) .mcp-token-dialog .mcp-block button { color: #b9b4d6; }
+html:not(.rd-off) .mcp-token-dialog .mcp-block button:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+html:not(.rd-off) .mcp-token-dialog .mcp-setup-hint { margin-top: 8px; font-size: var(--fs-xs); color: var(--text-tertiary); }
+html:not(.rd-off) .mcp-token-dialog .confirm-actions {
   margin: var(--sp-5) 0 0; padding: var(--sp-4) var(--sp-5); background: var(--bg-app); border-top: 1px solid rgba(11, 10, 16, 0.05);
 }
-html:not([data-theme="dark"]) .mcp-token-dialog > .confirm-actions { margin-left: 0; margin-right: 0; }
-html:not([data-theme="dark"]) .mcp-token-dialog input { margin-top: var(--sp-3); }
-html:not([data-theme="dark"]) .mcp-token-dialog .mcp-block-value { padding-right: 40px; }
+html:not(.rd-off) .mcp-token-dialog > .confirm-actions { margin-left: 0; margin-right: 0; }
+html:not(.rd-off) .mcp-token-dialog input { margin-top: var(--sp-3); }
+html:not(.rd-off) .mcp-token-dialog .mcp-block-value { padding-right: 40px; }
 
 /* View-only banner: a slim, quiet pill instead of a full-width yellow block. */
-html:not([data-theme="dark"]) .editor-lockbanner {
+html:not(.rd-off) .editor-lockbanner {
   display: inline-flex !important;
   align-items: center;
   gap: 10px;
@@ -1148,22 +1148,22 @@ html:not([data-theme="dark"]) .editor-lockbanner {
   border-radius: 999px !important;
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 4px 14px -6px rgba(11, 10, 16, 0.15) !important;
 }
-html:not([data-theme="dark"]) .editor-lockbanner-icon {
+html:not(.rd-off) .editor-lockbanner-icon {
   width: 28px !important; height: 28px !important; border-radius: 50% !important;
   background: #fde99b !important; color: #987e1b !important; flex: none;
 }
-html:not([data-theme="dark"]) .editor-lockbanner-icon svg { width: 14px !important; height: 14px !important; }
-html:not([data-theme="dark"]) .editor-lockbanner-text { display: flex !important; flex-direction: row !important; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-html:not([data-theme="dark"]) .editor-lockbanner-text strong { font-size: var(--fs-sm) !important; font-weight: 600; }
-html:not([data-theme="dark"]) .editor-lockbanner-sub { font-size: var(--fs-sm) !important; color: var(--text-secondary) !important; }
+html:not(.rd-off) .editor-lockbanner-icon svg { width: 14px !important; height: 14px !important; }
+html:not(.rd-off) .editor-lockbanner-text { display: flex !important; flex-direction: row !important; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+html:not(.rd-off) .editor-lockbanner-text strong { font-size: var(--fs-sm) !important; font-weight: 600; }
+html:not(.rd-off) .editor-lockbanner-sub { font-size: var(--fs-sm) !important; color: var(--text-secondary) !important; }
 
 /* Sidebar back to the old, roomier scale: 14px names, 36px slots. */
-html:not([data-theme="dark"]) .sidebar .tree-row,
-html:not([data-theme="dark"]) .home-sidebar-row,
-html:not([data-theme="dark"]) .pinned-name { font-size: var(--fs-md); }
-html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row { height: 34px; margin-top: 1px; margin-bottom: 1px; }
-html:not([data-theme="dark"]) .vault-name { font-size: var(--fs-lg); }
-html:not([data-theme="dark"]) .identity-line1 { font-size: var(--fs-md); }
+html:not(.rd-off) .sidebar .tree-row,
+html:not(.rd-off) .home-sidebar-row,
+html:not(.rd-off) .pinned-name { font-size: var(--fs-md); }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-row { height: 34px; margin-top: 1px; margin-bottom: 1px; }
+html:not(.rd-off) .vault-name { font-size: var(--fs-lg); }
+html:not(.rd-off) .identity-line1 { font-size: var(--fs-md); }
 
 /* ---- Status picker in the account menu ---- */
 .rd-status { padding: 6px 8px 8px; margin-bottom: 4px; border-bottom: 1px solid var(--border); }
@@ -1189,50 +1189,50 @@ html:not([data-theme="dark"]) .identity-line1 { font-size: var(--fs-md); }
 .rd-prof .sm-host .avatar { width: 44px !important; height: 44px !important; }
 
 /* Tree performance: rows repaint on every expand/collapse, so keep them cheap. */
-html:not([data-theme="dark"]) .filetree-scroll .tree-row { transition: background 90ms linear; }
-html:not([data-theme="dark"]) .filetree-scroll .tree-row .tree-glyph { transition: none; }
+html:not(.rd-off) .filetree-scroll .tree-row { transition: background 90ms linear; }
+html:not(.rd-off) .filetree-scroll .tree-row .tree-glyph { transition: none; }
 
 /* ============================================================
    Sidebar blends in (Slack-style): the vault is a plain title,
    rows are flat with a soft tint, nothing floats as a card.
    ============================================================ */
-html:not([data-theme="dark"]) .sidebar-header-id {
+html:not(.rd-off) .sidebar-header-id {
   background: transparent;
   box-shadow: none;
   padding: 2px 4px;
   border-radius: var(--radius-md);
 }
-html:not([data-theme="dark"]) .sidebar-header-id:hover { background: rgba(11, 10, 16, 0.04); }
-html:not([data-theme="dark"]) .sidebar-header-id .vault-tile { width: 30px !important; height: 30px !important; border-radius: 8px !important; }
-html:not([data-theme="dark"]) .vault-name { font-size: var(--fs-lg); font-weight: 700; }
-html:not([data-theme="dark"]) .vault-path { font-size: var(--fs-xs); }
+html:not(.rd-off) .sidebar-header-id:hover { background: rgba(11, 10, 16, 0.04); }
+html:not(.rd-off) .sidebar-header-id .vault-tile { width: 30px !important; height: 30px !important; border-radius: 8px !important; }
+html:not(.rd-off) .vault-name { font-size: var(--fs-lg); font-weight: 700; }
+html:not(.rd-off) .vault-path { font-size: var(--fs-xs); }
 
 /* Rows: flat, a soft tint when open, no white card or shadow. */
-html:not([data-theme="dark"]) .tree-row.selected,
-html:not([data-theme="dark"]) .tree-row.selected:hover {
+html:not(.rd-off) .tree-row.selected,
+html:not(.rd-off) .tree-row.selected:hover {
   background: var(--accent-soft) !important;
   box-shadow: none !important;
   color: var(--text-primary);
 }
-html:not([data-theme="dark"]) .tree-row.selected::before { display: none; }
-html:not([data-theme="dark"]) .home-sidebar-row.selected { background: var(--accent-soft); box-shadow: none; }
+html:not(.rd-off) .tree-row.selected::before { display: none; }
+html:not(.rd-off) .home-sidebar-row.selected { background: var(--accent-soft); box-shadow: none; }
 
 /* Account row and Set a home: flat too. */
-html:not([data-theme="dark"]) .acct, html:not([data-theme="dark"]) .identity-bar { background: transparent; box-shadow: none; }
-html:not([data-theme="dark"]) .home-sidebar-row.is-unset { outline-width: 1px; }
+html:not(.rd-off) .acct, html:not(.rd-off) .identity-bar { background: transparent; box-shadow: none; }
+html:not(.rd-off) .home-sidebar-row.is-unset { outline-width: 1px; }
 
 /* ---- Account menu: compact, no wider than the sidebar ---- */
-html:not([data-theme="dark"]) .account-popover {
+html:not(.rd-off) .account-popover {
   width: calc(var(--sidebar-layout-w, 264px) - 16px) !important;
   min-width: 248px;
   padding: 6px;
   border-radius: var(--radius-lg);
 }
-html:not([data-theme="dark"]) .rd-prof { padding: 6px 6px 8px; margin: 0; gap: 10px; background: transparent; border-radius: 0; }
-html:not([data-theme="dark"]) .rd-prof .sm-host .avatar,
-html:not([data-theme="dark"]) .rd-prof .avatar { width: 32px !important; height: 32px !important; }
-html:not([data-theme="dark"]) .rd-prof-text b { font-size: var(--fs-md); }
-html:not([data-theme="dark"]) .rd-prof-text small { font-size: var(--fs-xs); }
+html:not(.rd-off) .rd-prof { padding: 6px 6px 8px; margin: 0; gap: 10px; background: transparent; border-radius: 0; }
+html:not(.rd-off) .rd-prof .sm-host .avatar,
+html:not(.rd-off) .rd-prof .avatar { width: 32px !important; height: 32px !important; }
+html:not(.rd-off) .rd-prof-text b { font-size: var(--fs-md); }
+html:not(.rd-off) .rd-prof-text small { font-size: var(--fs-xs); }
 .rd-status { padding: 4px 6px 8px; }
 .rd-status-head { font-size: var(--fs-sm); padding-bottom: 6px; }
 .rd-status-row { gap: 3px; }
@@ -1240,13 +1240,13 @@ html:not([data-theme="dark"]) .rd-prof-text small { font-size: var(--fs-xs); }
 .rd-status-btn svg { width: 15px; height: 15px; }
 .rd-status-clear { margin-top: 5px; gap: 2px; }
 .rd-status-clear button { height: 22px; font-size: 11px; }
-html:not([data-theme="dark"]) .account-popover .menu-item { min-height: 30px; padding: 3px 6px; font-size: var(--fs-sm); gap: 8px; }
-html:not([data-theme="dark"]) .account-popover .menu-hint { display: none; }
-html:not([data-theme="dark"]) .account-popover .menu-icon { width: 12px !important; height: 12px !important; padding: 4px; border-radius: 6px; }
-html:not([data-theme="dark"]) .account-popover .menu-sep { margin: 4px 6px; }
+html:not(.rd-off) .account-popover .menu-item { min-height: 30px; padding: 3px 6px; font-size: var(--fs-sm); gap: 8px; }
+html:not(.rd-off) .account-popover .menu-hint { display: none; }
+html:not(.rd-off) .account-popover .menu-icon { width: 12px !important; height: 12px !important; padding: 4px; border-radius: 6px; }
+html:not(.rd-off) .account-popover .menu-sep { margin: 4px 6px; }
 
 /* ---- Vault switcher: compact, no wider than the sidebar ---- */
-html:not([data-theme="dark"]) .vault-switcher {
+html:not(.rd-off) .vault-switcher {
   width: calc(var(--sidebar-layout-w, 264px) - 16px) !important;
   min-width: 248px;
   display: flex !important;
@@ -1255,37 +1255,37 @@ html:not([data-theme="dark"]) .vault-switcher {
   padding: 6px;
   border-radius: var(--radius-lg);
 }
-html:not([data-theme="dark"]) .vault-switcher::before { padding: 4px 6px 4px; }
-html:not([data-theme="dark"]) .vault-switcher .vault-card { min-height: 38px; padding: 0 6px; gap: 8px; border-radius: 8px; }
-html:not([data-theme="dark"]) .vault-switcher .vault-card .vault-tile { width: 24px !important; height: 24px !important; border-radius: 6px !important; }
-html:not([data-theme="dark"]) .vault-switcher .vault-card.current { box-shadow: none; }
-html:not([data-theme="dark"]) .vault-switcher .vault-card-sub { font-size: 11px; }
-html:not([data-theme="dark"]) .vault-switcher .vault-card-kbd { background: none; padding: 0; font-size: 10.5px; }
-html:not([data-theme="dark"]) .vault-switcher .menu-sep { margin: 4px 6px; }
+html:not(.rd-off) .vault-switcher::before { padding: 4px 6px 4px; }
+html:not(.rd-off) .vault-switcher .vault-card { min-height: 38px; padding: 0 6px; gap: 8px; border-radius: 8px; }
+html:not(.rd-off) .vault-switcher .vault-card .vault-tile { width: 24px !important; height: 24px !important; border-radius: 6px !important; }
+html:not(.rd-off) .vault-switcher .vault-card.current { box-shadow: none; }
+html:not(.rd-off) .vault-switcher .vault-card-sub { font-size: 11px; }
+html:not(.rd-off) .vault-switcher .vault-card-kbd { background: none; padding: 0; font-size: 10.5px; }
+html:not(.rd-off) .vault-switcher .menu-sep { margin: 4px 6px; }
 /* The three tiles go back to slim rows. */
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
   flex-direction: row !important; justify-content: flex-start; gap: 8px;
   padding: 3px 6px !important; min-height: 30px; background: transparent !important;
   font-size: var(--fs-sm) !important; text-align: left; border-radius: 8px;
 }
-html:not([data-theme="dark"]) .vault-switcher .menu-item .menu-icon,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
+html:not(.rd-off) .vault-switcher .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
   width: 12px !important; height: 12px !important; padding: 4px !important; border-radius: 6px !important;
 }
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: var(--fs-sm); }
-html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { content: none; }
-html:not([data-theme="dark"]) .vault-switcher .menu-item { min-height: 30px; padding: 3px 6px; font-size: var(--fs-sm); }
-html:not([data-theme="dark"]) .vault-switcher .menu-hint { font-size: 11px; }
-html:not([data-theme="dark"]) .vault-switcher .menu-item .menu-icon { box-sizing: content-box; flex: none; }
-html:not([data-theme="dark"]) .vault-switcher .menu-item:nth-last-of-type(-n + 2) .menu-icon { background: var(--bg-subtle); color: var(--text-secondary); }
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: var(--fs-sm); }
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { content: none; }
+html:not(.rd-off) .vault-switcher .menu-item { min-height: 30px; padding: 3px 6px; font-size: var(--fs-sm); }
+html:not(.rd-off) .vault-switcher .menu-hint { font-size: 11px; }
+html:not(.rd-off) .vault-switcher .menu-item .menu-icon { box-sizing: content-box; flex: none; }
+html:not(.rd-off) .vault-switcher .menu-item:nth-last-of-type(-n + 2) .menu-icon { background: var(--bg-subtle); color: var(--text-secondary); }
 
 /* ---- Account menu, direction D: hero card + status chip ---- */
-html:not([data-theme="dark"]) .rd-prof { background: var(--bg-app); border-radius: 10px; padding: 8px; margin-bottom: 6px; }
-html:not([data-theme="dark"]) .rd-prof .sm-host .avatar, html:not([data-theme="dark"]) .rd-prof .avatar { width: 40px !important; height: 40px !important; }
+html:not(.rd-off) .rd-prof { background: var(--bg-app); border-radius: 10px; padding: 8px; margin-bottom: 6px; }
+html:not(.rd-off) .rd-prof .sm-host .avatar, html:not(.rd-off) .rd-prof .avatar { width: 40px !important; height: 40px !important; }
 .rd-status { padding: 0 0 6px; border-bottom: 0; }
 .rd-status-chip {
   width: 100%; display: flex; align-items: center; gap: 10px; text-align: left;
@@ -1299,58 +1299,58 @@ html:not([data-theme="dark"]) .rd-prof .sm-host .avatar, html:not([data-theme="d
 .rd-status-chip em { margin-left: auto; font-style: normal; font-size: var(--fs-sm); font-weight: 500; }
 .rd-status-chip:hover { background: var(--accent-soft-hover); }
 .rd-status.is-open .rd-status-row { margin-top: 6px; }
-html:not([data-theme="dark"]) .account-popover > .menu-item .menu-icon { background: none !important; color: var(--text-primary) !important; padding: 2px; }
+html:not(.rd-off) .account-popover > .menu-item .menu-icon { background: none !important; color: var(--text-primary) !important; padding: 2px; }
 
 /* ---- Round: neutral selection, bigger vault icon, aligned columns ---- */
 /* Selection is a warm neutral, not purple. */
-html:not([data-theme="dark"]) .tree-row.selected,
-html:not([data-theme="dark"]) .tree-row.selected:hover,
-html:not([data-theme="dark"]) .home-sidebar-row.selected { background: rgba(11, 10, 16, 0.06) !important; }
-html:not([data-theme="dark"]) .tree-row:hover { background: rgba(11, 10, 16, 0.035); }
-html:not([data-theme="dark"]) .tree-row.selected .tree-glyph { color: var(--text-primary); }
+html:not(.rd-off) .tree-row.selected,
+html:not(.rd-off) .tree-row.selected:hover,
+html:not(.rd-off) .home-sidebar-row.selected { background: rgba(11, 10, 16, 0.06) !important; }
+html:not(.rd-off) .tree-row:hover { background: rgba(11, 10, 16, 0.035); }
+html:not(.rd-off) .tree-row.selected .tree-glyph { color: var(--text-primary); }
 
 /* Vault header: a 40px icon, name and path centred against it, on the
    same left edge (12px) as the section labels and tree glyphs. */
-html:not([data-theme="dark"]) .sidebar-header { padding-left: 8px; padding-right: 8px; }
-html:not([data-theme="dark"]) .sidebar-header-id { padding: 4px; gap: 12px; align-items: center; }
-html:not([data-theme="dark"]) .sidebar-header-id .vault-tile { width: 40px !important; height: 40px !important; border-radius: 10px !important; }
-html:not([data-theme="dark"]) .sidebar-header-text { transform: none; gap: 1px; }
-html:not([data-theme="dark"]) .vault-name { font-size: 16px; line-height: 20px; }
-html:not([data-theme="dark"]) .vault-path { font-size: 12px; line-height: 16px; }
+html:not(.rd-off) .sidebar-header { padding-left: 8px; padding-right: 8px; }
+html:not(.rd-off) .sidebar-header-id { padding: 4px; gap: 12px; align-items: center; }
+html:not(.rd-off) .sidebar-header-id .vault-tile { width: 40px !important; height: 40px !important; border-radius: 10px !important; }
+html:not(.rd-off) .sidebar-header-text { transform: none; gap: 1px; }
+html:not(.rd-off) .vault-name { font-size: 16px; line-height: 20px; }
+html:not(.rd-off) .vault-path { font-size: 12px; line-height: 16px; }
 
 /* Pixel grid: every icon starts at x=20, every label at x=50. */
-html:not([data-theme="dark"]) .pinned-label { padding-left: 8px; padding-right: 8px; }
-html:not([data-theme="dark"]) .home-sidebar-row { padding-left: 2px; gap: 10px; }
-html:not([data-theme="dark"]) .home-sidebar-row svg { width: 20px; height: 20px; }
-html:not([data-theme="dark"]) .pinned-section .pinned-row { padding-left: 2px; }
-html:not([data-theme="dark"]) .pinned-open { gap: 10px; }
-html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row { margin-left: 3px; gap: 10px; }
-html:not([data-theme="dark"]) .sidebar .tree-glyph { width: 20px; }
-html:not([data-theme="dark"]) .sidebar-footer .identity-bar { padding-left: 4px; }
-html:not([data-theme="dark"]) .home-sidebar-row { margin-left: -2px !important; padding-left: 0 !important; }
-html:not([data-theme="dark"]) .sidebar-footer .identity-bar { padding-left: 12px; }
+html:not(.rd-off) .pinned-label { padding-left: 8px; padding-right: 8px; }
+html:not(.rd-off) .home-sidebar-row { padding-left: 2px; gap: 10px; }
+html:not(.rd-off) .home-sidebar-row svg { width: 20px; height: 20px; }
+html:not(.rd-off) .pinned-section .pinned-row { padding-left: 2px; }
+html:not(.rd-off) .pinned-open { gap: 10px; }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-row { margin-left: 3px; gap: 10px; }
+html:not(.rd-off) .sidebar .tree-glyph { width: 20px; }
+html:not(.rd-off) .sidebar-footer .identity-bar { padding-left: 4px; }
+html:not(.rd-off) .home-sidebar-row { margin-left: -2px !important; padding-left: 0 !important; }
+html:not(.rd-off) .sidebar-footer .identity-bar { padding-left: 12px; }
 /* No grey behind the vault header, at rest, on hover or while open. */
-html:not([data-theme="dark"]) .sidebar-header-id,
-html:not([data-theme="dark"]) .sidebar-header-id:hover,
-html:not([data-theme="dark"]) .vault-switch-tile,
-html:not([data-theme="dark"]) .vault-switch-btn,
-html:not([data-theme="dark"]) .vault-switch-btn.open,
-html:not([data-theme="dark"]) .vault-switch-btn:hover { background: transparent !important; box-shadow: none !important; }
-html:not([data-theme="dark"]) .sidebar-header-id .vault-tile { background: var(--tile-fill) !important; }
+html:not(.rd-off) .sidebar-header-id,
+html:not(.rd-off) .sidebar-header-id:hover,
+html:not(.rd-off) .vault-switch-tile,
+html:not(.rd-off) .vault-switch-btn,
+html:not(.rd-off) .vault-switch-btn.open,
+html:not(.rd-off) .vault-switch-btn:hover { background: transparent !important; box-shadow: none !important; }
+html:not(.rd-off) .sidebar-header-id .vault-tile { background: var(--tile-fill) !important; }
 
-html:not([data-theme="dark"]) .home-sidebar-row { margin-left: 0 !important; }
+html:not(.rd-off) .home-sidebar-row { margin-left: 0 !important; }
 
 /* Account menu grid: avatar, status icon and row icons start 14px in;
    names and labels share one text column. */
-html:not([data-theme="dark"]) .account-popover { padding: 6px; }
-html:not([data-theme="dark"]) .rd-prof { padding: 8px; gap: 10px; margin: 0 0 6px; }
+html:not(.rd-off) .account-popover { padding: 6px; }
+html:not(.rd-off) .rd-prof { padding: 8px; gap: 10px; margin: 0 0 6px; }
 .rd-status { padding: 0 0 6px; }
 .rd-status-chip { padding: 8px 10px 8px 8px; gap: 10px; }
 .rd-status-chip svg { width: 40px; height: 18px; }
-html:not([data-theme="dark"]) .account-popover > .menu-item { padding: 4px 8px; gap: 10px; min-height: 32px; }
-html:not([data-theme="dark"]) .account-popover > .menu-item .menu-icon { width: 16px !important; height: 16px !important; padding: 0 !important; margin: 0 12px; }
-html:not([data-theme="dark"]) .account-popover .menu-sep { margin: 4px 8px; }
-html:not([data-theme="dark"]) .vault-switcher .vault-card.current { background: rgba(11, 10, 16, 0.06) !important; }
+html:not(.rd-off) .account-popover > .menu-item { padding: 4px 8px; gap: 10px; min-height: 32px; }
+html:not(.rd-off) .account-popover > .menu-item .menu-icon { width: 16px !important; height: 16px !important; padding: 0 !important; margin: 0 12px; }
+html:not(.rd-off) .account-popover .menu-sep { margin: 4px 8px; }
+html:not(.rd-off) .vault-switcher .vault-card.current { background: rgba(11, 10, 16, 0.06) !important; }
 
 /* ============================================================
    Professional pass: inline forms in the switcher, Vaults page
@@ -1358,96 +1358,96 @@ html:not([data-theme="dark"]) .vault-switcher .vault-card.current { background: 
 
 /* Switcher "Vault name / Create" and "Join code / Join": one field with the
    button inside it, a calm focus ring, no browser-green outline. */
-html:not([data-theme="dark"]) .menu-create-org {
+html:not(.rd-off) .menu-create-org {
   position: relative; display: flex; align-items: center; gap: 0;
   margin: 2px 4px; padding: 3px; border-radius: 10px;
   background: var(--bg-subtle); box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.08);
   transition: box-shadow 120ms ease, background 120ms ease;
 }
-html:not([data-theme="dark"]) .menu-create-org:focus-within {
+html:not(.rd-off) .menu-create-org:focus-within {
   background: #fff; box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft);
 }
-html:not([data-theme="dark"]) .menu-create-org input {
+html:not(.rd-off) .menu-create-org input {
   flex: 1; min-width: 0; height: 30px; padding: 0 8px;
   border: 0 !important; outline: none !important; box-shadow: none !important;
   background: transparent !important; font: 13px var(--font-body); color: var(--text-primary);
 }
-html:not([data-theme="dark"]) .menu-create-org input::placeholder { color: #0b0a1066; }
-html:not([data-theme="dark"]) .menu-create-org button.primary.sm {
+html:not(.rd-off) .menu-create-org input::placeholder { color: #0b0a1066; }
+html:not(.rd-off) .menu-create-org button.primary.sm {
   height: 28px; padding: 0 12px; border-radius: 8px; font-size: 12.5px; font-weight: 500;
   box-shadow: none; flex: none;
 }
-html:not([data-theme="dark"]) .menu-create-org button.primary.sm:disabled { background: #0b0a1014; color: #0b0a1066; opacity: 1; }
+html:not(.rd-off) .menu-create-org button.primary.sm:disabled { background: #0b0a1014; color: #0b0a1066; opacity: 1; }
 
 /* ---- Account settings → Vaults ---- */
-html:not([data-theme="dark"]) .account-vaults-head,
-html:not([data-theme="dark"]) .settings-content .subhead {
+html:not(.rd-off) .account-vaults-head,
+html:not(.rd-off) .settings-content .subhead {
   font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: #0b0a1088;
   display: flex; align-items: center;
 }
-html:not([data-theme="dark"]) .vault-hdr-btn,
-html:not([data-theme="dark"]) .account-vaults-head-actions button,
-html:not([data-theme="dark"]) .settings-content .subhead button {
+html:not(.rd-off) .vault-hdr-btn,
+html:not(.rd-off) .account-vaults-head-actions button,
+html:not(.rd-off) .settings-content .subhead button {
   height: 32px; padding: 0 12px; border-radius: 9px; font: 500 13px var(--font-body);
   text-transform: none; letter-spacing: 0; box-shadow: none;
 }
-html:not([data-theme="dark"]) .vault-hdr-btn.secondary,
-html:not([data-theme="dark"]) .settings-content .subhead .ghost-pill,
-html:not([data-theme="dark"]) .settings-content .subhead button.secondary {
+html:not(.rd-off) .vault-hdr-btn.secondary,
+html:not(.rd-off) .settings-content .subhead .ghost-pill,
+html:not(.rd-off) .settings-content .subhead button.secondary {
   background: #fff; color: var(--text-primary); border: 0; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1);
 }
 
 /* Vault cards: a clean tile with the icon, name and one status line. */
-html:not([data-theme="dark"]) .vault-grid { gap: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
-html:not([data-theme="dark"]) .vault-grid-card {
+html:not(.rd-off) .vault-grid { gap: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+html:not(.rd-off) .vault-grid-card {
   background: #fff; border: 0; border-radius: 14px; padding: 14px;
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.04);
   transition: box-shadow 140ms ease, transform 140ms ease; min-height: 0;
 }
-html:not([data-theme="dark"]) .vault-grid-card:hover { box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1), 0 10px 24px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px); }
-html:not([data-theme="dark"]) .vault-grid-card.current {
+html:not(.rd-off) .vault-grid-card:hover { box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1), 0 10px 24px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px); }
+html:not(.rd-off) .vault-grid-card.current {
   border-color: transparent !important; outline: 0;
   box-shadow: 0 0 0 1.5px var(--accent), 0 12px 28px -16px rgba(124, 92, 255, 0.45);
 }
-html:not([data-theme="dark"]) .vault-grid-card.current .vault-switch-chip { background: #e4f3e6; color: #2f8a4a; }
-html:not([data-theme="dark"]) .vault-grid-card .vault-tile { width: 36px !important; height: 36px !important; border-radius: 9px !important; }
-html:not([data-theme="dark"]) .vault-grid-name { font: 600 14px var(--font-body); margin-top: 12px; }
-html:not([data-theme="dark"]) .vault-grid-foot { margin-top: 8px; }
-html:not([data-theme="dark"]) .vault-switch-chip {
+html:not(.rd-off) .vault-grid-card.current .vault-switch-chip { background: #e4f3e6; color: #2f8a4a; }
+html:not(.rd-off) .vault-grid-card .vault-tile { width: 36px !important; height: 36px !important; border-radius: 9px !important; }
+html:not(.rd-off) .vault-grid-name { font: 600 14px var(--font-body); margin-top: 12px; }
+html:not(.rd-off) .vault-grid-foot { margin-top: 8px; }
+html:not(.rd-off) .vault-switch-chip {
   font: 500 11.5px var(--font-body); padding: 3px 8px; border-radius: 99px;
   background: var(--bg-subtle); color: var(--text-secondary); border: 0;
 }
-html:not([data-theme="dark"]) .vault-grid-card:not(.current) .vault-switch-chip { background: var(--accent-soft); color: #4a2fc7; }
+html:not(.rd-off) .vault-grid-card:not(.current) .vault-switch-chip { background: var(--accent-soft); color: #4a2fc7; }
 
 /* Folder location: one field with its actions inside. */
-html:not([data-theme="dark"]) .join-code-row {
+html:not(.rd-off) .join-code-row {
   background: #fff; border-radius: 12px; padding: 6px 6px 6px 14px; gap: 6px;
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.08);
 }
-html:not([data-theme="dark"]) .join-code-row .vault-root-path { background: transparent !important; padding: 0; font-size: 12.5px; flex: 1; }
-html:not([data-theme="dark"]) .join-code-row .link-btn { height: 30px; padding: 0 10px; border-radius: 8px; font-size: 12.5px; }
-html:not([data-theme="dark"]) .join-code-row .link-btn:hover { background: var(--bg-subtle); }
-html:not([data-theme="dark"]) .settings-content .subhead .member-access-view-btn { height: 26px; width: 30px; padding: 0; box-shadow: none; background: transparent; display: grid; place-items: center; }
-html:not([data-theme="dark"]) .settings-content .subhead .member-access-view-btn.is-active { background: #fff; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1); }
-html:not([data-theme="dark"]) .settings-content .subhead .member-access-view-btn svg { width: 15px; height: 15px; }
-html:not([data-theme="dark"]) .rd-settings-close:focus:not(:focus-visible) { outline: none; box-shadow: var(--rd-card-shadow); }
+html:not(.rd-off) .join-code-row .vault-root-path { background: transparent !important; padding: 0; font-size: 12.5px; flex: 1; }
+html:not(.rd-off) .join-code-row .link-btn { height: 30px; padding: 0 10px; border-radius: 8px; font-size: 12.5px; }
+html:not(.rd-off) .join-code-row .link-btn:hover { background: var(--bg-subtle); }
+html:not(.rd-off) .settings-content .subhead .member-access-view-btn { height: 26px; width: 30px; padding: 0; box-shadow: none; background: transparent; display: grid; place-items: center; }
+html:not(.rd-off) .settings-content .subhead .member-access-view-btn.is-active { background: #fff; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1); }
+html:not(.rd-off) .settings-content .subhead .member-access-view-btn svg { width: 15px; height: 15px; }
+html:not(.rd-off) .rd-settings-close:focus:not(:focus-visible) { outline: none; box-shadow: var(--rd-card-shadow); }
 
 /* View-only banner: reads as a warning. Soft amber, a strong amber edge,
    amber lock, still slim. */
-html:not([data-theme="dark"]) .editor-lockbanner {
+html:not(.rd-off) .editor-lockbanner {
   display: flex !important; width: auto !important;
   padding: 8px 14px 8px 8px !important;
   background: #fff7e6 !important;
   border-radius: 12px !important;
   box-shadow: inset 0 0 0 1px #f1d79a, inset 3px 0 0 #e0a21a !important;
 }
-html:not([data-theme="dark"]) .editor-lockbanner-icon { background: #fde6a8 !important; color: #8a5a00 !important; }
-html:not([data-theme="dark"]) .editor-lockbanner-text strong { color: #6b4500; }
-html:not([data-theme="dark"]) .editor-lockbanner-sub { color: #8a6a2a !important; }
+html:not(.rd-off) .editor-lockbanner-icon { background: #fde6a8 !important; color: #8a5a00 !important; }
+html:not(.rd-off) .editor-lockbanner-text strong { color: #6b4500; }
+html:not(.rd-off) .editor-lockbanner-sub { color: #8a6a2a !important; }
 
 /* ---- View only: floating dark chip + a thin amber page frame ---- */
 /* The amber frame wraps the whole page, drawn as an overlay so nothing clips it. */
-html:not([data-theme="dark"]) .editor-wrap:has(.rd-viewonly)::after {
+html:not(.rd-off) .editor-wrap:has(.rd-viewonly)::after {
   content: ""; position: absolute; inset: 6px; border-radius: 14px; pointer-events: none; z-index: 30;
   box-shadow: inset 0 0 0 2px #f2c66d;
 }
@@ -1469,47 +1469,47 @@ html:not([data-theme="dark"]) .editor-wrap:has(.rd-viewonly)::after {
 .rd-viewonly:not(:has(.rd-viewonly-ask)) { padding-right: 12px; }
 
 /* ---- Colourful tags: each name keeps its own pastel ---- */
-html:not([data-theme="dark"]) .cm-editor .cm-hashtag {
+html:not(.rd-off) .cm-editor .cm-hashtag {
   background: var(--tag-bg, #ece6ff) !important; color: var(--tag-fg, #5b3fd6) !important;
 }
-html:not([data-theme="dark"]) .prop-chip {
+html:not(.rd-off) .prop-chip {
   background: var(--tag-bg, var(--bg-subtle)) !important; color: var(--tag-fg, var(--text-primary)) !important;
   border: 0 !important; font-weight: 500;
 }
-html:not([data-theme="dark"]) .prop-chip button { color: inherit; opacity: 0.6; }
+html:not(.rd-off) .prop-chip button { color: inherit; opacity: 0.6; }
 
 /* ---- "On this device only": one slim row that blends into the sidebar ---- */
-html:not([data-theme="dark"]) .local-sync-row {
+html:not(.rd-off) .local-sync-row {
   display: flex; align-items: center; gap: 8px;
   margin: 0 8px 6px; padding: 5px 5px 5px 8px; min-height: 0;
   border: 0; border-radius: 9px;
   background: #fff; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.06);
 }
-html:not([data-theme="dark"]) .local-sync-icon {
+html:not(.rd-off) .local-sync-icon {
   width: 20px !important; height: 20px !important; flex: none; padding: 3px; box-sizing: border-box;
   border-radius: 6px; background: #fff1c9; color: #7a5a00;
 }
-html:not([data-theme="dark"]) .local-sync-label { display: flex; min-width: 0; line-height: 1.2; overflow: hidden; }
-html:not([data-theme="dark"]) .local-sync-label b { font-weight: 500; font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-html:not([data-theme="dark"]) .local-sync-label small { display: none; }
-html:not([data-theme="dark"]) .local-sync-btn {
+html:not(.rd-off) .local-sync-label { display: flex; min-width: 0; line-height: 1.2; overflow: hidden; }
+html:not(.rd-off) .local-sync-label b { font-weight: 500; font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html:not(.rd-off) .local-sync-label small { display: none; }
+html:not(.rd-off) .local-sync-btn {
   margin: 0 0 0 auto !important; flex: none; height: 20px; padding: 0 6px !important; border-radius: 5px;
   background: transparent !important; color: var(--accent) !important; font: 600 11px var(--font-body) !important; text-decoration: none !important;
 }
-html:not([data-theme="dark"]) .local-sync-btn:hover:not(:disabled) { background: rgba(124, 92, 255, 0.1) !important; }
+html:not(.rd-off) .local-sync-btn:hover:not(:disabled) { background: rgba(124, 92, 255, 0.1) !important; }
 
 .rd-viewonly { padding: 8px 8px 8px 16px; gap: 12px; font-size: 13.5px; }
 .rd-viewonly:not(:has(.rd-viewonly-ask)) { padding-right: 16px; }
 .rd-viewonly-dot.is-lock { background: rgba(251, 198, 74, 0.18); color: #fbc64a; }
 .rd-viewonly-dot.is-lock svg { width: 11px; height: 11px; color: #fbc64a; }
 /* Centre the chip on the page itself, not on a computed window offset. */
-html:not([data-theme="dark"]) .editor-wrap { position: relative; }
-html:not([data-theme="dark"]) .editor-wrap .editor-column,
-html:not([data-theme="dark"]) .editor-wrap .editor-topbar,
-html:not([data-theme="dark"]) .editor-wrap .editor-slot { position: static; }
+html:not(.rd-off) .editor-wrap { position: relative; }
+html:not(.rd-off) .editor-wrap .editor-column,
+html:not(.rd-off) .editor-wrap .editor-topbar,
+html:not(.rd-off) .editor-wrap .editor-slot { position: static; }
 .rd-viewonly { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); }
 /* No amber frame: the chip alone says view only. */
-html:not([data-theme="dark"]) .editor-wrap:has(.rd-viewonly)::after { content: none; }
+html:not(.rd-off) .editor-wrap:has(.rd-viewonly)::after { content: none; }
 .rd-viewonly-msg { color: rgba(255, 255, 255, 0.72); }
 /* Centred without transform, so the entrance animation can't undo it. */
 .rd-viewonly {
@@ -1521,44 +1521,44 @@ html:not([data-theme="dark"]) .editor-wrap:has(.rd-viewonly)::after { content: n
 .rd-viewonly-msg { overflow: hidden; text-overflow: ellipsis; }
 /* Home row spans the sidebar: box from x=12 to the sync-dot column's right
    edge, icon still on the 20px line, label on 50px. */
-html:not([data-theme="dark"]) .home-sidebar-entry { position: relative; }
-html:not([data-theme="dark"]) .home-sidebar-row {
+html:not(.rd-off) .home-sidebar-entry { position: relative; }
+html:not(.rd-off) .home-sidebar-row {
   margin-left: -8px !important; padding-left: 8px !important;
   width: calc(100% + 3px) !important; min-height: 36px; border-radius: 10px;
 }
-html:not([data-theme="dark"]) .home-sidebar-menu { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); }
+html:not(.rd-off) .home-sidebar-menu { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); }
 
 /* ---- Sidebar columns that hold at any width, with or without a scrollbar ----
    The tree always reserves an 8px scrollbar lane (macOS, Windows and Linux
    alike), and Home/Pinned reserve the same lane, so every row shares one
    left edge (12px) and one right edge. */
-html:not([data-theme="dark"]) .filetree-scroll { scrollbar-gutter: stable; }
-html:not([data-theme="dark"]) .filetree-scroll::-webkit-scrollbar { width: 8px; }
-html:not([data-theme="dark"]) .filetree-scroll::-webkit-scrollbar-thumb { background: rgba(11, 10, 16, 0.14); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
-html:not([data-theme="dark"]) .filetree-scroll::-webkit-scrollbar-track { background: transparent; }
-html:not([data-theme="dark"]) .home-section, html:not([data-theme="dark"]) .pinned-section { padding-right: 8px !important; }
+html:not(.rd-off) .filetree-scroll { scrollbar-gutter: stable; }
+html:not(.rd-off) .filetree-scroll::-webkit-scrollbar { width: 8px; }
+html:not(.rd-off) .filetree-scroll::-webkit-scrollbar-thumb { background: rgba(11, 10, 16, 0.14); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+html:not(.rd-off) .filetree-scroll::-webkit-scrollbar-track { background: transparent; }
+html:not(.rd-off) .home-section, html:not(.rd-off) .pinned-section { padding-right: 8px !important; }
 /* Row highlight drawn as an inset layer: starts at x=12 like the Home box and
    ends where the row's ⋯ button ends, without moving the icon/label grid. */
-html:not([data-theme="dark"]) .sidebar .tree-row { position: relative; isolation: isolate; background: transparent !important; box-shadow: none !important; }
-html:not([data-theme="dark"]) .sidebar .tree-row::after {
+html:not(.rd-off) .sidebar .tree-row { position: relative; isolation: isolate; background: transparent !important; box-shadow: none !important; }
+html:not(.rd-off) .sidebar .tree-row::after {
   content: ""; position: absolute; top: 0; bottom: 0; left: 9px; right: 4px;
   border-radius: 9px; z-index: -1; background: var(--rd-row-bg, transparent);
   transition: background 90ms linear;
 }
-html:not([data-theme="dark"]) .sidebar .tree-row:hover { --rd-row-bg: rgba(11, 10, 16, 0.04); }
-html:not([data-theme="dark"]) .sidebar .tree-row.selected { --rd-row-bg: rgba(11, 10, 16, 0.065); }
-html:not([data-theme="dark"]) .sidebar .tree-row.drop-target { --rd-row-bg: var(--accent-soft); }
+html:not(.rd-off) .sidebar .tree-row:hover { --rd-row-bg: rgba(11, 10, 16, 0.04); }
+html:not(.rd-off) .sidebar .tree-row.selected { --rd-row-bg: rgba(11, 10, 16, 0.065); }
+html:not(.rd-off) .sidebar .tree-row.drop-target { --rd-row-bg: var(--accent-soft); }
 /* Home box spans the same 12px → row-end line. */
-html:not([data-theme="dark"]) .home-sidebar-row { width: calc(var(--sidebar-layout-w, 300px) - 22px) !important; }
+html:not(.rd-off) .home-sidebar-row { width: calc(var(--sidebar-layout-w, 300px) - 22px) !important; }
 /* Right edge = the NOTES header's last icon (the select checkbox). Boxes end
    there; the sync dot and the row's ⋯ sit centred under that icon. */
-html:not([data-theme="dark"]) .sidebar .tree-row::after { right: 36px; }
-html:not([data-theme="dark"]) .home-sidebar-row { width: calc(var(--sidebar-layout-w, 300px) - 54px) !important; }
-html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-sync { transform: translateX(8px); }
-html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-more { transform: translateX(-20px); }
-html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row:hover .tree-sync { opacity: 0; }
+html:not(.rd-off) .sidebar .tree-row::after { right: 36px; }
+html:not(.rd-off) .home-sidebar-row { width: calc(var(--sidebar-layout-w, 300px) - 54px) !important; }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-sync { transform: translateX(8px); }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more { transform: translateX(-20px); }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-row:hover .tree-sync { opacity: 0; }
 /* Bring the menu hints back, right-aligned and quiet. */
-html:not([data-theme="dark"]) .account-popover .menu-hint { display: inline !important; margin-left: auto; font-size: 11.5px; color: #0b0a1080; }
+html:not(.rd-off) .account-popover .menu-hint { display: inline !important; margin-left: auto; font-size: 11.5px; color: #0b0a1080; }
 .rd-status-chip-text small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Empty status: a quiet field with three one-tap shortcuts. */
@@ -1580,16 +1580,16 @@ html:not([data-theme="dark"]) .account-popover .menu-hint { display: inline !imp
 .rd-status-quick svg { width: 16px; height: 16px; }
 .rd-status-quick:hover { background: var(--accent-soft); color: var(--accent-hover); }
 /* Synced badge: same breathing room on the left as above and below. */
-html:not([data-theme="dark"]) .header-actions { padding-left: 8px !important; }
-html:not([data-theme="dark"]) .header-actions .sync-badge { padding-left: 11px; padding-right: 12px; gap: 6px; }
+html:not(.rd-off) .header-actions { padding-left: 8px !important; }
+html:not(.rd-off) .header-actions .sync-badge { padding-left: 11px; padding-right: 12px; gap: 6px; }
 .rd-status-field.is-set .rd-status-field-main { color: var(--text-primary); }
 .rd-status-field.is-set .rd-status-set-icon { color: var(--accent); }
 .rd-status-set-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rd-status-set-text b { font-weight: 500; }
 .rd-status-set-text small { color: var(--text-tertiary); font-size: 12.5px; }
 /* Menu labels never truncate; the grey hint gives way first. */
-html:not([data-theme="dark"]) .account-popover .menu-item-label { flex: none; }
-html:not([data-theme="dark"]) .account-popover .menu-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html:not(.rd-off) .account-popover .menu-item-label { flex: none; }
+html:not(.rd-off) .account-popover .menu-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* View-only chip: warm amber instead of black. */
 .rd-viewonly {
@@ -1604,18 +1604,18 @@ html:not([data-theme="dark"]) .account-popover .menu-hint { min-width: 0; overfl
 
 /* Account menu grows out of the account row: it covers the row, and the
    profile card sits at the bottom exactly where the row was. */
-html:not([data-theme="dark"]) .account-popover {
+html:not(.rd-off) .account-popover {
   bottom: 0 !important; top: auto !important;
   display: flex !important; flex-direction: column;
 }
-html:not([data-theme="dark"]) .account-popover > .rd-status { order: 98; margin-top: 4px; padding: 8px 0 4px; border-top: 1px solid var(--border); }
-html:not([data-theme="dark"]) .account-popover > .rd-prof { order: 99; background: transparent; margin: 0; }
-html:not([data-theme="dark"]) .rd-prof .sm-host .avatar,
-html:not([data-theme="dark"]) .rd-prof .avatar { width: 34px !important; height: 34px !important; }
-html:not([data-theme="dark"]) .rd-prof .sm-host .avatar,
-html:not([data-theme="dark"]) .rd-prof .avatar { width: 28px !important; height: 28px !important; }
-html:not([data-theme="dark"]) .account-popover > .rd-prof { padding: 8px 6px 8px 6px; }
-html:not([data-theme="dark"]) .account-popover > .rd-prof { padding-top: 15px; padding-bottom: 1px; gap: 8px; }
+html:not(.rd-off) .account-popover > .rd-status { order: 98; margin-top: 4px; padding: 8px 0 4px; border-top: 1px solid var(--border); }
+html:not(.rd-off) .account-popover > .rd-prof { order: 99; background: transparent; margin: 0; }
+html:not(.rd-off) .rd-prof .sm-host .avatar,
+html:not(.rd-off) .rd-prof .avatar { width: 34px !important; height: 34px !important; }
+html:not(.rd-off) .rd-prof .sm-host .avatar,
+html:not(.rd-off) .rd-prof .avatar { width: 28px !important; height: 28px !important; }
+html:not(.rd-off) .account-popover > .rd-prof { padding: 8px 6px 8px 6px; }
+html:not(.rd-off) .account-popover > .rd-prof { padding-top: 15px; padding-bottom: 1px; gap: 8px; }
 
 /* One colour per status, used on every status icon. */
 .s-online { --st: #3f8850; --st-bg: #dff3e5; }
@@ -1633,150 +1633,150 @@ html:not([data-theme="dark"]) .account-popover > .rd-prof { padding-top: 15px; p
 .rd-status-btn[class*="s-"].on { background: var(--st); color: #fff; }
 
 /* ---- Agent Skills row: same grid as the tree ---- */
-html:not([data-theme="dark"]) .skills-sparkles { display: none; }
-html:not([data-theme="dark"]) .skills-shortcut-row {
+html:not(.rd-off) .skills-sparkles { display: none; }
+html:not(.rd-off) .skills-shortcut-row {
   position: relative; display: flex; align-items: center; gap: 10px;
   height: 36px; margin: 0 0 0 12px; padding: 0 8px; border-radius: 9px;
   width: calc(var(--sidebar-layout-w, 300px) - 54px); box-sizing: border-box;
 }
-html:not([data-theme="dark"]) .skills-shortcut-row:hover { background: rgba(11, 10, 16, 0.04); }
-html:not([data-theme="dark"]) .skills-shortcut-row > svg:first-child,
-html:not([data-theme="dark"]) .skills-shortcut-row .skills-shortcut-icon {
+html:not(.rd-off) .skills-shortcut-row:hover { background: rgba(11, 10, 16, 0.04); }
+html:not(.rd-off) .skills-shortcut-row > svg:first-child,
+html:not(.rd-off) .skills-shortcut-row .skills-shortcut-icon {
   width: 20px; height: 20px; padding: 3px; box-sizing: border-box; border-radius: 6px;
   background: #ece6ff; color: #5b3fd6; flex: none;
 }
-html:not([data-theme="dark"]) .skills-shortcut-name { font-size: var(--fs-md); color: var(--text-primary); }
-html:not([data-theme="dark"]) .skills-shortcut-new {
+html:not(.rd-off) .skills-shortcut-name { font-size: var(--fs-md); color: var(--text-primary); }
+html:not(.rd-off) .skills-shortcut-new {
   height: 18px; padding: 0 7px; border-radius: 99px; border: 0;
   background: #ece6ff; color: #5b3fd6; font: 600 10.5px var(--font-body); display: inline-flex; align-items: center;
 }
-html:not([data-theme="dark"]) .skills-shortcut-count { margin-left: auto; width: 14px; text-align: center; font: 500 11.5px var(--font-body); color: var(--text-tertiary); }
-html:not([data-theme="dark"]) .skills-shortcut-row { margin-left: 4px; padding: 0 0 0 8px; background: transparent; border: 0; cursor: pointer; }
-html:not([data-theme="dark"]) .skills-shortcut-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
-html:not([data-theme="dark"]) .skills-shortcut-dot { margin-left: auto; }
-html:not([data-theme="dark"]) .skills-shortcut-dot + .skills-shortcut-count { margin-left: 6px; }
+html:not(.rd-off) .skills-shortcut-count { margin-left: auto; width: 14px; text-align: center; font: 500 11.5px var(--font-body); color: var(--text-tertiary); }
+html:not(.rd-off) .skills-shortcut-row { margin-left: 4px; padding: 0 0 0 8px; background: transparent; border: 0; cursor: pointer; }
+html:not(.rd-off) .skills-shortcut-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+html:not(.rd-off) .skills-shortcut-dot { margin-left: auto; }
+html:not(.rd-off) .skills-shortcut-dot + .skills-shortcut-count { margin-left: 6px; }
 /* Agent Skills: on the 20/50px lines, and set apart from the notes with a hairline. */
-html:not([data-theme="dark"]) .skills-shortcut-row { margin-left: 12px !important; }
-html:not([data-theme="dark"]) .skills-shortcut {
+html:not(.rd-off) .skills-shortcut-row { margin-left: 12px !important; }
+html:not(.rd-off) .skills-shortcut {
   position: relative; margin-top: 8px; padding-top: 8px;
 }
-html:not([data-theme="dark"]) .skills-shortcut::before {
+html:not(.rd-off) .skills-shortcut::before {
   content: ""; position: absolute; top: 0; left: 20px;
   width: calc(var(--sidebar-layout-w, 300px) - 62px); height: 1px; background: rgba(11, 10, 16, 0.08);
 }
 
 /* ---- No grey fills on controls: white with a hairline, violet when active ---- */
-html:not([data-theme="dark"]) .member-access-view,
-html:not([data-theme="dark"]) .settings-content .subhead .member-access-view {
+html:not(.rd-off) .member-access-view,
+html:not(.rd-off) .settings-content .subhead .member-access-view {
   background: #fff !important; border: 0 !important; padding: 3px; border-radius: 11px;
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1) !important;
 }
-html:not([data-theme="dark"]) .member-access-view-btn { background: transparent !important; box-shadow: none !important; color: var(--text-secondary); border-radius: 8px; }
-html:not([data-theme="dark"]) .member-access-view-btn:hover { color: var(--text-primary); }
-html:not([data-theme="dark"]) .member-access-view-btn.is-active,
-html:not([data-theme="dark"]) .settings-content .subhead .member-access-view-btn.is-active {
+html:not(.rd-off) .member-access-view-btn { background: transparent !important; box-shadow: none !important; color: var(--text-secondary); border-radius: 8px; }
+html:not(.rd-off) .member-access-view-btn:hover { color: var(--text-primary); }
+html:not(.rd-off) .member-access-view-btn.is-active,
+html:not(.rd-off) .settings-content .subhead .member-access-view-btn.is-active {
   background: var(--accent-soft) !important; color: #4a2fc7 !important; box-shadow: none !important;
 }
-html:not([data-theme="dark"]) button.secondary,
-html:not([data-theme="dark"]) .skills-hdr-btn.secondary {
+html:not(.rd-off) button.secondary,
+html:not(.rd-off) .skills-hdr-btn.secondary {
   background: #fff !important; border: 0 !important; color: var(--text-primary);
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1) !important;
 }
-html:not([data-theme="dark"]) button.secondary:hover:not(:disabled) { background: #fcfaf6 !important; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.16) !important; }
-html:not([data-theme="dark"]) .skills-hdr-btn { height: 36px; border-radius: 10px; font-weight: 500; }
-html:not([data-theme="dark"]) .settings-page-header .icon-btn:focus,
-html:not([data-theme="dark"]) .settings-page-header .icon-btn:focus-visible { outline: none; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.12), 0 0 0 4px var(--accent-soft); }
+html:not(.rd-off) button.secondary:hover:not(:disabled) { background: #fcfaf6 !important; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.16) !important; }
+html:not(.rd-off) .skills-hdr-btn { height: 36px; border-radius: 10px; font-weight: 500; }
+html:not(.rd-off) .settings-page-header .icon-btn:focus,
+html:not(.rd-off) .settings-page-header .icon-btn:focus-visible { outline: none; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.12), 0 0 0 4px var(--accent-soft); }
 
 /* ---- Agent Skills cards ---- */
-html:not([data-theme="dark"]) .skills-works-with { background: var(--bg-app); }
-html:not([data-theme="dark"]) .skills-works-with::before { background: linear-gradient(to bottom, transparent, var(--bg-app)); }
-html:not([data-theme="dark"]) .skills-works-coin { background: #fff; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.08); }
-html:not([data-theme="dark"]) .skills-grid { gap: 12px; }
-html:not([data-theme="dark"]) .skills-card {
+html:not(.rd-off) .skills-works-with { background: var(--bg-app); }
+html:not(.rd-off) .skills-works-with::before { background: linear-gradient(to bottom, transparent, var(--bg-app)); }
+html:not(.rd-off) .skills-works-coin { background: #fff; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.08); }
+html:not(.rd-off) .skills-grid { gap: 12px; }
+html:not(.rd-off) .skills-card {
   --skills-card-bg: #fff; --skills-card-bg-hover: #fff; --skills-tile-bg: #f6f3ff;
   border-radius: 14px; padding: 16px;
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.04);
   transition: box-shadow 140ms ease, transform 140ms ease;
 }
-html:not([data-theme="dark"]) .skills-card:not(.is-static):hover {
+html:not(.rd-off) .skills-card:not(.is-static):hover {
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1), 0 12px 26px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px);
 }
-html:not([data-theme="dark"]) .skills-card .skills-icon.is-lg { border: 0; background: #f1edff; color: #6a4fe0; border-radius: 10px; }
-html:not([data-theme="dark"]) .skills-card .skills-row-name { font-size: 14px; }
-html:not([data-theme="dark"]) .skills-card-byline { font-size: 11.5px; color: var(--text-tertiary); }
-html:not([data-theme="dark"]) .skills-card-desc { font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
-html:not([data-theme="dark"]) .skills-card-action {
+html:not(.rd-off) .skills-card .skills-icon.is-lg { border: 0; background: #f1edff; color: #6a4fe0; border-radius: 10px; }
+html:not(.rd-off) .skills-card .skills-row-name { font-size: 14px; }
+html:not(.rd-off) .skills-card-byline { font-size: 11.5px; color: var(--text-tertiary); }
+html:not(.rd-off) .skills-card-desc { font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+html:not(.rd-off) .skills-card-action {
   border: 0 !important; background: transparent !important; color: var(--text-tertiary) !important;
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1) !important; border-radius: 9px !important;
 }
-html:not([data-theme="dark"]) .skills-card-action:hover { color: #4a2fc7 !important; box-shadow: 0 0 0 1px #c9bcf6 !important; background: #f6f3ff !important; }
-html:not([data-theme="dark"]) .skills-group-head { font-size: 13.5px; font-weight: 600; }
-html:not([data-theme="dark"]) .skills-chip { background: #fff; border: 0; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1); color: var(--text-secondary); font-size: 11.5px; }
+html:not(.rd-off) .skills-card-action:hover { color: #4a2fc7 !important; box-shadow: 0 0 0 1px #c9bcf6 !important; background: #f6f3ff !important; }
+html:not(.rd-off) .skills-group-head { font-size: 13.5px; font-weight: 600; }
+html:not(.rd-off) .skills-chip { background: #fff; border: 0; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1); color: var(--text-secondary); font-size: 11.5px; }
 
 /* ---- Activity panel ---- */
-html:not([data-theme="dark"]) .right-panel-head { border-bottom: 1px solid rgba(11, 10, 16, 0.06); }
-html:not([data-theme="dark"]) .right-panel-tab { border-radius: 9px; }
-html:not([data-theme="dark"]) .activity-clear { font-size: 12px; color: var(--text-tertiary); }
-html:not([data-theme="dark"]) .activity-list { padding: 0 8px; }
-html:not([data-theme="dark"]) .activity-row { border: 0 !important; border-radius: 12px; padding: 10px 10px; }
-html:not([data-theme="dark"]) .activity-row:hover { background: rgba(11, 10, 16, 0.03); }
-html:not([data-theme="dark"]) .activity-row-head { align-items: flex-start; gap: 10px; }
+html:not(.rd-off) .right-panel-head { border-bottom: 1px solid rgba(11, 10, 16, 0.06); }
+html:not(.rd-off) .right-panel-tab { border-radius: 9px; }
+html:not(.rd-off) .activity-clear { font-size: 12px; color: var(--text-tertiary); }
+html:not(.rd-off) .activity-list { padding: 0 8px; }
+html:not(.rd-off) .activity-row { border: 0 !important; border-radius: 12px; padding: 10px 10px; }
+html:not(.rd-off) .activity-row:hover { background: rgba(11, 10, 16, 0.03); }
+html:not(.rd-off) .activity-row-head { align-items: flex-start; gap: 10px; }
 
 /* Kind as a soft coloured pill instead of a bold black word. */
-html:not([data-theme="dark"]) .activity-row-chip {
+html:not(.rd-off) .activity-row-chip {
   flex: none; min-width: 0; height: 22px; padding: 0 9px; border-radius: 99px; border: 0;
   display: inline-flex; align-items: center; font: 600 11px var(--font-body); letter-spacing: 0.01em;
   background: #ece6ff; color: #5b3fd6;
 }
-html:not([data-theme="dark"]) .activity-row-chip[data-tone="trash"],
-html:not([data-theme="dark"]) .activity-row-chip[data-tone="failed"] { background: #fdecea; color: #b8473a; }
-html:not([data-theme="dark"]) .activity-row-chip[data-tone="warn"],
-html:not([data-theme="dark"]) .activity-row-chip[data-tone="held"],
-html:not([data-theme="dark"]) .activity-row-chip[data-tone="paused"],
-html:not([data-theme="dark"]) .activity-row-chip[data-tone="shrunk"] { background: #fff1c9; color: #7a5a00; }
-html:not([data-theme="dark"]) .activity-row-chip[data-tone="invitation"] { background: #dff3e5; color: #2f7044; }
-html:not([data-theme="dark"]) .activity-row-chip[data-tone="none"],
-html:not([data-theme="dark"]) .activity-row-chip[data-tone="round"] { background: #eef0f3; color: #4a5361; }
+html:not(.rd-off) .activity-row-chip[data-tone="trash"],
+html:not(.rd-off) .activity-row-chip[data-tone="failed"] { background: #fdecea; color: #b8473a; }
+html:not(.rd-off) .activity-row-chip[data-tone="warn"],
+html:not(.rd-off) .activity-row-chip[data-tone="held"],
+html:not(.rd-off) .activity-row-chip[data-tone="paused"],
+html:not(.rd-off) .activity-row-chip[data-tone="shrunk"] { background: #fff1c9; color: #7a5a00; }
+html:not(.rd-off) .activity-row-chip[data-tone="invitation"] { background: #dff3e5; color: #2f7044; }
+html:not(.rd-off) .activity-row-chip[data-tone="none"],
+html:not(.rd-off) .activity-row-chip[data-tone="round"] { background: #eef0f3; color: #4a5361; }
 
-html:not([data-theme="dark"]) .activity-row-message { font-size: 13.5px; font-weight: 500; color: var(--text-primary); }
-html:not([data-theme="dark"]) .activity-row-path,
-html:not([data-theme="dark"]) .activity-row-paths { font-size: 11.5px; color: var(--text-tertiary); }
-html:not([data-theme="dark"]) .activity-row-time { font-size: 11.5px; color: var(--text-tertiary); white-space: nowrap; }
+html:not(.rd-off) .activity-row-message { font-size: 13.5px; font-weight: 500; color: var(--text-primary); }
+html:not(.rd-off) .activity-row-path,
+html:not(.rd-off) .activity-row-paths { font-size: 11.5px; color: var(--text-tertiary); }
+html:not(.rd-off) .activity-row-time { font-size: 11.5px; color: var(--text-tertiary); white-space: nowrap; }
 
 /* Expanded detail: an inset cream panel with neat small buttons. */
-html:not([data-theme="dark"]) .activity-row-detail {
+html:not(.rd-off) .activity-row-detail {
   margin-top: 8px; padding: 10px 12px; border-radius: 10px; background: var(--bg-app);
   font-size: 12.5px; color: var(--text-secondary); line-height: 1.55;
 }
-html:not([data-theme="dark"]) .activity-row-explain { font-size: 13px; color: var(--text-primary); margin-bottom: 4px; }
-html:not([data-theme="dark"]) .activity-row-fact { font-size: 12px; color: var(--text-tertiary); }
-html:not([data-theme="dark"]) .activity-row-actions { gap: 6px; margin-top: 8px; }
-html:not([data-theme="dark"]) .activity-row-actions button {
+html:not(.rd-off) .activity-row-explain { font-size: 13px; color: var(--text-primary); margin-bottom: 4px; }
+html:not(.rd-off) .activity-row-fact { font-size: 12px; color: var(--text-tertiary); }
+html:not(.rd-off) .activity-row-actions { gap: 6px; margin-top: 8px; }
+html:not(.rd-off) .activity-row-actions button {
   height: 28px; padding: 0 12px; border-radius: 8px; font: 500 12.5px var(--font-body);
   background: #fff !important; border: 0 !important; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.12) !important; color: var(--text-primary);
 }
-html:not([data-theme="dark"]) .activity-row-actions button:last-child { background: var(--accent) !important; color: #fff !important; box-shadow: none !important; }
+html:not(.rd-off) .activity-row-actions button:last-child { background: var(--accent) !important; color: #fff !important; box-shadow: none !important; }
 /* Chip colour by kind: deletes red, access/copies violet, warnings amber. */
-html:not([data-theme="dark"]) .activity-row-chip[data-kind="trash"],
-html:not([data-theme="dark"]) .activity-row-chip[data-kind="deleted"],
-html:not([data-theme="dark"]) .activity-row-chip[data-kind="failed"] { background: #fdecea; color: #b8473a; }
-html:not([data-theme="dark"]) .activity-row-chip[data-kind="invitation"] { background: #dff3e5; color: #2f7044; }
-html:not([data-theme="dark"]) .activity-row-chip[data-tone="warn"]:not([data-kind="trash"]):not([data-kind="failed"]):not([data-kind="invitation"]) { background: #fff1c9; color: #7a5a00; }
+html:not(.rd-off) .activity-row-chip[data-kind="trash"],
+html:not(.rd-off) .activity-row-chip[data-kind="deleted"],
+html:not(.rd-off) .activity-row-chip[data-kind="failed"] { background: #fdecea; color: #b8473a; }
+html:not(.rd-off) .activity-row-chip[data-kind="invitation"] { background: #dff3e5; color: #2f7044; }
+html:not(.rd-off) .activity-row-chip[data-tone="warn"]:not([data-kind="trash"]):not([data-kind="failed"]):not([data-kind="invitation"]) { background: #fff1c9; color: #7a5a00; }
 
 /* Search icon back beside the sidebar toggle. */
 .titlebar-search { display: inline-flex !important; }
 
 /* Skill detail header: title and meta get the full width, buttons wrap
    underneath instead of crushing the name into a narrow column. */
-html:not([data-theme="dark"]) .skills-detail-head { flex-wrap: wrap; align-items: flex-start; row-gap: 12px; }
-html:not([data-theme="dark"]) .skills-detail-title { flex: 1 1 260px; }
-html:not([data-theme="dark"]) .skills-detail-head .settings-section-title { font-size: 20px; white-space: normal; }
-html:not([data-theme="dark"]) .skills-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-html:not([data-theme="dark"]) .skills-meta-line,
-html:not([data-theme="dark"]) .skills-byline { white-space: normal; word-break: normal; overflow-wrap: anywhere; font-size: 12.5px; color: var(--text-tertiary); }
-html:not([data-theme="dark"]) .skills-detail-controls { flex-wrap: wrap; }
-html:not([data-theme="dark"]) .skills-detail-controls .skills-hdr-btn { height: 34px; }
-html:not([data-theme="dark"]) .member-profile-back { display: inline-flex !important; margin-bottom: 8px; }
+html:not(.rd-off) .skills-detail-head { flex-wrap: wrap; align-items: flex-start; row-gap: 12px; }
+html:not(.rd-off) .skills-detail-title { flex: 1 1 260px; }
+html:not(.rd-off) .skills-detail-head .settings-section-title { font-size: 20px; white-space: normal; }
+html:not(.rd-off) .skills-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+html:not(.rd-off) .skills-meta-line,
+html:not(.rd-off) .skills-byline { white-space: normal; word-break: normal; overflow-wrap: anywhere; font-size: 12.5px; color: var(--text-tertiary); }
+html:not(.rd-off) .skills-detail-controls { flex-wrap: wrap; }
+html:not(.rd-off) .skills-detail-controls .skills-hdr-btn { height: 34px; }
+html:not(.rd-off) .member-profile-back { display: inline-flex !important; margin-bottom: 8px; }
 
 /* ============================================================
    Inner settings pages: one system everywhere.
@@ -1784,192 +1784,192 @@ html:not([data-theme="dark"]) .member-profile-back { display: inline-flex !impor
    - Section labels are small caps above their card.
    - Lists (tokens, checkpoints, agents, statuses) are cards of rows.
    ============================================================ */
-html:not([data-theme="dark"]) .settings-content { --rd-gap: 14px; gap: var(--rd-gap); }
-html:not([data-theme="dark"]) .settings-content > .muted,
-html:not([data-theme="dark"]) .settings-content > div > .muted:first-child,
-html:not([data-theme="dark"]) .settings-content > div > p.muted:first-child,
-html:not([data-theme="dark"]) .connection-tab > .field-hint:first-child { font-size: 13px; color: var(--text-secondary); line-height: 1.55; max-width: 640px; }
-html:not([data-theme="dark"]) .settings-content .menu-sep { display: none; }
-html:not([data-theme="dark"]) .settings-content .subhead {
+html:not(.rd-off) .settings-content { --rd-gap: 14px; gap: var(--rd-gap); }
+html:not(.rd-off) .settings-content > .muted,
+html:not(.rd-off) .settings-content > div > .muted:first-child,
+html:not(.rd-off) .settings-content > div > p.muted:first-child,
+html:not(.rd-off) .connection-tab > .field-hint:first-child { font-size: 13px; color: var(--text-secondary); line-height: 1.55; max-width: 640px; }
+html:not(.rd-off) .settings-content .menu-sep { display: none; }
+html:not(.rd-off) .settings-content .subhead {
   margin: 8px 0 -6px 2px; font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: #0b0a1080;
 }
 
 /* Grouped rows */
-html:not([data-theme="dark"]) .settings-content > .menu-row {
+html:not(.rd-off) .settings-content > .menu-row {
   background: #fff; margin: 0; padding: 14px 16px; min-height: 56px;
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07); border-radius: 0;
 }
-html:not([data-theme="dark"]) .settings-content > .menu-row + .menu-row { margin-top: calc(-1 * var(--rd-gap) + 1px); }
-html:not([data-theme="dark"]) .settings-content > .menu-row:not(.menu-row + .menu-row) { border-top-left-radius: 14px; border-top-right-radius: 14px; }
-html:not([data-theme="dark"]) .settings-content > .menu-row:not(:has(+ .menu-row)) { border-bottom-left-radius: 14px; border-bottom-right-radius: 14px; }
-html:not([data-theme="dark"]) .menu-row-label { font-size: 14px; color: var(--text-primary); }
-html:not([data-theme="dark"]) .menu-row-label .field-hint,
-html:not([data-theme="dark"]) .menu-row .field-hint { font-size: 12px; color: var(--text-tertiary); }
-html:not([data-theme="dark"]) .width-preview { background: var(--bg-app); border: 0; border-radius: 10px; }
-html:not([data-theme="dark"]) .appearance-tag { font: 500 11px var(--font-body); color: #5b3fd6; background: #f1edff; border-radius: 99px; padding: 2px 8px; }
+html:not(.rd-off) .settings-content > .menu-row + .menu-row { margin-top: calc(-1 * var(--rd-gap) + 1px); }
+html:not(.rd-off) .settings-content > .menu-row:not(.menu-row + .menu-row) { border-top-left-radius: 14px; border-top-right-radius: 14px; }
+html:not(.rd-off) .settings-content > .menu-row:not(:has(+ .menu-row)) { border-bottom-left-radius: 14px; border-bottom-right-radius: 14px; }
+html:not(.rd-off) .menu-row-label { font-size: 14px; color: var(--text-primary); }
+html:not(.rd-off) .menu-row-label .field-hint,
+html:not(.rd-off) .menu-row .field-hint { font-size: 12px; color: var(--text-tertiary); }
+html:not(.rd-off) .width-preview { background: var(--bg-app); border: 0; border-radius: 10px; }
+html:not(.rd-off) .appearance-tag { font: 500 11px var(--font-body); color: #5b3fd6; background: #f1edff; border-radius: 99px; padding: 2px 8px; }
 
 /* Generic card helper used below */
-html:not([data-theme="dark"]) .mcp-endpoint,
-html:not([data-theme="dark"]) .mcp-conn-list,
-html:not([data-theme="dark"]) .checkpoint-list,
-html:not([data-theme="dark"]) .status-options,
-html:not([data-theme="dark"]) .about-update-row,
-html:not([data-theme="dark"]) .installed-agents-status,
-html:not([data-theme="dark"]) .connection-tab > .field,
-html:not([data-theme="dark"]) .io-section,
-html:not([data-theme="dark"]) .versioning-tab .invite-bar,
-html:not([data-theme="dark"]) .perm-empty {
+html:not(.rd-off) .mcp-endpoint,
+html:not(.rd-off) .mcp-conn-list,
+html:not(.rd-off) .checkpoint-list,
+html:not(.rd-off) .status-options,
+html:not(.rd-off) .about-update-row,
+html:not(.rd-off) .installed-agents-status,
+html:not(.rd-off) .connection-tab > .field,
+html:not(.rd-off) .io-section,
+html:not(.rd-off) .versioning-tab .invite-bar,
+html:not(.rd-off) .perm-empty {
   background: #fff; border: 0 !important; border-radius: 14px; padding: 14px 16px; margin: 0;
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.03);
 }
-html:not([data-theme="dark"]) .mcp-conn-list,
-html:not([data-theme="dark"]) .checkpoint-list,
-html:not([data-theme="dark"]) .status-options { padding: 4px; list-style: none; }
+html:not(.rd-off) .mcp-conn-list,
+html:not(.rd-off) .checkpoint-list,
+html:not(.rd-off) .status-options { padding: 4px; list-style: none; }
 
 /* Rows inside list cards */
-html:not([data-theme="dark"]) .mcp-conn,
-html:not([data-theme="dark"]) .checkpoint-row,
-html:not([data-theme="dark"]) .status-options .menu-item,
-html:not([data-theme="dark"]) .installed-agent-row {
+html:not(.rd-off) .mcp-conn,
+html:not(.rd-off) .checkpoint-row,
+html:not(.rd-off) .status-options .menu-item,
+html:not(.rd-off) .installed-agent-row {
   border-radius: 10px; padding: 10px 12px; border: 0 !important; margin: 0;
 }
-html:not([data-theme="dark"]) .mcp-conn + .mcp-conn,
-html:not([data-theme="dark"]) .checkpoint-row + .checkpoint-row,
-html:not([data-theme="dark"]) .status-options .menu-item + .menu-item { box-shadow: 0 -1px 0 rgba(11, 10, 16, 0.06); }
-html:not([data-theme="dark"]) .checkpoint-row:hover,
-html:not([data-theme="dark"]) .mcp-conn:hover,
-html:not([data-theme="dark"]) .status-options .menu-item:hover { background: var(--bg-app); }
-html:not([data-theme="dark"]) .status-options .menu-item.active { background: #f1edff; box-shadow: none; }
+html:not(.rd-off) .mcp-conn + .mcp-conn,
+html:not(.rd-off) .checkpoint-row + .checkpoint-row,
+html:not(.rd-off) .status-options .menu-item + .menu-item { box-shadow: 0 -1px 0 rgba(11, 10, 16, 0.06); }
+html:not(.rd-off) .checkpoint-row:hover,
+html:not(.rd-off) .mcp-conn:hover,
+html:not(.rd-off) .status-options .menu-item:hover { background: var(--bg-app); }
+html:not(.rd-off) .status-options .menu-item.active { background: #f1edff; box-shadow: none; }
 
 /* Each settings page's sections */
-html:not([data-theme="dark"]) .versioning-tab,
-html:not([data-theme="dark"]) .about-tab,
-html:not([data-theme="dark"]) .connection-tab,
-html:not([data-theme="dark"]) .status-tab { display: flex; flex-direction: column; gap: 14px; }
-html:not([data-theme="dark"]) .versioning-tab .invite-bar { display: flex; gap: 8px; padding: 8px; }
-html:not([data-theme="dark"]) .versioning-tab .invite-bar input { flex: 1; height: 34px; border: 0 !important; box-shadow: none !important; background: transparent !important; padding: 0 8px; }
-html:not([data-theme="dark"]) .io-tab { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
-html:not([data-theme="dark"]) .io-section { padding: 18px; }
-html:not([data-theme="dark"]) .io-heading { font: 600 15px var(--font-display); margin-bottom: 6px; }
-html:not([data-theme="dark"]) .io-desc, html:not([data-theme="dark"]) .io-hint { font-size: 12.5px; color: var(--text-secondary); line-height: 1.55; }
-html:not([data-theme="dark"]) .io-actions { display: flex; gap: 8px; margin: 14px 0 8px; flex-wrap: wrap; }
-html:not([data-theme="dark"]) .io-actions button { height: 34px; border-radius: 9px; font-weight: 500; }
-html:not([data-theme="dark"]) .about-update-row { display: flex; align-items: center; justify-content: space-between; }
-html:not([data-theme="dark"]) .installed-agents-status h3 { font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: #0b0a1080; margin-bottom: 4px; }
-html:not([data-theme="dark"]) .about-tab > .menu-item.danger { align-self: flex-start; padding: 8px 12px; border-radius: 9px; }
-html:not([data-theme="dark"]) .connection-tab > .field { display: flex; flex-direction: column; gap: 8px; }
-html:not([data-theme="dark"]) .connection-tab .field-label { font-size: 12.5px; font-weight: 500; color: var(--text-secondary); }
-html:not([data-theme="dark"]) .connection-tab input { height: 38px; border-radius: 9px; background: var(--bg-app) !important; border: 0 !important; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06) !important; padding: 0 12px; }
-html:not([data-theme="dark"]) .update-actions { display: flex; justify-content: flex-end; }
-html:not([data-theme="dark"]) .mcp-endpoint { display: flex; align-items: center; gap: 12px; }
-html:not([data-theme="dark"]) .mcp-section-head { margin-top: 6px; }
-html:not([data-theme="dark"]) .perm-empty { color: var(--text-secondary); font-size: 13px; }
+html:not(.rd-off) .versioning-tab,
+html:not(.rd-off) .about-tab,
+html:not(.rd-off) .connection-tab,
+html:not(.rd-off) .status-tab { display: flex; flex-direction: column; gap: 14px; }
+html:not(.rd-off) .versioning-tab .invite-bar { display: flex; gap: 8px; padding: 8px; }
+html:not(.rd-off) .versioning-tab .invite-bar input { flex: 1; height: 34px; border: 0 !important; box-shadow: none !important; background: transparent !important; padding: 0 8px; }
+html:not(.rd-off) .io-tab { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+html:not(.rd-off) .io-section { padding: 18px; }
+html:not(.rd-off) .io-heading { font: 600 15px var(--font-display); margin-bottom: 6px; }
+html:not(.rd-off) .io-desc, html:not(.rd-off) .io-hint { font-size: 12.5px; color: var(--text-secondary); line-height: 1.55; }
+html:not(.rd-off) .io-actions { display: flex; gap: 8px; margin: 14px 0 8px; flex-wrap: wrap; }
+html:not(.rd-off) .io-actions button { height: 34px; border-radius: 9px; font-weight: 500; }
+html:not(.rd-off) .about-update-row { display: flex; align-items: center; justify-content: space-between; }
+html:not(.rd-off) .installed-agents-status h3 { font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: #0b0a1080; margin-bottom: 4px; }
+html:not(.rd-off) .about-tab > .menu-item.danger { align-self: flex-start; padding: 8px 12px; border-radius: 9px; }
+html:not(.rd-off) .connection-tab > .field { display: flex; flex-direction: column; gap: 8px; }
+html:not(.rd-off) .connection-tab .field-label { font-size: 12.5px; font-weight: 500; color: var(--text-secondary); }
+html:not(.rd-off) .connection-tab input { height: 38px; border-radius: 9px; background: var(--bg-app) !important; border: 0 !important; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06) !important; padding: 0 12px; }
+html:not(.rd-off) .update-actions { display: flex; justify-content: flex-end; }
+html:not(.rd-off) .mcp-endpoint { display: flex; align-items: center; gap: 12px; }
+html:not(.rd-off) .mcp-section-head { margin-top: 6px; }
+html:not(.rd-off) .perm-empty { color: var(--text-secondary); font-size: 13px; }
 
 /* Buttons inside pages: one size. */
-html:not([data-theme="dark"]) .settings-content button.primary:not(.sm),
-html:not([data-theme="dark"]) .settings-content button.secondary { height: 34px; padding: 0 14px; border-radius: 9px; font-weight: 500; font-size: 13px; }
-html:not([data-theme="dark"]) .io-tab { width: 100%; max-width: none; }
-html:not([data-theme="dark"]) .io-section { max-width: none; width: auto; height: 100%; }
+html:not(.rd-off) .settings-content button.primary:not(.sm),
+html:not(.rd-off) .settings-content button.secondary { height: 34px; padding: 0 14px; border-radius: 9px; font-weight: 500; font-size: 13px; }
+html:not(.rd-off) .io-tab { width: 100%; max-width: none; }
+html:not(.rd-off) .io-section { max-width: none; width: auto; height: 100%; }
 
 /* Windows: keep the header pill clear of the minimise / maximise / close buttons
    (the redesign's main-header padding otherwise wins over App.css's 146px). */
-html[data-platform="windows"]:not([data-theme="dark"]) .main-header { padding-right: 146px; }
-html[data-platform="windows"]:not([data-theme="dark"]):has(.right-panel) .main-header { padding-right: var(--sp-4); }
+html[data-platform="windows"]:not(.rd-off) .main-header { padding-right: 146px; }
+html[data-platform="windows"]:not(.rd-off):has(.right-panel) .main-header { padding-right: var(--sp-4); }
 
 /* The Home "···" menu has to sit above the Pinned / Notes rows below it. */
 .home-section:has(.home-sidebar-menu[open]),
 .home-sidebar-entry:has(.home-sidebar-menu[open]) { position: relative; z-index: 60; }
 
 /* ---- Upgrade (Team plans): one cream page, quiet cards, one violet focus ---- */
-html:not([data-theme="dark"]) .modal.upgrade-dialog.is-page { background: #fcfaf6; }
-html:not([data-theme="dark"]) .modal.upgrade-dialog.is-page .modal-header {
+html:not(.rd-off) .modal.upgrade-dialog.is-page { background: #fcfaf6; }
+html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-header {
   background: transparent; border-bottom: 0; padding-bottom: 0;
 }
-html:not([data-theme="dark"]) .modal.upgrade-dialog.is-page .modal-header h2,
-html:not([data-theme="dark"]) .modal.upgrade-dialog.is-page .modal-header .subhead {
+html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-header h2,
+html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-header .subhead {
   font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; font-weight: 500;
   letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary);
 }
-html:not([data-theme="dark"]) .modal.upgrade-dialog.is-page .modal-page-body {
+html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-page-body {
   background: transparent; border: 0; box-shadow: none; padding-top: 12px;
 }
-html:not([data-theme="dark"]) .upgrade-tiers-heading {
+html:not(.rd-off) .upgrade-tiers-heading {
   font-family: var(--font-body); font-size: 26px; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 26px;
 }
-html:not([data-theme="dark"]) .upgrade-tiers { column-gap: 18px; }
-html:not([data-theme="dark"]) .upgrade-tier {
+html:not(.rd-off) .upgrade-tiers { column-gap: 18px; }
+html:not(.rd-off) .upgrade-tier {
   --tier-pad: 26px;
   background: #fff; border: 0; border-radius: 16px;
   box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.04);
 }
-html:not([data-theme="dark"]) .upgrade-tier.is-featured {
+html:not(.rd-off) .upgrade-tier.is-featured {
   padding: var(--tier-pad); border: 0;
   box-shadow: 0 0 0 1.5px var(--accent), 0 18px 40px -18px rgba(124, 92, 255, 0.35);
 }
-html:not([data-theme="dark"]) .upgrade-tier.is-featured .upgrade-tier-list-head {
+html:not(.rd-off) .upgrade-tier.is-featured .upgrade-tier-list-head {
   margin-inline: calc(-1 * var(--tier-pad)); padding-inline: var(--tier-pad);
 }
-html:not([data-theme="dark"]) .upgrade-tier-icon {
+html:not(.rd-off) .upgrade-tier-icon {
   width: 38px; height: 38px; margin-bottom: 18px; border-radius: 10px;
   align-items: center; justify-content: center;
   background: #f3efe6; color: #6b6558;
 }
-html:not([data-theme="dark"]) .upgrade-tier.is-featured .upgrade-tier-icon { background: #efeaff; color: var(--accent); }
-html:not([data-theme="dark"]) .upgrade-tier-icon svg { width: 20px; height: 20px; }
-html:not([data-theme="dark"]) .upgrade-tier-name { font-family: var(--font-body); font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
-html:not([data-theme="dark"]) .upgrade-tier-tagline { font-size: 13px; color: var(--text-tertiary); }
-html:not([data-theme="dark"]) .upgrade-tier-price { margin-top: 16px; }
-html:not([data-theme="dark"]) .upgrade-tier-price .upgrade-amount,
-html:not([data-theme="dark"]) .upgrade-tier-price > :first-child { font-size: 34px; font-weight: 600; letter-spacing: -0.03em; line-height: 1; }
-html:not([data-theme="dark"]) .upgrade-tier-unit { color: var(--text-tertiary); font-size: 11.5px; }
-html:not([data-theme="dark"]) .upgrade-tier-controls { font-size: 13px; color: var(--text-secondary); }
-html:not([data-theme="dark"]) .upgrade-tier-cta {
+html:not(.rd-off) .upgrade-tier.is-featured .upgrade-tier-icon { background: #efeaff; color: var(--accent); }
+html:not(.rd-off) .upgrade-tier-icon svg { width: 20px; height: 20px; }
+html:not(.rd-off) .upgrade-tier-name { font-family: var(--font-body); font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+html:not(.rd-off) .upgrade-tier-tagline { font-size: 13px; color: var(--text-tertiary); }
+html:not(.rd-off) .upgrade-tier-price { margin-top: 16px; }
+html:not(.rd-off) .upgrade-tier-price .upgrade-amount,
+html:not(.rd-off) .upgrade-tier-price > :first-child { font-size: 34px; font-weight: 600; letter-spacing: -0.03em; line-height: 1; }
+html:not(.rd-off) .upgrade-tier-unit { color: var(--text-tertiary); font-size: 11.5px; }
+html:not(.rd-off) .upgrade-tier-controls { font-size: 13px; color: var(--text-secondary); }
+html:not(.rd-off) .upgrade-tier-cta {
   height: 38px; padding: 0 16px; border-radius: 10px; font-size: 13.5px; font-weight: 500;
 }
-html:not([data-theme="dark"]) .upgrade-tier-cta.ghost-pill:disabled {
+html:not(.rd-off) .upgrade-tier-cta.ghost-pill:disabled {
   background: #f6f3ec; box-shadow: none; border: 0; color: var(--text-tertiary);
 }
-html:not([data-theme="dark"]) .upgrade-tier-footnote { font-size: 11.5px; }
-html:not([data-theme="dark"]) .upgrade-tier-list-head {
+html:not(.rd-off) .upgrade-tier-footnote { font-size: 11.5px; }
+html:not(.rd-off) .upgrade-tier-list-head {
   border-top: 1px solid rgba(11, 10, 16, 0.06); font-size: 12px; font-weight: 500; color: var(--text-tertiary);
 }
-html:not([data-theme="dark"]) .upgrade-tier .upgrade-features li { font-size: 13.5px; color: var(--text-primary); }
-html:not([data-theme="dark"]) .upgrade-tier .upgrade-features li::before { width: 17px; height: 17px; font-size: 9.5px; }
-html:not([data-theme="dark"]) .upgrade-tier.is-featured .upgrade-features li::before { background: #efeaff; color: var(--accent); }
-html:not([data-theme="dark"]) .upgrade-tier:not(.is-featured) .upgrade-features li::before { background: #f3efe6; color: #8a8374; }
+html:not(.rd-off) .upgrade-tier .upgrade-features li { font-size: 13.5px; color: var(--text-primary); }
+html:not(.rd-off) .upgrade-tier .upgrade-features li::before { width: 17px; height: 17px; font-size: 9.5px; }
+html:not(.rd-off) .upgrade-tier.is-featured .upgrade-features li::before { background: #efeaff; color: var(--accent); }
+html:not(.rd-off) .upgrade-tier:not(.is-featured) .upgrade-features li::before { background: #f3efe6; color: #8a8374; }
 /* Monthly / Yearly: white thumb on a cream track, like the other toggles. */
-html:not([data-theme="dark"]) .upgrade-tier-toggle { background: #f3efe6; border: 0; padding: 3px; border-radius: 9px; }
-html:not([data-theme="dark"]) .upgrade-tier-toggle button { height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12px; }
-html:not([data-theme="dark"]) .modal.upgrade-dialog.is-page .modal-header > span {
+html:not(.rd-off) .upgrade-tier-toggle { background: #f3efe6; border: 0; padding: 3px; border-radius: 9px; }
+html:not(.rd-off) .upgrade-tier-toggle button { height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12px; }
+html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-header > span {
   font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; font-weight: 500;
   letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary);
 }
 /* Upgrade, round 2: livelier icon tiles, a "current plan" label, a deeper CTA. */
-html:not([data-theme="dark"]) .upgrade-tier-icon { background: #e4f3e6; color: #2f8a4a; }
-html:not([data-theme="dark"]) .upgrade-tier.is-featured .upgrade-tier-icon { background: #e9e2ff; color: #6a46f0; }
-html:not([data-theme="dark"]) .upgrade-tier-icon svg { stroke-width: 2; }
-html:not([data-theme="dark"]) .upgrade-tier:not(.is-featured) .upgrade-features li::before { background: #e4f3e6; color: #2f8a4a; }
-html:not([data-theme="dark"]) .upgrade-tier-cta.ghost-pill:disabled {
+html:not(.rd-off) .upgrade-tier-icon { background: #e4f3e6; color: #2f8a4a; }
+html:not(.rd-off) .upgrade-tier.is-featured .upgrade-tier-icon { background: #e9e2ff; color: #6a46f0; }
+html:not(.rd-off) .upgrade-tier-icon svg { stroke-width: 2; }
+html:not(.rd-off) .upgrade-tier:not(.is-featured) .upgrade-features li::before { background: #e4f3e6; color: #2f8a4a; }
+html:not(.rd-off) .upgrade-tier-cta.ghost-pill:disabled {
   background: transparent; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.08);
   color: var(--text-secondary); gap: 7px;
 }
-html:not([data-theme="dark"]) .upgrade-tier-cta.ghost-pill:disabled::before {
+html:not(.rd-off) .upgrade-tier-cta.ghost-pill:disabled::before {
   content: ""; width: 16px; height: 16px; flex: none; border-radius: 50%;
   background: #2f8a4a url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 8.2l2.2 2.2 4.8-4.8' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 16px no-repeat;
 }
-html:not([data-theme="dark"]) .upgrade-tier-cta.primary {
+html:not(.rd-off) .upgrade-tier-cta.primary {
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 6px 16px -6px rgba(124, 92, 255, 0.55);
   transition: background-color 140ms ease, box-shadow 140ms ease;
 }
-html:not([data-theme="dark"]) .upgrade-tier-cta.primary:hover:not(:disabled) {
+html:not(.rd-off) .upgrade-tier-cta.primary:hover:not(:disabled) {
   background: var(--accent-hover);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 10px 22px -8px rgba(124, 92, 255, 0.6);
 }
 
 /* Account → Vaults → one vault: section labels keep their own line, never
    squashed under the cards below. */
-html:not([data-theme="dark"]) .account-vault-page > * { flex-shrink: 0; }
-html:not([data-theme="dark"]) .account-vault-page > .subhead { margin: 22px 0 8px 2px; line-height: 1.4; min-height: 16px; }
+html:not(.rd-off) .account-vault-page > * { flex-shrink: 0; }
+html:not(.rd-off) .account-vault-page > .subhead { margin: 22px 0 8px 2px; line-height: 1.4; min-height: 16px; }
 
 /* ---- Motion: dialogs leave as softly as they arrive; settings tabs glide ---- */
 @keyframes rd-out-fade { to { opacity: 0; } }
