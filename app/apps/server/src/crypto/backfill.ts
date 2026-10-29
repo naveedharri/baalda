@@ -65,7 +65,12 @@ export interface BackfillCursors {
   /** ISO time the last full recount found nothing left. */
   completedAt?: string;
   checkedAt?: string;
+  /** ISO time of the last index catch-up (see `catchUpIndex`). */
+  indexedAt?: string;
 }
+
+/** A tick re-runs the index catch-up at most this often; a key arrival always does. */
+export const INDEX_CATCHUP_EVERY_MS = 10 * 60_000;
 
 /** Test seams. Production never replaces these. */
 export const backfillHooks: {
@@ -378,6 +383,8 @@ export interface BackfillOptions {
   batchSize?: number;
   throttleMs?: number;
   maxBatches?: number;
+  /** Run the index catch-up now regardless of when it last ran (key arrival). */
+  indexCatchUp?: boolean;
 }
 
 export type BackfillOutcome =
@@ -396,7 +403,13 @@ async function loadCursors(vaultId: string, db: Queryable): Promise<BackfillCurs
   );
   if (!rows[0]) return null;
   const c = rows[0].cursors ?? {};
-  return { tables: c.tables ?? {}, passes: c.passes ?? 0, completedAt: c.completedAt, checkedAt: c.checkedAt };
+  return {
+    tables: c.tables ?? {},
+    passes: c.passes ?? 0,
+    completedAt: c.completedAt,
+    checkedAt: c.checkedAt,
+    indexedAt: c.indexedAt,
+  };
 }
 
 async function saveCursors(vaultId: string, cursors: BackfillCursors, db: Queryable): Promise<void> {
@@ -497,7 +510,12 @@ export async function backfillVault(vaultId: string, opts: BackfillOptions = {})
     const probe = await heldCrypto(vaultId, cache, db);
     if (!probe) return "no_key";
     probe.key.fill(0);
-    await catchUpIndex(vaultId, db);
+    const lastIndexed = Date.parse(cursors.indexedAt ?? "");
+    if (opts.indexCatchUp || !Number.isFinite(lastIndexed) || Date.now() - lastIndexed >= INDEX_CATCHUP_EVERY_MS) {
+      await catchUpIndex(vaultId, db);
+      cursors.indexedAt = new Date().toISOString();
+      await saveCursors(vaultId, cursors, db);
+    }
     if (cursors.completedAt) {
       const checked = Date.parse(cursors.checkedAt ?? cursors.completedAt);
       if (Number.isFinite(checked) && Date.now() - checked < BACKFILL_RECHECK_MS) return "complete";
@@ -607,7 +625,7 @@ const kicked = new Set<string>();
 export function kickVaultBackfill(vaultId: string, opts: BackfillOptions = {}): Promise<void> {
   if (kicked.has(vaultId) || !vaultKeysEnabled()) return Promise.resolve();
   kicked.add(vaultId);
-  return backfillVault(vaultId, { maxBatches: BACKFILL_BATCHES_PER_TICK, ...opts })
+  return backfillVault(vaultId, { maxBatches: BACKFILL_BATCHES_PER_TICK, indexCatchUp: true, ...opts })
     .then(() => undefined)
     .catch((err) => console.error(`[backfill] vault ${vaultId} failed:`, err))
     .finally(() => kicked.delete(vaultId));
