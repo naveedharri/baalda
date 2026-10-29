@@ -230,8 +230,15 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     if (!(await enabled()) || accountMismatch) return [];
     if (!(await keys.getAccountPrivateKey())) return [];
     const out: PendingDeviceView[] = [];
-    for (const d of await api.listPendingDevices()) {
-      if (d.deviceId === deps.deviceId()) continue;
+    const listed = await api.listPendingDevices();
+    if (!Array.isArray(listed)) return [];
+    const seen = new Set<string>();
+    for (const d of listed) {
+      // The server's list is untrusted: bounded, one prompt per device.
+      if (out.length >= MAX_PENDING_DEVICES) break;
+      if (!d || typeof d.deviceId !== "string" || typeof d.publicKey !== "string") continue;
+      if (d.deviceId === deps.deviceId() || seen.has(d.deviceId)) continue;
+      seen.add(d.deviceId);
       try {
         const pub = fromBase64(d.publicKey);
         if (pub.length === 32) out.push({ ...d, code: deviceCode(pub) });
@@ -242,14 +249,24 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     return out;
   }
 
-  /** The person approved `device` (codes matched): seal our account key to it. */
-  async function approveDevice(device: PendingDeviceView): Promise<boolean> {
+  /**
+   * The person approved `device` by TYPING the code the new computer shows:
+   * seal our account key to it. The prompt never displays the code, so a
+   * device row the person never started (a server's or database writer's own
+   * key) cannot be approved by clicking through.
+   */
+  async function approveDevice(device: PendingDevice, typedCode: string): Promise<boolean> {
     if (!(await enabled()) || accountMismatch) return false;
+    let pub: Uint8Array;
+    try {
+      pub = fromBase64(device.publicKey);
+    } catch {
+      return false;
+    }
+    if (pub.length !== 32 || !sameDeviceCode(typedCode, deviceCode(pub))) return false;
     const priv = await keys.getAccountPrivateKey();
     const remote = await api.getMyKeys();
     if (!priv || !remote || !sameKey(publicKeyFromPrivate(priv), remote.publicKey)) return false;
-    const pub = fromBase64(device.publicKey);
-    if (pub.length !== 32 || deviceCode(pub) !== device.code) return false;
     await api.putDeviceKey(device.deviceId, toBase64(sealTo(pub, priv)));
     return true;
   }
@@ -524,7 +541,29 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     if (!(await enabled()) || accountMismatch) return out;
     const held = verified.get(vaultId);
     if (!held) return out;
-    for (const r of await api.listVaultKeyRequests(vaultId)) {
+    const listed = await api.listVaultKeyRequests(vaultId);
+    if (!Array.isArray(listed)) return out;
+    // The list is the server's word: bounded per run, one key per person. A
+    // person listed with two different keys at once is refused outright.
+    const byUser = new Map<string, Set<string>>();
+    for (const r of listed) {
+      if (!r || typeof r.userId !== "string" || typeof r.publicKey !== "string") continue;
+      const keysOf = byUser.get(r.userId) ?? new Set<string>();
+      keysOf.add(r.publicKey);
+      byUser.set(r.userId, keysOf);
+    }
+    const requests: Array<{ userId: string; publicKey: string }> = [];
+    for (const [userId, pubs] of byUser) {
+      if (requests.length + out.refused.length >= MAX_KEY_REQUESTS_PER_RUN) break;
+      if (pubs.size !== 1) out.refused.push(userId);
+      else requests.push({ userId, publicKey: [...pubs][0] });
+    }
+    const memberMemo = new Map<string, boolean>();
+    const isMember = async (userId: string) => {
+      if (!memberMemo.has(userId)) memberMemo.set(userId, await deps.isMember(vaultId, userId));
+      return memberMemo.get(userId)!;
+    };
+    for (const r of requests) {
       let pub: Uint8Array;
       try {
         pub = fromBase64(r.publicKey);
@@ -532,7 +571,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
         out.refused.push(r.userId);
         continue;
       }
-      if (pub.length !== 32 || !(await deps.isMember(vaultId, r.userId))) {
+      if (pub.length !== 32 || !(await isMember(r.userId))) {
         out.refused.push(r.userId);
         continue;
       }
@@ -591,6 +630,18 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
 }
 
 export type VaultKeySession = ReturnType<typeof createVaultKeySession>;
+
+/** Most key requests handled in one run (the rest wait for the next run). */
+export const MAX_KEY_REQUESTS_PER_RUN = 50;
+/** Most "a new computer is signing in" prompts raised from one listing. */
+export const MAX_PENDING_DEVICES = 5;
+
+/** A typed device code matches, ignoring case, spaces and dashes. */
+function sameDeviceCode(typed: unknown, code: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[\s-]/g, "");
+  const t = norm(typeof typed === "string" ? typed : "");
+  return t.length === 8 && t === norm(code);
+}
 
 function sameKey(a: Uint8Array, b64: string): boolean {
   try {
