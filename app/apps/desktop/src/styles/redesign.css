@@ -1550,3 +1550,6 @@ html:not([data-theme="dark"]) .home-sidebar-row { width: calc(var(--sidebar-layo
 html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-sync { transform: translateX(8px); }
 html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-more { transform: translateX(-20px); }
 html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row:hover .tree-sync { opacity: 0; }
+/* Bring the menu hints back, right-aligned and quiet. */
+html:not([data-theme="dark"]) .account-popover .menu-hint { display: inline !important; margin-left: auto; font-size: 11.5px; color: #0b0a1080; }
+.rd-status-chip-text small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
