@@ -740,3 +740,5 @@ html:not([data-theme="dark"]) .vault-local-only-card {
   border: 0;
   border-radius: var(--radius-xl);
 }
+html:not([data-theme="dark"]) .settings-content > .toggle-row { height: auto; min-height: 0; flex-shrink: 0; align-items: center; overflow: visible; }
+html:not([data-theme="dark"]) .settings-content > * { flex-shrink: 0; }
