@@ -1543,3 +1543,10 @@ html:not([data-theme="dark"]) .sidebar .tree-row.selected { --rd-row-bg: rgba(11
 html:not([data-theme="dark"]) .sidebar .tree-row.drop-target { --rd-row-bg: var(--accent-soft); }
 /* Home box spans the same 12px → row-end line. */
 html:not([data-theme="dark"]) .home-sidebar-row { width: calc(var(--sidebar-layout-w, 300px) - 22px) !important; }
+/* Right edge = the NOTES header's last icon (the select checkbox). Boxes end
+   there; the sync dot and the row's ⋯ sit centred under that icon. */
+html:not([data-theme="dark"]) .sidebar .tree-row::after { right: 36px; }
+html:not([data-theme="dark"]) .home-sidebar-row { width: calc(var(--sidebar-layout-w, 300px) - 54px) !important; }
+html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-sync { transform: translateX(8px); }
+html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-more { transform: translateX(-20px); }
+html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row:hover .tree-sync { opacity: 0; }
