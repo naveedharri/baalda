@@ -32,6 +32,7 @@ export class VaultKeyCache {
   private readonly entries = new Map<string, Entry>();
   private readonly graceMs: number;
   private readonly now: () => number;
+  private readonly listeners = new Set<(vaultId: string) => void>();
 
   constructor(opts: KeyCacheOptions = {}) {
     this.graceMs = opts.graceMs ?? KEY_CACHE_GRACE_MS;
@@ -60,6 +61,17 @@ export class VaultKeyCache {
     entry.refs += 1;
     entry.expiresAt = null;
     const held = entry;
+    // Background work that deferred for want of this vault's key retries now.
+    // A listener never sees the key, only the vault id, and runs off this stack.
+    for (const listener of this.listeners) {
+      queueMicrotask(() => {
+        try {
+          listener(vaultId);
+        } catch (err) {
+          console.error("[key-cache] acquire listener failed:", err);
+        }
+      });
+    }
     let released = false;
     return () => {
       if (released) return;
@@ -80,6 +92,17 @@ export class VaultKeyCache {
     this.sweep();
     const entry = this.entries.get(vaultId);
     return entry ? { key: Buffer.from(entry.key), generation: entry.generation } : null;
+  }
+
+  /**
+   * Be told (vault id only, never the key) each time a key for a vault is
+   * acquired, so deferred background work can retry. Returns the unsubscribe.
+   */
+  onAcquire(listener: (vaultId: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   /** Whether a key is held for `vaultId` (no copy made). */

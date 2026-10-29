@@ -6,6 +6,9 @@ import { pool as defaultPool } from "../db/pool.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
 import { BULK_ORIGIN, BULK_SEED_ORIGIN } from "../sync/doc-batch.js";
 import { storeNoteText } from "./texts.js";
+import { KeyRequiredError } from "../crypto/transport.js";
+import { vaultKeyCache, type VaultKeyCache } from "../crypto/key-cache.js";
+import { indexCryptoFor } from "../index/sealed-index.js";
 
 /**
  * Automatic version capture + "last edited by" stamping.
@@ -37,6 +40,12 @@ type Queryable = Pick<pg.Pool, "query">;
 
 /** Doc inactivity that ends an "edit session" and triggers a capture. */
 export const IDLE_CAPTURE_MS = 10 * 60_000;
+/**
+ * A keyed vault's idle capture that found no key held waits for one: it runs
+ * again the moment any member's key is cached (`VaultKeyCache.onAcquire`), and
+ * as a fallback this often while it is still waiting.
+ */
+export const KEY_DEFER_RETRY_MS = 5 * 60_000;
 /** Versions kept per note; the oldest beyond this are pruned on each capture. */
 export const MAX_VERSIONS_PER_NOTE = 50;
 /** Recent `pre-shrink` versions kept past {@link MAX_VERSIONS_PER_NOTE}. */
@@ -260,6 +269,10 @@ export interface VersionCaptureDeps {
   db?: Queryable;
   /** Override the idle window (tests). */
   idleMs?: number;
+  /** Key cache whose acquisitions retry deferred keyed captures (tests). */
+  keyCache?: Pick<VaultKeyCache, "onAcquire" | "has">;
+  /** Override {@link KEY_DEFER_RETRY_MS} (tests). */
+  keyRetryMs?: number;
 }
 
 export interface VersionCapture {
@@ -288,6 +301,8 @@ interface Session {
   /** Last editor seen in this session — the version's author. */
   userId: string | null;
   timer?: ReturnType<typeof setTimeout>;
+  /** Idle-captured, but the vault is keyed and no key was held: waiting. */
+  deferred?: boolean;
 }
 
 /** The last `registry-changed` this process announced for a scope, and who it
@@ -328,6 +343,14 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
     { checkpointId: string; docIds: Set<string>; timer?: ReturnType<typeof setTimeout> }
   >();
   const inFlight = new Set<Promise<unknown>>();
+  const keyCache = deps.keyCache ?? vaultKeyCache;
+  const keyRetryMs = deps.keyRetryMs ?? KEY_DEFER_RETRY_MS;
+  /** Keyed vaults with idle captures waiting for a key, and their fallback timer. */
+  const deferredByVault = new Map<
+    string,
+    { docIds: Set<string>; timer?: ReturnType<typeof setTimeout> }
+  >();
+  let unsubscribeKeys: (() => void) | null = null;
 
   function track<T>(p: Promise<T>): Promise<T> {
     inFlight.add(p);
@@ -456,6 +479,7 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
     sessions.delete(docId);
     docNotices.delete(docId);
     if (session.timer) clearTimeout(session.timer);
+    let cacheCopy: Buffer | null = null;
     try {
       // Only live notes get versions — a soft-deleted one has nothing to show
       // them in, and its vault row may already be gone.
@@ -464,7 +488,20 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
         [docId, session.vaultId],
       );
       if (!rows[0]) return;
-      const content = await deps.docWriter.peekContent(session.vaultId, docId);
+      // W3: a keyed vault's capture needs the key for BOTH halves: reading a
+      // doc that is no longer live (its sealed log; the per-doc socket that
+      // edited it has usually closed ten idle minutes later) and sealing the
+      // text. One cache COPY serves both. Before, `peekContent` got no key and
+      // threw `key_required` even while a member's vault channel held one.
+      // No key held at all: defer, writing nothing.
+      const resolved = await indexCryptoFor(session.vaultId, db);
+      if (resolved === null) {
+        deferForKey(docId, session);
+        return;
+      }
+      if (resolved) cacheCopy = resolved.key;
+      const crypto = resolved ?? undefined;
+      const content = await deps.docWriter.peekContent(session.vaultId, docId, crypto);
       // No server-side state yet (content still uploading) — there is nothing
       // truthful to version. The next edit re-arms the timer.
       if (content == null) return;
@@ -475,11 +512,71 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
           content,
           cause: "idle",
           authorId: session.userId,
+          crypto,
         },
         db,
       );
     } catch (err) {
+      // The key went away (or the vault became keyed) between the lookup and
+      // the read: the same as no key held. Nothing was written.
+      if (err instanceof KeyRequiredError) {
+        deferForKey(docId, session);
+        return;
+      }
       console.error(`[versions] idle capture failed for ${docId}:`, err);
+    } finally {
+      cacheCopy?.fill(0);
+    }
+  }
+
+  /**
+   * Park a captured session until a key for its vault is held. Nothing is
+   * written and nothing is logged: `key_required` here is a normal state (no
+   * member connected), not a failure. A newer session for the doc (someone
+   * edited since) supersedes the parked one, since it captures the later text.
+   */
+  function deferForKey(docId: string, session: Session): void {
+    if (sessions.has(docId)) return;
+    sessions.set(docId, { vaultId: session.vaultId, userId: session.userId, deferred: true });
+    let waiting = deferredByVault.get(session.vaultId);
+    if (!waiting) {
+      waiting = { docIds: new Set() };
+      deferredByVault.set(session.vaultId, waiting);
+    }
+    waiting.docIds.add(docId);
+    if (!waiting.timer) armKeyRetry(session.vaultId, waiting);
+    if (!unsubscribeKeys) {
+      unsubscribeKeys = keyCache.onAcquire((vaultId) => {
+        if (deferredByVault.has(vaultId)) retryDeferred(vaultId);
+      });
+    }
+  }
+
+  function armKeyRetry(
+    vaultId: string,
+    waiting: { timer?: ReturnType<typeof setTimeout> },
+  ): void {
+    const timer = setTimeout(() => {
+      waiting.timer = undefined;
+      // Cheap check first: no key held means nothing to retry yet.
+      if (keyCache.has(vaultId)) retryDeferred(vaultId);
+      else if (deferredByVault.get(vaultId) === waiting) armKeyRetry(vaultId, waiting);
+    }, keyRetryMs);
+    if (typeof timer.unref === "function") timer.unref();
+    waiting.timer = timer;
+  }
+
+  function retryDeferred(vaultId: string): void {
+    const waiting = deferredByVault.get(vaultId);
+    if (!waiting) return;
+    deferredByVault.delete(vaultId);
+    if (waiting.timer) clearTimeout(waiting.timer);
+    for (const docId of waiting.docIds) {
+      const session = sessions.get(docId);
+      // Re-armed by a later edit (no longer deferred): its own timer captures.
+      if (!session?.deferred) continue;
+      session.deferred = false;
+      void track(captureIdle(docId));
     }
   }
 
@@ -515,6 +612,12 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
         if (!session) {
           session = { vaultId, userId };
           sessions.set(docId, session);
+        }
+        if (session.deferred) {
+          // A parked capture becomes a live session again: the idle timer
+          // below captures it (with the later text) instead of the key wait.
+          session.deferred = false;
+          deferredByVault.get(session.vaultId)?.docIds.delete(docId);
         }
         session.vaultId = vaultId;
         session.userId = userId;
@@ -624,6 +727,12 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
         if (session.timer) clearTimeout(session.timer);
       }
       sessions.clear();
+      for (const waiting of deferredByVault.values()) {
+        if (waiting.timer) clearTimeout(waiting.timer);
+      }
+      deferredByVault.clear();
+      unsubscribeKeys?.();
+      unsubscribeKeys = null;
       vaultChecked.clear();
       vaultShrunkAt.clear();
       vaultNotices.clear();
