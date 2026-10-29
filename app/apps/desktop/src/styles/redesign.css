@@ -1965,3 +1965,8 @@ html:not([data-theme="dark"]) .upgrade-tier-cta.primary:hover:not(:disabled) {
   background: var(--accent-hover);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 10px 22px -8px rgba(124, 92, 255, 0.6);
 }
+
+/* Account → Vaults → one vault: section labels keep their own line, never
+   squashed under the cards below. */
+html:not([data-theme="dark"]) .account-vault-page > * { flex-shrink: 0; }
+html:not([data-theme="dark"]) .account-vault-page > .subhead { margin: 22px 0 8px 2px; line-height: 1.4; min-height: 16px; }
