@@ -1002,3 +1002,11 @@ html:not([data-theme="dark"]) .confirm-actions button.primary { box-shadow: 0 8p
 html:not([data-theme="dark"]) .confirm-actions button.primary:disabled { background: var(--accent); opacity: 0.4; box-shadow: none; }
 html:not([data-theme="dark"]) .confirm-actions button.danger,
 html:not([data-theme="dark"]) .confirm-actions button.primary.danger { background: #bb433a; box-shadow: 0 8px 18px -8px rgba(187, 67, 58, 0.55); }
+html:not([data-theme="dark"]) .invite-chips input,
+html:not([data-theme="dark"]) .invite-chips input:focus {
+  background: transparent !important; box-shadow: none !important; min-height: 0;
+}
+html:not([data-theme="dark"]) .confirm-actions button.primary:disabled {
+  opacity: 1; background: #d9d0ff; color: #fff !important;
+}
+html:not([data-theme="dark"]) .confirm-actions button.primary:disabled * { color: #fff !important; opacity: 1 !important; }
