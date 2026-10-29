@@ -31,12 +31,14 @@ import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
 import {
+  earlyVaultChannelAllowed,
   isVaultKeyBlocked,
   onVaultKeyEvent,
   VAULT_KEY_PAUSE_REASON,
   vaultKeysClosed,
   vaultKeysNudge,
   vaultKeysOpened,
+  vaultKeyStateFor,
 } from "../vaultKeys/runtime";
 import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
@@ -5170,7 +5172,18 @@ export class SyncManager implements InboundHost {
         // and disk-delete paths stay inert). All the early socket can do is
         // backfill content for docs the prime already mapped — which is exactly
         // the work we want overlapped.
-        this.startVaultEngine(scope);
+        //
+        // NOT for a vault whose key state is unknown or keyed without the key:
+        // the server closes that hello with 4409 `key_required`, which used to
+        // loop at startup. The gate below starts the channel once it proceeds.
+        if (
+          earlyVaultChannelAllowed(
+            vaultKeyStateFor(registry.vaultId),
+            !!registry.vaultId && !!api.vaultKeyFor(registry.vaultId),
+          )
+        ) {
+          this.startVaultEngine(scope);
+        }
       }
     } catch (e) {
       console.warn("[sync] local prime failed; falling back to reconcile-first", e);

@@ -277,6 +277,17 @@ export async function vaultKeysGate(opts: {
   return verdict;
 }
 
+/**
+ * May the vault channel open EARLY (the prime window, before the W3 gate)?
+ * Only on a KNOWN answer: unkeyed/disabled, or the verified key already held.
+ * Unknown (no state yet, the normal launch) waits for the gate, which starts the
+ * channel once it proceeds; opening first only earns a 4409 `key_required`.
+ */
+export function earlyVaultChannelAllowed(state: VaultKeyState | null, keyHeld: boolean): boolean {
+  if (keyHeld) return true;
+  return state?.state === "unkeyed" || state?.state === "disabled";
+}
+
 /** Paused for an unknown key state: blocked until a known answer arrives. */
 export function markVaultKeyUnknown(vaultId: string): void {
   if (blockedVaults.has(vaultId)) return;

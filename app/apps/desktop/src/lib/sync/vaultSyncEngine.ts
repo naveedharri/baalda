@@ -731,9 +731,19 @@ export class VaultSyncEngine {
     return false;
   }
 
-  /** `key_required`: make the key ready; the next connect sends it. */
+  /**
+   * `key_required`: make the key ready; the next connect sends it. The reconnect
+   * WAITS for this answer (see `scheduleReconnect`) and never takes the
+   * near-immediate first lap: reconnecting before the key is held only earns
+   * another 4409, which is the startup loop this guards against.
+   */
+  private keyWait: Promise<boolean> | null = null;
   private requestVaultKey(): void {
-    void this.api.ensureVaultKeyFor?.(this.vaultId);
+    this.attempt = Math.max(this.attempt, 1);
+    if (this.keyWait) return;
+    const ensure = this.api.ensureVaultKeyFor;
+    if (!ensure) return;
+    this.keyWait = ensure.call(this.api, this.vaultId).catch(() => false);
   }
 
   private async onOpen(): Promise<void> {
@@ -1107,7 +1117,23 @@ export class VaultSyncEngine {
     this.attempt++;
     this.reconnectTimer = this.setTimeoutImpl(() => {
       this.reconnectTimer = null;
-      if (!this.stopped) this.connect();
+      if (this.stopped) return;
+      const waiting = this.keyWait;
+      if (!waiting) {
+        this.connect();
+        return;
+      }
+      // A key refusal is pending: connect only once the key is ready. A key
+      // that is still not ready backs off and asks again on the next lap.
+      void waiting.then((ok) => {
+        if (this.keyWait === waiting) this.keyWait = null;
+        if (this.stopped || this.ws || this.reconnectTimer) return;
+        if (ok) this.connect();
+        else {
+          this.requestVaultKey();
+          this.scheduleReconnect();
+        }
+      });
     }, delay);
   }
 

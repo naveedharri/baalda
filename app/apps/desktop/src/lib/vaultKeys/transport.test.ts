@@ -141,7 +141,43 @@ describe("vault key on the wire", () => {
     expect(empties).toEqual([]);
     expect(sink.dropped).toEqual([]);
     scheduled[0]();
+    await tick();
     expect(created).toHaveLength(2);
+    e.stop();
+  });
+
+  it("4409 never reconnects before the key is ready, and backs off (no spin)", async () => {
+    const api = tokenApi();
+    let asked = 0;
+    const answers: Array<(ok: boolean) => void> = [];
+    api.setKeyRequiredHandler(() => {
+      asked++;
+      return new Promise<boolean>((r) => answers.push(r));
+    });
+    const { e, created, scheduled } = engine(api);
+    e.start();
+    created[0].onopen?.(null);
+    await awaitHello(created[0]);
+    created[0].onclose?.({ code: WS_CLOSE_KEY_REQUIRED, reason: "key_required" });
+    expect(scheduled).toHaveLength(1);
+    // The reconnect timer fires while the key is still being fetched: no socket.
+    scheduled[0]();
+    await tick();
+    expect(created).toHaveLength(1);
+    // Key not ready: ask again on a backed-off lap, still no socket.
+    answers[0](false);
+    await tick();
+    expect(created).toHaveLength(1);
+    expect(scheduled).toHaveLength(2);
+    expect(asked).toBe(2);
+    scheduled[1]();
+    await tick();
+    expect(created).toHaveLength(1);
+    // Key ready: exactly one connect.
+    answers[1](true);
+    await tick();
+    expect(created).toHaveLength(2);
+    expect(scheduled).toHaveLength(2);
     e.stop();
   });
 
@@ -168,5 +204,17 @@ describe("vault key on the wire", () => {
       "wait-for-server",
     );
     e.stop();
+  });
+});
+
+describe("startup ordering: the channel opens early only on a known key state", () => {
+  it("unknown or keyed-without-key waits for the gate; unkeyed or key held opens", async () => {
+    const { earlyVaultChannelAllowed } = await import("./runtime");
+    expect(earlyVaultChannelAllowed(null, false)).toBe(false);
+    expect(earlyVaultChannelAllowed({ state: "waiting-for-teammate" }, false)).toBe(false);
+    expect(earlyVaultChannelAllowed({ state: "ready", generation: 1 }, false)).toBe(false);
+    expect(earlyVaultChannelAllowed({ state: "unkeyed" }, false)).toBe(true);
+    expect(earlyVaultChannelAllowed({ state: "disabled" }, false)).toBe(true);
+    expect(earlyVaultChannelAllowed(null, true)).toBe(true);
   });
 });
