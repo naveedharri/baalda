@@ -1218,3 +1218,27 @@ html:not([data-theme="dark"]) .home-sidebar-row.selected { background: var(--acc
 /* Account row and Set a home: flat too. */
 html:not([data-theme="dark"]) .acct, html:not([data-theme="dark"]) .identity-bar { background: transparent; box-shadow: none; }
 html:not([data-theme="dark"]) .home-sidebar-row.is-unset { outline-width: 1px; }
+
+/* ---- Account menu: compact, no wider than the sidebar ---- */
+html:not([data-theme="dark"]) .account-popover {
+  width: calc(var(--sidebar-layout-w, 264px) - 16px) !important;
+  min-width: 248px;
+  padding: 6px;
+  border-radius: var(--radius-lg);
+}
+html:not([data-theme="dark"]) .rd-prof { padding: 6px 6px 8px; margin: 0; gap: 10px; background: transparent; border-radius: 0; }
+html:not([data-theme="dark"]) .rd-prof .sm-host .avatar,
+html:not([data-theme="dark"]) .rd-prof .avatar { width: 32px !important; height: 32px !important; }
+html:not([data-theme="dark"]) .rd-prof-text b { font-size: var(--fs-md); }
+html:not([data-theme="dark"]) .rd-prof-text small { font-size: var(--fs-xs); }
+.rd-status { padding: 4px 6px 8px; }
+.rd-status-head { font-size: var(--fs-sm); padding-bottom: 6px; }
+.rd-status-row { gap: 3px; }
+.rd-status-btn { height: 28px; border-radius: 7px; }
+.rd-status-btn svg { width: 15px; height: 15px; }
+.rd-status-clear { margin-top: 5px; gap: 2px; }
+.rd-status-clear button { height: 22px; font-size: 11px; }
+html:not([data-theme="dark"]) .account-popover .menu-item { min-height: 30px; padding: 3px 6px; font-size: var(--fs-sm); gap: 8px; }
+html:not([data-theme="dark"]) .account-popover .menu-hint { display: none; }
+html:not([data-theme="dark"]) .account-popover .menu-icon { width: 12px !important; height: 12px !important; padding: 4px; border-radius: 6px; }
+html:not([data-theme="dark"]) .account-popover .menu-sep { margin: 4px 6px; }
