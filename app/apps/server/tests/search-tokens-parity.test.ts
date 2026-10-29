@@ -159,6 +159,40 @@ describe("search_tokens parity (migration 068)", () => {
     }
   });
 
+  it("falls back to SQL for Turkish İ, Kelvin K and an over-cap note, finding the same hits", async () => {
+    expect(searchTokenSet("İstanbul office")).toBeNull();
+    expect(searchTokenSet("273 \u212Aelvin")).toBeNull();
+    expect(searchTokenSet("café Straße 日本語")).not.toBeNull();
+    let big = "";
+    for (let i = 0; big.length < 70 * 1024; i++) big += `w${i} `;
+    expect(searchTokenSet(big)).toBeNull();
+    const add = async (title: string, content: string) => {
+      const id = randomUUID();
+      await pool.query(
+        `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id) VALUES ($1, $2, NULL, $1, $1 || '.md', $1)`,
+        [id, vault],
+      );
+      await pool.query(
+        `INSERT INTO note_index (doc_id, vault_id, title, content, vector, search_tokens) VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
+        [id, vault, title, content, JSON.stringify(embed(`${title}\n${content}`)), searchTokenSet(`${title} ${content}`)],
+      );
+      ids.push(id);
+      return id;
+    };
+    const turk = await add("Trip", "Meeting in İstanbul next week");
+    const huge = await add("Huge", `${big} needle_at_the_end`);
+    for (const q of ["istanbul", "needle_at_the_end", "w9999 pipeline"]) {
+      const base = { vaultId: vault, query: q, k: 50, readableDocIds: ids, vaultWideReader: true };
+      const sql = await searchNoteIndex({ ...base, keywordMode: "sql" });
+      expect(await searchNoteIndex({ ...base, keywordMode: "app" })).toEqual(sql);
+    }
+    const { rows } = await pool.query<{ doc_id: string; search_tokens: string | null }>(
+      "SELECT doc_id, search_tokens FROM note_index WHERE doc_id = ANY($1::text[])",
+      [[turk, huge]],
+    );
+    expect(rows.every((r) => r.search_tokens === null)).toBe(true);
+  });
+
   it.runIf(process.env.SEARCH_BENCH === "1")("benchmark: 20k notes", async () => {
     await resetDb();
     org = await seedOrg("Bench", `bench-${randomUUID().slice(0, 8)}`);

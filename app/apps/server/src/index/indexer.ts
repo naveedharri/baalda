@@ -558,7 +558,7 @@ async function searchBlobText(opts: {
             b.filename,
             bt.vector,
             CASE WHEN $6::boolean THEN NULL ELSE bt.search_tokens END AS search_tokens,
-            CASE WHEN bt.search_tokens IS NULL OR $6::boolean THEN (
+            CASE WHEN bt.search_tokens IS NULL OR $6::boolean OR b.rel_path ~ '[^\x01-\x7f]' THEN (
               SELECT count(*) FROM unnest($3::text[]) AS t(tok)
                WHERE position(t.tok IN lower(coalesce(b.rel_path, '') || ' ' || bt.content)) > 0
             )::int END AS matched_legacy
@@ -581,10 +581,12 @@ async function searchBlobText(opts: {
     // extracted text through the stored set. Union of the two = the old
     // `position(tok IN lower(rel_path || ' ' || content))` (the space is outside
     // the token alphabet, so no match can straddle it).
+    // Any row the SQL counted (no stored set, or a non-ASCII rel_path) keeps
+    // that count; otherwise both halves here are pure ASCII.
     const matched =
-      r.search_tokens !== null
-        ? keywordMatchCount(opts.qTokens, `${searchTokenSet(relPath)} ${r.search_tokens}`)
-        : (r.matched_legacy ?? 0);
+      r.matched_legacy !== null || r.search_tokens === null
+        ? (r.matched_legacy ?? 0)
+        : keywordMatchCount(opts.qTokens, `${searchTokenSet(relPath) ?? ""} ${r.search_tokens}`);
     const boost = opts.qTokens.length > 0 ? 0.1 * (matched / opts.qTokens.length) : 0;
     return {
       docId: r.doc_id,
