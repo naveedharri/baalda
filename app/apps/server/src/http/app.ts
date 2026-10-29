@@ -198,6 +198,9 @@ export function createApp(deps: AppDeps): Hono {
         // The desktop's app version on every call, so the content-write routes
         // can refuse a build too old to push safely (`client-version.ts`, #251).
         CLIENT_VERSION_HEADER,
+        // The vault key a device presents for a keyed vault (`crypto/`): a
+        // webview refuses to send it cross-origin unless it is listed here.
+        "x-baalda-vk",
       ],
       // set-auth-token carries the session token the desktop client reads after
       // sign-in/up; without exposing it the browser hides it even on success.
