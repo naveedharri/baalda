@@ -1520,3 +1520,26 @@ html:not([data-theme="dark"]) .home-sidebar-row {
   width: calc(100% + 3px) !important; min-height: 36px; border-radius: 10px;
 }
 html:not([data-theme="dark"]) .home-sidebar-menu { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); }
+
+/* ---- Sidebar columns that hold at any width, with or without a scrollbar ----
+   The tree always reserves an 8px scrollbar lane (macOS, Windows and Linux
+   alike), and Home/Pinned reserve the same lane, so every row shares one
+   left edge (12px) and one right edge. */
+html:not([data-theme="dark"]) .filetree-scroll { scrollbar-gutter: stable; }
+html:not([data-theme="dark"]) .filetree-scroll::-webkit-scrollbar { width: 8px; }
+html:not([data-theme="dark"]) .filetree-scroll::-webkit-scrollbar-thumb { background: rgba(11, 10, 16, 0.14); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+html:not([data-theme="dark"]) .filetree-scroll::-webkit-scrollbar-track { background: transparent; }
+html:not([data-theme="dark"]) .home-section, html:not([data-theme="dark"]) .pinned-section { padding-right: 8px !important; }
+/* Row highlight drawn as an inset layer: starts at x=12 like the Home box and
+   ends where the row's ⋯ button ends, without moving the icon/label grid. */
+html:not([data-theme="dark"]) .sidebar .tree-row { position: relative; isolation: isolate; background: transparent !important; box-shadow: none !important; }
+html:not([data-theme="dark"]) .sidebar .tree-row::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 9px; right: 4px;
+  border-radius: 9px; z-index: -1; background: var(--rd-row-bg, transparent);
+  transition: background 90ms linear;
+}
+html:not([data-theme="dark"]) .sidebar .tree-row:hover { --rd-row-bg: rgba(11, 10, 16, 0.04); }
+html:not([data-theme="dark"]) .sidebar .tree-row.selected { --rd-row-bg: rgba(11, 10, 16, 0.065); }
+html:not([data-theme="dark"]) .sidebar .tree-row.drop-target { --rd-row-bg: var(--accent-soft); }
+/* Home box spans the same 12px → row-end line. */
+html:not([data-theme="dark"]) .home-sidebar-row { width: calc(var(--sidebar-layout-w, 300px) - 22px) !important; }
