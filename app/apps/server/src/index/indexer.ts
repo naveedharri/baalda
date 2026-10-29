@@ -1,6 +1,7 @@
 import type { DocCrypto } from "../crypto/doc-crypto.js";
 import { indexCryptoFor, openBlobTextRow, openSearchRow, sealSearchRow } from "./sealed-index.js";
-import { KeyRequiredError } from "../crypto/transport.js";
+import { KeyRequiredError, loadVkCheck } from "../crypto/transport.js";
+import { vaultKeyCache } from "../crypto/key-cache.js";
 import * as Y from "yjs";
 import { pgText } from "../db/text.js";
 import type pg from "pg";
@@ -32,8 +33,10 @@ const CONTENT_FIELD = "content";
 /** Default debounce window: collapse bursts of updates into one index write. */
 const DEBOUNCE_MS = 2000;
 
-// Per-doc pending timers (debounce). Keyed by docId.
-const pending = new Map<string, ReturnType<typeof setTimeout>>();
+// Per-doc pending timers (debounce). Keyed by docId. `crypto` is a COPY of a
+// key the scheduling request presented and the server verified (W3), held only
+// until the run fires and zeroed right after; absent = background path.
+const pending = new Map<string, { timer: ReturnType<typeof setTimeout>; crypto?: DocCrypto }>();
 // Index runs whose timer already fired, so {@link flushIndexQueue} can wait for
 // them too (a 0 ms schedule is usually mid-flight by the caller's next await).
 const inFlight = new Set<Promise<void>>();
@@ -123,8 +126,11 @@ export async function indexDoc(
     vault_id: string;
     title: string | null;
     rel_path: string;
+    started: string;
   }>(
-    "SELECT vault_id, title, rel_path FROM notes WHERE id = $1 AND deleted_at IS NULL",
+    // `started` (database clock, as TEXT to keep microseconds): a queued
+    // deferral older than this run is satisfied by it (see `clearSatisfied`).
+    "SELECT vault_id, title, rel_path, clock_timestamp()::text AS started FROM notes WHERE id = $1 AND deleted_at IS NULL",
     [docId],
   );
   const note = rows[0];
@@ -142,7 +148,22 @@ export async function indexDoc(
   // W3: a keyed vault indexes only with a key a connected member supplied
   // (process cache COPY, zeroed below). No key held: defer, writing nothing —
   // the existing row stays as it was and the next edit or connect re-indexes.
-  if (given && given.vaultId === note.vault_id) return indexNoteRow(docId, note, given, db);
+  if (given && given.vaultId === note.vault_id) {
+    // Re-check the generation at run time: a debounced run fires after the
+    // request, and a rotation in between must not seal under a retired key.
+    // Any miss or failure falls through to the background path below (cached
+    // key, else the queue), so a note is never dropped unindexed.
+    const state = await loadVkCheck(note.vault_id, db);
+    if (state && state.generation === given.generation) {
+      try {
+        const ok = await indexNoteRow(docId, note, given, db);
+        await clearSatisfied(docId, note.started, db);
+        return ok;
+      } catch (err) {
+        console.warn(`[indexer] keyed index of ${docId} failed, falling back:`, (err as Error).message);
+      }
+    }
+  }
   const crypto = await indexCryptoFor(note.vault_id, db);
   if (crypto === null) {
     // Queue the doc so the key-arrival catch-up indexes exactly it (no vault
@@ -153,13 +174,44 @@ export async function indexDoc(
        ON CONFLICT (doc_id) DO UPDATE SET vault_id = EXCLUDED.vault_id, queued_at = EXCLUDED.queued_at`,
       [docId, note.vault_id],
     );
+    if (vaultKeyCache.has(note.vault_id)) {
+      // A key arrived between the lookup above and the INSERT: the arrival's
+      // drain may already have read the queue, so ask for another pass.
+      try {
+        indexDeferredHook?.(note.vault_id);
+      } catch (err) {
+        console.error("[indexer] deferral hook failed:", err);
+      }
+    }
     return false;
   }
   try {
-    return await indexNoteRow(docId, note, crypto, db);
+    const ok = await indexNoteRow(docId, note, crypto, db);
+    if (crypto) await clearSatisfied(docId, note.started, db);
+    return ok;
   } finally {
     crypto?.key.fill(0);
   }
+}
+
+/**
+ * A keyed index just ran: a deferral queued BEFORE it started is satisfied, so
+ * drop it rather than have the catch-up index the note a second time. A row
+ * re-queued after `started` (a newer edit deferred meanwhile) is kept.
+ */
+async function clearSatisfied(docId: string, started: string, db: Queryable): Promise<void> {
+  await db.query("DELETE FROM index_pending WHERE doc_id = $1 AND queued_at < $2::timestamptz", [docId, started]);
+}
+
+/** Told (vault id only) when a note was queued while a key is cached; see `setIndexDeferredHook`. */
+let indexDeferredHook: ((vaultId: string) => void) | null = null;
+
+/**
+ * Registered by the crypto backfill (which imports this module, so the hook
+ * runs the other way): a deferral that raced a key arrival kicks a drain.
+ */
+export function setIndexDeferredHook(fn: ((vaultId: string) => void) | null): void {
+  indexDeferredHook = fn;
 }
 
 async function indexNoteRow(
@@ -259,22 +311,37 @@ async function indexNoteRow(
  * hook — repeated calls within the window reset the timer so only the last one
  * fires. Errors are logged, never thrown (indexing must not break sync).
  */
-export function scheduleIndex(docId: string, delayMs: number = DEBOUNCE_MS): void {
+export function scheduleIndex(docId: string, delayMs: number = DEBOUNCE_MS, given?: DocCrypto): void {
   const existing = pending.get(docId);
-  if (existing) clearTimeout(existing);
+  if (existing) clearTimeout(existing.timer);
+  // Keep the newest key: a keyless reschedule (trash restore) must not drop a
+  // key an earlier write in the same window supplied.
+  let crypto = existing?.crypto;
+  if (given) {
+    crypto?.key.fill(0);
+    crypto = { vaultId: given.vaultId, key: Buffer.from(given.key), generation: given.generation };
+  }
   const timer = setTimeout(() => {
     pending.delete(docId);
-    const run = indexDoc(docId)
-      .then(() => undefined)
-      .catch((err) => {
-        console.error(`[indexer] failed to index ${docId}:`, err);
-      })
-      .finally(() => inFlight.delete(run));
-    inFlight.add(run);
+    void runIndex(docId, crypto);
   }, delayMs);
   // Don't keep the event loop alive just for a pending index.
   if (typeof timer.unref === "function") timer.unref();
-  pending.set(docId, timer);
+  pending.set(docId, { timer, crypto });
+}
+
+function runIndex(docId: string, crypto: DocCrypto | undefined): Promise<void> {
+  const run: Promise<void> = indexDoc(docId, defaultPool, crypto)
+    .then(() => undefined)
+    .catch((err) => {
+      console.error(`[indexer] failed to index ${docId}:`, err);
+    })
+    .finally(() => {
+      crypto?.key.fill(0);
+      inFlight.delete(run);
+    });
+  inFlight.add(run);
+  return run;
 }
 
 /**
@@ -293,19 +360,12 @@ export function scheduleIndex(docId: string, delayMs: number = DEBOUNCE_MS): voi
  * flush after the writes have settled.
  */
 export async function flushIndexQueue(): Promise<void> {
-  const ids = [...pending.keys()];
-  for (const id of ids) {
-    const timer = pending.get(id);
-    if (timer) clearTimeout(timer);
+  const entries = [...pending.entries()];
+  for (const [id, { timer }] of entries) {
+    clearTimeout(timer);
     pending.delete(id);
   }
-  for (const id of ids) {
-    try {
-      await indexDoc(id);
-    } catch (err) {
-      console.error(`[indexer] failed to index ${id}:`, err);
-    }
-  }
+  for (const [id, { crypto }] of entries) await runIndex(id, crypto);
   await Promise.all([...inFlight]);
 }
 
