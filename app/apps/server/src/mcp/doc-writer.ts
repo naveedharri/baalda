@@ -200,7 +200,13 @@ export function createDocWriter(
       // persist exactly like a human's.
       live.transact(() => fn(live.getText(CONTENT_FIELD)), {
         source: "local",
-        context: { source: MCP_ORIGIN, userId },
+        // W3: the call's own key rides along, so `onChange` seals the update
+        // and any pre-shrink text with it when the live doc remembers none.
+        context: {
+          source: MCP_ORIGIN,
+          userId,
+          ...(actor?.crypto ? { vaultKey: actor.crypto.key, vaultKeyGeneration: actor.crypto.generation } : {}),
+        },
       } satisfies LocalTransactionOrigin);
       return;
     }

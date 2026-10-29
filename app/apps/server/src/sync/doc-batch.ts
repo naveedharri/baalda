@@ -221,6 +221,9 @@ export async function applyDetached(
       doc.getText(CONTENT_FIELD).toString(),
       userId,
       actor?.source ?? null,
+      // The same key that just sealed the update (a keyless write to a keyed
+      // vault never gets here: `appendUpdate` refused it with key_required).
+      actor?.crypto,
     );
     // Fan out to background subscribers, which the live path gets free from
     // Hocuspocus's onChange. Best-effort like the re-index: the write is already
@@ -438,7 +441,14 @@ export async function applyDocPush(
         // origin.context : {}`, so a string origin is permanently anonymous.
         const origin: LocalTransactionOrigin = {
           source: "local",
-          context: { source, userId: actor?.userId ?? null },
+          // W3: the request's own key rides along (see the doc writer).
+          context: {
+            source,
+            userId: actor?.userId ?? null,
+            ...(actor?.crypto
+              ? { vaultKey: actor.crypto.key, vaultKeyGeneration: actor.crypto.generation }
+              : {}),
+          },
         };
         const captured: Uint8Array[] = [];
         const capture = (u: Uint8Array) => captured.push(u);

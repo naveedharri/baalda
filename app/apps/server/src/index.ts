@@ -204,8 +204,9 @@ async function main() {
   // A single update that wipes most of a note keeps the text it replaced (#200).
   // …and every open Activity feed in the vault refetches once it is stored
   // (#260), instead of polling for it.
-  setShrinkHook((vaultId, docId, previousText) => {
-    void (versionCapture?.preShrink(vaultId, docId, previousText) ?? Promise.resolve())
+  // The writer's own key rides along (W3); `preShrink` copies it synchronously.
+  setShrinkHook((vaultId, docId, previousText, _userId, crypto) => {
+    void (versionCapture?.preShrink(vaultId, docId, previousText, crypto) ?? Promise.resolve())
       .then(() => vaultChannel.publishActivityChanged(vaultId))
       .catch(broadcastFailed("activity-changed"));
   });
