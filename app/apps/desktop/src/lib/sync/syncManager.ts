@@ -578,7 +578,7 @@ export class DocSync {
 
   private async mintToken(): Promise<string | null> {
     try {
-      const res = await this.api.syncToken(this.docId);
+      const res = await this.api.syncToken(this.docId, this.vaultId);
       this._readOnly = res.readOnly;
       markReadOnlyDoc(this.docId, res.readOnly === true);
       // (Re)arm refresh based on the real token TTL.

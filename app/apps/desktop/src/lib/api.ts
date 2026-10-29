@@ -3965,10 +3965,13 @@ export class ApiClient {
   // ---- Sync token ---------------------------------------------------------
 
   /** Mint a per-doc sync JWT. Throws ApiError(403) when the user has no access. */
-  async syncToken(docId: string): Promise<SyncTokenResponse> {
+  async syncToken(docId: string, vaultId?: string): Promise<SyncTokenResponse> {
     const { data } = await this.request<SyncTokenResponse>("POST", "/api/sync-token", {
       body: { docId },
       query: { [CLIENT_VERSION_PARAM]: CLIENT_VERSION },
+      // A keyed vault's key, when held, rides as `X-Baalda-VK`: on its own it
+      // proves a vault-key build to the server's keyed-vault gate.
+      vaultScope: vaultId ?? null,
     });
     return data;
   }
