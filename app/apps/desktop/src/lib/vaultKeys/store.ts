@@ -95,11 +95,13 @@ export function keychainVaultKeyStore(serverUrl: string, userId: string) {
     setDeviceLinkKey: (key: Uint8Array) => setBytes(deviceLinkKeyName(serverUrl, userId), key),
     deleteDeviceLinkKey: () => remove(deviceLinkKeyName(serverUrl, userId)),
     setVaultKey: (vaultId: string, vk: Uint8Array) => setVaultKey(serverUrl, vaultId, vk),
-    isVaultKeyProvisional: async (vaultId: string) => (await io.get(provisionalVaultKeyName(serverUrl, vaultId))) === "1",
+    // Through the same session cache as the keys (no extra keychain prompts).
+    isVaultKeyProvisional: async (vaultId: string) =>
+      (await getBytes(provisionalVaultKeyName(serverUrl, vaultId)))?.[0] === 1,
     setVaultKeyProvisional: async (vaultId: string, on: boolean) => {
       const name = provisionalVaultKeyName(serverUrl, vaultId);
-      if (on) await io.set(name, "1");
-      else if ((await io.get(name)) != null) await io.delete(name);
+      if (on) await setBytes(name, Uint8Array.of(1));
+      else await remove(name);
     },
     clearCache: clearVaultKeyCache,
   };
