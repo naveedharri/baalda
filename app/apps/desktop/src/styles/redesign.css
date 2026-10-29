@@ -644,3 +644,99 @@ html:not([data-theme="dark"]) .pinned-row.is-dir .tree-glyph.colored svg {
   fill: none !important;
   stroke-width: 2;
 }
+
+/* ============================================================
+   Round 5
+   ============================================================ */
+
+/* Account row vanished when a note opened: an unclipped .main plus transform
+   animations hit the WKWebView compositing bug App.css warns about. Keep .main
+   clipped and animate opacity only. */
+html:not([data-theme="dark"]) .main { overflow: hidden; }
+@media (prefers-reduced-motion: no-preference) {
+  .editor-wrap .cm-editor { animation: rd-fade 160ms var(--ease) both; }
+  .tree-row.selected { animation: none; }
+}
+
+/* ---- Editor: calmer type, tighter paragraph gaps ---- */
+html:not([data-theme="dark"]) { --inline-title-weight: 600; }
+html:not([data-theme="dark"]) .cm-editor .cm-content > .cm-line:has(> br:only-child) { line-height: 0.85; }
+html:not([data-theme="dark"]) .cm-editor .cm-content { color: #2e2d36; }
+
+/* ---- Tree: children indent under the folder name, like the mockup ---- */
+html:not([data-theme="dark"]) .filetree-scroll .tree-row:not(.is-dir) .tree-glyph { color: #0b0a1066; }
+html:not([data-theme="dark"]) .filetree-scroll .tree-row.selected .tree-glyph { color: var(--accent); }
+html:not([data-theme="dark"]) .sidebar .tree-row { height: 32px; }
+
+/* ---- Pinned: yellow star squares ---- */
+html:not([data-theme="dark"]) .pinned-row:not(.is-dir) .tree-glyph {
+  width: 20px; height: 20px; border-radius: 6px;
+  background: #fde99baa; color: #987e1b !important;
+}
+html:not([data-theme="dark"]) .pinned-row:not(.is-dir) .tree-glyph svg { display: none; }
+html:not([data-theme="dark"]) .pinned-row:not(.is-dir) .tree-glyph::after {
+  content: ""; width: 12px; height: 12px; background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='m12 4 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.6-4.8 2.6.9-5.4-3.9-3.8 5.4-.8z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+html:not([data-theme="dark"]) .pinned-shared { font-size: var(--fs-xs); color: var(--text-tertiary); }
+
+/* ---- Vault settings: cream window, white cards, title top-left ---- */
+html:not([data-theme="dark"]) .settings-page.settings-modal {
+  background: var(--bg-app);
+  border: 0;
+  border-radius: 24px;
+  box-shadow: 0 50px 100px -24px rgba(11, 10, 16, 0.45);
+}
+html:not([data-theme="dark"]) .settings-page-header {
+  border-bottom: 0;
+  padding: var(--sp-5) var(--sp-6) var(--sp-2);
+}
+html:not([data-theme="dark"]) .settings-eyebrow { font-family: var(--font-mono); font-weight: 500; letter-spacing: 0.7px; color: #0b0a1099; }
+html:not([data-theme="dark"]) .settings-page-header .icon-btn {
+  background: #fff; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
+}
+html:not([data-theme="dark"]) .settings-body { padding-top: var(--sp-3); }
+html:not([data-theme="dark"]) .settings-nav { width: 220px; }
+html:not([data-theme="dark"]) .settings-nav .menu-item { min-height: 36px; border-radius: var(--radius-md); font-size: var(--fs-md); gap: var(--sp-2); }
+html:not([data-theme="dark"]) .settings-nav .menu-item.active { background: #fff; box-shadow: var(--rd-card-shadow); color: var(--text-primary); }
+.settings-nav .menu-item:nth-of-type(5n + 1) .menu-icon { --rd-tint: #cfc4ff66; --rd-ink: #6a4fe0; }
+.settings-nav .menu-item:nth-of-type(5n + 2) .menu-icon { --rd-tint: #9bd8a966; --rd-ink: #3f8850; }
+.settings-nav .menu-item:nth-of-type(5n + 3) .menu-icon { --rd-tint: #9ed4ef77; --rd-ink: #427e8a; }
+.settings-nav .menu-item:nth-of-type(5n + 4) .menu-icon { --rd-tint: #fde99baa; --rd-ink: #987e1b; }
+.settings-nav .menu-item:nth-of-type(5n + 5) .menu-icon { --rd-tint: #f3c4ec88; --rd-ink: #a549ab; }
+
+/* The content pane is the cream ground; each block is its own white card. */
+html:not([data-theme="dark"]) .settings-content {
+  background: transparent;
+  box-shadow: none;
+  padding: 0 var(--sp-1) var(--sp-8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+html:not([data-theme="dark"]) .settings-section-title { font-size: var(--fs-2xl); font-weight: 600; letter-spacing: -0.02em; margin: 0 0 var(--sp-2); }
+html:not([data-theme="dark"]) .settings-content > .menu-sep { display: none; }
+html:not([data-theme="dark"]) .settings-content > .vault-icon-settings,
+html:not([data-theme="dark"]) .settings-content > .toggle-row,
+html:not([data-theme="dark"]) .settings-content > .join-code-row {
+  background: #fff;
+  border-radius: var(--radius-xl);
+  box-shadow: var(--rd-card-shadow);
+  padding: var(--sp-5);
+  margin: 0;
+}
+html:not([data-theme="dark"]) .settings-content > .subhead {
+  margin: var(--sp-3) 0 calc(-1 * var(--sp-1)) var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.7px;
+  color: #0b0a1099;
+}
+html:not([data-theme="dark"]) .settings-content .vault-root-path { background: var(--bg-app); border-radius: var(--radius-md); }
+html:not([data-theme="dark"]) .vault-icon-option { border-radius: 10px; }
+html:not([data-theme="dark"]) .vault-local-only-card {
+  background: linear-gradient(180deg, #fff, #fff8f7);
+  box-shadow: 0 0 0 1px rgba(187, 67, 58, 0.16), var(--rd-card-shadow);
+  border: 0;
+  border-radius: var(--radius-xl);
+}
