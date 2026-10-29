@@ -27,12 +27,19 @@ export function StatusPicker() {
     useStore.getState().setActivityStatus(id, id === "online" ? null : statusUntilFrom(minutes));
   const current = items.find((i) => i.id === status);
   const left = until ? Math.max(0, Math.round((until - Date.now()) / 60_000)) : null;
+  const [open, setOpen] = useState(false);
+  const isOnline = status === "online" || !current;
   return (
-    <div className="rd-status">
-      <div className="rd-status-head">
-        <span>{current ? current.label : "Set a status"}</span>
-        {left !== null && status !== "online" && <small>clears in {left >= 60 ? `${Math.round(left / 60)} h` : `${left} min`}</small>}
-      </div>
+    <div className={`rd-status${open ? " is-open" : ""}`}>
+      <button type="button" className="rd-status-chip" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: ICONS[isOnline ? "online" : status] ?? ICONS.online }} />
+        <span className="rd-status-chip-text">
+          <b>{isOnline ? "Set a status" : current!.label}</b>
+          <small>{isOnline ? "Let your team know what you are up to" : left !== null ? `Clears in ${left >= 60 ? `${Math.round(left / 60)} h` : `${left} min`}` : "Until you change it"}</small>
+        </span>
+        <em>{open ? "Done" : "Change"}</em>
+      </button>
+      {open && (<>
       <div className="rd-status-row" role="radiogroup" aria-label="Status">
         {items.map((i) => (
           <button
@@ -63,6 +70,7 @@ export function StatusPicker() {
           </button>
         ))}
       </div>
+      </>)}
     </div>
   );
 }
