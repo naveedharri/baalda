@@ -1504,3 +1504,11 @@ html:not([data-theme="dark"]) .editor-wrap .editor-slot { position: static; }
 /* No amber frame: the chip alone says view only. */
 html:not([data-theme="dark"]) .editor-wrap:has(.rd-viewonly)::after { content: none; }
 .rd-viewonly-msg { color: rgba(255, 255, 255, 0.72); }
+/* Centred without transform, so the entrance animation can't undo it. */
+.rd-viewonly {
+  left: 0 !important; right: 0 !important; transform: none !important;
+  margin: 0 auto; width: max-content; max-width: calc(100% - 48px);
+  animation: rd-chip-in 260ms var(--ease) both;
+}
+@keyframes rd-chip-in { from { opacity: 0; translate: 0 8px; } to { opacity: 1; translate: 0 0; } }
+.rd-viewonly-msg { overflow: hidden; text-overflow: ellipsis; }
