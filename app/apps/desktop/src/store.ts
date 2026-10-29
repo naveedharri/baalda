@@ -8,6 +8,9 @@ import { create } from "zustand";
 import * as ipc from "./lib/ipc";
 import { DOCUMENTS_BLOCKED_TEXT, isDocumentsDenied } from "./lib/vault/folderErrors";
 import { bridgeManager } from "./lib/bridge";
+import { resetVaultKeySessions } from "./lib/vaultKeys/session";
+import { onVaultKeyBlockChange, VAULT_KEY_PAUSE_REASON, vaultKeysGate } from "./lib/vaultKeys/runtime";
+import { clearVaultKeyCache } from "./lib/vaultKeys/store";
 import {
   colorsAdopted,
   markColorsAdopted,
@@ -2063,6 +2066,9 @@ async function unsyncLocalTeardown(
   await get().refreshTitles();
 }
 
+// W3: the first sync pass of a vault waits for a known vault-key state.
+syncManager.setVaultKeyGate?.(vaultKeysGate);
+
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
   tree: null,
@@ -3494,6 +3500,9 @@ export const useStore = create<AppStore>((set, get) => ({
     // reconcile/pull with a token that is about to be revoked.
     leaveVaultSync();
     await authManager.signOut();
+    // Vault keys belong to the account: drop every in-memory copy.
+    resetVaultKeySessions();
+    clearVaultKeyCache();
     // A queued shared link belongs to the account that clicked it.
     clearPendingNoteLink();
     // Ditto a queued invitation and the card describing it: an invitation is
@@ -3593,6 +3602,9 @@ export const useStore = create<AppStore>((set, get) => ({
       // fails (the address could not be saved) falls back to it intact.
       leaveVaultSync();
       set({ syncEnabled: false });
+      // Vault keys are per server: drop every in-memory copy before switching.
+      resetVaultKeySessions();
+      clearVaultKeyCache();
       let session: SessionInfo | null;
       try {
         // Clears the old bearer before exposing the new base URL.
@@ -5505,6 +5517,15 @@ export const useStore = create<AppStore>((set, get) => ({
       } else {
         set({ locks: [] });
         if (result.reason) console.warn("[sync] not enabled:", result.reason);
+        // W3: paused for the vault key. Nothing on disk was touched; run the
+        // whole enable again once the key state is known and safe.
+        if (result.reason === VAULT_KEY_PAUSE_REASON) {
+          const off = onVaultKeyBlockChange((_vaultId, blocked) => {
+            if (blocked) return;
+            off();
+            if (!stale()) void get().enableSyncForVault(opts);
+          });
+        }
       }
     })().finally(resolvePrimed);
 

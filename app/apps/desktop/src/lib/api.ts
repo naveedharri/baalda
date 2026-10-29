@@ -1418,6 +1418,87 @@ function newClientId(): string {
  * Stateful client: holds the base URL + bearer token in memory. The auth
  * manager owns persistence (keychain) and calls `setToken`.
  */
+// ---- Client-held vault keys (W3) -------------------------------------------
+
+/** Carries the base64 vault key on every content request for a keyed vault. */
+export const VAULT_KEY_HEADER = "X-Baalda-VK";
+/** 409 code for a content request to a keyed vault without a valid key. */
+export const KEY_REQUIRED_CODE = "key_required";
+
+/** The path of an absolute or relative URL ("" when unparseable). */
+function pathOf(url: string): string {
+  try {
+    return new URL(url, "http://x").pathname;
+  } catch {
+    return "";
+  }
+}
+
+/** The collection id of a `/api/vaults/:vaultId/...` path, else null. */
+export function vaultIdFromPath(path: string): string | null {
+  const m = /^\/api\/vaults\/([^/?#]+)\//.exec(path);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return null;
+  }
+}
+
+export interface VaultKeyInit {
+  vkCheck: string;
+  generation: number;
+  sealedVkForSelf: string;
+}
+export interface VaultKeyWrap {
+  generation: number;
+  sealedVk: string;
+}
+interface MyVaultKeysBody {
+  vkCheck: string;
+  generation: number;
+  wraps: VaultKeyWrap[];
+}
+/** A pending answer may still carry `vkCheck`, so a restore can verify a typed key. */
+export type MyVaultKeys =
+  /** The server's DEFINITIVE "this vault has no key" (`{keyed: false}`). */
+  | { keyed: false; pending: false; conversionAllowed: boolean }
+  | { keyed: true; pending: true; vkCheck?: string; generation?: number }
+  | ({ keyed: true; pending: false } & MyVaultKeysBody);
+export interface VaultKeyRequest {
+  userId: string;
+  publicKey: string;
+  requestedAt: string;
+}
+export interface VaultKeyWrapPost extends VaultKeyWrap {
+  userId: string;
+}
+/** A credential that must keep working after conversion (MCP token, OAuth grant, public link). */
+export interface AllowlistCandidate {
+  kind: string;
+  id: string;
+  hash: string;
+}
+export interface AllowlistEntry {
+  kind: string;
+  id: string;
+  /** base64 HMAC-SHA256(VK, utf8(id) || utf8(hash)). */
+  mac: string;
+}
+
+export interface PendingDevice {
+  deviceId: string;
+  publicKey: string;
+  requestedAt?: string;
+  /** e.g. "MacBook Pro", when the server knows. */
+  name?: string | null;
+}
+export interface AccountKeysBody {
+  publicKey: string;
+  /** Optional since the owner decision: the VAULT key is the recovery path. */
+  privWrappedRecovery?: string;
+}
+
 export class ApiClient {
   private baseUrl: string;
   private token: string | null;
@@ -1482,6 +1563,177 @@ export class ApiClient {
     this.token = token;
   }
 
+  /**
+   * Client-held vault keys (W3): returns the base64 VK for a keyed vault whose
+   * key this device holds, else null. Synchronous (reads the session cache).
+   * The header value is a secret: never log request headers.
+   */
+  private vaultKeyResolver: ((vaultId: string) => string | null) | null = null;
+  setVaultKeyResolver(fn: ((vaultId: string) => string | null) | null): void {
+    this.vaultKeyResolver = fn;
+  }
+  /** On 409 `key_required`: make the vault key ready; true = retry once. */
+  private keyRequiredHandler: ((vaultId: string) => Promise<boolean>) | null = null;
+  setKeyRequiredHandler(fn: ((vaultId: string) => Promise<boolean>) | null): void {
+    this.keyRequiredHandler = fn;
+  }
+  /** The verified base64 VK for a vault (vault channel `hello.vk`, per-doc
+   *  token suffix), or null. A secret: never log it. */
+  vaultKeyFor(vaultId: string): string | null {
+    return this.vaultKeyResolver ? this.vaultKeyResolver(vaultId) : null;
+  }
+  /** Ask the key session to make a vault's key ready (a socket `key_required`). */
+  async ensureVaultKeyFor(vaultId: string): Promise<boolean> {
+    return this.keyRequiredHandler ? this.keyRequiredHandler(vaultId).catch(() => false) : false;
+  }
+
+  /** `X-Baalda-VK` for a vault-scoped path, or nothing. */
+  private vaultKeyHeaders(path: string): Record<string, string> {
+    const id = vaultIdFromPath(path);
+    const vk = id && this.vaultKeyResolver ? this.vaultKeyResolver(id) : null;
+    return vk ? { [VAULT_KEY_HEADER]: vk } : {};
+  }
+
+  // ---- Client-held vault keys (W3) ----------------------------------------
+
+  /** 200 = keyed now; 409 = already keyed (caller falls through to `mine`). */
+  async initVaultKeys(vaultId: string, body: VaultKeyInit): Promise<"created" | "already-keyed"> {
+    try {
+      await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/init`, { body });
+      return "created";
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && (e.body as { code?: string })?.code === "already_keyed") {
+        return "already-keyed";
+      }
+      throw e;
+    }
+  }
+
+  async getMyVaultKeys(vaultId: string): Promise<MyVaultKeys> {
+    const { data, status } = await this.request<Partial<MyVaultKeysBody> & { keyed?: boolean; pending?: boolean }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/mine`,
+    );
+    // Only an explicit `keyed: false` means unkeyed; anything unexpected throws
+    // (the caller then does nothing rather than keying a vault that has a key).
+    if (data?.keyed === false && status === 200) {
+      // Rollout gate for converting an existing vault: absent ⇒ false.
+      return { keyed: false, pending: false, conversionAllowed: (data as { conversionAllowed?: unknown }).conversionAllowed === true };
+    }
+    if (status === 202 || data?.pending) {
+      return { keyed: true, pending: true, vkCheck: data?.vkCheck, generation: data?.generation };
+    }
+    if (typeof data?.vkCheck !== "string" || typeof data.generation !== "number" || !Array.isArray(data.wraps)) {
+      throw new ApiError(status, "Unexpected vault key answer", data);
+    }
+    return { keyed: true, pending: false, vkCheck: data.vkCheck, generation: data.generation, wraps: data.wraps };
+  }
+
+  async listVaultKeyRequests(vaultId: string): Promise<VaultKeyRequest[]> {
+    const { data } = await this.request<VaultKeyRequest[]>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/requests`,
+    );
+    return Array.isArray(data) ? data : [];
+  }
+
+  /** `vkBase64` proves we hold the key; sent only as `X-Baalda-VK`. */
+  async postVaultKeyWrap(vaultId: string, wrap: VaultKeyWrapPost, vkBase64: string): Promise<void> {
+    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/wraps`, {
+      body: wrap,
+      headers: { [VAULT_KEY_HEADER]: vkBase64 },
+    });
+  }
+
+  async putMyKeys(body: AccountKeysBody): Promise<void> {
+    await this.request("PUT", "/api/me/keys", { body });
+  }
+
+  /** null when this account has no keys yet (404). */
+  async getMyKeys(): Promise<AccountKeysBody | null> {
+    try {
+      return (await this.request<AccountKeysBody>("GET", "/api/me/keys")).data;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  /** Approve a pending device: the account private key sealed to its key. */
+  async putDeviceKey(deviceId: string, privWrapped: string): Promise<void> {
+    await this.request("PUT", `/api/me/devices/${encodeURIComponent(deviceId)}/key`, { body: { privWrapped } });
+  }
+
+  // ---- Converting an existing vault (W3) ------------------------------------
+
+  /** Claim the conversion with our check. 409 = another device already holds it. */
+  async registerPendingVaultKey(
+    vaultId: string,
+    body: { vkCheck: string; generation: number; deviceId: string },
+  ): Promise<"registered" | "claimed"> {
+    try {
+      await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/pending`, { body });
+      return "registered";
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) return "claimed";
+      throw e;
+    }
+  }
+
+  async getAllowlistCandidates(vaultId: string): Promise<AllowlistCandidate[]> {
+    const { data } = await this.request<AllowlistCandidate[] | { candidates?: AllowlistCandidate[] }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/allowlist-candidates`,
+    );
+    const list = Array.isArray(data) ? data : (data?.candidates ?? []);
+    return list.filter((c) => typeof c?.id === "string" && typeof c?.hash === "string");
+  }
+
+  async postAllowlist(vaultId: string, entries: AllowlistEntry[], vkBase64: string): Promise<void> {
+    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/allowlist`, {
+      body: { entries },
+      headers: { [VAULT_KEY_HEADER]: vkBase64 },
+    });
+  }
+
+  /** Keeps the pending key warm on the server and asks whether init may run. */
+  async getConversionReady(vaultId: string, vkBase64: string): Promise<boolean> {
+    const { data } = await this.request<{ ready?: boolean }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/conversion-ready`,
+      { headers: { [VAULT_KEY_HEADER]: vkBase64 } },
+    );
+    return data?.ready === true;
+  }
+
+  /** Link-a-device: publish this device's ephemeral public key as pending. */
+  async registerPendingDevice(deviceId: string, publicKey: string): Promise<void> {
+    await this.request("POST", "/api/me/devices", { body: { deviceId, publicKey } });
+  }
+
+  async listPendingDevices(): Promise<PendingDevice[]> {
+    const { data } = await this.request<PendingDevice[]>("GET", "/api/me/devices/pending");
+    return Array.isArray(data) ? data : [];
+  }
+
+  /** The approval for this device, or null while none exists (404). */
+  async getDeviceKey(deviceId: string): Promise<string | null> {
+    try {
+      const { data } = await this.request<{ privWrapped?: string }>(
+        "GET",
+        `/api/me/devices/${encodeURIComponent(deviceId)}/key`,
+      );
+      return data?.privWrapped ?? null;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  async denyDevice(deviceId: string): Promise<void> {
+    await this.request("DELETE", `/api/me/devices/${encodeURIComponent(deviceId)}`);
+  }
+
   // ---- low-level request --------------------------------------------------
 
   private async request<T>(
@@ -1502,6 +1754,10 @@ export class ApiClient {
        * that never finishes deciding whether to delete files.
        */
       timeoutMs?: number;
+      /** Extra headers (never logged). */
+      headers?: Record<string, string>;
+      /** Internal: this is the one retry after a `key_required` refusal. */
+      keyRetry?: boolean;
     } = {},
   ): Promise<{ data: T; authToken: string | null; status: number }> {
     const url = new URL(this.baseUrl + path);
@@ -1525,6 +1781,7 @@ export class ApiClient {
       /* leave unset */
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    Object.assign(headers, this.vaultKeyHeaders(path), opts.headers);
     let bodyInit: string | undefined;
     if (opts.body !== undefined) {
       headers["Content-Type"] = "application/json";
@@ -1575,6 +1832,20 @@ export class ApiClient {
           : undefined) ??
         `HTTP ${res.status}`;
       if (res.status === 426) notifyClientOutdated(parsed);
+      // A keyed vault refused us for want of its key: fetch/verify the key and
+      // retry ONCE. Otherwise it stays an error, never an empty answer, so no
+      // caller can mistake it for an empty server (split-brain rule).
+      if (
+        res.status === 409 &&
+        !opts.keyRetry &&
+        (parsed as { code?: unknown } | undefined)?.code === KEY_REQUIRED_CODE
+      ) {
+        const id = vaultIdFromPath(path);
+        const handler = this.keyRequiredHandler;
+        if (id && handler && (await handler(id).catch(() => false))) {
+          return this.request<T>(method, path, { ...opts, keyRetry: true });
+        }
+      }
       throw new ApiError(res.status, msg, parsed);
     }
 
@@ -2939,7 +3210,7 @@ export class ApiClient {
     if (opts.maxBytes !== undefined) url.searchParams.set("maxBytes", String(opts.maxBytes));
     const res = await this.fetchImpl(url.toString(), {
       method: "GET",
-      headers: { ...this.baseHeaders(), [ORIGIN_HEADER]: this.clientId },
+      headers: { ...this.baseHeaders(url.toString()), [ORIGIN_HEADER]: this.clientId },
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -3612,8 +3883,8 @@ export class ApiClient {
   // ---- Attachment blobs (Phase 3 blob store, spec 02 §2/§5A) --------------
 
   /** Common headers (Origin + bearer) shared by the binary blob endpoints. */
-  private baseHeaders(): Record<string, string> {
-    const headers: Record<string, string> = {};
+  private baseHeaders(forUrl?: string): Record<string, string> {
+    const headers: Record<string, string> = forUrl ? this.vaultKeyHeaders(pathOf(forUrl)) : {};
     try {
       headers.Origin = new URL(this.baseUrl).origin;
     } catch {
@@ -3669,7 +3940,7 @@ export class ApiClient {
      *  server answers 409 `stale_base` when the file has moved on since. */
     baseSha?: string | null;
   }): Promise<BlobMeta> {
-    const headers = this.baseHeaders();
+    const headers = this.baseHeaders(`/api/vaults/${encodeURIComponent(input.vaultId)}/blobs`);
     headers["Content-Type"] = input.mime ?? "application/octet-stream";
     headers["x-rel-path"] = input.relPath;
     if (input.fileName) headers["x-file-name"] = input.fileName;
@@ -3931,6 +4202,7 @@ export class ApiClient {
         /* leave unset */
       }
       if (this.token) headers.Authorization = `Bearer ${this.token}`;
+      Object.assign(headers, this.vaultKeyHeaders(pathOf(url)));
     }
     const res = await this.fetchImpl(url, { method, headers, body: JSON.stringify(body) });
     const text = await res.text();

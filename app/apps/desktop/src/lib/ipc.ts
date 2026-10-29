@@ -1105,6 +1105,21 @@ export const keychainGet = (serviceKey: string) =>
 export const keychainDelete = (serviceKey: string) =>
   invoke<void>("keychain_delete", { serviceKey });
 
+// Client-held vault keys (W3): Rust accepts only `baalda.keys:` (account
+// private key) and `vk:` (vault key) names, from the trusted main window.
+export const vaultSecretSet = (key: string, value: string) =>
+  invoke<void>("vault_secret_set", { key, value });
+
+export const vaultSecretGet = (key: string) =>
+  invoke<string | null>("vault_secret_get", { key });
+
+export const vaultSecretDelete = (key: string) =>
+  invoke<void>("vault_secret_delete", { key });
+
+/** Write a small `.txt` at a path from the save dialog (vault key file). */
+export const saveTextFile = (path: string, contents: string) =>
+  invoke<void>("save_text_file", { path, contents });
+
 // ---- Google OAuth loopback (spec 04 §7) -----------------------------------
 // The Rust core runs a one-shot 127.0.0.1 listener that catches the browser
 // redirect at the end of Google sign-in. `listen` returns the ephemeral port
