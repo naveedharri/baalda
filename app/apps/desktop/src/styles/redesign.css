@@ -1868,3 +1868,7 @@ html:not([data-theme="dark"]) .io-section { max-width: none; width: auto; height
    (the redesign's main-header padding otherwise wins over App.css's 146px). */
 html[data-platform="windows"]:not([data-theme="dark"]) .main-header { padding-right: 146px; }
 html[data-platform="windows"]:not([data-theme="dark"]):has(.right-panel) .main-header { padding-right: var(--sp-4); }
+
+/* The Home "···" menu has to sit above the Pinned / Notes rows below it. */
+.home-section:has(.home-sidebar-menu[open]),
+.home-sidebar-entry:has(.home-sidebar-menu[open]) { position: relative; z-index: 60; }
