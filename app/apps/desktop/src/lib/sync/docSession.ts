@@ -32,6 +32,7 @@ import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
 import {
   isVaultKeyBlocked,
+  onVaultKeyEvent,
   VAULT_KEY_PAUSE_REASON,
   vaultKeysClosed,
   vaultKeysNudge,
@@ -449,6 +450,22 @@ export class SyncManager implements InboundHost {
 
   constructor() {
     this.configureRegistry();
+    // A vault that becomes keyed while its sockets are up (this device just
+    // converted it, restored the key, or a teammate sealed it to us) left the
+    // vault channel and the open note connected WITHOUT the key: the server now
+    // refuses them. Reconnect both once, so the fresh `hello` / token carries
+    // the key. Only on the transition into "ready", never on every 2-min run.
+    // A vault first seen already "ready" connected with its key: no reconnect.
+    const lastState = new Map<string, string>();
+    onVaultKeyEvent((e) => {
+      if (e.kind !== "vault") return;
+      const prev = lastState.get(e.vaultId);
+      lastState.set(e.vaultId, e.state.state);
+      if (e.state.state !== "ready" || prev === undefined || prev === "ready") return;
+      if (e.vaultId !== this.vaultEngineId) return;
+      this.vaultEngine?.reconnect({ liveOnly: this.vaultEngineLiveOnly });
+      this.current?.refreshAccess();
+    });
   }
 
   private configureRegistry(): void {
