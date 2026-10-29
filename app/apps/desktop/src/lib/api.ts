@@ -1583,7 +1583,9 @@ export class ApiClient {
       await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/init`, { body });
       return "created";
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409) return "already-keyed";
+      if (e instanceof ApiError && e.status === 409 && (e.body as { code?: string })?.code === "already_keyed") {
+        return "already-keyed";
+      }
       throw e;
     }
   }
