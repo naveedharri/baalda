@@ -1770,3 +1770,96 @@ html:not([data-theme="dark"]) .skills-byline { white-space: normal; word-break: 
 html:not([data-theme="dark"]) .skills-detail-controls { flex-wrap: wrap; }
 html:not([data-theme="dark"]) .skills-detail-controls .skills-hdr-btn { height: 34px; }
 html:not([data-theme="dark"]) .member-profile-back { display: inline-flex !important; margin-bottom: 8px; }
+
+/* ============================================================
+   Inner settings pages: one system everywhere.
+   - Settings rows group into a white card with hairline dividers.
+   - Section labels are small caps above their card.
+   - Lists (tokens, checkpoints, agents, statuses) are cards of rows.
+   ============================================================ */
+html:not([data-theme="dark"]) .settings-content { --rd-gap: 14px; gap: var(--rd-gap); }
+html:not([data-theme="dark"]) .settings-content > .muted,
+html:not([data-theme="dark"]) .settings-content > div > .muted:first-child,
+html:not([data-theme="dark"]) .settings-content > div > p.muted:first-child,
+html:not([data-theme="dark"]) .connection-tab > .field-hint:first-child { font-size: 13px; color: var(--text-secondary); line-height: 1.55; max-width: 640px; }
+html:not([data-theme="dark"]) .settings-content .menu-sep { display: none; }
+html:not([data-theme="dark"]) .settings-content .subhead {
+  margin: 8px 0 -6px 2px; font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: #0b0a1080;
+}
+
+/* Grouped rows */
+html:not([data-theme="dark"]) .settings-content > .menu-row {
+  background: #fff; margin: 0; padding: 14px 16px; min-height: 56px;
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07); border-radius: 0;
+}
+html:not([data-theme="dark"]) .settings-content > .menu-row + .menu-row { margin-top: calc(-1 * var(--rd-gap) + 1px); }
+html:not([data-theme="dark"]) .settings-content > .menu-row:not(.menu-row + .menu-row) { border-top-left-radius: 14px; border-top-right-radius: 14px; }
+html:not([data-theme="dark"]) .settings-content > .menu-row:not(:has(+ .menu-row)) { border-bottom-left-radius: 14px; border-bottom-right-radius: 14px; }
+html:not([data-theme="dark"]) .menu-row-label { font-size: 14px; color: var(--text-primary); }
+html:not([data-theme="dark"]) .menu-row-label .field-hint,
+html:not([data-theme="dark"]) .menu-row .field-hint { font-size: 12px; color: var(--text-tertiary); }
+html:not([data-theme="dark"]) .width-preview { background: var(--bg-app); border: 0; border-radius: 10px; }
+html:not([data-theme="dark"]) .appearance-tag { font: 500 11px var(--font-body); color: #5b3fd6; background: #f1edff; border-radius: 99px; padding: 2px 8px; }
+
+/* Generic card helper used below */
+html:not([data-theme="dark"]) .mcp-endpoint,
+html:not([data-theme="dark"]) .mcp-conn-list,
+html:not([data-theme="dark"]) .checkpoint-list,
+html:not([data-theme="dark"]) .status-options,
+html:not([data-theme="dark"]) .about-update-row,
+html:not([data-theme="dark"]) .installed-agents-status,
+html:not([data-theme="dark"]) .connection-tab > .field,
+html:not([data-theme="dark"]) .io-section,
+html:not([data-theme="dark"]) .versioning-tab .invite-bar,
+html:not([data-theme="dark"]) .perm-empty {
+  background: #fff; border: 0 !important; border-radius: 14px; padding: 14px 16px; margin: 0;
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.03);
+}
+html:not([data-theme="dark"]) .mcp-conn-list,
+html:not([data-theme="dark"]) .checkpoint-list,
+html:not([data-theme="dark"]) .status-options { padding: 4px; list-style: none; }
+
+/* Rows inside list cards */
+html:not([data-theme="dark"]) .mcp-conn,
+html:not([data-theme="dark"]) .checkpoint-row,
+html:not([data-theme="dark"]) .status-options .menu-item,
+html:not([data-theme="dark"]) .installed-agent-row {
+  border-radius: 10px; padding: 10px 12px; border: 0 !important; margin: 0;
+}
+html:not([data-theme="dark"]) .mcp-conn + .mcp-conn,
+html:not([data-theme="dark"]) .checkpoint-row + .checkpoint-row,
+html:not([data-theme="dark"]) .status-options .menu-item + .menu-item { box-shadow: 0 -1px 0 rgba(11, 10, 16, 0.06); }
+html:not([data-theme="dark"]) .checkpoint-row:hover,
+html:not([data-theme="dark"]) .mcp-conn:hover,
+html:not([data-theme="dark"]) .status-options .menu-item:hover { background: var(--bg-app); }
+html:not([data-theme="dark"]) .status-options .menu-item.active { background: #f1edff; box-shadow: none; }
+
+/* Each settings page's sections */
+html:not([data-theme="dark"]) .versioning-tab,
+html:not([data-theme="dark"]) .about-tab,
+html:not([data-theme="dark"]) .connection-tab,
+html:not([data-theme="dark"]) .status-tab { display: flex; flex-direction: column; gap: 14px; }
+html:not([data-theme="dark"]) .versioning-tab .invite-bar { display: flex; gap: 8px; padding: 8px; }
+html:not([data-theme="dark"]) .versioning-tab .invite-bar input { flex: 1; height: 34px; border: 0 !important; box-shadow: none !important; background: transparent !important; padding: 0 8px; }
+html:not([data-theme="dark"]) .io-tab { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+html:not([data-theme="dark"]) .io-section { padding: 18px; }
+html:not([data-theme="dark"]) .io-heading { font: 600 15px var(--font-display); margin-bottom: 6px; }
+html:not([data-theme="dark"]) .io-desc, html:not([data-theme="dark"]) .io-hint { font-size: 12.5px; color: var(--text-secondary); line-height: 1.55; }
+html:not([data-theme="dark"]) .io-actions { display: flex; gap: 8px; margin: 14px 0 8px; flex-wrap: wrap; }
+html:not([data-theme="dark"]) .io-actions button { height: 34px; border-radius: 9px; font-weight: 500; }
+html:not([data-theme="dark"]) .about-update-row { display: flex; align-items: center; justify-content: space-between; }
+html:not([data-theme="dark"]) .installed-agents-status h3 { font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: #0b0a1080; margin-bottom: 4px; }
+html:not([data-theme="dark"]) .about-tab > .menu-item.danger { align-self: flex-start; padding: 8px 12px; border-radius: 9px; }
+html:not([data-theme="dark"]) .connection-tab > .field { display: flex; flex-direction: column; gap: 8px; }
+html:not([data-theme="dark"]) .connection-tab .field-label { font-size: 12.5px; font-weight: 500; color: var(--text-secondary); }
+html:not([data-theme="dark"]) .connection-tab input { height: 38px; border-radius: 9px; background: var(--bg-app) !important; border: 0 !important; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06) !important; padding: 0 12px; }
+html:not([data-theme="dark"]) .update-actions { display: flex; justify-content: flex-end; }
+html:not([data-theme="dark"]) .mcp-endpoint { display: flex; align-items: center; gap: 12px; }
+html:not([data-theme="dark"]) .mcp-section-head { margin-top: 6px; }
+html:not([data-theme="dark"]) .perm-empty { color: var(--text-secondary); font-size: 13px; }
+
+/* Buttons inside pages: one size. */
+html:not([data-theme="dark"]) .settings-content button.primary:not(.sm),
+html:not([data-theme="dark"]) .settings-content button.secondary { height: 34px; padding: 0 14px; border-radius: 9px; font-weight: 500; font-size: 13px; }
+html:not([data-theme="dark"]) .io-tab { width: 100%; max-width: none; }
+html:not([data-theme="dark"]) .io-section { max-width: none; width: auto; height: 100%; }
