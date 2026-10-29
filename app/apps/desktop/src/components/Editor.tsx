@@ -25,6 +25,7 @@ import { syncManager } from "../lib/sync/docSession";
 import { colorForUser, PRESENCE_OFFLINE, statusTone, ringShowsColor } from "../lib/presence/color";
 import type { ActivityStatus } from "../lib/prefs";
 import { StatusMoment } from "./StatusMoment";
+import { isMoment } from "../lib/prefs";
 import { useStore } from "../store";
 import * as ipc from "../lib/ipc";
 import { FilePreview } from "./FilePreview";
@@ -971,8 +972,11 @@ export function Editor() {
               <div
                 className="presence-controls"
                 ref={presenceRef}
-                // Redesign preview: hover shows the status pop-out; the roster
-                // (and Ping) opens on click.
+                // Redesign preview: when someone here has a status moment, hover
+                // plays it and the roster (with Ping) opens on click. Otherwise
+                // hover opens the roster as before.
+                onMouseEnter={() => { if (!peers.some((p) => isMoment(p.status))) openRoster(); }}
+                onMouseLeave={scheduleCloseRoster}
                 onFocus={openRoster}
                 onBlur={(e) => {
                   // Ignore focus moving between the stack and a Ping button
