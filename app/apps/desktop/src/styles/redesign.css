@@ -1512,3 +1512,11 @@ html:not([data-theme="dark"]) .editor-wrap:has(.rd-viewonly)::after { content: n
 }
 @keyframes rd-chip-in { from { opacity: 0; translate: 0 8px; } to { opacity: 1; translate: 0 0; } }
 .rd-viewonly-msg { overflow: hidden; text-overflow: ellipsis; }
+/* Home row spans the sidebar: box from x=12 to the sync-dot column's right
+   edge, icon still on the 20px line, label on 50px. */
+html:not([data-theme="dark"]) .home-sidebar-entry { position: relative; }
+html:not([data-theme="dark"]) .home-sidebar-row {
+  margin-left: -8px !important; padding-left: 8px !important;
+  width: calc(100% + 3px) !important; min-height: 36px; border-radius: 10px;
+}
+html:not([data-theme="dark"]) .home-sidebar-menu { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); }
