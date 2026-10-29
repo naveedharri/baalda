@@ -41,6 +41,10 @@ const SERVER_ENV = [
   "BAALDA_DEPLOYMENT",
   // Client-held vault keys (W3); unset/off = today's behaviour.
   "BAALDA_VAULT_KEYS",
+  // Rollout gate for converting existing vaults to vault keys; unset/off = never.
+  "VAULT_KEY_CONVERSION",
+  // Attachment access rule mode: text | shadow (default) | refs.
+  "ATTACHMENT_ACL_MODE",
   "NODE_OPTIONS",
   "SYNC_TOKEN_TTL_SECONDS",
   "COMPACTION_THRESHOLD",
