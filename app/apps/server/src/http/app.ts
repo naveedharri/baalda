@@ -148,6 +148,20 @@ function allowedOrigins(): string[] {
  *  - /api/vaults/:id/graph, /api/vaults/:id/search → note index (links+vectors)
  *  - /api/mcp → Model Context Protocol endpoint (AI clients); /api/mcp/tokens → token mgmt
  */
+/** RFC 9116 body for `contact`, or null when no contact is configured. */
+export function securityTxt(contact: string | undefined, now: Date = new Date()): string | null {
+  const value = contact?.trim();
+  if (!value) return null;
+  const expires = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString();
+  return [
+    `Contact: ${value}`,
+    `Expires: ${expires}`,
+    "Policy: https://github.com/naveedharri/baalda/blob/main/SECURITY.md",
+    "Preferred-Languages: en",
+    "",
+  ].join("\n");
+}
+
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
 
@@ -278,6 +292,15 @@ export function createApp(deps: AppDeps): Hono {
 </body>
 </html>`),
   );
+
+  // RFC 9116 security.txt, read per request from SECURITY_CONTACT (e.g.
+  // `mailto:security@example.com`). Unset ⇒ 404, so a self-hosted server never
+  // advertises someone else's contact.
+  app.get("/.well-known/security.txt", (c) => {
+    const body = securityTxt(process.env.SECURITY_CONTACT);
+    if (!body) return c.notFound();
+    return c.body(body, 200, { "content-type": "text/plain; charset=utf-8" });
+  });
 
   // ── MCP OAuth discovery (RFC 8414 / RFC 9728) ─────────────────────────────
   // These MUST sit at the origin root: our protected-resource metadata names
