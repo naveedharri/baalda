@@ -224,15 +224,81 @@ describe("vault key routes", () => {
   it("keys/mine on an unkeyed vault reports the conversion gate (default off)", async () => {
     const s = await setup();
     const res = await call(s.owner, "GET", `/vaults/${s.vaultId}/keys/mine`);
-    expect(await res.json()).toEqual({ keyed: false, conversionAllowed: false });
+    expect(await res.json()).toEqual({ keyed: false, conversionAllowed: false, encryptionRequested: false });
     vi.stubEnv("VAULT_KEY_CONVERSION", "on");
     vi.stubEnv("MIN_CLIENT_VERSION", "0.1.90");
-    const old = await app.request(`/api/vaults/${s.vaultId}/keys/mine`, { headers: { ...authHeaders(s.owner), "x-baalda-version": "0.1.80" } });
-    expect((await old.json()).conversionAllowed).toBe(false);
-    const cur = await app.request(`/api/vaults/${s.vaultId}/keys/mine`, { headers: { ...authHeaders(s.owner), "x-baalda-version": "0.1.95" } });
-    expect((await cur.json()).conversionAllowed).toBe(true);
-    const none = await app.request(`/api/vaults/${s.vaultId}/keys/mine`, { headers: authHeaders(s.owner) });
-    expect((await none.json()).conversionAllowed).toBe(false);
+    const mine = async (version?: string) =>
+      (await app.request(`/api/vaults/${s.vaultId}/keys/mine`, {
+        headers: { ...authHeaders(s.owner), ...(version ? { "x-baalda-version": version } : {}) },
+      })).json();
+    // An existing vault stays unkeyed until an owner/admin opts it in.
+    expect(await mine("0.1.95")).toEqual({ keyed: false, conversionAllowed: false, encryptionRequested: false });
+    expect((await call(s.owner, "POST", `/vaults/${s.vaultId}/keys/request-encryption`)).status).toBe(201);
+    expect((await mine("0.1.80")).conversionAllowed).toBe(false);
+    expect(await mine("0.1.95")).toEqual({ keyed: false, conversionAllowed: true, encryptionRequested: true });
+    expect((await mine()).conversionAllowed).toBe(false);
+    // Requested but the rollout gate is closed: not allowed, but reported as requested.
+    vi.stubEnv("VAULT_KEY_CONVERSION", "off");
+    expect(await mine("0.1.95")).toEqual({ keyed: false, conversionAllowed: false, encryptionRequested: true });
+  });
+
+  it("request-encryption: owner/admin only, idempotent, one-way, audited", async () => {
+    const s = await setup();
+    const admin = await signUp("admin@keys.test");
+    await seedMember(s.orgId, admin.userId, "admin");
+    const path = `/vaults/${s.vaultId}/keys/request-encryption`;
+    const state = async () =>
+      (await pool.query("SELECT encryption_requested_at, encryption_requested_by FROM vaults WHERE id = $1", [s.vaultId])).rows[0];
+
+    const denied = await call(s.member, "POST", path);
+    expect(denied.status).toBe(403);
+    expect((await denied.json()).code).toBe("access_manager_required");
+    expect((await call(s.outsider, "POST", path)).status).toBe(404);
+    expect((await state()).encryption_requested_at).toBeNull();
+
+    const first = await call(admin, "POST", path);
+    expect(first.status).toBe(201);
+    const after = await state();
+    expect(after.encryption_requested_at).not.toBeNull();
+    expect(after.encryption_requested_by).toBe(admin.userId);
+
+    // Repeat (even by the owner) changes nothing.
+    const again = await call(s.owner, "POST", path);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ encryptionRequested: true, requestedBy: admin.userId });
+    expect(await state()).toEqual(after);
+
+    const audit = await pool.query(
+      "SELECT actor_user_id, entity_type, entity_id, action FROM access_audit WHERE organization_id = $1 AND action = 'encryption_requested'",
+      [s.orgId],
+    );
+    expect(audit.rows).toEqual([
+      { actor_user_id: admin.userId, entity_type: "vault", entity_id: s.vaultId, action: "encryption_requested" },
+    ]);
+    // A member still reads the state (UI shows "being set up").
+    expect((await (await call(s.member, "GET", `/vaults/${s.vaultId}/keys/mine`)).json()).encryptionRequested).toBe(true);
+  });
+
+  it("request-encryption is not there with the flag off", async () => {
+    const s = await setup();
+    vi.stubEnv("BAALDA_VAULT_KEYS", "off");
+    expect((await call(s.owner, "POST", `/vaults/${s.vaultId}/keys/request-encryption`)).status).toBe(404);
+  });
+
+  it("a vault created with vault keys on is requested automatically; flag off sets nothing", async () => {
+    const owner = await signUp("creator@keys.test");
+    const org = await createOrg(owner, "Create", `create-${Date.now()}`);
+    const create = async (name: string) => {
+      const res = await call(owner, "POST", "/vaults", { name, organizationId: org.id });
+      expect(res.status).toBe(201);
+      const { id } = await res.json();
+      return (await pool.query("SELECT encryption_requested_at, encryption_requested_by FROM vaults WHERE id = $1", [id])).rows[0];
+    };
+    const on = await create("On");
+    expect(on.encryption_requested_at).not.toBeNull();
+    expect(on.encryption_requested_by).toBe(owner.userId);
+    vi.stubEnv("BAALDA_VAULT_KEYS", "off");
+    expect(await create("Off")).toEqual({ encryption_requested_at: null, encryption_requested_by: null });
   });
 
   it("/health advertises vault-keys only with the flag on", async () => {

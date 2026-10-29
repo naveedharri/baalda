@@ -48,6 +48,7 @@ import {
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
 import { docCryptoOf, requireVaultKey } from "../../crypto/transport.js";
+import { vaultKeysEnabled } from "../../crypto/config.js";
 import type { DocCrypto } from "../../crypto/doc-crypto.js";
 import { softDeleteSet } from "../../trash/retention.js";
 import { trashChanged } from "../../trash/activity.js";
@@ -267,9 +268,14 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const isFirstVault = existing[0]?.n === "0";
 
     const id = randomUUID();
+    // Vault keys: a vault created while the feature is on is encrypted from
+    // the start (the creator's desktop keys it). Existing vaults are opt-in
+    // through keys/request-encryption; nothing here touches them.
+    const requestEncryption = vaultKeysEnabled();
     await pool.query(
-      "INSERT INTO vaults (id, organization_id, name) VALUES ($1, $2, $3)",
-      [id, organizationId, name],
+      `INSERT INTO vaults (id, organization_id, name, encryption_requested_at, encryption_requested_by)
+       VALUES ($1, $2, $3, CASE WHEN $4::boolean THEN now() END, CASE WHEN $4::boolean THEN $5 END)`,
+      [id, organizationId, name, requestEncryption, session.userId],
     );
 
     // Shared-with-team by default: a brand-new vault gets an org-wide `edit`
