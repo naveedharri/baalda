@@ -1116,6 +1116,10 @@ export const vaultSecretGet = (key: string) =>
 export const vaultSecretDelete = (key: string) =>
   invoke<void>("vault_secret_delete", { key });
 
+/** Write a small `.txt` at a path from the save dialog (vault key file). */
+export const saveTextFile = (path: string, contents: string) =>
+  invoke<void>("save_text_file", { path, contents });
+
 // ---- Google OAuth loopback (spec 04 §7) -----------------------------------
 // The Rust core runs a one-shot 127.0.0.1 listener that catches the browser
 // redirect at the end of Google sign-in. `listen` returns the ephemeral port

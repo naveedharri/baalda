@@ -20,6 +20,7 @@ pub mod extract_worker;
 pub mod import_export;
 pub mod index;
 pub mod keychain;
+pub mod text_export;
 pub mod notefile;
 pub mod oauth;
 pub mod parse;
@@ -333,6 +334,7 @@ pub fn run() {
             keychain::vault_secret_set,
             keychain::vault_secret_get,
             keychain::vault_secret_delete,
+            text_export::save_text_file,
             oauth::google_oauth_listen,
             oauth::google_oauth_await,
             oauth::google_oauth_return_to_app,
