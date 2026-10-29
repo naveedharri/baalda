@@ -13,6 +13,7 @@ import { pool as defaultPool } from "../db/pool.js";
 import { vaultKeysEnabled } from "./config.js";
 import { KEY_BYTES } from "./envelope.js";
 import { verifyVk } from "./vk-check.js";
+import { vaultKeyCache } from "./key-cache.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -110,6 +111,10 @@ export async function requireVaultKey(
   if (!state) return { ok: true, key: null, keyed: false };
   const vk = (c.get("presentedVk" as never) as Buffer | undefined) ?? decodeVk(c.req.header(VK_HEADER));
   if (vk && verifyVk(vk, vaultId, state.vkCheck)) {
+    // A member's device just proved it holds the key: keep the vault keyed for
+    // background work (index, idle versions) as a vault channel would. Fills
+    // the cache only; this request is still served from ITS key, never from it.
+    vaultKeyCache.holdForRequest(vaultId, vk, state.generation);
     return { ok: true, key: vk, keyed: true, generation: state.generation };
   }
   return {

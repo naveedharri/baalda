@@ -32,7 +32,7 @@ import { pool as defaultPool } from "../db/pool.js";
 import { inc } from "../metrics/sync-metrics.js";
 import { openBlobTextRow, openSearchRow, sealBlobTextRow, sealSearchRow } from "../index/sealed-index.js";
 import { openNoteTextBytes, sealNoteText } from "../versions/texts.js";
-import { indexDoc } from "../index/indexer.js";
+import { indexDoc, setIndexDeferredHook } from "../index/indexer.js";
 import { vaultKeysEnabled } from "./config.js";
 import { openDocBytes, sealDocBytes, type DocCrypto } from "./doc-crypto.js";
 import { vaultKeyCache, type VaultKeyCache } from "./key-cache.js";
@@ -71,8 +71,6 @@ export interface BackfillCursors {
   reconciledAt?: string;
 }
 
-/** A tick re-runs the index catch-up at most this often; a key arrival always does. */
-export const INDEX_CATCHUP_EVERY_MS = 10 * 60_000;
 
 /** Test seams. Production never replaces these. */
 export const backfillHooks: {
@@ -385,8 +383,10 @@ export interface BackfillOptions {
   batchSize?: number;
   throttleMs?: number;
   maxBatches?: number;
-  /** Run the index catch-up now regardless of when it last ran (key arrival). */
+  /** Run the index catch-up now even if the queue looked empty (key arrival). */
   indexCatchUp?: boolean;
+  /** Pause between index catch-up batches (tests pass 0). */
+  indexThrottleMs?: number;
 }
 
 export type BackfillOutcome =
@@ -495,32 +495,85 @@ export async function hasPendingIndex(vaultId: string, db: Queryable = defaultPo
   return rows[0]?.pending === true;
 }
 
+export interface CatchUpOptions {
+  cache?: VaultKeyCache;
+  batchSize?: number;
+  throttleMs?: number;
+}
+
+/** Pause between catch-up batches, so a 20k drain leaves the pool to live traffic. */
+export const INDEX_CATCHUP_THROTTLE_MS = 25;
+
 /**
- * Index the notes the keyed vault's indexer deferred (`index_pending`), oldest
- * first; returns how many were indexed. A row is removed only after its doc was
- * handled (indexed, or no live note left to index) AND only if nobody re-queued
- * it meanwhile (same `queued_at`); a throw keeps the row for the next run.
+ * Drain the notes the keyed vault's indexer deferred (`index_pending`), oldest
+ * first, in batches of {@link INDEX_CATCHUP_LIMIT}, for as long as a member's
+ * key is cached; returns how many were indexed. The key is re-fetched and
+ * re-verified before every batch and zeroed after it, so an eviction, a
+ * rotation or a shutdown stops the drain at the next batch boundary.
+ *
+ * A row is removed only after its doc was handled (indexed, or no live note
+ * left to index) AND only if nobody re-queued it meanwhile (same `queued_at`);
+ * a throw keeps the row. The keyset cursor walks PAST a row that keeps failing,
+ * so one poison note cannot spin the drain; a re-queued row has a newer
+ * `queued_at` and is met again later in the same drain.
  */
-export async function catchUpIndex(vaultId: string, db: Queryable = defaultPool): Promise<number> {
-  // queued_at as TEXT: a JS Date would drop the microseconds the delete matches on.
-  const { rows } = await db.query<{ doc_id: string; queued_at: string }>(
-    `SELECT doc_id, queued_at::text AS queued_at FROM index_pending
-      WHERE vault_id = $1 ORDER BY queued_at LIMIT $2`,
-    [vaultId, INDEX_CATCHUP_LIMIT],
-  );
-  let n = 0;
-  for (const { doc_id, queued_at } of rows) {
+export async function catchUpIndex(
+  vaultId: string,
+  db: Queryable = defaultPool,
+  opts: CatchUpOptions = {},
+): Promise<number> {
+  const cache = opts.cache ?? vaultKeyCache;
+  const limit = opts.batchSize ?? INDEX_CATCHUP_LIMIT;
+  const throttleMs = opts.throttleMs ?? INDEX_CATCHUP_THROTTLE_MS;
+  let afterTs: string | null = null;
+  let afterId = "";
+  let total = 0;
+  for (let batch = 0; !stopping; batch += 1) {
+    if (batch > 0 && throttleMs > 0) await sleep(throttleMs);
+    const crypto = await heldCrypto(vaultId, cache, db);
+    if (!crypto) break;
+    let n = 0;
+    let read = 0;
+    let removed = 0;
     try {
-      if (await indexDoc(doc_id, db)) n += 1;
-      // A deferral inside indexDoc re-queued with a newer queued_at, so this
-      // delete matches nothing and the row survives for the next key arrival.
-      await db.query("DELETE FROM index_pending WHERE doc_id = $1 AND queued_at = $2::timestamptz", [doc_id, queued_at]);
-    } catch (err) {
-      console.error(`[backfill] index catch-up failed for ${doc_id}:`, err);
+      // queued_at as TEXT: a JS Date would drop the microseconds the delete matches on.
+      const { rows }: { rows: { doc_id: string; queued_at: string }[] } = await db.query<{ doc_id: string; queued_at: string }>(
+        `SELECT doc_id, queued_at::text AS queued_at FROM index_pending
+          WHERE vault_id = $1
+            AND ($2::timestamptz IS NULL OR (queued_at, doc_id) > ($2::timestamptz, $3))
+          ORDER BY queued_at, doc_id LIMIT $4`,
+        [vaultId, afterTs, afterId, limit],
+      );
+      read = rows.length;
+      for (const { doc_id, queued_at } of rows) {
+        afterTs = queued_at;
+        afterId = doc_id;
+        try {
+          // The batch's verified key, so 500 notes cost one key check, not 500.
+          if (await indexDoc(doc_id, db, crypto)) n += 1;
+          // A deferral inside indexDoc re-queued with a newer queued_at, so this
+          // delete matches nothing and the row survives for the next run.
+          const del = await db.query("DELETE FROM index_pending WHERE doc_id = $1 AND queued_at = $2::timestamptz", [
+            doc_id,
+            queued_at,
+          ]);
+          removed += del.rowCount ?? 0;
+        } catch (err) {
+          console.error(`[backfill] index catch-up failed for ${doc_id}:`, err);
+        }
+      }
+    } finally {
+      crypto.key.fill(0);
     }
+    total += n;
+    if (n > 0) inc("backfill.index_catchup", n);
+    // The end of the queue, or a batch that made no progress (every row failed
+    // or was deferred again): stop, the next kick or tick tries again. A row
+    // handled without an index write (its note was deleted meanwhile) is
+    // progress too, so a batch of deleted notes does not stop the drain.
+    if (read < limit || (n === 0 && removed === 0)) break;
   }
-  if (n > 0) inc("backfill.index_catchup", n);
-  return n;
+  return total;
 }
 
 /**
@@ -559,10 +612,11 @@ export async function backfillVault(vaultId: string, opts: BackfillOptions = {})
       cursors.reconciledAt = new Date().toISOString();
       await saveCursors(vaultId, cursors, db);
     }
-    const lastIndexed = Date.parse(cursors.indexedAt ?? "");
-    if (opts.indexCatchUp || !Number.isFinite(lastIndexed) || Date.now() - lastIndexed >= INDEX_CATCHUP_EVERY_MS) {
-      // One indexed SELECT on index_pending; nothing per note when it is empty.
-      await catchUpIndex(vaultId, db);
+    // Drain the WHOLE deferred queue while the key is held (one cheap EXISTS
+    // when it is empty). It used to take 500 per run, every 10 minutes: about
+    // 6 hours before a 20k-note import was searchable.
+    if (opts.indexCatchUp || (await hasPendingIndex(vaultId, db))) {
+      await catchUpIndex(vaultId, db, { cache, throttleMs: opts.indexThrottleMs });
       cursors.indexedAt = new Date().toISOString();
       await saveCursors(vaultId, cursors, db);
     }
@@ -666,6 +720,11 @@ export async function backfillTick(opts: BackfillOptions = {}): Promise<void> {
 }
 
 const kicked = new Set<string>();
+/** Vaults kicked again while their run was in flight: run once more after it. */
+const rearm = new Set<string>();
+/** Set on shutdown: a running drain stops at its next batch boundary. */
+let stopping = false;
+let unsubscribeAcquire: (() => void) | null = null;
 
 /**
  * A key arrival is worth a run only when there is work: deferred notes queued
@@ -687,7 +746,12 @@ async function kickNeeded(vaultId: string, db: Queryable): Promise<boolean> {
  * notes indexed-while-keyless become searchable at once. Deduplicated per vault.
  */
 export function kickVaultBackfill(vaultId: string, opts: BackfillOptions = {}): Promise<void> {
-  if (kicked.has(vaultId) || !vaultKeysEnabled()) return Promise.resolve();
+  if (!vaultKeysEnabled() || stopping) return Promise.resolve();
+  if (kicked.has(vaultId)) {
+    // A run is in flight and may already be past the new work: one more pass.
+    rearm.add(vaultId);
+    return Promise.resolve();
+  }
   kicked.add(vaultId);
   return kickNeeded(vaultId, opts.db ?? defaultPool)
     .then((needed) =>
@@ -695,12 +759,22 @@ export function kickVaultBackfill(vaultId: string, opts: BackfillOptions = {}): 
     )
     .then(() => undefined)
     .catch((err) => console.error(`[backfill] vault ${vaultId} failed:`, err))
-    .finally(() => kicked.delete(vaultId));
+    .finally(() => {
+      kicked.delete(vaultId);
+      if (rearm.delete(vaultId)) void kickVaultBackfill(vaultId, opts);
+    });
 }
 
 /** Started only from `index.ts`. */
 export function startCryptoBackfill(): void {
   if (timer) return;
+  stopping = false;
+  // A note deferred while this process holds the vault's key (it raced the
+  // key's arrival) is drained now rather than at the next tick.
+  setIndexDeferredHook((vaultId) => void kickVaultBackfill(vaultId));
+  // Any key arrival (a vault channel, or a verified request key warming the
+  // cache) drains what was deferred while no key was held.
+  unsubscribeAcquire = vaultKeyCache.onAcquire((vaultId) => void kickVaultBackfill(vaultId));
   timer = setInterval(() => void backfillTick(), BACKFILL_TICK_MS);
   if (typeof timer.unref === "function") timer.unref();
 }
@@ -708,4 +782,8 @@ export function startCryptoBackfill(): void {
 export function stopCryptoBackfill(): void {
   if (timer) clearInterval(timer);
   timer = null;
+  stopping = true;
+  setIndexDeferredHook(null);
+  unsubscribeAcquire?.();
+  unsubscribeAcquire = null;
 }

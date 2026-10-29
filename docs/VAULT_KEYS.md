@@ -67,6 +67,16 @@ ciphertext cannot be moved to another row.
   carry the key, checked against `vk_check`. The in-memory key cache serves only the server's own background work
   (indexing, compaction, checkpoints, backfill), never a user request, so a session forged in the database reads
   nothing.
+- **What fills the key cache.** A member's vault channel holds the key while it is connected, plus 10 minutes.
+  A request that presented a key the server VERIFIED also fills it for 15 minutes after the last such request
+  (`VaultKeyCache.holdForRequest`): any verified `X-Baalda-VK` request, an MCP or OAuth write with its token's own
+  key (checked against `vk_check` first), and `keys/init` with the key it just set. So a keyed vault edited only
+  over HTTP or MCP, with no desktop connected, is still indexed, its links kept and its idle versions captured
+  (those fire about 10 minutes after the edit). It only ever goes one way: a request fills the cache and never
+  reads from it. Read-only public-link views never fill it.
+- **Indexing a keyed vault.** User writes index with the request's own key (debounced, after the response; the
+  key copy is zeroed after the run). With no key at all, a note is queued in `index_pending`; any key arrival,
+  and the 30-second tick while a key is held, drains the whole queue in batches of 500.
 - **Rule 2 — only a member's device shares the key.** Sealing the key to a new member or device happens on an
   existing member's device. The server only queues the request, so a member or device inserted into the
   database gets nothing.

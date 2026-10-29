@@ -236,8 +236,10 @@ export async function applyDetached(
       console.warn(`[doc-batch] failed to publish update for ${docId}`, err);
     }
     // Keep search/graph in sync (best-effort; never fail the write on it).
-    if (opts.deferIndex) scheduleIndex(docId);
-    else await indexDoc(docId).catch(() => {});
+    // W3: the request's own verified key, so a keyed vault's write is
+    // searchable with no member connected (the queue only has their keys).
+    if (opts.deferIndex) scheduleIndex(docId, undefined, actor?.crypto);
+    else await indexDoc(docId, pool, actor?.crypto).catch(() => {});
     // Attribution + version capture, the detached counterpart of the sync
     // server's `onDocEdited`.
     try {

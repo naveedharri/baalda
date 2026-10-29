@@ -155,7 +155,9 @@ describe("MCP tokens and public links with vault keys", () => {
     const { rows } = await pool.query<{ wrapped_vk: Buffer }>("SELECT wrapped_vk FROM mcp_token_keys WHERE token_id = $1", [id]);
     expect(rows).toHaveLength(1);
     expect(rows[0].wrapped_vk.includes(s.vk)).toBe(false);
-    expect(vaultKeyCache.has(s.vaultId)).toBe(false);
+    // The MCP writes warmed the cache for background work. One-way: every call
+    // above was served from the token's own key, never from the cache.
+    expect(vaultKeyCache.has(s.vaultId)).toBe(true);
   });
 
   it("a token row inserted without the key never gets one; an edit on the unreadable note writes nothing", async () => {

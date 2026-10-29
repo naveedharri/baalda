@@ -10,10 +10,24 @@
 // must never be served from this cache, or a session forged through database
 // access could read content.
 //
+// A REQUEST that presented a verified key for a write (X-Baalda-VK, a key
+// unwrapped from an MCP/OAuth token, `keys/init`) also warms the cache with
+// `holdForRequest`: the vault stays keyed for background work for
+// REQUEST_KEY_HOLD_MS after the last such request, exactly as if a member's
+// vault channel had just disconnected. The direction is one-way: a request
+// fills the cache, it never reads it. Read-only public-link views never hold.
+//
 // The cache holds its own copy of each key and zeroes it (`fill(0)`) on evict.
 import { KEY_BYTES } from "./envelope.js";
 
 export const KEY_CACHE_GRACE_MS = 10 * 60 * 1000;
+
+/**
+ * How long a request's verified key keeps the vault keyed for background work
+ * after the request (index queue, idle version capture ~10 min later, links,
+ * checkpoints). Longer than the idle-capture delay on purpose.
+ */
+export const REQUEST_KEY_HOLD_MS = 15 * 60 * 1000;
 
 interface Entry {
   key: Buffer;
@@ -21,6 +35,8 @@ interface Entry {
   refs: number;
   /** Set when refs reaches 0; the entry is evicted at or after this time. */
   expiresAt: number | null;
+  /** Latest request hold (`holdForRequest`); a release never expires it sooner. */
+  heldUntil: number;
 }
 
 export interface KeyCacheOptions {
@@ -49,7 +65,7 @@ export class VaultKeyCache {
     this.sweep();
     let entry = this.entries.get(vaultId);
     if (!entry) {
-      entry = { key: Buffer.from(key), generation, refs: 0, expiresAt: null };
+      entry = { key: Buffer.from(key), generation, refs: 0, expiresAt: null, heldUntil: 0 };
       this.entries.set(vaultId, entry);
     } else if (generation > entry.generation) {
       entry.key.fill(0);
@@ -61,8 +77,54 @@ export class VaultKeyCache {
     entry.refs += 1;
     entry.expiresAt = null;
     const held = entry;
-    // Background work that deferred for want of this vault's key retries now.
-    // A listener never sees the key, only the vault id, and runs off this stack.
+    this.notify(vaultId);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      // The entry may have been evicted and replaced; only touch our own.
+      if (this.entries.get(vaultId) !== held) return;
+      held.refs = Math.max(0, held.refs - 1);
+      if (held.refs === 0) held.expiresAt = Math.max(this.now() + this.graceMs, held.heldUntil);
+    };
+  }
+
+  /**
+   * A request presented `key` for `vaultId` and the server VERIFIED it against
+   * `vk_check` (the caller's job): keep it for background work until `holdMs`
+   * after this call, or longer if a connection holds it. Never throws (a key
+   * that disagrees with the cached one for its generation is ignored and
+   * logged), never hands a key back. Listeners fire only when the vault was not
+   * keyed here before (or the generation moved), so a busy writer costs nothing.
+   */
+  holdForRequest(vaultId: string, key: Buffer, generation = 1, holdMs = REQUEST_KEY_HOLD_MS): void {
+    if (key.length !== KEY_BYTES) return;
+    this.sweep();
+    const until = this.now() + holdMs;
+    const entry = this.entries.get(vaultId);
+    if (!entry) {
+      this.entries.set(vaultId, { key: Buffer.from(key), generation, refs: 0, expiresAt: until, heldUntil: until });
+      this.notify(vaultId);
+      return;
+    }
+    if (generation > entry.generation) {
+      entry.key.fill(0);
+      entry.key = Buffer.from(key);
+      entry.generation = generation;
+      this.notify(vaultId);
+    } else if (generation === entry.generation && !entry.key.equals(key)) {
+      console.error("[key-cache] a request key disagrees with the cached key; not held");
+      return;
+    } else if (generation < entry.generation) {
+      return;
+    }
+    entry.heldUntil = Math.max(entry.heldUntil, until);
+    if (entry.refs === 0) entry.expiresAt = Math.max(entry.expiresAt ?? 0, until);
+  }
+
+  /** Background work that deferred for want of this vault's key retries now.
+   *  A listener never sees the key, only the vault id, and runs off this stack. */
+  private notify(vaultId: string): void {
     for (const listener of this.listeners) {
       queueMicrotask(() => {
         try {
@@ -72,15 +134,6 @@ export class VaultKeyCache {
         }
       });
     }
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      // The entry may have been evicted and replaced; only touch our own.
-      if (this.entries.get(vaultId) !== held) return;
-      held.refs = Math.max(0, held.refs - 1);
-      if (held.refs === 0) held.expiresAt = this.now() + this.graceMs;
-    };
   }
 
   /**
