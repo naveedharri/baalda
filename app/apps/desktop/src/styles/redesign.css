@@ -1,0 +1,209 @@
+/* ============================================================
+   Local redesign preview (v4: admin + site blend).
+   Light theme only. Imported last from App.tsx so it wins over
+   App.css; nothing else in the app is edited for the look.
+   ============================================================ */
+
+html:not([data-theme="dark"]) {
+  /* Very light cream canvas, white cards. */
+  --bg-app: #fcfaf6;
+  --bg-card: #fcfaf6;
+  --bg-subtle: #f6f3ed;
+  --text-primary: #1a1920;
+  --text-secondary: #55545e;
+  --text-tertiary: #85848f;
+  --accent: #7c5cff;
+  --accent-hover: #6a4fe0;
+  --accent-soft: #f1edff;
+  --accent-soft-hover: #e7e0ff;
+  --border: rgba(11, 10, 16, 0.08);
+  --border-strong: rgba(11, 10, 16, 0.14);
+  --rd-card-shadow: 0 0 0 1px rgba(11, 10, 16, 0.075), 0 1px 2px rgba(11, 10, 16, 0.04), 0 8px 22px -10px rgba(11, 10, 16, 0.13);
+  --editor-font-size: 17px;
+  --inline-title-size: 2.5em;
+  --inline-title-weight: 600;
+}
+
+/* ---- Shell: tabs on the canvas, the note on a floating white card ---- */
+html:not([data-theme="dark"]) .main {
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  overflow: visible;
+}
+html:not([data-theme="dark"]) .editor-wrap {
+  background: #fff;
+  border-radius: 22px;
+  box-shadow: var(--rd-card-shadow);
+  margin: 2px 14px 14px 6px;
+}
+
+/* ---- Tabs ---- */
+html:not([data-theme="dark"]) .tab-active-bg {
+  background: #fff;
+  box-shadow: var(--rd-card-shadow);
+}
+html:not([data-theme="dark"]) .tab {
+  color: #0b0a10a8;
+}
+
+/* ---- Right-hand controls pill ---- */
+html:not([data-theme="dark"]) .header-actions {
+  border: 0;
+  background: #fff;
+  box-shadow: var(--rd-card-shadow);
+  padding: 4px 6px 4px 5px;
+}
+
+/* ---- Sidebar ---- */
+html:not([data-theme="dark"]) .sidebar-header-id {
+  background: #fff;
+  border-radius: 18px;
+  box-shadow: var(--rd-card-shadow);
+  padding: 10px 12px 10px 10px;
+}
+html:not([data-theme="dark"]) .vault-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+html:not([data-theme="dark"]) .pinned-label,
+html:not([data-theme="dark"]) .filetree-head .section-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: #0b0a1099;
+}
+html:not([data-theme="dark"]) .pinned-section {
+  border-bottom: 0;
+}
+html:not([data-theme="dark"]) .home-sidebar-row {
+  min-height: 40px;
+  border-radius: 12px;
+}
+html:not([data-theme="dark"]) .home-sidebar-row.is-unset {
+  outline: 1.5px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  font-weight: 500;
+}
+
+/* Tree rows: soft rounded rows, the open note lifts as a white pill. */
+html:not([data-theme="dark"]) .tree-row {
+  border-radius: 10px;
+  min-height: 32px;
+  color: #2e2d36;
+}
+html:not([data-theme="dark"]) .tree-row:hover {
+  background: rgba(11, 10, 16, 0.04);
+}
+html:not([data-theme="dark"]) .tree-row.selected,
+html:not([data-theme="dark"]) .tree-row.selected:hover {
+  background: #fff;
+  box-shadow: var(--rd-card-shadow);
+  color: var(--text-primary);
+  position: relative;
+}
+html:not([data-theme="dark"]) .tree-row.selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+/* ---- Editor writing styles ---- */
+html:not([data-theme="dark"]) .cm-editor .cm-content {
+  color: #26252d;
+}
+html:not([data-theme="dark"]) .cm-editor .cm-line {
+  line-height: 1.75;
+}
+
+/* Bullets: a short violet dash in place of the dot. */
+html:not([data-theme="dark"]) .cm-editor .cm-bullet {
+  color: transparent !important;
+  position: relative;
+  display: inline-block;
+}
+html:not([data-theme="dark"]) .cm-editor .cm-bullet::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 9px;
+  height: 1.6px;
+  margin-left: -4.5px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.85;
+}
+
+/* [[links]]: violet text with a thin underline, no chip. */
+html:not([data-theme="dark"]) .cm-editor .cm-wikilink {
+  color: #4a2fc7 !important;
+  font-weight: 500;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(124, 92, 255, 0.4);
+  border-radius: 0 !important;
+}
+html:not([data-theme="dark"]) .cm-editor .cm-wikilink:hover {
+  background: transparent !important;
+  border-bottom-color: var(--accent);
+}
+
+/* #tags: a small soft tag, not a loud pill. */
+html:not([data-theme="dark"]) .cm-editor .cm-hashtag {
+  background: rgba(124, 92, 255, 0.08) !important;
+  color: #4a2fc7;
+  font-weight: 500;
+  font-size: 0.85em;
+  border-radius: 7px !important;
+  padding: 0.12em 0.45em 0.18em !important;
+}
+
+/* > quotes: a thin violet bar and calm grey text. */
+html:not([data-theme="dark"]) .cm-editor .cm-blockquote {
+  color: #55545e !important;
+}
+html:not([data-theme="dark"]) .cm-editor .cm-blockquote::before {
+  width: 2px !important;
+  background-color: var(--accent) !important;
+}
+
+/* ==highlight==: a marker stroke under the words. */
+html:not([data-theme="dark"]) .cm-editor .cm-highlight,
+html:not([data-theme="dark"]) .cm-editor .cm-hl {
+  background: linear-gradient(transparent 55%, rgba(253, 233, 155, 0.9) 55%) !important;
+}
+
+/* - [ ] tasks: a rounded square that fills violet when done. */
+html:not([data-theme="dark"]) .cm-editor .cm-task-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 17px !important;
+  height: 17px !important;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1.5px rgba(11, 10, 16, 0.3);
+  background: #fff;
+  position: relative;
+  vertical-align: -3px !important;
+}
+html:not([data-theme="dark"]) .cm-editor .cm-task-checkbox:checked {
+  background: var(--accent);
+  box-shadow: none;
+}
+html:not([data-theme="dark"]) .cm-editor .cm-task-checkbox:checked::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 4.5px;
+  width: 8px;
+  height: 4px;
+  border: 2px solid #fff;
+  border-top: 0;
+  border-right: 0;
+  transform: rotate(-45deg);
+}

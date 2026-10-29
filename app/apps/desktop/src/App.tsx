@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import "./App.css";
+import "./styles/redesign.css";
 import { AccountMenu } from "./components/AccountMenu";
 import { BackendBehindNotice } from "./components/BackendBehindNotice";
 import { AsyncButton } from "./components/AsyncButton";
