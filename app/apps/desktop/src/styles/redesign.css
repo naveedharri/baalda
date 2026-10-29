@@ -1278,3 +1278,5 @@ html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-
 html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { content: none; }
 html:not([data-theme="dark"]) .vault-switcher .menu-item { min-height: 30px; padding: 3px 6px; font-size: var(--fs-sm); }
 html:not([data-theme="dark"]) .vault-switcher .menu-hint { font-size: 11px; }
+html:not([data-theme="dark"]) .vault-switcher .menu-item .menu-icon { box-sizing: content-box; flex: none; }
+html:not([data-theme="dark"]) .vault-switcher .menu-item:nth-last-of-type(-n + 2) .menu-icon { background: var(--bg-subtle); color: var(--text-secondary); }
