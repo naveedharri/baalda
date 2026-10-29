@@ -1720,7 +1720,6 @@ export default function App() {
           inert={effectiveSidebarHidden}
         >
           <SidebarHeader />
-          <NewNoteButton />
           <HomeSection />
           <PinnedSection />
           {/* The tree still lists the OUTGOING vault's files until the folder
