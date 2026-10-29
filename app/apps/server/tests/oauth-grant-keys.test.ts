@@ -206,6 +206,81 @@ describe("OAuth connector tokens: hashed storage + vault keys", () => {
     expect((await tool(r2.body.access_token!, "read_note", { docId: s.docId })).data.content).toBe("secret plan");
   });
 
+  it("a new connection to a keyed vault is finished by the desktop, then works with zero desktops online", async () => {
+    vi.stubEnv("BAALDA_VAULT_KEYS", "on");
+    const s = await setup();
+    await pool.query(`DELETE FROM "oauthAccessToken"`);
+    await pool.query("DELETE FROM mcp_oauth_vault");
+    const init = await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/init`, {
+      vkCheck: b64(s.vkCheck),
+      generation: 1,
+      sealedVkForSelf: b64(randomBytes(80)),
+    }, s.vk);
+    expect(init.status).toBe(201);
+    noDesktops();
+
+    // The browser's Allow does not complete: it hands off to the desktop.
+    const allow = await app.request("/oauth/consent", {
+      method: "POST",
+      headers: { authorization: `Bearer ${s.owner.token}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        consent_code: "cc",
+        client_id: CLIENT,
+        organization_id: s.orgId,
+        decision: "allow",
+      }).toString(),
+    });
+    expect(allow.status).toBe(200);
+    const html = await allow.text();
+    expect(html).toContain("Open Baalda on your computer to finish connecting");
+    const id = decodeURIComponent(/oauth-consent\?id=([^&"]+)/.exec(html)![1]);
+    expect((await pool.query("SELECT 1 FROM mcp_oauth_vault")).rowCount).toBe(0);
+
+    // Without the key (a forged session has none) or as someone else: refused.
+    const other = await signUp(`other-${randomBytes(4).toString("hex")}@ok.test`);
+    expect((await api(other, "POST", `/oauth/consents/${id}/complete`, {}, s.vk)).status).toBe(404);
+    const noKey = await api(s.owner, "POST", `/oauth/consents/${id}/complete`, {});
+    expect(noKey.status).toBe(409);
+    expect((await api(s.owner, "POST", `/oauth/consents/${id}/complete`, {}, randomBytes(32))).status).toBe(409);
+    expect(await (await api(s.owner, "GET", `/oauth/consents/${id}`)).json()).toMatchObject({
+      app: "Claude",
+      organizationId: s.orgId,
+      approved: false,
+    });
+
+    // The desktop finishes it; the page's poll sees it.
+    expect((await api(s.owner, "POST", `/oauth/consents/${id}/complete`, {}, s.vk)).status).toBe(200);
+    const status = await app.request(`/oauth/consent/status?id=${encodeURIComponent(id)}`, { headers: authHeaders(s.owner) });
+    expect(await status.json()).toEqual({ approved: true });
+
+    // Re-submitting Allow now proceeds (binding written; Better Auth then
+    // rejects our fake consent_code, which is fine for this test).
+    await app.request("/oauth/consent", {
+      method: "POST",
+      headers: { authorization: `Bearer ${s.owner.token}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ consent_code: "cc", client_id: CLIENT, organization_id: s.orgId, decision: "allow" }).toString(),
+    });
+    expect((await pool.query("SELECT 1 FROM mcp_oauth_vault")).rowCount).toBe(1);
+
+    // The code exchange: Better Auth writes the row, our hook wraps the key.
+    const access = "FreshAccessTokenFromCodeExchange";
+    const refreshToken = "FreshRefreshTokenFromCodeExchang";
+    await pool.query(
+      `INSERT INTO "oauthAccessToken" (id, "accessToken", "refreshToken", "accessTokenExpiresAt", "refreshTokenExpiresAt", "clientId", "userId", scopes)
+       VALUES ('g2', $1, $2, now() + interval '1 hour', now() + interval '7 days', $3, $4, 'openid offline_access')`,
+      [access, refreshToken, CLIENT, s.owner.userId],
+    );
+    const { rewrapOnIssue } = await import("../src/mcp/oauth-grant-keys.js");
+    await rewrapOnIssue({ grantId: "g2", accessToken: access, refreshToken });
+    expect((await pool.query("SELECT consumed_at IS NOT NULL AS c FROM oauth_consents WHERE id = $1", [id])).rows[0].c).toBe(true);
+
+    noDesktops();
+    expect((await tool(access, "update_note", { docId: s.docId, content: "hello" })).isError).toBe(false);
+    const r = await refresh(refreshToken);
+    expect(r.status).toBe(200);
+    expect((await tool(r.body.access_token!, "read_note", { docId: s.docId })).data.content).toBe("hello");
+  });
+
   it("a grant inserted into the database never gets a key", async () => {
     vi.stubEnv("BAALDA_VAULT_KEYS", "on");
     const s = await setup();

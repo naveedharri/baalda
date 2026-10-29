@@ -152,6 +152,12 @@ export function holdConsentKeys(consentId: string, keys: Array<{ vaultId: string
   setTimeout(() => dropConsentKeys(consentId), CONSENT_TTL_MS).unref?.();
 }
 
+/** True while a consent still holds unexpired keys in this process. */
+export function hasConsentKeys(consentId: string): boolean {
+  const keys = consentKeys.get(consentId);
+  return !!keys && keys.length > 0 && keys.every((k) => k.expiresAt > Date.now());
+}
+
 export function dropConsentKeys(consentId: string): void {
   for (const k of consentKeys.get(consentId) ?? []) k.key.fill(0);
   consentKeys.delete(consentId);
