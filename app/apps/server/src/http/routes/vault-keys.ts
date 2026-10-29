@@ -7,6 +7,7 @@
 //
 // POST /api/vaults/:vaultId/keys/init      first member to key the vault
 // GET  /api/vaults/:vaultId/keys/mine      my sealed wraps (or 202 pending)
+// POST /api/vaults/:vaultId/keys/request-encryption  owner/admin opts an existing vault in (one-way)
 // GET  /api/vaults/:vaultId/keys/requests  pending requests (wrap holders only)
 // POST /api/vaults/:vaultId/keys/wraps     seal VK to a member (holder + valid VK)
 // GET  /api/me/keys                         my key pair record
@@ -17,7 +18,7 @@ import type pg from "pg";
 import { pool } from "../../db/pool.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
 import { requireVaultKey } from "../../crypto/transport.js";
-import { initGate, lockGateRows } from "../../crypto/conversion.js";
+import { ENCRYPTION_NOT_REQUESTED, initGate, lockGateRows } from "../../crypto/conversion.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
 import { CLIENT_VERSION_HEADER, CLIENT_VERSION_PARAM, clientVersionPolicy, judgeClientVersion } from "../client-version.js";
@@ -97,8 +98,8 @@ export function createVaultKeyRoutes(): Hono {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const { rows } = await client.query<{ vk_check: Buffer | null }>(
-        "SELECT vk_check FROM vaults WHERE id = $1 FOR UPDATE",
+      const { rows } = await client.query<{ vk_check: Buffer | null; encryption_requested_at: Date | null }>(
+        "SELECT vk_check, encryption_requested_at FROM vaults WHERE id = $1 FOR UPDATE",
         [vaultId],
       );
       if (!rows[0]) {
@@ -108,6 +109,12 @@ export function createVaultKeyRoutes(): Hono {
       if (rows[0].vk_check) {
         await client.query("ROLLBACK");
         return c.json({ error: "This vault already has a key", code: "already_keyed" }, 409);
+      }
+      // Opt-in (migration 081): never key a vault nobody asked to encrypt,
+      // whatever the client. Read under the vault row lock.
+      if (!rows[0].encryption_requested_at) {
+        await client.query("ROLLBACK");
+        return c.json(ENCRYPTION_NOT_REQUESTED, 409);
       }
       // MCP/links conversion gate (crypto/conversion.ts): no active token,
       // link or OAuth grant may be cut off by keying the vault. It runs INSIDE
@@ -152,12 +159,21 @@ export function createVaultKeyRoutes(): Hono {
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const vaultId = c.req.param("vaultId");
     if (!(await membership(vaultId, session.userId))) return c.json({ error: "Unknown vault" }, 404);
-    const { rows: v } = await pool.query<{ vk_check: Buffer | null; key_generation: number | null }>(
-      "SELECT vk_check, key_generation FROM vaults WHERE id = $1",
+    const { rows: v } = await pool.query<{
+      vk_check: Buffer | null;
+      key_generation: number | null;
+      encryption_requested_at: Date | null;
+    }>(
+      "SELECT vk_check, key_generation, encryption_requested_at FROM vaults WHERE id = $1",
       [vaultId],
     );
     if (!v[0]?.vk_check) {
-      return c.json({ keyed: false, conversionAllowed: conversionAllowed(c.req.header(CLIENT_VERSION_HEADER) ?? c.req.query(CLIENT_VERSION_PARAM)) });
+      // Opt-in: an existing vault is keyed only after an owner/admin asked
+      // for it (or it was created with vault keys on). Until then a desktop
+      // must not key it, whatever the rollout gate says.
+      const encryptionRequested = v[0]?.encryption_requested_at != null;
+      const gate = conversionAllowed(c.req.header(CLIENT_VERSION_HEADER) ?? c.req.query(CLIENT_VERSION_PARAM));
+      return c.json({ keyed: false, conversionAllowed: gate && encryptionRequested, encryptionRequested });
     }
     // Wraps sealed before the caller last replaced their account key cannot be
     // opened by them any more; they are kept (never deleted) but do not count.
@@ -196,6 +212,65 @@ export function createVaultKeyRoutes(): Hono {
         sealedByUserId: r.sealed_by_user_id,
       })),
     });
+  });
+
+  // "Encrypt this vault": an owner/admin opts an existing vault in. One-way and
+  // idempotent: the first call records who and when (and one access_audit
+  // row); later calls change nothing. There is deliberately no undo route.
+  // This only records the decision; a member's desktop does the keying once
+  // the rollout gate (conversionAllowed) also opens.
+  routes.post("/vaults/:vaultId/keys/request-encryption", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const member = await membership(vaultId, session.userId);
+    if (!member) return c.json({ error: "Unknown vault" }, 404);
+    if (member.role !== "owner" && member.role !== "admin") {
+      return c.json({ error: "Only an owner or admin can encrypt this vault", code: "access_manager_required" }, 403);
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query<{ encryption_requested_at: Date | null; encryption_requested_by: string | null }>(
+        "SELECT encryption_requested_at, encryption_requested_by FROM vaults WHERE id = $1 FOR UPDATE",
+        [vaultId],
+      );
+      if (!rows[0]) {
+        await client.query("ROLLBACK");
+        return c.json({ error: "Unknown vault" }, 404);
+      }
+      if (rows[0].encryption_requested_at) {
+        await client.query("ROLLBACK");
+        return c.json({
+          encryptionRequested: true,
+          requestedAt: rows[0].encryption_requested_at,
+          requestedBy: rows[0].encryption_requested_by,
+        });
+      }
+      const { rows: done } = await client.query<{ encryption_requested_at: Date }>(
+        `UPDATE vaults SET encryption_requested_at = now(), encryption_requested_by = $2
+          WHERE id = $1 RETURNING encryption_requested_at`,
+        [vaultId, session.userId],
+      );
+      await client.query(
+        `INSERT INTO access_audit (organization_id, actor_user_id, actor_name, entity_type, entity_id, action, before_state, after_state)
+         VALUES ($1, $2, (SELECT name FROM "user" WHERE id = $2), 'vault', $3, 'encryption_requested', $4::jsonb, $5::jsonb)`,
+        [
+          member.orgId,
+          session.userId,
+          vaultId,
+          JSON.stringify({ encryptionRequested: false }),
+          JSON.stringify({ encryptionRequested: true }),
+        ],
+      );
+      await client.query("COMMIT");
+      return c.json({ encryptionRequested: true, requestedAt: done[0].encryption_requested_at, requestedBy: session.userId }, 201);
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
   });
 
   routes.get("/vaults/:vaultId/keys/requests", async (c) => {

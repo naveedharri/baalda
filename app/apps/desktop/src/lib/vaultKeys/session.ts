@@ -122,8 +122,9 @@ export type VaultKeyState =
   /** `created`: this device just keyed the vault. */
   | { state: "ready"; generation: number; created?: true }
   | { state: "waiting-for-teammate" }
-  /** `conversionAllowed`: the server's rollout gate for converting this vault. */
-  | { state: "unkeyed"; conversionAllowed?: boolean }
+  /** `conversionAllowed`: the server's rollout gate for converting this vault.
+   * `encryptionRequested`: an owner/admin opted it in (absent = unknown/no). */
+  | { state: "unkeyed"; conversionAllowed?: boolean; encryptionRequested?: boolean }
   | { state: "needs-account-key" }
   /** The only key on offer does not open `vk_check`: never used. */
   | { state: "key-mismatch" };
@@ -417,7 +418,9 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const mine: MyVaultKeys = await api.getMyVaultKeys(vaultId);
     if (!mine.keyed) {
       const r = await keyUnkeyedVault(vaultId);
-      return r.state === "unkeyed" ? { state: "unkeyed", conversionAllowed: mine.conversionAllowed } : r;
+      return r.state === "unkeyed"
+        ? { state: "unkeyed", conversionAllowed: mine.conversionAllowed, encryptionRequested: mine.encryptionRequested }
+        : r;
     }
     if (mine.pending) {
       // A key restored on this device earlier still counts when it verifies.
@@ -450,6 +453,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
   }
 
   async function keyUnkeyedVault(vaultId: string): Promise<VaultKeyState> {
+    // NOTE: does not check the owner/admin opt-in (`encryptionRequested`);
+    // `keysAllowed` is off in production and all keying goes through
+    // `convertVault`, which honours `conversionAllowed`. Check it here before
+    // ever turning that switch on.
     if (!deps.keysAllowed(vaultId)) return { state: "unkeyed" };
     // A key this device already holds for the vault is never replaced by a
     // fresh one: the server's "unkeyed" may be wrong, the local key is not lost.

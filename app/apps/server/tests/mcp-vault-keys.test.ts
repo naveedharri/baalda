@@ -19,7 +19,7 @@ import { resetMcpBadTokens } from "../src/http/routes/mcp.js";
 import { testAppDeps } from "./helpers/app.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { seedBlob, seedBlobText, seedNote, seedVault } from "./helpers/seed.js";
+import { seedBlob, seedBlobText, seedNote, markEncryptionRequested, seedVault } from "./helpers/seed.js";
 import { sealBlobTextRow } from "../src/index/sealed-index.js";
 
 const server = { hocuspocus: { documents: new Map() } } as unknown as Server<SyncContext>;
@@ -61,6 +61,8 @@ async function setup() {
   const owner = await signUp(`owner-${randomBytes(4).toString("hex")}@mk.test`);
   const org = await createOrg(owner, "MK", `mk-${Date.now()}-${randomBytes(3).toString("hex")}`);
   const vaultId = await seedVault(org.id);
+  // These tests exercise conversion: an owner opted the vault in.
+  await markEncryptionRequested(vaultId, owner.userId);
   const docId = await seedNote(vaultId, null, "a.md", owner.userId);
   const vk = randomBytes(32);
   const vkCheck = makeVkCheck(vk, vaultId);

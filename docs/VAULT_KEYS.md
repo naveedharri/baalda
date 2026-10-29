@@ -16,10 +16,20 @@ The feature is **off by default**. With it off, the server behaves exactly as it
 | Variable | Default | Meaning |
 |---|---|---|
 | `BAALDA_VAULT_KEYS` | off | `on` enables vault keys: the key routes, the `vault-keys` feature in `GET /health`, and sealed storage for keyed vaults. Off: nothing in `src/crypto/` is consulted. Any value other than on/off (`1/true/on/yes`, `0/false/off/no`, empty) stops the server at first use. |
-| `VAULT_KEY_CONVERSION` | off | `on` lets desktops key vaults (new and existing). Also requires the desktop to report a version at or above the `MIN_CLIENT_VERSION` floor. Keep it off until every member runs a desktop that supports vault keys. |
+| `VAULT_KEY_CONVERSION` | off | `on` lets desktops key vaults that asked for it (see below). Also requires the desktop to report a version at or above the `MIN_CLIENT_VERSION` floor. Keep it off until every member runs a desktop that supports vault keys. |
 
 Turn on `BAALDA_VAULT_KEYS` first, upgrade desktops, raise `MIN_CLIENT_VERSION`, and only then turn on
 `VAULT_KEY_CONVERSION`. A vault no member opens after that stays unkeyed until someone does.
+
+**Which vaults get keyed.** New vaults created while `BAALDA_VAULT_KEYS` is on are encrypted
+automatically (`POST /api/vaults` records `vaults.encryption_requested_at`). Existing vaults stay
+exactly as they are until an owner or admin clicks **Encrypt this vault** in Vault Settings → General
+(`POST /api/vaults/:vaultId/keys/request-encryption`: owner/admin only, idempotent, one-way; there is no
+undo, and the first request is recorded in the access history). `GET …/keys/mine` on an unkeyed vault
+answers `encryptionRequested` and `conversionAllowed`, which is the rollout gate above AND a recorded
+request. The server enforces it: `keys/pending` and `keys/init` refuse an unrequested vault with 409
+`encryption_not_requested` and store nothing, whatever the client. Plain members see nothing until the
+vault is keyed.
 
 ## What is encrypted
 
@@ -69,7 +79,7 @@ ciphertext cannot be moved to another row.
   approves it and shares the account key. A session alone never yields keys.
 - **Owner vault key.** Owners can reveal the vault key in Vault Settings → General ("Show vault key") to copy
   or save it. It is never emailed or sent anywhere. An owner who has lost every device restores with it.
-- **Conversion of an existing vault.** The first member device on a supporting version registers a pending
+- **Conversion of an existing vault** (after an owner/admin asked for it). The first owner/admin device on a supporting version registers a pending
   key. Existing MCP tokens and public links are allow-listed by the device and upgraded on their next use. The
   vault is keyed only when nothing used in the last 30 days still lacks its own wrap; until then everything
   works exactly as before. A connection idle for more than 30 days needs one reconnect after conversion.
