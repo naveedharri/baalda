@@ -1051,6 +1051,11 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   after the request. MCP and links work with no desktop online.
 - **Device linking:** a new device of the same account shows a code that an existing device approves;
   a session alone never yields keys. There is no account recovery kit.
+- **Churn brakes** (`crypto/key-churn.ts`): ≤3 account-key replacements per user per 24 h (counted from
+  `user_key_history.replaced_at` under the `user_keys` row lock; first create and same-key re-PUT free),
+  ≤10 new device registrations and ≤10 new approvals per user per hour (in process). 429
+  `rate_limited` + Retry-After + plain message, nothing stored; desktop toasts it (`rateLimitedMessage`,
+  runtime `startFreshAccountKey`).
 - **Owner vault key:** owners reveal it in Vault Settings → General ("Show vault key"); no popup, never
   emailed. "Restore with vault key" verifies against `vk_check`.
 - **Conversion gate + MCP upgrade** (`crypto/conversion.ts`): a device registers a pending key,

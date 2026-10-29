@@ -1230,6 +1230,17 @@ export function blobErrorCode(e: unknown): string | null {
   return null;
 }
 
+/**
+ * The server's plain-words refusal when a key-churn brake answered
+ * (`429 rate_limited` on `PUT /api/me/keys`, `POST /api/me/devices`, a device
+ * approval), else null. Nothing was stored server-side; retrying later works.
+ */
+export function rateLimitedMessage(e: unknown): string | null {
+  if (!(e instanceof ApiError) || e.status !== 429 || errorCodeOf(e.body) !== "rate_limited") return null;
+  const b = e.body as { error?: unknown } | undefined;
+  return typeof b?.error === "string" && b.error ? b.error : "Too many security key changes. Try again later.";
+}
+
 function errorCodeOf(body: unknown): string | null {
   if (!body || typeof body !== "object") return null;
   const b = body as { code?: unknown; error?: unknown };
