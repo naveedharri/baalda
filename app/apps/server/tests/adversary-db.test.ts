@@ -24,6 +24,7 @@ import { resetMcpBadTokens } from "../src/http/routes/mcp.js";
 import { compact, loadDocState } from "../src/yjs/persistence.js";
 import { testAppDeps } from "./helpers/app.js";
 import { resetDb } from "./helpers/db.js";
+import { CLIENT_VERSION_HEADER, VAULT_KEYS_MIN_DESKTOP } from "../src/http/client-version.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
 import { markEncryptionRequested, seedNote, seedVault } from "./helpers/seed.js";
 
@@ -47,10 +48,15 @@ function textOf(state: Uint8Array | null): string {
   return t;
 }
 
-function api(user: TestUser, method: string, path: string, body?: unknown, vk?: Buffer) {
+/** A vault-key capable desktop unless `old` (no version reported). */
+function api(user: TestUser, method: string, path: string, body?: unknown, vk?: Buffer, old = false) {
   return app.request(`/api${path}`, {
     method,
-    headers: { ...authHeaders(user), ...(vk ? { "x-baalda-vk": b64(vk) } : {}) },
+    headers: {
+      ...authHeaders(user),
+      ...(old ? {} : { [CLIENT_VERSION_HEADER]: VAULT_KEYS_MIN_DESKTOP }),
+      ...(vk ? { "x-baalda-vk": b64(vk) } : {}),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
@@ -118,8 +124,8 @@ const newPending = (k: K) => {
     deviceId: "dev-x",
   }, evil);
 };
-const pushPlain = (k: K, text: string, docId = k.docId) =>
-  api(k.owner, "POST", `/vaults/${k.vaultId}/docs/batch`, { items: [{ docId, update: b64(updateWith(text)) }] });
+const pushPlain = (k: K, text: string, docId = k.docId, old = false) =>
+  api(k.owner, "POST", `/vaults/${k.vaultId}/docs/batch`, { items: [{ docId, update: b64(updateWith(text)) }] }, undefined, old);
 
 describe("database attacker without a vault key (W3)", () => {
   beforeEach(async () => {
@@ -143,6 +149,10 @@ describe("database attacker without a vault key (W3)", () => {
     const push = await pushPlain(k, "plaintext after wipe");
     expect(push.status).toBe(409);
     expect((await push.json()).code).toBe("key_required");
+    // An old build (no version) is told to update; it writes nothing either.
+    const oldPush = await pushPlain(k, "plaintext after wipe", k.docId, true);
+    expect(oldPush.status).toBe(426);
+    expect((await oldPush.json()).code).toBe("client_outdated");
     // Even the real key no longer verifies (nothing to verify against): refuse.
     expect((await api(k.owner, "POST", `/vaults/${k.vaultId}/docs/batch`, { items: [{ docId: k.docId, update: b64(updateWith("x")) }] }, k.vk)).status).toBe(409);
     expect((await pool.query("SELECT 1 FROM doc_updates WHERE update IS NOT NULL")).rowCount).toBe(0);
@@ -292,9 +302,12 @@ describe("database attacker without a vault key (W3)", () => {
     // The forged session itself is accepted (sessions are plaintext in the DB)...
     expect((await api(forged, "GET", `/vaults/${k.vaultId}/keys/mine`)).status).toBe(200);
     // ...but content needs the key: no read, no plaintext write.
-    expect((await app.request(`/api/vaults/${k.vaultId}/bootstrap/x`, { headers: authHeaders(forged) })).status).toBe(409);
+    expect((await api(forged, "GET", `/vaults/${k.vaultId}/bootstrap/x`)).status).toBe(409);
     const push = await pushPlain({ ...k, owner: forged }, "forged write");
     expect(push.status).toBe(409);
+    // Posing as an old build gets 426 instead, and still writes nothing.
+    expect((await api(forged, "GET", `/vaults/${k.vaultId}/bootstrap/x`, undefined, undefined, true)).status).toBe(426);
+    expect((await pushPlain({ ...k, owner: forged }, "forged write", k.docId, true)).status).toBe(426);
     const versions = await api(forged, "GET", `/notes/${k.docId}/versions`);
     expect(await versions.text()).not.toContain(SECRET);
     // And it can mint no MCP token without the key.
