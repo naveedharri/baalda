@@ -2195,3 +2195,28 @@ html[data-theme="dark"]:not(.rd-off) .upgrade-tier.is-featured {
 html[data-theme="dark"]:not(.rd-off) .vault-grid-card.current {
   box-shadow: 0 0 0 1px rgba(165, 151, 255, 0.45), 0 12px 28px -18px rgba(0, 0, 0, 0.7);
 }
+
+/* ---- Welcome: a soft glass gradient instead of the dot grid ----
+   Layered colour fields, heavily blurred, under a faint frosted sheen. */
+.vault-picker::before {
+  background-image:
+    radial-gradient(60% 55% at 85% 8%, rgba(124, 92, 255, 0.22), transparent 70%),
+    radial-gradient(50% 50% at 8% 92%, rgba(255, 138, 101, 0.16), transparent 70%),
+    radial-gradient(45% 45% at 10% 25%, rgba(74, 163, 255, 0.12), transparent 70%),
+    radial-gradient(55% 50% at 92% 88%, rgba(236, 112, 180, 0.12), transparent 70%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0) 55%);
+  background-size: auto;
+  opacity: 1;
+  -webkit-mask-image: none;
+  mask-image: none;
+  filter: blur(8px);
+}
+.vault-picker .aurora-blob { filter: blur(120px); }
+html[data-theme="dark"] .vault-picker::before {
+  background-image:
+    radial-gradient(60% 55% at 85% 8%, rgba(124, 92, 255, 0.24), transparent 70%),
+    radial-gradient(50% 50% at 8% 92%, rgba(255, 138, 101, 0.1), transparent 70%),
+    radial-gradient(45% 45% at 10% 25%, rgba(74, 163, 255, 0.08), transparent 70%),
+    radial-gradient(55% 50% at 92% 88%, rgba(236, 112, 180, 0.1), transparent 70%),
+    linear-gradient(160deg, rgba(255, 248, 236, 0.05), rgba(255, 248, 236, 0) 55%);
+}
