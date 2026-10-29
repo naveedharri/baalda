@@ -1940,3 +1940,24 @@ html:not([data-theme="dark"]) .modal.upgrade-dialog.is-page .modal-header > span
   font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; font-weight: 500;
   letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary);
 }
+/* Upgrade, round 2: livelier icon tiles, a "current plan" label, a deeper CTA. */
+html:not([data-theme="dark"]) .upgrade-tier-icon { background: #e4f3e6; color: #2f8a4a; }
+html:not([data-theme="dark"]) .upgrade-tier.is-featured .upgrade-tier-icon { background: #e9e2ff; color: #6a46f0; }
+html:not([data-theme="dark"]) .upgrade-tier-icon svg { stroke-width: 2; }
+html:not([data-theme="dark"]) .upgrade-tier:not(.is-featured) .upgrade-features li::before { background: #e4f3e6; color: #2f8a4a; }
+html:not([data-theme="dark"]) .upgrade-tier-cta.ghost-pill:disabled {
+  background: transparent; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.08);
+  color: var(--text-secondary); gap: 7px;
+}
+html:not([data-theme="dark"]) .upgrade-tier-cta.ghost-pill:disabled::before {
+  content: ""; width: 16px; height: 16px; flex: none; border-radius: 50%;
+  background: #2f8a4a url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 8.2l2.2 2.2 4.8-4.8' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 16px no-repeat;
+}
+html:not([data-theme="dark"]) .upgrade-tier-cta.primary {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 6px 16px -6px rgba(124, 92, 255, 0.55);
+  transition: background-color 140ms ease, box-shadow 140ms ease;
+}
+html:not([data-theme="dark"]) .upgrade-tier-cta.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 10px 22px -8px rgba(124, 92, 255, 0.6);
+}
