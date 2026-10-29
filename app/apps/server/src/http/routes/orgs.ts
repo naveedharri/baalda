@@ -453,6 +453,13 @@ async function deleteVaultEverywhere(
         WHERE organization_id = $1 AND NOT ($4::boolean AND billing_account_id IS NOT NULL)`,
       [orgId, orgName, actorUserId, teamModel()],
     );
+    // Access history survives the vault (migration 065 dropped its FK); close
+    // it with one row saying who deleted the vault.
+    await client.query(
+      `INSERT INTO access_audit (organization_id, actor_user_id, actor_name, entity_type, entity_id, action, before_state)
+       VALUES ($1, $2, (SELECT name FROM "user" WHERE id = $2), 'organization', $1, 'delete', jsonb_build_object('name', $3::text))`,
+      [orgId, actorUserId, orgName],
+    );
     // Cascades: member, invitation, vaults→(folders, notes, files), shares,
     // org_join_codes, mcp_tokens, public_links.
     await client.query("DELETE FROM organization WHERE id = $1", [orgId]);
