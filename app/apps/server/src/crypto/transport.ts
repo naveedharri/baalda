@@ -64,16 +64,31 @@ export function redactToken(token: unknown): string {
   return `<token length ${splitSyncToken(token).jwt.length}>`;
 }
 
-/** The vault's key state: null when the vault is not keyed (today's path). */
+/**
+ * The vault's key state: null when the vault is not keyed (today's path).
+ *
+ * A NULL `vk_check` beside key material the vault can only have once keyed
+ * (wraps, wrap history, a `vault_crypto_state` row) is a wiped check, never an
+ * unkeyed vault: none of those exist without the check in normal operation.
+ * Treating it as unkeyed would accept plaintext writes into a sealed vault, so
+ * it answers an empty check that no key opens, and every path fails closed
+ * with `key_required`.
+ */
 export async function loadVkCheck(
   vaultId: string,
   db: Queryable = defaultPool,
 ): Promise<{ vkCheck: Buffer; generation: number } | null> {
-  const { rows } = await db.query<{ vk_check: Buffer | null; key_generation: number | null }>(
-    "SELECT vk_check, key_generation FROM vaults WHERE id = $1",
+  const { rows } = await db.query<{ vk_check: Buffer | null; key_generation: number | null; orphaned: boolean }>(
+    `SELECT v.vk_check, v.key_generation,
+            (v.vk_check IS NULL AND (
+               EXISTS (SELECT 1 FROM vault_key_wraps w WHERE w.vault_id = v.id)
+            OR EXISTS (SELECT 1 FROM vault_key_wrap_history h WHERE h.vault_id = v.id)
+            OR EXISTS (SELECT 1 FROM vault_crypto_state s WHERE s.vault_id = v.id))) AS orphaned
+       FROM vaults v WHERE v.id = $1`,
     [vaultId],
   );
   const row = rows[0];
+  if (row?.orphaned) return { vkCheck: Buffer.alloc(0), generation: row.key_generation ?? 1 };
   if (!row?.vk_check) return null;
   return { vkCheck: row.vk_check, generation: row.key_generation ?? 1 };
 }

@@ -172,6 +172,43 @@ export const ENCRYPTION_NOT_REQUESTED = {
   code: "encryption_not_requested",
 } as const;
 
+/**
+ * A vault that already holds sealed data or key material must never be keyed
+ * again: a NEW key would leave every sealed row unreadable. `vk_check` being
+ * NULL alone proves nothing (anyone with database access can clear it), so
+ * `keys/init` and `keys/pending` also ask this. Sealed rows are the anchor a
+ * database writer cannot fake away without destroying the data itself.
+ */
+export const KEY_MATERIAL_EXISTS = {
+  error: "This vault already holds encrypted data. Open Baalda on a device that has its key, or restore it with the vault key.",
+  code: "key_material_exists",
+} as const;
+
+export async function vaultHasKeyMaterial(vaultId: string, db: Queryable): Promise<boolean> {
+  const { rows } = await db.query<{ found: boolean }>(
+    `SELECT (
+          EXISTS (SELECT 1 FROM vault_key_wraps WHERE vault_id = $1)
+       OR EXISTS (SELECT 1 FROM vault_key_wrap_history WHERE vault_id = $1)
+       OR EXISTS (SELECT 1 FROM vault_crypto_state WHERE vault_id = $1)
+       OR EXISTS (SELECT 1 FROM note_index WHERE vault_id = $1 AND search_enc IS NOT NULL)
+       OR EXISTS (SELECT 1 FROM blob_text WHERE vault_id = $1 AND search_enc IS NOT NULL)
+       OR EXISTS (SELECT 1 FROM note_texts WHERE vault_id = $1 AND content_enc IS NOT NULL)
+       -- Driven from the vault's notes/files (indexed by vault), so a large
+       -- unkeyed vault costs index probes, never a scan of the whole log.
+       OR EXISTS (SELECT 1 FROM notes n JOIN doc_updates d ON d.doc_id = n.id
+                   WHERE n.vault_id = $1 AND d.update_enc IS NOT NULL)
+       OR EXISTS (SELECT 1 FROM files f JOIN doc_updates d ON d.doc_id = f.id
+                   WHERE f.vault_id = $1 AND d.update_enc IS NOT NULL)
+       OR EXISTS (SELECT 1 FROM notes n JOIN doc_snapshots d ON d.doc_id = n.id
+                   WHERE n.vault_id = $1 AND d.snapshot_enc IS NOT NULL)
+       OR EXISTS (SELECT 1 FROM files f JOIN doc_snapshots d ON d.doc_id = f.id
+                   WHERE f.vault_id = $1 AND d.snapshot_enc IS NOT NULL)
+     ) AS found`,
+    [vaultId],
+  );
+  return rows[0]?.found === true;
+}
+
 export async function encryptionRequested(vaultId: string, db: Queryable): Promise<boolean> {
   const { rows } = await db.query<{ requested: boolean }>(
     "SELECT encryption_requested_at IS NOT NULL AS requested FROM vaults WHERE id = $1",

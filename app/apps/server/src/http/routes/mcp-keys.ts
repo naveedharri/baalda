@@ -25,7 +25,9 @@ import {
   isReady,
   loadPendingCheck,
   vaultCheckState,
+  vaultHasKeyMaterial,
   verifyPresentedKey,
+  KEY_MATERIAL_EXISTS,
 } from "../../crypto/conversion.js";
 import { decodeVk, loadVkCheck, VK_HEADER, KEY_REQUIRED_CODE } from "../../crypto/transport.js";
 import { verifyVk } from "../../crypto/vk-check.js";
@@ -114,6 +116,8 @@ export function createMcpKeyRoutes(): Hono {
     }
     // Opt-in: nothing is stored for a vault nobody asked to encrypt.
     if (!(await encryptionRequested(m.vaultId, pool))) return c.json(ENCRYPTION_NOT_REQUESTED, 409);
+    // Sealed data already here (a wiped vk_check): never register a new key.
+    if (await vaultHasKeyMaterial(m.vaultId, pool)) return c.json(KEY_MATERIAL_EXISTS, 409);
     await pool.query(
       `INSERT INTO vault_pending_keys (vault_id, vk_check, generation, created_by) VALUES ($1, $2, $3, $4)
        ON CONFLICT (vault_id) DO NOTHING`,
