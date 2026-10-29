@@ -15,7 +15,8 @@ import { loadVkCheck } from "../crypto/transport.js";
 type Queryable = Pick<pg.Pool, "query">;
 
 export interface SealedSearchRow {
-  content: string;
+  /** The note body, exactly what `note_index.content` holds for a plaintext row. */
+  body: string;
   vector: number[];
   tokens: string | null;
 }

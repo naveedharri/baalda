@@ -169,26 +169,25 @@ async function indexNoteRow(
     // Keyed: content, vector and tokens go ONLY into the sealed `search_enc`.
     // The plaintext columns are not written, and never nulled here: an old row
     // keeps its stale plaintext until the separate null-out step (W3 rule).
-    // `ref_text` stays plaintext for now so the attachment rule keeps every
-    // member's access exactly as today (to be sealed with the ACL slice).
+    // `ref_text` is not written either: the attachment rule decides a sealed
+    // row from its decrypted body in memory (`permissions/sealed-refs.ts`),
+    // which is the same answer the excerpt gives.
     await db.query(
-      `INSERT INTO note_index (doc_id, vault_id, title, updated_at, ref_text, ref_heads, search_enc)
-       VALUES ($1, $2, $3, now(), $4, $5::text[], $6)
+      `INSERT INTO note_index (doc_id, vault_id, title, updated_at, ref_heads, search_enc)
+       VALUES ($1, $2, $3, now(), $4::text[], $5)
        ON CONFLICT (doc_id) DO UPDATE
          SET vault_id = EXCLUDED.vault_id,
              title = EXCLUDED.title,
              updated_at = now(),
-             ref_text = EXCLUDED.ref_text,
              ref_heads = EXCLUDED.ref_heads,
              search_enc = EXCLUDED.search_enc`,
       [
         docId,
         note.vault_id,
         title,
-        refText(content, heads),
         heads,
         sealSearchRow(crypto, docId, {
-          content: `${title ?? ""} ${content}`,
+          body: content,
           vector,
           tokens: searchTokenSet(`${title ?? ""} ${content}`) ?? null,
         }),
@@ -485,9 +484,11 @@ export async function searchNoteIndex(opts: {
       search_tokens: string | null;
       matched_legacy: number | null;
       search_enc: Buffer | null;
+      title: string | null;
     }>(
       `SELECT ni.doc_id,
               ni.search_enc,
+              ni.title,
               ni.vector,
               CASE WHEN $6::boolean THEN NULL ELSE ni.search_tokens END AS search_tokens,
               CASE WHEN ni.search_tokens IS NULL OR $6::boolean THEN (
@@ -514,7 +515,7 @@ export async function searchNoteIndex(opts: {
         const matched =
           sealed.tokens !== null && !legacySql
             ? keywordMatchCount(qTokens, sealed.tokens)
-            : legacySubstringCount(qTokens, sealed.content);
+            : legacySubstringCount(qTokens, `${r.title ?? ""} ${sealed.body}`);
         const boost = qTokens.length > 0 ? 0.1 * (matched / qTokens.length) : 0;
         scored.push({ docId: r.doc_id, score: sim + boost });
         continue;
