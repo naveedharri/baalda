@@ -742,3 +742,12 @@ html:not([data-theme="dark"]) .vault-local-only-card {
 }
 html:not([data-theme="dark"]) .settings-content > .toggle-row { height: auto; min-height: 0; flex-shrink: 0; align-items: center; overflow: visible; }
 html:not([data-theme="dark"]) .settings-content > * { flex-shrink: 0; }
+
+/* Sidebar text on the small step of the scale. */
+html:not([data-theme="dark"]) .sidebar .tree-row,
+html:not([data-theme="dark"]) .home-sidebar-row,
+html:not([data-theme="dark"]) .pinned-name { font-size: var(--fs-sm); }
+html:not([data-theme="dark"]) .sidebar .tree-row { height: 30px; }
+html:not([data-theme="dark"]) .vault-name { font-size: 13px; }
+html:not([data-theme="dark"]) .rd-new-note { font-size: var(--fs-sm); }
+html:not([data-theme="dark"]) .identity-line1 { font-size: var(--fs-sm); }

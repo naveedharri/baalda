@@ -106,9 +106,24 @@ export function automaticItemColorAssignments(
 ): Record<string, string> {
   const result: Record<string, string> = {};
   const recentFamilies: string[] = [];
+  // Redesign preview: walk a short set of clearly different hues down the
+  // list, so neighbouring folders never look alike.
+  let next = 0;
 
   for (const item of items) {
     let colorId = item.explicitColorId;
+    if (!itemColorValue(colorId)) {
+      let pick = REDESIGN_ORDER[next % REDESIGN_ORDER.length];
+      for (let tries = 0; tries < REDESIGN_ORDER.length && recentFamilies.includes(familyOf(pick)); tries++) {
+        next++;
+        pick = REDESIGN_ORDER[next % REDESIGN_ORDER.length];
+      }
+      next++;
+      result[item.key] = pick;
+      recentFamilies.push(familyOf(pick));
+      if (recentFamilies.length > 2) recentFamilies.shift();
+      continue;
+    }
     if (!itemColorValue(colorId)) {
       const preferred = automaticItemColorId(userId, vaultIdentity, item.identity);
       const start = ITEM_COLORS.findIndex((color) => color.id === preferred);
@@ -130,6 +145,11 @@ export function automaticItemColorAssignments(
   }
 
   return result;
+}
+
+const REDESIGN_ORDER = ["red", "green", "gold", "sky", "violet", "pink", "teal", "orange"];
+function familyOf(id: string): string {
+  return ITEM_COLORS.find((color) => color.id === id)?.family ?? id;
 }
 
 const STORE_PREFIX = "context.itemColors:";
