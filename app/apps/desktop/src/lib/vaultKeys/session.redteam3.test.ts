@@ -57,7 +57,7 @@ function harness() {
     clearCache: vi.fn(),
   };
   const pins = new Map<string, string>();
-  const isMember = vi.fn(async () => true);
+  const isMember = vi.fn(async (_vaultId: string, _userId: string) => true);
   const deps: VaultKeySessionDeps = {
     api: api as unknown as VaultKeySessionDeps["api"],
     keys,
@@ -94,6 +94,31 @@ describe("red team 3: crafted key requests from the server", () => {
     expect(h.api.postVaultKeyWrap.mock.calls.length).toBeLessThanOrEqual(MAX_KEY_REQUESTS_PER_RUN);
     expect(h.isMember.mock.calls.length).toBeLessThanOrEqual(MAX_KEY_REQUESTS_PER_RUN);
     expect(out.sealed.length + out.refused.length).toBeLessThanOrEqual(MAX_KEY_REQUESTS_PER_RUN);
+  });
+
+  it("junk listed ahead of a real teammate cannot starve them: reached within two runs", async () => {
+    const h = harness();
+    await h.ready();
+    h.isMember.mockImplementation(async (_v: string, u: string) => u === "u-real");
+    h.setRequests([
+      ...Array.from({ length: MAX_KEY_REQUESTS_PER_RUN + 10 }, (_, i) => ({ userId: `fake${i}`, publicKey: pub() })),
+      { userId: "u-real", publicKey: pub() },
+    ]);
+    const first = await h.session.serviceKeyRequests("v1");
+    const second = await h.session.serviceKeyRequests("v1");
+    expect([...first.sealed, ...second.sealed].map((s) => s.userId)).toEqual(["u-real"]);
+  });
+
+  it("junk devices listed ahead of the person's real computer: it is offered by the second listing", async () => {
+    const h = harness();
+    await h.session.ensureAccountKeys();
+    h.setDevices([
+      ...Array.from({ length: MAX_PENDING_DEVICES * 2 }, (_, i) => ({ deviceId: `junk${i}`, publicKey: pub() })),
+      { deviceId: "d-real", publicKey: pub() },
+    ]);
+    const seen = new Set<string>();
+    for (let i = 0; i < 3; i++) for (const d of await h.session.pendingDevices()) seen.add(d.deviceId);
+    expect(seen.has("d-real")).toBe(true);
   });
 
   it("one person listed thousands of times with one key: sealed once, checked once", async () => {

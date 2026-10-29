@@ -174,6 +174,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
   /** vaultId → verified VK (+ generation). The only source for the header. */
   const verified = new Map<string, { vk: Uint8Array; b64: string; generation: number }>();
 
+  /** Ids already offered / handled this session: listed after new ones. */
+  const offeredDevices = new Set<string>();
+  const handledRequests = new Set<string>();
+
   /** Set when the server's account key is not ours: every key step refuses. */
   let accountMismatch = false;
   const enabled = async () => (await deps.features()).has(VAULT_KEYS);
@@ -233,12 +237,15 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const listed = await api.listPendingDevices();
     if (!Array.isArray(listed)) return [];
     const seen = new Set<string>();
-    for (const d of listed) {
+    // Never-offered devices first, so junk rows listed ahead of the person's
+    // real new computer cannot hold the bounded window forever.
+    for (const d of byNovelty(listed, (x) => (x as PendingDevice | null)?.deviceId, offeredDevices)) {
       // The server's list is untrusted: bounded, one prompt per device.
       if (out.length >= MAX_PENDING_DEVICES) break;
       if (!d || typeof d.deviceId !== "string" || typeof d.publicKey !== "string") continue;
       if (d.deviceId === deps.deviceId() || seen.has(d.deviceId)) continue;
       seen.add(d.deviceId);
+      offeredDevices.add(d.deviceId);
       try {
         const pub = fromBase64(d.publicKey);
         if (pub.length === 32) out.push({ ...d, code: deviceCode(pub) });
@@ -553,8 +560,11 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       byUser.set(r.userId, keysOf);
     }
     const requests: Array<{ userId: string; publicKey: string }> = [];
-    for (const [userId, pubs] of byUser) {
+    // People not handled yet first: refused junk listed ahead of a real
+    // teammate moves to the back after one run instead of starving them.
+    for (const [userId, pubs] of byNovelty([...byUser], ([u]) => u, handledRequests)) {
       if (requests.length + out.refused.length >= MAX_KEY_REQUESTS_PER_RUN) break;
+      handledRequests.add(userId);
       if (pubs.size !== 1) out.refused.push(userId);
       else requests.push({ userId, publicKey: [...pubs][0] });
     }
@@ -618,6 +628,8 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     },
     clear() {
       verified.clear();
+      offeredDevices.clear();
+      handledRequests.clear();
       accountMismatch = false;
       keys.clearCache();
     },
@@ -635,6 +647,17 @@ export type VaultKeySession = ReturnType<typeof createVaultKeySession>;
 export const MAX_KEY_REQUESTS_PER_RUN = 50;
 /** Most "a new computer is signing in" prompts raised from one listing. */
 export const MAX_PENDING_DEVICES = 5;
+
+/** Items whose id is not in `handled` first, original order kept within each group. */
+function byNovelty<T>(items: T[], idOf: (item: T) => unknown, handled: ReadonlySet<string>): T[] {
+  const fresh: T[] = [];
+  const old: T[] = [];
+  for (const item of items) {
+    const id = idOf(item);
+    (typeof id === "string" && handled.has(id) ? old : fresh).push(item);
+  }
+  return [...fresh, ...old];
+}
 
 /** A typed device code matches, ignoring case, spaces and dashes. */
 function sameDeviceCode(typed: unknown, code: string): boolean {
