@@ -131,6 +131,8 @@ export function createVaultKeyRoutes(): Hono {
       "SELECT vk_check, key_generation FROM vaults WHERE id = $1",
       [vaultId],
     );
+    // TODO(crypto-core): desktop contract is `{ keyed: false, conversionAllowed }`
+    // (the per-vault rollout gate flag owned by crypto-core).
     if (!v[0]?.vk_check) return c.json({ keyed: false });
     const { rows } = await pool.query<{ generation: number; sealed_vk: Buffer; sealed_by_user_id: string | null }>(
       `SELECT generation, sealed_vk, sealed_by_user_id FROM vault_key_wraps

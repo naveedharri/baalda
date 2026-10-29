@@ -8,8 +8,8 @@
 //      so the vault is still plaintext and every path (sync, MCP, links) is
 //      exactly today's. The server can now verify a presented VK.
 //   2. ALLOW-LIST. The desktop reads `GET …/keys/allowlist-candidates` (the
-//      org's live `mcp_` tokens and the vault's public links, with their
-//      hashes) and posts HMAC(VK, id || 0x00 || hash) for each
+//      org's live `mcp_` tokens, OAuth grants and the vault's public links,
+//      with their hashes) and posts HMAC(VK, utf8(id) || utf8(hash)) for each
 //      (`POST …/keys/allowlist`). A row inserted without VK never has a MAC.
 //   3. UPGRADE. On each allow-listed token's next call (link's next view),
 //      while a member's VK is held in memory, the server checks the MAC and

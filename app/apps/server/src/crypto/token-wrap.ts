@@ -6,11 +6,11 @@
 // neither the token nor anything that opens the wrap. The wrap reuses the
 // envelope format (AES-256-GCM, AAD bound to table/column/vault/row).
 //
-// Allow-list MAC: HMAC-SHA256(VK, tokenId || 0x00 || tokenHash), written by a
+// Allow-list MAC: HMAC-SHA256(VK, utf8(id) || utf8(hash)), written by a
 // member's device for a token that predates the vault's key. Only a VK holder
 // can produce it, so a token row inserted straight into the database never
-// qualifies for a key. Interop contract with the desktop: tokenHash is the
-// lowercase hex sha256 of the token, joined to the id with one NUL byte.
+// qualifies for a key. Interop contract with the desktop: hash is the
+// lowercase hex sha256 of the secret, concatenated with no separator.
 import { createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 import { KEY_BYTES, aadFor, open, seal } from "./envelope.js";
 
@@ -62,7 +62,9 @@ export function unwrapVk(
 }
 
 export function allowMac(vk: Buffer, tokenId: string, tokenHash: string): Buffer {
-  return createHmac("sha256", vk).update(`${tokenId}\u0000${tokenHash}`, "utf8").digest();
+  // utf8(id) || utf8(hash), no separator (desktop contract). Unambiguous: the
+  // hash is always 64 lowercase hex chars.
+  return createHmac("sha256", vk).update(tokenId, "utf8").update(tokenHash, "utf8").digest();
 }
 
 export function verifyAllowMac(vk: Buffer, tokenId: string, tokenHash: string, mac: Buffer): boolean {

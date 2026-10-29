@@ -3,7 +3,7 @@
 // W3: MCP tokens and public links in keyed vaults behave exactly as today and
 // work with ZERO desktops online (no key in the process cache). Conversion of
 // an existing vault waits until every active token/link has its own wrap.
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { Server } from "@hocuspocus/server";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/http/app.js";
@@ -185,7 +185,10 @@ describe("MCP tokens and public links with vault keys", () => {
 
     // Pending: the vault stays plaintext and MCP is unchanged.
     expect((await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 })).status).toBe(409);
-    expect((await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk)).status).toBe(201);
+    expect((await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1, deviceId: "d1" }, s.vk)).status).toBe(200);
+    // Idempotent for identical bytes; another check is refused.
+    expect((await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk)).status).toBe(200);
+    expect((await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(makeVkCheck(s.vk, s.vaultId)), generation: 1 }, s.vk)).status).toBe(409);
     expect((await tool(token, "read_note", { docId: s.docId })).data.content).toBe("before");
 
     const ready0 = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/conversion-ready`)).json();
@@ -197,14 +200,13 @@ describe("MCP tokens and public links with vault keys", () => {
     // The desktop vouches for the token with a MAC under VK.
     expect((await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`)).status).toBe(409);
     const cand = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`, undefined, s.vk)).json();
-    expect(cand.tokens.map((t: { id: string }) => t.id)).toEqual([row.id]);
-    const entry = cand.tokens[0] as { id: string; tokenHash: string };
-    expect(entry.tokenHash).toBe(sha(token));
+    expect(cand).toEqual([{ kind: "mcp_token", id: row.id, hash: sha(token) }]);
+    const entry = cand[0] as { id: string; hash: string };
     const posted = await (
       await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/allowlist`, {
         entries: [
-          { kind: "token", id: entry.id, mac: b64(allowMac(s.vk, entry.id, entry.tokenHash)) },
-          { kind: "token", id: entry.id + "x", mac: b64(randomBytes(32)) },
+          { kind: "mcp_token", id: entry.id, mac: b64(allowMac(s.vk, entry.id, entry.hash)) },
+          { kind: "mcp_token", id: entry.id + "x", mac: b64(randomBytes(32)) },
         ],
       }, s.vk)
     ).json();
@@ -280,13 +282,10 @@ describe("MCP tokens and public links with vault keys", () => {
     expect(r0.blockers.links).toBe(1);
 
     const cand = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`, undefined, s.vk)).json();
-    const l = cand.links[0] as { id: string; tokenHash: string };
-    expect(l.tokenHash).toBe(sha(link));
-    const tokEntries = (cand.tokens as Array<{ id: string; tokenHash: string }>).map((t) => ({
-      kind: "token", id: t.id, mac: b64(allowMac(s.vk, t.id, t.tokenHash)),
-    }));
+    const list = cand as Array<{ kind: string; id: string; hash: string }>;
+    expect(list.find((x) => x.kind === "public_link")?.hash).toBe(sha(link));
     await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/allowlist`, {
-      entries: [{ kind: "link", id: l.id, mac: b64(allowMac(s.vk, l.id, l.tokenHash)) }, ...tokEntries],
+      entries: list.map((x) => ({ kind: x.kind, id: x.id, mac: b64(allowMac(s.vk, x.id, x.hash)) })),
     }, s.vk);
     // Views and calls upgrade them (the pending key is warm).
     expect((await view(link)).status).toBe(200);
@@ -311,6 +310,50 @@ describe("MCP tokens and public links with vault keys", () => {
     expect((await tool(t, "update_note", { docId: s.docId, content: "x" })).isError).toBe(false);
     noDesktops();
     expect((await view(link)).status).toBe(404);
+  });
+
+  it("the MAC is HMAC-SHA256(VK, utf8(id) || utf8(hash)) with no separator", () => {
+    const vk = randomBytes(32);
+    const want = createHmac("sha256", vk).update(Buffer.from("tok-1" + sha("x"), "utf8")).digest();
+    expect(allowMac(vk, "tok-1", sha("x")).equals(want)).toBe(true);
+  });
+
+  it("an active OAuth grant is a candidate and keeps the vault pending until slice 2", async () => {
+    const s = await setup();
+    await pool.query(
+      `INSERT INTO "oauthApplication" (id, name, "clientId", "redirectUrls", type) VALUES ('app1', 'Claude', 'client1', 'https://x', 'public')`,
+    );
+    await pool.query(
+      `INSERT INTO "oauthAccessToken" (id, "accessToken", "refreshToken", "accessTokenExpiresAt", "refreshTokenExpiresAt", "clientId", "userId", scopes)
+       VALUES ('g1', 'acc', 'ref-secret', now() + interval '1 hour', now() + interval '30 days', 'client1', $1, 'openid')`,
+      [s.owner.userId],
+    );
+    await pool.query(
+      "INSERT INTO mcp_oauth_vault (client_id, user_id, organization_id) VALUES ('client1', $1, $2)",
+      [s.owner.userId, s.orgId],
+    );
+    await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk);
+    const cand = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`, undefined, s.vk)).json();
+    expect(cand).toEqual([{ kind: "oauth_grant", id: "g1", hash: sha("ref-secret") }]);
+    const posted = await (
+      await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/allowlist`, {
+        entries: [{ kind: "oauth_grant", id: "g1", mac: b64(allowMac(s.vk, "g1", sha("ref-secret"))) }],
+      }, s.vk)
+    ).json();
+    expect(posted.accepted).toBe(1);
+    const ready = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/conversion-ready`, undefined, s.vk)).json();
+    expect(ready).toMatchObject({ ready: false, blockers: { oauthGrants: 1 } });
+    expect((await init(s)).status).toBe(409);
+  });
+
+  it("the conversion routes are not there with the flag off", async () => {
+    vi.stubEnv("BAALDA_VAULT_KEYS", "off");
+    const s = await setup();
+    for (const p of ["pending", "allowlist-candidates", "allowlist", "conversion-ready"]) {
+      const method = p === "pending" || p === "allowlist" ? "POST" : "GET";
+      const body = method === "POST" ? {} : undefined;
+      expect((await api(s.owner, method, `/vaults/${s.vaultId}/keys/${p}`, body, s.vk)).status, p).toBe(404);
+    }
   });
 
   it("unkeyed vaults are exactly today, flag on or off", async () => {

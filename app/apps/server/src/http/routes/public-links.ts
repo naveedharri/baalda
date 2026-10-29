@@ -15,7 +15,7 @@ import { renderNoteHtml } from "../../render/note-html.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
 import { vaultCheckState, type VaultCheckState } from "../../crypto/conversion.js";
-import { decodeVk, KEY_REQUIRED_CODE, VK_HEADER } from "../../crypto/transport.js";
+import { decodeVk, KEY_REQUIRED_CODE, KeyRequiredError, VK_HEADER } from "../../crypto/transport.js";
 import { verifyVk } from "../../crypto/vk-check.js";
 import {
   linkCrypto,
@@ -498,9 +498,11 @@ async function viewMarkdown(
   }
   try {
     return { md: await deps.docWriter.peekContent(row.vault_id, row.doc_id, k.crypto) };
-  } catch {
-    // A sealed doc this view could not open (KeyRequiredError) is a miss.
-    return null;
+  } catch (err) {
+    // A sealed doc this view could not open is a miss; anything else is the
+    // same error as before W3.
+    if (err instanceof KeyRequiredError) return null;
+    throw err;
   } finally {
     k.crypto?.key.fill(0);
   }

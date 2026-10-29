@@ -38,6 +38,18 @@ CREATE TABLE mcp_token_allow (
   PRIMARY KEY (token_id, vault_id)
 );
 
+-- The same vouching for an existing OAuth grant (`oauthAccessToken` row,
+-- hash = sha256 of its refresh token). Consumed by slice 2's OAuth upgrade;
+-- until then every grant active in the last 30 days keeps conversion waiting.
+CREATE TABLE oauth_grant_allow (
+  grant_id   TEXT NOT NULL,
+  vault_id   TEXT NOT NULL,
+  mac        BYTEA NOT NULL,
+  created_by TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (grant_id, vault_id)
+);
+
 CREATE TABLE vault_pending_keys (
   vault_id   TEXT PRIMARY KEY,
   vk_check   BYTEA NOT NULL,
