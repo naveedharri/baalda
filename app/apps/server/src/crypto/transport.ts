@@ -21,6 +21,20 @@ export const KEY_REQUIRED_CODE = "key_required";
 /** Hocuspocus close code for a keyed vault reached without a valid key. */
 export const CLOSE_KEY_REQUIRED = 4409;
 
+/**
+ * A keyed vault reached without a valid vault key. Hocuspocus closes with
+ * `code`/`reason` (4409 `key_required`); persistence throws it when sealed
+ * rows are read, or a keyed doc written, without a key.
+ */
+export class KeyRequiredError extends Error {
+  readonly code = CLOSE_KEY_REQUIRED;
+  readonly reason = KEY_REQUIRED_CODE;
+  constructor() {
+    super(KEY_REQUIRED_CODE);
+    this.name = "KeyRequiredError";
+  }
+}
+
 /** Strict base64 → exactly 32 bytes, else null. */
 export function decodeVk(raw: string | null | undefined): Buffer | null {
   if (!raw || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(raw)) return null;

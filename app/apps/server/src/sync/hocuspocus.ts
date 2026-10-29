@@ -11,7 +11,8 @@ import { formatDocName, parseDocName } from "./doc-name.js";
 import { redisExtensions } from "./redis-extension.js";
 import { isShrinkHeld, reportShrink } from "../versions/shrink-guard.js";
 import { vaultKeysEnabled } from "../crypto/config.js";
-import { CLOSE_KEY_REQUIRED, KEY_REQUIRED_CODE, loadVkCheck, redactToken, splitSyncToken } from "../crypto/transport.js";
+import { KeyRequiredError, loadVkCheck, redactToken, splitSyncToken } from "../crypto/transport.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
 import { verifyVk } from "../crypto/vk-check.js";
 
 /**
@@ -61,15 +62,7 @@ class NoteTooLargeError extends Error {
   }
 }
 
-/** A keyed vault reached without a valid vault key (W3). Close 4409 `key_required`. */
-export class KeyRequiredError extends Error {
-  readonly code = CLOSE_KEY_REQUIRED;
-  readonly reason = KEY_REQUIRED_CODE;
-  constructor() {
-    super(KEY_REQUIRED_CODE);
-    this.name = "KeyRequiredError";
-  }
-}
+export { KeyRequiredError };
 
 export interface SyncContext {
   docId: string;
@@ -91,6 +84,8 @@ export interface SyncContext {
    * vault or with BAALDA_VAULT_KEYS off.
    */
   vaultKey?: Buffer;
+  /** Generation recorded in `vaults.key_generation` when `vaultKey` was verified. */
+  vaultKeyGeneration?: number;
   /** Throttle for {@link RejectedHook}: last time this connection reported a
    *  dropped read-only edit (ms epoch). */
   lastRejectedAt?: number;
@@ -185,6 +180,9 @@ export function noteSizeRefusal(
   }
   return null;
 }
+
+/** W3: the key a keyed doc was loaded with, per in-memory Y.Doc. */
+const docCrypto = new WeakMap<Y.Doc, DocCrypto>();
 
 export function createSyncServer(
   port: number = config.hocuspocusPort,
@@ -347,11 +345,13 @@ export function createSyncServer(
       // W3: a keyed vault needs this socket's own key, checked against
       // `vk_check` (never the process cache). Unkeyed vault: today's path.
       let vaultKey: Buffer | undefined;
+      let vaultKeyGeneration: number | undefined;
       if (keysOn) {
         const state = await loadVkCheck(parsed.vaultId, pool);
         if (state) {
           if (!vk || !verifyVk(vk, parsed.vaultId, state.vkCheck)) throw new KeyRequiredError();
           vaultKey = vk;
+          vaultKeyGeneration = state.generation;
         }
       }
 
@@ -361,7 +361,7 @@ export function createSyncServer(
         readOnly: readOnly || shrinkHeld,
         userId: claims.userId ?? null,
         ...(shrinkHeld ? { shrinkHeld: true } : {}),
-        ...(vaultKey ? { vaultKey } : {}),
+        ...(vaultKey ? { vaultKey, vaultKeyGeneration } : {}),
       };
       return context;
     },
@@ -370,7 +370,15 @@ export function createSyncServer(
       const parsed = parseDocName(data.documentName);
       if (!parsed) return data.document;
       try {
-        const state = await loadDocState(parsed.docId);
+        // W3: a keyed vault's log is sealed; the loading connection's verified
+        // key opens it and is remembered for this in-memory doc, so every later
+        // write (any connection, or a server-side writer) seals with it.
+        const loadCtx = data.context as Partial<SyncContext> | undefined;
+        const crypto: DocCrypto | undefined = loadCtx?.vaultKey
+          ? { vaultId: parsed.vaultId, key: Buffer.from(loadCtx.vaultKey), generation: loadCtx.vaultKeyGeneration ?? 1 }
+          : undefined;
+        if (crypto) docCrypto.set(data.document, crypto);
+        const state = await loadDocState(parsed.docId, pool, crypto);
         if (state) {
           Y.applyUpdate(data.document, state, LOAD_ORIGIN);
         }
@@ -438,7 +446,13 @@ export function createSyncServer(
       // named on `ready.behind` and re-pushed. A crash loses that signal for
       // every other doc too.
       try {
-        await appendUpdate(parsed.docId, data.update);
+        // Captured synchronously above any await: the doc's remembered key, or
+        // this connection's own. Unkeyed vault: undefined, today's path.
+        const ctxKey = (data.context as Partial<SyncContext> | undefined)?.vaultKey;
+        const crypto =
+          docCrypto.get(data.document) ??
+          (ctxKey ? { vaultId: parsed.vaultId, key: Buffer.from(ctxKey), generation: (data.context as Partial<SyncContext>).vaultKeyGeneration ?? 1 } : undefined);
+        await appendUpdate(parsed.docId, data.update, pool, config.compactionThreshold, crypto);
       } catch (err) {
         console.error(
           `[sync] failed to persist an update for ${data.documentName}; the client stays ahead and will re-push:`,

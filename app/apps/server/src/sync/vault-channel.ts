@@ -11,7 +11,7 @@ import { deletedNotesAmong } from "../trash/access.js";
 import { pool } from "../db/pool.js";
 import { vaultKeysEnabled } from "../crypto/config.js";
 import { vaultKeyCache } from "../crypto/key-cache.js";
-import { decodeVk, loadVkCheck } from "../crypto/transport.js";
+import { CLOSE_KEY_REQUIRED, KEY_REQUIRED_CODE, decodeVk, loadVkCheck } from "../crypto/transport.js";
 import { verifyVk } from "../crypto/vk-check.js";
 import { observeCount } from "../metrics/sync-metrics.js";
 import {
@@ -669,19 +669,28 @@ class VaultConnection {
     // W3: a hello may carry the vault key. Verified against `vk_check`, it is
     // held in the process cache for this connection (background work only);
     // released in cleanup(). Flag off or no key: exactly today's path.
-    if (hello.vk && vaultKeysEnabled()) {
-      const vk = decodeVk(hello.vk);
+    // A keyed vault without a valid key is refused: close 4409, err frame
+    // message `key_required` (the desktop asks a member's device for the key).
+    if (vaultKeysEnabled()) {
+      let state;
       try {
-        const state = await loadVkCheck(this.vaultId, pool);
-        if (vk && state && verifyVk(vk, this.vaultId, state.vkCheck) && !this.closed) {
-          this.releaseKey = vaultKeyCache.acquire(this.vaultId, vk, state.generation);
-        }
+        state = await loadVkCheck(this.vaultId, pool);
       } catch (err) {
         console.error("Vault channel key check failed:", (err as Error)?.message ?? err);
-      } finally {
-        vk?.fill(0);
+        return this.fail("key check failed");
       }
       if (this.closed) return;
+      if (state) {
+        const vk = decodeVk(hello.vk);
+        try {
+          if (!vk || !verifyVk(vk, this.vaultId, state.vkCheck)) {
+            return this.fail(KEY_REQUIRED_CODE, CLOSE_KEY_REQUIRED);
+          }
+          this.releaseKey = vaultKeyCache.acquire(this.vaultId, vk, state.generation);
+        } finally {
+          vk?.fill(0);
+        }
+      }
     }
 
     try {
