@@ -1091,7 +1091,9 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   is kept in place. `crypto/null-out.ts` (run from the backfill tick after `complete`) clears plaintext
   only when the backfill is complete, a fresh `encryptionStatus` is 0 and `VAULT_PLAINTEXT_RETENTION_DAYS`
   have passed: per row, open the sealed copy, compare byte for byte, clear under `WHERE plaintext =
-  original AND sealed = compared`; a mismatch keeps both (ids logged). Inline pre-038 version/checkpoint
+  original AND sealed = compared`; a mismatch keeps both (ids logged). `doc_updates`/`doc_snapshots`
+  clears run under the doc's EXCLUSIVE advisory lock (`withDocWriteLock`, the one compaction holds), so
+  a converting compaction can never fold a just-cleared row's plaintext back into its dual row. Inline pre-038 version/checkpoint
   texts are first sealed into `note_texts` by the backfill. At zero plaintext `phase = 'sealed'`;
   `keys/mine` reports `fullyEncrypted`/`plaintextRemaining` as last recorded (never counted per request).
   A keyed re-index leaves stale `note_index`/`blob_text` plaintext that never byte-matches; it is derived,

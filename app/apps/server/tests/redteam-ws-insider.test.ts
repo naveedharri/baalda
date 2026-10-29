@@ -328,6 +328,31 @@ describe("red team: insider over the websockets on a keyed vault", () => {
     expect(ws.frames().some((f) => f.docId === "A")).toBe(true);
   });
 
+  it("live-only hello: updates heard during the ACL read are delivered for readable docs only", async () => {
+    let calls = 0;
+    let releaseFirst: (s: Set<string>) => void = () => {};
+    const ch = channel({
+      verifyToken: (async (t: string) => ({ userId: t, vaultId: "v1" })) as never,
+      listReadableDocs: (async () => {
+        calls++;
+        if (calls === 1) return new Promise<Set<string>>((r) => (releaseFirst = r));
+        return new Set(["A"]);
+      }) as never,
+      listEmpty: (async () => ({ empty: [], truncated: false })) as never,
+      listDeletedAmong: (async () => new Set<string>()) as never,
+    });
+    const ws = new FakeWs();
+    ch.handleConnection(ws as never);
+    ws.hello("u1", { mode: "live-only" });
+    await waitFor(() => calls === 1);
+    await ch.publishDocUpdate("v1", "A", new Uint8Array([7, 7]));
+    await ch.publishDocUpdate("v1", "S", new Uint8Array([9, 9]));
+    releaseFirst(new Set(["A"]));
+    await waitFor(() => ws.controls().some((c) => c.t === "ready"));
+    expect(ws.frames().filter((f) => f.docId === "A")).toHaveLength(1);
+    expect(ws.frames().some((f) => f.docId === "S")).toBe(false);
+  });
+
   it("per-doc socket: refused for the restricted doc even with the key and a minted token", async () => {
     const v = await insiderVault();
     const jwt = await mintSyncToken({ docId: v.secret, vaultId: v.vaultId, readOnly: false, userId: v.member });

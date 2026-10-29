@@ -125,6 +125,8 @@ export interface VaultChannelDeps {
  * Mirrored in `desktop/src/lib/sync/vaultSyncEngine.ts` as `WS_CLOSE_*`.
  */
 export const WS_CLOSE_UNAUTHORIZED = 4401;
+/** Live updates held per connection while its first ACL read is in flight. */
+export const PRE_ACL_UPDATES_MAX = 256;
 export const WS_CLOSE_PROTOCOL = 4400;
 
 export const REGISTRY_COALESCE_MS = 120;
@@ -552,6 +554,8 @@ class VaultConnection {
    */
   private aclLoaded = false;
   private aclDirty = false;
+  /** Live updates heard before that first read lands; replayed through the ACL gate (bounded). */
+  private preAclUpdates: Array<{ docId: string; update: Uint8Array }> | null = [];
   private unsubscribe: (() => void) | null = null;
   /** The user-addressed topic (`invitations` cap only, sync/user-events.ts). */
   private unsubscribeUser: (() => void) | null = null;
@@ -752,10 +756,14 @@ class VaultConnection {
       }
       this.aclLoaded = true;
     } catch (err) {
+      this.preAclUpdates = null;
       console.error("Vault channel ACL resolve failed:", err);
       return this.fail("acl resolve failed");
     }
+    const held = this.preAclUpdates;
+    this.preAclUpdates = null;
     if (this.closed || this.ws.readyState !== this.ws.OPEN) return;
+    for (const u of held ?? []) if (this.readable.has(u.docId)) this.forwardLive(u.docId, u.update);
 
     // Events addressed to this USER (an invitation to another vault) ride
     // whichever vault channel they have open. Opt-in by cap: an old client
@@ -1187,6 +1195,16 @@ class VaultConnection {
     const msg = decodePubsub(payload);
     if (!msg) return;
     if (msg.type === "update") {
+      if (!this.aclLoaded) {
+        // Subscribed, but the readable set is not read yet: hold it (a
+        // live-only client has no backfill to cover it) and judge it after.
+        if (this.preAclUpdates && this.preAclUpdates.length < PRE_ACL_UPDATES_MAX) {
+          this.preAclUpdates.push({ docId: msg.docId, update: msg.update });
+        } else {
+          this.preAclUpdates = null; // overflow: the backfill / next connect re-sends
+        }
+        return;
+      }
       if (this.readable.has(msg.docId)) this.forwardLive(msg.docId, msg.update);
       return;
     }
