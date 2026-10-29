@@ -1495,3 +1495,9 @@ html:not([data-theme="dark"]) .local-sync-btn:hover:not(:disabled) { background:
 .rd-viewonly:not(:has(.rd-viewonly-ask)) { padding-right: 16px; }
 .rd-viewonly-dot.is-lock { background: rgba(251, 198, 74, 0.18); color: #fbc64a; }
 .rd-viewonly-dot.is-lock svg { width: 11px; height: 11px; color: #fbc64a; }
+/* Centre the chip on the page itself, not on a computed window offset. */
+html:not([data-theme="dark"]) .editor-wrap { position: relative; }
+html:not([data-theme="dark"]) .editor-wrap .editor-column,
+html:not([data-theme="dark"]) .editor-wrap .editor-topbar,
+html:not([data-theme="dark"]) .editor-wrap .editor-slot { position: static; }
+.rd-viewonly { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); }
