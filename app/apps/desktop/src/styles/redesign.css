@@ -5,20 +5,27 @@
    ============================================================ */
 
 html:not(.rd-off) {
+  /* Redesign surface tokens (dark values in the dark block below). */
+  --rd-surface: #fff;
+  --rd-cream: #fcfaf6;
+  --rd-fill: #f3efe6;
+  --rd-fill-soft: #f6f3ec;
+  --rd-chip: #1a1920;
+  --rd-ink: 11, 10, 16;
   /* Very light cream canvas, white cards. */
-  --bg-app: #fcfaf6;
-  --bg-card: #fcfaf6;
+  --bg-app: var(--rd-cream);
+  --bg-card: var(--rd-cream);
   --bg-subtle: #f6f3ed;
-  --text-primary: #1a1920;
+  --text-primary: var(--rd-chip);
   --text-secondary: #55545e;
   --text-tertiary: #85848f;
   --accent: #7c5cff;
   --accent-hover: #6a4fe0;
   --accent-soft: #f1edff;
   --accent-soft-hover: #e7e0ff;
-  --border: rgba(11, 10, 16, 0.08);
-  --border-strong: rgba(11, 10, 16, 0.14);
-  --rd-card-shadow: 0 0 0 1px rgba(11, 10, 16, 0.075), 0 1px 2px rgba(11, 10, 16, 0.04), 0 8px 22px -10px rgba(11, 10, 16, 0.13);
+  --border: rgba(var(--rd-ink), 0.08);
+  --border-strong: rgba(var(--rd-ink), 0.14);
+  --rd-card-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.075), 0 1px 2px rgba(var(--rd-ink), 0.04), 0 8px 22px -10px rgba(var(--rd-ink), 0.13);
   --editor-font-size: 17px;
   --inline-title-size: 2.5em;
   --inline-title-weight: 600;
@@ -32,7 +39,7 @@ html:not(.rd-off) .main {
   overflow: visible;
 }
 html:not(.rd-off) .editor-wrap {
-  background: #fff;
+  background: var(--rd-surface);
   border-radius: 22px;
   box-shadow: var(--rd-card-shadow);
   margin: 2px 14px 14px 6px;
@@ -40,24 +47,24 @@ html:not(.rd-off) .editor-wrap {
 
 /* ---- Tabs ---- */
 html:not(.rd-off) .tab-active-bg {
-  background: #fff;
+  background: var(--rd-surface);
   box-shadow: var(--rd-card-shadow);
 }
 html:not(.rd-off) .tab {
-  color: #0b0a10a8;
+  color: rgba(var(--rd-ink), 0.66);
 }
 
 /* ---- Right-hand controls pill ---- */
 html:not(.rd-off) .header-actions {
   border: 0;
-  background: #fff;
+  background: var(--rd-surface);
   box-shadow: var(--rd-card-shadow);
   padding: 4px 6px 4px 5px;
 }
 
 /* ---- Sidebar ---- */
 html:not(.rd-off) .sidebar-header-id {
-  background: #fff;
+  background: var(--rd-surface);
   border-radius: 18px;
   box-shadow: var(--rd-card-shadow);
   padding: 10px 12px 10px 10px;
@@ -72,7 +79,7 @@ html:not(.rd-off) .filetree-head .section-label {
   font-size: 10.5px;
   letter-spacing: 0.7px;
   text-transform: uppercase;
-  color: #0b0a1099;
+  color: rgba(var(--rd-ink), 0.60);
 }
 html:not(.rd-off) .pinned-section {
   border-bottom: 0;
@@ -94,11 +101,11 @@ html:not(.rd-off) .tree-row {
   color: #2e2d36;
 }
 html:not(.rd-off) .tree-row:hover {
-  background: rgba(11, 10, 16, 0.04);
+  background: rgba(var(--rd-ink), 0.04);
 }
 html:not(.rd-off) .tree-row.selected,
 html:not(.rd-off) .tree-row.selected:hover {
-  background: #fff;
+  background: var(--rd-surface);
   box-shadow: var(--rd-card-shadow);
   color: var(--text-primary);
   position: relative;
@@ -187,7 +194,7 @@ html:not(.rd-off) .cm-editor .cm-task-checkbox {
   height: 17px !important;
   border-radius: 5px;
   box-shadow: inset 0 0 0 1.5px rgba(11, 10, 16, 0.3);
-  background: #fff;
+  background: var(--rd-surface);
   position: relative;
   vertical-align: -3px !important;
 }
@@ -202,7 +209,7 @@ html:not(.rd-off) .cm-editor .cm-task-checkbox:checked::after {
   top: 4.5px;
   width: 8px;
   height: 4px;
-  border: 2px solid #fff;
+  border: 2px solid var(--rd-surface);
   border-top: 0;
   border-right: 0;
   transform: rotate(-45deg);
@@ -280,7 +287,7 @@ html:not(.rd-off) .cm-editor .cm-md-link:hover { border-bottom-color: var(--acce
 html:not(.rd-off) .modal {
   border-radius: 24px;
   border: 0;
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.06), 0 30px 70px -20px rgba(11, 10, 16, 0.35);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 30px 70px -20px rgba(11, 10, 16, 0.35);
 }
 html:not(.rd-off) .modal-backdrop {
   background: rgba(11, 10, 16, 0.22);
@@ -407,7 +414,7 @@ html:not(.rd-off) .vault-popover {
   border: 0;
   border-radius: 20px;
   padding: 8px;
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.06), 0 2px 4px rgba(11, 10, 16, 0.05), 0 30px 60px -16px rgba(11, 10, 16, 0.25);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 2px 4px rgba(var(--rd-ink), 0.05), 0 30px 60px -16px rgba(11, 10, 16, 0.25);
 }
 
 /* Profile header at the top of the account menu. */
@@ -434,7 +441,7 @@ html:not(.rd-off) .vault-switcher .menu-item {
   border-radius: 12px;
   font-size: 14px;
 }
-html:not(.rd-off) .account-popover .menu-hint { font-size: 12px; color: #0b0a1099; }
+html:not(.rd-off) .account-popover .menu-hint { font-size: 12px; color: rgba(var(--rd-ink), 0.60); }
 html:not(.rd-off) .account-popover .menu-icon,
 html:not(.rd-off) .settings-nav .menu-icon,
 html:not(.rd-off) .settings-tabs .menu-icon {
@@ -478,7 +485,7 @@ html:not(.rd-off) .vault-switcher::before {
   font: 500 10.5px var(--font-mono);
   letter-spacing: 0.7px;
   text-transform: uppercase;
-  color: #0b0a1099;
+  color: rgba(var(--rd-ink), 0.60);
 }
 html:not(.rd-off) .vault-switcher .vault-card {
   min-height: 58px;
@@ -509,7 +516,7 @@ html:not(.rd-off) .vault-switcher .vault-card.current {
 }
 html:not(.rd-off) .vault-switcher .vault-card-kbd {
   font: 11px var(--font-mono);
-  color: #0b0a1070;
+  color: rgba(var(--rd-ink), 0.44);
   background: var(--bg-subtle);
   padding: 3px 6px;
   border-radius: 6px;
@@ -658,7 +665,7 @@ html:not(.rd-off) { --inline-title-weight: 600; }
 html:not(.rd-off) .cm-editor .cm-content { color: #2e2d36; }
 
 /* ---- Tree: children indent under the folder name, like the mockup ---- */
-html:not(.rd-off) .filetree-scroll .tree-row:not(.is-dir) .tree-glyph { color: #0b0a1066; }
+html:not(.rd-off) .filetree-scroll .tree-row:not(.is-dir) .tree-glyph { color: rgba(var(--rd-ink), 0.40); }
 html:not(.rd-off) .filetree-scroll .tree-row.selected .tree-glyph { color: var(--accent); }
 html:not(.rd-off) .sidebar .tree-row { height: 32px; }
 
@@ -685,14 +692,14 @@ html:not(.rd-off) .settings-page-header {
   border-bottom: 0;
   padding: var(--sp-5) var(--sp-6) var(--sp-2);
 }
-html:not(.rd-off) .settings-eyebrow { font-family: var(--font-mono); font-weight: 500; letter-spacing: 0.7px; color: #0b0a1099; }
+html:not(.rd-off) .settings-eyebrow { font-family: var(--font-mono); font-weight: 500; letter-spacing: 0.7px; color: rgba(var(--rd-ink), 0.60); }
 html:not(.rd-off) .settings-page-header .icon-btn {
-  background: #fff; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
+  background: var(--rd-surface); box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
 }
 html:not(.rd-off) .settings-body { padding-top: var(--sp-3); }
 html:not(.rd-off) .settings-nav { width: 220px; }
 html:not(.rd-off) .settings-nav .menu-item { min-height: 36px; border-radius: var(--radius-md); font-size: var(--fs-md); gap: var(--sp-2); }
-html:not(.rd-off) .settings-nav .menu-item.active { background: #fff; box-shadow: var(--rd-card-shadow); color: var(--text-primary); }
+html:not(.rd-off) .settings-nav .menu-item.active { background: var(--rd-surface); box-shadow: var(--rd-card-shadow); color: var(--text-primary); }
 .settings-nav .menu-item:nth-of-type(5n + 1) .menu-icon { --rd-tint: #cfc4ff66; --rd-ink: #6a4fe0; }
 .settings-nav .menu-item:nth-of-type(5n + 2) .menu-icon { --rd-tint: #9bd8a966; --rd-ink: #3f8850; }
 .settings-nav .menu-item:nth-of-type(5n + 3) .menu-icon { --rd-tint: #9ed4ef77; --rd-ink: #427e8a; }
@@ -713,7 +720,7 @@ html:not(.rd-off) .settings-content > .menu-sep { display: none; }
 html:not(.rd-off) .settings-content > .vault-icon-settings,
 html:not(.rd-off) .settings-content > .toggle-row,
 html:not(.rd-off) .settings-content > .join-code-row {
-  background: #fff;
+  background: var(--rd-surface);
   border-radius: var(--radius-xl);
   box-shadow: var(--rd-card-shadow);
   padding: var(--sp-5);
@@ -724,7 +731,7 @@ html:not(.rd-off) .settings-content > .subhead {
   font-family: var(--font-mono);
   font-size: 10.5px;
   letter-spacing: 0.7px;
-  color: #0b0a1099;
+  color: rgba(var(--rd-ink), 0.60);
 }
 html:not(.rd-off) .settings-content .vault-root-path { background: var(--bg-app); border-radius: var(--radius-md); }
 html:not(.rd-off) .vault-icon-option { border-radius: 10px; }
@@ -752,9 +759,9 @@ html:not(.rd-off) .identity-line1 { font-size: var(--fs-sm); }
    sit in its top row. No floating card, no cream strip.
    ============================================================ */
 html:not(.rd-off) .main {
-  background: #fff;
+  background: var(--rd-surface);
   border-top-left-radius: var(--radius-xl);
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.06), 0 8px 24px rgba(20, 20, 40, 0.06);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 8px 24px rgba(20, 20, 40, 0.06);
 }
 html:not(.rd-off) .editor-wrap {
   margin: 0;
@@ -787,14 +794,14 @@ html:not(.rd-off) .settings-body { padding: var(--sp-6) var(--sp-6) var(--sp-6) 
 .rd-settings-close {
   position: absolute; top: var(--sp-5); right: var(--sp-5); z-index: 3;
   width: 34px; height: 34px; display: grid; place-items: center;
-  background: #fff !important; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
+  background: var(--rd-surface) !important; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
 }
 .rd-settings-id { display: flex; align-items: center; gap: var(--sp-3); padding: 0 var(--sp-1) var(--sp-4); }
 .rd-settings-id .vault-tile { width: 40px; height: 40px; border-radius: 11px; flex: none; }
 .rd-settings-id .settings-title h1 { font-size: var(--fs-md); font-weight: 600; }
 .rd-settings-group {
   padding: var(--sp-3) var(--sp-2) var(--sp-1);
-  font: 500 10px var(--font-mono); letter-spacing: 0.7px; text-transform: uppercase; color: #0b0a1088;
+  font: 500 10px var(--font-mono); letter-spacing: 0.7px; text-transform: uppercase; color: rgba(var(--rd-ink), 0.53);
 }
 .rd-settings-head { margin-bottom: var(--sp-2); padding-right: 48px; }
 .rd-settings-head p { margin: 4px 0 0; font-size: var(--fs-sm); color: var(--text-secondary); }
@@ -811,7 +818,7 @@ html:not(.rd-off) .vault-icon-settings .vault-icon-head { display: contents; }
 html:not(.rd-off) .vault-icon-settings .vault-icon-preview {
   grid-row: 1 / span 2; grid-column: 1;
   display: grid; place-items: center; align-self: stretch; min-height: 180px;
-  border-radius: var(--radius-lg); background: var(--bg-app); box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.05);
+  border-radius: var(--radius-lg); background: var(--bg-app); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.05);
 }
 html:not(.rd-off) .vault-icon-settings .vault-icon-preview .vault-tile { width: 76px; height: 76px; border-radius: 20px; box-shadow: 0 12px 24px -10px rgba(11, 10, 16, 0.35); }
 html:not(.rd-off) .vault-icon-settings .vault-icon-head-text { grid-column: 2; grid-row: 1; }
@@ -824,7 +831,7 @@ html:not(.rd-off) .vault-icon-option.active { background: var(--accent); color: 
 /* Settings menu: the selected pill stays inside the menu column. */
 html:not(.rd-off) .settings-nav { padding: 2px 8px 2px 2px; overflow-x: hidden; }
 html:not(.rd-off) .settings-nav .menu-item { width: 100%; box-sizing: border-box; }
-html:not(.rd-off) .settings-nav .menu-item.active { box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 2px 6px -2px rgba(11, 10, 16, 0.1); }
+html:not(.rd-off) .settings-nav .menu-item.active { box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 2px 6px -2px rgba(var(--rd-ink), 0.1); }
 
 /* ---- Inner settings pages ---- */
 /* Header actions clear the close button. */
@@ -833,7 +840,7 @@ html:not(.rd-off) .members-access-intro { color: var(--text-secondary); font-siz
 
 /* Everyone / New members rows: one white card. */
 html:not(.rd-off) .members-access-rows {
-  background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow);
+  background: var(--rd-surface); border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow);
   padding: 4px var(--sp-4);
 }
 html:not(.rd-off) .members-access-row-icon {
@@ -843,52 +850,52 @@ html:not(.rd-off) .members-access-row + .members-access-row .members-access-row-
 
 /* People table: a white card with a quiet header row. */
 html:not(.rd-off) .members-table {
-  background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow);
+  background: var(--rd-surface); border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow);
   border: 0 !important; overflow: hidden; border-collapse: separate; border-spacing: 0;
 }
 html:not(.rd-off) .members-table th {
-  background: var(--bg-app) !important; font: 500 10.5px var(--font-mono); letter-spacing: 0.6px; text-transform: uppercase; color: #0b0a1088;
+  background: var(--bg-app) !important; font: 500 10.5px var(--font-mono); letter-spacing: 0.6px; text-transform: uppercase; color: rgba(var(--rd-ink), 0.53);
 }
 html:not(.rd-off) .members-table td,
-html:not(.rd-off) .members-table th { border-color: rgba(11, 10, 16, 0.06) !important; }
+html:not(.rd-off) .members-table th { border-color: rgba(var(--rd-ink), 0.06) !important; }
 html:not(.rd-off) .members-table tr.is-clickable:hover td { background: var(--bg-app); }
 html:not(.rd-off) .members-access-search {
-  background: #fff; border: 0; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
+  background: var(--rd-surface); border: 0; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
 }
 html:not(.rd-off) .members-access-mcp-hint { color: var(--text-tertiary); }
 
 /* Profile: name card and segmented tabs. */
 html:not(.rd-off) .member-profile-head {
-  background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); padding: var(--sp-4);
+  background: var(--rd-surface); border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); padding: var(--sp-4);
 }
 html:not(.rd-off) .member-profile-head .avatar { width: 40px; height: 40px; }
 html:not(.rd-off) .member-profile-name { font: 600 var(--fs-lg) var(--font-display); }
 html:not(.rd-off) .member-profile-tabs {
   display: inline-flex; gap: 2px; padding: 3px; border: 0 !important;
-  background: rgba(11, 10, 16, 0.05); border-radius: var(--radius-md); align-self: flex-start;
+  background: rgba(var(--rd-ink), 0.05); border-radius: var(--radius-md); align-self: flex-start;
 }
 html:not(.rd-off) .member-profile-tab {
   border: 0 !important; border-radius: 8px; padding: 6px 14px; font-size: var(--fs-sm); color: var(--text-secondary);
 }
 html:not(.rd-off) .member-profile-tab::after { display: none !important; }
 html:not(.rd-off) .member-profile-tab.active {
-  background: #fff; color: var(--text-primary); font-weight: 500; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1);
+  background: var(--rd-surface); color: var(--text-primary); font-weight: 500; box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.1);
 }
 html:not(.rd-off) .member-profile-access > .members-access-row {
-  background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); padding: var(--sp-3) var(--sp-4); border: 0;
+  background: var(--rd-surface); border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); padding: var(--sp-3) var(--sp-4); border: 0;
 }
 
 /* Access board: white column cards with a soft tinted header. */
 html:not(.rd-off) .access-board-column {
-  background: #fff; border: 0 !important; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); overflow: hidden;
+  background: var(--rd-surface); border: 0 !important; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); overflow: hidden;
 }
-html:not(.rd-off) .access-board-column-head { border-bottom: 1px solid rgba(11, 10, 16, 0.05); }
+html:not(.rd-off) .access-board-column-head { border-bottom: 1px solid rgba(var(--rd-ink), 0.05); }
 html:not(.rd-off) .access-board-row { border-radius: var(--radius-sm); margin: 1px 6px; font-size: var(--fs-sm); }
 html:not(.rd-off) .access-board-row:hover { background: var(--bg-app); }
-html:not(.rd-off) .access-board-icon { color: #0b0a1070; }
+html:not(.rd-off) .access-board-icon { color: rgba(var(--rd-ink), 0.44); }
 html:not(.rd-off) .access-board-empty { border-radius: var(--radius-lg); }
-html:not(.rd-off) .member-access-view { background: rgba(11, 10, 16, 0.05); border: 0; border-radius: var(--radius-md); padding: 3px; }
-html:not(.rd-off) .member-access-view-btn.is-active { background: #fff; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1); }
+html:not(.rd-off) .member-access-view { background: rgba(var(--rd-ink), 0.05); border: 0; border-radius: var(--radius-md); padding: 3px; }
+html:not(.rd-off) .member-access-view-btn.is-active { background: var(--rd-surface); box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.1); }
 
 /* Name and icon card, lighter: small preview inline, compact picker. */
 html:not(.rd-off) .settings-content > .vault-icon-settings { display: block; padding: var(--sp-4); }
@@ -927,7 +934,7 @@ html:not(.rd-off) .vault-icon-option .vault-icon-svg { width: 16px; height: 16px
    ============================================================ */
 html:not(.rd-off) .modal {
   padding: var(--sp-6);
-  background: #fff;
+  background: var(--rd-surface);
 }
 html:not(.rd-off) .modal .confirm-title,
 html:not(.rd-off) .modal .modal-header h2 {
@@ -946,7 +953,7 @@ html:not(.rd-off) .modal textarea,
 html:not(.rd-off) .invite-chips {
   background: var(--bg-app) !important;
   border: 0 !important;
-  box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06) !important;
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06) !important;
   border-radius: var(--radius-md) !important;
   min-height: 42px;
   font-size: var(--fs-md);
@@ -954,7 +961,7 @@ html:not(.rd-off) .invite-chips {
 html:not(.rd-off) .modal input:focus,
 html:not(.rd-off) .modal textarea:focus,
 html:not(.rd-off) .invite-chips:focus-within {
-  background: #fff !important;
+  background: var(--rd-surface) !important;
   box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft) !important;
   outline: none;
 }
@@ -964,14 +971,14 @@ html:not(.rd-off) .invite-people-fields { gap: var(--sp-2); }
 html:not(.rd-off) .invite-field {
   background: var(--bg-app);
   border: 0 !important;
-  box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06);
   border-radius: var(--radius-md);
   min-width: 0;
   overflow: hidden;
 }
 html:not(.rd-off) .invite-field > *:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 html:not(.rd-off) .invite-field-label {
-  font: 500 10px var(--font-mono); letter-spacing: 0.6px; text-transform: uppercase; color: #0b0a1088;
+  font: 500 10px var(--font-mono); letter-spacing: 0.6px; text-transform: uppercase; color: rgba(var(--rd-ink), 0.53);
 }
 
 /* Join code: a quiet panel with the code in mono. */
@@ -992,7 +999,7 @@ html:not(.rd-off) .confirm-actions .ghost-pill,
 html:not(.rd-off) .confirm-actions button.primary {
   height: 36px; padding: 0 var(--sp-4); border-radius: var(--radius-md); font-weight: 500; font-size: var(--fs-sm);
 }
-html:not(.rd-off) .confirm-actions .ghost-pill { border: 0; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.1); background: #fff; color: var(--text-primary); }
+html:not(.rd-off) .confirm-actions .ghost-pill { border: 0; box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.1); background: var(--rd-surface); color: var(--text-primary); }
 html:not(.rd-off) .confirm-actions button.primary { box-shadow: 0 8px 18px -8px rgba(124, 92, 255, 0.6); }
 html:not(.rd-off) .confirm-actions button.primary:disabled { background: var(--accent); opacity: 0.4; box-shadow: none; }
 html:not(.rd-off) .confirm-actions button.danger,
@@ -1018,12 +1025,12 @@ html:not(.rd-off) .vault-icon-grid { gap: 2px; }
 html:not(.rd-off) .vault-icon-option,
 html:not(.rd-off) .vault-icon-option.active {
   background: transparent !important;
-  color: #0b0a1099 !important;
+  color: rgba(var(--rd-ink), 0.60) !important;
   border: 0 !important;
   box-shadow: none !important;
   border-radius: 8px;
 }
-html:not(.rd-off) .vault-icon-option:hover { background: rgba(11, 10, 16, 0.05) !important; color: var(--text-primary) !important; }
+html:not(.rd-off) .vault-icon-option:hover { background: rgba(var(--rd-ink), 0.05) !important; color: var(--text-primary) !important; }
 html:not(.rd-off) .vault-icon-option.active {
   background: var(--accent-soft) !important;
   color: #4a2fc7 !important;
@@ -1067,9 +1074,9 @@ html:not(.rd-off) .vault-icon-settings .vault-icon-customise {
   padding: var(--sp-3) var(--sp-4) var(--sp-4);
   border-radius: var(--radius-lg);
   background: var(--bg-subtle);
-  box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06);
 }
-html:not(.rd-off) .vault-icon-option:hover { background: rgba(11, 10, 16, 0.06) !important; }
+html:not(.rd-off) .vault-icon-option:hover { background: rgba(var(--rd-ink), 0.06) !important; }
 
 /* Path field like the Profile inputs. */
 html:not(.rd-off) .settings-content .vault-root-path { background: var(--bg-subtle); padding: 10px 12px; }
@@ -1085,7 +1092,7 @@ html:not(.rd-off) .mcp-token-dialog .skills-form-head {
   display: flex; align-items: center; gap: 12px;
   padding: var(--sp-5) var(--sp-5) var(--sp-4);
   background: linear-gradient(180deg, #f6f3ff, #fff);
-  border-bottom: 1px solid rgba(11, 10, 16, 0.05);
+  border-bottom: 1px solid rgba(var(--rd-ink), 0.05);
 }
 html:not(.rd-off) .mcp-token-dialog .skills-form-head::before {
   content: ""; width: 38px; height: 38px; flex: none; border-radius: 11px;
@@ -1094,7 +1101,7 @@ html:not(.rd-off) .mcp-token-dialog .skills-form-head::before {
 }
 html:not(.rd-off) .mcp-token-dialog .skills-form-head .confirm-title { margin: 0; flex: 1; font-size: var(--fs-lg); }
 html:not(.rd-off) .mcp-token-dialog .skills-form-head .icon-btn {
-  width: 30px; height: 30px; border-radius: 9px; background: #fff; box-shadow: var(--rd-card-shadow); display: grid; place-items: center; font-size: 12px;
+  width: 30px; height: 30px; border-radius: 9px; background: var(--rd-surface); box-shadow: var(--rd-card-shadow); display: grid; place-items: center; font-size: 12px;
 }
 html:not(.rd-off) .mcp-token-dialog > :not(.skills-form-head) { margin-left: var(--sp-5); margin-right: var(--sp-5); }
 html:not(.rd-off) .mcp-token-dialog .skills-form-intro {
@@ -1104,13 +1111,13 @@ html:not(.rd-off) .mcp-token-dialog .skills-form-intro {
 /* Token: a clean mono chip. */
 html:not(.rd-off) .mcp-token-dialog .mcp-field {
   margin-top: var(--sp-3);
-  background: #fff; border: 0; border-radius: var(--radius-md);
+  background: var(--rd-surface); border: 0; border-radius: var(--radius-md);
   box-shadow: 0 0 0 1px rgba(124, 92, 255, 0.35), 0 0 0 4px rgba(124, 92, 255, 0.08);
 }
 html:not(.rd-off) .mcp-token-dialog .mcp-field-value { font-size: 13px; letter-spacing: 0.2px; color: #2a1a7a; }
 /* Setup header and app switcher. */
 html:not(.rd-off) .mcp-token-dialog .mcp-setup-head { margin-top: var(--sp-5); }
-html:not(.rd-off) .mcp-token-dialog .mcp-setup-title { font: 500 10.5px var(--font-mono); letter-spacing: 0.7px; text-transform: uppercase; color: #0b0a1088; }
+html:not(.rd-off) .mcp-token-dialog .mcp-setup-title { font: 500 10.5px var(--font-mono); letter-spacing: 0.7px; text-transform: uppercase; color: rgba(var(--rd-ink), 0.53); }
 html:not(.rd-off) .mcp-token-dialog .mcp-client-tab { font-size: var(--fs-sm); padding: 5px 12px; border-radius: 8px; color: var(--text-secondary); }
 html:not(.rd-off) .mcp-token-dialog .mcp-client-tab.is-active { color: var(--text-primary); font-weight: 500; }
 /* Command: a dark terminal block. */
@@ -1129,7 +1136,7 @@ html:not(.rd-off) .mcp-token-dialog .mcp-block button { color: #b9b4d6; }
 html:not(.rd-off) .mcp-token-dialog .mcp-block button:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
 html:not(.rd-off) .mcp-token-dialog .mcp-setup-hint { margin-top: 8px; font-size: var(--fs-xs); color: var(--text-tertiary); }
 html:not(.rd-off) .mcp-token-dialog .confirm-actions {
-  margin: var(--sp-5) 0 0; padding: var(--sp-4) var(--sp-5); background: var(--bg-app); border-top: 1px solid rgba(11, 10, 16, 0.05);
+  margin: var(--sp-5) 0 0; padding: var(--sp-4) var(--sp-5); background: var(--bg-app); border-top: 1px solid rgba(var(--rd-ink), 0.05);
 }
 html:not(.rd-off) .mcp-token-dialog > .confirm-actions { margin-left: 0; margin-right: 0; }
 html:not(.rd-off) .mcp-token-dialog input { margin-top: var(--sp-3); }
@@ -1143,10 +1150,10 @@ html:not(.rd-off) .editor-lockbanner {
   width: auto !important;
   max-width: 100%;
   padding: 6px 14px 6px 6px !important;
-  background: #fff !important;
+  background: var(--rd-surface) !important;
   border: 0 !important;
   border-radius: 999px !important;
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 4px 14px -6px rgba(11, 10, 16, 0.15) !important;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 4px 14px -6px rgba(11, 10, 16, 0.15) !important;
 }
 html:not(.rd-off) .editor-lockbanner-icon {
   width: 28px !important; height: 28px !important; border-radius: 50% !important;
@@ -1202,7 +1209,7 @@ html:not(.rd-off) .sidebar-header-id {
   padding: 2px 4px;
   border-radius: var(--radius-md);
 }
-html:not(.rd-off) .sidebar-header-id:hover { background: rgba(11, 10, 16, 0.04); }
+html:not(.rd-off) .sidebar-header-id:hover { background: rgba(var(--rd-ink), 0.04); }
 html:not(.rd-off) .sidebar-header-id .vault-tile { width: 30px !important; height: 30px !important; border-radius: 8px !important; }
 html:not(.rd-off) .vault-name { font-size: var(--fs-lg); font-weight: 700; }
 html:not(.rd-off) .vault-path { font-size: var(--fs-xs); }
@@ -1305,8 +1312,8 @@ html:not(.rd-off) .account-popover > .menu-item .menu-icon { background: none !i
 /* Selection is a warm neutral, not purple. */
 html:not(.rd-off) .tree-row.selected,
 html:not(.rd-off) .tree-row.selected:hover,
-html:not(.rd-off) .home-sidebar-row.selected { background: rgba(11, 10, 16, 0.06) !important; }
-html:not(.rd-off) .tree-row:hover { background: rgba(11, 10, 16, 0.035); }
+html:not(.rd-off) .home-sidebar-row.selected { background: rgba(var(--rd-ink), 0.06) !important; }
+html:not(.rd-off) .tree-row:hover { background: rgba(var(--rd-ink), 0.035); }
 html:not(.rd-off) .tree-row.selected .tree-glyph { color: var(--text-primary); }
 
 /* Vault header: a 40px icon, name and path centred against it, on the
@@ -1350,7 +1357,7 @@ html:not(.rd-off) .rd-prof { padding: 8px; gap: 10px; margin: 0 0 6px; }
 html:not(.rd-off) .account-popover > .menu-item { padding: 4px 8px; gap: 10px; min-height: 32px; }
 html:not(.rd-off) .account-popover > .menu-item .menu-icon { width: 16px !important; height: 16px !important; padding: 0 !important; margin: 0 12px; }
 html:not(.rd-off) .account-popover .menu-sep { margin: 4px 8px; }
-html:not(.rd-off) .vault-switcher .vault-card.current { background: rgba(11, 10, 16, 0.06) !important; }
+html:not(.rd-off) .vault-switcher .vault-card.current { background: rgba(var(--rd-ink), 0.06) !important; }
 
 /* ============================================================
    Professional pass: inline forms in the switcher, Vaults page
@@ -1361,28 +1368,28 @@ html:not(.rd-off) .vault-switcher .vault-card.current { background: rgba(11, 10,
 html:not(.rd-off) .menu-create-org {
   position: relative; display: flex; align-items: center; gap: 0;
   margin: 2px 4px; padding: 3px; border-radius: 10px;
-  background: var(--bg-subtle); box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.08);
+  background: var(--bg-subtle); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.08);
   transition: box-shadow 120ms ease, background 120ms ease;
 }
 html:not(.rd-off) .menu-create-org:focus-within {
-  background: #fff; box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft);
+  background: var(--rd-surface); box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft);
 }
 html:not(.rd-off) .menu-create-org input {
   flex: 1; min-width: 0; height: 30px; padding: 0 8px;
   border: 0 !important; outline: none !important; box-shadow: none !important;
   background: transparent !important; font: 13px var(--font-body); color: var(--text-primary);
 }
-html:not(.rd-off) .menu-create-org input::placeholder { color: #0b0a1066; }
+html:not(.rd-off) .menu-create-org input::placeholder { color: rgba(var(--rd-ink), 0.40); }
 html:not(.rd-off) .menu-create-org button.primary.sm {
   height: 28px; padding: 0 12px; border-radius: 8px; font-size: 12.5px; font-weight: 500;
   box-shadow: none; flex: none;
 }
-html:not(.rd-off) .menu-create-org button.primary.sm:disabled { background: #0b0a1014; color: #0b0a1066; opacity: 1; }
+html:not(.rd-off) .menu-create-org button.primary.sm:disabled { background: rgba(var(--rd-ink), 0.08); color: rgba(var(--rd-ink), 0.40); opacity: 1; }
 
 /* ---- Account settings → Vaults ---- */
 html:not(.rd-off) .account-vaults-head,
 html:not(.rd-off) .settings-content .subhead {
-  font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: #0b0a1088;
+  font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: rgba(var(--rd-ink), 0.53);
   display: flex; align-items: center;
 }
 html:not(.rd-off) .vault-hdr-btn,
@@ -1394,17 +1401,17 @@ html:not(.rd-off) .settings-content .subhead button {
 html:not(.rd-off) .vault-hdr-btn.secondary,
 html:not(.rd-off) .settings-content .subhead .ghost-pill,
 html:not(.rd-off) .settings-content .subhead button.secondary {
-  background: #fff; color: var(--text-primary); border: 0; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1);
+  background: var(--rd-surface); color: var(--text-primary); border: 0; box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1);
 }
 
 /* Vault cards: a clean tile with the icon, name and one status line. */
 html:not(.rd-off) .vault-grid { gap: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
 html:not(.rd-off) .vault-grid-card {
-  background: #fff; border: 0; border-radius: 14px; padding: 14px;
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.04);
+  background: var(--rd-surface); border: 0; border-radius: 14px; padding: 14px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.04);
   transition: box-shadow 140ms ease, transform 140ms ease; min-height: 0;
 }
-html:not(.rd-off) .vault-grid-card:hover { box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1), 0 10px 24px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px); }
+html:not(.rd-off) .vault-grid-card:hover { box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1), 0 10px 24px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px); }
 html:not(.rd-off) .vault-grid-card.current {
   border-color: transparent !important; outline: 0;
   box-shadow: 0 0 0 1.5px var(--accent), 0 12px 28px -16px rgba(124, 92, 255, 0.45);
@@ -1421,14 +1428,14 @@ html:not(.rd-off) .vault-grid-card:not(.current) .vault-switch-chip { background
 
 /* Folder location: one field with its actions inside. */
 html:not(.rd-off) .join-code-row {
-  background: #fff; border-radius: 12px; padding: 6px 6px 6px 14px; gap: 6px;
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.08);
+  background: var(--rd-surface); border-radius: 12px; padding: 6px 6px 6px 14px; gap: 6px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.08);
 }
 html:not(.rd-off) .join-code-row .vault-root-path { background: transparent !important; padding: 0; font-size: 12.5px; flex: 1; }
 html:not(.rd-off) .join-code-row .link-btn { height: 30px; padding: 0 10px; border-radius: 8px; font-size: 12.5px; }
 html:not(.rd-off) .join-code-row .link-btn:hover { background: var(--bg-subtle); }
 html:not(.rd-off) .settings-content .subhead .member-access-view-btn { height: 26px; width: 30px; padding: 0; box-shadow: none; background: transparent; display: grid; place-items: center; }
-html:not(.rd-off) .settings-content .subhead .member-access-view-btn.is-active { background: #fff; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1); }
+html:not(.rd-off) .settings-content .subhead .member-access-view-btn.is-active { background: var(--rd-surface); box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.1); }
 html:not(.rd-off) .settings-content .subhead .member-access-view-btn svg { width: 15px; height: 15px; }
 html:not(.rd-off) .rd-settings-close:focus:not(:focus-visible) { outline: none; box-shadow: var(--rd-card-shadow); }
 
@@ -1455,7 +1462,7 @@ html:not(.rd-off) .editor-wrap:has(.rd-viewonly)::after {
   position: fixed; left: calc(var(--sidebar-layout-w, 300px) + (100vw - var(--sidebar-layout-w, 300px)) / 2); bottom: 22px;
   transform: translateX(-50%); z-index: 40;
   display: flex; align-items: center; gap: 10px; padding: 7px 7px 7px 14px;
-  border-radius: 999px; background: #1a1920; color: #fff; font-size: 13px; white-space: nowrap;
+  border-radius: 999px; background: var(--rd-chip); color: #fff; font-size: 13px; white-space: nowrap;
   box-shadow: 0 14px 30px -12px rgba(11, 10, 16, 0.55);
   animation: rd-rise 260ms var(--ease) both;
 }
@@ -1463,7 +1470,7 @@ html:not(.rd-off) .editor-wrap:has(.rd-viewonly)::after {
 .rd-viewonly-label { font-weight: 500; }
 .rd-viewonly-who { display: flex; align-items: center; gap: 6px; color: rgba(255, 255, 255, 0.65); padding: 0 6px 0 10px; border-left: 1px solid rgba(255, 255, 255, 0.15); }
 .rd-viewonly-dot { width: 20px; height: 20px; border-radius: 50%; background: #3f8850; color: #fff; display: grid; place-items: center; font: 600 10px var(--font-body); }
-.rd-viewonly-ask { border: 0; border-radius: 99px; padding: 4px 13px; background: #fbc64a; color: #1a1920; font: 600 12.5px var(--font-body); cursor: pointer; }
+.rd-viewonly-ask { border: 0; border-radius: 99px; padding: 4px 13px; background: #fbc64a; color: var(--rd-chip); font: 600 12.5px var(--font-body); cursor: pointer; }
 .rd-viewonly-ask:hover:not(:disabled) { background: #ffd56b; }
 .rd-viewonly-ask:disabled { background: rgba(255, 255, 255, 0.15); color: #fff; cursor: default; }
 .rd-viewonly:not(:has(.rd-viewonly-ask)) { padding-right: 12px; }
@@ -1483,7 +1490,7 @@ html:not(.rd-off) .local-sync-row {
   display: flex; align-items: center; gap: 8px;
   margin: 0 8px 6px; padding: 5px 5px 5px 8px; min-height: 0;
   border: 0; border-radius: 9px;
-  background: #fff; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.06);
+  background: var(--rd-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06);
 }
 html:not(.rd-off) .local-sync-icon {
   width: 20px !important; height: 20px !important; flex: none; padding: 3px; box-sizing: border-box;
@@ -1534,7 +1541,7 @@ html:not(.rd-off) .home-sidebar-menu { position: absolute; right: 2px; top: 50%;
    left edge (12px) and one right edge. */
 html:not(.rd-off) .filetree-scroll { scrollbar-gutter: stable; }
 html:not(.rd-off) .filetree-scroll::-webkit-scrollbar { width: 8px; }
-html:not(.rd-off) .filetree-scroll::-webkit-scrollbar-thumb { background: rgba(11, 10, 16, 0.14); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+html:not(.rd-off) .filetree-scroll::-webkit-scrollbar-thumb { background: rgba(var(--rd-ink), 0.14); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
 html:not(.rd-off) .filetree-scroll::-webkit-scrollbar-track { background: transparent; }
 html:not(.rd-off) .home-section, html:not(.rd-off) .pinned-section { padding-right: 8px !important; }
 /* Row highlight drawn as an inset layer: starts at x=12 like the Home box and
@@ -1545,8 +1552,8 @@ html:not(.rd-off) .sidebar .tree-row::after {
   border-radius: 9px; z-index: -1; background: var(--rd-row-bg, transparent);
   transition: background 90ms linear;
 }
-html:not(.rd-off) .sidebar .tree-row:hover { --rd-row-bg: rgba(11, 10, 16, 0.04); }
-html:not(.rd-off) .sidebar .tree-row.selected { --rd-row-bg: rgba(11, 10, 16, 0.065); }
+html:not(.rd-off) .sidebar .tree-row:hover { --rd-row-bg: rgba(var(--rd-ink), 0.04); }
+html:not(.rd-off) .sidebar .tree-row.selected { --rd-row-bg: rgba(var(--rd-ink), 0.065); }
 html:not(.rd-off) .sidebar .tree-row.drop-target { --rd-row-bg: var(--accent-soft); }
 /* Home box spans the same 12px → row-end line. */
 html:not(.rd-off) .home-sidebar-row { width: calc(var(--sidebar-layout-w, 300px) - 22px) !important; }
@@ -1558,13 +1565,13 @@ html:not(.rd-off) .sidebar .filetree-scroll .tree-sync { transform: translateX(8
 html:not(.rd-off) .sidebar .filetree-scroll .tree-more { transform: translateX(-20px); }
 html:not(.rd-off) .sidebar .filetree-scroll .tree-row:hover .tree-sync { opacity: 0; }
 /* Bring the menu hints back, right-aligned and quiet. */
-html:not(.rd-off) .account-popover .menu-hint { display: inline !important; margin-left: auto; font-size: 11.5px; color: #0b0a1080; }
+html:not(.rd-off) .account-popover .menu-hint { display: inline !important; margin-left: auto; font-size: 11.5px; color: rgba(var(--rd-ink), 0.50); }
 .rd-status-chip-text small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Empty status: a quiet field with three one-tap shortcuts. */
 .rd-status-field {
   display: flex; align-items: center; gap: 2px; padding: 3px;
-  border-radius: 10px; background: #fff; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.12);
+  border-radius: 10px; background: var(--rd-surface); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.12);
 }
 .rd-status-field-main {
   flex: 1; display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 8px;
@@ -1639,7 +1646,7 @@ html:not(.rd-off) .skills-shortcut-row {
   height: 36px; margin: 0 0 0 12px; padding: 0 8px; border-radius: 9px;
   width: calc(var(--sidebar-layout-w, 300px) - 54px); box-sizing: border-box;
 }
-html:not(.rd-off) .skills-shortcut-row:hover { background: rgba(11, 10, 16, 0.04); }
+html:not(.rd-off) .skills-shortcut-row:hover { background: rgba(var(--rd-ink), 0.04); }
 html:not(.rd-off) .skills-shortcut-row > svg:first-child,
 html:not(.rd-off) .skills-shortcut-row .skills-shortcut-icon {
   width: 20px; height: 20px; padding: 3px; box-sizing: border-box; border-radius: 6px;
@@ -1662,14 +1669,14 @@ html:not(.rd-off) .skills-shortcut {
 }
 html:not(.rd-off) .skills-shortcut::before {
   content: ""; position: absolute; top: 0; left: 20px;
-  width: calc(var(--sidebar-layout-w, 300px) - 62px); height: 1px; background: rgba(11, 10, 16, 0.08);
+  width: calc(var(--sidebar-layout-w, 300px) - 62px); height: 1px; background: rgba(var(--rd-ink), 0.08);
 }
 
 /* ---- No grey fills on controls: white with a hairline, violet when active ---- */
 html:not(.rd-off) .member-access-view,
 html:not(.rd-off) .settings-content .subhead .member-access-view {
-  background: #fff !important; border: 0 !important; padding: 3px; border-radius: 11px;
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1) !important;
+  background: var(--rd-surface) !important; border: 0 !important; padding: 3px; border-radius: 11px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1) !important;
 }
 html:not(.rd-off) .member-access-view-btn { background: transparent !important; box-shadow: none !important; color: var(--text-secondary); border-radius: 8px; }
 html:not(.rd-off) .member-access-view-btn:hover { color: var(--text-primary); }
@@ -1679,27 +1686,27 @@ html:not(.rd-off) .settings-content .subhead .member-access-view-btn.is-active {
 }
 html:not(.rd-off) button.secondary,
 html:not(.rd-off) .skills-hdr-btn.secondary {
-  background: #fff !important; border: 0 !important; color: var(--text-primary);
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1) !important;
+  background: var(--rd-surface) !important; border: 0 !important; color: var(--text-primary);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1) !important;
 }
-html:not(.rd-off) button.secondary:hover:not(:disabled) { background: #fcfaf6 !important; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.16) !important; }
+html:not(.rd-off) button.secondary:hover:not(:disabled) { background: var(--rd-cream) !important; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.16) !important; }
 html:not(.rd-off) .skills-hdr-btn { height: 36px; border-radius: 10px; font-weight: 500; }
 html:not(.rd-off) .settings-page-header .icon-btn:focus,
-html:not(.rd-off) .settings-page-header .icon-btn:focus-visible { outline: none; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.12), 0 0 0 4px var(--accent-soft); }
+html:not(.rd-off) .settings-page-header .icon-btn:focus-visible { outline: none; box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.12), 0 0 0 4px var(--accent-soft); }
 
 /* ---- Agent Skills cards ---- */
 html:not(.rd-off) .skills-works-with { background: var(--bg-app); }
 html:not(.rd-off) .skills-works-with::before { background: linear-gradient(to bottom, transparent, var(--bg-app)); }
-html:not(.rd-off) .skills-works-coin { background: #fff; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.08); }
+html:not(.rd-off) .skills-works-coin { background: var(--rd-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.08); }
 html:not(.rd-off) .skills-grid { gap: 12px; }
 html:not(.rd-off) .skills-card {
-  --skills-card-bg: #fff; --skills-card-bg-hover: #fff; --skills-tile-bg: #f6f3ff;
+  --skills-card-bg: var(--rd-surface); --skills-card-bg-hover: var(--rd-surface); --skills-tile-bg: #f6f3ff;
   border-radius: 14px; padding: 16px;
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.04);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.04);
   transition: box-shadow 140ms ease, transform 140ms ease;
 }
 html:not(.rd-off) .skills-card:not(.is-static):hover {
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1), 0 12px 26px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1), 0 12px 26px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px);
 }
 html:not(.rd-off) .skills-card .skills-icon.is-lg { border: 0; background: #f1edff; color: #6a4fe0; border-radius: 10px; }
 html:not(.rd-off) .skills-card .skills-row-name { font-size: 14px; }
@@ -1707,19 +1714,19 @@ html:not(.rd-off) .skills-card-byline { font-size: 11.5px; color: var(--text-ter
 html:not(.rd-off) .skills-card-desc { font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
 html:not(.rd-off) .skills-card-action {
   border: 0 !important; background: transparent !important; color: var(--text-tertiary) !important;
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1) !important; border-radius: 9px !important;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1) !important; border-radius: 9px !important;
 }
 html:not(.rd-off) .skills-card-action:hover { color: #4a2fc7 !important; box-shadow: 0 0 0 1px #c9bcf6 !important; background: #f6f3ff !important; }
 html:not(.rd-off) .skills-group-head { font-size: 13.5px; font-weight: 600; }
-html:not(.rd-off) .skills-chip { background: #fff; border: 0; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1); color: var(--text-secondary); font-size: 11.5px; }
+html:not(.rd-off) .skills-chip { background: var(--rd-surface); border: 0; box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1); color: var(--text-secondary); font-size: 11.5px; }
 
 /* ---- Activity panel ---- */
-html:not(.rd-off) .right-panel-head { border-bottom: 1px solid rgba(11, 10, 16, 0.06); }
+html:not(.rd-off) .right-panel-head { border-bottom: 1px solid rgba(var(--rd-ink), 0.06); }
 html:not(.rd-off) .right-panel-tab { border-radius: 9px; }
 html:not(.rd-off) .activity-clear { font-size: 12px; color: var(--text-tertiary); }
 html:not(.rd-off) .activity-list { padding: 0 8px; }
 html:not(.rd-off) .activity-row { border: 0 !important; border-radius: 12px; padding: 10px 10px; }
-html:not(.rd-off) .activity-row:hover { background: rgba(11, 10, 16, 0.03); }
+html:not(.rd-off) .activity-row:hover { background: rgba(var(--rd-ink), 0.03); }
 html:not(.rd-off) .activity-row-head { align-items: flex-start; gap: 10px; }
 
 /* Kind as a soft coloured pill instead of a bold black word. */
@@ -1753,7 +1760,7 @@ html:not(.rd-off) .activity-row-fact { font-size: 12px; color: var(--text-tertia
 html:not(.rd-off) .activity-row-actions { gap: 6px; margin-top: 8px; }
 html:not(.rd-off) .activity-row-actions button {
   height: 28px; padding: 0 12px; border-radius: 8px; font: 500 12.5px var(--font-body);
-  background: #fff !important; border: 0 !important; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.12) !important; color: var(--text-primary);
+  background: var(--rd-surface) !important; border: 0 !important; box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.12) !important; color: var(--text-primary);
 }
 html:not(.rd-off) .activity-row-actions button:last-child { background: var(--accent) !important; color: #fff !important; box-shadow: none !important; }
 /* Chip colour by kind: deletes red, access/copies violet, warnings amber. */
@@ -1791,13 +1798,13 @@ html:not(.rd-off) .settings-content > div > p.muted:first-child,
 html:not(.rd-off) .connection-tab > .field-hint:first-child { font-size: 13px; color: var(--text-secondary); line-height: 1.55; max-width: 640px; }
 html:not(.rd-off) .settings-content .menu-sep { display: none; }
 html:not(.rd-off) .settings-content .subhead {
-  margin: 8px 0 -6px 2px; font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: #0b0a1080;
+  margin: 8px 0 -6px 2px; font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: rgba(var(--rd-ink), 0.50);
 }
 
 /* Grouped rows */
 html:not(.rd-off) .settings-content > .menu-row {
-  background: #fff; margin: 0; padding: 14px 16px; min-height: 56px;
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07); border-radius: 0;
+  background: var(--rd-surface); margin: 0; padding: 14px 16px; min-height: 56px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07); border-radius: 0;
 }
 html:not(.rd-off) .settings-content > .menu-row + .menu-row { margin-top: calc(-1 * var(--rd-gap) + 1px); }
 html:not(.rd-off) .settings-content > .menu-row:not(.menu-row + .menu-row) { border-top-left-radius: 14px; border-top-right-radius: 14px; }
@@ -1819,8 +1826,8 @@ html:not(.rd-off) .connection-tab > .field,
 html:not(.rd-off) .io-section,
 html:not(.rd-off) .versioning-tab .invite-bar,
 html:not(.rd-off) .perm-empty {
-  background: #fff; border: 0 !important; border-radius: 14px; padding: 14px 16px; margin: 0;
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.03);
+  background: var(--rd-surface); border: 0 !important; border-radius: 14px; padding: 14px 16px; margin: 0;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.03);
 }
 html:not(.rd-off) .mcp-conn-list,
 html:not(.rd-off) .checkpoint-list,
@@ -1835,7 +1842,7 @@ html:not(.rd-off) .installed-agent-row {
 }
 html:not(.rd-off) .mcp-conn + .mcp-conn,
 html:not(.rd-off) .checkpoint-row + .checkpoint-row,
-html:not(.rd-off) .status-options .menu-item + .menu-item { box-shadow: 0 -1px 0 rgba(11, 10, 16, 0.06); }
+html:not(.rd-off) .status-options .menu-item + .menu-item { box-shadow: 0 -1px 0 rgba(var(--rd-ink), 0.06); }
 html:not(.rd-off) .checkpoint-row:hover,
 html:not(.rd-off) .mcp-conn:hover,
 html:not(.rd-off) .status-options .menu-item:hover { background: var(--bg-app); }
@@ -1855,11 +1862,11 @@ html:not(.rd-off) .io-desc, html:not(.rd-off) .io-hint { font-size: 12.5px; colo
 html:not(.rd-off) .io-actions { display: flex; gap: 8px; margin: 14px 0 8px; flex-wrap: wrap; }
 html:not(.rd-off) .io-actions button { height: 34px; border-radius: 9px; font-weight: 500; }
 html:not(.rd-off) .about-update-row { display: flex; align-items: center; justify-content: space-between; }
-html:not(.rd-off) .installed-agents-status h3 { font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: #0b0a1080; margin-bottom: 4px; }
+html:not(.rd-off) .installed-agents-status h3 { font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: rgba(var(--rd-ink), 0.50); margin-bottom: 4px; }
 html:not(.rd-off) .about-tab > .menu-item.danger { align-self: flex-start; padding: 8px 12px; border-radius: 9px; }
 html:not(.rd-off) .connection-tab > .field { display: flex; flex-direction: column; gap: 8px; }
 html:not(.rd-off) .connection-tab .field-label { font-size: 12.5px; font-weight: 500; color: var(--text-secondary); }
-html:not(.rd-off) .connection-tab input { height: 38px; border-radius: 9px; background: var(--bg-app) !important; border: 0 !important; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06) !important; padding: 0 12px; }
+html:not(.rd-off) .connection-tab input { height: 38px; border-radius: 9px; background: var(--bg-app) !important; border: 0 !important; box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06) !important; padding: 0 12px; }
 html:not(.rd-off) .update-actions { display: flex; justify-content: flex-end; }
 html:not(.rd-off) .mcp-endpoint { display: flex; align-items: center; gap: 12px; }
 html:not(.rd-off) .mcp-section-head { margin-top: 6px; }
@@ -1881,7 +1888,7 @@ html[data-platform="windows"]:not(.rd-off):has(.right-panel) .main-header { padd
 .home-sidebar-entry:has(.home-sidebar-menu[open]) { position: relative; z-index: 60; }
 
 /* ---- Upgrade (Team plans): one cream page, quiet cards, one violet focus ---- */
-html:not(.rd-off) .modal.upgrade-dialog.is-page { background: #fcfaf6; }
+html:not(.rd-off) .modal.upgrade-dialog.is-page { background: var(--rd-cream); }
 html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-header {
   background: transparent; border-bottom: 0; padding-bottom: 0;
 }
@@ -1899,8 +1906,8 @@ html:not(.rd-off) .upgrade-tiers-heading {
 html:not(.rd-off) .upgrade-tiers { column-gap: 18px; }
 html:not(.rd-off) .upgrade-tier {
   --tier-pad: 26px;
-  background: #fff; border: 0; border-radius: 16px;
-  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.04);
+  background: var(--rd-surface); border: 0; border-radius: 16px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.04);
 }
 html:not(.rd-off) .upgrade-tier.is-featured {
   padding: var(--tier-pad); border: 0;
@@ -1912,7 +1919,7 @@ html:not(.rd-off) .upgrade-tier.is-featured .upgrade-tier-list-head {
 html:not(.rd-off) .upgrade-tier-icon {
   width: 38px; height: 38px; margin-bottom: 18px; border-radius: 10px;
   align-items: center; justify-content: center;
-  background: #f3efe6; color: #6b6558;
+  background: var(--rd-fill); color: #6b6558;
 }
 html:not(.rd-off) .upgrade-tier.is-featured .upgrade-tier-icon { background: #efeaff; color: var(--accent); }
 html:not(.rd-off) .upgrade-tier-icon svg { width: 20px; height: 20px; }
@@ -1927,18 +1934,18 @@ html:not(.rd-off) .upgrade-tier-cta {
   height: 38px; padding: 0 16px; border-radius: 10px; font-size: 13.5px; font-weight: 500;
 }
 html:not(.rd-off) .upgrade-tier-cta.ghost-pill:disabled {
-  background: #f6f3ec; box-shadow: none; border: 0; color: var(--text-tertiary);
+  background: var(--rd-fill-soft); box-shadow: none; border: 0; color: var(--text-tertiary);
 }
 html:not(.rd-off) .upgrade-tier-footnote { font-size: 11.5px; }
 html:not(.rd-off) .upgrade-tier-list-head {
-  border-top: 1px solid rgba(11, 10, 16, 0.06); font-size: 12px; font-weight: 500; color: var(--text-tertiary);
+  border-top: 1px solid rgba(var(--rd-ink), 0.06); font-size: 12px; font-weight: 500; color: var(--text-tertiary);
 }
 html:not(.rd-off) .upgrade-tier .upgrade-features li { font-size: 13.5px; color: var(--text-primary); }
 html:not(.rd-off) .upgrade-tier .upgrade-features li::before { width: 17px; height: 17px; font-size: 9.5px; }
 html:not(.rd-off) .upgrade-tier.is-featured .upgrade-features li::before { background: #efeaff; color: var(--accent); }
-html:not(.rd-off) .upgrade-tier:not(.is-featured) .upgrade-features li::before { background: #f3efe6; color: #8a8374; }
+html:not(.rd-off) .upgrade-tier:not(.is-featured) .upgrade-features li::before { background: var(--rd-fill); color: #8a8374; }
 /* Monthly / Yearly: white thumb on a cream track, like the other toggles. */
-html:not(.rd-off) .upgrade-tier-toggle { background: #f3efe6; border: 0; padding: 3px; border-radius: 9px; }
+html:not(.rd-off) .upgrade-tier-toggle { background: var(--rd-fill); border: 0; padding: 3px; border-radius: 9px; }
 html:not(.rd-off) .upgrade-tier-toggle button { height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12px; }
 html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-header > span {
   font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; font-weight: 500;
@@ -1950,7 +1957,7 @@ html:not(.rd-off) .upgrade-tier.is-featured .upgrade-tier-icon { background: #e9
 html:not(.rd-off) .upgrade-tier-icon svg { stroke-width: 2; }
 html:not(.rd-off) .upgrade-tier:not(.is-featured) .upgrade-features li::before { background: #e4f3e6; color: #2f8a4a; }
 html:not(.rd-off) .upgrade-tier-cta.ghost-pill:disabled {
-  background: transparent; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.08);
+  background: transparent; box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.08);
   color: var(--text-secondary); gap: 7px;
 }
 html:not(.rd-off) .upgrade-tier-cta.ghost-pill:disabled::before {
