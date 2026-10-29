@@ -5,6 +5,7 @@
    draw the still prop only; everything is static under reduced motion (CSS). */
 import { STATUS_MOMENTS, isMoment } from "../lib/prefs";
 import { resolveAvatar } from "../lib/avatarIdentity";
+import { LazyAvatar } from "./Face";
 import "./statusMoment.css";
 
 const LN = 'stroke="#000" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"';
@@ -24,8 +25,8 @@ function layers(status: string, full: boolean): { clip: string; free: string } {
       .map((i) => `<circle class="sm-out" style="animation-delay:${i * 0.1}s" cx="958" cy="958" r="${55 + i * 6}" fill="#8a8a95"/>`)
       .join("");
     return {
-      clip: `<g class="sm-hand"><path ${LN} fill="#fff" d="M1075 1090 q-30 300 -60 660 l300 0 q-20 -360 -40 -660z"/>${CIGARETTE}<path ${LN} fill="#fff" d="M1110 925 q-10 -55 55 -55 h60 q70 0 70 70 v95 q0 65 -65 65 h-60 q-65 0 -65 -70z"/><path ${LN} fill="none" d="M1150 990 h90 M1150 1040 h90 M1150 1090 h70"/></g><g class="sm-purse"><rect x="895" y="928" width="120" height="60" rx="28" fill="#fff"/><ellipse cx="955" cy="958" rx="20" ry="17" fill="#2c2b33"/></g>`,
-      free: `<g class="sm-hand"><g class="sm-gate">${tip}</g>${ash}</g>${out}`,
+      clip: `<g class="sm-hand"><path ${LN} fill="#fff" d="M1075 1090 q-30 300 -60 660 l300 0 q-20 -360 -40 -660z"/></g><g class="sm-purse"><rect x="895" y="928" width="120" height="60" rx="28" fill="#fff"/><ellipse cx="955" cy="958" rx="20" ry="17" fill="#2c2b33"/></g>`,
+      free: `<g class="sm-hand">${CIGARETTE}<path ${LN} fill="#fff" d="M1110 925 q-10 -55 55 -55 h60 q70 0 70 70 v95 q0 65 -65 65 h-60 q-65 0 -65 -70z"/><path ${LN} fill="none" d="M1150 990 h90 M1150 1040 h90 M1150 1090 h70"/><g class="sm-gate">${tip}</g>${ash}</g>${out}`,
     };
   }
   if (status === "coffee") {
@@ -35,16 +36,15 @@ function layers(status: string, full: boolean): { clip: string; free: string } {
       .map((i) => `<path class="sm-steam" style="animation-delay:${i * 0.8}s" d="M${1000 + i * 55} 960 q-30 -60 0 -120 q30 -60 0 -120" stroke="#9a9aa5" stroke-width="18" fill="none" stroke-linecap="round"/>`)
       .join("");
     return {
-      clip: `<g class="sm-mug">${mug}<path ${LN} fill="#fff" d="M1030 1280 q-20 120 -10 420 l200 0 q0 -300 -20 -420z"/></g><g class="sm-sip">${CLOSED_EYES}</g>`,
-      free: steam,
+      clip: `<g class="sm-mug"><path ${LN} fill="#fff" d="M1030 1280 q-20 120 -10 420 l200 0 q0 -300 -20 -420z"/></g><g class="sm-sip">${CLOSED_EYES}</g>`,
+      free: `<g class="sm-mug">${mug}</g>${steam}`,
     };
   }
   if (status === "lunch") {
     const bowl = `<path ${LN} fill="#f7d9be" d="M760 1380 q190 160 380 0 z"/><path ${LN} fill="none" d="M740 1380 h420"/>`;
-    if (!full) return { clip: bowl, free: "" };
     return {
-      clip: `${bowl}<g class="sm-chop"><path ${LN} d="M960 960 L1320 1300 M1000 940 L1350 1270"/><path stroke="#e8c27a" stroke-width="16" fill="none" stroke-linecap="round" d="M950 960 q-20 60 10 120 q20 50 -5 100 M985 955 q20 70 -5 130"/></g><g class="sm-chew"><rect x="900" y="935" width="100" height="40" rx="20" fill="#fff"/><path ${LN} fill="none" d="M915 958 q35 22 70 0"/></g>`,
-      free: "",
+      clip: `${bowl}<g class="sm-chew"><rect x="900" y="935" width="100" height="40" rx="20" fill="#fff"/><path ${LN} fill="none" d="M915 958 q35 22 70 0"/></g>`,
+      free: `<g class="sm-chop"><path ${LN} d="M960 960 L1320 1300 M1000 940 L1350 1270"/><path stroke="#e8c27a" stroke-width="16" fill="none" stroke-linecap="round" d="M950 960 q-20 60 10 120 q20 50 -5 100 M985 955 q20 70 -5 130"/></g>`,
     };
   }
   if (status === "meeting") {
@@ -68,7 +68,15 @@ export function StatusMoment({
   status,
   size,
   image,
+  userId,
+  name,
+  pop = "up",
 }: {
+  /** With a user, small avatars get a big pop-out that plays the scene. */
+  userId?: string | null;
+  name?: string;
+  /** Which way the pop-out rises from the small avatar. */
+  pop?: "up" | "down";
   status: string | undefined;
   /** Rendered avatar size in px: under 30 draws the still prop only. */
   size: number;
@@ -86,11 +94,31 @@ export function StatusMoment({
       </span>
     );
   }
-  const { clip, free } = layers(status, size >= 30);
+  const { clip, free } = layers(status, true);
+  // Small faces (account row, note presence) get the props enlarged around the
+  // mouth, so the cigarette, mug and smoke burst out past the circle.
+  const k = size < 60 ? 1.7 : 1;
+  const freeScaled = k === 1 ? free : `<g transform="translate(958 958) scale(${k}) translate(-958 -958)">${free}</g>`;
+  const popOut =
+    size < 60 && name ? (
+      <span className={`sm-pop sm-pop-${pop}`} aria-hidden="true">
+        <span className="sm-pop-face">
+          <LazyAvatar label={name} image={image} userId={userId} />
+          <span className={`sm-layer sm-${status}`}>
+            <svg className="sm-clip" viewBox="0 0 1744 1744" dangerouslySetInnerHTML={{ __html: clip }} />
+            <svg className="sm-free" viewBox="0 0 1744 1744" dangerouslySetInnerHTML={{ __html: free }} />
+          </span>
+        </span>
+        <span className="sm-pop-label">{meta.label}</span>
+      </span>
+    ) : null;
   return (
+    <>
+    {popOut}
     <span className={`sm-layer sm-${status}`} aria-hidden="true" title={meta.label}>
       <svg className="sm-clip" viewBox="0 0 1744 1744" dangerouslySetInnerHTML={{ __html: clip }} />
-      <svg className="sm-free" viewBox="0 0 1744 1744" dangerouslySetInnerHTML={{ __html: free }} />
+      <svg className="sm-free" viewBox="0 0 1744 1744" dangerouslySetInnerHTML={{ __html: freeScaled }} />
     </span>
+    </>
   );
 }

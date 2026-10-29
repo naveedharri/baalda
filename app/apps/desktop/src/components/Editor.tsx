@@ -154,7 +154,7 @@ function PresenceAvatar({
         style={{ "--user-color": live ? peer.color : PRESENCE_OFFLINE } as CSSProperties}
         ariaHidden
       />
-      <StatusMoment status={peer.status} size={30} image={peer.image} />
+      <StatusMoment status={peer.status} size={30} image={peer.image} userId={peer.id} name={peer.name} pop="down" />
     </span>
   );
 }
