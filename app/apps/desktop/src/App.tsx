@@ -41,6 +41,7 @@ import { TabBar } from "./components/TabBar";
 import { VirtualTabHost } from "./components/VirtualTabHost";
 import { Toasts } from "./components/Toasts";
 import { VaultKeyPrompts } from "./components/VaultKeyPrompts";
+import { VaultKeyWaitingNotice } from "./components/VaultKeyWaitingNotice";
 import { toast } from "./lib/toast";
 import { RightPanel } from "./components/RightPanel";
 import { TalkStatus } from "./components/TalkButton";
@@ -1812,6 +1813,7 @@ export default function App() {
           <MembershipLostBanner />
           <VaultRootMissingBanner />
           <VaultRootRestoredBanner />
+          <VaultKeyWaitingNotice />
           <AccountLapsedNotice />
           <ClosedAppChangesBanner />
           <NotSyncingBanner />

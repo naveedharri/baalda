@@ -10,6 +10,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { toast } from "../lib/toast";
+import { useStore } from "../store";
+import { memberDisplayName } from "../lib/vaultKeys/names";
 import { confirmWordsMatch, pickConfirmPositions } from "../lib/vaultKeys/confirmWords";
 import { currentVaultKeySession, onVaultKeyEvent } from "../lib/vaultKeys/runtime";
 import type { PendingDeviceView, SealedFor } from "../lib/vaultKeys/session";
@@ -29,8 +31,11 @@ const promptKey = (p: Prompt) =>
         ? `s:${p.vaultId}`
         : `a:${p.code}`;
 
+const nameOf = (userId: string) => memberDisplayName(useStore.getState().members, userId);
+
 export function VaultKeyPrompts() {
   const [queue, setQueue] = useState<Prompt[]>([]);
+  useStore((s) => s.members); // re-render when the roster arrives
 
   useEffect(() => {
     const seen = new Set<string>();
@@ -51,7 +56,7 @@ export function VaultKeyPrompts() {
       } else if (e.kind === "pending-devices") {
         for (const device of e.devices) push({ kind: "approve-device", device });
       } else if (e.kind === "serviced") {
-        for (const s of e.result.sealed) toast(`Gave ${s.userId} the vault key · ${s.fingerprint}`);
+        for (const s of e.result.sealed) toast(`Gave ${nameOf(s.userId)} the vault key · ${s.fingerprint}`);
         for (const change of e.result.keyChanged) push({ kind: "key-changed", vaultId: e.vaultId, change });
       }
     });
@@ -105,7 +110,7 @@ export function VaultKeyPrompts() {
     case "key-changed":
       return (
         <ConfirmDialog
-          title={`${current.change.userId}'s security key changed`}
+          title={`${nameOf(current.change.userId)}'s security key changed`}
           tone="danger"
           confirmLabel="Approve"
           cancelLabel="Not now"
