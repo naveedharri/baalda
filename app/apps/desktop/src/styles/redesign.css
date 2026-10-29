@@ -925,7 +925,6 @@ html:not([data-theme="dark"]) .vault-icon-option .vault-tile {
   --tile-fill: transparent; --tile-ink: currentColor;
 }
 html:not([data-theme="dark"]) .vault-icon-option .vault-icon-svg { width: 16px; height: 16px; display: grid; place-items: center; }
-html:not([data-theme="dark"]) .vault-icon-option .vault-icon-svg svg * { stroke: currentColor; }
 
 /* ============================================================
    Small dialogs (Invite people, confirms, prompts)
@@ -1038,5 +1037,9 @@ html:not([data-theme="dark"]) .vault-icon-option .vault-tile * {
   background: transparent !important;
   box-shadow: none !important;
 }
-html:not([data-theme="dark"]) .vault-icon-option svg,
-html:not([data-theme="dark"]) .vault-icon-option svg * { stroke: currentColor !important; fill: none !important; }
+/* The picker icons are SVGs with a baked-in tile rect and colours. */
+html:not([data-theme="dark"]) .vault-icon-option svg > g > rect:first-child { fill: transparent !important; }
+html:not([data-theme="dark"]) .vault-icon-option svg > g > g [stroke]:not([stroke="none"]) { stroke: currentColor !important; }
+html:not([data-theme="dark"]) .vault-icon-option svg > g > g [fill]:not([fill="none"]) { fill: currentColor !important; }
+html:not([data-theme="dark"]) .vault-icon-option .vault-icon-svg,
+html:not([data-theme="dark"]) .vault-icon-option svg { width: 22px !important; height: 22px !important; }
