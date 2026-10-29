@@ -19,7 +19,15 @@ import * as ipc from "../lib/ipc";
 import { toast } from "../lib/toast";
 import { syncManager } from "../lib/sync/docSession";
 import { api } from "../lib/auth/authManager";
-import { currentVaultKeySession, onVaultKeyEvent, vaultKeysNudge, vaultKeyStateFor } from "../lib/vaultKeys/runtime";
+import {
+  currentVaultKeySession,
+  onVaultKeyEvent,
+  pendingConversionReview,
+  submitConversionReview,
+  vaultKeysNudge,
+  vaultKeyStateFor,
+} from "../lib/vaultKeys/runtime";
+import { ConversionReviewDialog } from "./ConversionReviewDialog";
 import { conversionLine, vaultKeySectionView } from "../lib/vaultKeys/sectionView";
 import { vaultKeyFileText, wordsToVaultKey } from "../lib/vaultKeys/crypto";
 import { AsyncButton } from "./AsyncButton";
@@ -50,6 +58,7 @@ export function VaultKeySection({
   const [restoring, setRestoring] = useState(false);
   const [restoreText, setRestoreText] = useState("");
   const [confirmEncrypt, setConfirmEncrypt] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const [fullyEncrypted, setFullyEncrypted] = useState<boolean | undefined>(undefined);
   const [, bump] = useState(0);
   // Revealed words belong to ONE vault: a vault switch hides them (they must
@@ -61,7 +70,7 @@ export function VaultKeySection({
   }, [vaultId]);
   useEffect(() => {
     const off = onVaultKeyEvent((e) => {
-      if (e.kind === "vault") bump((n) => n + 1);
+      if (e.kind === "vault" || e.kind === "conversion-review") bump((n) => n + 1);
     });
     return () => void off();
   }, []);
@@ -97,10 +106,36 @@ export function VaultKeySection({
     ) : null;
   }
   if (view === "setting-up") {
+    const review = pendingConversionReview(vaultId);
     return (
       <>
         <div className="menu-sep" />
-        <div className="muted">Encryption is being set up for this vault.</div>
+        {review ? (
+          <div className="menu-row vault-key-row">
+            <span className="menu-row-label">
+              Encryption
+              <span className="field-hint">
+                Encryption is waiting for you to review the connected AI tools and public links.
+              </span>
+            </span>
+            <button type="button" className="secondary sm" onClick={() => setReviewing(true)}>
+              Review connections
+            </button>
+          </div>
+        ) : (
+          <div className="muted">Encryption is being set up for this vault.</div>
+        )}
+        {review && reviewing && (
+          <ConversionReviewDialog
+            candidates={review}
+            onSubmit={(keep) => {
+              setReviewing(false);
+              submitConversionReview(vaultId, keep);
+              bump((n) => n + 1);
+            }}
+            onLater={() => setReviewing(false)}
+          />
+        )}
       </>
     );
   }
@@ -183,7 +218,7 @@ export function VaultKeySection({
 
       {words && shown && (
         <div className="vault-key-panel">
-          <CopyField value={shown} label="vault key" wrap />
+          <CopyField value={shown} label="vault key" wrap sensitive />
           <div className="row">
             <AsyncButton
               className="secondary sm"

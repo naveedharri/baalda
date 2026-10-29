@@ -102,7 +102,13 @@ export interface ConversionBlockers {
   oauthGrants: number;
 }
 
-/** What still lacks a wrap for `generation` and was used in the last 30 days. */
+/**
+ * What still lacks a wrap for `generation` and was used in the last 30 days,
+ * minus what an owner/admin unchecked in the conversion review
+ * (`vault_conversion_exclusions`): those were never allow-listed, so they could
+ * never be wrapped, and waiting for them would hold the vault pending forever.
+ * They need reconnecting after conversion (the review says so).
+ */
 export async function conversionBlockers(
   vaultId: string,
   generation: number,
@@ -114,15 +120,19 @@ export async function conversionBlockers(
         AND t.last_used_at > now() - make_interval(days => $3)
         AND NOT EXISTS (SELECT 1 FROM mcp_token_keys k
                          WHERE k.token_id = t.id AND k.vault_id = $1 AND k.generation = $2)
+        AND NOT EXISTS (SELECT 1 FROM vault_conversion_exclusions x
+                         WHERE x.vault_id = $1 AND x.kind = 'mcp_token' AND x.item_id = t.id)
       ORDER BY t.id`,
     [vaultId, generation, ACTIVE_WINDOW_DAYS],
   );
   const { rows: links } = await db.query<{ id: string }>(
-    `SELECT id FROM public_links
+    `SELECT id FROM public_links l
       WHERE vault_id = $1
         AND (last_viewed_at > now() - make_interval(days => $3)
              OR view_tracking_since > now() - make_interval(days => $3))
         AND (wrapped_vk IS NULL OR wrap_generation IS DISTINCT FROM $2)
+        AND NOT EXISTS (SELECT 1 FROM vault_conversion_exclusions x
+                         WHERE x.vault_id = $1 AND x.kind = 'public_link' AND x.item_id = l.id)
       ORDER BY id`,
     [vaultId, generation, ACTIVE_WINDOW_DAYS],
   );
@@ -136,6 +146,8 @@ export async function conversionBlockers(
         -- A grant is covered once every token that can still act holds a wrap
         -- for this generation: a live access token needs an access wrap, a
         -- usable refresh token (offline_access, unexpired) a refresh wrap.
+        AND NOT EXISTS (SELECT 1 FROM vault_conversion_exclusions x
+                         WHERE x.vault_id = $1 AND x.kind = 'oauth_grant' AND x.item_id = a.id)
         AND (
           (a."accessTokenExpiresAt" > now() AND NOT EXISTS (
              SELECT 1 FROM oauth_grant_keys k WHERE k.grant_id = a.id AND k.vault_id = $1
@@ -232,6 +244,7 @@ export async function lockGateRows(db: Queryable, vaultId: string): Promise<void
     [vaultId],
   );
   await db.query("SELECT 1 FROM public_links WHERE vault_id = $1 FOR UPDATE", [vaultId]);
+  await db.query("SELECT 1 FROM vault_conversion_exclusions WHERE vault_id = $1 FOR UPDATE", [vaultId]);
 }
 
 /**

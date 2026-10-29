@@ -7,7 +7,7 @@
 // server without the `vault-keys` feature.
 
 import { api } from "../auth/authManager";
-import { rateLimitedMessage } from "../api";
+import { rateLimitedMessage, type AllowlistCandidate } from "../api";
 import { runFreshAccountKey, type FreshKeyResult } from "./recovery";
 import {
   createVaultKeySession,
@@ -61,7 +61,9 @@ export type VaultKeyEvent =
   /** The server's churn brake refused a key step (429 rate_limited): its plain message. */
   | { kind: "rate-limited"; message: string }
   /** Lost every device: a new account key exists; teammates confirm `code`. */
-  | { kind: "fresh-key"; code: string };
+  | { kind: "fresh-key"; code: string }
+  /** Converting: the owner reviews these connections before any is allow-listed. */
+  | { kind: "conversion-review"; vaultId: string; candidates: AllowlistCandidate[] };
 
 const listeners = new Set<(e: VaultKeyEvent) => void>();
 /** UI: recovery kit, "<name>'s security key changed", the "given access" toast. */
@@ -149,6 +151,7 @@ function sessionFor(userId: string) {
     keysAllowed: () => keysAllowed,
     selfUserId: () => userId,
     deviceId: installDeviceId,
+    reviewConnections: true,
     canConvert: async () => {
       const orgId = current?.orgId;
       if (!orgId) return false;
@@ -198,7 +201,11 @@ async function runOnce(): Promise<void> {
       const ready: VaultKeyState = { state: "ready", generation: 1, created: true };
       noteVaultKeyState(vaultId, ready);
       emit({ kind: "vault", vaultId, state: ready });
-    } else if (conv === "waiting-ready" && !c.conversionTimer) {
+    } else if (conv === "needs-review") {
+      const candidates = c.session.pendingConversionReview(vaultId);
+      if (candidates) emit({ kind: "conversion-review", vaultId, candidates });
+    }
+    if ((conv === "waiting-ready" || conv === "needs-review") && !c.conversionTimer) {
       // Keep the pending key warm: ask again every minute while open.
       c.conversionTimer = setTimeout(() => {
         c.conversionTimer = null;
@@ -343,6 +350,17 @@ export async function vaultKeysEnsure(vaultId: string): Promise<boolean> {
   return state.state === "ready";
 }
 
+/** Connections waiting for the owner's review of the open vault's conversion. */
+export function pendingConversionReview(vaultId: string | null | undefined): AllowlistCandidate[] | null {
+  return (vaultId && current?.session.pendingConversionReview(vaultId)) || null;
+}
+
+/** The owner answered the review (`keep` = checked candidate keys): post it now. */
+export function submitConversionReview(vaultId: string, keep: ReadonlySet<string>): void {
+  current?.session.submitConversionReview(vaultId, keep);
+  vaultKeysNudge();
+}
+
 /** The open session, for the approval/restore screens. */
 export function currentVaultKeySession(): VaultKeySession | null {
   return current?.session ?? null;
@@ -400,6 +418,17 @@ export function freshAccountKeyCode(): string | null {
   if (!scope) return null;
   if (memoFreshCodes.has(scope)) return memoFreshCodes.get(scope) ?? null;
   return readFreshCodes()[scope] ?? null;
+}
+
+/**
+ * This person's own security code for Account Settings, or null when vault
+ * keys are off here, no account key is held, or the session has not confirmed
+ * it matches the server's (`ownSecurityCodeView`).
+ */
+export async function ownSecurityCode(): Promise<string | null> {
+  const c = current;
+  if (!c || c.account?.state !== "ready") return null;
+  return c.session.accountKeyCode().catch(() => null);
 }
 
 /** The last account state the open session reported (null = not asked yet). */

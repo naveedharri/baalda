@@ -1062,7 +1062,11 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   allow-lists existing tokens/links with an HMAC under VK, and they upgrade on next use. `keys/init`
   accepts only when nothing used in 30 days lacks a wrap and the check bytes match the pending row; the
   gate runs inside the init transaction under row locks (`lockGateRows`). `VAULT_KEY_CONVERSION` plus
-  the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all.
+  the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all. Owner review (migration
+  083): owners/admins get candidate metadata (label, creator, created/last used, `allowed`/`excluded`) and
+  review them in `ConversionReviewDialog` (all checked); unchecked ones go to `vault_conversion_exclusions`
+  via `allowlist`'s `excluded` (owner/admin, pending only): never allow-listed, skipped by the gate, NOT
+  revoked (works until keyed, then needs reconnecting); a later allow-list entry deletes the exclusion.
 - **Opt-in for existing vaults** (migration 081, decided 2026-10-29): `keys/mine`'s `conversionAllowed`
   also needs `vaults.encryption_requested_at`. `POST /api/vaults` sets it while `BAALDA_VAULT_KEYS` is on
   (new vaults encrypt automatically); an existing vault gets it only from an owner/admin's

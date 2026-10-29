@@ -109,9 +109,14 @@ since its last re-index waits for the next one.
 - **Owner vault key.** Owners can reveal the vault key in Vault Settings → General ("Show vault key") to copy
   or save it. It is never emailed or sent anywhere. An owner who has lost every device restores with it.
 - **Conversion of an existing vault** (after an owner/admin asked for it). The first owner/admin device on a supporting version registers a pending
-  key. Existing MCP tokens and public links are allow-listed by the device and upgraded on their next use. The
-  vault is keyed only when nothing used in the last 30 days still lacks its own wrap; until then everything
-  works exactly as before. A connection idle for more than 30 days needs one reconnect after conversion.
+  key. Before anything is allow-listed, the owner/admin reviews every existing MCP token, Claude/ChatGPT
+  connection and public link (name, who created it, last used), all checked by default. Checked ones are
+  allow-listed by the device and upgraded on their next use. An unchecked one is recorded as excluded
+  (`vault_conversion_exclusions`): it is never allow-listed, keeps working until the vault is keyed (nothing
+  is revoked), does not hold the conversion, and needs reconnecting afterwards. Re-checking it in a later
+  review allow-lists it again. The vault is keyed only when nothing used in the last 30 days and not
+  excluded still lacks its own wrap; until then everything works exactly as before. A connection idle for
+  more than 30 days needs one reconnect after conversion.
 
 ## Older desktops
 
