@@ -63,6 +63,9 @@ const TABLES = [
   "mcp_token_keys",
   "mcp_token_allow",
   "vault_pending_keys",
+  "user_device_registrations",
+  "user_key_history",
+  "vault_key_wrap_history",
   '"user"',
 ];
 

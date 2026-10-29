@@ -19,7 +19,8 @@ import { resetMcpBadTokens } from "../src/http/routes/mcp.js";
 import { testAppDeps } from "./helpers/app.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { seedNote, seedVault } from "./helpers/seed.js";
+import { seedBlob, seedBlobText, seedNote, seedVault } from "./helpers/seed.js";
+import { sealBlobTextRow } from "../src/index/sealed-index.js";
 
 const server = { hocuspocus: { documents: new Map() } } as unknown as Server<SyncContext>;
 const app = createApp(testAppDeps({ docWriter: createDocWriter(server) }));
@@ -127,6 +128,26 @@ describe("MCP tokens and public links with vault keys", () => {
     const app2 = await tool(token, "append_note", { docId: s.docId, text: " v2" });
     expect(app2.isError).toBe(false);
     expect((await tool(token, "read_note", { docId: s.docId })).data.content).toBe("secret plan v2");
+
+    // Search finds the MCP write (indexed with the call's key, sealed) and a
+    // sealed file text reads back — still with no desktop online.
+    const { rows: idx } = await pool.query("SELECT search_enc IS NOT NULL AS sealed FROM note_index WHERE doc_id = $1", [s.docId]);
+    expect(idx).toEqual([{ sealed: true }]);
+    const found = await tool(token, "search_notes", { vaultId: s.vaultId, query: "secret plan" });
+    expect(found.isError, found.text).toBe(false);
+    expect(JSON.stringify(found.data)).toContain(s.docId);
+    const blobId = await seedBlob(s.vaultId, s.orgId, "docs/q.txt", { mime: "text/plain" });
+    await seedBlobText(blobId, s.vaultId, null, "");
+    const crypto = { vaultId: s.vaultId, key: s.vk, generation: 1 };
+    await pool.query("UPDATE blob_text SET search_enc = $2 WHERE blob_id = $1", [
+      blobId,
+      sealBlobTextRow(crypto, blobId, { body: "quarterly numbers", vector: [], tokens: "quarterly numbers" }),
+    ]);
+    // The note embeds the file, which is what lets a scoped reader see it.
+    expect((await tool(token, "append_note", { docId: s.docId, text: "\n![[docs/q.txt]]" })).isError).toBe(false);
+    const text = await tool(token, "read_attachment_text", { vaultId: s.vaultId, blobId });
+    expect(text.isError, text.text).toBe(false);
+    expect(text.data.text).toBe("quarterly numbers");
 
     // Only the hash and the wrap are stored; neither is the key or the token.
     const { rows } = await pool.query<{ wrapped_vk: Buffer }>("SELECT wrapped_vk FROM mcp_token_keys WHERE token_id = $1", [id]);

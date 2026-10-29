@@ -99,6 +99,9 @@ export const BOOTSTRAP_ONLY = "bootstrap-only";
 /** One-step file upload: a blob intent may carry `register`, and the `files`
  *  row is created with the bytes (no separate `POST /api/files`). */
 export const FILES_WITH_BYTES = "files-with-bytes";
+/** Client-held vault keys (W3): `/api/vaults/:id/keys/*`, `/api/me/keys`,
+ *  `X-Baalda-VK`. Absent ⇒ every vault-key step is a no-op. */
+export const VAULT_KEYS = "vault-keys";
 
 const featureCache = new Map<string, Promise<ServerHealth | null>>();
 

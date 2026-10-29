@@ -57,6 +57,7 @@ import { VaultIconSettings } from "./VaultIconSettings";
 import { VaultDashboardsTab } from "./VaultDashboardsTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
 import { SkillsTab } from "./skills/SkillsTab";
+import { VaultKeySection } from "./VaultKeySection";
 import { AGENT_SKILLS_ICON_PATH } from "./skills/parts";
 
 // Defined in `lib/settingsTabs.ts` so the store can name a tab without importing
@@ -535,6 +536,8 @@ function GeneralTab({
           {vault?.path ?? "—"}
         </code>
       </div>
+
+      {isSynced && isOwner && <VaultKeySection vaultName={activeOrgName ?? "Vault"} />}
 
       {isSynced && isOwner && <UnsyncDangerZone />}
 

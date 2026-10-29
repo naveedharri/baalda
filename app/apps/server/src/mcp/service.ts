@@ -27,7 +27,7 @@ import {
   resolveFolderParent,
   resolveParentFolder,
 } from "../registry/tree-ops.js";
-import { purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
+import { indexDoc, purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
 import type { McpAuth } from "./tokens.js";
 import {
   NoteTooLargeError,
@@ -54,6 +54,7 @@ import { registerCtx, registerFile } from "../registry/batch-ops.js";
 import { vaultKeysEnabled } from "../crypto/config.js";
 import { KeyRequiredError, KEY_REQUIRED_CODE, loadVkCheck } from "../crypto/transport.js";
 import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { openBlobTextRow } from "../index/sealed-index.js";
 
 /**
  * The CRUD operations the MCP exposes, each one gated by the SAME ACL the rest
@@ -114,6 +115,21 @@ async function vaultCrypto(auth: McpAuth, vaultId: string): Promise<DocCrypto | 
     throw new McpToolError(KEY_REQUIRED_MESSAGE, KEY_REQUIRED_CODE);
   }
   return { vaultId, key: held.key, generation: held.generation };
+}
+
+/**
+ * W3: re-index a keyed vault's note with THIS call's key, so the write is
+ * searchable with no desktop online (background indexing only has the keys of
+ * connected members). Unkeyed: nothing to do here, the usual queue indexes it.
+ * Best-effort: the write is already durable.
+ */
+async function indexWithCallKey(docId: string, crypto: DocCrypto | undefined): Promise<void> {
+  if (!crypto) return;
+  try {
+    await indexDoc(docId, pool, crypto);
+  } catch (err) {
+    console.warn(`[mcp] keyed re-index of ${docId} failed:`, (err as Error).message);
+  }
 }
 
 /** A write refusal: `account_read_only` when the vault's billing account has
@@ -857,6 +873,7 @@ export async function createNote(
           }),
         );
         seeded = true;
+        await indexWithCallKey(row.id, crypto);
       }
     }
     return {
@@ -892,6 +909,7 @@ export async function createNote(
       }),
     );
   }
+  if (input.content) await indexWithCallKey(docId, crypto);
   // After the content, so a client that reacts to the announcement by pulling
   // the note finds it already written rather than briefly empty.
   ctx.onRegistryChanged?.(input.vaultId);
@@ -989,6 +1007,7 @@ export async function updateNote(
     ),
   );
   await pool.query("UPDATE notes SET updated_at = now() WHERE id = $1", [docId]);
+  await indexWithCallKey(docId, crypto);
   return { docId, bytes: content.length, revision };
 }
 
@@ -1054,6 +1073,7 @@ export async function appendNote(
   );
   if (key) rememberAppend(key, { revision });
   await pool.query("UPDATE notes SET updated_at = now() WHERE id = $1", [docId]);
+  await indexWithCallKey(docId, crypto);
   return { docId, appended: text.length, duplicate: false, revision };
 }
 
@@ -1314,6 +1334,7 @@ export async function editNote(
     ),
   );
   await pool.query("UPDATE notes SET updated_at = now() WHERE id = $1", [docId]);
+  await indexWithCallKey(docId, crypto);
   return { docId, applied: edits.length, bytes: content.length, revision };
 }
 
@@ -1409,16 +1430,21 @@ export async function searchNotes(
   //    `kind: "file"`, gated by the SAME readable set; the vault-wide flag only
   //    decides whether the doc-less `attachments/` blobs are candidates, which
   //    mirrors what the download gate would answer for them.
+  // W3: a keyed vault's sealed rows are scored with this call's own key.
+  const crypto = await vaultCrypto(ctx.auth, vaultId);
   const readable = await listReadableDocsInVault(ctx.auth.userId, vaultId);
   const access = await vaultAccess(pool, ctx.auth.userId, vaultId);
-  return searchNoteIndex({
-    vaultId,
-    query,
-    k: limit,
-    readableDocIds: readable,
-    includeFiles,
-    vaultWideReader: access?.vaultWide === true,
-  });
+  return writeOrToolError(() =>
+    searchNoteIndex({
+      vaultId,
+      query,
+      k: limit,
+      readableDocIds: readable,
+      includeFiles,
+      vaultWideReader: access?.vaultWide === true,
+      crypto,
+    }),
+  );
 }
 
 // ── attachments / files ───────────────────────────────────────────────────
@@ -1477,7 +1503,11 @@ export async function listAttachments(
     [vaultId, prefix, ATTACHMENT_LIST_SCAN],
   );
 
-  const visible = await filterReadableBlobs(ctx.auth.userId, vaultId, rows);
+  // W3: the attachment ACL may read sealed note text (embed references).
+  const crypto = await vaultCrypto(ctx.auth, vaultId);
+  const visible = await writeOrToolError(() =>
+    filterReadableBlobs(ctx.auth.userId, vaultId, rows, pool, crypto),
+  );
   return visible.slice(0, limit).map((r) => ({
     docId: r.doc_id,
     blobId: r.id,
@@ -1523,8 +1553,9 @@ export async function readAttachmentText(
     sha256: string;
     chars: number | null;
     content: string | null;
+    search_enc: Buffer | null;
   }>(
-    `SELECT b.id, b.doc_id, b.rel_path, b.sha256, bt.chars, bt.content
+    `SELECT b.id, b.doc_id, b.rel_path, b.sha256, bt.chars, bt.content, bt.search_enc
        FROM blobs b
        LEFT JOIN blob_text bt ON bt.blob_id = b.id
       WHERE b.vault_id = $1 AND b.status = 'ready'
@@ -1535,11 +1566,18 @@ export async function readAttachmentText(
   );
   const row = rows[0];
   if (!row) throw new McpToolError("No such file in this vault", "not_found");
-  if (!(await canReadAttachment(ctx.auth.userId, vaultId, row.rel_path, row.doc_id))) {
+  const crypto = await vaultCrypto(ctx.auth, vaultId);
+  if (!(await writeOrToolError(() => canReadAttachment(ctx.auth.userId, vaultId, row.rel_path, row.doc_id, pool, crypto)))) {
     throw new McpToolError("You do not have access to this file", "no_access");
   }
 
-  const full = row.content ?? "";
+  // W3: sealed text is opened with this call's own key (the token's wrap);
+  // without one, `vaultCrypto` refuses with key_required. Never "" for it.
+  let full = row.content ?? "";
+  if (row.search_enc) {
+    if (!crypto) throw new McpToolError(KEY_REQUIRED_MESSAGE, KEY_REQUIRED_CODE);
+    full = openBlobTextRow(crypto, row.id, row.search_enc).body;
+  }
   const text = full.length > cap ? full.slice(0, cap) : full;
   return {
     blobId: row.id,

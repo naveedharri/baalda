@@ -1,3 +1,4 @@
+import type { DocCrypto } from "../crypto/doc-crypto.js";
 import { createHash } from "node:crypto";
 import { pgText } from "../db/text.js";
 import type pg from "pg";
@@ -150,6 +151,8 @@ export async function recordVersion(
     content: string;
     cause: VersionCause;
     authorId: string | null;
+    /** W3: a request's own key; background capture omits it (cache copy or refuse). */
+    crypto?: DocCrypto;
   },
   db: Queryable = defaultPool,
 ): Promise<number | null> {
@@ -165,7 +168,7 @@ export async function recordVersion(
   }
 
   // Text first, reference second: the order the text sweep's grace relies on.
-  await storeNoteText(db, { vaultId: input.vaultId, docId: input.docId, sha, content });
+  await storeNoteText(db, { vaultId: input.vaultId, docId: input.docId, sha, content }, input.crypto);
   const { rows } = await db.query<{ id: string }>(
     `INSERT INTO note_versions (doc_id, vault_id, content, sha256, cause, author_id)
      VALUES ($1, $2, NULL, $3, $4, $5)

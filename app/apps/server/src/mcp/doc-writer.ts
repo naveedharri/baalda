@@ -1,3 +1,5 @@
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { pool } from "../db/pool.js";
 import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import type { LocalTransactionOrigin, Server } from "@hocuspocus/server";
@@ -5,7 +7,6 @@ import { formatDocName } from "../sync/doc-name.js";
 import type { SyncContext } from "../sync/hocuspocus.js";
 import { loadDocState } from "../yjs/persistence.js";
 import { config } from "../config.js";
-import type { DocCrypto } from "../crypto/doc-crypto.js";
 import {
   applyDetached,
   setDocBatchRuntime,
@@ -220,8 +221,8 @@ export function createDocWriter(
   async function peekContent(vaultId: string, docId: string, crypto?: DocCrypto): Promise<string | null> {
     const live = server.hocuspocus.documents.get(formatDocName(vaultId, docId));
     if (live) return live.getText(CONTENT_FIELD).toString();
-    // Sealed rows without `crypto` throw KeyRequiredError, which propagates.
-    const state = await loadDocState(docId, undefined, crypto);
+    // W3: a sealed log needs the caller's key (key_required otherwise).
+    const state = await loadDocState(docId, pool, crypto);
     // No state is NOT an empty note: it is a note whose content has never
     // reached this server. The distinction is load-bearing for checkpoints.
     if (!state) return null;

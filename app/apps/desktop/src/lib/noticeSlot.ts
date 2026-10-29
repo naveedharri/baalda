@@ -31,6 +31,8 @@ export const NOTICE_PRIORITY = [
   "root-restored",
   "account-lapsed",
   "closed-app-changes",
+  // W3: this computer lacks the open vault's key; sync is paused (informational).
+  "vault-key-waiting",
   "not-syncing",
   "sync-paused",
   "note-limit",

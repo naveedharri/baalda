@@ -1,3 +1,6 @@
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { indexCryptoFor, openBlobTextRow, openSearchRow, sealSearchRow } from "./sealed-index.js";
+import { KeyRequiredError } from "../crypto/transport.js";
 import * as Y from "yjs";
 import { pgText } from "../db/text.js";
 import type pg from "pg";
@@ -68,8 +71,9 @@ export function parseWikilinks(text: string): string[] {
 export async function extractDocText(
   docId: string,
   db: Queryable = defaultPool,
+  crypto?: DocCrypto,
 ): Promise<string> {
-  const state = await loadDocState(docId, db);
+  const state = await loadDocState(docId, db, crypto);
   if (!state) return "";
   const doc = new Y.Doc();
   try {
@@ -108,6 +112,12 @@ export function setLiveDocLookup(fn: LiveDocLookup | null): void {
 export async function indexDoc(
   docId: string,
   db: Queryable = defaultPool,
+  /**
+   * W3: a key the CURRENT request presented and the server verified (e.g. an
+   * MCP token's own wrap), so a keyed vault's write is searchable with no
+   * member connected. Never zeroed here; the caller owns it.
+   */
+  given?: DocCrypto,
 ): Promise<boolean> {
   const { rows } = await db.query<{
     vault_id: string;
@@ -129,11 +139,30 @@ export async function indexDoc(
     return false;
   }
 
+  // W3: a keyed vault indexes only with a key a connected member supplied
+  // (process cache COPY, zeroed below). No key held: defer, writing nothing —
+  // the existing row stays as it was and the next edit or connect re-indexes.
+  if (given && given.vaultId === note.vault_id) return indexNoteRow(docId, note, given, db);
+  const crypto = await indexCryptoFor(note.vault_id, db);
+  if (crypto === null) return false;
+  try {
+    return await indexNoteRow(docId, note, crypto, db);
+  } finally {
+    crypto?.key.fill(0);
+  }
+}
+
+async function indexNoteRow(
+  docId: string,
+  note: { vault_id: string; title: string | null; rel_path: string },
+  crypto: DocCrypto | undefined,
+  db: Queryable,
+): Promise<boolean> {
   // Postgres rejects NUL in `text`; a single such byte in one note used to fail
   // that note's indexing forever (see `pgText`).
   const live = liveDocLookup?.(note.vault_id, docId);
   const content = pgText(
-    live ? live.getText(CONTENT_FIELD).toString() : await extractDocText(docId, db),
+    live ? live.getText(CONTENT_FIELD).toString() : await extractDocText(docId, db, crypto),
   );
   const title = pgText(note.title ?? relPathStem(note.rel_path));
   const links = parseWikilinks(content);
@@ -143,7 +172,35 @@ export async function indexDoc(
   // The excerpts the scoped attachment list reads instead of `content` (#343).
   const heads = await cachedRefHeads(note.vault_id, db);
 
-  await db.query(
+  if (crypto) {
+    // Keyed: content, vector and tokens go ONLY into the sealed `search_enc`.
+    // The plaintext columns are not written, and never nulled here: an old row
+    // keeps its stale plaintext until the separate null-out step (W3 rule).
+    // `ref_text` is not written either: the attachment rule decides a sealed
+    // row from its decrypted body in memory (`permissions/sealed-refs.ts`),
+    // which is the same answer the excerpt gives.
+    await db.query(
+      `INSERT INTO note_index (doc_id, vault_id, title, updated_at, ref_heads, search_enc)
+       VALUES ($1, $2, $3, now(), $4::text[], $5)
+       ON CONFLICT (doc_id) DO UPDATE
+         SET vault_id = EXCLUDED.vault_id,
+             title = EXCLUDED.title,
+             updated_at = now(),
+             ref_heads = EXCLUDED.ref_heads,
+             search_enc = EXCLUDED.search_enc`,
+      [
+        docId,
+        note.vault_id,
+        title,
+        heads,
+        sealSearchRow(crypto, docId, {
+          body: content,
+          vector,
+          tokens: searchTokenSet(`${title ?? ""} ${content}`) ?? null,
+        }),
+      ],
+    );
+  } else await db.query(
     `INSERT INTO note_index (doc_id, vault_id, title, content, vector, updated_at, ref_text, ref_heads, search_tokens)
      VALUES ($1, $2, $3, $4, $5::jsonb, now(), $6, $7::text[], $8)
      ON CONFLICT (doc_id) DO UPDATE
@@ -404,6 +461,12 @@ export async function searchNoteIndex(opts: {
    * from `search_tokens`, falling back to SQL only for rows not yet re-indexed.
    */
   keywordMode?: "app" | "sql";
+  /**
+   * W3: the REQUEST's verified vault key for a keyed vault. A sealed row is
+   * scored from its decrypted text/vector/tokens with the same formula; a
+   * sealed row without a key throws {@link KeyRequiredError} (fail closed).
+   */
+  crypto?: DocCrypto;
   db?: Queryable;
 }): Promise<NoteSearchHit[]> {
   const db = opts.db ?? defaultPool;
@@ -427,8 +490,12 @@ export async function searchNoteIndex(opts: {
       vector: number[] | null;
       search_tokens: string | null;
       matched_legacy: number | null;
+      search_enc: Buffer | null;
+      title: string | null;
     }>(
       `SELECT ni.doc_id,
+              ni.search_enc,
+              ni.title,
               ni.vector,
               CASE WHEN $6::boolean THEN NULL ELSE ni.search_tokens END AS search_tokens,
               CASE WHEN ni.search_tokens IS NULL OR $6::boolean THEN (
@@ -446,6 +513,20 @@ export async function searchNoteIndex(opts: {
     );
     if (rows.length === 0) break;
     for (const r of rows) {
+      if (r.search_enc) {
+        // Sealed row: same score from the decrypted fields. No token set means
+        // the pre-068 rule, substring-counted over the same "title body" text.
+        if (!opts.crypto) throw new KeyRequiredError();
+        const sealed = openSearchRow(opts.crypto, r.doc_id, r.search_enc);
+        const sim = sealed.vector ? cosineSimilarity(qVec, sealed.vector) : 0;
+        const matched =
+          sealed.tokens !== null && !legacySql
+            ? keywordMatchCount(qTokens, sealed.tokens)
+            : legacySubstringCount(qTokens, `${r.title ?? ""} ${sealed.body}`);
+        const boost = qTokens.length > 0 ? 0.1 * (matched / qTokens.length) : 0;
+        scored.push({ docId: r.doc_id, score: sim + boost });
+        continue;
+      }
       const sim = r.vector ? cosineSimilarity(qVec, r.vector) : 0;
       const matched =
         r.search_tokens !== null ? keywordMatchCount(qTokens, r.search_tokens) : (r.matched_legacy ?? 0);
@@ -466,6 +547,7 @@ export async function searchNoteIndex(opts: {
         readableDocIds: docIds,
         vaultWideReader: opts.vaultWideReader === true,
         legacySql,
+        crypto: opts.crypto,
       })
     : [];
 
@@ -512,6 +594,14 @@ export async function searchNoteIndex(opts: {
     .slice(0, opts.k);
 }
 
+/** The pre-068 SQL rule in app memory: query tokens found as substrings of lower(text). */
+function legacySubstringCount(qTokens: string[], text: string): number {
+  const hay = text.toLowerCase();
+  let n = 0;
+  for (const t of qTokens) if (hay.includes(t)) n++;
+  return n;
+}
+
 /**
  * The FILE half of {@link searchNoteIndex}: rank `blob_text` the same way.
  *
@@ -542,8 +632,10 @@ async function searchBlobText(opts: {
   readableDocIds: string[];
   vaultWideReader: boolean;
   legacySql: boolean;
+  crypto?: DocCrypto;
 }): Promise<NoteSearchHit[]> {
   const { rows } = await opts.db.query<{
+    search_enc: Buffer | null;
     blob_id: string;
     doc_id: string | null;
     rel_path: string | null;
@@ -553,6 +645,7 @@ async function searchBlobText(opts: {
     matched_legacy: number | null;
   }>(
     `SELECT bt.blob_id,
+            bt.search_enc,
             b.doc_id,
             b.rel_path,
             b.filename,
@@ -575,8 +668,22 @@ async function searchBlobText(opts: {
   );
 
   const scored = rows.map((r) => {
-    const sim = r.vector ? cosineSimilarity(opts.qVec, r.vector) : 0;
     const relPath = r.rel_path ?? "";
+    let vector = r.vector;
+    let matchedSealed: number | null = null;
+    if (r.search_enc) {
+      // W3 sealed row: the same formula over the decrypted fields. The SQL
+      // count (no stored set, a non-ASCII rel_path, or legacy mode) becomes the
+      // identical substring count over lower(rel_path || ' ' || body).
+      if (!opts.crypto) throw new KeyRequiredError();
+      const sealed = openBlobTextRow(opts.crypto, r.blob_id, r.search_enc);
+      vector = sealed.vector;
+      matchedSealed =
+        sealed.tokens === null || opts.legacySql || /[^\x01-\x7f]/.test(relPath)
+          ? legacySubstringCount(opts.qTokens, `${relPath} ${sealed.body}`)
+          : keywordMatchCount(opts.qTokens, `${searchTokenSet(relPath) ?? ""} ${sealed.tokens}`);
+    }
+    const sim = vector ? cosineSimilarity(opts.qVec, vector) : 0;
     // rel_path is file metadata, not content: its tokens are matched live, the
     // extracted text through the stored set. Union of the two = the old
     // `position(tok IN lower(rel_path || ' ' || content))` (the space is outside
@@ -584,7 +691,9 @@ async function searchBlobText(opts: {
     // Any row the SQL counted (no stored set, or a non-ASCII rel_path) keeps
     // that count; otherwise both halves here are pure ASCII.
     const matched =
-      r.matched_legacy !== null || r.search_tokens === null
+      matchedSealed !== null
+        ? matchedSealed
+        : r.matched_legacy !== null || r.search_tokens === null
         ? (r.matched_legacy ?? 0)
         : keywordMatchCount(opts.qTokens, `${searchTokenSet(relPath) ?? ""} ${r.search_tokens}`);
     const boost = opts.qTokens.length > 0 ? 0.1 * (matched / opts.qTokens.length) : 0;
