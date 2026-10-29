@@ -16,6 +16,7 @@ The feature is **off by default**. With it off, the server behaves exactly as it
 | Variable | Default | Meaning |
 |---|---|---|
 | `BAALDA_VAULT_KEYS` | off | `on` enables vault keys: the key routes, the `vault-keys` feature in `GET /health`, and sealed storage for keyed vaults. Off: nothing in `src/crypto/` is consulted. Any value other than on/off (`1/true/on/yes`, `0/false/off/no`, empty) stops the server at first use. |
+| `VAULT_PLAINTEXT_RETENTION_DAYS` | 30 | Days between a verified-complete conversion and removing the old plaintext (see "Removing the old plaintext"). `0` is allowed; an invalid value falls back to 30. |
 | `VAULT_KEY_CONVERSION` | off | `on` lets desktops key vaults that asked for it (see below). Also requires the desktop to report a version at or above the `MIN_CLIENT_VERSION` floor. Keep it off until every member runs a desktop that supports vault keys. |
 
 Turn on `BAALDA_VAULT_KEYS` first, upgrade desktops, raise `MIN_CLIENT_VERSION`, and only then turn on

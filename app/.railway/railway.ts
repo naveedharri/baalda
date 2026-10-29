@@ -43,6 +43,8 @@ const SERVER_ENV = [
   "BAALDA_VAULT_KEYS",
   // Rollout gate for converting existing vaults to vault keys; unset/off = never.
   "VAULT_KEY_CONVERSION",
+  // Days a keyed vault keeps its verified pre-keying plaintext before the null-out; unset = 30.
+  "VAULT_PLAINTEXT_RETENTION_DAYS",
   // Attachment access rule mode: text | shadow (default) | refs.
   "ATTACHMENT_ACL_MODE",
   "NODE_OPTIONS",

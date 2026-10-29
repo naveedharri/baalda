@@ -22,6 +22,8 @@ import { resetDb } from "./helpers/db.js";
 import { seedBlob, seedBlobText, seedNote, seedOrg, seedVault } from "./helpers/seed.js";
 
 const FAST = { throttleMs: 0 };
+/** Tests call the worker several times within the hourly recheck window. */
+const RUN = { throttleMs: 0, force: true };
 /** Unique per test: rows of earlier tests' vaults outlive `resetDb` (note_index has no FK). */
 let SECRET = "zanzibarsecretword";
 
@@ -66,6 +68,14 @@ async function plaintextVault(notes = 2) {
     docIds.push(docId);
     live.push(doc);
   }
+  // A pre-038 checkpoint with an inline text.
+  const cpId = `cp-${Math.random().toString(36).slice(2)}`;
+  await pool.query("INSERT INTO vault_checkpoints (id, vault_id, kind) VALUES ($1, $2, 'auto')", [cpId, vaultId]);
+  const cpText = `checkpoint text ${SECRET}`;
+  await pool.query(
+    "INSERT INTO vault_checkpoint_docs (checkpoint_id, doc_id, sha256, content) VALUES ($1, $2, $3, $4)",
+    [cpId, docIds[0], sha256Hex(cpText), cpText],
+  );
   const blobId = await seedBlob(vaultId, orgId, "report.pdf");
   await seedBlobText(blobId, vaultId, null, `attachment text ${SECRET}`);
   return { orgId, vaultId, docIds, live, blobId };
@@ -113,7 +123,16 @@ async function reads(vaultId: string, docIds: string[], blobId: string, c: DocCr
   const texts = t.map((r) => resolveText(r, { vaultId, docId: r.doc_id, sha: r.sha256 }, c));
   const { rows: b } = await pool.query("SELECT content, search_enc FROM blob_text WHERE blob_id = $1", [blobId]);
   const blob = b[0].search_enc ? openBlobTextRow(c, blobId, b[0].search_enc).body : b[0].content;
+  const { rows: cp } = await pool.query(
+    `SELECT d.doc_id, d.sha256, COALESCE(d.content, t.content) AS content,
+            CASE WHEN d.content IS NULL THEN t.content_enc END AS content_enc
+       FROM vault_checkpoint_docs d JOIN vault_checkpoints k ON k.id = d.checkpoint_id
+       LEFT JOIN note_texts t ON t.doc_id = d.doc_id AND t.sha256 = d.sha256
+      WHERE k.vault_id = $1`,
+    [vaultId],
+  );
   return {
+    checkpoints: cp.map((r) => resolveText(r, { vaultId, docId: r.doc_id, sha: r.sha256 }, c)),
     states,
     diffs,
     search: search.map((h: { docId?: string; id?: string }) => h.docId ?? h.id).sort(),
@@ -213,17 +232,18 @@ describe("plaintext null-out + converting compaction (W3)", () => {
     expect((await encryptionStatus(vaultId)).total).toBe(0);
     const before = await reads(vaultId, docIds, blobId, c);
     expect(before.versions.some((v) => v.startsWith("inline version"))).toBe(true);
+    expect(before.checkpoints).toEqual([`checkpoint text ${SECRET}`]);
 
     vi.stubEnv("VAULT_PLAINTEXT_RETENTION_DAYS", "30");
-    expect(await nullOutVault(vaultId)).toBe("waiting");
+    expect(await nullOutVault(vaultId, RUN)).toBe("waiting");
     expect((await plaintextStatus(vaultId)).total).toBeGreaterThan(0);
     expect(await encryptionProgress(vaultId)).toMatchObject({ fullyEncrypted: false });
     // Exactly at the boundary later: still waiting one ms before, runs after.
     const { rows: s } = await pool.query("SELECT cursors->>'completedAt' AS at FROM vault_crypto_state WHERE vault_id = $1", [vaultId]);
     const done = Date.parse(s[0].at);
     const day = 24 * 60 * 60_000;
-    expect(await nullOutVault(vaultId, { now: () => done + 30 * day - 1 })).toBe("waiting");
-    expect(await nullOutVault(vaultId, { now: () => done + 30 * day })).toBe("sealed");
+    expect(await nullOutVault(vaultId, { ...RUN, now: () => done + 30 * day - 1 })).toBe("waiting");
+    expect(await nullOutVault(vaultId, { ...RUN, now: () => done + 30 * day })).toBe("sealed");
 
     expect((await plaintextStatus(vaultId)).total).toBe(0);
     expect(await encryptionProgress(vaultId)).toEqual({ fullyEncrypted: true, plaintextRemaining: 0 });
@@ -255,7 +275,7 @@ describe("plaintext null-out + converting compaction (W3)", () => {
         await pool.query("UPDATE note_texts SET content = content || ' (edited)' WHERE doc_id = $1 AND sha256 = $2", [t[0].doc_id, t[0].sha256]);
       }
     };
-    expect(await nullOutVault(vaultId)).toBe("remaining");
+    expect(await nullOutVault(vaultId, RUN)).toBe("remaining");
 
     const { rows: u2 } = await pool.query("SELECT update FROM doc_updates WHERE id = $1", [u[0].id]);
     expect(Buffer.compare(u2[0].update, u[0].update)).toBe(0);
@@ -277,11 +297,14 @@ describe("plaintext null-out + converting compaction (W3)", () => {
     const plain = await plaintextVault(1);
     const snapshot = async (vaultId: string) => plaintextStatus(vaultId);
     const plainBefore = await snapshot(plain.vaultId);
-    expect(await nullOutVault(plain.vaultId)).toBe("not_keyed");
+    expect(await nullOutVault(plain.vaultId, RUN)).toBe("not_keyed");
+    // The gate's counts run at most once an hour per vault.
+    expect(await nullOutVault(keyed.vaultId, { throttleMs: 0 })).toBe("waiting");
+    expect(await nullOutVault(keyed.vaultId, { throttleMs: 0 })).toBe("remaining");
     expect(await snapshot(plain.vaultId)).toEqual(plainBefore);
     // Keyed but no key cached: the backfill never completes, the null-out waits.
     expect(await backfillVault(keyed.vaultId, FAST)).toBe("no_key");
-    expect(await nullOutVault(keyed.vaultId)).toBe("waiting");
+    expect(await nullOutVault(keyed.vaultId, RUN)).toBe("waiting");
     expect((await plaintextStatus(keyed.vaultId)).total).toBeGreaterThan(0);
     // A compaction in the unkeyed vault is today's plaintext compaction.
     await compact(plain.docIds[0], pool);
@@ -297,7 +320,7 @@ describe("plaintext null-out + converting compaction (W3)", () => {
     const docId = await seedNote(vaultId, null, "a.md");
     const doc = new Y.Doc();
     await appendUpdate(docId, edit(doc, "hello\n"), pool, 1000, c);
-    expect(await nullOutVault(vaultId)).toBe("sealed");
+    expect(await nullOutVault(vaultId, RUN)).toBe("sealed");
     expect(await encryptionProgress(vaultId)).toEqual({ fullyEncrypted: true, plaintextRemaining: 0 });
     doc.destroy();
   });

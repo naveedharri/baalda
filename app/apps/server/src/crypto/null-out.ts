@@ -59,6 +59,10 @@ export const NULL_OUT_TABLES = [
 export type NullOutTable = (typeof NULL_OUT_TABLES)[number];
 
 export const NULL_OUT_BATCH = 200;
+/** Pause between batches, so a big vault leaves the pool to live traffic. */
+export const NULL_OUT_THROTTLE_MS = 50;
+/** Ids logged per table per pass for rows kept on a mismatch (the rest are counted). */
+const MISMATCH_IDS_LOGGED = 10;
 /** A finished pass is repeated at most this often per vault. */
 export const NULL_OUT_RECHECK_MS = 60 * 60_000;
 export const DEFAULT_RETENTION_DAYS = 30;
@@ -85,6 +89,8 @@ export interface NullOutCounts {
   cleared: number;
   mismatch: number;
   skipped: number;
+  /** First few mismatched ids per table, for one log line per table per pass. */
+  mismatchIds: Partial<Record<NullOutTable, string[]>>;
 }
 
 /** The sealed JSON a search row's plaintext columns stand for (same shape as the backfill's). */
@@ -96,8 +102,9 @@ function searchJson(body: string, vectorText: string | null, tokens: string | nu
 function mismatch(table: NullOutTable, key: string, counts: NullOutCounts): void {
   counts.mismatch += 1;
   inc(`nullout.${table}.mismatch`);
-  // Ids only: never a byte of content.
-  console.warn(`[null-out] ${table} ${key}: sealed copy differs from the plaintext; both kept`);
+  // Ids only, never a byte of content; logged once per table per pass.
+  const ids = (counts.mismatchIds[table] ??= []);
+  if (ids.length < MISMATCH_IDS_LOGGED) ids.push(key);
 }
 
 async function clear(
@@ -362,8 +369,12 @@ interface NullOutState {
   tables: Partial<Record<NullOutTable, { after: string | null; done: boolean }>>;
   /** ISO time the last full pass ended. */
   passedAt?: string;
+  /** ISO time the gate last counted (plaintext + sealable rows). */
+  checkedAt?: string;
   mismatches?: number;
 }
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 type Cursors = BackfillCursors & { nullOut?: NullOutState; plaintextRemaining?: number; sealedAt?: string };
 
@@ -382,6 +393,7 @@ export interface NullOutOptions {
   cache?: VaultKeyCache;
   batchSize?: number;
   maxBatches?: number;
+  throttleMs?: number;
   /** Ignore the once-an-hour pass limit (tests). */
   force?: boolean;
   now?: () => number;
@@ -439,6 +451,7 @@ export async function nullOutVault(vaultId: string, opts: NullOutOptions = {}): 
   const cache = opts.cache ?? vaultKeyCache;
   const batchSize = opts.batchSize ?? NULL_OUT_BATCH;
   const maxBatches = opts.maxBatches ?? Number.POSITIVE_INFINITY;
+  const throttleMs = opts.throttleMs ?? NULL_OUT_THROTTLE_MS;
   const now = opts.now ?? Date.now;
 
   const lockClient = await db.connect();
@@ -455,21 +468,26 @@ export async function nullOutVault(vaultId: string, opts: NullOutOptions = {}): 
     const state = await loadState(vaultId, db);
     if (!state) return "not_keyed";
     if (state.phase === "sealed") return "sealed";
+    const nullOut: NullOutState = state.cursors.nullOut ?? { tables: {} };
+    // A pass stopped half way (budget, key eviction) resumes without waiting.
+    const midPass = !nullOut.passedAt && Object.values(nullOut.tables).some((t) => t && !t.done);
+    // The counts below are heavy: at most once per recheck interval per vault.
+    const recent = (iso: string | undefined) => !!iso && now() - Date.parse(iso) < NULL_OUT_RECHECK_MS;
+    if (!opts.force && !midPass && recent(nullOut.checkedAt)) return "remaining";
+    nullOut.checkedAt = new Date(now()).toISOString();
+    await saveOwn(vaultId, { nullOut }, db);
     // Nothing plaintext at all (a vault keyed from creation): sealed now.
     if ((await recordPlaintextStatus(vaultId, db)) === 0) return "sealed";
 
     const completed = Date.parse(state.cursors.completedAt ?? "");
     if (!Number.isFinite(completed) || now() - completed < plaintextRetentionMs()) return "waiting";
+    if (!opts.force && !midPass && recent(nullOut.passedAt)) return "remaining";
     // The backfill's completion is a cached verdict: count again before trusting it.
     if ((await encryptionStatus(vaultId, db)).total !== 0) return "waiting";
-    const nullOut: NullOutState = state.cursors.nullOut ?? { tables: {} };
-    if (!opts.force && nullOut.passedAt && now() - Date.parse(nullOut.passedAt) < NULL_OUT_RECHECK_MS) {
-      return "remaining";
-    }
     if (nullOut.passedAt) nullOut.tables = {};
     nullOut.passedAt = undefined;
 
-    const counts: NullOutCounts = { cleared: 0, mismatch: 0, skipped: 0 };
+    const counts: NullOutCounts = { cleared: 0, mismatch: 0, skipped: 0, mismatchIds: {} };
     let batches = 0;
     for (const table of NULL_OUT_TABLES) {
       const cur = nullOut.tables[table] ?? { after: null, done: false };
@@ -493,6 +511,11 @@ export async function nullOutVault(vaultId: string, opts: NullOutOptions = {}): 
         }
         batches += 1;
         await saveOwn(vaultId, { nullOut }, db);
+        if (throttleMs > 0) await sleep(throttleMs);
+      }
+      const ids = counts.mismatchIds[table];
+      if (ids?.length) {
+        console.warn(`[null-out] vault ${vaultId} ${table}: rows kept (sealed copy differs), first ids: ${ids.join(", ")}`);
       }
     }
     nullOut.passedAt = new Date(now()).toISOString();
