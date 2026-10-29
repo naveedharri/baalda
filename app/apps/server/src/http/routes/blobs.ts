@@ -17,6 +17,7 @@ import { relAssetPath } from "../../render/note-html.js";
 import { config } from "../../config.js";
 import { pgText } from "../../db/text.js";
 import { embed } from "../../index/embedder.js";
+import { searchTokenSet } from "../../index/search-tokens.js";
 import { ByteBudget } from "../../blobs/admission.js";
 import {
   BLOB_MIME_ENFORCE,
@@ -1869,8 +1870,8 @@ blobRoutes.put("/vaults/:vaultId/blobs/:blobId/text", async (c) => {
   const source = typeof body.source === "string" && body.source ? body.source : "client";
 
   await pool.query(
-    `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, vector, source, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, now())
+    `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, vector, source, updated_at, search_tokens)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, now(), $8)
      ON CONFLICT (blob_id) DO UPDATE
        SET vault_id = EXCLUDED.vault_id,
            doc_id = EXCLUDED.doc_id,
@@ -1878,8 +1879,9 @@ blobRoutes.put("/vaults/:vaultId/blobs/:blobId/text", async (c) => {
            content = EXCLUDED.content,
            vector = EXCLUDED.vector,
            source = EXCLUDED.source,
-           updated_at = now()`,
-    [row.id, vaultId, row.doc_id, chars, stored, JSON.stringify(embed(stored)), source],
+           updated_at = now(),
+           search_tokens = EXCLUDED.search_tokens`,
+    [row.id, vaultId, row.doc_id, chars, stored, JSON.stringify(embed(stored)), source, searchTokenSet(stored)],
   );
 
   return c.body(null, 204);
