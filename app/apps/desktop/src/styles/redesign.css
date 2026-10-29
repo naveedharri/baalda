@@ -2158,3 +2158,33 @@ html[data-theme="dark"]:not(.rd-off) .cm-editor .cm-highlight,
 html[data-theme="dark"]:not(.rd-off) .cm-editor mark {
   background: linear-gradient(transparent 55%, rgba(229, 182, 90, 0.32) 55%) !important;
 }
+
+/* ---- Dark: buttons sit in the room, they don't glow ----
+   A deeper, slightly muted violet with soft off-white text and no coloured
+   halo; hover lifts one step. Links keep the lighter --accent. */
+html[data-theme="dark"]:not(.rd-off) :is(button.primary, .primary-btn, .upgrade-tier-cta.primary, .local-sync-btn, .rd-new-note, .account-vaults-head-actions button.primary) {
+  background: #5f50c4 !important;
+  color: #ece8ff !important;
+  box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.06) inset !important;
+}
+html[data-theme="dark"]:not(.rd-off) :is(button.primary, .primary-btn, .upgrade-tier-cta.primary, .local-sync-btn, .rd-new-note):hover:not(:disabled) {
+  background: #6b5cd0 !important;
+}
+html[data-theme="dark"]:not(.rd-off) :is(button.primary, .upgrade-tier-cta.primary):disabled {
+  background: #3a3360 !important; color: rgba(236, 232, 255, 0.55) !important;
+}
+/* The text-link version of Turn on sync stays a link. */
+html[data-theme="dark"]:not(.rd-off) .local-sync-btn { background: transparent !important; color: var(--accent) !important; box-shadow: none !important; }
+/* Switches: a calmer "on". */
+html[data-theme="dark"]:not(.rd-off) .switch input:checked + span,
+html[data-theme="dark"]:not(.rd-off) .toggle input:checked + .slider,
+html[data-theme="dark"]:not(.rd-off) [role="switch"][aria-checked="true"] { background: #5f50c4 !important; }
+/* Badges / counts in solid violet: same softer tone. */
+html[data-theme="dark"]:not(.rd-off) .notif-badge,
+html[data-theme="dark"]:not(.rd-off) .badge-count { background: #5f50c4 !important; color: #ece8ff !important; }
+html[data-theme="dark"]:not(.rd-off) .upgrade-tier.is-featured {
+  box-shadow: 0 0 0 1px rgba(165, 151, 255, 0.45), 0 18px 40px -20px rgba(0, 0, 0, 0.7) !important;
+}
+html[data-theme="dark"]:not(.rd-off) .vault-grid-card.current {
+  box-shadow: 0 0 0 1px rgba(165, 151, 255, 0.45), 0 12px 28px -18px rgba(0, 0, 0, 0.7);
+}
