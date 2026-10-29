@@ -1093,12 +1093,20 @@ class VaultConnection {
     // The ACL can be revoked while we're parked — re-check before reading.
     if (!this.readable.has(docId)) return;
     const clientSv = clientSvB64 ? new Uint8Array(Buffer.from(clientSvB64, "base64")) : null;
+    // The channel zeroes its key on close, possibly while this read is parked
+    // or running: read with a private copy, and stop once the socket is gone.
+    if (this.closed) return;
+    const held = this.docCrypto;
+    const crypto = held ? { ...held, key: Buffer.from(held.key) } : undefined;
     let diff;
     try {
-      diff = await this.deps.loadDiff(docId, clientSv, undefined, this.docCrypto ?? undefined);
+      diff = await this.deps.loadDiff(docId, clientSv, undefined, crypto);
     } catch (err) {
+      if (this.closed) return; // the socket went away mid-read; the next connect re-sends
       console.error(`Vault channel backfill failed for ${docId}:`, err);
       return;
+    } finally {
+      crypto?.key.fill(0);
     }
     if (diff?.clientAhead) {
       if (this.behind.length < BEHIND_CAP) this.behind.push(docId);
