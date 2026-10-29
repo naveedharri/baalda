@@ -772,3 +772,8 @@ html:not([data-theme="dark"]) .header-actions { position: static; }
 html:not([data-theme="dark"]) .tab-active-bg { background: var(--bg-app); box-shadow: none; }
 .rd-crumbs { display: none; }
 html:not([data-theme="dark"]) .editor-wrap .cm-scroller { padding-top: 0; }
+
+/* Tree rows: 38px slots with a 4px breathing gap between rows. */
+html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row { height: 34px; margin-top: 2px; margin-bottom: 2px; }
+html:not([data-theme="dark"]) .pinned-section .pinned-row,
+html:not([data-theme="dark"]) .home-sidebar-row { min-height: 34px; margin-top: 2px; margin-bottom: 2px; }
