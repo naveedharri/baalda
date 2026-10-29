@@ -301,8 +301,7 @@ html:not([data-theme="dark"]) .modal-backdrop {
 
 @media (prefers-reduced-motion: no-preference) {
   /* Every button gives a little under the finger. */
-  button:not(:disabled) { transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease), transform 90ms var(--ease); }
-  button:active:not(:disabled):not(.tree-row button) { transform: scale(0.97); }
+  button.primary:active:not(:disabled), .ghost-pill:active:not(:disabled), .rd-status-btn:active { transform: scale(0.97); }
 
   /* Menus and popovers open with a soft pop from the trigger. */
   .context-menu, .account-menu, .vault-popover, .home-sidebar-menu-items, .menu-select-list {
@@ -315,7 +314,6 @@ html:not([data-theme="dark"]) .modal-backdrop {
 
   /* The open note's row settles into its white pill. */
   .tree-row.selected { animation: rd-lift 180ms var(--ease) both; }
-  .tree-row { transition: background 140ms var(--ease), color 140ms var(--ease), box-shadow 180ms var(--ease); }
 
   /* Switching notes: the page eases in instead of snapping. */
   .editor-wrap .cm-editor { animation: rd-note-in 180ms var(--ease) both; }
@@ -658,7 +656,6 @@ html:not([data-theme="dark"]) .main { overflow: hidden; }
 
 /* ---- Editor: calmer type, tighter paragraph gaps ---- */
 html:not([data-theme="dark"]) { --inline-title-weight: 600; }
-html:not([data-theme="dark"]) .cm-editor .cm-content > .cm-line:has(> br:only-child) { line-height: 0.85; }
 html:not([data-theme="dark"]) .cm-editor .cm-content { color: #2e2d36; }
 
 /* ---- Tree: children indent under the folder name, like the mockup ---- */
@@ -1165,3 +1162,30 @@ html:not([data-theme="dark"]) .pinned-name { font-size: var(--fs-md); }
 html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row { height: 34px; margin-top: 1px; margin-bottom: 1px; }
 html:not([data-theme="dark"]) .vault-name { font-size: var(--fs-lg); }
 html:not([data-theme="dark"]) .identity-line1 { font-size: var(--fs-md); }
+
+/* ---- Status picker in the account menu ---- */
+.rd-status { padding: 6px 8px 8px; margin-bottom: 4px; border-bottom: 1px solid var(--border); }
+.rd-status-head { display: flex; align-items: baseline; gap: 6px; font-size: var(--fs-sm); font-weight: 500; color: var(--text-primary); padding: 0 2px 6px; }
+.rd-status-head small { color: var(--text-tertiary); font-weight: 400; font-size: var(--fs-xs); }
+.rd-status-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.rd-status-btn {
+  height: 34px; border: 0; border-radius: var(--radius-sm); background: var(--bg-subtle);
+  color: var(--text-secondary); display: grid; place-items: center; cursor: pointer;
+}
+.rd-status-btn svg { width: 17px; height: 17px; }
+.rd-status-btn:hover { background: var(--accent-soft); color: var(--accent-hover); }
+.rd-status-btn.on { background: var(--accent); color: #fff; }
+.rd-status-btn.s-online { color: #3f8850; }
+.rd-status-btn.s-online.on { background: #3f8850; color: #fff; }
+.rd-status-clear { display: flex; gap: 4px; margin-top: 6px; }
+.rd-status-clear button {
+  flex: 1; height: 24px; border: 0; border-radius: 99px; font: 500 var(--fs-xs) var(--font-body);
+  background: transparent; color: var(--text-secondary); cursor: pointer;
+}
+.rd-status-clear button:hover { background: var(--bg-subtle); }
+.rd-status-clear button.on { background: var(--accent-soft); color: var(--accent-hover); }
+.rd-prof .sm-host .avatar { width: 44px !important; height: 44px !important; }
+
+/* Tree performance: rows repaint on every expand/collapse, so keep them cheap. */
+html:not([data-theme="dark"]) .filetree-scroll .tree-row { transition: background 90ms linear; }
+html:not([data-theme="dark"]) .filetree-scroll .tree-row .tree-glyph { transition: none; }

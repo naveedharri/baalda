@@ -13,7 +13,57 @@ import {
   type AppearanceSettings,
 } from "./appearanceSettings";
 
-export type ActivityStatus = "online" | "away" | "busy" | "invisible";
+/** Status moments: a status your avatar acts out (redesign preview). */
+export type MomentStatus = "smoke" | "coffee" | "lunch" | "meeting" | "focus" | "brb";
+export type ActivityStatus = "online" | "away" | "busy" | "invisible" | MomentStatus;
+
+export const STATUS_MOMENTS: Array<{
+  id: MomentStatus;
+  emoji: string;
+  label: string;
+  hint: string;
+  /** How older apps (and the presence ring) read it. */
+  tone: "away" | "busy";
+}> = [
+  { id: "smoke", emoji: "🚬", label: "Out for a smoke", hint: "Back in a few minutes", tone: "away" },
+  { id: "coffee", emoji: "☕", label: "Coffee break", hint: "Grabbing a coffee", tone: "away" },
+  { id: "lunch", emoji: "🍜", label: "At lunch", hint: "Eating, back soon", tone: "away" },
+  { id: "meeting", emoji: "🎧", label: "In a meeting", hint: "On a call", tone: "busy" },
+  { id: "focus", emoji: "🌙", label: "Focusing", hint: "Notifications paused", tone: "busy" },
+  { id: "brb", emoji: "⏱️", label: "Back in 10", hint: "Short break", tone: "away" },
+];
+
+export function isMoment(v: unknown): v is MomentStatus {
+  return STATUS_MOMENTS.some((m) => m.id === v);
+}
+
+/** Clear-after choices, in minutes (null = never). */
+export const STATUS_CLEAR_AFTER: Array<{ label: string; minutes: number | null }> = [
+  { label: "30 min", minutes: 30 },
+  { label: "1 hour", minutes: 60 },
+  { label: "Today", minutes: -1 },
+  { label: "Never", minutes: null },
+];
+const STATUS_UNTIL_KEY = "context.activityStatusUntil";
+
+export function statusUntilFrom(minutes: number | null, now = Date.now()): number | null {
+  if (minutes === null) return null;
+  if (minutes === -1) {
+    const end = new Date(now);
+    end.setHours(23, 59, 59, 999);
+    return end.getTime();
+  }
+  return now + minutes * 60_000;
+}
+
+export function readActivityStatusUntil(): number | null {
+  try {
+    const v = Number(localStorage.getItem(STATUS_UNTIL_KEY));
+    return Number.isFinite(v) && v > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 export const ACTIVITY_STATUSES: Array<{
   id: ActivityStatus;
@@ -31,21 +81,25 @@ const MENTION_SOUND_KEY = "context.mentionSound";
 const AUTOMATIC_ITEM_COLORS_KEY = "context.automaticItemColors:";
 
 function isActivityStatus(v: unknown): v is ActivityStatus {
-  return v === "online" || v === "away" || v === "busy" || v === "invisible";
+  return v === "online" || v === "away" || v === "busy" || v === "invisible" || isMoment(v);
 }
 
 export function readActivityStatus(): ActivityStatus {
   try {
     const v = localStorage.getItem(STATUS_KEY);
+    const until = readActivityStatusUntil();
+    if (until !== null && until <= Date.now()) return "online";
     return isActivityStatus(v) ? v : "online";
   } catch {
     return "online";
   }
 }
 
-export function writeActivityStatus(status: ActivityStatus): void {
+export function writeActivityStatus(status: ActivityStatus, until: number | null = null): void {
   try {
     localStorage.setItem(STATUS_KEY, status);
+    if (until === null) localStorage.removeItem(STATUS_UNTIL_KEY);
+    else localStorage.setItem(STATUS_UNTIL_KEY, String(until));
   } catch {
     /* localStorage unavailable — status stays in-memory only */
   }

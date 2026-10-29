@@ -3,7 +3,7 @@
 // session — no server round-trip, no per-connection randomness.
 
 import { selfAvatarImage } from "../avatarIdentity";
-import type { ActivityStatus } from "../prefs";
+import { STATUS_MOMENTS, type ActivityStatus } from "../prefs";
 
 /**
  * A curated palette of bright, cheerful hues harmonized with the violet accent.
@@ -87,6 +87,8 @@ export type PresenceTone = "online" | "away" | "busy" | "offline";
 
 /** Fold a chosen availability status into a presence tone. */
 export function statusTone(status: ActivityStatus | undefined): PresenceTone {
+  const moment = STATUS_MOMENTS.find((m) => m.id === status);
+  if (moment) return moment.tone;
   switch (status) {
     case "away":
       return "away";

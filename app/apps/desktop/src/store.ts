@@ -69,6 +69,7 @@ import {
   type ActivityStatus,
   type EditorMeasure,
   readActivityStatus,
+  readActivityStatusUntil,
   readAppearanceOverrides,
   writeAppearanceOverrides,
   readAutomaticItemColors,
@@ -805,7 +806,8 @@ interface AppStore {
   // Account profile & preferences
   /** Update display name / avatar (server-backed; refreshes the session). */
   updateProfile: (input: { name?: string; image?: string | null }) => Promise<void>;
-  setActivityStatus: (status: ActivityStatus) => void;
+  setActivityStatus: (status: ActivityStatus, until?: number | null) => void;
+  activityStatusUntil: number | null;
   setMentionSound: (enabled: boolean) => void;
   setPropertiesMode: (mode: PropertiesMode) => void;
   setEditorMeasure: (measure: EditorMeasure) => void;
@@ -2063,6 +2065,19 @@ async function unsyncLocalTeardown(
   await get().refreshTitles();
 }
 
+/** Clears a timed status ("Out for a smoke · 30 min") when its time is up. */
+let statusClearTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleStatusClear(until: number | null): void {
+  if (statusClearTimer) clearTimeout(statusClearTimer);
+  statusClearTimer = null;
+  if (until === null) return;
+  const wait = Math.max(0, until - Date.now());
+  // setTimeout caps near 24.8 days; a status never runs that long.
+  statusClearTimer = setTimeout(() => {
+    if (useStore.getState().activityStatusUntil === until) useStore.getState().setActivityStatus("online", null);
+  }, Math.min(wait, 2_000_000_000));
+}
+
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
   tree: null,
@@ -2188,6 +2203,7 @@ export const useStore = create<AppStore>((set, get) => ({
   orgBilling: null,
   myBilling: null,
   activityStatus: readActivityStatus(),
+  activityStatusUntil: readActivityStatusUntil(),
   mentionSound: readMentionSound(),
   automaticItemColors: readAutomaticItemColors(null),
   propertiesMode: readPropertiesMode(),
@@ -3652,9 +3668,10 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ session });
   },
 
-  setActivityStatus: (status) => {
-    writeActivityStatus(status);
-    set({ activityStatus: status });
+  setActivityStatus: (status, until = null) => {
+    writeActivityStatus(status, until);
+    set({ activityStatus: status, activityStatusUntil: until });
+    scheduleStatusClear(until);
     // Re-broadcast immediately on any live note presence.
     syncManager.setPresenceStatus(status);
   },
@@ -5625,3 +5642,6 @@ useStore.subscribe((state, prev) => {
 
 // Registry pull → store mirror (see `lib/sync/vaultVisibility`).
 vaultVisibility.subscribe((v) => useStore.setState({ vaultVisibility: v }));
+
+// A timed status set before a restart still clears on time.
+scheduleStatusClear(useStore.getState().activityStatusUntil);

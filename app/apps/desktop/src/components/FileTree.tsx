@@ -12,6 +12,7 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { StatusMoment } from "./StatusMoment";
 import { NOT_CREATOR_MESSAGE, canDeleteItem } from "../lib/sync/deletePolicy";
 import {
   Tree,
@@ -2631,6 +2632,7 @@ function SidebarAvatar({ peer }: { peer: VaultPeer }) {
   const tone = statusTone(peer.status);
   const live = ringShowsColor(tone);
   return (
+    <span className="sm-host">
     <Face
       userId={peer.userId}
       name={peer.name}
@@ -2642,6 +2644,8 @@ function SidebarAvatar({ peer }: { peer: VaultPeer }) {
       }
       title={peer.name}
     />
+    <StatusMoment status={peer.status} size={20} />
+    </span>
   );
 }
 

@@ -24,6 +24,7 @@ import { playPingSound } from "../lib/presence/ping";
 import { syncManager } from "../lib/sync/docSession";
 import { colorForUser, PRESENCE_OFFLINE, statusTone, ringShowsColor } from "../lib/presence/color";
 import type { ActivityStatus } from "../lib/prefs";
+import { StatusMoment } from "./StatusMoment";
 import { useStore } from "../store";
 import * as ipc from "../lib/ipc";
 import { FilePreview } from "./FilePreview";
@@ -144,14 +145,17 @@ function PresenceAvatar({
   const tone = statusTone(peer.status);
   const live = online && ringShowsColor(tone);
   return (
-    <FaceSvg
-      userId={peer.id}
-      name={peer.name}
-      image={peer.image}
-      className={`presence-avatar tone-${tone}${live ? "" : " offline"}${className ? ` ${className}` : ""}`}
-      style={{ "--user-color": live ? peer.color : PRESENCE_OFFLINE } as CSSProperties}
-      ariaHidden
-    />
+    <span className="sm-host">
+      <FaceSvg
+        userId={peer.id}
+        name={peer.name}
+        image={peer.image}
+        className={`presence-avatar tone-${tone}${live ? "" : " offline"}${className ? ` ${className}` : ""}`}
+        style={{ "--user-color": live ? peer.color : PRESENCE_OFFLINE } as CSSProperties}
+        ariaHidden
+      />
+      <StatusMoment status={peer.status} size={30} image={peer.image} />
+    </span>
   );
 }
 

@@ -143,26 +143,6 @@ function NoteBreadcrumb() {
   );
 }
 
-/** Sidebar's primary action: a full-width New note button under the vault card. */
-function NewNoteButton() {
-  const rootFrozen = useStore((s) => s.rootFrozen);
-  const mac = document.documentElement.dataset.platform === "macos";
-  return (
-    <button
-      type="button"
-      className="rd-new-note"
-      disabled={rootFrozen}
-      onClick={() => void useStore.getState().createNoteIn("")}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-        <path d="M12 5v14M5 12h14" />
-      </svg>
-      <span>New note</span>
-      <kbd>{mac ? "⌘N" : "Ctrl+N"}</kbd>
-    </button>
-  );
-}
-
 function RemovedBanner() {
   const noteRemoved = useStore((s) => s.noteRemoved);
   const openNote = useStore((s) => s.openNote);
