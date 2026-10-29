@@ -626,6 +626,13 @@ function AccountPopover({
       onPointerDownCapture={onPin}
       onFocusCapture={onPin}
     >
+      <div className="rd-prof">
+        <LazyAvatar label={session.user.name || session.user.email} image={session.user.image} userId={session.user.id} />
+        <div className="rd-prof-text">
+          <b>{session.user.name || session.user.email}</b>
+          {session.user.name && <small>{session.user.email}</small>}
+        </div>
+      </div>
       {userInvitations.length > 0 && (
         <>
           {/* Pending invitations as plain menu rows, a hairline above the

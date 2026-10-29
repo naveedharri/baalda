@@ -401,3 +401,154 @@ html:not([data-theme="dark"]) .cm-editor .cm-wikilink * {
   color: inherit !important;
   text-decoration: none !important;
 }
+
+/* ============================================================
+   Round 4: menus and settings like the mockup
+   ============================================================ */
+
+/* Popovers: white, 20px corners, soft deep shadow. */
+html:not([data-theme="dark"]) .account-popover,
+html:not([data-theme="dark"]) .vault-popover {
+  border: 0;
+  border-radius: 20px;
+  padding: 8px;
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.06), 0 2px 4px rgba(11, 10, 16, 0.05), 0 30px 60px -16px rgba(11, 10, 16, 0.25);
+}
+
+/* Profile header at the top of the account menu. */
+.rd-prof {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  margin-bottom: 4px;
+  border-radius: 14px;
+  background: var(--bg-app);
+}
+.rd-prof .avatar { width: 44px !important; height: 44px !important; font-size: 16px; }
+.rd-prof-text { display: flex; flex-direction: column; min-width: 0; }
+.rd-prof-text b { font: 600 15px var(--font-display); color: var(--text-primary); }
+.rd-prof-text small { font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; }
+
+/* Menu rows: taller, roomier, the icon in a pastel square. */
+html:not([data-theme="dark"]) .account-popover .menu-item,
+html:not([data-theme="dark"]) .vault-switcher .menu-item {
+  min-height: 44px;
+  padding: 0 10px;
+  gap: 12px;
+  border-radius: 12px;
+  font-size: 14px;
+}
+html:not([data-theme="dark"]) .account-popover .menu-hint { font-size: 12px; color: #0b0a1099; }
+html:not([data-theme="dark"]) .account-popover .menu-icon,
+html:not([data-theme="dark"]) .settings-nav .menu-icon,
+html:not([data-theme="dark"]) .settings-tabs .menu-icon {
+  box-sizing: content-box;
+  width: 15px !important;
+  height: 15px !important;
+  padding: 7.5px;
+  border-radius: 9px;
+  flex: none;
+  color: var(--rd-ink, #6a4fe0);
+  background: var(--rd-tint, rgba(124, 92, 255, 0.12));
+}
+/* A pastel per row, cycling through the site's palette. */
+.account-popover > .menu-item:nth-of-type(5n + 1) .menu-icon,
+.settings-tab:nth-of-type(5n + 1) .menu-icon { --rd-tint: #b8caf566; --rd-ink: #4b68c3; }
+.account-popover > .menu-item:nth-of-type(5n + 2) .menu-icon,
+.settings-tab:nth-of-type(5n + 2) .menu-icon { --rd-tint: #fde99baa; --rd-ink: #987e1b; }
+.account-popover > .menu-item:nth-of-type(5n + 3) .menu-icon,
+.settings-tab:nth-of-type(5n + 3) .menu-icon { --rd-tint: #9ed4ef77; --rd-ink: #427e8a; }
+.account-popover > .menu-item:nth-of-type(5n + 4) .menu-icon,
+.settings-tab:nth-of-type(5n + 4) .menu-icon { --rd-tint: #9bd8a966; --rd-ink: #3f8850; }
+.account-popover > .menu-item:nth-of-type(5n + 5) .menu-icon,
+.settings-tab:nth-of-type(5n + 5) .menu-icon { --rd-tint: #f3c4ec88; --rd-ink: #a549ab; }
+.account-popover > .menu-item.danger .menu-icon { --rd-tint: #f4c5c066; --rd-ink: #bb433a; }
+html:not([data-theme="dark"]) .account-popover .menu-sep { margin: 6px 8px; }
+
+/* ---- Vault switcher ---- */
+html:not([data-theme="dark"]) .vault-switcher {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2px 8px;
+  right: auto;
+  width: 360px;
+  max-height: none;
+}
+html:not([data-theme="dark"]) .vault-switcher > * { grid-column: 1 / -1; }
+html:not([data-theme="dark"]) .vault-switcher::before {
+  content: "Your vaults";
+  grid-column: 1 / -1;
+  padding: 8px 10px 6px;
+  font: 500 10.5px var(--font-mono);
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: #0b0a1099;
+}
+html:not([data-theme="dark"]) .vault-switcher .vault-card {
+  min-height: 58px;
+  padding: 0 10px;
+  gap: 12px;
+  border-radius: 12px;
+}
+html:not([data-theme="dark"]) .vault-switcher .vault-card .vault-tile {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+}
+html:not([data-theme="dark"]) .vault-switcher .vault-card-name { font-size: 14px; font-weight: 500; }
+html:not([data-theme="dark"]) .vault-switcher .vault-card-sub { font-size: 11.5px; color: var(--text-secondary); }
+html:not([data-theme="dark"]) .vault-switcher .vault-card-sub::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #3f8850;
+  vertical-align: 1px;
+}
+html:not([data-theme="dark"]) .vault-switcher .vault-card.current {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px rgba(124, 92, 255, 0.2);
+}
+html:not([data-theme="dark"]) .vault-switcher .vault-card-kbd {
+  font: 11px var(--font-mono);
+  color: #0b0a1070;
+  background: var(--bg-subtle);
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 0;
+}
+html:not([data-theme="dark"]) .vault-switcher .menu-sep { margin: 6px 8px; }
+
+/* New vault · Join with code · Manage: three tiles in a row. */
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
+  grid-column: auto;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  min-height: 0;
+  padding: 12px 6px 10px;
+  border-radius: 14px;
+  background: var(--bg-app);
+  font-size: 12px;
+  text-align: center;
+}
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
+  box-sizing: content-box;
+  width: 16px !important;
+  height: 16px !important;
+  padding: 8px;
+  border-radius: 9px;
+}
+.vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon { background: #cfc4ff66; color: #6a4fe0; }
+.vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon { background: #9bd8a966; color: #3f8850; }
+.vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon { background: #9ed4ef77; color: #427e8a; }
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: 0; }
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { content: "Manage"; font-size: 12px; }
+html:not([data-theme="dark"]) .vault-switcher .menu-item:hover { background: var(--bg-hover); }
