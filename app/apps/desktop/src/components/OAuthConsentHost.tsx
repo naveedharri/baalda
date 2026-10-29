@@ -3,6 +3,7 @@ import type { OAuthConsentRequest } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import { consentKeyHeader, linkMatchesServer } from "../lib/oauthConsentLink";
 import { toast } from "../lib/toast";
+import { orgOfVault } from "../lib/vaultKeys/forget";
 import { useStore } from "../store";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -55,7 +56,12 @@ export function OAuthConsentHost() {
   if (!request) return null;
 
   const allow = async () => {
-    const header = await consentKeyHeader(request.vaultIds, authManager.api);
+    const userId = useStore.getState().session?.user.id ?? "";
+    const base = authManager.api.getBaseUrl();
+    const header = await consentKeyHeader(request.vaultIds, authManager.api, (id) => {
+      const org = orgOfVault(base, userId, id);
+      return org !== null && org !== request.organizationId;
+    });
     if (!header) {
       toast(`This computer doesn't have the key for ${request.vaultName || "this vault"} yet.`, "error");
       return;
@@ -73,10 +79,33 @@ export function OAuthConsentHost() {
       onConfirm={allow}
       onCancel={close}
     >
+      <ConsentPromptBody request={request} />
+    </ConfirmDialog>
+  );
+}
+
+/**
+ * What the person is agreeing to. The app name is whatever the connector's
+ * registrant typed (anyone can register a client called "Claude"), so the
+ * place it sends people back to is shown beside it.
+ */
+export function ConsentPromptBody({ request }: { request: OAuthConsentRequest }) {
+  const hosts = (Array.isArray(request.redirectHosts) ? request.redirectHosts : [])
+    .filter((h): h is string => typeof h === "string" && h.length > 0)
+    .slice(0, 5);
+  return (
+    <>
       <p>
         {request.app} wants to read and edit notes in <b>{request.vaultName || "your vault"}</b>, within your
         existing permissions. It keeps working when this computer is off.
       </p>
-    </ConfirmDialog>
+      {hosts.length > 0 ? (
+        <p>
+          It returns you to <b>{hosts.join(", ")}</b>. Allow only if you started this connection there yourself.
+        </p>
+      ) : (
+        <p>Allow only if you started this connection yourself, just now.</p>
+      )}
+    </>
   );
 }

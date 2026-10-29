@@ -1145,6 +1145,9 @@ export interface OAuthConsentRequest {
   /** The vault's collections this device must present keys for. */
   vaultIds: string[];
   approved: boolean;
+  /** The connector's registered redirect hosts (absent on older servers). The
+   *  name above is self-chosen by whoever registered the client; this is not. */
+  redirectHosts?: string[];
 }
 
 export class ApiError extends Error {

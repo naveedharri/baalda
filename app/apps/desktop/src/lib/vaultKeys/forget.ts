@@ -77,6 +77,13 @@ export function vaultIdsForOrg(serverUrl: string, userId: string, orgId: string)
   return readMap()[scopeKey(serverUrl, userId)]?.[orgId] ?? [];
 }
 
+/** The org this device last recorded a collection under, or null when unknown. */
+export function orgOfVault(serverUrl: string, userId: string, vaultId: string): string | null {
+  const orgs = readMap()[scopeKey(serverUrl, userId)] ?? {};
+  for (const [orgId, ids] of Object.entries(orgs)) if (Array.isArray(ids) && ids.includes(vaultId)) return orgId;
+  return null;
+}
+
 export function forgetOrgVaultIds(serverUrl: string, userId: string, orgId: string): void {
   const m = readMap();
   const k = scopeKey(serverUrl, userId);
