@@ -121,6 +121,12 @@ async function main() {
   });
   // A removed/departed member's vault-channel sockets are told and closed.
   setMemberRemovedPublisher((vaultId, orgId, userId, reason) => {
+    // …and their per-doc sockets too. Our own DELETE route kicks every doc,
+    // but Better Auth's remove-member / leave paths only reach this publisher:
+    // without this an open note kept streaming to a removed member until the
+    // token expired. A reconnect fails at onAuthenticate (no membership).
+    // (`sync` is created below; this only runs on a request, after startup.)
+    disconnectUserInVault(sync, vaultId, userId);
     void vaultChannel
       .publishMemberRemoved(vaultId, orgId, userId, reason)
       .catch(broadcastFailed("member-removed"));
