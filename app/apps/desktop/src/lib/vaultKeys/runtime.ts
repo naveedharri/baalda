@@ -402,6 +402,17 @@ export function freshAccountKeyCode(): string | null {
   return readFreshCodes()[scope] ?? null;
 }
 
+/**
+ * This person's own security code for Account Settings, or null when vault
+ * keys are off here, no account key is held, or the session has not confirmed
+ * it matches the server's (`ownSecurityCodeView`).
+ */
+export async function ownSecurityCode(): Promise<string | null> {
+  const c = current;
+  if (!c || c.account?.state !== "ready") return null;
+  return c.session.accountKeyCode().catch(() => null);
+}
+
 /** The last account state the open session reported (null = not asked yet). */
 export function accountKeyStateNow(): AccountKeysState | null {
   return current?.account ?? null;

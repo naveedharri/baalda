@@ -55,3 +55,16 @@ export function vaultKeySectionView(opts: {
     state?.state === "waiting-for-teammate" || state?.state === "needs-account-key" || state?.state === "key-mismatch";
   return noKeyHere && isOwner ? "restore" : "hidden";
 }
+
+/** Account Settings → Profile: the line under "Your security code". */
+export const SECURITY_CODE_HINT = "Teammates may ask you to read this out to confirm a new device or key.";
+
+/**
+ * The person's OWN security code (the same `shortFingerprint` teammates see in
+ * "<name>'s security key changed"), shown only while this computer holds the
+ * account key the server names. Vault keys off, no key, a device still
+ * waiting for approval or a mismatched key: nothing.
+ */
+export function ownSecurityCodeView(account: { state: string } | null, code: string | null): string | null {
+  return account?.state === "ready" && code ? code : null;
+}
