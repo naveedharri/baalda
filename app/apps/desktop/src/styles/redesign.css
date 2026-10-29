@@ -207,3 +207,157 @@ html:not([data-theme="dark"]) .cm-editor .cm-task-checkbox:checked::after {
   border-right: 0;
   transform: rotate(-45deg);
 }
+
+/* ============================================================
+   Round 2: closer to the mockup
+   ============================================================ */
+
+/* Search lives on ⌘F / ⌘K, not as a sidebar icon. */
+.titlebar-search { display: none !important; }
+
+/* Full-width New note button under the vault card. */
+.rd-new-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  margin: 0 var(--sp-3) var(--sp-3);
+  padding: 0 14px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  font: 500 14px var(--font-body);
+  cursor: pointer;
+  box-shadow: 0 8px 18px -8px rgba(124, 92, 255, 0.65);
+  transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+.rd-new-note svg { width: 16px; height: 16px; }
+.rd-new-note kbd { margin-left: auto; font: 11px var(--font-mono); color: rgba(255, 255, 255, 0.7); }
+.rd-new-note:hover:not(:disabled) { background: var(--accent-hover); box-shadow: 0 10px 22px -8px rgba(124, 92, 255, 0.75); }
+.rd-new-note:active:not(:disabled) { transform: scale(0.98); }
+.rd-new-note:disabled { opacity: 0.5; cursor: default; }
+.rd-new-note:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* Rows sit inside the sidebar, not edge to edge. */
+html:not([data-theme="dark"]) .sidebar .tree-row,
+html:not([data-theme="dark"]) .home-sidebar-row {
+  margin-left: 6px;
+  margin-right: 6px;
+  width: auto;
+}
+html:not([data-theme="dark"]) .home-section,
+html:not([data-theme="dark"]) .pinned-section { padding-left: 4px; padding-right: 4px; }
+
+/* No green dot on every synced row: only rows that need attention show one. */
+.tree-sync.synced { visibility: hidden; }
+
+/* Folders: the coloured glyph sits in a soft tinted square. */
+html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph,
+html:not([data-theme="dark"]) .pinned-row.is-dir .tree-glyph {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 13%, transparent);
+}
+html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph svg { width: 14px; height: 14px; }
+html:not([data-theme="dark"]) .tree-row.is-dir:hover .tree-glyph { transform: none; }
+
+/* No rule above the account row. */
+html:not([data-theme="dark"]) .sidebar-footer { border-top: 0; }
+
+/* Note column: narrower and centred, like the mockup. */
+html:not([data-theme="dark"]) .editor-column { --editor-measure: 68ch; }
+
+/* Markdown links: violet with a thin underline, same family as [[links]]. */
+html:not([data-theme="dark"]) .cm-editor .cm-md-link {
+  color: #4a2fc7 !important;
+  text-decoration: none !important;
+  border-bottom: 1px solid rgba(124, 92, 255, 0.4);
+}
+html:not([data-theme="dark"]) .cm-editor .cm-md-link:hover { border-bottom-color: var(--accent); }
+
+/* ---- Welcome screen: flat cream, a calm centred card ---- */
+html:not([data-theme="dark"]) .vault-picker { background: var(--bg-app); }
+html:not([data-theme="dark"]) .vault-picker::before,
+html:not([data-theme="dark"]) .vault-picker .aurora { display: none; }
+html:not([data-theme="dark"]) .vault-picker-card {
+  width: min(560px, calc(100% - 48px));
+  padding: 56px 48px 44px;
+  background: #fff;
+  border-radius: 28px;
+  box-shadow: var(--rd-card-shadow);
+}
+html:not([data-theme="dark"]) .vault-picker-card .product-name { margin-bottom: 40px; }
+html:not([data-theme="dark"]) .vault-picker-card .wordmark { width: min(300px, 70%); }
+html:not([data-theme="dark"]) .vault-picker-card .ghost-pill {
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1);
+  border: 0;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+html:not([data-theme="dark"]) .vault-picker-card button.primary { font-weight: 500; box-shadow: 0 8px 18px -8px rgba(124, 92, 255, 0.65); }
+html:not([data-theme="dark"]) .vault-picker-card .hint { color: var(--text-secondary); }
+
+/* ---- Sign-in dialog ---- */
+html:not([data-theme="dark"]) .modal {
+  border-radius: 24px;
+  border: 0;
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.06), 0 30px 70px -20px rgba(11, 10, 16, 0.35);
+}
+html:not([data-theme="dark"]) .modal-backdrop {
+  background: rgba(11, 10, 16, 0.22);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* ============================================================
+   Motion: small, quick, quiet. All of it is off for reduced motion.
+   ============================================================ */
+@keyframes rd-pop { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes rd-rise { from { opacity: 0; transform: translateY(6px) scale(0.985); } to { opacity: 1; transform: none; } }
+@keyframes rd-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rd-lift { from { box-shadow: none; transform: scale(0.985); } to { transform: none; } }
+@keyframes rd-tick { 0% { transform: scale(0.8); } 60% { transform: scale(1.12); } 100% { transform: scale(1); } }
+@keyframes rd-note-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: no-preference) {
+  /* Every button gives a little under the finger. */
+  button:not(:disabled) { transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease), transform 90ms var(--ease); }
+  button:active:not(:disabled):not(.tree-row button) { transform: scale(0.97); }
+
+  /* Menus and popovers open with a soft pop from the trigger. */
+  .context-menu, .account-menu, .vault-popover, .home-sidebar-menu-items, .menu-select-list {
+    animation: rd-pop 140ms var(--ease) both;
+    transform-origin: top left;
+  }
+  /* Dialogs rise in over a fading backdrop. */
+  .modal-backdrop { animation: rd-fade 160ms var(--ease) both; }
+  .modal { animation: rd-rise 200ms var(--ease) both; }
+
+  /* The open note's row settles into its white pill. */
+  .tree-row.selected { animation: rd-lift 180ms var(--ease) both; }
+  .tree-row { transition: background 140ms var(--ease), color 140ms var(--ease), box-shadow 180ms var(--ease); }
+
+  /* Switching notes: the page eases in instead of snapping. */
+  .editor-wrap .cm-editor { animation: rd-note-in 180ms var(--ease) both; }
+
+  /* Ticking a task gives a tiny bounce. */
+  .cm-editor .cm-task-checkbox:checked { animation: rd-tick 220ms var(--ease) both; }
+
+  /* Tabs and toolbar icons warm up on hover. */
+  .tab { transition: color var(--t-fast) var(--ease); }
+  .header-actions .icon-btn:hover { background: var(--bg-subtle); }
+
+  /* Welcome card rises in. */
+  .vault-picker-card { animation: rd-rise 320ms var(--ease) both; }
+}
+
+/* The link text inside .cm-md-link carries its own highlight colour. */
+html:not([data-theme="dark"]) .cm-editor .cm-md-link * {
+  color: inherit !important;
+  text-decoration: none !important;
+}
+/* Preview: hold the calm reading width even if Content width is set wider. */
+html:not([data-theme="dark"]) .editor-column { --editor-measure: 68ch !important; }
+html:not([data-theme="dark"]) .cm-editor .cm-bullet { margin-right: 0.35em; }
