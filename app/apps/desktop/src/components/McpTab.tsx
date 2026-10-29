@@ -461,7 +461,7 @@ function CopyButton({ value, label }: { value: string; label: string }) {
 }
 
 /** A monospace value with its copy button inside the field; one line unless `wrap`. */
-function CopyField({ value, label, wrap = false }: { value: string; label: string; wrap?: boolean }) {
+export function CopyField({ value, label, wrap = false }: { value: string; label: string; wrap?: boolean }) {
   return (
     <div className="mcp-field">
       <code className={`mcp-field-value${wrap ? " is-wrapped" : ""}`} title={value}>

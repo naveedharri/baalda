@@ -4555,7 +4555,8 @@ button.secondary.about-update-btn:disabled {
    graph panel and nowhere else. Checkboxes and radios keep their own compact
    controls instead of inheriting text-field dimensions. */
 .settings-page input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
-.settings-page select {
+.settings-page select,
+.settings-page textarea.vault-key-input {
   background: var(--bg-subtle);
   border: 1px solid transparent;
   color: var(--text-primary);
@@ -4569,18 +4570,21 @@ button.secondary.about-update-btn:disabled {
     box-shadow var(--t-fast) var(--ease),
     background var(--t-fast) var(--ease);
 }
-.settings-page input::placeholder {
+.settings-page input::placeholder,
+.settings-page textarea.vault-key-input::placeholder {
   color: var(--text-tertiary);
 }
 .settings-page input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):hover,
-.settings-page select:hover {
+.settings-page select:hover,
+.settings-page textarea.vault-key-input:hover {
   border-color: var(--border-strong);
 }
 /* A focused range keeps the browser's own ring — the box-shadow + surface
    background below are a text field's focus, and the background would repaint
    the track out of existence. */
 .settings-page input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus,
-.settings-page select:focus {
+.settings-page select:focus,
+.settings-page textarea.vault-key-input:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
@@ -6146,6 +6150,25 @@ button.secondary:disabled {
   color: var(--text-tertiary);
   font-weight: 400;
   margin-top: 2px;
+}
+
+/* General → Vault key: the revealed words or the restore field sit under the
+   row, with their actions in one line below. */
+.vault-key-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-3);
+}
+.vault-key-row > button {
+  flex: none;
+  white-space: nowrap;
+}
+.settings-page textarea.vault-key-input {
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
 }
 
 /* The General tab's destructive sync exit is a contained decision, with the

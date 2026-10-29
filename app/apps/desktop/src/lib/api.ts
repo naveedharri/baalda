@@ -1656,7 +1656,10 @@ export class ApiClient {
   /** null when this account has no keys yet (404). */
   async getMyKeys(): Promise<AccountKeysBody | null> {
     try {
-      return (await this.request<AccountKeysBody>("GET", "/api/me/keys")).data;
+      // The server answers 200 with `publicKey: null` before any key exists:
+      // that is "no keys", never another device's key to link against.
+      const body = (await this.request<AccountKeysBody>("GET", "/api/me/keys")).data;
+      return body?.publicKey ? body : null;
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;

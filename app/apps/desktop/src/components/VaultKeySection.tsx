@@ -3,17 +3,19 @@
 // Hidden by default; "Show vault key" reveals the 24 words inline with Copy
 // and Save to file. Never emailed or sent anywhere: the words leave this
 // screen only through the clipboard or a file the owner picks.
-// When this device has no verified key for the vault, the same place offers
-// "Restore with vault key" (a wrong key is refused, never stored).
+// When the vault is keyed but this device has no verified key for it, the same
+// place offers "Restore with vault key" (a wrong key is refused, never stored).
+// A vault that is not keyed yet shows one line; an unknown state shows nothing.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import * as ipc from "../lib/ipc";
 import { toast } from "../lib/toast";
 import { syncManager } from "../lib/sync/docSession";
-import { currentVaultKeySession } from "../lib/vaultKeys/runtime";
+import { blocksStructure, currentVaultKeySession, onVaultKeyEvent, vaultKeyStateFor } from "../lib/vaultKeys/runtime";
 import { vaultKeyFileText, wordsToVaultKey } from "../lib/vaultKeys/crypto";
 import { AsyncButton } from "./AsyncButton";
+import { CopyField } from "./McpTab";
 
 const RESTORE_MESSAGES: Record<string, string> = {
   restored: "Vault key restored on this computer.",
@@ -28,89 +30,124 @@ export function VaultKeySection({ vaultName }: { vaultName: string }) {
   const vaultId = syncManager.registry.vaultId;
   const session = currentVaultKeySession();
   const [shown, setShown] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState(false);
   const [restoreText, setRestoreText] = useState("");
   const [, bump] = useState(0);
+  useEffect(() => {
+    const off = onVaultKeyEvent((e) => {
+      if (e.kind === "vault") bump((n) => n + 1);
+    });
+    return () => void off();
+  }, []);
   if (!vaultId || !session) return null;
   const words = session.revealVaultKey(vaultId);
+  const state = vaultKeyStateFor(vaultId);
+
+  if (!words) {
+    if (state?.state === "unkeyed") {
+      return (
+        <>
+          <div className="menu-sep" />
+          <div className="muted">Encryption is being set up for this vault.</div>
+        </>
+      );
+    }
+    // Keyed, but this computer cannot open it (a security warning has its own notice).
+    if (!state || !blocksStructure(state) || state.state === "security-warning") return null;
+  }
 
   return (
     <>
       <div className="menu-sep" />
-      <div className="subhead">Vault key</div>
-      {words ? (
-        <>
-          <p className="muted">
-            The 24 words that unlock this vault. Anyone who has them can read it. Keep them somewhere safe.
-          </p>
-          {shown ? (
-            <>
-              <div className="join-code-row">
-                <code>{shown}</code>
-              </div>
-              <div className="join-code-row">
-                <button
-                  type="button"
-                  className="ghost-pill"
-                  onClick={() => void navigator.clipboard?.writeText(shown).then(() => toast("Vault key copied."))}
-                >
-                  Copy
-                </button>
-                <AsyncButton
-                  className="ghost-pill"
-                  onClick={async () => {
-                    const vk = wordsToVaultKey(shown);
-                    if (!vk) return;
-                    const dest = await saveDialog({
-                      defaultPath: `${vaultName} vault key.txt`,
-                      filters: [{ name: "Text", extensions: ["txt"] }],
-                    });
-                    if (!dest) return;
-                    await ipc.saveTextFile(dest, vaultKeyFileText(vaultName, vaultId, vk));
-                    toast("Vault key saved.");
-                  }}
-                >
-                  Save to file
-                </AsyncButton>
-                <button type="button" className="ghost-pill" onClick={() => setShown(null)}>
-                  Hide
-                </button>
-              </div>
-            </>
-          ) : (
-            <div className="join-code-row">
-              <button type="button" className="ghost-pill" onClick={() => setShown(words)}>
-                Show vault key
-              </button>
-            </div>
-          )}
-        </>
-      ) : (
-        <>
-          <p className="muted">This computer does not hold the key for this vault. Paste the 24 words to restore it.</p>
+      <div className="menu-row vault-key-row">
+        <span className="menu-row-label">
+          Vault key
+          <span className="field-hint">
+            {words
+              ? "The 24 words that unlock this vault. Keep them somewhere safe; anyone with them can read it."
+              : "This computer doesn't have this vault's key yet. A teammate's computer usually shares it automatically."}
+          </span>
+        </span>
+        {words && !shown && (
+          <button type="button" className="secondary sm" onClick={() => setShown(words)}>
+            Show vault key
+          </button>
+        )}
+        {!words && !restoring && (
+          <button type="button" className="secondary sm" onClick={() => setRestoring(true)}>
+            Restore with vault key
+          </button>
+        )}
+      </div>
+
+      {words && shown && (
+        <div className="vault-key-panel">
+          <CopyField value={shown} label="vault key" wrap />
+          <div className="row">
+            <AsyncButton
+              className="secondary sm"
+              onClick={async () => {
+                const vk = wordsToVaultKey(shown);
+                if (!vk) return;
+                const dest = await saveDialog({
+                  defaultPath: `${vaultName} vault key.txt`,
+                  filters: [{ name: "Text", extensions: ["txt"] }],
+                });
+                if (!dest) return;
+                await ipc.saveTextFile(dest, vaultKeyFileText(vaultName, vaultId, vk));
+                toast("Vault key saved.");
+              }}
+            >
+              Save to file
+            </AsyncButton>
+            <button type="button" className="secondary sm" onClick={() => setShown(null)}>
+              Hide
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!words && restoring && (
+        <div className="vault-key-panel">
           <textarea
+            className="vault-key-input"
             value={restoreText}
             rows={3}
+            autoFocus
             autoComplete="off"
             spellCheck={false}
+            placeholder="Paste the 24 words of this vault's key"
+            aria-label="Vault key"
             onChange={(e) => setRestoreText(e.target.value)}
           />
-          <div className="join-code-row">
+          <div className="row">
             <AsyncButton
-              className="primary"
+              className="primary sm"
               disabled={!restoreText.trim()}
               onClick={async () => {
                 const result = await session.restoreWithVaultKey(vaultId, restoreText);
                 toast(RESTORE_MESSAGES[result] ?? result, result === "restored" ? "success" : "error");
                 if (result === "restored") {
                   setRestoreText("");
+                  setRestoring(false);
                   bump((n) => n + 1);
                 }
               }}
             >
-              Restore with vault key
+              Restore
             </AsyncButton>
+            <button
+              type="button"
+              className="secondary sm"
+              onClick={() => {
+                setRestoring(false);
+                setRestoreText("");
+              }}
+            >
+              Cancel
+            </button>
           </div>
-        </>
+        </div>
       )}
     </>
   );

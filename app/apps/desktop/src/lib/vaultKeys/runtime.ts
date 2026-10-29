@@ -94,8 +94,15 @@ export function onVaultKeyBlockChange(cb: (vaultId: string, blocked: boolean) =>
   return () => blockListeners.delete(cb);
 }
 
+/** The last known key state per vault, for Vault Settings (absent = unknown). */
+const lastStates = new Map<string, VaultKeyState>();
+export function vaultKeyStateFor(vaultId: string | null | undefined): VaultKeyState | null {
+  return (vaultId && lastStates.get(vaultId)) || null;
+}
+
 /** Record a vault's key state (exported for tests). */
 export function noteVaultKeyState(vaultId: string, state: VaultKeyState): void {
+  lastStates.set(vaultId, state);
   const was = blockedVaults.has(vaultId);
   const now = blocksStructure(state);
   if (now) blockedVaults.add(vaultId);
@@ -222,6 +229,7 @@ export function vaultKeysOpened(opts: { userId: string; vaultId: string; orgId: 
 
 export function vaultKeysClosed(): void {
   blockedVaults.clear();
+  lastStates.clear();
   if (!current) return;
   if (current.timer) clearInterval(current.timer);
   current.timer = null;

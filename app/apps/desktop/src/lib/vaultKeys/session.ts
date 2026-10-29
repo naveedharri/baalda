@@ -119,7 +119,7 @@ export type AccountKeysState =
 export type VaultKeyState =
   | { state: "disabled" }
   | { state: "security-warning" }
-  /** `created`: this device just keyed the vault: show "Save your vault key". */
+  /** `created`: this device just keyed the vault. */
   | { state: "ready"; generation: number; created?: true }
   | { state: "waiting-for-teammate" }
   /** `conversionAllowed`: the server's rollout gate for converting this vault. */
