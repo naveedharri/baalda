@@ -1089,8 +1089,10 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   original AND sealed = compared`; a mismatch keeps both (ids logged). Inline pre-038 version/checkpoint
   texts are first sealed into `note_texts` by the backfill. At zero plaintext `phase = 'sealed'`;
   `keys/mine` reports `fullyEncrypted`/`plaintextRemaining` as last recorded (never counted per request).
-  A keyed re-index leaves stale `note_index`/`blob_text` plaintext that never byte-matches: it stays
-  until a decision on derived rows is made, so an edited vault does not reach `sealed` yet.
+  A keyed re-index leaves stale `note_index`/`blob_text` plaintext that never byte-matches; it is derived,
+  so it is cleared (decided 2026-10-29) under the same guard when the sealed entry is CURRENT
+  (`sealedIsCurrent`: note body equals the CRDT text now; blob text opens under the current key).
+  `note_links` titles stay. Residuals with no sealed column: `blobs.data`, `checkpoint_blob_bytes`, skills files.
 
 ## Conventions & gotchas
 

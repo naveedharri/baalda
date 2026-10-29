@@ -51,7 +51,10 @@ ciphertext cannot be moved to another row.
 - **Attachment and file bytes.** With `BLOB_STORAGE=s3` (S3, R2, MinIO) uploads and downloads go straight to
   the bucket through presigned URLs and are **not** encrypted with the vault key. They are protected only by
   the storage provider's own encryption at rest. With `BLOB_STORAGE=postgres` they sit in Postgres without
-  vault-key encryption.
+  vault-key encryption (`blobs.data`), and so do the file bytes pinned by checkpoints
+  (`checkpoint_blob_bytes`). The null-out does not touch either: they have no sealed copy.
+- Team skill files (`skill_version_files`, `skill_draft_files`).
+- Wikilink targets (`note_links`), which are note titles.
 - Note titles, file and folder paths and names, sizes, timestamps, membership, sharing rules and audit rows.
 - Rows written before a vault was keyed stay as they were until a separate, delayed null-out step has checked
   every row. Database backups taken before then keep the plaintext until they age out under your retention.
@@ -64,8 +67,11 @@ compares it byte for byte with the plaintext. Only an exact match clears the pla
 also checks the row has not changed since. A row that does not match keeps both copies and is logged by id.
 Until then, compaction of a converting note keeps exactly its old plaintext in one checked row and stores
 everything newer encrypted only. Vault Settings shows "Older content is being encrypted; new edits are
-already encrypted." until no plaintext is left. Search rows re-indexed after keying keep their older
-plaintext beside the newer sealed copy; those are not removed yet.
+already encrypted." until no plaintext is left. A search row re-indexed after keying keeps its older plaintext
+beside the newer sealed entry, so the two never match. That plaintext is derived (rebuilt from the note), so
+it is cleared too, with the same guarded statement, but only when the sealed entry is current: for a note,
+its text equals the note's text right now; for a file, it is the entry every reader uses. A note edited
+since its last re-index waits for the next one.
 
 ## How it works
 

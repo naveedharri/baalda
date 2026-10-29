@@ -17,9 +17,13 @@
 //     AND the sealed column still holding the exact bytes that were compared,
 //     so a row changed meanwhile (an edit, a compaction, a re-index) gets 0
 //     rows updated and is left as it is.
-//   · A mismatch (sealed copy differs, e.g. a search row re-indexed under the
-//     key while its old plaintext stayed) clears NOTHING: both copies stay; the
-//     row is counted and only its id is logged, never its content.
+//   · A mismatch (sealed copy differs) clears NOTHING: both copies stay; the
+//     row is counted and only its id is logged, never its content. One
+//     exception, decided 2026-10-29: a DERIVED search row (note_index /
+//     blob_text) re-indexed under the key keeps its older plaintext beside the
+//     newer sealed entry. That plaintext is rebuildable from the note, so it is
+//     cleared — same guarded statement — but only when the sealed entry is
+//     current (`sealedIsCurrent`). note_links (titles) stay plaintext by design.
 //   · Runs only while `vaultKeyCache` holds the vault's key, re-verified before
 //     every batch and zeroed after it. One runner per vault across instances
 //     (session advisory lock).
@@ -36,7 +40,9 @@
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { inc } from "../metrics/sync-metrics.js";
-import { openBlobTextRow, openSearchRow } from "../index/sealed-index.js";
+import { openBlobTextRow, openSearchRow, type SealedSearchRow } from "../index/sealed-index.js";
+import { extractDocText } from "../index/indexer.js";
+import { pgText } from "../db/text.js";
 import { openNoteTextBytes } from "../versions/texts.js";
 import { sha256Hex } from "../versions/capture.js";
 import { vaultKeysEnabled } from "./config.js";
@@ -89,6 +95,8 @@ export interface NullOutCounts {
   cleared: number;
   mismatch: number;
   skipped: number;
+  /** Stale derived search rows whose plaintext was cleared under a current sealed entry. */
+  staleCleared: number;
   /** First few mismatched ids per table, for one log line per table per pass. */
   mismatchIds: Partial<Record<NullOutTable, string[]>>;
 }
@@ -132,6 +140,25 @@ function tryOpen(fn: () => Buffer): Buffer | null {
     return fn();
   } catch {
     return null;
+  }
+}
+
+/** Is a search row's sealed entry the current one for its note / file? */
+async function sealedIsCurrent(
+  isNote: boolean,
+  key: string,
+  sealed: SealedSearchRow,
+  c: DocCrypto,
+  db: Queryable,
+): Promise<boolean> {
+  if (!isNote) return true;
+  try {
+    const { rows } = await db.query("SELECT 1 FROM notes WHERE id = $1 AND vault_id = $2", [key, c.vaultId]);
+    if (rows.length === 0) return false;
+    const current = pgText(await extractDocText(key, db, c));
+    return sealed.body === current;
+  } catch {
+    return false;
   }
 }
 
@@ -226,15 +253,34 @@ async function batch(
         [c.vaultId, after ?? "", limit],
       );
       for (const r of rows) {
-        const opened = tryOpen(() =>
-          Buffer.from(
-            JSON.stringify(isNote ? openSearchRow(c, r.key, r.search_enc) : openBlobTextRow(c, r.key, r.search_enc)),
-            "utf8",
-          ),
-        );
-        if (!opened || !opened.equals(searchJson(r.content, r.vector, r.search_tokens))) {
+        let sealedRow: SealedSearchRow | null = null;
+        try {
+          sealedRow = isNote ? openSearchRow(c, r.key, r.search_enc) : openBlobTextRow(c, r.key, r.search_enc);
+        } catch {
+          sealedRow = null;
+        }
+        const opened = sealedRow ? Buffer.from(JSON.stringify(sealedRow), "utf8") : null;
+        if (!opened || !sealedRow) {
           mismatch(table, r.key, counts);
           continue;
+        }
+        if (!opened.equals(searchJson(r.content, r.vector, r.search_tokens))) {
+          // A STALE derived copy: the keyed indexer wrote a newer sealed entry
+          // and (by design) left the old plaintext beside it. Search text is
+          // rebuilt from the note, so clearing it loses no data, but only when
+          // the sealed entry is CURRENT (decided 2026-10-29):
+          //  · note_index: its body equals the note's text right now, opened
+          //    from the CRDT with the same key;
+          //  · blob_text: it opens under the vault's current key; it is the copy
+          //    every reader already uses, and both are derived from the same
+          //    immutable blob bytes.
+          // Anything else (a note edited since, no CRDT to compare with) keeps both.
+          if (!(await sealedIsCurrent(isNote, r.key, sealedRow, c, db))) {
+            mismatch(table, r.key, counts);
+            continue;
+          }
+          counts.staleCleared += 1;
+          inc(`nullout.${table}.stale`);
         }
         await clear(
           table,
@@ -487,7 +533,7 @@ export async function nullOutVault(vaultId: string, opts: NullOutOptions = {}): 
     if (nullOut.passedAt) nullOut.tables = {};
     nullOut.passedAt = undefined;
 
-    const counts: NullOutCounts = { cleared: 0, mismatch: 0, skipped: 0, mismatchIds: {} };
+    const counts: NullOutCounts = { cleared: 0, mismatch: 0, skipped: 0, staleCleared: 0, mismatchIds: {} };
     let batches = 0;
     for (const table of NULL_OUT_TABLES) {
       const cur = nullOut.tables[table] ?? { after: null, done: false };

@@ -291,6 +291,51 @@ describe("plaintext null-out + converting compaction (W3)", () => {
     void blobId;
   });
 
+  it("clears stale derived search plaintext only under a CURRENT sealed entry", async () => {
+    const { vaultId, docIds, live, blobId } = await plaintextVault(2);
+    const c = await keyVault(vaultId);
+    expect(await backfillVault(vaultId, FAST)).toBe("complete");
+    const [d0, d1] = docIds;
+    // Both notes edited after keying and re-indexed with the key: the sealed
+    // entry is newer, the old plaintext stays beside it (by design).
+    for (const [i, d] of docIds.entries()) {
+      await appendUpdate(d, edit(live[i], "walrus keyed edit\n"), pool, 1000, c);
+      await indexDoc(d, pool, c);
+    }
+    // d1 is edited again and NOT re-indexed: its sealed entry is no longer current.
+    await appendUpdate(d1, edit(live[1], "later edit\n"), pool, 1000, c);
+    // The file's text was re-extracted under the key (different extractor output).
+    const { sealBlobTextRow } = await import("../src/index/sealed-index.js");
+    await pool.query("UPDATE blob_text SET search_enc = $2 WHERE blob_id = $1", [
+      blobId,
+      sealBlobTextRow(c, blobId, { body: "re-extracted text", vector: [], tokens: null }),
+    ]);
+
+    expect(await nullOutVault(vaultId, RUN)).toBe("remaining");
+    const { rows } = await pool.query("SELECT doc_id, content FROM note_index WHERE doc_id = ANY($1::text[])", [docIds]);
+    const content = Object.fromEntries(rows.map((r) => [r.doc_id, r.content]));
+    expect(content[d0]).toBe("");
+    expect(content[d1]).toContain(SECRET);
+    const { rows: b } = await pool.query("SELECT content, vector, search_tokens FROM blob_text WHERE blob_id = $1", [blobId]);
+    expect(b[0]).toEqual({ content: "", vector: null, search_tokens: null });
+    expect((await plaintextStatus(vaultId)).byTable.note_index).toBe(1);
+    // Search still finds the post-keying text through the sealed entry.
+    const hits = await searchNoteIndex({
+      vaultId,
+      query: "walrus",
+      k: 10,
+      readableDocIds: docIds,
+      vaultWideReader: true,
+      crypto: c,
+    } as Parameters<typeof searchNoteIndex>[0]);
+    expect(hits.length).toBeGreaterThan(0);
+
+    // Re-indexing d1 makes its sealed entry current; the next pass clears it.
+    await indexDoc(d1, pool, c);
+    expect(await nullOutVault(vaultId, RUN)).toBe("sealed");
+    expect(await dumpHits(SECRET)).toEqual([]);
+  });
+
   it("refuses without a held key, and never touches an unkeyed vault", async () => {
     const keyed = await plaintextVault(1);
     await keyVault(keyed.vaultId, false);
