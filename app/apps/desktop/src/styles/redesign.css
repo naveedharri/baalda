@@ -1437,3 +1437,53 @@ html:not([data-theme="dark"]) .editor-lockbanner {
 html:not([data-theme="dark"]) .editor-lockbanner-icon { background: #fde6a8 !important; color: #8a5a00 !important; }
 html:not([data-theme="dark"]) .editor-lockbanner-text strong { color: #6b4500; }
 html:not([data-theme="dark"]) .editor-lockbanner-sub { color: #8a6a2a !important; }
+
+/* ---- View only: floating dark chip + a thin amber page frame ---- */
+html:not([data-theme="dark"]) .editor-topbar:has(.rd-viewonly) ~ *,
+html:not([data-theme="dark"]) .editor-column:has(.rd-viewonly) { box-shadow: inset 0 0 0 2px #f2c66d; border-radius: 4px; }
+.rd-viewonly {
+  position: fixed; left: calc(var(--sidebar-layout-w, 300px) + (100vw - var(--sidebar-layout-w, 300px)) / 2); bottom: 22px;
+  transform: translateX(-50%); z-index: 40;
+  display: flex; align-items: center; gap: 10px; padding: 7px 7px 7px 14px;
+  border-radius: 999px; background: #1a1920; color: #fff; font-size: 13px; white-space: nowrap;
+  box-shadow: 0 14px 30px -12px rgba(11, 10, 16, 0.55);
+  animation: rd-rise 260ms var(--ease) both;
+}
+.rd-viewonly svg { width: 15px; height: 15px; color: #fbc64a; flex: none; }
+.rd-viewonly-label { font-weight: 500; }
+.rd-viewonly-who { display: flex; align-items: center; gap: 6px; color: rgba(255, 255, 255, 0.65); padding: 0 6px 0 10px; border-left: 1px solid rgba(255, 255, 255, 0.15); }
+.rd-viewonly-dot { width: 20px; height: 20px; border-radius: 50%; background: #3f8850; color: #fff; display: grid; place-items: center; font: 600 10px var(--font-body); }
+.rd-viewonly-ask { border: 0; border-radius: 99px; padding: 4px 13px; background: #fbc64a; color: #1a1920; font: 600 12.5px var(--font-body); cursor: pointer; }
+.rd-viewonly-ask:hover:not(:disabled) { background: #ffd56b; }
+.rd-viewonly-ask:disabled { background: rgba(255, 255, 255, 0.15); color: #fff; cursor: default; }
+.rd-viewonly:not(:has(.rd-viewonly-ask)) { padding-right: 12px; }
+
+/* ---- Colourful tags: each name keeps its own pastel ---- */
+html:not([data-theme="dark"]) .cm-editor .cm-hashtag {
+  background: var(--tag-bg, #ece6ff) !important; color: var(--tag-fg, #5b3fd6) !important;
+}
+html:not([data-theme="dark"]) .prop-chip {
+  background: var(--tag-bg, var(--bg-subtle)) !important; color: var(--tag-fg, var(--text-primary)) !important;
+  border: 0 !important; font-weight: 500;
+}
+html:not([data-theme="dark"]) .prop-chip button { color: inherit; opacity: 0.6; }
+
+/* ---- "On this device only": a small card, not a bare text line ---- */
+html:not([data-theme="dark"]) .local-sync-row {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 8px 8px; padding: 9px 9px 9px 10px;
+  border: 0; border-radius: 12px;
+  background: #fff; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 1px 2px rgba(11, 10, 16, 0.04);
+}
+html:not([data-theme="dark"]) .local-sync-icon {
+  width: 30px !important; height: 30px !important; flex: none; padding: 7px; box-sizing: border-box;
+  border-radius: 8px; background: #fff1c9; color: #7a5a00;
+}
+html:not([data-theme="dark"]) .local-sync-label { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+html:not([data-theme="dark"]) .local-sync-label b { font-weight: 500; font-size: 13px; color: var(--text-primary); }
+html:not([data-theme="dark"]) .local-sync-label small { font-size: 11.5px; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html:not([data-theme="dark"]) .local-sync-btn {
+  margin-left: auto; flex: none; height: 28px; padding: 0 11px; border-radius: 8px;
+  background: var(--accent) !important; color: #fff !important; font: 500 12px var(--font-body); text-decoration: none !important;
+}
+html:not([data-theme="dark"]) .local-sync-btn:hover:not(:disabled) { background: var(--accent-hover) !important; }

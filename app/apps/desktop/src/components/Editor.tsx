@@ -333,6 +333,48 @@ function PeerRoster({
  * doc is shared, a HocuspocusProvider syncs it to the server and supplies live
  * cursors + presence; a view-only grant makes the editor read-only.
  */
+/** Redesign preview: view-only as a floating dark chip with who can edit and,
+ *  when the owner is on this note right now, an Ask button that pings them. */
+function ViewOnlyChip({
+  reason,
+  peers,
+  onAsk,
+}: {
+  reason: "view" | "removed" | "lapsed";
+  peers: Peer[];
+  onAsk: (peer: Peer) => void;
+}) {
+  const members = useStore((s) => s.members);
+  const myId = useStore((s) => s.session?.user.id);
+  const owner = members.find((m) => m.role === "owner" && m.userId !== myId);
+  const ownerName = owner?.user?.name || owner?.user?.email?.split("@")[0] || null;
+  const ownerHere = owner ? peers.find((p) => p.id === owner.userId) : undefined;
+  const [asked, setAsked] = useState(false);
+  const label = reason === "removed" ? "Access removed" : reason === "lapsed" ? "Read only" : "View only";
+  return (
+    <div className="rd-viewonly" role="status">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="5" y="10" width="14" height="10" rx="2" />
+        <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+      </svg>
+      <span className="rd-viewonly-label">{label}</span>
+      {reason === "view" && ownerName && (
+        <span className="rd-viewonly-who">
+          <span className="rd-viewonly-dot">{ownerName.slice(0, 1).toUpperCase()}</span>
+          {ownerName} can edit
+        </span>
+      )}
+      {reason === "lapsed" && <span className="rd-viewonly-who">Team plan ended</span>}
+      {reason === "removed" && <span className="rd-viewonly-who">Not syncing</span>}
+      {reason === "view" && ownerHere && (
+        <button type="button" className="rd-viewonly-ask" disabled={asked} onClick={() => { onAsk(ownerHere); setAsked(true); }}>
+          {asked ? "Asked" : "Ask"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function Editor() {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -913,42 +955,11 @@ export function Editor() {
       {(readOnly || showToolbar) && (
         <div className="editor-topbar">
           {readOnly && (
-            // ONE banner for every read-only reason (lock, Read-only posture, a
-            // per-user view grant, a server readOnly token): the reason never
-            // changes what the reader can do, so it never changes the copy —
-            // except a lapsed Team subscription, whose fix is not an access
-            // setting anyone can look for.
-            <div className="editor-lockbanner" role="status">
-              <span className="editor-lockbanner-icon" aria-hidden="true">
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <rect x="4" y="11" width="16" height="10" rx="2" />
-                  <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-                </svg>
-              </span>
-              <span className="editor-lockbanner-text">
-                <strong>
-                  {syncStatus === "no-access"
-                    ? "Access removed"
-                    : billingLapsed
-                      ? "Read-only:"
-                      : "View-only access"}
-                </strong>
-                <span className="editor-lockbanner-sub">
-                  {syncStatus === "no-access"
-                    ? "This local copy is not syncing. Editing is disabled."
-                    : billingLapsed
-                      ? "the Team subscription for this vault ended."
-                      : "You can read this note, but you can’t edit it."}
-                </span>
-              </span>
-            </div>
+            <ViewOnlyChip
+              reason={syncStatus === "no-access" ? "removed" : billingLapsed ? "lapsed" : "view"}
+              peers={peers}
+              onAsk={sendPing}
+            />
           )}
           {showToolbar && (
             <div className="editor-toolbar">

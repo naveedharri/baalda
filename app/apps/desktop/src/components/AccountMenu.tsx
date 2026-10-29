@@ -78,7 +78,8 @@ function LocalVaultSyncRow({ onTurnOnSync }: { onTurnOnSync: () => void }) {
         <path d="M3 19h18" />
       </svg>
       <span className="local-sync-label" title="This vault lives only on this computer">
-        On this device only
+        <b>On this device only</b>
+        <small>Sync to back up and share</small>
       </span>
       <button
         type="button"

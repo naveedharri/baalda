@@ -1,3 +1,5 @@
+import type { CSSProperties } from "react";
+import { tagColor } from "../../lib/tagColor";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Transaction } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
@@ -260,7 +262,7 @@ function StaticRow({ entry }: { entry: PropEntry }) {
     value = (
       <div className="prop-chips">
         {items.map((item, i) => (
-          <span className="prop-chip" key={`${item}-${i}`}>
+          <span className="prop-chip" key={`${item}-${i}`} style={{ "--tag-bg": tagColor(String(item)).bg, "--tag-fg": tagColor(String(item)).fg } as CSSProperties}>
             {item}
           </span>
         ))}
@@ -639,7 +641,7 @@ function Chips({
   return (
     <div className="prop-chips">
       {items.map((item, i) => (
-        <span className="prop-chip" key={`${item}-${i}`}>
+        <span className="prop-chip" key={`${item}-${i}`} style={{ "--tag-bg": tagColor(String(item)).bg, "--tag-fg": tagColor(String(item)).fg } as CSSProperties}>
           {item}
           {!readOnly && (
             <button
