@@ -1014,3 +1014,29 @@ html:not([data-theme="dark"]) .modal .invite-chips input:not([type]),
 html:not([data-theme="dark"]) .modal .invite-chips input:not([type]):focus {
   background: transparent !important; box-shadow: none !important; min-height: 0;
 }
+
+/* Icon picker, clean: plain grey line icons, light hover, violet ring when chosen. */
+html:not([data-theme="dark"]) .vault-icon-grid { gap: 2px; }
+html:not([data-theme="dark"]) .vault-icon-option,
+html:not([data-theme="dark"]) .vault-icon-option.active {
+  background: transparent !important;
+  color: #0b0a1099 !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  border-radius: 8px;
+}
+html:not([data-theme="dark"]) .vault-icon-option:hover { background: rgba(11, 10, 16, 0.05) !important; color: var(--text-primary) !important; }
+html:not([data-theme="dark"]) .vault-icon-option.active {
+  background: var(--accent-soft) !important;
+  color: #4a2fc7 !important;
+  box-shadow: inset 0 0 0 1.5px var(--accent) !important;
+}
+html:not([data-theme="dark"]) .vault-icon-option .vault-tile,
+html:not([data-theme="dark"]) .vault-icon-option .vault-tile * {
+  --tile-fill: transparent !important;
+  --tile-ink: currentColor !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+html:not([data-theme="dark"]) .vault-icon-option svg,
+html:not([data-theme="dark"]) .vault-icon-option svg * { stroke: currentColor !important; fill: none !important; }
