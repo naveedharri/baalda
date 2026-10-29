@@ -1439,8 +1439,11 @@ html:not([data-theme="dark"]) .editor-lockbanner-text strong { color: #6b4500; }
 html:not([data-theme="dark"]) .editor-lockbanner-sub { color: #8a6a2a !important; }
 
 /* ---- View only: floating dark chip + a thin amber page frame ---- */
-html:not([data-theme="dark"]) .editor-topbar:has(.rd-viewonly) ~ *,
-html:not([data-theme="dark"]) .editor-column:has(.rd-viewonly) { box-shadow: inset 0 0 0 2px #f2c66d; border-radius: 4px; }
+/* The amber frame wraps the whole page, drawn as an overlay so nothing clips it. */
+html:not([data-theme="dark"]) .editor-wrap:has(.rd-viewonly)::after {
+  content: ""; position: absolute; inset: 6px; border-radius: 14px; pointer-events: none; z-index: 30;
+  box-shadow: inset 0 0 0 2px #f2c66d;
+}
 .rd-viewonly {
   position: fixed; left: calc(var(--sidebar-layout-w, 300px) + (100vw - var(--sidebar-layout-w, 300px)) / 2); bottom: 22px;
   transform: translateX(-50%); z-index: 40;
@@ -1487,3 +1490,8 @@ html:not([data-theme="dark"]) .local-sync-btn {
   background: var(--accent) !important; color: #fff !important; font: 500 12px var(--font-body); text-decoration: none !important;
 }
 html:not([data-theme="dark"]) .local-sync-btn:hover:not(:disabled) { background: var(--accent-hover) !important; }
+
+.rd-viewonly { padding: 8px 8px 8px 16px; gap: 12px; font-size: 13.5px; }
+.rd-viewonly:not(:has(.rd-viewonly-ask)) { padding-right: 16px; }
+.rd-viewonly-dot.is-lock { background: rgba(251, 198, 74, 0.18); color: #fbc64a; }
+.rd-viewonly-dot.is-lock svg { width: 11px; height: 11px; color: #fbc64a; }
