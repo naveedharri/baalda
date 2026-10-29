@@ -1447,6 +1447,32 @@ function pathOf(url: string): string {
   }
 }
 
+/**
+ * `url` with this build's `clientVersion` query parameter, for every call to
+ * our own API (Better Auth's `/api/auth/*` excepted). A server holding a KEYED
+ * vault treats a request that does not report a vault-key version as a build
+ * that predates vault keys and answers `426 client_outdated` instead of
+ * `409 key_required` (`server src/crypto/transport.ts`), so every route that
+ * can reach a keyed vault must carry it, not only the content-write ones of
+ * #251. A query parameter, not a header: an older server ignores it.
+ */
+export function withClientVersion(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url, "http://x");
+  } catch {
+    return url;
+  }
+  const path = parsed.pathname;
+  if (!path.startsWith("/api/") || path.startsWith("/api/auth/")) return url;
+  if (parsed.searchParams.has(CLIENT_VERSION_PARAM)) return url;
+  const param = `${CLIENT_VERSION_PARAM}=${encodeURIComponent(CLIENT_VERSION)}`;
+  const hash = url.indexOf("#");
+  const head = hash === -1 ? url : url.slice(0, hash);
+  const tail = hash === -1 ? "" : url.slice(hash);
+  return `${head}${head.includes("?") ? "&" : "?"}${param}${tail}`;
+}
+
 /** The collection id of a `/api/vaults/:vaultId/...` path, else null. */
 export function vaultIdFromPath(path: string): string | null {
   const m = /^\/api\/vaults\/([^/?#]+)\//.exec(path);
@@ -1814,6 +1840,14 @@ export class ApiClient {
       for (const [k, v] of Object.entries(opts.query)) {
         if (v !== undefined) url.searchParams.set(k, v);
       }
+    }
+    // Every API call reports this build's version (see `withClientVersion`).
+    if (
+      path.startsWith("/api/") &&
+      !path.startsWith("/api/auth/") &&
+      !url.searchParams.has(CLIENT_VERSION_PARAM)
+    ) {
+      url.searchParams.set(CLIENT_VERSION_PARAM, CLIENT_VERSION);
     }
 
     const headers: Record<string, string> = {
@@ -3278,7 +3312,7 @@ export class ApiClient {
     );
     if (opts.cursor !== undefined) url.searchParams.set("cursor", String(opts.cursor));
     if (opts.maxBytes !== undefined) url.searchParams.set("maxBytes", String(opts.maxBytes));
-    const res = await this.fetchImpl(url.toString(), {
+    const res = await this.fetchImpl(withClientVersion(url.toString()), {
       method: "GET",
       headers: { ...this.baseHeaders(url.toString()), [ORIGIN_HEADER]: this.clientId },
     });
@@ -3945,7 +3979,9 @@ export class ApiClient {
     const { data } = await this.request<VaultSyncTokenResponse>(
       "POST",
       "/api/vault-sync-token",
-      { body: { vaultId }, query: { [CLIENT_VERSION_PARAM]: CLIENT_VERSION } },
+      // `vaultScope`: a keyed vault's key rides as `X-Baalda-VK`, which on its
+      // own proves a vault-key build to the server's keyed-vault gate.
+      { body: { vaultId }, query: { [CLIENT_VERSION_PARAM]: CLIENT_VERSION }, vaultScope: vaultId },
     );
     return data;
   }
@@ -4024,9 +4060,11 @@ export class ApiClient {
       // `baseSha` rides the query, not a header: a server that predates it
       // would refuse an unknown header at the CORS preflight and fail the
       // upload outright, while an unknown query parameter is simply ignored.
-      `${this.baseUrl}/api/vaults/${encodeURIComponent(input.vaultId)}/blobs${
-        input.docId && input.baseSha ? `?baseSha=${encodeURIComponent(input.baseSha)}` : ""
-      }`,
+      withClientVersion(
+        `${this.baseUrl}/api/vaults/${encodeURIComponent(input.vaultId)}/blobs${
+          input.docId && input.baseSha ? `?baseSha=${encodeURIComponent(input.baseSha)}` : ""
+        }`,
+      ),
       { method: "POST", headers, body: buf },
     );
     const text = await res.text();
@@ -4265,7 +4303,8 @@ export class ApiClient {
       "Content-Type": "application/json",
       [ORIGIN_HEADER]: this.clientId,
     };
-    if (this.isOwnOrigin(url)) {
+    const own = this.isOwnOrigin(url);
+    if (own) {
       try {
         headers.Origin = new URL(this.baseUrl).origin;
       } catch {
@@ -4274,7 +4313,8 @@ export class ApiClient {
       if (this.token) headers.Authorization = `Bearer ${this.token}`;
       Object.assign(headers, this.vaultKeyHeaders(pathOf(url)));
     }
-    const res = await this.fetchImpl(url, { method, headers, body: JSON.stringify(body) });
+    const target = own ? withClientVersion(url) : url;
+    const res = await this.fetchImpl(target, { method, headers, body: JSON.stringify(body) });
     const text = await res.text();
     let parsed: unknown = undefined;
     if (text) {
@@ -4302,7 +4342,7 @@ export class ApiClient {
 
   /** Download an attachment's bytes by blob id. */
   async downloadBlob(id: string): Promise<Uint8Array> {
-    const res = await this.fetchImpl(`${this.baseUrl}/api/blobs/${encodeURIComponent(id)}`, {
+    const res = await this.fetchImpl(withClientVersion(`${this.baseUrl}/api/blobs/${encodeURIComponent(id)}`), {
       method: "GET",
       headers: this.baseHeaders(),
     });

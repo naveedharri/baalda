@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { ApiClient, ApiError, HEALTH_TIMEOUT_MS } from "../api";
+import { ApiClient, ApiError, HEALTH_TIMEOUT_MS, withClientVersion } from "../api";
+import { CLIENT_VERSION } from "../clientVersion";
 import { gzipSync } from "node:zlib";
 import { encodeBootstrapPage, decodeBootstrapPage } from "../sync/bootstrapCodec";
 
@@ -11,12 +12,20 @@ interface Call {
 }
 
 /** Build a fake `fetch` that records calls and returns scripted responses. */
+/** The URL without this build's `clientVersion` parameter, which every API
+ *  call now carries (`withClientVersion`); asserted on its own in api.test.ts. */
+function stripClientVersion(raw: string): string {
+  const u = new URL(raw);
+  u.searchParams.delete("clientVersion");
+  return u.toString();
+}
+
 function fakeFetch(
   script: (call: Call) => { status?: number; json?: unknown; headers?: Record<string, string> },
 ) {
   const calls: Call[] = [];
   const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
+    const url = stripClientVersion(String(input));
     const headers = (init?.headers ?? {}) as Record<string, string>;
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
     const call: Call = { url, method: init?.method ?? "GET", headers, body };
@@ -667,5 +676,49 @@ describe("vaultStorage", () => {
     });
     expect(calls[0].method).toBe("GET");
     expect(calls[0].url).toBe("http://localhost:3010/api/vaults/v%201/storage");
+  });
+});
+
+/**
+ * A keyed vault's server answers a request that reports no vault-key version
+ * with `426 client_outdated` (it takes it for a build that predates vault
+ * keys), so every call to our API carries `clientVersion`, raw fetches too.
+ */
+describe("every API call reports this build's version", () => {
+  it("request(), bootstrap pages, blob complete and downloads carry clientVersion; auth and foreign URLs do not", async () => {
+    const urls: string[] = [];
+    const impl = (async (input: RequestInfo | URL) => {
+      urls.push(String(input));
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () => "{}",
+        arrayBuffer: async () => new ArrayBuffer(0),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
+
+    await api.listTrash("v1").catch(() => {});
+    await api.fetchBootstrapPage("v1", "s1").catch(() => {});
+    await api.completeBlob("http://localhost:3010/api/blobs/b1/complete", {}).catch(() => {});
+    await api.completeBlob("https://elsewhere.test/complete", {}).catch(() => {});
+    await api.downloadBlob("b1").catch(() => {});
+    const has = (u: string) => new URL(u).searchParams.get("clientVersion") === CLIENT_VERSION;
+    const own = urls.filter((u) => u.startsWith("http://localhost:3010/api/"));
+    expect(own.length).toBeGreaterThanOrEqual(4);
+    expect(own.every(has)).toBe(true);
+    expect(urls.filter((u) => u.startsWith("https://elsewhere.test")).some(has)).toBe(false);
+
+    // Better Auth's routes are left exactly as they were.
+    expect(withClientVersion("http://localhost:3010/api/auth/get-session")).toBe(
+      "http://localhost:3010/api/auth/get-session",
+    );
+    // An existing parameter is kept, and never doubled.
+    expect(withClientVersion("http://localhost:3010/api/blobs/b/parts?t=x")).toBe(
+      `http://localhost:3010/api/blobs/b/parts?t=x&clientVersion=${encodeURIComponent(CLIENT_VERSION)}`,
+    );
+    const once = withClientVersion("http://localhost:3010/api/x");
+    expect(withClientVersion(once)).toBe(once);
   });
 });
