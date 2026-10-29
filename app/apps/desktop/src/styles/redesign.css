@@ -2126,3 +2126,12 @@ html:not(.rd-off) .account-vault-page > .subhead { margin: 22px 0 8px 2px; line-
 @media (prefers-reduced-motion: no-preference) {
   .filetree-scroll .tree-row.rd-row-new { animation: rd-row-in 170ms var(--ease) both; }
 }
+
+/* Dark: vault tiles carry a JS pastel; dim it so it sits in the room. */
+html[data-theme="dark"]:not(.rd-off) .vault-tile,
+html[data-theme="dark"]:not(.rd-off) .vault-switch-tile { filter: brightness(0.62) saturate(0.9); }
+/* Dark: menus and popovers float one step above the page. */
+html[data-theme="dark"]:not(.rd-off) :is(.account-popover, .vault-popover, .vault-switcher, .context-menu, .home-sidebar-menu-items, .menu-select-list) {
+  background: #262421 !important;
+  box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.08), 0 18px 40px -14px rgba(0, 0, 0, 0.7) !important;
+}
