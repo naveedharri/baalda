@@ -1006,8 +1006,11 @@ html:not([data-theme="dark"]) .confirm-actions button.primary:disabled {
 }
 html:not([data-theme="dark"]) .confirm-actions button.primary:disabled * { color: #fff !important; opacity: 1 !important; }
 html:not([data-theme="dark"]) .modal .invite-chips input:not([type]),
-html:not([data-theme="dark"]) .modal .invite-chips input:not([type]):focus {
+html:not([data-theme="dark"]) .modal .invite-chips input:not([type]):focus,
+html:not([data-theme="dark"]) .modal .skills-prefix-input input,
+html:not([data-theme="dark"]) .modal .skills-prefix-input input:focus {
   background: transparent !important; box-shadow: none !important; min-height: 0;
+  border: 0 !important; outline: none; padding-left: 0; padding-right: 0;
 }
 
 /* Icon picker, clean: plain grey line icons, light hover, violet ring when chosen. */
