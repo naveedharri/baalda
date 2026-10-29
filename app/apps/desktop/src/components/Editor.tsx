@@ -371,14 +371,6 @@ function ViewOnlyChip({
           {ownerName} can edit
         </span>
       )}
-      {reason === "view" && !ownerName && (
-        <span className="rd-viewonly-who">
-          <span className="rd-viewonly-dot is-lock">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
-          </span>
-          Unlock from the folder menu
-        </span>
-      )}
       {reason === "view" && ownerHere && (
         <button type="button" className="rd-viewonly-ask" disabled={asked} onClick={() => { onAsk(ownerHere); setAsked(true); }}>
           {asked ? "Asked" : "Ask"}
