@@ -31,14 +31,30 @@ export function StatusPicker() {
   const isOnline = status === "online" || !current;
   return (
     <div className={`rd-status${open ? " is-open" : ""}`}>
-      <button type="button" className="rd-status-chip" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: ICONS[isOnline ? "online" : status] ?? ICONS.online }} />
-        <span className="rd-status-chip-text">
-          <b>{isOnline ? "Set a status" : current!.label}</b>
-          <small>{isOnline ? "Tell your team where you are" : left !== null ? `Clears in ${left >= 60 ? `${Math.round(left / 60)} h` : `${left} min`}` : "Until you change it"}</small>
-        </span>
-        <em>{open ? "Done" : "Change"}</em>
-      </button>
+      {isOnline ? (
+        <div className="rd-status-field">
+          <button type="button" className="rd-status-field-main" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" /><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9.5h.01M15 9.5h.01" />
+            </svg>
+            Update your status
+          </button>
+          {(["smoke", "coffee", "focus"] as const).map((id) => (
+            <button key={id} type="button" className="rd-status-quick" title={items.find((i) => i.id === id)?.label} onClick={() => set(id, clearAfter)}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: ICONS[id] }} />
+            </button>
+          ))}
+        </div>
+      ) : (
+        <button type="button" className="rd-status-chip" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: ICONS[status] ?? ICONS.online }} />
+          <span className="rd-status-chip-text">
+            <b>{current!.label}</b>
+            <small>{left !== null ? `Clears in ${left >= 60 ? `${Math.round(left / 60)} h` : `${left} min`}` : "Until you change it"}</small>
+          </span>
+          <em>{open ? "Done" : "Change"}</em>
+        </button>
+      )}
       {open && (<>
       <div className="rd-status-row" role="radiogroup" aria-label="Status">
         {items.map((i) => (

@@ -1553,3 +1553,22 @@ html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row:hover .tree-sy
 /* Bring the menu hints back, right-aligned and quiet. */
 html:not([data-theme="dark"]) .account-popover .menu-hint { display: inline !important; margin-left: auto; font-size: 11.5px; color: #0b0a1080; }
 .rd-status-chip-text small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Empty status: a quiet field with three one-tap shortcuts. */
+.rd-status-field {
+  display: flex; align-items: center; gap: 2px; padding: 3px;
+  border-radius: 10px; background: #fff; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.12);
+}
+.rd-status-field-main {
+  flex: 1; display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 8px;
+  border: 0; border-radius: 8px; background: transparent; cursor: pointer;
+  font: 400 13px var(--font-body); color: var(--text-secondary); text-align: left;
+}
+.rd-status-field-main svg { width: 18px; height: 18px; color: var(--text-tertiary); flex: none; }
+.rd-status-field-main:hover { background: var(--bg-subtle); color: var(--text-primary); }
+.rd-status-quick {
+  width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent; cursor: pointer;
+  display: grid; place-items: center; color: var(--text-tertiary);
+}
+.rd-status-quick svg { width: 16px; height: 16px; }
+.rd-status-quick:hover { background: var(--accent-soft); color: var(--accent-hover); }
