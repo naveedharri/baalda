@@ -67,6 +67,8 @@ export interface BackfillCursors {
   checkedAt?: string;
   /** ISO time of the last index catch-up (see `catchUpIndex`). */
   indexedAt?: string;
+  /** ISO time of the last full staleness reconciliation (`reconcileIndexQueue`). */
+  reconciledAt?: string;
 }
 
 /** A tick re-runs the index catch-up at most this often; a key arrival always does. */
@@ -409,6 +411,7 @@ async function loadCursors(vaultId: string, db: Queryable): Promise<BackfillCurs
     completedAt: c.completedAt,
     checkedAt: c.checkedAt,
     indexedAt: c.indexedAt,
+    reconciledAt: c.reconciledAt,
   };
 }
 
@@ -445,11 +448,15 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** Notes re-indexed per catch-up run (the rest wait for the next run). */
 export const INDEX_CATCHUP_LIMIT = 500;
 
+/** The full staleness reconciliation (a safety net) runs at most this often per vault. */
+export const INDEX_RECONCILE_EVERY_MS = 24 * 60 * 60_000;
+
 /**
  * Live notes of a vault whose search row is missing or older than the note's
- * latest content change. A keyed vault's indexer DEFERS (writes nothing) while
- * no member holds the key, so a note written then — by MCP, or a socket that
- * closed before its debounce fired — would otherwise stay unsearchable.
+ * latest content change. EXPENSIVE (a correlated doc_updates read per note):
+ * only the once-a-day `reconcileIndexQueue` safety net uses it, to catch a
+ * re-index lost without ever reaching the indexer (process restart inside a
+ * debounce window). Deferred indexing itself is queued in `index_pending`.
  */
 export async function staleIndexDocs(vaultId: string, db: Queryable, limit = INDEX_CATCHUP_LIMIT): Promise<string[]> {
   const { rows } = await db.query<{ id: string }>(
@@ -466,14 +473,50 @@ export async function staleIndexDocs(vaultId: string, db: Queryable, limit = IND
   return rows.map((r) => r.id);
 }
 
-/** Index what the keyed vault's indexer had to skip; returns how many were indexed. */
+/** Queue every stale note of the vault (the daily safety net); returns how many. */
+export async function reconcileIndexQueue(vaultId: string, db: Queryable = defaultPool): Promise<number> {
+  const ids = await staleIndexDocs(vaultId, db, 100_000);
+  if (ids.length === 0) return 0;
+  await db.query(
+    `INSERT INTO index_pending (doc_id, vault_id)
+     SELECT unnest($2::text[]), $1
+     ON CONFLICT (doc_id) DO NOTHING`,
+    [vaultId, ids],
+  );
+  return ids.length;
+}
+
+/** Cheap check: does this vault have deferred notes waiting for a key? */
+export async function hasPendingIndex(vaultId: string, db: Queryable = defaultPool): Promise<boolean> {
+  const { rows } = await db.query<{ pending: boolean }>(
+    "SELECT EXISTS (SELECT 1 FROM index_pending WHERE vault_id = $1) AS pending",
+    [vaultId],
+  );
+  return rows[0]?.pending === true;
+}
+
+/**
+ * Index the notes the keyed vault's indexer deferred (`index_pending`), oldest
+ * first; returns how many were indexed. A row is removed only after its doc was
+ * handled (indexed, or no live note left to index) AND only if nobody re-queued
+ * it meanwhile (same `queued_at`); a throw keeps the row for the next run.
+ */
 export async function catchUpIndex(vaultId: string, db: Queryable = defaultPool): Promise<number> {
+  // queued_at as TEXT: a JS Date would drop the microseconds the delete matches on.
+  const { rows } = await db.query<{ doc_id: string; queued_at: string }>(
+    `SELECT doc_id, queued_at::text AS queued_at FROM index_pending
+      WHERE vault_id = $1 ORDER BY queued_at LIMIT $2`,
+    [vaultId, INDEX_CATCHUP_LIMIT],
+  );
   let n = 0;
-  for (const docId of await staleIndexDocs(vaultId, db)) {
+  for (const { doc_id, queued_at } of rows) {
     try {
-      if (await indexDoc(docId, db)) n += 1;
+      if (await indexDoc(doc_id, db)) n += 1;
+      // A deferral inside indexDoc re-queued with a newer queued_at, so this
+      // delete matches nothing and the row survives for the next key arrival.
+      await db.query("DELETE FROM index_pending WHERE doc_id = $1 AND queued_at = $2::timestamptz", [doc_id, queued_at]);
     } catch (err) {
-      console.error(`[backfill] index catch-up failed for ${docId}:`, err);
+      console.error(`[backfill] index catch-up failed for ${doc_id}:`, err);
     }
   }
   if (n > 0) inc("backfill.index_catchup", n);
@@ -510,8 +553,15 @@ export async function backfillVault(vaultId: string, opts: BackfillOptions = {})
     const probe = await heldCrypto(vaultId, cache, db);
     if (!probe) return "no_key";
     probe.key.fill(0);
+    const reconciled = Date.parse(cursors.reconciledAt ?? "");
+    if (!Number.isFinite(reconciled) || Date.now() - reconciled >= INDEX_RECONCILE_EVERY_MS) {
+      await reconcileIndexQueue(vaultId, db);
+      cursors.reconciledAt = new Date().toISOString();
+      await saveCursors(vaultId, cursors, db);
+    }
     const lastIndexed = Date.parse(cursors.indexedAt ?? "");
     if (opts.indexCatchUp || !Number.isFinite(lastIndexed) || Date.now() - lastIndexed >= INDEX_CATCHUP_EVERY_MS) {
+      // One indexed SELECT on index_pending; nothing per note when it is empty.
       await catchUpIndex(vaultId, db);
       cursors.indexedAt = new Date().toISOString();
       await saveCursors(vaultId, cursors, db);
@@ -618,6 +668,20 @@ export async function backfillTick(opts: BackfillOptions = {}): Promise<void> {
 const kicked = new Set<string>();
 
 /**
+ * A key arrival is worth a run only when there is work: deferred notes queued
+ * (cheap EXISTS), or sealing not yet complete. An idle, fully sealed vault —
+ * the common reconnect — costs exactly this one query.
+ */
+async function kickNeeded(vaultId: string, db: Queryable): Promise<boolean> {
+  const { rows } = await db.query<{ pending: boolean; sealing: boolean | null }>(
+    `SELECT EXISTS (SELECT 1 FROM index_pending WHERE vault_id = $1) AS pending,
+            (SELECT (s.cursors->>'completedAt') IS NULL FROM vault_crypto_state s WHERE s.vault_id = $1) AS sealing`,
+    [vaultId],
+  );
+  return rows[0]?.pending === true || rows[0]?.sealing === true;
+}
+
+/**
  * A member's key for `vaultId` just reached the cache (vault channel hello):
  * run the worker for that vault now instead of waiting for the next tick, so
  * notes indexed-while-keyless become searchable at once. Deduplicated per vault.
@@ -625,7 +689,10 @@ const kicked = new Set<string>();
 export function kickVaultBackfill(vaultId: string, opts: BackfillOptions = {}): Promise<void> {
   if (kicked.has(vaultId) || !vaultKeysEnabled()) return Promise.resolve();
   kicked.add(vaultId);
-  return backfillVault(vaultId, { maxBatches: BACKFILL_BATCHES_PER_TICK, indexCatchUp: true, ...opts })
+  return kickNeeded(vaultId, opts.db ?? defaultPool)
+    .then((needed) =>
+      needed ? backfillVault(vaultId, { maxBatches: BACKFILL_BATCHES_PER_TICK, indexCatchUp: true, ...opts }) : undefined,
+    )
     .then(() => undefined)
     .catch((err) => console.error(`[backfill] vault ${vaultId} failed:`, err))
     .finally(() => kicked.delete(vaultId));

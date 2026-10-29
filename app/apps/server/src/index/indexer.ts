@@ -144,7 +144,17 @@ export async function indexDoc(
   // the existing row stays as it was and the next edit or connect re-indexes.
   if (given && given.vaultId === note.vault_id) return indexNoteRow(docId, note, given, db);
   const crypto = await indexCryptoFor(note.vault_id, db);
-  if (crypto === null) return false;
+  if (crypto === null) {
+    // Queue the doc so the key-arrival catch-up indexes exactly it (no vault
+    // scan). `clock_timestamp()` so a re-queue during a drain is never
+    // mistaken for the row the drain read (it deletes by queued_at).
+    await db.query(
+      `INSERT INTO index_pending (doc_id, vault_id, queued_at) VALUES ($1, $2, clock_timestamp())
+       ON CONFLICT (doc_id) DO UPDATE SET vault_id = EXCLUDED.vault_id, queued_at = EXCLUDED.queued_at`,
+      [docId, note.vault_id],
+    );
+    return false;
+  }
   try {
     return await indexNoteRow(docId, note, crypto, db);
   } finally {

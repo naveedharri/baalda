@@ -13,6 +13,7 @@ export async function ensureMigrated(): Promise<void> {
 const TABLES = [
   // No FK to organization since migration 065, so the CASCADE below misses it.
   "access_audit",
+  "index_pending",
   "skill_version_files",
   "skill_versions",
   "skill_draft_files",
