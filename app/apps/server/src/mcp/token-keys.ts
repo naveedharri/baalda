@@ -157,5 +157,8 @@ export async function keysForMint(
     if (hit) keys.push({ vaultId: v.vaultId, key: hit.key, generation: v.generation });
     else if (!v.pending) missing.push(v.vaultId);
   }
+  // Offered keys that matched no vault are never used: zero them now. Matched
+  // ones go back to the caller, which zeroes them after minting.
+  for (const o of offered) if (!keys.some((k) => k.key === o.key)) o.key.fill(0);
   return { keys, missing };
 }

@@ -147,7 +147,25 @@ export function isReady(b: ConversionBlockers): boolean {
 }
 
 /**
- * The `keys/init` gate: null = may key the vault now; else the 409 body. With
+ * Lock what the `keys/init` gate reads, inside the init transaction (after the
+ * vault row's FOR UPDATE): the pending row and every token/link row whose
+ * `last_used_at` / `last_viewed_at` / wrap the gate judges. A concurrent
+ * token use or link view then waits for the init to commit instead of landing
+ * between the gate's read and the `vk_check` write.
+ */
+export async function lockGateRows(db: Queryable, vaultId: string): Promise<void> {
+  await db.query("SELECT 1 FROM vault_pending_keys WHERE vault_id = $1 FOR UPDATE", [vaultId]);
+  await db.query(
+    `SELECT 1 FROM mcp_tokens t JOIN vaults v ON v.organization_id = t.organization_id
+      WHERE v.id = $1 FOR UPDATE OF t`,
+    [vaultId],
+  );
+  await db.query("SELECT 1 FROM public_links WHERE vault_id = $1 FOR UPDATE", [vaultId]);
+}
+
+/**
+ * The `keys/init` gate (call it inside the init transaction, after
+ * {@link lockGateRows}): null = may key the vault now; else the 409 body. With
  * a pending row, init must present the SAME check bytes and generation (the
  * wraps made while pending are under that key). With or without one, nothing
  * active may lack a wrap: keying it would cut that connection off.

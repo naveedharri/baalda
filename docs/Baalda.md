@@ -148,3 +148,8 @@ See [[STATUS]] for the live build checklist.
 - [Home and dashboards](DASHBOARDS.md): personal/shared pins and Home, ordinary HTML
   notes, the optional read-only bridge, linked dashboards, and installed Codex.
 
+
+## Security
+
+- [Vault keys](VAULT_KEYS.md): encryption at rest with client-held keys (not end-to-end
+  encryption), what is and is not encrypted, and how to enable it on a self-hosted server.
