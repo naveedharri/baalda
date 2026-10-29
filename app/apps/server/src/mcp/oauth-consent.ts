@@ -78,6 +78,29 @@ export interface ConsentView {
   /** The org's note collections (`vaults.id`) the desktop must present keys for. */
   vaultIds: string[];
   approved: boolean;
+  /** Where the connector sends people back (its registered redirect hosts).
+   *  The display name is chosen by whoever registered the client; the host is
+   *  what the desktop prompt shows so a look-alike "Claude" can be told apart. */
+  redirectHosts: string[];
+}
+
+/** Hosts of a client's registered redirect URIs (comma-separated), deduped, at most 5. */
+export function redirectHostsOf(raw: string | null | undefined): string[] {
+  const out: string[] = [];
+  for (const part of (raw ?? "").split(",")) {
+    const value = part.trim();
+    if (!value) continue;
+    let label: string;
+    try {
+      const u = new URL(value);
+      label = u.host ? u.host.toLowerCase() : `${u.protocol}`;
+    } catch {
+      continue;
+    }
+    if (!out.includes(label)) out.push(label);
+    if (out.length >= 5) break;
+  }
+  return out;
 }
 
 /** A live consent of THIS user, for the desktop's confirm prompt / the page's poll. */
@@ -90,8 +113,10 @@ export async function consentFor(id: string, userId: string, db: Queryable = def
     app: string | null;
     vault_name: string | null;
     vault_ids: string[] | null;
+    redirect_urls: string | null;
   }>(
     `SELECT c.id, c.client_id, c.organization_id, c.approved_at, a.name AS app, o.name AS vault_name,
+            a."redirectUrls" AS redirect_urls,
             (SELECT array_agg(v.id ORDER BY v.id) FROM vaults v WHERE v.organization_id = c.organization_id) AS vault_ids
        FROM oauth_consents c
        LEFT JOIN "oauthApplication" a ON a."clientId" = c.client_id
@@ -111,6 +136,7 @@ export async function consentFor(id: string, userId: string, db: Queryable = def
     vaultName: r.vault_name ?? "",
     vaultIds: r.vault_ids ?? [],
     approved: !!r.approved_at && hasConsentKeys(r.id),
+    redirectHosts: redirectHostsOf(r.redirect_urls),
   };
 }
 

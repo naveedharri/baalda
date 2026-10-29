@@ -372,7 +372,7 @@ describe("vault key session", () => {
 
     const pending = await old.pendingDevices();
     expect(pending.map((d) => [d.deviceId, d.code])).toEqual([["d-new", waiting.code]]);
-    expect(await old.approveDevice(pending[0])).toBe(true);
+    expect(await old.approveDevice(pending[0], waiting.code.toUpperCase())).toBe(true);
 
     expect(await fresh.ensureAccountKeys()).toEqual({ state: "ready", isNew: false });
     expect(await newKeys.getAccountPrivateKey()).toEqual(await oldKeys.getAccountPrivateKey());
@@ -400,7 +400,7 @@ describe("vault key session", () => {
     const fresh = session({ api: srv.api, keys: fakeKeys(), deviceId: () => "d-new" });
     await fresh.ensureAccountKeys();
     const [d] = await old.pendingDevices();
-    expect(await old.approveDevice({ ...d, code: "0000 0000" })).toBe(false);
+    expect(await old.approveDevice(d, "0000 0000")).toBe(false);
     expect(srv.api.putDeviceKey).not.toHaveBeenCalled();
     await old.denyDevice(d.deviceId);
     expect(await old.pendingDevices()).toEqual([]);

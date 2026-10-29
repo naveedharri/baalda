@@ -249,6 +249,8 @@ describe("OAuth connector tokens: hashed storage + vault keys", () => {
       organizationId: s.orgId,
       vaultIds: [s.vaultId],
       approved: false,
+      // Red team 3: the self-chosen name comes with the host it returns to.
+      redirectHosts: ["x"],
     });
 
     // The desktop finishes it; the page's poll sees it.

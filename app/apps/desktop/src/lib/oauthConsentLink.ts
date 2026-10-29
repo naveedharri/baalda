@@ -26,12 +26,19 @@ export function parseOAuthConsentLink(url: string): OAuthConsentLink | null {
     return null;
   }
   if (!isAppProtocol(parsed.protocol)) return null;
+  // `baalda://evil.example@oauth-consent` only dresses the link up: refuse it.
+  if (parsed.username || parsed.password) return null;
   const segments = [parsed.host, ...parsed.pathname.split("/")].filter((s) => s.length > 0);
   if (segments.length !== 1 || segments[0] !== "oauth-consent") return null;
-  const id = parsed.searchParams.get("id")?.trim() ?? "";
+  const ids = parsed.searchParams.getAll("id");
+  if (ids.length !== 1) return null;
+  const id = ids[0].trim();
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(id)) return null;
   const rawServer = parsed.searchParams.get("server");
-  return { id, server: rawServer ? normalizeServerUrl(rawServer) : null };
+  if (!rawServer) return { id, server: null };
+  // A server named but unreadable is not "no server named": refuse it.
+  const server = normalizeServerUrl(rawServer);
+  return server ? { id, server } : null;
 }
 
 /** Does the link belong to the server this app is signed in to? */
@@ -46,9 +53,17 @@ type KeyApi = Pick<ApiClient, "vaultKeyFor" | "ensureVaultKeyFor">;
  * `X-Baalda-VK` for every collection of the consent's vault, as
  * `vaultId=<b64>` pairs; null when this device does not hold one of them.
  */
-export async function consentKeyHeader(vaultIds: string[], api: KeyApi): Promise<string | null> {
+export async function consentKeyHeader(
+  vaultIds: string[],
+  api: KeyApi,
+  /** True for a collection this device knows belongs to ANOTHER vault: the
+   *  server's list is not trusted to pull in keys the prompt never named. */
+  belongsElsewhere: (vaultId: string) => boolean = () => false,
+): Promise<string | null> {
+  if (!Array.isArray(vaultIds) || vaultIds.length > 16) return null;
   const parts: string[] = [];
   for (const id of vaultIds) {
+    if (typeof id !== "string" || !id || belongsElsewhere(id)) return null;
     let vk = api.vaultKeyFor(id);
     if (!vk && (await api.ensureVaultKeyFor(id))) vk = api.vaultKeyFor(id);
     if (!vk) return null;

@@ -103,8 +103,9 @@ since its last re-index waits for the next one.
 - **Rule 3 — tokens unwrap their own key.** MCP tokens and public links store hashes only, plus the vault key
   wrapped under a key derived from the token's secret. Each call unwraps it, uses it and zeroes it. MCP and
   public links keep working with no desktop online.
-- **Device linking.** A new device of the same account shows a code; one of the user's existing devices
-  approves it and shares the account key. A session alone never yields keys.
+- **Device linking.** A new device of the same account shows a code; on one of the user's existing devices
+  the person TYPES that code to approve it (the prompt never displays it, so a device row nobody started
+  cannot be clicked through), and that device shares the account key. A session alone never yields keys.
 - **Owner vault key.** Owners can reveal the vault key in Vault Settings → General ("Show vault key") to copy
   or save it. It is never emailed or sent anywhere. An owner who has lost every device restores with it.
 - **Conversion of an existing vault** (after an owner/admin asked for it). The first owner/admin device on a supporting version registers a pending

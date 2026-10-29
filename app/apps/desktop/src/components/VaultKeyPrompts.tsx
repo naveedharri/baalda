@@ -35,6 +35,49 @@ const promptKey = (p: Prompt) =>
 
 const nameOf = (userId: string) => memberDisplayName(useStore.getState().members, userId);
 
+/**
+ * "A new computer is signing in as you": approved only by TYPING the code the
+ * new computer shows. The code is never displayed here, so a device the person
+ * did not start (a row a server or database writer added with its own key)
+ * cannot be approved by clicking through.
+ */
+export function ApproveDevicePrompt({ device, done }: { device: PendingDeviceView; done: () => void }) {
+  const [typed, setTyped] = useState("");
+  const ready = typed.replace(/[\s-]/g, "").length === 8;
+  return (
+    <ConfirmDialog
+      title="A new computer is signing in as you"
+      tone="accent"
+      confirmLabel="Approve"
+      cancelLabel="Deny"
+      confirmDisabled={!ready}
+      onConfirm={async () => {
+        const ok = await currentVaultKeySession()?.approveDevice(device, typed);
+        toast(ok ? "Computer approved." : "That code does not match. Nothing was approved.", ok ? "success" : "error");
+        done();
+      }}
+      onCancel={() => {
+        void currentVaultKeySession()?.denyDevice(device.deviceId);
+        done();
+      }}
+    >
+      <p>
+        If you are setting up Baalda on another computer, type the code it shows. If you are not, choose Deny.
+      </p>
+      <input
+        type="text"
+        aria-label="Code shown on the new computer"
+        placeholder="abcd 1234"
+        autoComplete="off"
+        spellCheck={false}
+        maxLength={12}
+        value={typed}
+        onChange={(e) => setTyped(e.target.value)}
+      />
+    </ConfirmDialog>
+  );
+}
+
 export function VaultKeyPrompts() {
   const [queue, setQueue] = useState<Prompt[]>([]);
   useStore((s) => s.members); // re-render when the roster arrives
@@ -95,27 +138,7 @@ export function VaultKeyPrompts() {
     case "lost-devices":
       return <LostDevicesFlow isOwner={isOwner} vaultId={syncManager.registry.vaultId} onClose={done} />;
     case "approve-device":
-      return (
-        <ConfirmDialog
-          title="A new computer is signing in as you"
-          tone="accent"
-          confirmLabel="Approve"
-          cancelLabel="Deny"
-          onConfirm={async () => {
-            const ok = await currentVaultKeySession()?.approveDevice(current.device);
-            toast(ok ? "Computer approved." : "Could not approve that computer.", ok ? "success" : "error");
-            done();
-          }}
-          onCancel={() => {
-            void currentVaultKeySession()?.denyDevice(current.device.deviceId);
-            done();
-          }}
-        >
-          <p>
-            Approve only if it is yours and shows this code: <strong>{current.device.code}</strong>
-          </p>
-        </ConfirmDialog>
-      );
+      return <ApproveDevicePrompt key={current.device.deviceId} device={current.device} done={done} />;
     case "key-changed":
       return (
         <ConfirmDialog

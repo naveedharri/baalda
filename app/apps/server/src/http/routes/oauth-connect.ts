@@ -15,6 +15,7 @@ import {
   consentNeedsDesktop,
   openConsent,
   readyConsent,
+  redirectHostsOf,
 } from "../../mcp/oauth-consent.js";
 
 /**
@@ -42,6 +43,16 @@ async function clientName(clientId: string | undefined): Promise<string> {
   return rows[0]?.name?.trim() || "An application";
 }
 
+/** The client's registered redirect hosts: its name is self-chosen, the host is not. */
+async function clientRedirectHosts(clientId: string | undefined): Promise<string[]> {
+  if (!clientId) return [];
+  const { rows } = await pool.query<{ redirect_urls: string | null }>(
+    'SELECT "redirectUrls" AS redirect_urls FROM "oauthApplication" WHERE "clientId" = $1',
+    [clientId],
+  );
+  return redirectHostsOf(rows[0]?.redirect_urls);
+}
+
 /** A soft pastel tile (fill + deeper letter of the same hue) that stays the same for a vault. */
 function monogramStyle(id: string): string {
   let h = 0;
@@ -58,8 +69,13 @@ export function consentPage(opts: {
   clientId: string;
   vaults: { id: string; name: string; role: string }[];
   preselect: string;
+  redirectHosts?: string[];
 }): string {
   const { app, email, consentCode, clientId, vaults, preselect } = opts;
+  const hosts = opts.redirectHosts ?? [];
+  const returnsTo = hosts.length
+    ? `<p class="sub">Returns you to <b>${hosts.map(esc).join("</b>, <b>")}</b>. Allow only if you started this from that site.</p>`
+    : "";
   const options = vaults
     .map((w) => {
       const initial = (w.name.trim().match(/\p{L}|\p{N}/u)?.[0] ?? "?").toUpperCase();
@@ -86,6 +102,7 @@ export function consentPage(opts: {
   const body = `
     <h1><b>${esc(app)}</b> wants access</h1>
     <p class="sub">Signed in as <b>${esc(email)}</b></p>
+    ${returnsTo}
     <form method="POST" action="/oauth/consent">
       <input type="hidden" name="consent_code" value="${esc(consentCode)}" />
       <input type="hidden" name="client_id" value="${esc(clientId)}" />
@@ -355,6 +372,7 @@ oauthConnectRoutes.get("/oauth/consent", async (c) => {
       clientId,
       vaults,
       preselect: session.activeOrganizationId ?? vaults[0].id,
+      redirectHosts: await clientRedirectHosts(clientId),
     }),
   );
 });
