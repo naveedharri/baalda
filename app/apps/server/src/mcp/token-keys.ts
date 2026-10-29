@@ -11,16 +11,15 @@
 // device keeps warm). This is the only place a request path consults a cache,
 // and only to create the wrap the MAC proves a VK holder asked for.
 import type pg from "pg";
-import { vaultKeyCache, VaultKeyCache } from "../crypto/key-cache.js";
+import { vaultKeyCache } from "../crypto/key-cache.js";
+import { heldKey } from "../crypto/conversion.js";
 import { unwrapVk, verifyAllowMac, wrapVk } from "../crypto/token-wrap.js";
 import { verifyVk } from "../crypto/vk-check.js";
+import { decodeVk } from "../crypto/transport.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
 const TABLE = "mcp_token_keys";
-
-/** Keys a converting device presented for a vault that is not keyed yet. */
-export const pendingKeyCache = new VaultKeyCache();
 
 export interface HeldKey {
   key: Buffer;
@@ -118,13 +117,45 @@ async function tryUpgrade(
     [tokenId, v.vaultId],
   );
   if (!rows[0]) return null;
-  const held = (v.pending ? pendingKeyCache : vaultKeyCache).get(v.vaultId);
-  if (!held) return null;
-  const vk = held.key;
-  if (!verifyVk(vk, v.vaultId, v.check) || !verifyAllowMac(vk, tokenId, tokenHash, rows[0].mac)) {
+  const vk = heldKey(v.vaultId, { check: v.check, generation: v.generation, pending: v.pending }, vaultKeyCache);
+  if (!vk) return null;
+  if (!verifyAllowMac(vk, tokenId, tokenHash, rows[0].mac)) {
     vk.fill(0);
     return null;
   }
   await storeTokenWraps(token, tokenId, [{ vaultId: v.vaultId, key: vk, generation: v.generation }], db);
   return { key: vk, generation: v.generation };
+}
+
+/**
+ * Keys a desktop presented when minting a token, from `X-Baalda-VK`: either
+ * one bare base64 key (tried against every keyed/pending vault of the org) or
+ * `vaultId=<b64>` pairs separated by commas. Every KEYED vault of the org must
+ * be covered by a key that verifies, else `missing` names it (the route answers
+ * 409 `key_required`, nothing minted). A PENDING vault without a key is fine:
+ * it is still plaintext, and the token can be allow-listed before conversion.
+ */
+export async function keysForMint(
+  orgId: string,
+  header: string | undefined,
+  db: Queryable,
+): Promise<{ keys: Array<{ vaultId: string; key: Buffer; generation: number }>; missing: string[] }> {
+  const checks = await orgVaultChecks(orgId, db);
+  const offered: Array<{ vaultId: string | null; key: Buffer }> = [];
+  for (const part of (header ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const eq = part.indexOf("=", 1);
+    const named = eq > 0 && !/^[A-Za-z0-9+/_-]+={1,2}$/.test(part);
+    const key = decodeVk(named ? part.slice(eq + 1) : part);
+    if (key) offered.push({ vaultId: named ? part.slice(0, eq) : null, key });
+  }
+  const keys: Array<{ vaultId: string; key: Buffer; generation: number }> = [];
+  const missing: string[] = [];
+  for (const v of checks) {
+    const hit = offered.find(
+      (o) => (o.vaultId === null || o.vaultId === v.vaultId) && verifyVk(o.key, v.vaultId, v.check),
+    );
+    if (hit) keys.push({ vaultId: v.vaultId, key: hit.key, generation: v.generation });
+    else if (!v.pending) missing.push(v.vaultId);
+  }
+  return { keys, missing };
 }

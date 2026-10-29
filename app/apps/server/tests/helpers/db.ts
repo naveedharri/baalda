@@ -60,6 +60,9 @@ const TABLES = [
   "vault_key_wraps",
   "vault_key_requests",
   "vault_crypto_state",
+  "mcp_token_keys",
+  "mcp_token_allow",
+  "vault_pending_keys",
   '"user"',
 ];
 

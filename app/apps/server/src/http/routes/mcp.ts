@@ -18,6 +18,9 @@ import {
 import { TOOLS, TOOLS_BY_NAME } from "../../mcp/tools.js";
 import { mcpBuckets, rateLimitKey, toolCallCost } from "../../mcp/rate-limit.js";
 import { inc } from "../../metrics/sync-metrics.js";
+import { vaultKeysEnabled } from "../../crypto/config.js";
+import { KEY_REQUIRED_CODE, VK_HEADER } from "../../crypto/transport.js";
+import { keysForMint } from "../../mcp/token-keys.js";
 
 /**
  * The tool catalog every connection can reach (identical for all tokens; the
@@ -320,9 +323,25 @@ export function createMcpRoutes(deps: McpDeps): Hono {
     const body = (await c.req.json().catch(() => ({}))) as { name?: unknown };
     const name =
       typeof body.name === "string" && body.name.trim() ? body.name.trim() : "MCP token";
+    // W3: a keyed vault of the org needs its VK (X-Baalda-VK), wrapped under
+    // the new token's secret so it works with no desktop online. Refused
+    // before anything is minted when a keyed vault's key is missing.
+    let vaultKeys: Array<{ vaultId: string; key: Buffer; generation: number }> = [];
+    if (vaultKeysEnabled()) {
+      const mint = await keysForMint(org, c.req.header(VK_HEADER), pool);
+      if (mint.missing.length > 0) {
+        return c.json(
+          { error: "This vault needs its key. Open Baalda on a device that has it.", code: KEY_REQUIRED_CODE },
+          409,
+        );
+      }
+      vaultKeys = mint.keys;
+    }
     const { token, row } = await createMcpToken(
       { userId: session.userId, organizationId: org },
       name,
+      pool,
+      vaultKeys,
     );
     // The plaintext token is returned exactly once.
     return c.json({ token, ...row }, 201);
