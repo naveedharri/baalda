@@ -183,7 +183,7 @@ export function VaultKeySection({
 
       {words && shown && (
         <div className="vault-key-panel">
-          <CopyField value={shown} label="vault key" wrap />
+          <CopyField value={shown} label="vault key" wrap sensitive />
           <div className="row">
             <AsyncButton
               className="secondary sm"

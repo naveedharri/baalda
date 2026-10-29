@@ -233,6 +233,7 @@ pub fn run() {
             dashboard_remote::update_dashboard_link,
             dashboard_remote::unmount_dashboard_link,
             clipboard::clipboard_write,
+            clipboard::clipboard_clear_if,
             relaunch::set_background_relaunch,
             relaunch::launched_in_background,
             commands::pick_vault,

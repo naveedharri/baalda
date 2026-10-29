@@ -303,6 +303,11 @@ export interface ImportSummary {
 export const clipboardWrite = (text: string, html?: string) =>
   invoke<void>("clipboard_write", { text, html: html ?? null });
 
+/** Clears the clipboard only while it still holds the text with this sha256
+ *  (hex); true when it cleared. The contents never come back to the webview. */
+export const clipboardClearIf = (expectedSha256: string) =>
+  invoke<boolean>("clipboard_clear_if", { expectedSha256 });
+
 // ---- Vault ----------------------------------------------------------------
 
 export const pickVault = () => invoke<VaultInfo | null>("pick_vault");
