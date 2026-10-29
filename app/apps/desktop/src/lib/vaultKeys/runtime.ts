@@ -291,6 +291,22 @@ export function earlyVaultChannelAllowed(state: VaultKeyState | null, keyHeld: b
   return state?.state === "unkeyed" || state?.state === "disabled";
 }
 
+/**
+ * The prime window's full early-channel check (injected into the SyncManager by
+ * `store.ts`). A known answer of either kind decides at once; otherwise the
+ * server's features decide: a server that ANSWERED `/health` without
+ * `vault-keys` has no keyed vaults, so the channel opens early exactly as it did
+ * before vault keys. Unknown features, or a `vault-keys` server whose key state
+ * is not known yet, wait for the gate (no 4409 `key_required` at startup).
+ */
+export function vaultKeysEarlyChannel(vaultId: string): boolean | Promise<boolean> {
+  if (earlyVaultChannelAllowed(vaultKeyStateFor(vaultId), !!api.vaultKeyFor(vaultId))) return true;
+  return knownFeatures().then(
+    (features) => !features.has("vault-keys"),
+    () => false,
+  );
+}
+
 /** Paused for an unknown key state: blocked until a known answer arrives. */
 export function markVaultKeyUnknown(vaultId: string): void {
   if (blockedVaults.has(vaultId)) return;

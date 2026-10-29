@@ -12,6 +12,7 @@ import { resetVaultKeySessions } from "./lib/vaultKeys/session";
 import {
   onVaultKeyBlockChange,
   VAULT_KEY_PAUSE_REASON,
+  vaultKeysEarlyChannel,
   vaultKeysGate,
   vaultKeysMembershipEnded,
 } from "./lib/vaultKeys/runtime";
@@ -2109,6 +2110,7 @@ async function unsyncLocalTeardown(
 
 // W3: the first sync pass of a vault waits for a known vault-key state.
 syncManager.setVaultKeyGate?.(vaultKeysGate);
+syncManager.setEarlyVaultChannelCheck?.(vaultKeysEarlyChannel);
 
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
