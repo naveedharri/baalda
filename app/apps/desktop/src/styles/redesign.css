@@ -1010,3 +1010,7 @@ html:not([data-theme="dark"]) .confirm-actions button.primary:disabled {
   opacity: 1; background: #d9d0ff; color: #fff !important;
 }
 html:not([data-theme="dark"]) .confirm-actions button.primary:disabled * { color: #fff !important; opacity: 1 !important; }
+html:not([data-theme="dark"]) .modal .invite-chips input:not([type]),
+html:not([data-theme="dark"]) .modal .invite-chips input:not([type]):focus {
+  background: transparent !important; box-shadow: none !important; min-height: 0;
+}
