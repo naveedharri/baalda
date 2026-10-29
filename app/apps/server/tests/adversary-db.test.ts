@@ -172,6 +172,23 @@ describe("database attacker without a vault key (W3)", () => {
     await expect(loadDocState(k.docId, pool)).rejects.toThrow();
   });
 
+  it("1c. RESIDUAL: with every key row wiped too, a key-less client's plaintext push is accepted", async () => {
+    // The per-request check only consults the cheap key rows; a sealed-row
+    // probe needs a partial index (migration) to be cheap enough per request.
+    // Desktops holding the key refuse this state (session.ts key-mismatch),
+    // so only a client WITHOUT the key (e.g. an MCP token) can write here.
+    const k = await keyedVault();
+    await pool.query("UPDATE vaults SET vk_check = NULL, key_generation = NULL WHERE id = $1", [k.vaultId]);
+    await pool.query("DELETE FROM vault_key_wraps WHERE vault_id = $1", [k.vaultId]);
+    await pool.query("DELETE FROM vault_crypto_state WHERE vault_id = $1", [k.vaultId]);
+    const fresh = await seedNote(k.vaultId, null, "fresh.md", k.owner.userId);
+    const push = await pushPlain(k, "written after the wipe", fresh);
+    expect(push.status).toBe(200);
+    expect((await pool.query("SELECT 1 FROM doc_updates WHERE doc_id = $1 AND update IS NOT NULL", [fresh])).rowCount).toBe(1);
+    // Old sealed content still never leaks.
+    expect(await plaintextLeft()).toBe(false);
+  });
+
   it("8. sealed rows swapped between docs fail to open (no silent wrong content)", async () => {
     const k = await keyedVault();
     const a = (await pool.query("SELECT id, update_enc FROM doc_updates WHERE doc_id = $1", [k.docId])).rows[0];
@@ -320,5 +337,21 @@ describe("database attacker without a vault key (W3)", () => {
     await compact(k.docId, pool, k.crypto);
     expect((await pool.query("SELECT count(*)::int AS n FROM doc_updates WHERE doc_id = $1", [k.docId])).rows[0].n).toBe(rows);
     expect((await pool.query("SELECT 1 FROM doc_snapshots WHERE doc_id = $1", [k.docId])).rowCount).toBe(0);
+
+    // RESIDUAL: the backfill treats it as legacy plaintext and dual-writes a
+    // sealed copy (plaintext kept), i.e. it launders the injected row.
+    const { backfillVault } = await import("../src/crypto/backfill.js");
+    const release = vaultKeyCache.acquire(k.vaultId, Buffer.from(k.vk), 1);
+    try {
+      await backfillVault(k.vaultId, { db: pool, maxBatches: 5 });
+    } finally {
+      release();
+    }
+    const injected = await pool.query<{ update: Buffer | null; update_enc: Buffer | null }>(
+      "SELECT update, update_enc FROM doc_updates WHERE doc_id = $1 AND update IS NOT NULL",
+      [k.docId],
+    );
+    expect(injected.rowCount).toBe(1);
+    expect(injected.rows[0].update_enc).not.toBeNull();
   });
 });
