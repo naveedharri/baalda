@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DEFAULT_SERVER_URL } from "../lib/api";
 import type { AccountSettingsTab } from "../lib/settingsTabs";
 import { authManager } from "../lib/auth/authManager";
@@ -150,29 +150,6 @@ const ACCOUNT_TABS: Array<{ id: AccountTab; label: string; icon: React.ReactNode
   },
 ];
 
-/** Redesign preview: menu groups and a one-line subtitle per page. */
-const RD_ACCOUNT_GROUP: Partial<Record<string, string>> = {
-  profile: "You", status: "You", notifications: "You",
-  plan: "Account", vaults: "Account", connection: "Account",
-  appearance: "App", "ai-tools": "App", about: "App",
-};
-const RD_ACCOUNT_SUB: Partial<Record<string, string>> = {
-  profile: "Your name and picture, as teammates see them.",
-  status: "Let your team know if you are around.",
-  plan: "Your plan, seats and billing.",
-  vaults: "Every vault you can open on this computer.",
-  appearance: "Theme, colours and how notes look.",
-  notifications: "What Baalda tells you about, and how.",
-  "ai-tools": "The AI apps installed on this computer.",
-  connection: "The server this app talks to.",
-  about: "Version and updates.",
-};
-
-const RD_ACCOUNT_GROUPS = ["You", "Account", "App"];
-const RD_ACCOUNT_ORDER = [...ACCOUNT_TABS].sort(
-  (a, b) => RD_ACCOUNT_GROUPS.indexOf(RD_ACCOUNT_GROUP[a.id] ?? "App") - RD_ACCOUNT_GROUPS.indexOf(RD_ACCOUNT_GROUP[b.id] ?? "App"),
-);
-
 export function AccountSettings({
   onClose,
   initialTab,
@@ -191,23 +168,21 @@ export function AccountSettings({
 
   return (
     <SettingsModal label="Account settings" onClose={onClose}>
-      <button className="icon-btn rd-settings-close" onClick={onClose} aria-label="Close settings" title="Close (Esc)">
-        ✕
-      </button>
+      <header className="settings-page-header">
+        <div className="settings-title">
+          <span className="settings-eyebrow">Account settings</span>
+          <h1>{userLabel}</h1>
+        </div>
+        <button className="icon-btn" onClick={onClose} aria-label="Close settings" title="Close (Esc)">
+          ✕
+        </button>
+      </header>
 
       <div className="settings-body">
         <nav className="settings-nav" aria-label="Account sections">
-          <div className="rd-settings-id">
-            <Avatar label={userLabel} userId={session.user.id} image={session.user.image ?? null} />
-            <div className="settings-title">
-              <span className="settings-eyebrow">Account settings</span>
-              <h1>{userLabel}</h1>
-            </div>
-          </div>
-          {RD_ACCOUNT_ORDER.map((t, i) => (
-            <Fragment key={t.id}>
-            {(i === 0 || RD_ACCOUNT_GROUP[RD_ACCOUNT_ORDER[i - 1].id] !== RD_ACCOUNT_GROUP[t.id]) && <div className="rd-settings-group">{RD_ACCOUNT_GROUP[t.id] ?? "App"}</div>}
+          {ACCOUNT_TABS.map((t) => (
             <button
+              key={t.id}
               type="button"
               className={`menu-item${tab === t.id ? " active" : ""}`}
               onClick={() => setTab(t.id)}
@@ -215,7 +190,6 @@ export function AccountSettings({
               {t.icon}
               <span className="menu-item-label">{t.label}</span>
             </button>
-            </Fragment>
           ))}
           {vaultOpen && (
             <SettingsCrossLink
@@ -226,7 +200,7 @@ export function AccountSettings({
         </nav>
 
         <section className="settings-content" aria-label={activeTab.label}>
-          <div className="rd-settings-head"><h2 className="settings-section-title">{activeTab.label}</h2>{RD_ACCOUNT_SUB[tab] && <p>{RD_ACCOUNT_SUB[tab]}</p>}</div>
+          <h2 className="settings-section-title">{activeTab.label}</h2>
           {tab === "profile" ? (
             <ProfileTab />
           ) : tab === "status" ? (

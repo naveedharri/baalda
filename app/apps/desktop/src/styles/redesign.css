@@ -1044,3 +1044,35 @@ html:not([data-theme="dark"]) .vault-icon-option svg > g > g [fill]:not([fill="n
 html:not([data-theme="dark"]) .vault-icon-option .vault-icon-svg,
 html:not([data-theme="dark"]) .vault-icon-option svg { width: 22px !important; height: 22px !important; }
 .rd-settings-id .avatar { width: 40px; height: 40px; flex: none; }
+
+/* ============================================================
+   Vault settings follows the Account settings Profile page:
+   open content on the cream ground, no stacked cards.
+   ============================================================ */
+html:not([data-theme="dark"]) .settings-content > .vault-icon-settings,
+html:not([data-theme="dark"]) .settings-content > .toggle-row,
+html:not([data-theme="dark"]) .settings-content > .join-code-row {
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 0;
+}
+html:not([data-theme="dark"]) .settings-content { gap: var(--sp-4); }
+html:not([data-theme="dark"]) .settings-section-title { font-size: var(--fs-2xl); margin-bottom: var(--sp-1); }
+
+/* Icon row like the avatar row: big icon, name, buttons on the right. */
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-preview .vault-tile { width: 56px; height: 56px; border-radius: 15px; }
+/* The picker sits in a soft panel, like "Or pick a character". */
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-customise {
+  margin-top: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  border-radius: var(--radius-lg);
+  background: var(--bg-subtle);
+  box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06);
+}
+html:not([data-theme="dark"]) .vault-icon-option:hover { background: rgba(11, 10, 16, 0.06) !important; }
+
+/* Path field like the Profile inputs. */
+html:not([data-theme="dark"]) .settings-content .vault-root-path { background: var(--bg-subtle); padding: 10px 12px; }
+
+/* Danger zone keeps its soft red cards. */
