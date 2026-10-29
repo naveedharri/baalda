@@ -824,3 +824,72 @@ html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-customise { grid-
 html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-actions button.secondary { background: var(--text-primary); color: #fff; border: 0; }
 html:not([data-theme="dark"]) .vault-icon-option { background: rgba(124, 92, 255, 0.07); border: 0; color: #4a2fc7; }
 html:not([data-theme="dark"]) .vault-icon-option.active { background: var(--accent); color: #fff; }
+
+/* Settings menu: the selected pill stays inside the menu column. */
+html:not([data-theme="dark"]) .settings-nav { padding: 2px 8px 2px 2px; overflow-x: hidden; }
+html:not([data-theme="dark"]) .settings-nav .menu-item { width: 100%; box-sizing: border-box; }
+html:not([data-theme="dark"]) .settings-nav .menu-item.active { box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.07), 0 2px 6px -2px rgba(11, 10, 16, 0.1); }
+
+/* ---- Inner settings pages ---- */
+/* Header actions clear the close button. */
+html:not([data-theme="dark"]) .members-access-header { padding-right: 48px; }
+html:not([data-theme="dark"]) .members-access-intro { color: var(--text-secondary); font-size: var(--fs-sm); }
+
+/* Everyone / New members rows: one white card. */
+html:not([data-theme="dark"]) .members-access-rows {
+  background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow);
+  padding: 4px var(--sp-4);
+}
+html:not([data-theme="dark"]) .members-access-row-icon {
+  width: 30px; height: 30px; border-radius: 9px; background: #cfc4ff55; color: #6a4fe0; display: grid; place-items: center;
+}
+html:not([data-theme="dark"]) .members-access-row + .members-access-row .members-access-row-icon { background: #fde99baa; color: #987e1b; }
+
+/* People table: a white card with a quiet header row. */
+html:not([data-theme="dark"]) .members-table {
+  background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow);
+  border: 0 !important; overflow: hidden; border-collapse: separate; border-spacing: 0;
+}
+html:not([data-theme="dark"]) .members-table th {
+  background: var(--bg-app) !important; font: 500 10.5px var(--font-mono); letter-spacing: 0.6px; text-transform: uppercase; color: #0b0a1088;
+}
+html:not([data-theme="dark"]) .members-table td,
+html:not([data-theme="dark"]) .members-table th { border-color: rgba(11, 10, 16, 0.06) !important; }
+html:not([data-theme="dark"]) .members-table tr.is-clickable:hover td { background: var(--bg-app); }
+html:not([data-theme="dark"]) .members-access-search {
+  background: #fff; border: 0; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
+}
+html:not([data-theme="dark"]) .members-access-mcp-hint { color: var(--text-tertiary); }
+
+/* Profile: name card and segmented tabs. */
+html:not([data-theme="dark"]) .member-profile-head {
+  background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); padding: var(--sp-4);
+}
+html:not([data-theme="dark"]) .member-profile-head .avatar { width: 40px; height: 40px; }
+html:not([data-theme="dark"]) .member-profile-name { font: 600 var(--fs-lg) var(--font-display); }
+html:not([data-theme="dark"]) .member-profile-tabs {
+  display: inline-flex; gap: 2px; padding: 3px; border: 0 !important;
+  background: rgba(11, 10, 16, 0.05); border-radius: var(--radius-md); align-self: flex-start;
+}
+html:not([data-theme="dark"]) .member-profile-tab {
+  border: 0 !important; border-radius: 8px; padding: 6px 14px; font-size: var(--fs-sm); color: var(--text-secondary);
+}
+html:not([data-theme="dark"]) .member-profile-tab::after { display: none !important; }
+html:not([data-theme="dark"]) .member-profile-tab.active {
+  background: #fff; color: var(--text-primary); font-weight: 500; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1);
+}
+html:not([data-theme="dark"]) .member-profile-access > .members-access-row {
+  background: #fff; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); padding: var(--sp-3) var(--sp-4); border: 0;
+}
+
+/* Access board: white column cards with a soft tinted header. */
+html:not([data-theme="dark"]) .access-board-column {
+  background: #fff; border: 0 !important; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); overflow: hidden;
+}
+html:not([data-theme="dark"]) .access-board-column-head { border-bottom: 1px solid rgba(11, 10, 16, 0.05); }
+html:not([data-theme="dark"]) .access-board-row { border-radius: var(--radius-sm); margin: 1px 6px; font-size: var(--fs-sm); }
+html:not([data-theme="dark"]) .access-board-row:hover { background: var(--bg-app); }
+html:not([data-theme="dark"]) .access-board-icon { color: #0b0a1070; }
+html:not([data-theme="dark"]) .access-board-empty { border-radius: var(--radius-lg); }
+html:not([data-theme="dark"]) .member-access-view { background: rgba(11, 10, 16, 0.05); border: 0; border-radius: var(--radius-md); padding: 3px; }
+html:not([data-theme="dark"]) .member-access-view-btn.is-active { background: #fff; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1); }
