@@ -12,7 +12,7 @@ import { createDocWriter } from "../src/mcp/doc-writer.js";
 import type { SyncContext } from "../src/sync/hocuspocus.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { vaultKeyCache } from "../src/crypto/key-cache.js";
-import { pendingKeyCache } from "../src/crypto/conversion.js";
+import { lockGateRows, pendingKeyCache } from "../src/crypto/conversion.js";
 import { allowMac } from "../src/crypto/token-wrap.js";
 import { createMcpToken } from "../src/mcp/tokens.js";
 import { resetMcpBadTokens } from "../src/http/routes/mcp.js";
@@ -256,6 +256,34 @@ describe("MCP tokens and public links with vault keys", () => {
     for (const secret of [token, b64(s.vk), s.vk.toString("base64url"), s.vk.toString("hex")]) {
       expect(all.includes(secret)).toBe(false);
     }
+  });
+
+  it("the init gate's rows are locked in its transaction: a token use waits for the init to commit", async () => {
+    const s = await setup();
+    const { row } = await createMcpToken({ userId: s.owner.userId, organizationId: s.orgId }, "racer");
+    const initTx = await pool.connect();
+    const other = await pool.connect();
+    try {
+      await initTx.query("BEGIN");
+      await initTx.query("SELECT vk_check FROM vaults WHERE id = $1 FOR UPDATE", [s.vaultId]);
+      await lockGateRows(initTx, s.vaultId);
+      await other.query("BEGIN");
+      await other.query("SET LOCAL lock_timeout = '200ms'");
+      await expect(
+        other.query("UPDATE mcp_tokens SET last_used_at = now() WHERE id = $1", [row.id]),
+      ).rejects.toMatchObject({ code: "55P03" });
+      await other.query("ROLLBACK");
+    } finally {
+      await initTx.query("ROLLBACK");
+      initTx.release();
+      other.release();
+    }
+    // Once the token has been used, the gate (now in-transaction) refuses.
+    await pool.query("UPDATE mcp_tokens SET last_used_at = now() WHERE id = $1", [row.id]);
+    const res = await init(s);
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("conversion_not_ready");
+    expect((await pool.query("SELECT vk_check FROM vaults WHERE id = $1", [s.vaultId])).rows[0].vk_check).toBeNull();
   });
 
   it("an idle (30+ days) token does not hold up conversion; a fresh vault converts at once", async () => {

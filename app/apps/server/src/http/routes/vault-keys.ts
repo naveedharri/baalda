@@ -17,7 +17,7 @@ import type pg from "pg";
 import { pool } from "../../db/pool.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
 import { requireVaultKey } from "../../crypto/transport.js";
-import { initGate } from "../../crypto/conversion.js";
+import { initGate, lockGateRows } from "../../crypto/conversion.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
 import { CLIENT_VERSION_HEADER, CLIENT_VERSION_PARAM, clientVersionPolicy, judgeClientVersion } from "../client-version.js";
@@ -94,10 +94,6 @@ export function createVaultKeyRoutes(): Hono {
       return c.json({ error: "vkCheck, generation and sealedVkForSelf are required", code: "invalid_argument" }, 400);
     }
     const generation = body.generation as number;
-    // MCP/links conversion gate (crypto/conversion.ts): no active token, link
-    // or OAuth grant may be cut off by keying the vault.
-    const gated = await initGate(vaultId, vkCheck, generation, pool);
-    if (gated) return c.json(gated, 409);
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -112,6 +108,18 @@ export function createVaultKeyRoutes(): Hono {
       if (rows[0].vk_check) {
         await client.query("ROLLBACK");
         return c.json({ error: "This vault already has a key", code: "already_keyed" }, 409);
+      }
+      // MCP/links conversion gate (crypto/conversion.ts): no active token,
+      // link or OAuth grant may be cut off by keying the vault. It runs INSIDE
+      // this transaction, under the vault row lock plus locks on the pending
+      // row, the org's tokens and the vault's links, so a token used (or a
+      // pending key replaced) between the check and the write cannot slip
+      // through: such a write waits for this commit and then sees a keyed vault.
+      await lockGateRows(client, vaultId);
+      const gated = await initGate(vaultId, vkCheck, generation, client);
+      if (gated) {
+        await client.query("ROLLBACK");
+        return c.json(gated, 409);
       }
       await client.query("UPDATE vaults SET vk_check = $2, key_generation = $3 WHERE id = $1", [
         vaultId,
