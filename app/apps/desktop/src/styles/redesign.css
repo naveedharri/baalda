@@ -1657,3 +1657,25 @@ html:not([data-theme="dark"]) .skills-shortcut::before {
   content: ""; position: absolute; top: 0; left: 20px;
   width: calc(var(--sidebar-layout-w, 300px) - 62px); height: 1px; background: rgba(11, 10, 16, 0.08);
 }
+
+/* ---- No grey fills on controls: white with a hairline, violet when active ---- */
+html:not([data-theme="dark"]) .member-access-view,
+html:not([data-theme="dark"]) .settings-content .subhead .member-access-view {
+  background: #fff !important; border: 0 !important; padding: 3px; border-radius: 11px;
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1) !important;
+}
+html:not([data-theme="dark"]) .member-access-view-btn { background: transparent !important; box-shadow: none !important; color: var(--text-secondary); border-radius: 8px; }
+html:not([data-theme="dark"]) .member-access-view-btn:hover { color: var(--text-primary); }
+html:not([data-theme="dark"]) .member-access-view-btn.is-active,
+html:not([data-theme="dark"]) .settings-content .subhead .member-access-view-btn.is-active {
+  background: var(--accent-soft) !important; color: #4a2fc7 !important; box-shadow: none !important;
+}
+html:not([data-theme="dark"]) button.secondary,
+html:not([data-theme="dark"]) .skills-hdr-btn.secondary {
+  background: #fff !important; border: 0 !important; color: var(--text-primary);
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1) !important;
+}
+html:not([data-theme="dark"]) button.secondary:hover:not(:disabled) { background: #fcfaf6 !important; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.16) !important; }
+html:not([data-theme="dark"]) .skills-hdr-btn { height: 36px; border-radius: 10px; font-weight: 500; }
+html:not([data-theme="dark"]) .settings-page-header .icon-btn:focus,
+html:not([data-theme="dark"]) .settings-page-header .icon-btn:focus-visible { outline: none; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.12), 0 0 0 4px var(--accent-soft); }
