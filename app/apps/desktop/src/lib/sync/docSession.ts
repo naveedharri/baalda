@@ -5231,6 +5231,10 @@ export class SyncManager implements InboundHost {
       return { ok: false, reason: VAULT_KEY_PAUSE_REASON, scope };
     }
     if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
+    // The gate proceeded, so the key state is now KNOWN (no feature, unkeyed, or
+    // the verified key held): a primed vault the early check held back opens its
+    // channel here, still beside the reconcile. Idempotent if it already opened.
+    if (this.primed) this.startVaultEngine(scope);
     // ---- PHASE B: the networked reconcile. Unchanged. ----
     try {
       // The registry reads the vault tree itself (the FULL recursive walk); it
