@@ -2220,3 +2220,21 @@ html[data-theme="dark"] .vault-picker {
 html[data-theme="dark"] .vault-picker::before {
   background-image: linear-gradient(180deg, rgba(255, 248, 236, 0.035), rgba(255, 248, 236, 0) 45%);
 }
+
+/* ---- Welcome footnotes: one quiet, even group under the actions ---- */
+.vault-picker-card .hint {
+  margin: 0; font-size: 13px; line-height: 1.5; letter-spacing: 0;
+  color: var(--text-tertiary); text-align: center;
+}
+.vault-picker-card .hint + .hint { margin-top: 4px; }
+.vault-picker-card .hint:first-of-type { margin-top: 18px; }
+.vault-picker-card .hint .linkish {
+  font: inherit; font-weight: 500; color: var(--accent);
+  text-decoration: none; padding: 0 1px; border-radius: 4px;
+  transition: color 120ms var(--ease);
+}
+.vault-picker-card .hint .linkish:hover:not(:disabled) { color: var(--accent-hover); text-decoration: underline; text-underline-offset: 3px; }
+.vault-picker-card .hint code {
+  font: 500 11.5px var(--font-mono); padding: 1px 5px; border-radius: 5px;
+  background: rgba(var(--rd-ink), 0.06); color: var(--text-secondary);
+}
