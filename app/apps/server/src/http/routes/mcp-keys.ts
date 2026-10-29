@@ -7,9 +7,15 @@
 // POST /api/vaults/:vaultId/keys/pending                {vkCheck, generation, deviceId} (VK);
 //                                                       identical repeat 200, another check 409
 // GET  /api/vaults/:vaultId/keys/allowlist-candidates   [{kind, id, hash}] (VK), kind =
-//                                                       mcp_token | oauth_grant | public_link
-// POST /api/vaults/:vaultId/keys/allowlist              {entries:[{kind, id, mac}]} (VK),
-//                                                       mac = HMAC-SHA256(VK, utf8(id) || utf8(hash))
+//                                                       mcp_token | oauth_grant | public_link;
+//                                                       owners/admins also get label, createdBy,
+//                                                       createdAt, lastUsedAt, allowed, excluded
+// POST /api/vaults/:vaultId/keys/allowlist              {entries:[{kind, id, mac}],
+//                                                        excluded?:[{kind, id}]} (VK),
+//                                                       mac = HMAC-SHA256(VK, utf8(id) || utf8(hash));
+//                                                       `excluded` = unchecked in the owner's review
+//                                                       (owner/admin, pending only): never allow-listed,
+//                                                       no longer holds the gate, nothing revoked
 // GET  /api/vaults/:vaultId/keys/conversion-ready       {ready, …} may `keys/init` run yet?
 //
 // "(VK)" = the request must carry `X-Baalda-VK`, verified against the vault's
@@ -86,6 +92,112 @@ async function oauthGrants(orgId: string, id?: string): Promise<Array<{ id: stri
   return rows.map((r) => ({ id: r.id, hash: bareHashHex(r.refresh) }));
 }
 
+const isManager = (role: string | null) => role === "owner" || role === "admin";
+
+/** Is this token / grant / link one of this org's (vault's)? Never an outsider's id. */
+async function belongsHere(kind: string, id: string, orgId: string, vaultId: string): Promise<boolean> {
+  const q =
+    kind === "mcp_token"
+      ? pool.query("SELECT 1 FROM mcp_tokens WHERE id = $1 AND organization_id = $2", [id, orgId])
+      : kind === "oauth_grant"
+        ? pool.query(
+            `SELECT 1 FROM "oauthAccessToken" a
+               JOIN mcp_oauth_vault m ON m.client_id = a."clientId" AND m.user_id = a."userId"
+              WHERE a.id = $1 AND m.organization_id = $2`,
+            [id, orgId],
+          )
+        : pool.query("SELECT 1 FROM public_links WHERE id = $1 AND vault_id = $2", [id, vaultId]);
+  return ((await q).rowCount ?? 0) > 0;
+}
+
+export interface ReviewCandidate {
+  kind: "mcp_token" | "oauth_grant" | "public_link";
+  id: string;
+  hash: string;
+  /** Token name, the OAuth app's name (Claude, ChatGPT…), or the note's path. */
+  label: string | null;
+  /** Display name (else email) of who made it; null when unknown/deleted. */
+  createdBy: string | null;
+  createdAt: string | null;
+  lastUsedAt: string | null;
+  /** Already allow-listed for this vault. */
+  allowed: boolean;
+  /** Unchecked in an earlier review (`vault_conversion_exclusions`). */
+  excluded: boolean;
+}
+
+const iso = (d: Date | string | null) => (d ? new Date(d).toISOString() : null);
+
+/** The allow-list candidates with what an owner/admin needs to review them. */
+async function reviewCandidates(orgId: string, vaultId: string): Promise<ReviewCandidate[]> {
+  const creator = `COALESCE(NULLIF(btrim(u.name), ''), u.email)`;
+  type Row = {
+    id: string;
+    hash: string;
+    label: string | null;
+    created_by: string | null;
+    created_at: Date | null;
+    last_used_at: Date | null;
+    allowed: boolean;
+    excluded: boolean;
+  };
+  const excludedSql = (kind: string, idCol: string, vaultParam = "$2") =>
+    `EXISTS (SELECT 1 FROM vault_conversion_exclusions x
+              WHERE x.vault_id = ${vaultParam} AND x.kind = '${kind}' AND x.item_id = ${idCol})`;
+  const { rows: tokens } = await pool.query<Row>(
+    `SELECT t.id, t.token_hash AS hash, t.name AS label, ${creator} AS created_by,
+            t.created_at, t.last_used_at,
+            EXISTS (SELECT 1 FROM mcp_token_allow a WHERE a.token_id = t.id AND a.vault_id = $2) AS allowed,
+            ${excludedSql("mcp_token", "t.id")} AS excluded
+       FROM mcp_tokens t LEFT JOIN "user" u ON u.id = t.user_id
+      WHERE t.organization_id = $1
+      ORDER BY t.created_at, t.id`,
+    [orgId, vaultId],
+  );
+  const { rows: grants } = await pool.query<Row & { refresh: string }>(
+    `SELECT a.id, a."refreshToken" AS refresh, app.name AS label, ${creator} AS created_by,
+            a."createdAt" AS created_at, GREATEST(a."createdAt", a."updatedAt") AS last_used_at,
+            EXISTS (SELECT 1 FROM oauth_grant_allow g WHERE g.grant_id = a.id AND g.vault_id = $2) AS allowed,
+            ${excludedSql("oauth_grant", "a.id")} AS excluded
+       FROM "oauthAccessToken" a
+       JOIN mcp_oauth_vault m ON m.client_id = a."clientId" AND m.user_id = a."userId"
+       LEFT JOIN "oauthApplication" app ON app."clientId" = a."clientId"
+       LEFT JOIN "user" u ON u.id = a."userId"
+      WHERE m.organization_id = $1 AND a."refreshTokenExpiresAt" > now()
+      ORDER BY a."createdAt", a.id`,
+    [orgId, vaultId],
+  );
+  const { rows: links } = await pool.query<Row>(
+    `SELECT l.id, l.token_hash AS hash, n.rel_path AS label, ${creator} AS created_by,
+            l.created_at, l.last_viewed_at AS last_used_at,
+            l.allow_mac IS NOT NULL AS allowed,
+            ${excludedSql("public_link", "l.id", "$1")} AS excluded
+       FROM public_links l
+       LEFT JOIN notes n ON n.id = l.doc_id
+       LEFT JOIN "user" u ON u.id = l.created_by
+      WHERE l.vault_id = $1 AND l.token_hash IS NOT NULL
+      ORDER BY l.created_at, l.id`,
+    [vaultId],
+  );
+  const shape = (kind: ReviewCandidate["kind"], r: Row, hash: string): ReviewCandidate => ({
+    kind,
+    id: r.id,
+    hash,
+    label: r.label,
+    createdBy: r.created_by,
+    createdAt: iso(r.created_at),
+    lastUsedAt: iso(r.last_used_at),
+    allowed: r.allowed,
+    excluded: r.excluded,
+  });
+  return [
+    ...tokens.map((r) => shape("mcp_token", r, r.hash)),
+    // The MAC input is the bare hex sha256 of the refresh token (never `h1:`).
+    ...grants.map((r) => shape("oauth_grant", r, bareHashHex(r.refresh))),
+    ...links.map((r) => shape("public_link", r, r.hash)),
+  ];
+}
+
 const keyRequired = (c: Context) =>
   c.json({ error: "This needs the vault's key from your device", code: KEY_REQUIRED_CODE }, 409);
 
@@ -138,6 +250,9 @@ export function createMcpKeyRoutes(): Hono {
     if (m instanceof Response) return m;
     const state = await verifyPresentedKey(m.vaultId, presented(c), pool);
     if (!state) return keyRequired(c);
+    // Owners/admins review the list before anything is allow-listed: they get
+    // what each connection is, who made it and when it was last used.
+    if (isManager(await orgRole(m.orgId, m.userId))) return c.json(await reviewCandidates(m.orgId, m.vaultId));
     const { rows: tokens } = await pool.query<{ id: string; token_hash: string }>(
       "SELECT id, token_hash FROM mcp_tokens WHERE organization_id = $1 ORDER BY created_at, id",
       [m.orgId],
@@ -162,13 +277,49 @@ export function createMcpKeyRoutes(): Hono {
     const vk = presented(c);
     const state = await verifyPresentedKey(m.vaultId, vk, pool);
     if (!state || !vk) return keyRequired(c);
-    const body = (await c.req.json().catch(() => null)) as { entries?: unknown } | null;
-    const entries = Array.isArray(body?.entries) ? (body.entries as Array<Record<string, unknown>>) : null;
-    if (!entries || entries.length > MAX_ENTRIES) {
+    const body = (await c.req.json().catch(() => null)) as { entries?: unknown; excluded?: unknown } | null;
+    const excludedIn = Array.isArray(body?.excluded) ? (body.excluded as Array<Record<string, unknown>>) : null;
+    const entries = Array.isArray(body?.entries)
+      ? (body.entries as Array<Record<string, unknown>>)
+      : excludedIn
+        ? []
+        : null;
+    if (!entries || entries.length + (excludedIn?.length ?? 0) > MAX_ENTRIES) {
       return c.json({ error: `entries (at most ${MAX_ENTRIES}) are required`, code: "invalid_argument" }, 400);
     }
     let accepted = 0;
     const rejected: string[] = [];
+    let excluded = 0;
+    if (excludedIn?.length) {
+      // The owner's review: what they unchecked is never allow-listed and no
+      // longer holds the conversion. Owner/admin only, and only while pending.
+      if (!isManager(await orgRole(m.orgId, m.userId))) {
+        return c.json({ error: "Only an owner or admin can review connections", code: "access_manager_required" }, 403);
+      }
+      if (!state.pending) return c.json({ error: "This vault already has a key", code: "already_keyed" }, 409);
+      for (const e of excludedIn) {
+        const kind = KINDS[String(e?.kind)];
+        const id = typeof e?.id === "string" ? e.id : "";
+        if (!kind || !id || !(await belongsHere(kind, id, m.orgId, m.vaultId))) {
+          rejected.push(id || "?");
+          continue;
+        }
+        await pool.query(
+          `INSERT INTO vault_conversion_exclusions (vault_id, kind, item_id, created_by) VALUES ($1, $2, $3, $4)
+           ON CONFLICT (vault_id, kind, item_id) DO NOTHING`,
+          [m.vaultId, kind, id, m.userId],
+        );
+        // Unchecked after an earlier allow: withdraw it so it is not upgraded.
+        if (kind === "mcp_token") {
+          await pool.query("DELETE FROM mcp_token_allow WHERE token_id = $1 AND vault_id = $2", [id, m.vaultId]);
+        } else if (kind === "oauth_grant") {
+          await pool.query("DELETE FROM oauth_grant_allow WHERE grant_id = $1 AND vault_id = $2", [id, m.vaultId]);
+        } else {
+          await pool.query("UPDATE public_links SET allow_mac = NULL WHERE id = $1 AND vault_id = $2", [id, m.vaultId]);
+        }
+        excluded += 1;
+      }
+    }
     for (const e of entries) {
       const kind = KINDS[String(e.kind)];
       const id = typeof e.id === "string" ? e.id : "";
@@ -215,9 +366,14 @@ export function createMcpKeyRoutes(): Hono {
         }
         await pool.query("UPDATE public_links SET allow_mac = $2 WHERE id = $1", [id, mac]);
       }
+      // Re-checked in a later review: no longer excluded.
+      await pool.query(
+        "DELETE FROM vault_conversion_exclusions WHERE vault_id = $1 AND kind = $2 AND item_id = $3",
+        [m.vaultId, kind, id],
+      );
       accepted += 1;
     }
-    return c.json({ accepted, rejected });
+    return c.json(excludedIn ? { accepted, rejected, excluded } : { accepted, rejected });
   });
 
   routes.get("/vaults/:vaultId/keys/conversion-ready", async (c) => {

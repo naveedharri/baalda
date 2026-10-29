@@ -225,7 +225,7 @@ describe("MCP tokens and public links with vault keys", () => {
     // The desktop vouches for the token with a MAC under VK.
     expect((await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`)).status).toBe(409);
     const cand = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`, undefined, s.vk)).json();
-    expect(cand).toEqual([{ kind: "mcp_token", id: row.id, hash: sha(token) }]);
+    expect(cand).toMatchObject([{ kind: "mcp_token", id: row.id, hash: sha(token), label: "old", allowed: false, excluded: false }]);
     const entry = cand[0] as { id: string; hash: string };
     const posted = await (
       await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/allowlist`, {
@@ -387,7 +387,7 @@ describe("MCP tokens and public links with vault keys", () => {
     );
     await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk);
     const cand = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`, undefined, s.vk)).json();
-    expect(cand).toEqual([{ kind: "oauth_grant", id: "g1", hash: sha("ref-secret") }]);
+    expect(cand).toMatchObject([{ kind: "oauth_grant", id: "g1", hash: sha("ref-secret"), allowed: false, excluded: false }]);
     const posted = await (
       await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/allowlist`, {
         entries: [{ kind: "oauth_grant", id: "g1", mac: b64(allowMac(s.vk, "g1", sha("ref-secret"))) }],

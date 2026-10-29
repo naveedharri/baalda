@@ -173,7 +173,7 @@ describe("OAuth connector tokens: hashed storage + vault keys", () => {
       (await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk)).status,
     ).toBe(200);
     const cand = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`, undefined, s.vk)).json();
-    expect(cand).toEqual([{ kind: "oauth_grant", id: "g1", hash: sha(s.refreshToken) }]);
+    expect(cand).toMatchObject([{ kind: "oauth_grant", id: "g1", hash: sha(s.refreshToken), allowed: false, excluded: false }]);
     await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/allowlist`, {
       entries: [{ kind: "oauth_grant", id: "g1", mac: b64(allowMac(s.vk, "g1", sha(s.refreshToken))) }],
     }, s.vk);
