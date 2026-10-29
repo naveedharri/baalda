@@ -70,6 +70,7 @@ function sessionFor(userId: string) {
     },
   });
   api.setVaultKeyResolver((vaultId) => session.headerFor(vaultId));
+  api.setKeyRequiredHandler((vaultId) => vaultKeysEnsure(vaultId));
   current = { key, session, vaultId: null, orgId: null, timer: null, running: null, again: false };
   return current;
 }

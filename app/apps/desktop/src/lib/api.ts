@@ -1423,6 +1423,17 @@ function newClientId(): string {
 
 /** Carries the base64 vault key on every content request for a keyed vault. */
 export const VAULT_KEY_HEADER = "X-Baalda-VK";
+/** 409 code for a content request to a keyed vault without a valid key. */
+export const KEY_REQUIRED_CODE = "key_required";
+
+/** The path of an absolute or relative URL ("" when unparseable). */
+function pathOf(url: string): string {
+  try {
+    return new URL(url, "http://x").pathname;
+  } catch {
+    return "";
+  }
+}
 
 /** The collection id of a `/api/vaults/:vaultId/...` path, else null. */
 export function vaultIdFromPath(path: string): string | null {
@@ -1568,6 +1579,11 @@ export class ApiClient {
   setVaultKeyResolver(fn: ((vaultId: string) => string | null) | null): void {
     this.vaultKeyResolver = fn;
   }
+  /** On 409 `key_required`: make the vault key ready; true = retry once. */
+  private keyRequiredHandler: ((vaultId: string) => Promise<boolean>) | null = null;
+  setKeyRequiredHandler(fn: ((vaultId: string) => Promise<boolean>) | null): void {
+    this.keyRequiredHandler = fn;
+  }
   /** `X-Baalda-VK` for a vault-scoped path, or nothing. */
   private vaultKeyHeaders(path: string): Record<string, string> {
     const id = vaultIdFromPath(path);
@@ -1655,6 +1671,8 @@ export class ApiClient {
       timeoutMs?: number;
       /** Extra headers (never logged). */
       headers?: Record<string, string>;
+      /** Internal: this is the one retry after a `key_required` refusal. */
+      keyRetry?: boolean;
     } = {},
   ): Promise<{ data: T; authToken: string | null; status: number }> {
     const url = new URL(this.baseUrl + path);
@@ -1729,6 +1747,20 @@ export class ApiClient {
           : undefined) ??
         `HTTP ${res.status}`;
       if (res.status === 426) notifyClientOutdated(parsed);
+      // A keyed vault refused us for want of its key: fetch/verify the key and
+      // retry ONCE. Otherwise it stays an error, never an empty answer, so no
+      // caller can mistake it for an empty server (split-brain rule).
+      if (
+        res.status === 409 &&
+        !opts.keyRetry &&
+        (parsed as { code?: unknown } | undefined)?.code === KEY_REQUIRED_CODE
+      ) {
+        const id = vaultIdFromPath(path);
+        const handler = this.keyRequiredHandler;
+        if (id && handler && (await handler(id).catch(() => false))) {
+          return this.request<T>(method, path, { ...opts, keyRetry: true });
+        }
+      }
       throw new ApiError(res.status, msg, parsed);
     }
 
@@ -3093,7 +3125,7 @@ export class ApiClient {
     if (opts.maxBytes !== undefined) url.searchParams.set("maxBytes", String(opts.maxBytes));
     const res = await this.fetchImpl(url.toString(), {
       method: "GET",
-      headers: { ...this.baseHeaders(), [ORIGIN_HEADER]: this.clientId },
+      headers: { ...this.baseHeaders(url.toString()), [ORIGIN_HEADER]: this.clientId },
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -3766,8 +3798,8 @@ export class ApiClient {
   // ---- Attachment blobs (Phase 3 blob store, spec 02 §2/§5A) --------------
 
   /** Common headers (Origin + bearer) shared by the binary blob endpoints. */
-  private baseHeaders(): Record<string, string> {
-    const headers: Record<string, string> = {};
+  private baseHeaders(forUrl?: string): Record<string, string> {
+    const headers: Record<string, string> = forUrl ? this.vaultKeyHeaders(pathOf(forUrl)) : {};
     try {
       headers.Origin = new URL(this.baseUrl).origin;
     } catch {
@@ -3823,7 +3855,7 @@ export class ApiClient {
      *  server answers 409 `stale_base` when the file has moved on since. */
     baseSha?: string | null;
   }): Promise<BlobMeta> {
-    const headers = this.baseHeaders();
+    const headers = this.baseHeaders(`/api/vaults/${encodeURIComponent(input.vaultId)}/blobs`);
     headers["Content-Type"] = input.mime ?? "application/octet-stream";
     headers["x-rel-path"] = input.relPath;
     if (input.fileName) headers["x-file-name"] = input.fileName;
@@ -4085,6 +4117,7 @@ export class ApiClient {
         /* leave unset */
       }
       if (this.token) headers.Authorization = `Bearer ${this.token}`;
+      Object.assign(headers, this.vaultKeyHeaders(pathOf(url)));
     }
     const res = await this.fetchImpl(url, { method, headers, body: JSON.stringify(body) });
     const text = await res.text();
