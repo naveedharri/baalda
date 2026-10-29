@@ -1648,3 +1648,12 @@ html:not([data-theme="dark"]) .skills-shortcut-row { margin-left: 4px; padding: 
 html:not([data-theme="dark"]) .skills-shortcut-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
 html:not([data-theme="dark"]) .skills-shortcut-dot { margin-left: auto; }
 html:not([data-theme="dark"]) .skills-shortcut-dot + .skills-shortcut-count { margin-left: 6px; }
+/* Agent Skills: on the 20/50px lines, and set apart from the notes with a hairline. */
+html:not([data-theme="dark"]) .skills-shortcut-row { margin-left: 12px !important; }
+html:not([data-theme="dark"]) .skills-shortcut {
+  position: relative; margin-top: 8px; padding-top: 8px;
+}
+html:not([data-theme="dark"]) .skills-shortcut::before {
+  content: ""; position: absolute; top: 0; left: 20px;
+  width: calc(var(--sidebar-layout-w, 300px) - 62px); height: 1px; background: rgba(11, 10, 16, 0.08);
+}
