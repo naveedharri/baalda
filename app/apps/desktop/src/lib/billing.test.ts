@@ -280,7 +280,6 @@ describe("Team plan copy", () => {
       "Unlimited people, one seat each",
       "Unlimited synced vaults",
       "Standalone file sync",
-      "Baalda Assistant",
       "Priority support",
     ]);
     expect(FREE_PLAN_INCLUDES).toEqual([
@@ -378,8 +377,6 @@ describe("Team limit codes", () => {
   it("classifies every 402 code", () => {
     expect(classifyLimitError(err({ error: "seat_limit_reached", seats: 5, used: 5, pending: 1 }))).toBe("seat_limit");
     expect(classifyLimitError(err({ error: "account_read_only" }))).toBe("read_only");
-    expect(classifyLimitError(err({ error: "housekeeper_requires_team" }))).toBe("housekeeper");
-    expect(classifyLimitError(err({ error: "housekeeper_requires_pro" }))).toBe("housekeeper");
     expect(classifyLimitError(err({ error: "attachment_sync_requires_pro", requiredPlan: "team" }))).toBe("attachment");
     expect(classifyLimitError(err({ error: "storage_limit_reached" }))).toBe("storage_limit");
     expect(classifyLimitError(err({ error: "member_limit_reached", limit: 2, scope: "account" }))).toBe("member_limit");
@@ -726,7 +723,6 @@ describe("legacy (per-vault) plan copy", () => {
     expect(LEGACY_PRO_BENEFITS).toEqual([
       "Unlimited team members",
       "Standalone file sync",
-      "Baalda Assistant",
       "Doesn't count toward your free vaults",
     ]);
     expect(LEGACY_PRO_BENEFITS).not.toEqual(TEAM_BENEFITS);
@@ -734,7 +730,7 @@ describe("legacy (per-vault) plan copy", () => {
   it("defaults to 3 members per vault and 2 free vaults", async () => {
     const { LEGACY_FREE_PLAN_EXPLANATION } = await import("./billing");
     expect(LEGACY_FREE_PLAN_EXPLANATION).toBe(
-      "Free includes 3 members per vault, 2 free vaults, note sync, embedded attachments and MCP. Pro adds unlimited members, standalone file sync and Baalda Assistant.",
+      "Free includes 3 members per vault, 2 free vaults, note sync, embedded attachments and MCP. Pro adds unlimited members and standalone file sync.",
     );
   });
   it("reads the numbers from the server's freeLimits", async () => {

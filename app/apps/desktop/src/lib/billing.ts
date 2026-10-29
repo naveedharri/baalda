@@ -16,7 +16,6 @@ export type LimitKind =
   | "member_limit"
   | "note_limit"
   | "seat_limit"
-  | "housekeeper"
   | "attachment"
   | "storage_limit"
   | "read_only";
@@ -32,8 +31,6 @@ export const LIMIT_CODES: ReadonlyArray<readonly [string, LimitKind]> = [
   ["vault_limit_reached", "vault_limit"],
   ["member_limit_reached", "member_limit"],
   ["storage_limit_reached", "storage_limit"],
-  ["housekeeper_requires_team", "housekeeper"],
-  ["housekeeper_requires_pro", "housekeeper"],
   ["attachment_sync_requires_pro", "attachment"],
 ];
 
@@ -44,7 +41,6 @@ export const TEAM_BENEFITS = [
   "Unlimited people, one seat each",
   "Unlimited synced vaults",
   "Standalone file sync",
-  "Baalda Assistant",
   "Priority support",
 ] as const;
 
@@ -66,7 +62,6 @@ export const PRO_BENEFITS = TEAM_BENEFITS;
 export const LEGACY_PRO_BENEFITS = [
   "Unlimited team members",
   "Standalone file sync",
-  "Baalda Assistant",
   "Doesn't count toward your free vaults",
 ] as const;
 
@@ -78,7 +73,7 @@ export function legacyFreePlanExplanation(
 ): string {
   const members = limits?.membersPerVault ?? 3;
   const vaults = limits?.vaultsPerUser ?? 2;
-  return `Free includes ${members} member${members === 1 ? "" : "s"} per vault, ${vaults} free vault${vaults === 1 ? "" : "s"}, note sync, embedded attachments and MCP. Pro adds unlimited members, standalone file sync and Baalda Assistant.`;
+  return `Free includes ${members} member${members === 1 ? "" : "s"} per vault, ${vaults} free vault${vaults === 1 ? "" : "s"}, note sync, embedded attachments and MCP. Pro adds unlimited members and standalone file sync.`;
 }
 
 /** {@link legacyFreePlanExplanation} with the default limits. */
@@ -89,11 +84,10 @@ export const FREE_PLAN_LACKS = [
   "More than 2 people",
   "More than 1 synced vault",
   "Standalone file sync",
-  "Baalda Assistant",
 ] as const;
 
 export const FREE_PLAN_EXPLANATION =
-  "Free includes 2 people, 1 synced vault, note sync, embedded attachments and MCP. Team adds more people, unlimited vaults, standalone file sync and Baalda Assistant.";
+  "Free includes 2 people, 1 synced vault, note sync, embedded attachments and MCP. Team adds more people, unlimited vaults and standalone file sync.";
 
 /** "Free includes N people": N is the account's own Free limit (grandfathered
  *  accounts hold more than the default 2). */
