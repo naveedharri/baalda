@@ -1863,3 +1863,8 @@ html:not([data-theme="dark"]) .settings-content button.primary:not(.sm),
 html:not([data-theme="dark"]) .settings-content button.secondary { height: 34px; padding: 0 14px; border-radius: 9px; font-weight: 500; font-size: 13px; }
 html:not([data-theme="dark"]) .io-tab { width: 100%; max-width: none; }
 html:not([data-theme="dark"]) .io-section { max-width: none; width: auto; height: 100%; }
+
+/* Windows: keep the header pill clear of the minimise / maximise / close buttons
+   (the redesign's main-header padding otherwise wins over App.css's 146px). */
+html[data-platform="windows"]:not([data-theme="dark"]) .main-header { padding-right: 146px; }
+html[data-platform="windows"]:not([data-theme="dark"]):has(.right-panel) .main-header { padding-right: var(--sp-4); }

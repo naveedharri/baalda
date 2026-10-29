@@ -761,18 +761,20 @@ export function VaultPicker() {
                   New vault
                 </motion.button>
                 <motion.button
-                  className={`ghost-pill lg${busy ? " is-busy" : ""}`}
+                  className={`ghost-pill lg${busy && !opening ? " is-busy" : ""}`}
                   disabled={busy}
-                  aria-busy={busy || undefined}
+                  aria-busy={(busy && !opening) || undefined}
                   onClick={pickExisting}
                   whileHover={reduceMotion ? undefined : { scale: 1.03, y: -1 }}
                   whileTap={reduceMotion ? undefined : { scale: 0.97 }}
                   transition={SPRING}
                 >
+                  {/* A recent card opening shows its own spinner; this button
+                      only reports a folder it picked itself. */}
                   <span className="async-btn-label">
-                    {busy ? "Opening…" : "Open existing"}
+                    {busy && !opening ? "Opening…" : "Open existing"}
                   </span>
-                  {busy && <Spinner size="xs" tone="neutral" />}
+                  {busy && !opening && <Spinner size="xs" tone="neutral" />}
                 </motion.button>
                 {/*
                   Third peer action: create / open / JOIN. It sits up here with
