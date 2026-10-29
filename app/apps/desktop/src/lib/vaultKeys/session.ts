@@ -22,7 +22,6 @@ import type {
   VaultKeyRequest,
   VaultKeyWrapPost,
 } from "../api";
-import { ApiError } from "../api";
 import { VAULT_KEYS } from "../serverFeatures";
 import {
   fromBase64,
@@ -238,8 +237,11 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     if (!(await enabled()) || accountMismatch) return false;
     if (await keys.getAccountPrivateKey()) return false;
     const { privateKey, publicKey } = generateAccountKeypair();
-    await keys.setAccountPrivateKey(privateKey);
+    // Server first: if it refuses (today's server keeps the old key, 409
+    // `keys_exist`) nothing local changes, so the device never ends up holding
+    // a key the server does not name.
     await api.putMyKeys({ publicKey: toBase64(publicKey) });
+    await keys.setAccountPrivateKey(privateKey);
     await keys.deleteDeviceLinkKey();
     return true;
   }
@@ -275,7 +277,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const vk = wordsToVaultKey(words);
     if (!vk) return "invalid-words";
     const mine = await api.getMyVaultKeys(vaultId);
-    if (!mine.vkCheck || mine.generation === undefined) return "cannot-verify";
+    if (!mine.keyed || !mine.vkCheck || mine.generation === undefined) return "cannot-verify";
     const vkCheck = fromBase64(mine.vkCheck);
     if (!(await verifyVk(vk, vaultId, vkCheck))) return "wrong-key";
     const held = await keys.getVaultKey(vaultId);
@@ -303,14 +305,9 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
   async function ensureVaultKey(vaultId: string): Promise<VaultKeyState> {
     if (!(await enabled())) return { state: "disabled" };
     if (accountMismatch) return { state: "security-warning" };
-    let mine: MyVaultKeys | null;
-    try {
-      mine = await api.getMyVaultKeys(vaultId);
-    } catch (e) {
-      if (!(e instanceof ApiError && e.status === 404)) throw e;
-      mine = null;
-    }
-    if (mine === null) return keyUnkeyedVault(vaultId);
+    // Any error (404 not a member, 5xx, timeout) propagates: never keyed on doubt.
+    const mine: MyVaultKeys = await api.getMyVaultKeys(vaultId);
+    if (!mine.keyed) return keyUnkeyedVault(vaultId);
     if (mine.pending) {
       // A key restored on this device earlier still counts when it verifies.
       const held = mine.vkCheck ? await keys.getVaultKey(vaultId) : null;

@@ -1461,8 +1461,10 @@ interface MyVaultKeysBody {
 }
 /** A pending answer may still carry `vkCheck`, so a restore can verify a typed key. */
 export type MyVaultKeys =
-  | { pending: true; vkCheck?: string; generation?: number }
-  | ({ pending: false } & MyVaultKeysBody);
+  /** The server's DEFINITIVE "this vault has no key" (`{keyed: false}`). */
+  | { keyed: false; pending: false }
+  | { keyed: true; pending: true; vkCheck?: string; generation?: number }
+  | ({ keyed: true; pending: false } & MyVaultKeysBody);
 export interface VaultKeyRequest {
   userId: string;
   publicKey: string;
@@ -1585,15 +1587,20 @@ export class ApiClient {
   }
 
   async getMyVaultKeys(vaultId: string): Promise<MyVaultKeys> {
-    const { data, status } = await this.request<MyVaultKeysBody | { pending: true }>(
+    const { data, status } = await this.request<Partial<MyVaultKeysBody> & { keyed?: boolean; pending?: boolean }>(
       "GET",
       `/api/vaults/${encodeURIComponent(vaultId)}/keys/mine`,
     );
-    if (status === 202 || (data as { pending?: boolean })?.pending) {
-      const d = (data ?? {}) as { vkCheck?: string; generation?: number };
-      return { pending: true, vkCheck: d.vkCheck, generation: d.generation };
+    // Only an explicit `keyed: false` means unkeyed; anything unexpected throws
+    // (the caller then does nothing rather than keying a vault that has a key).
+    if (data?.keyed === false && status === 200) return { keyed: false, pending: false };
+    if (status === 202 || data?.pending) {
+      return { keyed: true, pending: true, vkCheck: data?.vkCheck, generation: data?.generation };
     }
-    return { pending: false, ...(data as MyVaultKeysBody) };
+    if (typeof data?.vkCheck !== "string" || typeof data.generation !== "number" || !Array.isArray(data.wraps)) {
+      throw new ApiError(status, "Unexpected vault key answer", data);
+    }
+    return { keyed: true, pending: false, vkCheck: data.vkCheck, generation: data.generation, wraps: data.wraps };
   }
 
   async listVaultKeyRequests(vaultId: string): Promise<VaultKeyRequest[]> {

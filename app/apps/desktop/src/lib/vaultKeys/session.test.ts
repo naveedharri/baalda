@@ -37,10 +37,16 @@ function fakeServer() {
     }),
     getMyVaultKeys: vi.fn(async (vaultId: string): Promise<MyVaultKeys> => {
       const v = vaults.get(vaultId);
-      if (!v) throw new ApiError(404, "not keyed");
+      if (!v) return { keyed: false, pending: false };
       const w = v.wraps.get(caller);
-      if (!w) return { pending: true };
-      return { pending: false, vkCheck: v.vkCheck, generation: v.generation, wraps: [{ generation: v.generation, sealedVk: w }] };
+      if (!w) return { keyed: true, pending: true };
+      return {
+        keyed: true,
+        pending: false,
+        vkCheck: v.vkCheck,
+        generation: v.generation,
+        wraps: [{ generation: v.generation, sealedVk: w }],
+      };
     }),
     listVaultKeyRequests: vi.fn(async (vaultId: string) => requests.get(vaultId) ?? []),
     postVaultKeyWrap: vi.fn(async (vaultId: string, w: { userId: string; sealedVk: string }, header: string) => {
@@ -180,6 +186,7 @@ describe("vault key session", () => {
     await member.ensureAccountKeys();
     // Pending answer still carries vk_check, so the typed key can be verified.
     srv.api.getMyVaultKeys.mockResolvedValueOnce({
+      keyed: true,
       pending: true,
       vkCheck: srv.vaults.get("v1")!.vkCheck,
       generation: 1,
@@ -284,6 +291,8 @@ describe("vault key session", () => {
     const keys = fakeKeys();
     await keys.setAccountPrivateKey(generateAccountKeypair().privateKey);
     const s = session({ api: srv.api, keys });
+    srv.api.getMyVaultKeys.mockRejectedValueOnce(new ApiError(404, "Unknown vault"));
+    await expect(s.ensureVaultKey("v1")).rejects.toThrow();
     srv.api.getMyVaultKeys.mockRejectedValueOnce(new ApiError(503, "down"));
     await expect(s.ensureVaultKey("v1")).rejects.toThrow();
     srv.api.getMyVaultKeys.mockRejectedValueOnce(new Error("timeout"));
@@ -300,7 +309,7 @@ describe("vault key session", () => {
     const keys = fakeKeys();
     await keys.setAccountPrivateKey(generateAccountKeypair().privateKey);
     const s = session({ api: srv.api, keys });
-    srv.api.getMyVaultKeys.mockRejectedValueOnce(new ApiError(404, "not keyed"));
+    srv.api.getMyVaultKeys.mockResolvedValueOnce({ keyed: false, pending: false });
     srv.api.initVaultKeys.mockResolvedValueOnce("already-keyed");
     // Then the real answer: keyed, no wrap for us yet.
     srv.vaults.set("v1", { vkCheck: toBase64(await makeVkCheck(generateVaultKey(), "v1", 1)), generation: 1, wraps: new Map() });
