@@ -1624,3 +1624,27 @@ html:not([data-theme="dark"]) .account-popover > .rd-prof { padding-top: 15px; p
 .rd-status-btn[class*="s-"] { color: var(--st); }
 .rd-status-btn[class*="s-"]:hover { background: var(--st-bg); color: var(--st); }
 .rd-status-btn[class*="s-"].on { background: var(--st); color: #fff; }
+
+/* ---- Agent Skills row: same grid as the tree ---- */
+html:not([data-theme="dark"]) .skills-sparkles { display: none; }
+html:not([data-theme="dark"]) .skills-shortcut-row {
+  position: relative; display: flex; align-items: center; gap: 10px;
+  height: 36px; margin: 0 0 0 12px; padding: 0 8px; border-radius: 9px;
+  width: calc(var(--sidebar-layout-w, 300px) - 54px); box-sizing: border-box;
+}
+html:not([data-theme="dark"]) .skills-shortcut-row:hover { background: rgba(11, 10, 16, 0.04); }
+html:not([data-theme="dark"]) .skills-shortcut-row > svg:first-child,
+html:not([data-theme="dark"]) .skills-shortcut-row .skills-shortcut-icon {
+  width: 20px; height: 20px; padding: 3px; box-sizing: border-box; border-radius: 6px;
+  background: #ece6ff; color: #5b3fd6; flex: none;
+}
+html:not([data-theme="dark"]) .skills-shortcut-name { font-size: var(--fs-md); color: var(--text-primary); }
+html:not([data-theme="dark"]) .skills-shortcut-new {
+  height: 18px; padding: 0 7px; border-radius: 99px; border: 0;
+  background: #ece6ff; color: #5b3fd6; font: 600 10.5px var(--font-body); display: inline-flex; align-items: center;
+}
+html:not([data-theme="dark"]) .skills-shortcut-count { margin-left: auto; width: 14px; text-align: center; font: 500 11.5px var(--font-body); color: var(--text-tertiary); }
+html:not([data-theme="dark"]) .skills-shortcut-row { margin-left: 4px; padding: 0 0 0 8px; background: transparent; border: 0; cursor: pointer; }
+html:not([data-theme="dark"]) .skills-shortcut-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+html:not([data-theme="dark"]) .skills-shortcut-dot { margin-left: auto; }
+html:not([data-theme="dark"]) .skills-shortcut-dot + .skills-shortcut-count { margin-left: 6px; }
