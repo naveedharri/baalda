@@ -34,7 +34,6 @@ import { AsyncButton } from "./AsyncButton";
 import { McpTab } from "./McpTab";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { useResetLocalCopy } from "./useResetLocalCopy";
-import { AiSettingsTab } from "./AiSettingsTab";
 // Static, not via ./Face: this module is itself a lazy chunk, so it pays for
 // the avatar chunk it is already loading.
 import { LimitNudge } from "./LimitNudge";
@@ -92,14 +91,6 @@ const GENERAL_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
       <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
     </MenuIcon>
   ),
-};
-
-/** The AI (Beta) page is hidden for now; flip to bring it back. Anything that
- *  asks for the "ai" tab while it is hidden lands on General instead. */
-const SHOW_AI_TAB = false;
-
-const AI_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
-  id: "ai", label: "AI", icon: <MenuIcon><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z" /></MenuIcon>,
 };
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
@@ -216,7 +207,7 @@ export function VaultSettingsDialog({
   const locals = useLocalVaults();
 
   const visibleTab = (t: SettingsTab): SettingsTab =>
-    (!SHOW_AI_TAB && t === "ai") || (t === "vaults" && session) ? "general" : t;
+    t === "vaults" && session ? "general" : t;
   const [tab, setTabRaw] = useState<SettingsTab>(visibleTab(initialTab ?? "general"));
   /** Bumped when the active nav item is clicked again, so a tab can return to its first page. */
   const [tabReset, setTabReset] = useState(0);
@@ -247,7 +238,7 @@ export function VaultSettingsDialog({
     localClasses.resolved &&
     visibleFolders(locals, localClasses.classes).length > 0;
   const tabs = useMemo(() => {
-    const out = SHOW_AI_TAB ? [GENERAL_TAB, AI_TAB] : [GENERAL_TAB];
+    const out = [GENERAL_TAB];
     if (showVaults) out.push(...SETTINGS_TABS);
     else out.push(...SETTINGS_TABS.filter((t) => t.id !== "vaults"));
     if (billingEnabled) {
@@ -309,7 +300,7 @@ export function VaultSettingsDialog({
               <button
                 key={t.id}
                 type="button"
-                className={`menu-item${t.id === "ai" ? " settings-ai-item" : ""}${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
+                className={`menu-item${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
                 onClick={() => {
                   // Re-clicking the active item resets its sub-pages (#308).
                   if (tab === t.id) setTabReset((n) => n + 1);
@@ -318,7 +309,7 @@ export function VaultSettingsDialog({
                 title={locked ? "Turn on sync to unlock" : undefined}
               >
                 {t.icon}
-                <span className="menu-item-label">{t.id === "ai" ? "AI (Beta)" : t.label}</span>
+                <span className="menu-item-label">{t.label}</span>
                 {locked && (
                   <svg
                     className="nav-lock"
@@ -359,8 +350,6 @@ export function VaultSettingsDialog({
             />
           ) : shown === "dashboards" ? (
             <VaultDashboardsTab onClose={onClose} resetToken={tabReset} />
-          ) : shown === "ai" ? (
-            <AiSettingsTab onClose={onClose} onGoToGeneral={() => setTab("general")} />
           ) : lockedTab ? (
             <SyncGate label={activeTab.label} onRequestSignIn={onRequestSignIn} />
           ) : shown === "vaults" ? (

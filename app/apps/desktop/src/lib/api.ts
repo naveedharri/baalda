@@ -28,7 +28,6 @@ import { APP_CHANNEL, APP_SCHEME } from "./deepLinkScheme";
  * rather than whichever app owns `baalda://`. The server allow-lists the scheme.
  */
 const CHECKOUT_CLIENT = { channel: APP_CHANNEL, scheme: APP_SCHEME } as const;
-import type { AssistantProvider, HousekeeperStatus, HousekeeperScan, HousekeeperEdit, DiagnosticInput, DiagnosticReview } from "./housekeeper";
 // Type-only import: `bulkTypes.ts` is the hand-mirrored copy of the server's
 // wire contract, and importing the TYPES keeps this module a runtime leaf.
 import type {
@@ -951,7 +950,7 @@ export interface MyBillingAccount {
   /** Vaults with pending invitations that hold seats; counts sum to
    *  `seats.reserved`. Absent on older servers. */
   invitedByVault?: { orgId: string; name: string; count: number }[];
-  limits: { people: number | null; vaults: number | null; assistant: boolean; fileSync: boolean };
+  limits: { people: number | null; vaults: number | null; fileSync: boolean };
   lapsed: boolean;
   canManage: boolean;
   complimentaryUntil: string | null;
@@ -1486,38 +1485,6 @@ export interface AccountKeysBody {
 }
 
 export class ApiClient {
-  async housekeeperDiagnose(vaultId: string, diagnostics: DiagnosticInput, provider?: AssistantProvider): Promise<DiagnosticReview> {
-    return (await this.request<DiagnosticReview>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/diagnose`, {
-      body: { diagnostics, consent: true, provider }, timeoutMs: 20_000,
-    })).data;
-  }
-
-  async housekeeperStatus(vaultId: string): Promise<HousekeeperStatus> {
-    return (await this.request<HousekeeperStatus>("GET", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/status`, { timeoutMs: 15_000 })).data;
-  }
-
-  async housekeeperSuggest(vaultId: string, docId: string, offset = 0, provider?: AssistantProvider): Promise<HousekeeperScan> {
-    return (await this.request<HousekeeperScan>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/suggest`, {
-      body: { docId, consent: true, offset, provider }, timeoutMs: 60_000,
-    })).data;
-  }
-
-  async housekeeperRepair(vaultId: string, docId: string, finding: string, provider?: AssistantProvider): Promise<HousekeeperScan> {
-    return (await this.request<HousekeeperScan>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/repair`, {
-      body: { docId, finding, consent: true, provider }, timeoutMs: 30_000,
-    })).data;
-  }
-
-  async housekeeperAuthorize(vaultId: string, docId: string, path: string): Promise<void> {
-    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/authorize`, { body: { docId, path } });
-  }
-
-  async housekeeperEdit(vaultId: string, action: "apply" | "undo", id: string): Promise<HousekeeperEdit> {
-    return (await this.request<HousekeeperEdit>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/${action}`, {
-      body: { id }, timeoutMs: 20_000,
-    })).data;
-  }
-
   private baseUrl: string;
   private token: string | null;
   private readonly fetchImpl: FetchLike;

@@ -776,6 +776,97 @@ curl https://<your-server>/health
 A server that answers without `features` predates the list and counts as behind. A server the app
 cannot reach is never reported as behind.
 
+## Backups
+
+Everyone's synced notes live in Postgres, and with `BLOB_STORAGE=s3` attachments live in the
+bucket. Desktops keep their own copies, but the server is the only place a teammate's work meets
+yours, so back up both.
+
+**Postgres.** Take a logical dump at least daily and keep several days of them, stored somewhere
+other than the database host:
+
+```bash
+# Custom format: compressed, and pg_restore can pick tables or run in parallel.
+pg_dump --format=custom --no-owner --file "baalda-$(date +%F).dump" "$DATABASE_URL"
+```
+
+Run it from cron, a scheduled job on your platform, or your provider's managed backups if it has
+them (point-in-time recovery is better still). Encrypt the dumps at rest; they hold every note.
+Keep the dump tool's major version at or above the server's.
+
+**Restore drill.** A backup you have never restored is a guess. At least once a quarter, restore
+the latest dump into a scratch database and start a server against it:
+
+```bash
+createdb baalda_restore_test
+pg_restore --no-owner --dbname baalda_restore_test baalda-2026-01-01.dump
+DATABASE_URL=postgres://…/baalda_restore_test node dist/db/migrate.js   # should apply nothing new
+```
+
+Then open `GET /health` and sign in with a test account. Write down how long it took; that is your
+recovery time.
+
+**Bucket.** Turn on object versioning (or your provider's equivalent) for the attachments bucket,
+with a lifecycle rule that expires old versions after a few weeks. Blob keys are content hashes,
+so objects are never overwritten in place; versioning protects against an accidental delete or a
+compromised key. Back up the bucket and the database close together in time, so a restore pairs
+rows with the bytes they name.
+
+**Secrets.** Store `JWT_SECRET` and any provider keys in a password manager or secret store
+separate from the backups. A restored database is useless without the `JWT_SECRET` it was used with.
+
+## Hardening
+
+- **TLS is required.** Serve the server only over HTTPS (and `wss://` for sync). Put it behind a
+  reverse proxy or platform edge that terminates TLS, and redirect or refuse plain HTTP. Session
+  tokens and note content travel on every request.
+- **A strong `JWT_SECRET`.** At least 32 random bytes (`openssl rand -base64 48`), never the
+  `.env.example` value, never committed. It signs sync tokens and Better Auth state. Rotating it
+  signs everyone out and invalidates outstanding sync tokens, so rotate on a schedule you choose and
+  at once if it may have leaked; desktops sign in again and resume.
+- **Postgres is not public.** Bind it to a private network or `localhost` only. If you must reach
+  it from outside, use an SSH tunnel or your provider's private networking, require TLS, and use a
+  strong, unique password. Give one-off reporting tools a read-only role.
+- **`CORS_ORIGINS`.** The desktop app needs no CORS entry. Set it only if a browser-based tool of
+  your own calls the API, and list exact origins; never `*`.
+- **Firewall.** Expose only the HTTP port (3010 by default, or 443 on your proxy). Keep 3011 private
+  unless you deliberately publish it, and close everything else.
+- **Accounts with access.** Turn on two-factor authentication for the hosting provider, DNS,
+  source repository and email provider accounts that can change the server, and keep a list of
+  who has access.
+- **Optional:** set `SECURITY_CONTACT` (for example `mailto:security@example.com`) to publish
+  `/.well-known/security.txt` for your instance.
+
+## Upgrades and rollback
+
+1. Read the release notes and check for new migrations in `app/apps/server/migrations/`.
+2. Take a fresh backup (see above) right before upgrading.
+3. Deploy. Migrations run before the new server starts, and a failing migration stops the start.
+   On a platform with a pre-deploy step (Railway) the old server keeps serving meanwhile; with
+   plain Docker, keep the previous image tag at hand.
+4. Check `GET /health` reports the new `version`, then open a vault on a desktop and make an edit.
+
+Migrations only move forward; there are no down migrations. To roll back the code, redeploy the
+previous image: it keeps working as long as the new migrations only added things, which is the
+usual case. If a release changed data in a way the old code cannot read, restore the backup from
+step 2 instead. Edits made since the backup survive on the desktops that made them and sync up
+again when they reconnect.
+
+Update promptly when a release fixes a security issue; see `SECURITY.md`.
+
+## Log retention
+
+The server logs to stdout. Note text is never logged, and the metrics lines (`[sync-metrics]`,
+`[checkpoint]`) carry only ids and counts, but other lines can include user ids, emails, IP
+addresses and paths, so treat logs as personal data:
+
+- Keep them only as long as you need them to debug and investigate incidents; 14–30 days is a
+  common choice. Set that as your log platform's retention, or rotate with Docker's `json-file`
+  driver (`--log-opt max-size=50m --log-opt max-file=5`).
+- Restrict who can read them, as you would the database.
+- If you ship logs to a third-party service, list it wherever you tell your users who handles
+  their data.
+
 ## Scaling & high availability (spec 05)
 
 The default single-instance deploy scales to hundreds of concurrent users:

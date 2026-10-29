@@ -2,6 +2,15 @@ import * as Y from "yjs";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { config } from "../config.js";
+import { vaultKeyCache } from "../crypto/key-cache.js";
+import { KeyRequiredError } from "../crypto/transport.js";
+import {
+  assertWritableWithoutKey,
+  openDocBytes,
+  sealDocBytes,
+  vaultOfDoc,
+  type DocCrypto,
+} from "../crypto/doc-crypto.js";
 
 /**
  * Server-side binary Yjs store (spec 02 §5A, 03 §3).
@@ -136,6 +145,7 @@ async function bestEffort(
 export async function loadDocState(
   docId: string,
   db: Queryable = defaultPool,
+  crypto?: DocCrypto,
 ): Promise<Uint8Array | null> {
   // Snapshot + log under one consistent read (see `withDocLock`). Split across
   // two transactions this can return a doc missing everything a concurrent
@@ -143,20 +153,42 @@ export async function loadDocState(
   // CORRUPTION, not a slow read: `setContent` deletes only the text it can see,
   // so the unseen ops' text survives beside the new body once the two merge.
   return withDocLock(docId, db, "shared", async (q) => {
-    const snap = await q.query<{ snapshot: Buffer | null }>(
-      "SELECT snapshot FROM doc_snapshots WHERE doc_id = $1",
+    const snap = await q.query<{ snapshot: Buffer | null; snapshot_enc: Buffer | null }>(
+      "SELECT snapshot, snapshot_enc FROM doc_snapshots WHERE doc_id = $1",
       [docId],
     );
-    const updates = await q.query<{ update: Buffer }>(
-      "SELECT update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
+    const raw = await q.query<{ update: Buffer | null; update_enc: Buffer | null }>(
+      "SELECT update, update_enc FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
       [docId],
     );
+    const { snapshotBuf, rows } = openParts(docId, crypto, snap.rows[0], raw.rows);
+    if (!snapshotBuf && rows.length === 0) return null;
 
-    const snapshotBuf = snap.rows[0]?.snapshot ?? null;
-    if (!snapshotBuf && updates.rows.length === 0) return null;
-
-    return mergeParts(snapshotBuf, updates.rows);
+    return mergeParts(snapshotBuf, rows);
   });
+}
+
+/**
+ * W3: open a doc's rows. A row with `*_enc` is sealed (opened with `crypto`, or
+ * {@link KeyRequiredError} without one); any other row is plaintext, exactly as
+ * before. An unkeyed doc never has an `*_enc` row, so this is a pass-through.
+ */
+function openParts<R extends { update: Buffer | null; update_enc: Buffer | null }>(
+  docId: string,
+  crypto: DocCrypto | undefined,
+  snapRow: { snapshot: Buffer | null; snapshot_enc: Buffer | null } | undefined,
+  rows: R[],
+): { snapshotBuf: Buffer | null; rows: Array<R & { update: Buffer }> } {
+  const snapshotBuf = snapRow
+    ? openDocBytes(crypto, "doc_snapshots.snapshot", docId, snapRow.snapshot_enc, snapRow.snapshot)
+    : null;
+  return {
+    snapshotBuf,
+    rows: rows.map((r) => ({
+      ...r,
+      update: openDocBytes(crypto, "doc_updates.update", docId, r.update_enc, r.update) ?? Buffer.alloc(0),
+    })),
+  };
 }
 
 /**
@@ -330,6 +362,7 @@ export async function loadDocDiff(
   docId: string,
   clientStateVector: Uint8Array | null,
   db: Queryable = defaultPool,
+  crypto?: DocCrypto,
 ): Promise<DocDiff | null> {
   // FAST PATH, and the one that matters at scale: a cached per-doc state vector
   // that is provably current. This is the question the vault channel asks for
@@ -402,15 +435,16 @@ export async function loadDocDiff(
   // reads as FRESH forever after because the log genuinely is empty. That
   // combination does not just delay ops, it withholds them silently.
   const read = await withDocLock(docId, db, "shared", async (q, inTx) => {
-    const snap = await q.query<{ snapshot: Buffer | null }>(
-      "SELECT snapshot FROM doc_snapshots WHERE doc_id = $1",
+    const snap = await q.query<{ snapshot: Buffer | null; snapshot_enc: Buffer | null }>(
+      "SELECT snapshot, snapshot_enc FROM doc_snapshots WHERE doc_id = $1",
       [docId],
     );
-    const updates = await q.query<{ id: string; update: Buffer }>(
-      "SELECT id, update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
+    const raw = await q.query<{ id: string; update: Buffer | null; update_enc: Buffer | null }>(
+      "SELECT id, update, update_enc FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
       [docId],
     );
-    const snapshotBuf = snap.rows[0]?.snapshot ?? null;
+    const { snapshotBuf, rows: updateRows } = openParts(docId, crypto, snap.rows[0], raw.rows);
+    const updates = { rows: updateRows };
     if (!snapshotBuf && updates.rows.length === 0) return null;
 
     const merged = mergeParts(snapshotBuf, updates.rows);
@@ -530,11 +564,21 @@ export async function appendUpdate(
   update: Uint8Array,
   db: Queryable = defaultPool,
   threshold: number = config.compactionThreshold,
+  crypto?: DocCrypto,
 ): Promise<{ compacted: boolean }> {
-  await db.query(
-    "INSERT INTO doc_updates (doc_id, update) VALUES ($1, $2)",
-    [docId, Buffer.from(update)],
-  );
+  if (crypto) {
+    // W3: keyed vault — only the sealed column is written.
+    await db.query(
+      "INSERT INTO doc_updates (doc_id, update, update_enc) VALUES ($1, NULL, $2)",
+      [docId, sealDocBytes(crypto, "doc_updates.update", docId, update)],
+    );
+  } else {
+    await assertWritableWithoutKey(docId, crypto, db);
+    await db.query(
+      "INSERT INTO doc_updates (doc_id, update) VALUES ($1, $2)",
+      [docId, Buffer.from(update)],
+    );
+  }
   // The cached state vector is deliberately NOT updated here. Appending moves the
   // log's max id past the watermark the cache recorded, which makes the cache read
   // as stale on its own — so the next reader recomputes and re-caches.
@@ -564,7 +608,7 @@ export async function appendUpdate(
     // Forget the estimate: compaction truncates the log, and whatever survives
     // it (an append racing the merge) is counted fresh on the next write.
     logEstimates.delete(docId);
-    await compact(docId, db);
+    await compact(docId, db, crypto);
     return { compacted: true };
   }
   rememberEstimate(docId, count);
@@ -620,14 +664,15 @@ function rememberEstimate(docId: string, n: number): void {
 export async function compact(
   docId: string,
   db: Queryable = defaultPool,
+  crypto?: DocCrypto,
 ): Promise<void> {
   // FIRST belt, in-process: a per-doc promise chain, so the two `appendUpdate`
   // calls that a pair of typists past the threshold fire concurrently cannot
   // both be merging this doc at once inside ONE server.
   const prev = compactChains.get(docId) ?? Promise.resolve();
   const run = prev.then(
-    () => compactOnce(docId, db),
-    () => compactOnce(docId, db),
+    () => compactOnce(docId, db, crypto),
+    () => compactOnce(docId, db, crypto),
   );
   const tail = run.catch(() => {});
   compactChains.set(docId, tail);
@@ -643,31 +688,124 @@ export async function compact(
 /** In-flight compaction per doc; see `compact`. Entries are removed as they drain. */
 const compactChains = new Map<string, Promise<void>>();
 
-async function compactOnce(docId: string, db: Queryable): Promise<void> {
+async function compactOnce(docId: string, db: Queryable, given?: DocCrypto): Promise<void> {
+  // W3: a sealed log needs the key. Background compaction (no caller key) uses
+  // a COPY from the process cache and defers — leaves the log as is — when no
+  // member is connected to supply one. Unkeyed docs never reach the lookup.
+  let crypto = given;
+  let cachedCopy: Buffer | null = null;
+  if (!crypto) {
+    const { rows } = await db.query<{ sealed: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM doc_updates WHERE doc_id = $1 AND update_enc IS NOT NULL)
+           OR EXISTS (SELECT 1 FROM doc_snapshots WHERE doc_id = $1 AND snapshot_enc IS NOT NULL) AS sealed`,
+      [docId],
+    );
+    if (rows[0]?.sealed) {
+      const vaultId = await vaultOfDoc(docId, db);
+      const held = vaultId ? vaultKeyCache.get(vaultId) : null;
+      if (!vaultId || !held) return;
+      cachedCopy = held.key;
+      crypto = { vaultId, key: held.key, generation: held.generation };
+    }
+  }
+  try {
+    await compactLocked(docId, db, crypto);
+  } catch (err) {
+    // Fail closed, keep everything: a seal that does not verify leaves the log
+    // untouched (the check runs before any write). Compaction retries later.
+    if (err instanceof SealVerifyError) {
+      console.error(`[compact] ${err.message}`);
+      return;
+    }
+    throw err;
+  } finally {
+    cachedCopy?.fill(0);
+  }
+}
+
+/** Thrown when a sealed snapshot does not round-trip; nothing is written. */
+export class SealVerifyError extends Error {
+  constructor(docId: string) {
+    super(`sealed snapshot for ${docId} failed verification; compaction skipped`);
+    this.name = "SealVerifyError";
+  }
+}
+
+/** Exposed for tests: replace to simulate a bad seal. */
+export const sealVerifyHooks = { open: openDocBytes };
+
+function verifySealedSnapshot(
+  crypto: DocCrypto,
+  docId: string,
+  sealed: Buffer,
+  plain: Buffer,
+  expected: Y.Doc,
+): void {
+  let opened: Buffer | null;
+  try {
+    opened = sealVerifyHooks.open(crypto, "doc_snapshots.snapshot", docId, sealed, null);
+  } catch {
+    throw new SealVerifyError(docId);
+  }
+  if (!opened || !opened.equals(plain)) throw new SealVerifyError(docId);
+  const check = new Y.Doc();
+  try {
+    Y.applyUpdate(check, new Uint8Array(opened));
+    const same =
+      bytesEqual(Y.encodeStateVector(check), Y.encodeStateVector(expected)) &&
+      check.getText("content").toString() === expected.getText("content").toString();
+    if (!same) throw new SealVerifyError(docId);
+  } finally {
+    check.destroy();
+  }
+}
+
+async function compactLocked(docId: string, db: Queryable, crypto: DocCrypto | undefined): Promise<void> {
   // SECOND belt, cross-process and the real one: the doc's EXCLUSIVE advisory
   // lock, with the reads, the upsert and the delete in that one transaction.
   await withDocLock(docId, db, "exclusive", async (q, inTx) => {
-    const snap = await q.query<{ snapshot: Buffer | null }>(
-      "SELECT snapshot FROM doc_snapshots WHERE doc_id = $1",
+    const snap = await q.query<{ snapshot: Buffer | null; snapshot_enc: Buffer | null }>(
+      "SELECT snapshot, snapshot_enc FROM doc_snapshots WHERE doc_id = $1",
       [docId],
     );
-    const updates = await q.query<{ id: string; update: Buffer }>(
-      "SELECT id, update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
+    const raw = await q.query<{ id: string; update: Buffer | null; update_enc: Buffer | null }>(
+      "SELECT id, update, update_enc FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
       [docId],
     );
-    if (updates.rows.length === 0) return;
+    if (raw.rows.length === 0) return;
+    // W3 data-loss rule: a keyed compaction never deletes PLAINTEXT rows.
+    // Folding a legacy plaintext row into a sealed snapshot would null the
+    // plaintext, which is a separate, delayed, reversible step (not built).
+    // Mixed logs therefore stay as they are; reads still work.
+    if (crypto) {
+      const snapRow = snap.rows[0];
+      const plaintextLeft =
+        (snapRow && snapRow.snapshot !== null && !snapRow.snapshot_enc) ||
+        raw.rows.some((r) => !r.update_enc);
+      if (plaintextLeft) return;
+    }
+    const opened = openParts(docId, crypto, snap.rows[0], raw.rows);
+    const updates = { rows: opened.rows };
 
     const doc = new Y.Doc();
     let maxId = "0";
     try {
-      const snapshotBuf = snap.rows[0]?.snapshot ?? null;
+      const snapshotBuf = opened.snapshotBuf;
       if (snapshotBuf) Y.applyUpdate(doc, new Uint8Array(snapshotBuf));
       for (const row of updates.rows) {
         Y.applyUpdate(doc, new Uint8Array(row.update));
         maxId = row.id;
       }
-      const merged = Buffer.from(Y.encodeStateAsUpdate(doc));
+      const mergedPlain = Buffer.from(Y.encodeStateAsUpdate(doc));
       const stateVector = Buffer.from(Y.encodeStateVector(doc));
+      // W3: a keyed doc's snapshot goes only into `snapshot_enc`.
+      const merged = crypto ? null : mergedPlain;
+      const mergedEnc = crypto ? sealDocBytes(crypto, "doc_snapshots.snapshot", docId, mergedPlain) : null;
+      // Verify before replace: the sealed snapshot must decrypt to exactly the
+      // merged bytes AND decode to the same doc (state vector + text) before
+      // any row is replaced or deleted. Any mismatch throws, so the
+      // transaction rolls back and the log stays as it was.
+      if (mergedEnc && crypto) verifySealedSnapshot(crypto, docId, mergedEnc, mergedPlain, doc);
 
       // THIRD belt: never move the snapshot BACKWARDS. `seq` is the
       // `doc_updates.id` high-water mark the snapshot absorbed, so a merge that
@@ -676,16 +814,17 @@ async function compactOnce(docId: string, db: Queryable): Promise<void> {
       // committed update: A read the log at 1-3, B wrote 1-4 and truncated, A
       // then stamped its 1-3 merge over B's and update 4 existed nowhere.
       const wrote = await q.query(
-        `INSERT INTO doc_snapshots (doc_id, snapshot, state_vector, seq, updated_at)
-         VALUES ($1, $2, $3, $4, now())
+        `INSERT INTO doc_snapshots (doc_id, snapshot, state_vector, seq, updated_at, snapshot_enc)
+         VALUES ($1, $2, $3, $4, now(), $5)
          ON CONFLICT (doc_id) DO UPDATE
            SET snapshot = EXCLUDED.snapshot,
+               snapshot_enc = EXCLUDED.snapshot_enc,
                state_vector = EXCLUDED.state_vector,
                seq = EXCLUDED.seq,
                updated_at = now()
          WHERE doc_snapshots.seq IS NULL OR doc_snapshots.seq < EXCLUDED.seq
          RETURNING doc_id`,
-        [docId, merged, stateVector, maxId],
+        [docId, merged, stateVector, maxId, mergedEnc],
       );
       // Refused by the belt: a newer snapshot already covers at least this much,
       // so there is nothing to truncate against and nothing to invalidate.
@@ -745,6 +884,16 @@ export async function resetDocCrdt(
     if (content.length > 0) doc.getText("content").insert(0, content);
     const snapshot = Buffer.from(Y.encodeStateAsUpdate(doc));
     const stateVector = Buffer.from(Y.encodeStateVector(doc));
+    // W3: no sealed reset yet; refuse rather than write plaintext into a keyed
+    // vault. Also refuse whenever sealed rows exist, flag on or off: deleting
+    // rows nobody here can read is never a reset this server may do.
+    await assertWritableWithoutKey(docId, undefined, db);
+    const sealed = await db.query<{ sealed: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM doc_updates WHERE doc_id = $1 AND update_enc IS NOT NULL)
+           OR EXISTS (SELECT 1 FROM doc_snapshots WHERE doc_id = $1 AND snapshot_enc IS NOT NULL) AS sealed`,
+      [docId],
+    );
+    if (sealed.rows[0]?.sealed) throw new KeyRequiredError();
     await db.query("DELETE FROM doc_updates WHERE doc_id = $1", [docId]);
     await db.query(
       `INSERT INTO doc_snapshots (doc_id, snapshot, state_vector, seq, updated_at)
@@ -774,8 +923,8 @@ export async function docStoredBytes(
 ): Promise<number> {
   const { rows } = await db.query<{ bytes: string }>(
     `SELECT (
-       COALESCE((SELECT SUM(octet_length(snapshot)) FROM doc_snapshots WHERE doc_id = $1), 0)
-     + COALESCE((SELECT SUM(octet_length(update))   FROM doc_updates   WHERE doc_id = $1), 0)
+       COALESCE((SELECT SUM(octet_length(COALESCE(snapshot_enc, snapshot))) FROM doc_snapshots WHERE doc_id = $1), 0)
+     + COALESCE((SELECT SUM(octet_length(COALESCE(update_enc, update))) FROM doc_updates WHERE doc_id = $1), 0)
      )::text AS bytes`,
     [docId],
   );

@@ -84,6 +84,12 @@ export interface HelloFrame {
    * Absent ⇒ full backfill, which is every shipped client.
    */
   mode?: "live-only";
+  /**
+   * Client-held vault keys (W3): the vault key, base64 (32 bytes). Verified
+   * against `vaults.vk_check`; when valid, held in the process key cache for
+   * this connection's lifetime (background work only). Never logged.
+   */
+  vk?: string;
 }
 
 /** A teammate's live "who's viewing what" state, forwarded to every subscriber
@@ -329,6 +335,8 @@ export function parseHello(text: string): HelloFrame | null {
     // Exactly one recognised value; anything else is an older or a confused
     // client and gets the full backfill, which is always correct if slower.
     mode: f.mode === "live-only" ? "live-only" : undefined,
+    // W3: optional vault key (base64, 32 bytes); verified by the channel.
+    vk: typeof f.vk === "string" && f.vk ? f.vk : undefined,
   };
 }
 

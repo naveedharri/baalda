@@ -39,6 +39,8 @@ const SERVER_ENV = [
   "HOCUSPOCUS_PORT",
   "NODE_ENV",
   "BAALDA_DEPLOYMENT",
+  // Client-held vault keys (W3); unset/off = today's behaviour.
+  "BAALDA_VAULT_KEYS",
   "NODE_OPTIONS",
   "SYNC_TOKEN_TTL_SECONDS",
   "COMPACTION_THRESHOLD",
@@ -124,12 +126,13 @@ const SERVER_ENV = [
   "EMAIL_TRANSPORT",
   // Inbox for the desktop's "Report a bug" dialog (needs email on); unset = off.
   "BUG_REPORT_EMAIL",
+  // Contact served at /.well-known/security.txt; unset = 404.
+  "SECURITY_CONTACT",
   // Desktop URL scheme the server's pages bounce into; `baalda-staging` on the
   // staging project so its links open the Staging app, not the released one.
   "DEEP_LINK_SCHEME",
-  // Note Trash retention and the optional Baalda Assistant module override.
+  // Note Trash retention.
   "TRASH_RETENTION_DAYS",
-  "HOUSEKEEPER_MODULE",
   // Content-write safety (#251, #252): the oldest desktop build allowed to push
   // note content, what a build that reports no version gets, and the burst
   // brake on emptied notes.

@@ -3,6 +3,9 @@ import type { LocalTransactionOrigin, Server } from "@hocuspocus/server";
 import { formatDocName } from "./doc-name.js";
 import type { SyncContext } from "./hocuspocus.js";
 import { appendUpdate, compareStateVectors, loadDocState } from "../yjs/persistence.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { pool } from "../db/pool.js";
+import { config } from "../config.js";
 import { indexDoc, scheduleIndex } from "../index/indexer.js";
 import { isShrinkHeld, reportShrink } from "../versions/shrink-guard.js";
 
@@ -60,6 +63,12 @@ export interface DocActor {
    * Attribution (`last_edited_by`) is unchanged either way.
    */
   source?: string | null;
+  /**
+   * W3: the vault key this REQUEST presented and the server verified
+   * (`requireVaultKey`), for a keyed vault. In memory only; never logged.
+   * Absent for an unkeyed vault, which keeps today's plaintext path.
+   */
+  crypto?: DocCrypto;
 }
 
 /**
@@ -187,7 +196,7 @@ export async function applyDetached(
   opts: DetachedOptions = {},
 ): Promise<ApplyOutcome> {
   const userId = actor?.userId ?? null;
-  const state = await loadDocState(docId);
+  const state = await loadDocState(docId, pool, actor?.crypto);
   const doc = new Y.Doc();
   const updates: Uint8Array[] = [];
   const capture = (u: Uint8Array) => updates.push(u);
@@ -204,7 +213,7 @@ export async function applyDetached(
     }
     if (updates.length === 0) return "skipped";
     const merged = updates.length === 1 ? updates[0] : Y.mergeUpdates(updates);
-    await appendUpdate(docId, merged);
+    await appendUpdate(docId, merged, pool, config.compactionThreshold, actor?.crypto);
     reportShrink(
       vaultId,
       docId,
@@ -286,6 +295,7 @@ export async function serverDocCoversUpdate(
   vaultId: string,
   docId: string,
   update: Uint8Array,
+  crypto?: DocCrypto,
 ): Promise<boolean> {
   return withDocLock(docId, async () => {
     const submitted = new Y.Doc();
@@ -293,7 +303,7 @@ export async function serverDocCoversUpdate(
     try {
       Y.applyUpdate(submitted, update);
       const live = runtime?.server.hocuspocus.documents.get(formatDocName(vaultId, docId));
-      const state = live ? Y.encodeStateAsUpdate(live) : await loadDocState(docId);
+      const state = live ? Y.encodeStateAsUpdate(live) : await loadDocState(docId, pool, crypto);
       if (!state) return false;
       Y.applyUpdate(canonical, state);
 
@@ -334,6 +344,7 @@ export async function serverStateCovers(
   vaultId: string,
   docId: string,
   update: Uint8Array,
+  crypto?: DocCrypto,
 ): Promise<boolean> {
   return withDocLock(docId, async () => {
     const submitted = Y.encodeStateVectorFromUpdate(update);
@@ -342,7 +353,7 @@ export async function serverStateCovers(
     if (live) {
       serverSv = Y.encodeStateVector(live);
     } else {
-      const state = await loadDocState(docId);
+      const state = await loadDocState(docId, pool, crypto);
       if (!state) return false;
       serverSv = Y.encodeStateVectorFromUpdate(state);
     }

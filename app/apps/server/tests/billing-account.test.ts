@@ -165,7 +165,7 @@ describe("account billing routes (team model)", () => {
     expect(body.vaults).toHaveLength(2);
     expect(body.vaults[0]).toMatchObject({ people: 2, notes: 0, storageBytes: 0, files: 0 });
     expect(body.totals).toMatchObject({ people: 2, vaults: 2, notes: 0 });
-    expect(body.limits).toMatchObject({ people: 2, vaults: 1, assistant: false });
+    expect(body.limits).toMatchObject({ people: 2, vaults: 1 });
   });
 
   it("seat preview refuses below the floor", async () => {

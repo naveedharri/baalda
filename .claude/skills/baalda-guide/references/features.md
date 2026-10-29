@@ -285,7 +285,7 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   - **Free**: $0, forever. Up to 2 people on the account (the owner counts) and 1 synced vault.
     Notes and storage are unlimited for normal use. The AI connection point (MCP) is included.
     Images and files embedded in notes (the `attachments/` folder) sync; standalone files in the
-    sidebar and the Baalda Assistant need Team. Accounts that already had more vaults or members
+    sidebar need Team. Accounts that already had more vaults or members
     keep what they have; they just cannot add more without Team.
   - **Team**: $10 per seat per month, or $110 per seat per year, with a minimum of 3 seats.
     Every person is a seat, the owner included. One Team account covers every vault the owner
