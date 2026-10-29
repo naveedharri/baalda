@@ -53,6 +53,9 @@ import { createBillingRoutes } from "./routes/billing.js";
 import { PolarBillingProvider } from "../billing/polar.js";
 import type { BillingProvider } from "../billing/provider.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
+import { pool } from "../db/pool.js";
+import { handleMcpToken, isMcpGetSessionPath, isMcpTokenPath } from "../mcp/oauth-token-endpoint.js";
+import { rewrapOnIssue } from "../mcp/oauth-grant-keys.js";
 
 
 /**
@@ -361,6 +364,13 @@ export function createApp(deps: AppDeps): Hono {
   // Email sign-in passes the per-account failure throttle first (#237).
   app.post("/api/auth/sign-in/email", (c) => throttledSignIn(c.req.raw, auth.handler));
   app.on(["GET", "POST"], "/api/auth/*", async (c) => {
+    // OAuth connector tokens are stored as hashes (W3): the token endpoint is
+    // wrapped, and Better Auth's HTTP session probe (which would accept a
+    // stored hash as a bearer) is closed; POST /api/mcp resolves tokens itself.
+    if (isMcpGetSessionPath(c.req.path)) return c.json(null);
+    if (c.req.method === "POST" && isMcpTokenPath(c.req.path)) {
+      return handleMcpToken(c.req.raw, auth.handler, pool, { onIssued: rewrapOnIssue });
+    }
     if (c.req.method !== "POST" || !c.req.path.startsWith("/api/auth/organization/")) {
       return auth.handler(c.req.raw);
     }

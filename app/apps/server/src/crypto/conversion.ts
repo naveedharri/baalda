@@ -132,8 +132,21 @@ export async function conversionBlockers(
        JOIN vaults v ON v.organization_id = m.organization_id
       WHERE v.id = $1
         AND GREATEST(a."createdAt", a."updatedAt", a."accessTokenExpiresAt")
-            > now() - make_interval(days => $2)`,
-    [vaultId, ACTIVE_WINDOW_DAYS],
+            > now() - make_interval(days => $2)
+        -- A grant is covered once every token that can still act holds a wrap
+        -- for this generation: a live access token needs an access wrap, a
+        -- usable refresh token (offline_access, unexpired) a refresh wrap.
+        AND (
+          (a."accessTokenExpiresAt" > now() AND NOT EXISTS (
+             SELECT 1 FROM oauth_grant_keys k WHERE k.grant_id = a.id AND k.vault_id = $1
+               AND k.generation = $3 AND k.kind = 'access'))
+          OR (a."refreshTokenExpiresAt" > now()
+              AND ' ' || a.scopes || ' ' LIKE '% offline_access %'
+              AND NOT EXISTS (
+             SELECT 1 FROM oauth_grant_keys k WHERE k.grant_id = a.id AND k.vault_id = $1
+               AND k.generation = $3 AND k.kind = 'refresh'))
+        )`,
+    [vaultId, ACTIVE_WINDOW_DAYS, generation],
   );
   return {
     tokens: tokens.map((r) => r.id),
