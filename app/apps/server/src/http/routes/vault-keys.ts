@@ -20,7 +20,13 @@ import { vaultKeysEnabled } from "../../crypto/config.js";
 import { VK_HEADER, decodeVk, requireVaultKey } from "../../crypto/transport.js";
 import { vaultKeyCache } from "../../crypto/key-cache.js";
 import { verifyVk } from "../../crypto/vk-check.js";
-import { ENCRYPTION_NOT_REQUESTED, initGate, lockGateRows } from "../../crypto/conversion.js";
+import {
+  ENCRYPTION_NOT_REQUESTED,
+  KEY_MATERIAL_EXISTS,
+  initGate,
+  lockGateRows,
+  vaultHasKeyMaterial,
+} from "../../crypto/conversion.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
 import { CLIENT_VERSION_HEADER, CLIENT_VERSION_PARAM, clientVersionPolicy, judgeClientVersion } from "../client-version.js";
@@ -117,6 +123,12 @@ export function createVaultKeyRoutes(): Hono {
       if (!rows[0].encryption_requested_at) {
         await client.query("ROLLBACK");
         return c.json(ENCRYPTION_NOT_REQUESTED, 409);
+      }
+      // A NULL vk_check beside sealed rows or key material is a wiped check:
+      // a new key would make every sealed row unreadable. Never re-key.
+      if (await vaultHasKeyMaterial(vaultId, client)) {
+        await client.query("ROLLBACK");
+        return c.json(KEY_MATERIAL_EXISTS, 409);
       }
       // MCP/links conversion gate (crypto/conversion.ts): no active token,
       // link or OAuth grant may be cut off by keying the vault. It runs INSIDE
