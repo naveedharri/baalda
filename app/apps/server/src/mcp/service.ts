@@ -51,6 +51,9 @@ import { buildAccessContext, resolveAccessForUser } from "../permissions/resolve
 import { softDeleteSet } from "../trash/retention.js";
 import { deleteRegisteredFile } from "../http/routes/registry.js";
 import { registerCtx, registerFile } from "../registry/batch-ops.js";
+import { vaultKeysEnabled } from "../crypto/config.js";
+import { KeyRequiredError, KEY_REQUIRED_CODE, loadVkCheck } from "../crypto/transport.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
 
 /**
  * The CRUD operations the MCP exposes, each one gated by the SAME ACL the rest
@@ -91,6 +94,26 @@ export class McpToolError extends Error {
   ) {
     super(message);
   }
+}
+
+const KEY_REQUIRED_MESSAGE =
+  "This vault needs its key for this connection. Open Baalda on a device that has it, then try again.";
+
+/**
+ * W3: the caller's verified key for a keyed vault, unwrapped from the token's
+ * own wrap for this call (`McpAuth.vaultKeys`, never the process cache).
+ * Unkeyed vault or flag off: undefined, today's path. Keyed vault without a
+ * usable key: a hard `key_required` refusal BEFORE anything is read or written.
+ */
+async function vaultCrypto(auth: McpAuth, vaultId: string): Promise<DocCrypto | undefined> {
+  if (!vaultKeysEnabled()) return undefined;
+  const state = await loadVkCheck(vaultId);
+  if (!state) return undefined;
+  const held = auth.vaultKeys?.get(vaultId);
+  if (!held || held.generation !== state.generation) {
+    throw new McpToolError(KEY_REQUIRED_MESSAGE, KEY_REQUIRED_CODE);
+  }
+  return { vaultId, key: held.key, generation: held.generation };
 }
 
 /** A write refusal: `account_read_only` when the vault's billing account has
@@ -754,7 +777,8 @@ export async function readNote(ctx: McpContext, docId: string) {
   const note = await locateNote(ctx.auth, docId);
   const perm = await effectivePermission(ctx.auth.userId, docId);
   if (perm === "none") throw new McpToolError("You do not have access to this note", "no_access");
-  const content = await ctx.docWriter.readContent(note.vault_id, docId);
+  const crypto = await vaultCrypto(ctx.auth, note.vault_id);
+  const content = await writeOrToolError(() => ctx.docWriter.readContent(note.vault_id, docId, crypto));
   return {
     docId,
     vaultId: note.vault_id,
@@ -780,6 +804,8 @@ export async function createNote(
   },
 ) {
   input = { ...input, vaultId: await requireVaultInScope(ctx.auth, input.vaultId) };
+  // W3: content needs the key; refuse before any row is written.
+  const crypto = input.content ? await vaultCrypto(ctx.auth, input.vaultId) : undefined;
   // `relPath` is authoritative; `folderId` must be the folder at its dirname or
   // is resolved from it. An assistant that computes the two inconsistently
   // (the 2026-08-27 phantom-root-folder: `folderId` of `Team/BenAI/…/Daily`,
@@ -821,11 +847,15 @@ export async function createNote(
     // the caller can reach for once `adopted` has told it what happened.
     let seeded = false;
     if (input.content) {
-      const current = await ctx.docWriter.readContent(input.vaultId, row.id);
+      const current = await writeOrToolError(() => ctx.docWriter.readContent(input.vaultId, row.id, crypto));
       if (current.trim().length === 0) {
-        await ctx.docWriter.setContent(input.vaultId, row.id, input.content, {
-          userId: ctx.auth.userId,
-        });
+        const content = input.content;
+        await writeOrToolError(() =>
+          ctx.docWriter.setContent(input.vaultId, row.id, content, {
+            userId: ctx.auth.userId,
+            crypto,
+          }),
+        );
         seeded = true;
       }
     }
@@ -854,9 +884,13 @@ export async function createNote(
     );
   });
   if (input.content) {
-    await ctx.docWriter.setContent(input.vaultId, docId, input.content, {
-      userId: ctx.auth.userId,
-    });
+    const content = input.content;
+    await writeOrToolError(() =>
+      ctx.docWriter.setContent(input.vaultId, docId, content, {
+        userId: ctx.auth.userId,
+        crypto,
+      }),
+    );
   }
   // After the content, so a client that reacts to the announcement by pulling
   // the note finds it already written rather than briefly empty.
@@ -922,6 +956,9 @@ async function writeOrToolError<T>(fn: () => Promise<T>): Promise<T> {
     if (err instanceof StaleRevisionError) throw new McpToolError(err.message, "stale_revision");
     if (err instanceof EditError) throw new McpToolError(err.message, err.code);
     if (err instanceof NoteTooLargeError) throw new McpToolError(err.message, "note_too_large");
+    // Never "" or a partial write: the sealed doc could not be read, so nothing
+    // was applied and the caller is told so.
+    if (err instanceof KeyRequiredError) throw new McpToolError(KEY_REQUIRED_MESSAGE, KEY_REQUIRED_CODE);
     throw err;
   }
 }
@@ -937,6 +974,7 @@ export async function updateNote(
   expectedRevision?: string,
 ) {
   const note = await requireEditableNote(ctx.auth, docId);
+  const crypto = await vaultCrypto(ctx.auth, note.vault_id);
   // The actor rides along so the edit is attributed to the MCP token's user —
   // an AI write shows up as "edited by <that user>" like any teammate's.
   const { revision } = await writeOrToolError(() =>
@@ -947,7 +985,7 @@ export async function updateNote(
         requireRevision(current, expectedRevision);
         return replacementOp(current, content);
       },
-      { userId: ctx.auth.userId },
+      { userId: ctx.auth.userId, crypto },
     ),
   );
   await pool.query("UPDATE notes SET updated_at = now() WHERE id = $1", [docId]);
@@ -997,6 +1035,7 @@ export async function appendNote(
   opts: { expectedRevision?: string; idempotencyKey?: string } = {},
 ) {
   const note = await requireEditableNote(ctx.auth, docId);
+  const crypto = await vaultCrypto(ctx.auth, note.vault_id);
   const key = opts.idempotencyKey ? `${docId}\n${opts.idempotencyKey}` : null;
   if (key) {
     const prior = recallAppend(key);
@@ -1010,7 +1049,7 @@ export async function appendNote(
         requireRevision(current, opts.expectedRevision);
         return [{ index: current.length, deleteLength: 0, insert: text }];
       },
-      { userId: ctx.auth.userId },
+      { userId: ctx.auth.userId, crypto },
     ),
   );
   if (key) rememberAppend(key, { revision });
@@ -1262,6 +1301,7 @@ export async function editNote(
   expectedRevision?: string,
 ) {
   const note = await requireEditableNote(ctx.auth, docId);
+  const crypto = await vaultCrypto(ctx.auth, note.vault_id);
   const { revision, content } = await writeOrToolError(() =>
     ctx.docWriter.editContent(
       note.vault_id,
@@ -1270,7 +1310,7 @@ export async function editNote(
         requireRevision(current, expectedRevision);
         return planEdits(current, edits);
       },
-      { userId: ctx.auth.userId },
+      { userId: ctx.auth.userId, crypto },
     ),
   );
   await pool.query("UPDATE notes SET updated_at = now() WHERE id = $1", [docId]);

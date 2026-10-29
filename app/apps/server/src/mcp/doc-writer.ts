@@ -5,6 +5,7 @@ import { formatDocName } from "../sync/doc-name.js";
 import type { SyncContext } from "../sync/hocuspocus.js";
 import { loadDocState } from "../yjs/persistence.js";
 import { config } from "../config.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
 import {
   applyDetached,
   setDocBatchRuntime,
@@ -143,7 +144,12 @@ export interface DocWriter {
     actor?: DocActor,
   ): Promise<void>;
   /** Read the current note body (from the live doc if open, else from storage). */
-  readContent(vaultId: string, docId: string): Promise<string>;
+  /**
+   * W3: `crypto` is the CALLER's verified key for a keyed vault. A sealed doc
+   * read without it throws `KeyRequiredError` — never "" (an empty answer would
+   * let a caller write over text it could not see).
+   */
+  readContent(vaultId: string, docId: string, crypto?: DocCrypto): Promise<string>;
   /**
    * Like {@link readContent}, but `null` when the doc has NO live session and NO
    * persisted CRDT state — i.e. the server has never seen this note's content
@@ -151,7 +157,7 @@ export interface DocWriter {
    * Callers that snapshot content MUST use this: treating "not uploaded yet" as
    * "empty note" is how a checkpoint ends up bulldozing real text with "".
    */
-  peekContent(vaultId: string, docId: string): Promise<string | null>;
+  peekContent(vaultId: string, docId: string, crypto?: DocCrypto): Promise<string | null>;
 }
 
 export function createDocWriter(
@@ -211,10 +217,11 @@ export function createDocWriter(
 
   // A plain closure, NOT a method using `this`: call sites hand these functions
   // around detached (`readContent: docWriter.readContent`), where `this` dies.
-  async function peekContent(vaultId: string, docId: string): Promise<string | null> {
+  async function peekContent(vaultId: string, docId: string, crypto?: DocCrypto): Promise<string | null> {
     const live = server.hocuspocus.documents.get(formatDocName(vaultId, docId));
     if (live) return live.getText(CONTENT_FIELD).toString();
-    const state = await loadDocState(docId);
+    // Sealed rows without `crypto` throw KeyRequiredError, which propagates.
+    const state = await loadDocState(docId, undefined, crypto);
     // No state is NOT an empty note: it is a note whose content has never
     // reached this server. The distinction is load-bearing for checkpoints.
     if (!state) return null;
@@ -305,7 +312,7 @@ export function createDocWriter(
         actor,
       ),
 
-    readContent: async (vaultId, docId) => (await peekContent(vaultId, docId)) ?? "",
+    readContent: async (vaultId, docId, crypto) => (await peekContent(vaultId, docId, crypto)) ?? "",
 
     peekContent,
   };
