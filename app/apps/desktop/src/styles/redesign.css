@@ -1594,3 +1594,18 @@ html:not([data-theme="dark"]) .account-popover .menu-hint { min-width: 0; overfl
 .rd-viewonly-who { color: #8a6a2a !important; border-left-color: #f0d48f !important; }
 .rd-viewonly-ask { background: #c98a12 !important; color: #fff !important; }
 .rd-viewonly-ask:hover:not(:disabled) { background: #b07a10 !important; }
+
+/* Account menu grows out of the account row: it covers the row, and the
+   profile card sits at the bottom exactly where the row was. */
+html:not([data-theme="dark"]) .account-popover {
+  bottom: 0 !important; top: auto !important;
+  display: flex !important; flex-direction: column;
+}
+html:not([data-theme="dark"]) .account-popover > .rd-status { order: 98; margin-top: 4px; padding: 8px 0 4px; border-top: 1px solid var(--border); }
+html:not([data-theme="dark"]) .account-popover > .rd-prof { order: 99; background: transparent; margin: 0; }
+html:not([data-theme="dark"]) .rd-prof .sm-host .avatar,
+html:not([data-theme="dark"]) .rd-prof .avatar { width: 34px !important; height: 34px !important; }
+html:not([data-theme="dark"]) .rd-prof .sm-host .avatar,
+html:not([data-theme="dark"]) .rd-prof .avatar { width: 28px !important; height: 28px !important; }
+html:not([data-theme="dark"]) .account-popover > .rd-prof { padding: 8px 6px 8px 6px; }
+html:not([data-theme="dark"]) .account-popover > .rd-prof { padding-top: 15px; padding-bottom: 1px; gap: 8px; }
