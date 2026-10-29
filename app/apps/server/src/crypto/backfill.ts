@@ -9,7 +9,7 @@
 //     with the original → only then write the `*_enc` column. A row that does
 //     not round-trip is counted and left exactly as it was.
 //   · The plaintext column is NEVER nulled, rewritten or deleted here. Nulling
-//     is a separate, later, delayed step (not built). Readers already prefer
+//     is a separate, later, delayed step (`null-out.ts`). Readers already prefer
 //     `*_enc`, so a sealed copy must always equal the current plaintext.
 //   · Every write is conditional on the row still holding exactly what was
 //     read (`*_enc IS NULL AND <plaintext> = <original>` and, where the row is
@@ -23,26 +23,42 @@
 // (session advisory lock). Progress lives in `vault_crypto_state.cursors`, so a
 // crash or a key eviction resumes where it stopped.
 //
-// Not covered (no sealed column exists): pre-038 inline `note_versions.content`
-// / `vault_checkpoint_docs.content`, Postgres `blobs.data`,
-// `checkpoint_blob_bytes`, skills files. `encryptionStatus` reports the inline
-// version/checkpoint rows so the null-out gate cannot overlook them.
+// Pre-038 inline `note_versions.content` / `vault_checkpoint_docs.content` have
+// no sealed column of their own; their sealed form is the content-addressed
+// `note_texts (doc_id, sha256)` row readers already resolve when the inline
+// copy is NULL. The `*_inline` passes create that sealed row (verified, insert
+// only, never touching the inline text) for every inline row whose `sha256`
+// matches its text; a row whose hash does not match is never sealed and stays
+// plaintext (counted by `plaintextStatus`, never nulled).
+//
+// Not covered (no sealed column exists): Postgres `blobs.data`,
+// `checkpoint_blob_bytes`, skills files.
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { inc } from "../metrics/sync-metrics.js";
 import { openBlobTextRow, openSearchRow, sealBlobTextRow, sealSearchRow } from "../index/sealed-index.js";
 import { openNoteTextBytes, sealNoteText } from "../versions/texts.js";
+import { sha256Hex } from "../versions/capture.js";
 import { indexDoc, setIndexDeferredHook } from "../index/indexer.js";
 import { vaultKeysEnabled } from "./config.js";
 import { openDocBytes, sealDocBytes, type DocCrypto } from "./doc-crypto.js";
 import { vaultKeyCache, type VaultKeyCache } from "./key-cache.js";
 import { verifyVk } from "./vk-check.js";
+import { nullOutVault } from "./null-out.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 type ClientSource = Queryable & { connect: () => Promise<pg.PoolClient> };
 
 /** Fixed order; a table is finished before the next starts. */
-export const BACKFILL_TABLES = ["doc_updates", "doc_snapshots", "note_index", "blob_text", "note_texts"] as const;
+export const BACKFILL_TABLES = [
+  "doc_updates",
+  "doc_snapshots",
+  "note_index",
+  "blob_text",
+  "note_texts",
+  "note_versions_inline",
+  "checkpoint_docs_inline",
+] as const;
 export type BackfillTable = (typeof BACKFILL_TABLES)[number];
 
 export const BACKFILL_BATCH = 200;
@@ -114,6 +130,10 @@ async function runBatch(
       return batchBlobText(c, after, limit, db);
     case "note_texts":
       return batchNoteTexts(c, after, limit, db);
+    case "note_versions_inline":
+      return batchInlineTexts("note_versions_inline", c, after, limit, db);
+    case "checkpoint_docs_inline":
+      return batchInlineTexts("checkpoint_docs_inline", c, after, limit, db);
   }
 }
 
@@ -330,14 +350,76 @@ async function batchNoteTexts(c: DocCrypto, after: string | null, limit: number,
   return { rows: rows.length, last: last ? JSON.stringify([last.doc_id, last.sha256]) : after };
 }
 
+/** An inline row's hash matches its text (only such a row has a sealed form). */
+const INLINE_SHA_OK = (alias: string) =>
+  `encode(sha256(convert_to(${alias}.content, 'UTF8')), 'hex') = ${alias}.sha256`;
+/** No sealed `note_texts` copy for this inline row's (doc, sha) yet. */
+const NO_SEALED_TEXT = (alias: string) =>
+  `NOT EXISTS (SELECT 1 FROM note_texts t WHERE t.doc_id = ${alias}.doc_id AND t.sha256 = ${alias}.sha256 AND t.content_enc IS NOT NULL)`;
+
+/**
+ * Give a pre-038 inline version/checkpoint text its sealed form: a
+ * `note_texts` row with `content = ''` and the verified `content_enc`. Insert
+ * only (ON CONFLICT DO NOTHING): an existing plaintext `note_texts` row for the
+ * same (doc, sha) is sealed by the `note_texts` pass instead. The inline text is
+ * never touched here.
+ */
+async function batchInlineTexts(
+  table: "note_versions_inline" | "checkpoint_docs_inline",
+  c: DocCrypto,
+  after: string | null,
+  limit: number,
+  db: Queryable,
+): Promise<BatchResult> {
+  const sql =
+    table === "note_versions_inline"
+      ? `SELECT v.id::text AS key, v.doc_id, v.sha256, v.content
+           FROM note_versions v
+          WHERE v.vault_id = $1 AND v.id > $2::bigint AND v.content IS NOT NULL
+            AND ${INLINE_SHA_OK("v")} AND ${NO_SEALED_TEXT("v")}
+          ORDER BY v.id LIMIT $3`
+      : `SELECT d.checkpoint_id || ':' || d.doc_id AS key, d.doc_id, d.sha256, d.content
+           FROM vault_checkpoint_docs d JOIN vault_checkpoints k ON k.id = d.checkpoint_id
+          WHERE k.vault_id = $1 AND d.checkpoint_id || ':' || d.doc_id > $2 AND d.content IS NOT NULL
+            AND ${INLINE_SHA_OK("d")} AND ${NO_SEALED_TEXT("d")}
+          ORDER BY d.checkpoint_id || ':' || d.doc_id LIMIT $3`;
+  const { rows } = await db.query<{ key: string; doc_id: string; sha256: string; content: string }>(sql, [
+    c.vaultId,
+    after ?? (table === "note_versions_inline" ? "0" : ""),
+    limit,
+  ]);
+  for (const r of rows) {
+    // Belt for the SQL hash check: never seal a text under a sha it does not have.
+    if (sha256Hex(r.content) !== r.sha256) continue;
+    const sealed = sealVerified(
+      table,
+      r.key,
+      Buffer.from(r.content, "utf8"),
+      () => sealNoteText(c, r.doc_id, r.sha256, r.content),
+      (s) => openNoteTextBytes(c, r.doc_id, r.sha256, s),
+    );
+    if (!sealed) continue;
+    await write(
+      table,
+      r.key,
+      `INSERT INTO note_texts (doc_id, sha256, vault_id, content, content_enc)
+       VALUES ($1, $2, $3, '', $4)
+       ON CONFLICT (doc_id, sha256) DO NOTHING`,
+      [r.doc_id, r.sha256, c.vaultId, sealed],
+      db,
+    );
+  }
+  return { rows: rows.length, last: rows.at(-1)?.key ?? after };
+}
+
 // ── status ──────────────────────────────────────────────────────────────────
 
 export interface EncryptionStatus {
   /** Rows per table with plaintext and no sealed copy (what the backfill seals). */
   remaining: Record<BackfillTable, number>;
   /**
-   * Pre-038 inline version/checkpoint texts. No sealed column exists for them
-   * yet, so the backfill does not touch them; the null-out gate must.
+   * Pre-038 inline version/checkpoint texts still held inline (sealed form or
+   * not); the null-out clears them once their sealed `note_texts` copy matches.
    */
   unsupported: { note_versions_inline: number; checkpoint_docs_inline: number };
   /** Sum of `remaining` (0 = every sealable row has a verified sealed copy). */
@@ -355,9 +437,14 @@ export async function encryptionStatus(vaultId: string, db: Queryable = defaultP
        (SELECT count(*) FROM note_index WHERE vault_id = $1 AND search_enc IS NULL) AS note_index,
        (SELECT count(*) FROM blob_text WHERE vault_id = $1 AND search_enc IS NULL) AS blob_text,
        (SELECT count(*) FROM note_texts WHERE vault_id = $1 AND content_enc IS NULL) AS note_texts,
-       (SELECT count(*) FROM note_versions WHERE vault_id = $1 AND content IS NOT NULL) AS note_versions_inline,
+       (SELECT count(*) FROM note_versions v WHERE v.vault_id = $1 AND v.content IS NOT NULL
+           AND ${INLINE_SHA_OK("v")} AND ${NO_SEALED_TEXT("v")}) AS note_versions_inline,
        (SELECT count(*) FROM vault_checkpoint_docs d JOIN vault_checkpoints c ON c.id = d.checkpoint_id
-         WHERE c.vault_id = $1 AND d.content IS NOT NULL) AS checkpoint_docs_inline`,
+         WHERE c.vault_id = $1 AND d.content IS NOT NULL
+           AND ${INLINE_SHA_OK("d")} AND ${NO_SEALED_TEXT("d")}) AS checkpoint_docs_inline,
+       (SELECT count(*) FROM note_versions WHERE vault_id = $1 AND content IS NOT NULL) AS inline_versions_all,
+       (SELECT count(*) FROM vault_checkpoint_docs d JOIN vault_checkpoints c ON c.id = d.checkpoint_id
+         WHERE c.vault_id = $1 AND d.content IS NOT NULL) AS inline_checkpoint_docs_all`,
     [vaultId],
   );
   const r = rows[0] ?? {};
@@ -368,8 +455,8 @@ export async function encryptionStatus(vaultId: string, db: Queryable = defaultP
   return {
     remaining,
     unsupported: {
-      note_versions_inline: Number(r.note_versions_inline ?? 0),
-      checkpoint_docs_inline: Number(r.checkpoint_docs_inline ?? 0),
+      note_versions_inline: Number(r.inline_versions_all ?? 0),
+      checkpoint_docs_inline: Number(r.inline_checkpoint_docs_all ?? 0),
     },
     total: BACKFILL_TABLES.reduce((n, t) => n + remaining[t], 0),
   };
@@ -408,7 +495,7 @@ async function loadCursors(vaultId: string, db: Queryable): Promise<BackfillCurs
   return {
     tables: c.tables ?? {},
     passes: c.passes ?? 0,
-    completedAt: c.completedAt,
+    completedAt: c.completedAt ?? undefined,
     checkedAt: c.checkedAt,
     indexedAt: c.indexedAt,
     reconciledAt: c.reconciledAt,
@@ -416,9 +503,11 @@ async function loadCursors(vaultId: string, db: Queryable): Promise<BackfillCurs
 }
 
 async function saveCursors(vaultId: string, cursors: BackfillCursors, db: Queryable): Promise<void> {
+  // Merged, not replaced: the null-out keeps its own keys in the same JSON. A
+  // cleared completion is written as an explicit null so the merge removes it.
   await db.query(
-    "UPDATE vault_crypto_state SET cursors = $2::jsonb, updated_at = now() WHERE vault_id = $1",
-    [vaultId, JSON.stringify(cursors)],
+    "UPDATE vault_crypto_state SET cursors = cursors || $2::jsonb, updated_at = now() WHERE vault_id = $1",
+    [vaultId, JSON.stringify({ ...cursors, completedAt: cursors.completedAt ?? null })],
   );
 }
 
@@ -427,7 +516,7 @@ async function saveCursors(vaultId: string, cursors: BackfillCursors, db: Querya
  * Null: no member connected, the vault is not keyed, or a rotation moved the
  * generation (never seal under a key the vault no longer uses).
  */
-async function heldCrypto(vaultId: string, cache: VaultKeyCache, db: Queryable): Promise<DocCrypto | null> {
+export async function heldCrypto(vaultId: string, cache: VaultKeyCache, db: Queryable): Promise<DocCrypto | null> {
   const { rows } = await db.query<{ vk_check: Buffer | null; key_generation: number | null }>(
     "SELECT vk_check, key_generation FROM vaults WHERE id = $1",
     [vaultId],
@@ -709,7 +798,10 @@ export async function backfillTick(opts: BackfillOptions = {}): Promise<void> {
     for (const { vault_id } of rows) {
       if (!cache.has(vault_id)) continue;
       try {
-        await backfillVault(vault_id, { maxBatches: BACKFILL_BATCHES_PER_TICK, ...opts });
+        const outcome = await backfillVault(vault_id, { maxBatches: BACKFILL_BATCHES_PER_TICK, ...opts });
+        // The delayed, compared plaintext removal; gated on its own (retention,
+        // fresh recount, key held). Cheap once the vault is sealed.
+        if (outcome === "complete") await nullOutVault(vault_id, { maxBatches: BACKFILL_BATCHES_PER_TICK, db: opts.db, cache: opts.cache });
       } catch (err) {
         console.error(`[backfill] vault ${vault_id} failed:`, err);
       }

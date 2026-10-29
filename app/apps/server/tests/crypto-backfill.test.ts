@@ -298,22 +298,31 @@ describe("vault crypto backfill (W3)", () => {
     await compact(target, pool, c);
     await compact(target, pool);
     const want = live.getText("content").toString();
-    expect(want).toContain("concurrent 6");
+    expect(want).toContain("concurrent 1");
     expect(want).toContain("after 3");
     expect(textOf(await loadDocState(target, pool, c))).toBe(want);
-    // Every original plaintext row survives, with a sealed copy equal to it.
+    // Compaction now runs while the doc converts: the pre-keying plaintext is
+    // kept (and only it) in dual rows whose sealed copy equals the plaintext;
+    // nothing written after keying ever lands in a plaintext column.
     const { rows } = await pool.query(
-      "SELECT id, update, update_enc FROM doc_updates WHERE id = ANY($1::bigint[]) ORDER BY id",
-      [originalIds],
+      "SELECT id, update, update_enc FROM doc_updates WHERE doc_id = $1 AND update IS NOT NULL ORDER BY id",
+      [target],
     );
-    expect(rows.length).toBe(originalIds.length);
+    expect(rows.length).toBeGreaterThan(0);
     const { openDocBytes } = await import("../src/crypto/doc-crypto.js");
+    const plainDoc = new Y.Doc();
     for (const r of rows) {
-      expect(r.update).not.toBeNull();
       expect(openDocBytes(c, "doc_updates.update", target, r.update_enc, null)!.equals(r.update)).toBe(true);
+      Y.applyUpdate(plainDoc, new Uint8Array(r.update));
     }
-    const { rows: snap } = await pool.query("SELECT snapshot FROM doc_snapshots WHERE doc_id = $1", [target]);
-    expect(snap[0].snapshot).not.toBeNull();
+    const plainText = plainDoc.getText("content").toString();
+    plainDoc.destroy();
+    expect(plainText).toContain("note 0 line 4 budget");
+    expect(plainText).not.toContain("concurrent");
+    expect(plainText).not.toContain("after");
+    const { rows: snap } = await pool.query("SELECT snapshot, snapshot_enc FROM doc_snapshots WHERE doc_id = $1", [target]);
+    expect(snap[0].snapshot).toBeNull();
+    expect(snap[0].snapshot_enc).not.toBeNull();
     live.destroy();
   });
 

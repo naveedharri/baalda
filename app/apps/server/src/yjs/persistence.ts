@@ -4,6 +4,7 @@ import { pool as defaultPool } from "../db/pool.js";
 import { config } from "../config.js";
 import { vaultKeyCache } from "../crypto/key-cache.js";
 import { KeyRequiredError } from "../crypto/transport.js";
+import { inc } from "../metrics/sync-metrics.js";
 import {
   assertWritableWithoutKey,
   openDocBytes,
@@ -773,18 +774,19 @@ async function compactLocked(docId: string, db: Queryable, crypto: DocCrypto | u
       [docId],
     );
     if (raw.rows.length === 0) return;
-    // W3 data-loss rule: a keyed compaction never deletes PLAINTEXT rows.
-    // Folding a legacy plaintext row into a sealed snapshot would null the
-    // plaintext, which is a separate, delayed, reversible step (not built).
-    // Mixed logs therefore stay as they are; reads still work. A row the
-    // backfill (`crypto/backfill.ts`) has DUAL-written (plaintext kept beside
-    // its verified sealed copy) still counts as plaintext: compacting it would
-    // write `snapshot = NULL` and delete the row, i.e. a null-out.
+    // W3 data-loss rule: a keyed compaction never DROPS plaintext. Nulling it
+    // is the separate, delayed, per-row compared step (`crypto/null-out.ts`).
+    // A doc still converting (plaintext snapshot or plaintext log rows, sealed
+    // copies or not) is compacted by `compactConverting` instead, which keeps
+    // the plaintext it already had — and only that — in one verified dual row.
     if (crypto) {
       const snapRow = snap.rows[0];
       const plaintextLeft =
         (snapRow && snapRow.snapshot !== null) || raw.rows.some((r) => r.update !== null);
-      if (plaintextLeft) return;
+      if (plaintextLeft) {
+        await compactConverting(docId, q, inTx, crypto, snapRow, raw.rows);
+        return;
+      }
     }
     const opened = openParts(docId, crypto, snap.rows[0], raw.rows);
     const updates = { rows: opened.rows };
@@ -845,6 +847,158 @@ async function compactLocked(docId: string, db: Queryable, crypto: DocCrypto | u
       doc.destroy();
     }
   });
+}
+
+/** Exposed for tests: runs inside the transaction right before the first write. */
+export const convertingCompactHooks: { beforeWrite: () => Promise<void> | void } = {
+  beforeWrite: () => {},
+};
+
+/** Same SV and same visible text. */
+function sameDoc(a: Y.Doc, b: Y.Doc): boolean {
+  return (
+    bytesEqual(Y.encodeStateVector(a), Y.encodeStateVector(b)) &&
+    a.getText("content").toString() === b.getText("content").toString()
+  );
+}
+
+/**
+ * W3 compaction of a doc whose vault is keyed but which still holds PLAINTEXT
+ * (written before the vault was keyed, sealed copy or not). Without this the
+ * keyed compaction refused such a doc, so an actively edited note's log grew
+ * without bound until the null-out ran.
+ *
+ * Result, in the ONE exclusive transaction the caller holds:
+ *   · the snapshot = the merged state of EVERY row, sealed only
+ *     (`snapshot = NULL`), verified as in today's keyed compaction;
+ *   · ONE dual "legacy" log row = `Y.mergeUpdates` of exactly the plaintext
+ *     parts that already existed (plaintext snapshot + plaintext log rows) in
+ *     `update`, plus its sealed copy in `update_enc`. Post-keying edits are
+ *     never written to a plaintext column: no new plaintext, and the plaintext
+ *     kept is bounded by what was there before (no growth);
+ *   · every row folded in is deleted, except a lone legacy row that is already
+ *     that dual row (kept in place, so a repeat compaction does not churn).
+ *
+ * Fails closed BEFORE any write: a dual row whose sealed copy does not open to
+ * exactly its plaintext, a legacy merge that does not decode to the plaintext
+ * parts' state, a seal that does not round-trip, or a snapshot that does not
+ * cover the legacy ops, all throw {@link SealVerifyError} and roll back.
+ *
+ * The legacy row is byte-equal dual, so the null-out clears its `update` after
+ * the retention delay; the next compaction then folds it like any sealed row.
+ */
+async function compactConverting(
+  docId: string,
+  q: Queryable,
+  inTx: boolean,
+  crypto: DocCrypto,
+  snapRow: { snapshot: Buffer | null; snapshot_enc: Buffer | null } | undefined,
+  rows: Array<{ id: string; update: Buffer | null; update_enc: Buffer | null }>,
+): Promise<void> {
+  const checkDual = (column: "doc_updates.update" | "doc_snapshots.snapshot", plain: Buffer, enc: Buffer) => {
+    let opened: Buffer | null;
+    try {
+      opened = sealVerifyHooks.open(crypto, column, docId, enc, null);
+    } catch {
+      throw new SealVerifyError(docId);
+    }
+    if (!opened || !opened.equals(plain)) throw new SealVerifyError(docId);
+  };
+  // The plaintext that already exists, taken from the PLAINTEXT columns only.
+  const plainParts: Buffer[] = [];
+  if (snapRow?.snapshot) {
+    if (snapRow.snapshot_enc) checkDual("doc_snapshots.snapshot", snapRow.snapshot, snapRow.snapshot_enc);
+    plainParts.push(snapRow.snapshot);
+  }
+  const plainRows = rows.filter((r) => r.update !== null);
+  for (const r of plainRows) {
+    if (r.update_enc) checkDual("doc_updates.update", r.update!, r.update_enc);
+    plainParts.push(r.update!);
+  }
+  let opened: ReturnType<typeof openParts<(typeof rows)[number]>>;
+  try {
+    opened = openParts(docId, crypto, snapRow, rows);
+  } catch {
+    throw new SealVerifyError(docId);
+  }
+
+  const full = new Y.Doc();
+  const legacyDoc = new Y.Doc();
+  const legacyCheck = new Y.Doc();
+  try {
+    if (opened.snapshotBuf) Y.applyUpdate(full, new Uint8Array(opened.snapshotBuf));
+    let maxId = "0";
+    for (const row of opened.rows) {
+      Y.applyUpdate(full, new Uint8Array(row.update));
+      maxId = row.id;
+    }
+    const mergedPlain = Buffer.from(Y.encodeStateAsUpdate(full));
+    const stateVector = Buffer.from(Y.encodeStateVector(full));
+    const mergedEnc = sealDocBytes(crypto, "doc_snapshots.snapshot", docId, mergedPlain);
+    verifySealedSnapshot(crypto, docId, mergedEnc, mergedPlain, full);
+
+    // A lone plaintext log row that is already dual IS the legacy row.
+    const keep =
+      !snapRow?.snapshot && plainRows.length === 1 && plainRows[0]!.update_enc ? plainRows[0]! : null;
+    const legacyPlain = keep
+      ? keep.update!
+      : Buffer.from(plainParts.length === 1 ? plainParts[0]! : Y.mergeUpdates(plainParts.map((p) => new Uint8Array(p))));
+    // The legacy merge must stand for exactly the plaintext parts.
+    for (const p of plainParts) Y.applyUpdate(legacyDoc, new Uint8Array(p));
+    Y.applyUpdate(legacyCheck, new Uint8Array(legacyPlain));
+    if (!sameDoc(legacyDoc, legacyCheck)) throw new SealVerifyError(docId);
+    // The sealed snapshot must already cover every legacy op.
+    const covered = new Y.Doc();
+    try {
+      Y.applyUpdate(covered, new Uint8Array(mergedPlain));
+      Y.applyUpdate(covered, new Uint8Array(legacyPlain));
+      if (!sameDoc(covered, full)) throw new SealVerifyError(docId);
+    } finally {
+      covered.destroy();
+    }
+    let legacyEnc: Buffer | null = null;
+    if (!keep) {
+      legacyEnc = sealDocBytes(crypto, "doc_updates.update", docId, legacyPlain);
+      checkDual("doc_updates.update", legacyPlain, legacyEnc);
+    }
+
+    await convertingCompactHooks.beforeWrite();
+    // Same backwards-move belt as `compactLocked`.
+    const wrote = await q.query(
+      `INSERT INTO doc_snapshots (doc_id, snapshot, state_vector, seq, updated_at, snapshot_enc)
+       VALUES ($1, NULL, $2, $3, now(), $4)
+       ON CONFLICT (doc_id) DO UPDATE
+         SET snapshot = NULL,
+             snapshot_enc = EXCLUDED.snapshot_enc,
+             state_vector = EXCLUDED.state_vector,
+             seq = EXCLUDED.seq,
+             updated_at = now()
+       WHERE doc_snapshots.seq IS NULL OR doc_snapshots.seq < EXCLUDED.seq
+       RETURNING doc_id`,
+      [docId, stateVector, maxId, mergedEnc],
+    );
+    // Refused by the belt: a newer snapshot already covers more; nothing was
+    // written and nothing is deleted.
+    if (wrote.rowCount === 0) return;
+    if (legacyEnc) {
+      await q.query("INSERT INTO doc_updates (doc_id, update, update_enc) VALUES ($1, $2, $3)", [
+        docId,
+        legacyPlain,
+        legacyEnc,
+      ]);
+    }
+    await q.query("DELETE FROM doc_updates WHERE doc_id = $1 AND id <= $2 AND id <> $3", [
+      docId,
+      maxId,
+      keep?.id ?? "0",
+    ]);
+    inc("compact.converting");
+    await bestEffort(q, inTx, "sv_invalidate", (qq) => invalidateStateVector(docId, qq));
+  } finally {
+    full.destroy();
+    legacyDoc.destroy();
+    legacyCheck.destroy();
+  }
 }
 
 export async function countUpdates(
