@@ -6,6 +6,7 @@ import { pool } from "../../db/pool.js";
 import { config } from "../../config.js";
 import { BRAND_NAME } from "../../brand.js";
 import { WORDMARK_INK_DATA_URI } from "../../brand-assets.js";
+import { FONT_FACE_CSS } from "../fonts.js";
 import { orgRole } from "../../permissions/lookup.js";
 import { ACCOUNT_READ_ONLY_BODY, refusedForBilling } from "../../permissions/http-gates.js";
 import { effectivePermission } from "../../permissions/resolver.js";
@@ -322,10 +323,8 @@ export function pageShell(title: string, inner: string, openHref?: string): stri
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex" />
 <title>${esc(title)} · ${esc(BRAND_NAME)}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Radio+Canada+Big:wght@500;600&display=swap" />
-<style>${PAGE_CSS}</style>
+<style>${FONT_FACE_CSS}
+${PAGE_CSS}</style>
 </head>
 <body>
 <div class="wrap">
@@ -373,9 +372,9 @@ const PAGE_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "Content-Security-Policy":
     // data: for the embedded wordmark, the bucket for redirected images (see
-    // `bucketImageOrigins`), Google Fonts for baalda.com's type.
+    // `bucketImageOrigins`), and the self-hosted fonts (`http/fonts.ts`).
     `default-src 'none'; img-src ${["'self'", "data:", ...bucketImageOrigins()].join(" ")}; ` +
-    "style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com",
+    "style-src 'unsafe-inline'; font-src 'self'",
 };
 
 /** One generic page for malformed/unknown/revoked/deleted — byte-identical on

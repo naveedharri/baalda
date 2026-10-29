@@ -21,6 +21,7 @@ import { accountPageRoutes } from "./routes/account-pages.js";
 import { invitationRoutes } from "./routes/invitations.js";
 import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
 import { createAppearanceRoutes } from "./routes/appearance.js";
+import { createFontRoutes } from "./fonts.js";
 import { createSkillRoutes } from "./routes/skills.js";
 import { SKILL_ACCESS_FEATURE, SKILLS_FEATURE } from "../skills/feature.js";
 import { passwordResetRoutes } from "./routes/password-reset.js";
@@ -332,6 +333,8 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/.well-known/oauth-authorization-server/api/mcp", (c) =>
     oAuthDiscoveryMetadata(auth)(c.req.raw),
   );
+  // Self-hosted woff2 fonts for the pages below and the public link page.
+  app.route("/", createFontRoutes());
   // The human-facing login + consent screens of that OAuth flow.
   app.route("/", oauthConnectRoutes);
   // Account pages the emails link to: forgot/reset password, email verified,
