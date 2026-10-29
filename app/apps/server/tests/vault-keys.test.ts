@@ -76,7 +76,13 @@ describe("vault key routes", () => {
     await init(s);
     const res = await call(s.member, "GET", `/vaults/${s.vaultId}/keys/mine`);
     expect(res.status).toBe(202);
-    expect(await res.json()).toMatchObject({ pending: true });
+    expect(await res.json()).toMatchObject({
+      pending: true,
+      generation: 1,
+      vkCheck: b64(
+        (await pool.query("SELECT vk_check FROM vaults WHERE id = $1", [s.vaultId])).rows[0].vk_check,
+      ),
+    });
     const mine = await (await call(s.owner, "GET", `/vaults/${s.vaultId}/keys/mine`)).json();
     expect(mine.wraps).toHaveLength(1);
     expect(mine.generation).toBe(1);
@@ -131,7 +137,9 @@ describe("vault key routes", () => {
     expect(mine.wraps[0].sealedVk).toBe(first);
 
     const pk = b64(randomBytes(32));
-    expect((await call(s.owner, "PUT", "/me/keys", { publicKey: pk })).status).toBe(200);
+    // No recovery wrap (account kit dropped): accepted, stored as null.
+    expect((await call(s.owner, "PUT", "/me/keys", { publicKey: pk, privWrappedRecovery: null })).status).toBe(200);
+    expect((await (await call(s.owner, "GET", "/me/keys")).json()).privWrappedRecovery).toBeNull();
     expect((await call(s.owner, "PUT", "/me/keys", { publicKey: pk })).status).toBe(200);
     expect((await call(s.owner, "PUT", "/me/keys", { publicKey: b64(randomBytes(32)) })).status).toBe(409);
     expect((await (await call(s.owner, "GET", "/me/keys")).json()).publicKey).toBe(pk);

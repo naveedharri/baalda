@@ -10,7 +10,7 @@
 // GET  /api/vaults/:vaultId/keys/requests  pending requests (wrap holders only)
 // POST /api/vaults/:vaultId/keys/wraps     seal VK to a member (holder + valid VK)
 // GET  /api/me/keys                         my key pair record
-// PUT  /api/me/keys                         set my public key + recovery wrap
+// PUT  /api/me/keys                         set my public key (recovery wrap optional)
 // PUT  /api/me/devices/:deviceId/key        my private key wrapped for a device
 import { Hono } from "hono";
 import type pg from "pg";
@@ -137,7 +137,15 @@ export function createVaultKeyRoutes(): Hono {
          ON CONFLICT (vault_id, user_id) DO NOTHING`,
         [vaultId, session.userId],
       );
-      return c.json({ keyed: true, pending: true }, 202);
+      return c.json(
+        {
+          keyed: true,
+          pending: true,
+          generation: v[0].key_generation ?? 1,
+          vkCheck: v[0].vk_check.toString("base64"),
+        },
+        202,
+      );
     }
     return c.json({
       keyed: true,

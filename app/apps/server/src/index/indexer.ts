@@ -1,3 +1,6 @@
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { indexCryptoFor, openSearchRow, sealSearchRow } from "./sealed-index.js";
+import { KeyRequiredError } from "../crypto/transport.js";
 import * as Y from "yjs";
 import { pgText } from "../db/text.js";
 import type pg from "pg";
@@ -68,8 +71,9 @@ export function parseWikilinks(text: string): string[] {
 export async function extractDocText(
   docId: string,
   db: Queryable = defaultPool,
+  crypto?: DocCrypto,
 ): Promise<string> {
-  const state = await loadDocState(docId, db);
+  const state = await loadDocState(docId, db, crypto);
   if (!state) return "";
   const doc = new Y.Doc();
   try {
@@ -129,11 +133,29 @@ export async function indexDoc(
     return false;
   }
 
+  // W3: a keyed vault indexes only with a key a connected member supplied
+  // (process cache COPY, zeroed below). No key held: defer, writing nothing —
+  // the existing row stays as it was and the next edit or connect re-indexes.
+  const crypto = await indexCryptoFor(note.vault_id, db);
+  if (crypto === null) return false;
+  try {
+    return await indexNoteRow(docId, note, crypto, db);
+  } finally {
+    crypto?.key.fill(0);
+  }
+}
+
+async function indexNoteRow(
+  docId: string,
+  note: { vault_id: string; title: string | null; rel_path: string },
+  crypto: DocCrypto | undefined,
+  db: Queryable,
+): Promise<boolean> {
   // Postgres rejects NUL in `text`; a single such byte in one note used to fail
   // that note's indexing forever (see `pgText`).
   const live = liveDocLookup?.(note.vault_id, docId);
   const content = pgText(
-    live ? live.getText(CONTENT_FIELD).toString() : await extractDocText(docId, db),
+    live ? live.getText(CONTENT_FIELD).toString() : await extractDocText(docId, db, crypto),
   );
   const title = pgText(note.title ?? relPathStem(note.rel_path));
   const links = parseWikilinks(content);
@@ -143,7 +165,36 @@ export async function indexDoc(
   // The excerpts the scoped attachment list reads instead of `content` (#343).
   const heads = await cachedRefHeads(note.vault_id, db);
 
-  await db.query(
+  if (crypto) {
+    // Keyed: content, vector and tokens go ONLY into the sealed `search_enc`.
+    // The plaintext columns are not written, and never nulled here: an old row
+    // keeps its stale plaintext until the separate null-out step (W3 rule).
+    // `ref_text` stays plaintext for now so the attachment rule keeps every
+    // member's access exactly as today (to be sealed with the ACL slice).
+    await db.query(
+      `INSERT INTO note_index (doc_id, vault_id, title, updated_at, ref_text, ref_heads, search_enc)
+       VALUES ($1, $2, $3, now(), $4, $5::text[], $6)
+       ON CONFLICT (doc_id) DO UPDATE
+         SET vault_id = EXCLUDED.vault_id,
+             title = EXCLUDED.title,
+             updated_at = now(),
+             ref_text = EXCLUDED.ref_text,
+             ref_heads = EXCLUDED.ref_heads,
+             search_enc = EXCLUDED.search_enc`,
+      [
+        docId,
+        note.vault_id,
+        title,
+        refText(content, heads),
+        heads,
+        sealSearchRow(crypto, docId, {
+          content: `${title ?? ""} ${content}`,
+          vector,
+          tokens: searchTokenSet(`${title ?? ""} ${content}`) ?? null,
+        }),
+      ],
+    );
+  } else await db.query(
     `INSERT INTO note_index (doc_id, vault_id, title, content, vector, updated_at, ref_text, ref_heads, search_tokens)
      VALUES ($1, $2, $3, $4, $5::jsonb, now(), $6, $7::text[], $8)
      ON CONFLICT (doc_id) DO UPDATE
@@ -404,6 +455,12 @@ export async function searchNoteIndex(opts: {
    * from `search_tokens`, falling back to SQL only for rows not yet re-indexed.
    */
   keywordMode?: "app" | "sql";
+  /**
+   * W3: the REQUEST's verified vault key for a keyed vault. A sealed row is
+   * scored from its decrypted text/vector/tokens with the same formula; a
+   * sealed row without a key throws {@link KeyRequiredError} (fail closed).
+   */
+  crypto?: DocCrypto;
   db?: Queryable;
 }): Promise<NoteSearchHit[]> {
   const db = opts.db ?? defaultPool;
@@ -427,8 +484,10 @@ export async function searchNoteIndex(opts: {
       vector: number[] | null;
       search_tokens: string | null;
       matched_legacy: number | null;
+      search_enc: Buffer | null;
     }>(
       `SELECT ni.doc_id,
+              ni.search_enc,
               ni.vector,
               CASE WHEN $6::boolean THEN NULL ELSE ni.search_tokens END AS search_tokens,
               CASE WHEN ni.search_tokens IS NULL OR $6::boolean THEN (
@@ -446,6 +505,20 @@ export async function searchNoteIndex(opts: {
     );
     if (rows.length === 0) break;
     for (const r of rows) {
+      if (r.search_enc) {
+        // Sealed row: same score from the decrypted fields. No token set means
+        // the pre-068 rule, substring-counted over the same "title body" text.
+        if (!opts.crypto) throw new KeyRequiredError();
+        const sealed = openSearchRow(opts.crypto, r.doc_id, r.search_enc);
+        const sim = sealed.vector ? cosineSimilarity(qVec, sealed.vector) : 0;
+        const matched =
+          sealed.tokens !== null && !legacySql
+            ? keywordMatchCount(qTokens, sealed.tokens)
+            : legacySubstringCount(qTokens, sealed.content);
+        const boost = qTokens.length > 0 ? 0.1 * (matched / qTokens.length) : 0;
+        scored.push({ docId: r.doc_id, score: sim + boost });
+        continue;
+      }
       const sim = r.vector ? cosineSimilarity(qVec, r.vector) : 0;
       const matched =
         r.search_tokens !== null ? keywordMatchCount(qTokens, r.search_tokens) : (r.matched_legacy ?? 0);
@@ -510,6 +583,14 @@ export async function searchNoteIndex(opts: {
   return [...hits, ...fileHits]
     .sort((a, b) => b.score - a.score || (a.kind === b.kind ? 0 : a.kind === "note" ? -1 : 1))
     .slice(0, opts.k);
+}
+
+/** The pre-068 SQL rule in app memory: query tokens found as substrings of lower(text). */
+function legacySubstringCount(qTokens: string[], text: string): number {
+  const hay = text.toLowerCase();
+  let n = 0;
+  for (const t of qTokens) if (hay.includes(t)) n++;
+  return n;
 }
 
 /**
