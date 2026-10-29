@@ -227,6 +227,45 @@ describe("vault key session", () => {
     expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
   });
 
+  it("never auto-keys on an uncertain answer, nor over a key this device holds", async () => {
+    const srv = fakeServer();
+    const keys = fakeKeys();
+    await keys.setAccountPrivateKey(generateAccountKeypair().privateKey);
+    const s = session({ api: srv.api, keys });
+    srv.api.getMyVaultKeys.mockRejectedValueOnce(new ApiError(503, "down"));
+    await expect(s.ensureVaultKey("v1")).rejects.toThrow();
+    srv.api.getMyVaultKeys.mockRejectedValueOnce(new Error("timeout"));
+    await expect(s.ensureVaultKey("v1")).rejects.toThrow();
+    const held = generateVaultKey();
+    keys.vks.set("v1", held);
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed" });
+    expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
+    expect(keys.vks.get("v1")).toBe(held);
+  });
+
+  it("stores nothing when init is refused as already keyed", async () => {
+    const srv = fakeServer();
+    const keys = fakeKeys();
+    await keys.setAccountPrivateKey(generateAccountKeypair().privateKey);
+    const s = session({ api: srv.api, keys });
+    srv.api.getMyVaultKeys.mockRejectedValueOnce(new ApiError(404, "not keyed"));
+    srv.api.initVaultKeys.mockResolvedValueOnce("already-keyed");
+    // Then the real answer: keyed, no wrap for us yet.
+    srv.vaults.set("v1", { vkCheck: toBase64(await makeVkCheck(generateVaultKey(), "v1", 1)), generation: 1, wraps: new Map() });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "waiting-for-teammate" });
+    expect(keys.setVaultKey).not.toHaveBeenCalled();
+  });
+
+  it("recovery never replaces a private key the device holds", async () => {
+    const srv = fakeServer();
+    const keys = fakeKeys();
+    const s = session({ api: srv.api, keys });
+    const acct = await s.ensureAccountKeys();
+    if (acct.state !== "ready" || !acct.isNew) throw new Error("expected a new account");
+    expect(await s.recoverWithPhrase(acct.phrase)).toBe(false);
+    expect(keys.setAccountPrivateKey).toHaveBeenCalledTimes(1);
+  });
+
   it("sign-out clears every verified key", async () => {
     const srv = fakeServer();
     const keys = fakeKeys();

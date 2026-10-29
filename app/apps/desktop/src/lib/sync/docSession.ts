@@ -30,6 +30,7 @@ import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
+import { vaultKeysClosed, vaultKeysNudge, vaultKeysOpened } from "../vaultKeys/runtime";
 import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
 import type { ActivityStatus } from "../prefs";
@@ -6756,6 +6757,10 @@ export class SyncManager implements InboundHost {
     this.stopVaultEngine();
     this.vaultEngineId = vaultId;
     markOnce("channel-start");
+    // Client-held vault keys (no-op unless the server has `vault-keys`).
+    if (this.presence?.id && scope.orgId) {
+      vaultKeysOpened({ userId: this.presence.id, vaultId, orgId: scope.orgId });
+    }
     // Reflect "connecting" the moment we switch into a vault, so the light
     // moves off a stale value before the socket reports back.
     this.vaultStatus = "connecting";
@@ -6933,6 +6938,7 @@ export class SyncManager implements InboundHost {
         }
         this.handleRegistryChanged("registry-frame");
         this.notifyActivityChanged(scope);
+        vaultKeysNudge(); // a teammate may be waiting for the vault key
         // An open person Access tab re-reads its tree (a teammate's new file
         // or folder, an MCP create).
         markAccessTreeStale();
@@ -6940,7 +6946,10 @@ export class SyncManager implements InboundHost {
       // Trash / shrink listings moved (#260): refetch instead of polling.
       onActivityChanged: () => this.notifyActivityChanged(scope),
       // A new teammate joined the vault — refresh roster + celebrate.
-      onMemberJoined: (name) => this.onMemberJoined?.(name),
+      onMemberJoined: (name) => {
+        vaultKeysNudge(); // the new member's key request
+        this.onMemberJoined?.(name);
+      },
       onMemberRemoved: (change) => this.onMemberRemoved?.(change),
       // The vault was renamed or got a new icon (#306).
       onOrgChanged: (change) => this.onOrgChanged?.(change),
@@ -7022,6 +7031,7 @@ export class SyncManager implements InboundHost {
     this.deferredArrivalFlush.cancel();
     this.vaultEngine?.stop();
     this.vaultEngine = null;
+    vaultKeysClosed();
     this.vaultEngineId = null;
     // Cut any audio still playing: it belongs to the vault we're leaving, and
     // hearing a teammate from the previous vault after switching would be a bug

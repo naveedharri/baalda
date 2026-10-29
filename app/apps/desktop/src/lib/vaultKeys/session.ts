@@ -150,6 +150,8 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
 
   /** New device: restore the account private key from the recovery phrase. */
   async function recoverWithPhrase(phrase: string): Promise<boolean> {
+    // Never replace a private key this device already holds.
+    if (await keys.getAccountPrivateKey()) return false;
     const remote = await api.getMyKeys();
     if (!remote) return false;
     let priv: Uint8Array;
@@ -199,6 +201,9 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
 
   async function keyUnkeyedVault(vaultId: string): Promise<VaultKeyState> {
     if (!deps.keysAllowed(vaultId)) return { state: "unkeyed" };
+    // A key this device already holds for the vault is never replaced by a
+    // fresh one: the server's "unkeyed" may be wrong, the local key is not lost.
+    if (await keys.getVaultKey(vaultId)) return { state: "unkeyed" };
     const priv = await keys.getAccountPrivateKey();
     if (!priv) return { state: "needs-account-key" };
     const generation = 1;
@@ -208,14 +213,12 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       generation,
       sealedVkForSelf: toBase64(sealVkTo(publicKeyFromPrivate(priv), vk)),
     };
-    // Keychain first, so a key the server accepted is never lost locally.
-    await keys.setVaultKey(vaultId, vk);
+    // Server first (atomic: 409 `already_keyed` if anyone keyed it), keychain
+    // after. A failed keychain write loses nothing: `sealedVkForSelf` is opened
+    // from the server on the next run. Nothing is stored for a refused init.
     const result = await api.initVaultKeys(vaultId, body);
-    if (result === "already-keyed") {
-      // Someone else keyed it first: theirs wins; ours is never used (it fails
-      // `vk_check`) and is replaced when their wrap arrives.
-      return ensureVaultKey(vaultId);
-    }
+    if (result === "already-keyed") return ensureVaultKey(vaultId);
+    await keys.setVaultKey(vaultId, vk);
     return accept(vaultId, vk, generation);
   }
 
