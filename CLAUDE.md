@@ -1053,6 +1053,12 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   accepts only when nothing used in 30 days lacks a wrap and the check bytes match the pending row; the
   gate runs inside the init transaction under row locks (`lockGateRows`). `VAULT_KEY_CONVERSION` plus
   the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all.
+- **Opt-in for existing vaults** (migration 081, decided 2026-10-29): `keys/mine`'s `conversionAllowed`
+  also needs `vaults.encryption_requested_at`. `POST /api/vaults` sets it while `BAALDA_VAULT_KEYS` is on
+  (new vaults encrypt automatically); an existing vault gets it only from an owner/admin's
+  "Encrypt this vault" (`POST …/keys/request-encryption`, idempotent, one-way, no undo route, one
+  `access_audit` row `vault`/`encryption_requested`). Desktop: `VaultKeySection` (shown to owners and
+  admins; key reveal/restore stay owner-only), view logic in `lib/vaultKeys/sectionView.ts`.
 - **Zero data loss:** plaintext is never removed before a per-row decrypt-and-compare check (a separate,
   delayed, reversible step); `key_required` changes nothing server-side and never drops local edits;
   compaction verifies the sealed snapshot first; key generations are never destroyed; when in doubt,
