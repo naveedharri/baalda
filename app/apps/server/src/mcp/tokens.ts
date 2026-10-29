@@ -2,6 +2,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { orgRole } from "../permissions/lookup.js";
+import { vaultKeysEnabled } from "../crypto/config.js";
+import { resolveTokenKeys, storeTokenWraps, type HeldKey } from "./token-keys.js";
 
 /**
  * MCP access tokens (migration 006).
@@ -41,9 +43,15 @@ export interface McpAuth {
   /** The OAuth client id when auth came from an OAuth access token; with the
    *  user and vault it keys that connection (e.g. its rate-limit bucket). */
   oauthClientId?: string;
+  /**
+   * W3: this call's verified vault keys, by `vaults.id`, unwrapped from the
+   * token's own wraps. Per call only; never cached. Absent when the flag is
+   * off or no vault of the org is keyed (today's path).
+   */
+  vaultKeys?: Map<string, HeldKey>;
 }
 
-function hashToken(token: string): string {
+export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
@@ -60,6 +68,7 @@ export async function createMcpToken(
   auth: McpAuth,
   name: string,
   db: Queryable = defaultPool,
+  vaultKeys: Array<{ vaultId: string; key: Buffer; generation: number }> = [],
 ): Promise<{ token: string; row: McpTokenRow }> {
   const token = generateToken();
   const id = randomUUID();
@@ -70,6 +79,7 @@ export async function createMcpToken(
      RETURNING created_at`,
     [id, auth.userId, auth.organizationId, name, hashToken(token), tokenPrefix],
   );
+  if (vaultKeys.length > 0) await storeTokenWraps(token, id, vaultKeys, db);
   return {
     token,
     row: {
@@ -126,6 +136,11 @@ export async function revokeMcpToken(
     "DELETE FROM mcp_tokens WHERE id = $1 AND user_id = $2",
     [tokenId, userId],
   );
+  if ((rowCount ?? 0) > 0 && vaultKeysEnabled()) {
+    // Explicit cleanup: the key tables have no FK cascade (migration 075).
+    await db.query("DELETE FROM mcp_token_keys WHERE token_id = $1", [tokenId]);
+    await db.query("DELETE FROM mcp_token_allow WHERE token_id = $1", [tokenId]);
+  }
   return (rowCount ?? 0) > 0;
 }
 
@@ -169,7 +184,12 @@ export async function verifyMcpToken(
     [row.id, client],
   ).catch(() => {});
 
-  return { userId: row.user_id, organizationId: row.organization_id, tokenId: row.id };
+  const auth: McpAuth = { userId: row.user_id, organizationId: row.organization_id, tokenId: row.id };
+  if (vaultKeysEnabled()) {
+    const keys = await resolveTokenKeys(token, row.id, hashToken(token), row.organization_id, db);
+    if (keys.size > 0) auth.vaultKeys = keys;
+  }
+  return auth;
 }
 
 /**
