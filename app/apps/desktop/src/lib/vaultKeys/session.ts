@@ -81,6 +81,10 @@ export interface VaultKeyStore {
   setAccountPrivateKey(key: Uint8Array): Promise<void>;
   getVaultKey(vaultId: string): Promise<Uint8Array | null>;
   setVaultKey(vaultId: string, vk: Uint8Array): Promise<void>;
+  /** True only for a key this device generated for a conversion the server
+   *  has not confirmed: the one held key a teammate's wrap may replace. */
+  isVaultKeyProvisional(vaultId: string): Promise<boolean>;
+  setVaultKeyProvisional(vaultId: string, on: boolean): Promise<void>;
   clearCache(): void;
 }
 
@@ -309,6 +313,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     if (!(await verifyVk(vk, vaultId, vkCheck))) return "wrong-key";
     const held = await keys.getVaultKey(vaultId);
     if (!held || !(await verifyVk(held, vaultId, vkCheck))) await keys.setVaultKey(vaultId, vk);
+    await confirmed(vaultId);
     accept(vaultId, vk, mine.generation);
     const self = deps.selfUserId();
     const priv = await keys.getAccountPrivateKey();
@@ -344,6 +349,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     let vk = await keys.getVaultKey(vaultId); // a crashed earlier run: same key
     if (!vk) {
       vk = generateVaultKey();
+      // Provisional until the server confirms it (another claim may win). The
+      // marker goes FIRST: a crash between the two writes must never leave a
+      // fresh key that looks confirmed (that one would be refused forever).
+      await keys.setVaultKeyProvisional(vaultId, true);
       await keys.setVaultKey(vaultId, vk); // BEFORE any server call
     }
     const generation = 1;
@@ -379,6 +388,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       const state = await ensureVaultKey(vaultId);
       return state.state === "ready" ? "converted" : "claimed-elsewhere";
     }
+    await confirmed(vaultId);
     accept(vaultId, vk, generation);
     return "converted";
   }
@@ -416,7 +426,18 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     if (accountMismatch) return { state: "security-warning" };
     // Any error (404 not a member, 5xx, timeout) propagates: never keyed on doubt.
     const mine: MyVaultKeys = await api.getMyVaultKeys(vaultId);
+    // A confirmed key this device holds is the ground truth: the server's
+    // answer comes from a database anyone with DB access can rewrite. When it
+    // stops matching (vk_check wiped → "unkeyed", or swapped for a check the
+    // writer made with their own key), refuse: never sync this vault as
+    // plaintext, never adopt a key from a wrap, never replace the held key.
+    const held = await keys.getVaultKey(vaultId);
+    const heldConfirmed = held !== null && !(await keys.isVaultKeyProvisional(vaultId));
     if (!mine.keyed) {
+      if (heldConfirmed) {
+        verified.delete(vaultId);
+        return { state: "key-mismatch" };
+      }
       const r = await keyUnkeyedVault(vaultId);
       return r.state === "unkeyed"
         ? { state: "unkeyed", conversionAllowed: mine.conversionAllowed, encryptionRequested: mine.encryptionRequested }
@@ -424,19 +445,25 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     }
     if (mine.pending) {
       // A key restored on this device earlier still counts when it verifies.
-      const held = mine.vkCheck ? await keys.getVaultKey(vaultId) : null;
       if (held && mine.vkCheck && mine.generation !== undefined && (await verifyVk(held, vaultId, fromBase64(mine.vkCheck)))) {
+        await confirmed(vaultId);
         return accept(vaultId, held, mine.generation);
+      }
+      if (heldConfirmed) {
+        verified.delete(vaultId);
+        return { state: "key-mismatch" };
       }
       return { state: "waiting-for-teammate" };
     }
     const vkCheck = fromBase64(mine.vkCheck);
 
-    const local = await keys.getVaultKey(vaultId);
+    const local = held;
     if (local && (await verifyVk(local, vaultId, vkCheck))) {
+      await confirmed(vaultId);
       return accept(vaultId, local, mine.generation);
     }
     verified.delete(vaultId);
+    if (heldConfirmed) return { state: "key-mismatch" };
     const wrap = mine.wraps.find((w) => w.generation === mine.generation);
     if (!wrap) return { state: "waiting-for-teammate" };
     const priv = await keys.getAccountPrivateKey();
@@ -449,7 +476,13 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     }
     if (!(await verifyVk(vk, vaultId, vkCheck))) return { state: "key-mismatch" };
     await keys.setVaultKey(vaultId, vk);
+    await confirmed(vaultId);
     return accept(vaultId, vk, mine.generation);
+  }
+
+  /** The held key opened the server's check: no longer provisional. */
+  async function confirmed(vaultId: string): Promise<void> {
+    if (await keys.isVaultKeyProvisional(vaultId)) await keys.setVaultKeyProvisional(vaultId, false);
   }
 
   async function keyUnkeyedVault(vaultId: string): Promise<VaultKeyState> {

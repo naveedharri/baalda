@@ -76,6 +76,15 @@ export async function setVaultKey(serverUrl: string, vaultId: string, vk: Uint8A
 }
 export const deleteVaultKey = (serverUrl: string, vaultId: string) => remove(vaultKeyName(serverUrl, vaultId));
 
+/**
+ * Marks a vault key this device generated for a conversion the server has not
+ * confirmed yet (another device's claim may still win). Only such a key may be
+ * replaced by a teammate's wrap; any other held key that stops opening the
+ * server's `vk_check` (or a vault the server suddenly calls unkeyed) is refused.
+ */
+export const provisionalVaultKeyName = (serverUrl: string, vaultId: string) =>
+  `vk:${serverUrl}:${vaultId}|provisional`;
+
 /** The session's `VaultKeyStore`, scoped to one server + user. */
 export function keychainVaultKeyStore(serverUrl: string, userId: string) {
   return {
@@ -86,6 +95,12 @@ export function keychainVaultKeyStore(serverUrl: string, userId: string) {
     setDeviceLinkKey: (key: Uint8Array) => setBytes(deviceLinkKeyName(serverUrl, userId), key),
     deleteDeviceLinkKey: () => remove(deviceLinkKeyName(serverUrl, userId)),
     setVaultKey: (vaultId: string, vk: Uint8Array) => setVaultKey(serverUrl, vaultId, vk),
+    isVaultKeyProvisional: async (vaultId: string) => (await io.get(provisionalVaultKeyName(serverUrl, vaultId))) === "1",
+    setVaultKeyProvisional: async (vaultId: string, on: boolean) => {
+      const name = provisionalVaultKeyName(serverUrl, vaultId);
+      if (on) await io.set(name, "1");
+      else if ((await io.get(name)) != null) await io.delete(name);
+    },
     clearCache: clearVaultKeyCache,
   };
 }
