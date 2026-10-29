@@ -11,6 +11,7 @@ import {
   backfillHooks,
   backfillTick,
   backfillVault,
+  catchUpIndex,
   encryptionStatus,
   kickVaultBackfill,
 } from "../src/crypto/backfill.js";
@@ -344,6 +345,68 @@ describe("vault crypto backfill (W3)", () => {
       crypto: c,
     } as Parameters<typeof searchNoteIndex>[0]);
     expect(hits.map((h) => h.docId)).toContain(docId);
+  });
+
+  it("a deferred index is queued, drained on key arrival, and the row removed", async () => {
+    const orgId = await seedOrg("Queue", `queue-${Date.now()}`);
+    const vaultId = await seedVault(orgId);
+    const c = await keyVault(vaultId, false);
+    const docId = await seedNote(vaultId, null, "queued.md");
+    const doc = new Y.Doc();
+    await appendUpdate(docId, edit(doc, "okapi field notes\n"), pool, 1000, c);
+    doc.destroy();
+    expect(await indexDoc(docId, pool)).toBe(false);
+    const q1 = await pool.query("SELECT vault_id FROM index_pending WHERE doc_id = $1", [docId]);
+    expect(q1.rows).toEqual([{ vault_id: vaultId }]);
+    vaultKeyCache.acquire(vaultId, c.key, 1);
+    expect(await catchUpIndex(vaultId, pool)).toBe(1);
+    expect((await pool.query("SELECT 1 FROM index_pending WHERE doc_id = $1", [docId])).rowCount).toBe(0);
+    const { rows } = await pool.query("SELECT search_enc FROM note_index WHERE doc_id = $1", [docId]);
+    expect(openSearchRow(c, docId, rows[0].search_enc).body).toContain("okapi");
+  });
+
+  it("a failed catch-up keeps the pending row", async () => {
+    const orgId = await seedOrg("QueueFail", `queuefail-${Date.now()}`);
+    const vaultId = await seedVault(orgId);
+    const c = await keyVault(vaultId, false);
+    const docId = await seedNote(vaultId, null, "fails.md");
+    expect(await indexDoc(docId, pool)).toBe(false);
+    vaultKeyCache.acquire(vaultId, c.key, 1);
+    const failing = {
+      query: (sql: string, params?: unknown[]) => {
+        if (/INSERT INTO note_index/.test(sql)) return Promise.reject(new Error("boom"));
+        return pool.query(sql, params as unknown[]);
+      },
+    } as unknown as typeof pool;
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await catchUpIndex(vaultId, failing)).toBe(0);
+    spy.mockRestore();
+    expect((await pool.query("SELECT 1 FROM index_pending WHERE doc_id = $1", [docId])).rowCount).toBe(1);
+    // Still deferred (no key) during a drain: the row is re-queued, not lost.
+    vaultKeyCache.clear();
+    expect(await catchUpIndex(vaultId, pool)).toBe(0);
+    expect((await pool.query("SELECT 1 FROM index_pending WHERE doc_id = $1", [docId])).rowCount).toBe(1);
+  });
+
+  it("an idle sealed vault's key arrival runs no per-note queries", async () => {
+    const orgId = await seedOrg("Idle", `idle-${Date.now()}`);
+    const vaultId = await seedVault(orgId);
+    await keyVault(vaultId);
+    for (let i = 0; i < 5; i++) await seedNote(vaultId, null, `idle-${i}.md`);
+    expect(await backfillVault(vaultId, FAST)).toBe("complete");
+    await pool.query("DELETE FROM index_pending WHERE vault_id = $1", [vaultId]);
+    const seen: string[] = [];
+    const counting = {
+      query: (sql: string, params?: unknown[]) => {
+        seen.push(sql);
+        return pool.query(sql, params as unknown[]);
+      },
+      connect: () => pool.connect(),
+    } as unknown as typeof pool;
+    await kickVaultBackfill(vaultId, { ...FAST, db: counting });
+    expect(seen.length).toBe(1);
+    expect(seen[0]).toMatch(/EXISTS \(SELECT 1 FROM index_pending/);
+    expect(seen.some((s) => /doc_updates/.test(s))).toBe(false);
   });
 
   it("one runner per vault: a held lock answers 'locked'", async () => {
