@@ -9,6 +9,7 @@ import * as ipc from "./lib/ipc";
 import { DOCUMENTS_BLOCKED_TEXT, isDocumentsDenied } from "./lib/vault/folderErrors";
 import { bridgeManager } from "./lib/bridge";
 import { resetVaultKeySessions } from "./lib/vaultKeys/session";
+import { onVaultKeyBlockChange, VAULT_KEY_PAUSE_REASON, vaultKeysGate } from "./lib/vaultKeys/runtime";
 import { clearVaultKeyCache } from "./lib/vaultKeys/store";
 import {
   colorsAdopted,
@@ -2064,6 +2065,9 @@ async function unsyncLocalTeardown(
   await get().refreshTree();
   await get().refreshTitles();
 }
+
+// W3: the first sync pass of a vault waits for a known vault-key state.
+syncManager.setVaultKeyGate?.(vaultKeysGate);
 
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
@@ -5513,6 +5517,15 @@ export const useStore = create<AppStore>((set, get) => ({
       } else {
         set({ locks: [] });
         if (result.reason) console.warn("[sync] not enabled:", result.reason);
+        // W3: paused for the vault key. Nothing on disk was touched; run the
+        // whole enable again once the key state is known and safe.
+        if (result.reason === VAULT_KEY_PAUSE_REASON) {
+          const off = onVaultKeyBlockChange((_vaultId, blocked) => {
+            if (blocked) return;
+            off();
+            if (!stale()) void get().enableSyncForVault(opts);
+          });
+        }
       }
     })().finally(resolvePrimed);
 

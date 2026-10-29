@@ -6,6 +6,7 @@ import {
   generateVaultKey,
   makeVkCheck,
   openSealedVk,
+  allowlistMac,
   keyFingerprint,
   sealTo,
   sealVkTo,
@@ -23,6 +24,14 @@ function fakeServer() {
   const requests = new Map<string, VaultKeyRequest[]>();
   const posted: { vaultId: string; userId: string; header: string }[] = [];
   let pendingDevices: { deviceId: string; publicKey: string }[] = [];
+  const conv = {
+    allowed: false,
+    ready: false,
+    claims: new Map<string, { vkCheck: string; deviceId: string }>(),
+    candidates: [] as { kind: string; id: string; hash: string }[],
+    allowlists: [] as { vaultId: string; entries: { kind: string; id: string; mac: string }[]; header: string }[],
+    readyPolls: [] as string[],
+  };
   const deviceKeys = new Map<string, string>();
   let caller = "u1";
   const api = {
@@ -37,7 +46,7 @@ function fakeServer() {
     }),
     getMyVaultKeys: vi.fn(async (vaultId: string): Promise<MyVaultKeys> => {
       const v = vaults.get(vaultId);
-      if (!v) return { keyed: false, pending: false };
+      if (!v) return { keyed: false, pending: false, conversionAllowed: conv.allowed };
       const w = v.wraps.get(caller);
       if (!w) return { keyed: true, pending: true };
       return {
@@ -67,10 +76,28 @@ function fakeServer() {
     denyDevice: vi.fn(async (deviceId: string) => {
       pendingDevices = pendingDevices.filter((d) => d.deviceId !== deviceId);
     }),
+    registerPendingVaultKey: vi.fn(
+      async (vaultId: string, b: { vkCheck: string; generation: number; deviceId: string }) => {
+        const have = conv.claims.get(vaultId);
+        // Idempotent for the same check; any other check is a second claimer.
+        if (have && have.vkCheck !== b.vkCheck) return "claimed" as const;
+        conv.claims.set(vaultId, { vkCheck: b.vkCheck, deviceId: b.deviceId });
+        return "registered" as const;
+      },
+    ),
+    getAllowlistCandidates: vi.fn(async () => conv.candidates.slice()),
+    postAllowlist: vi.fn(async (vaultId: string, entries: { kind: string; id: string; mac: string }[], header: string) => {
+      conv.allowlists.push({ vaultId, entries, header });
+    }),
+    getConversionReady: vi.fn(async (_vaultId: string, header: string) => {
+      conv.readyPolls.push(header);
+      return conv.ready;
+    }),
   };
   return {
     api,
     vaults,
+    conv,
     deviceKeys,
     requests,
     posted,
@@ -146,7 +173,7 @@ describe("vault key session", () => {
     const keys = fakeKeys();
     await keys.setAccountPrivateKey(generateAccountKeypair().privateKey);
     const s = session({ api: srv.api, keys, keysAllowed: () => false });
-    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed" });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed", conversionAllowed: false });
     expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
     expect(s.headerFor("v1")).toBeNull();
   });
@@ -299,7 +326,7 @@ describe("vault key session", () => {
     await expect(s.ensureVaultKey("v1")).rejects.toThrow();
     const held = generateVaultKey();
     keys.vks.set("v1", held);
-    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed" });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed", conversionAllowed: false });
     expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
     expect(keys.vks.get("v1")).toBe(held);
   });
@@ -309,7 +336,7 @@ describe("vault key session", () => {
     const keys = fakeKeys();
     await keys.setAccountPrivateKey(generateAccountKeypair().privateKey);
     const s = session({ api: srv.api, keys });
-    srv.api.getMyVaultKeys.mockResolvedValueOnce({ keyed: false, pending: false });
+    srv.api.getMyVaultKeys.mockResolvedValueOnce({ keyed: false, pending: false, conversionAllowed: false });
     srv.api.initVaultKeys.mockResolvedValueOnce("already-keyed");
     // Then the real answer: keyed, no wrap for us yet.
     srv.vaults.set("v1", { vkCheck: toBase64(await makeVkCheck(generateVaultKey(), "v1", 1)), generation: 1, wraps: new Map() });
@@ -411,5 +438,130 @@ describe("vault key session", () => {
     expect(s.headerFor("v1")).toBeNull();
     expect(keys.clearCache).toHaveBeenCalled();
     s.dispose();
+  });
+});
+
+describe("converting an existing vault", () => {
+  async function ownerSetup(over: Partial<VaultKeySessionDeps> = {}) {
+    const srv = fakeServer();
+    const keys = fakeKeys();
+    const s = session({ api: srv.api, keys, keysAllowed: () => false, canConvert: async () => true, ...over });
+    await s.ensureAccountKeys();
+    return { srv, keys, s };
+  }
+
+  it("gate false (or no gate) does nothing at all", async () => {
+    const { srv, keys, s } = await ownerSetup();
+    srv.conv.allowed = false;
+    expect(await s.convertVault("v1")).toBe("not-allowed");
+    expect(keys.setVaultKey).not.toHaveBeenCalled();
+    expect(srv.api.registerPendingVaultKey).not.toHaveBeenCalled();
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed", conversionAllowed: false });
+  });
+
+  it("a member (not owner/admin) never converts", async () => {
+    const { srv, keys, s } = await ownerSetup({ canConvert: async () => false });
+    srv.conv.allowed = true;
+    expect(await s.convertVault("v1")).toBe("not-allowed");
+    expect(keys.setVaultKey).not.toHaveBeenCalled();
+  });
+
+  it("stores the key first, claims, allowlists, waits for ready, then inits", async () => {
+    const { srv, keys, s } = await ownerSetup();
+    srv.conv.allowed = true;
+    srv.conv.candidates = [{ kind: "mcp_token", id: "t1", hash: "abc" }];
+    expect(await s.convertVault("v1")).toBe("waiting-ready");
+    const vk = keys.vks.get("v1")!;
+    expect(vk).toBeDefined();
+    // The keychain write happened before the first server call.
+    expect(keys.setVaultKey.mock.invocationCallOrder[0]).toBeLessThan(
+      srv.api.registerPendingVaultKey.mock.invocationCallOrder[0],
+    );
+    expect(srv.conv.allowlists[0].entries).toEqual([
+      { kind: "mcp_token", id: "t1", mac: toBase64(allowlistMac(vk, "t1", "abc")) },
+    ]);
+    expect(srv.conv.allowlists[0].header).toBe(toBase64(vk));
+    expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
+
+    srv.conv.ready = true;
+    expect(await s.convertVault("v1")).toBe("converted");
+    expect(keys.vks.get("v1")).toBe(vk); // same key throughout
+    expect(srv.api.initVaultKeys).toHaveBeenCalledTimes(1);
+    expect(srv.vaults.get("v1")!.vkCheck).toBe(srv.conv.claims.get("v1")!.vkCheck);
+    expect(s.headerFor("v1")).toBe(toBase64(vk));
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
+  });
+
+  it("a crash between steps resumes with the same key and the same check", async () => {
+    const { srv, keys } = await ownerSetup();
+    srv.conv.allowed = true;
+    const first = session({ api: srv.api, keys, keysAllowed: () => false, canConvert: async () => true });
+    await first.ensureAccountKeys();
+    srv.api.getAllowlistCandidates.mockRejectedValueOnce(new Error("crash"));
+    await expect(first.convertVault("v1")).rejects.toThrow();
+    const vk = keys.vks.get("v1")!;
+    const claimed = srv.conv.claims.get("v1")!.vkCheck;
+
+    // App restarts: a fresh session, the keychain survived.
+    const again = session({ api: srv.api, keys, keysAllowed: () => false, canConvert: async () => true });
+    await again.ensureAccountKeys();
+    srv.conv.ready = true;
+    expect(await again.convertVault("v1")).toBe("converted");
+    expect(keys.vks.get("v1")).toBe(vk);
+    expect(srv.conv.claims.get("v1")!.vkCheck).toBe(claimed);
+    expect(keys.setVaultKey).toHaveBeenCalledTimes(1);
+  });
+
+  it("init that already landed (lost answer) still converges on our key", async () => {
+    const { srv, keys, s } = await ownerSetup();
+    srv.conv.allowed = true;
+    srv.conv.ready = true;
+    srv.api.initVaultKeys.mockImplementationOnce(async (vaultId: string, b: VaultKeyInit) => {
+      srv.vaults.set(vaultId, { vkCheck: b.vkCheck, generation: b.generation, wraps: new Map([["u1", b.sealedVkForSelf]]) });
+      throw new Error("connection reset");
+    });
+    await expect(s.convertVault("v1")).rejects.toThrow();
+    const vk = keys.vks.get("v1")!;
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
+    expect(keys.vks.get("v1")).toBe(vk);
+  });
+
+  it("another device holds the claim (409): adopt nothing, never init", async () => {
+    const { srv, keys, s } = await ownerSetup();
+    srv.conv.allowed = true;
+    srv.conv.claims.set("v1", { vkCheck: "someone-else", deviceId: "d9" });
+    expect(await s.convertVault("v1")).toBe("claimed-elsewhere");
+    expect(srv.api.postAllowlist).not.toHaveBeenCalled();
+    expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
+    expect(s.headerFor("v1")).toBeNull();
+    // Their key arrives later through keys/mine and replaces ours only after it verifies.
+    const theirs = generateVaultKey();
+    const pub = generateAccountKeypairPub((await keys.getAccountPrivateKey())!);
+    srv.vaults.set("v1", {
+      vkCheck: toBase64(await makeVkCheck(theirs, "v1", 1)),
+      generation: 1,
+      wraps: new Map([["u1", toBase64(sealVkTo(pub, theirs))]]),
+    });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
+    expect(keys.vks.get("v1")).toEqual(theirs);
+  });
+});
+
+describe("first sync pass gate", () => {
+  it("proceeds only on a known safe state; errors and missing keys pause", async () => {
+    const srv = fakeServer();
+    const keys = fakeKeys();
+    const s = session({ api: srv.api, keys, keysAllowed: () => false });
+    await s.ensureAccountKeys();
+    expect(await s.gateVaultOpen("v1")).toBe("proceed"); // unkeyed
+
+    srv.vaults.set("v1", { vkCheck: toBase64(await makeVkCheck(generateVaultKey(), "v1", 1)), generation: 1, wraps: new Map() });
+    expect(await s.gateVaultOpen("v1")).toBe("paused"); // keyed, waiting for a teammate
+
+    srv.api.getMyVaultKeys.mockRejectedValueOnce(new Error("timeout"));
+    expect(await s.gateVaultOpen("v1")).toBe("paused"); // unknown
+
+    const off = session({ api: srv.api, keys, features: async () => new Set() });
+    expect(await off.gateVaultOpen("v1")).toBe("proceed"); // server without vault keys
   });
 });

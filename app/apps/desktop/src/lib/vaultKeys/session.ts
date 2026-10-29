@@ -16,6 +16,8 @@
 
 import type {
   AccountKeysBody,
+  AllowlistCandidate,
+  AllowlistEntry,
   MyVaultKeys,
   PendingDevice,
   VaultKeyInit,
@@ -29,6 +31,8 @@ import {
   generateAccountKeypair,
   generateVaultKey,
   keyFingerprint,
+  allowlistMac,
+  makeStableVkCheck,
   makeVkCheck,
   openSealed,
   openSealedVk,
@@ -54,6 +58,13 @@ export interface VaultKeysApi {
   getDeviceKey(deviceId: string): Promise<string | null>;
   putDeviceKey(deviceId: string, privWrapped: string): Promise<void>;
   denyDevice(deviceId: string): Promise<void>;
+  registerPendingVaultKey(
+    vaultId: string,
+    body: { vkCheck: string; generation: number; deviceId: string },
+  ): Promise<"registered" | "claimed">;
+  getAllowlistCandidates(vaultId: string): Promise<AllowlistCandidate[]>;
+  postAllowlist(vaultId: string, entries: AllowlistEntry[], vkBase64: string): Promise<void>;
+  getConversionReady(vaultId: string, vkBase64: string): Promise<boolean>;
 }
 
 /** The keychain store, scoped to the current server + user by the caller. */
@@ -89,6 +100,8 @@ export interface VaultKeySessionDeps {
   selfUserId(): string | null;
   /** Stable id of this app install (not secret). */
   deviceId(): string;
+  /** May this user convert the vault (owner/admin)? Default: no. */
+  canConvert?(vaultId: string): Promise<boolean>;
 }
 
 export type AccountKeysState =
@@ -105,10 +118,19 @@ export type VaultKeyState =
   /** `created`: this device just keyed the vault: show "Save your vault key". */
   | { state: "ready"; generation: number; created?: true }
   | { state: "waiting-for-teammate" }
-  | { state: "unkeyed" }
+  /** `conversionAllowed`: the server's rollout gate for converting this vault. */
+  | { state: "unkeyed"; conversionAllowed?: boolean }
   | { state: "needs-account-key" }
   /** The only key on offer does not open `vk_check`: never used. */
   | { state: "key-mismatch" };
+
+export type ConvertResult =
+  | "converted"
+  | "waiting-ready"
+  | "claimed-elsewhere"
+  | "already-keyed"
+  | "needs-account-key"
+  | "not-allowed";
 
 export type RestoreResult =
   | "restored"
@@ -296,6 +318,81 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     return "restored";
   }
 
+  /**
+   * Convert an existing (unkeyed) vault, once, from an owner/admin device.
+   * Order is load-bearing for "never lose the key": the VK is in the keychain
+   * BEFORE any server call, and every step is resumable with that same key
+   * (the check is deterministic, the allowlist idempotent). Another device
+   * holding the claim (409) means we adopt nothing and wait for `keys/mine`.
+   */
+  async function convertVault(vaultId: string): Promise<ConvertResult> {
+    if (!(await enabled()) || accountMismatch) return "not-allowed";
+    const mine = await api.getMyVaultKeys(vaultId);
+    if (mine.keyed) return "already-keyed";
+    if (!mine.conversionAllowed) return "not-allowed";
+    if (!(deps.canConvert && (await deps.canConvert(vaultId)))) return "not-allowed";
+    const priv = await keys.getAccountPrivateKey();
+    if (!priv) return "needs-account-key";
+    const remote = await api.getMyKeys();
+    if (!remote || !sameKey(publicKeyFromPrivate(priv), remote.publicKey)) return "needs-account-key";
+
+    let vk = await keys.getVaultKey(vaultId); // a crashed earlier run: same key
+    if (!vk) {
+      vk = generateVaultKey();
+      await keys.setVaultKey(vaultId, vk); // BEFORE any server call
+    }
+    const generation = 1;
+    const vkCheck = toBase64(await makeStableVkCheck(vk, vaultId, generation));
+    const vkB64 = toBase64(vk);
+    const claim = await api.registerPendingVaultKey(vaultId, { vkCheck, generation, deviceId: deps.deviceId() });
+    if (claim === "claimed") return "claimed-elsewhere";
+
+    const candidates = await api.getAllowlistCandidates(vaultId);
+    const entries: AllowlistEntry[] = candidates.map((c) => ({
+      kind: c.kind,
+      id: c.id,
+      mac: toBase64(allowlistMac(vk!, c.id, c.hash)),
+    }));
+    await api.postAllowlist(vaultId, entries, vkB64);
+    if (!(await api.getConversionReady(vaultId, vkB64))) return "waiting-ready";
+
+    const result = await api.initVaultKeys(vaultId, {
+      vkCheck,
+      generation,
+      sealedVkForSelf: toBase64(sealVkTo(publicKeyFromPrivate(priv), vk)),
+    });
+    if (result === "already-keyed") {
+      // Our own earlier init (lost answer) verifies with our key; anyone
+      // else's does not, and then their wrap arrives through `keys/mine`.
+      const state = await ensureVaultKey(vaultId);
+      return state.state === "ready" ? "converted" : "claimed-elsewhere";
+    }
+    accept(vaultId, vk, generation);
+    return "converted";
+  }
+
+  /**
+   * Gate for the first sync pass on vault open: proceed only on a KNOWN state
+   * that cannot hurt local files (key held and verified, vault not keyed, or
+   * the server without vault keys). Anything else, including an error, pauses.
+   */
+  async function gateVaultOpen(vaultId: string): Promise<"proceed" | "paused"> {
+    try {
+      if (!(await enabled())) return "proceed";
+      try {
+        await ensureAccountKeys();
+      } catch {
+        /* the account check never decides the gate on its own */
+      }
+      const state = await ensureVaultKey(vaultId);
+      return state.state === "ready" || state.state === "unkeyed" || state.state === "disabled"
+        ? "proceed"
+        : "paused";
+    } catch {
+      return "paused";
+    }
+  }
+
   /** Owner's Settings → Security: the verified key as 24 words, else null. */
   function revealVaultKey(vaultId: string): string | null {
     const held = verified.get(vaultId);
@@ -307,7 +404,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     if (accountMismatch) return { state: "security-warning" };
     // Any error (404 not a member, 5xx, timeout) propagates: never keyed on doubt.
     const mine: MyVaultKeys = await api.getMyVaultKeys(vaultId);
-    if (!mine.keyed) return keyUnkeyedVault(vaultId);
+    if (!mine.keyed) {
+      const r = await keyUnkeyedVault(vaultId);
+      return r.state === "unkeyed" ? { state: "unkeyed", conversionAllowed: mine.conversionAllowed } : r;
+    }
     if (mine.pending) {
       // A key restored on this device earlier still counts when it verifies.
       const held = mine.vkCheck ? await keys.getVaultKey(vaultId) : null;
@@ -411,6 +511,8 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     ensureAccountKeys,
     restoreWithVaultKey,
     revealVaultKey,
+    convertVault,
+    gateVaultOpen,
     pendingDevices,
     approveDevice,
     denyDevice,

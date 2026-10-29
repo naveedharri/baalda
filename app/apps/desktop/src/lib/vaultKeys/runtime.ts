@@ -7,7 +7,6 @@
 // server without the `vault-keys` feature.
 
 import { api } from "../auth/authManager";
-import { serverFeatures } from "../serverFeatures";
 import {
   createVaultKeySession,
   type AccountKeysState,
@@ -19,6 +18,21 @@ import {
 import { keychainPinStore, keychainVaultKeyStore } from "./store";
 
 export const SERVICE_INTERVAL_MS = 2 * 60 * 1000;
+
+/**
+ * The server's features, or a THROW when `/health` gave no answer. Unknown must
+ * never read as "no vault keys": that would lift the open-time pause on a flaky
+ * network. A known answer is reused for a minute.
+ */
+let featureMemo: { url: string; at: number; set: ReadonlySet<string> } | null = null;
+async function knownFeatures(): Promise<ReadonlySet<string>> {
+  const url = api.getBaseUrl();
+  if (featureMemo && featureMemo.url === url && Date.now() - featureMemo.at < 60_000) return featureMemo.set;
+  const health = await api.getHealth().catch(() => null);
+  if (!health) throw new Error("server features unknown");
+  featureMemo = { url, at: Date.now(), set: new Set(health.features) };
+  return featureMemo.set;
+}
 
 const DEVICE_ID_KEY = "context.vaultKeys.deviceId";
 /** Stable, non-secret id of this install (a pending device is keyed by it). */
@@ -101,6 +115,7 @@ let current: {
   vaultId: string | null;
   orgId: string | null;
   timer: ReturnType<typeof setInterval> | null;
+  conversionTimer: ReturnType<typeof setTimeout> | null;
   running: Promise<void> | null;
   again: boolean;
 } | null = null;
@@ -115,10 +130,17 @@ function sessionFor(userId: string) {
     api,
     keys: keychainVaultKeyStore(serverUrl, userId),
     pins: keychainPinStore(serverUrl, userId),
-    features: () => serverFeatures(serverUrl, () => api.getHealth()),
+    features: knownFeatures,
     keysAllowed: () => keysAllowed,
     selfUserId: () => userId,
     deviceId: installDeviceId,
+    canConvert: async () => {
+      const orgId = current?.orgId;
+      if (!orgId) return false;
+      const { members } = await api.getMembersOverview(orgId);
+      const role = members.find((m) => m.userId === userId)?.role;
+      return role === "owner" || role === "admin";
+    },
     isMember: async (_vaultId, memberId) => {
       const orgId = current?.orgId;
       if (!orgId) return false;
@@ -128,9 +150,11 @@ function sessionFor(userId: string) {
   });
   api.setVaultKeyResolver((vaultId) => session.headerFor(vaultId));
   api.setKeyRequiredHandler((vaultId) => vaultKeysEnsure(vaultId));
-  current = { key, session, vaultId: null, orgId: null, timer: null, running: null, again: false };
+  current = { key, session, vaultId: null, orgId: null, timer: null, conversionTimer: null, running: null, again: false };
   return current;
 }
+
+export const CONVERSION_POLL_MS = 60 * 1000;
 
 async function runOnce(): Promise<void> {
   const c = current;
@@ -138,12 +162,30 @@ async function runOnce(): Promise<void> {
   const vaultId = c.vaultId;
   const account = await c.session.ensureAccountKeys();
   emit({ kind: "account", state: account });
-  if (account.state !== "ready") return;
-  const devices = await c.session.pendingDevices();
-  if (devices.length) emit({ kind: "pending-devices", devices });
+  if (account.state === "ready") {
+    const devices = await c.session.pendingDevices();
+    if (devices.length) emit({ kind: "pending-devices", devices });
+  }
+  // The vault's own state is asked even without a ready account key: an
+  // unkeyed vault must be able to leave the open-time pause.
   const state = await c.session.ensureVaultKey(vaultId);
   noteVaultKeyState(vaultId, state);
   emit({ kind: "vault", vaultId, state });
+  if (state.state === "unkeyed" && state.conversionAllowed) {
+    const conv = await c.session.convertVault(vaultId);
+    if (conv === "converted") {
+      const ready: VaultKeyState = { state: "ready", generation: 1, created: true };
+      noteVaultKeyState(vaultId, ready);
+      emit({ kind: "vault", vaultId, state: ready });
+    } else if (conv === "waiting-ready" && !c.conversionTimer) {
+      // Keep the pending key warm: ask again every minute while open.
+      c.conversionTimer = setTimeout(() => {
+        c.conversionTimer = null;
+        if (current === c) vaultKeysNudge();
+      }, CONVERSION_POLL_MS);
+    }
+    return;
+  }
   if (state.state !== "ready") return;
   const result = await c.session.serviceKeyRequests(vaultId);
   if (result.sealed.length || result.keyChanged.length) emit({ kind: "serviced", vaultId, result });
@@ -183,8 +225,55 @@ export function vaultKeysClosed(): void {
   if (!current) return;
   if (current.timer) clearInterval(current.timer);
   current.timer = null;
+  if (current.conversionTimer) clearTimeout(current.conversionTimer);
+  current.conversionTimer = null;
   current.vaultId = null;
   current.orgId = null;
+}
+
+export const VAULT_KEY_GATE_TIMEOUT_MS = 20_000;
+export const VAULT_KEY_PAUSE_REASON = "vault-key";
+
+/**
+ * The open-time gate (first sync pass). Proceeds only on a KNOWN safe answer:
+ * the server answered `/health` without `vault-keys`, or the vault is unkeyed,
+ * or its key is held and verified. Unknown (unreachable health, an error, the
+ * timeout) or a keyed vault without its key pauses: the vault is marked
+ * blocked, the retry loop keeps asking, and the caller re-runs on unblock.
+ */
+export async function vaultKeysGate(opts: {
+  userId: string;
+  vaultId: string;
+  orgId: string;
+  timeoutMs?: number;
+}): Promise<"proceed" | "paused"> {
+  const decide = async (): Promise<"proceed" | "paused"> => {
+    const features = await knownFeatures().catch(() => null);
+    if (!features) return "paused";
+    if (!features.has("vault-keys")) return "proceed";
+    const c = sessionFor(opts.userId);
+    c.orgId = opts.orgId;
+    return c.session.gateVaultOpen(opts.vaultId);
+  };
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<"paused">((resolve) => {
+    timer = setTimeout(() => resolve("paused"), opts.timeoutMs ?? VAULT_KEY_GATE_TIMEOUT_MS);
+  });
+  const verdict = await Promise.race([decide().catch(() => "paused" as const), timeout]);
+  if (timer) clearTimeout(timer);
+  if (verdict === "paused") {
+    markVaultKeyUnknown(opts.vaultId);
+    // Keep asking (2-minute loop + now); a known safe answer unblocks.
+    vaultKeysOpened({ userId: opts.userId, vaultId: opts.vaultId, orgId: opts.orgId });
+  }
+  return verdict;
+}
+
+/** Paused for an unknown key state: blocked until a known answer arrives. */
+export function markVaultKeyUnknown(vaultId: string): void {
+  if (blockedVaults.has(vaultId)) return;
+  blockedVaults.add(vaultId);
+  for (const cb of blockListeners) cb(vaultId, true);
 }
 
 /** Ensure the open vault's key now (a `key_required` refusal); true when ready. */

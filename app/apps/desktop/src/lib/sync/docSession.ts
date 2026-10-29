@@ -30,7 +30,13 @@ import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
-import { isVaultKeyBlocked, vaultKeysClosed, vaultKeysNudge, vaultKeysOpened } from "../vaultKeys/runtime";
+import {
+  isVaultKeyBlocked,
+  VAULT_KEY_PAUSE_REASON,
+  vaultKeysClosed,
+  vaultKeysNudge,
+  vaultKeysOpened,
+} from "../vaultKeys/runtime";
 import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
 import type { ActivityStatus } from "../prefs";
@@ -3380,6 +3386,36 @@ export class SyncManager implements InboundHost {
     return this.rootMissing;
   }
 
+  /**
+   * W3 open-time gate, injected (`setVaultKeyGate`) by the app's composition
+   * root (`store.ts`); a SyncManager built without one (tests) has no gate.
+   */
+  private vaultKeyGateFn:
+    | ((opts: { userId: string; vaultId: string; orgId: string }) => Promise<"proceed" | "paused">)
+    | null = null;
+  setVaultKeyGate(fn: typeof this.vaultKeyGateFn): void {
+    this.vaultKeyGateFn = fn;
+  }
+
+  /** The server collection id this vault opens with, for the key gate. */
+  private async vaultKeyGate(session: SessionInfo, orgId: string): Promise<"proceed" | "paused"> {
+    const gate = this.vaultKeyGateFn;
+    if (!gate) return "proceed";
+    let vaultId = this.registry.vaultId;
+    if (!vaultId) {
+      try {
+        vaultId = (await api.listVaults()).find((v) => v.organization_id === orgId)?.id ?? null;
+      } catch {
+        // The reconcile makes this same call and fails the same way: nothing
+        // structural can run without it, so there is nothing to gate.
+        return "proceed";
+      }
+    }
+    // A collection the server does not have yet is created unkeyed.
+    if (!vaultId) return "proceed";
+    return gate({ userId: session.user.id, vaultId, orgId });
+  }
+
   /** `InboundHost.structurePaused`: the registry's stop signal. Also held
    *  while this device knows it lacks the open (keyed) vault's key. */
   structurePaused(): boolean {
@@ -5121,6 +5157,14 @@ export class SyncManager implements InboundHost {
       }
     } catch (e) {
       console.warn("[sync] local prime failed; falling back to reconcile-first", e);
+    }
+    if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
+    // ---- W3 gate: the first pass waits for a KNOWN vault-key state. ----
+    // A keyed vault this device cannot read yet, or an unknown answer, pauses
+    // here before anything is materialized, registered or removed. The store
+    // re-runs `enable` once the key state is known (`onVaultKeyBlockChange`).
+    if ((await this.vaultKeyGate(session, vault.orgId)) === "paused") {
+      return { ok: false, reason: VAULT_KEY_PAUSE_REASON, scope };
     }
     if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
     // ---- PHASE B: the networked reconcile. Unchanged. ----

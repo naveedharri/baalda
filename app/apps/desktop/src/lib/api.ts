@@ -1462,7 +1462,7 @@ interface MyVaultKeysBody {
 /** A pending answer may still carry `vkCheck`, so a restore can verify a typed key. */
 export type MyVaultKeys =
   /** The server's DEFINITIVE "this vault has no key" (`{keyed: false}`). */
-  | { keyed: false; pending: false }
+  | { keyed: false; pending: false; conversionAllowed: boolean }
   | { keyed: true; pending: true; vkCheck?: string; generation?: number }
   | ({ keyed: true; pending: false } & MyVaultKeysBody);
 export interface VaultKeyRequest {
@@ -1473,6 +1473,19 @@ export interface VaultKeyRequest {
 export interface VaultKeyWrapPost extends VaultKeyWrap {
   userId: string;
 }
+/** A credential that must keep working after conversion (MCP token, OAuth grant, public link). */
+export interface AllowlistCandidate {
+  kind: string;
+  id: string;
+  hash: string;
+}
+export interface AllowlistEntry {
+  kind: string;
+  id: string;
+  /** base64 HMAC-SHA256(VK, utf8(id) || utf8(hash)). */
+  mac: string;
+}
+
 export interface PendingDevice {
   deviceId: string;
   publicKey: string;
@@ -1603,7 +1616,10 @@ export class ApiClient {
     );
     // Only an explicit `keyed: false` means unkeyed; anything unexpected throws
     // (the caller then does nothing rather than keying a vault that has a key).
-    if (data?.keyed === false && status === 200) return { keyed: false, pending: false };
+    if (data?.keyed === false && status === 200) {
+      // Rollout gate for converting an existing vault: absent ⇒ false.
+      return { keyed: false, pending: false, conversionAllowed: (data as { conversionAllowed?: unknown }).conversionAllowed === true };
+    }
     if (status === 202 || data?.pending) {
       return { keyed: true, pending: true, vkCheck: data?.vkCheck, generation: data?.generation };
     }
@@ -1646,6 +1662,48 @@ export class ApiClient {
   /** Approve a pending device: the account private key sealed to its key. */
   async putDeviceKey(deviceId: string, privWrapped: string): Promise<void> {
     await this.request("PUT", `/api/me/devices/${encodeURIComponent(deviceId)}/key`, { body: { privWrapped } });
+  }
+
+  // ---- Converting an existing vault (W3) ------------------------------------
+
+  /** Claim the conversion with our check. 409 = another device already holds it. */
+  async registerPendingVaultKey(
+    vaultId: string,
+    body: { vkCheck: string; generation: number; deviceId: string },
+  ): Promise<"registered" | "claimed"> {
+    try {
+      await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/pending`, { body });
+      return "registered";
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) return "claimed";
+      throw e;
+    }
+  }
+
+  async getAllowlistCandidates(vaultId: string): Promise<AllowlistCandidate[]> {
+    const { data } = await this.request<AllowlistCandidate[] | { candidates?: AllowlistCandidate[] }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/allowlist-candidates`,
+    );
+    const list = Array.isArray(data) ? data : (data?.candidates ?? []);
+    return list.filter((c) => typeof c?.id === "string" && typeof c?.hash === "string");
+  }
+
+  async postAllowlist(vaultId: string, entries: AllowlistEntry[], vkBase64: string): Promise<void> {
+    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/allowlist`, {
+      body: { entries },
+      headers: { [VAULT_KEY_HEADER]: vkBase64 },
+    });
+  }
+
+  /** Keeps the pending key warm on the server and asks whether init may run. */
+  async getConversionReady(vaultId: string, vkBase64: string): Promise<boolean> {
+    const { data } = await this.request<{ ready?: boolean }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/conversion-ready`,
+      { headers: { [VAULT_KEY_HEADER]: vkBase64 } },
+    );
+    return data?.ready === true;
   }
 
   /** Link-a-device: publish this device's ephemeral public key as pending. */

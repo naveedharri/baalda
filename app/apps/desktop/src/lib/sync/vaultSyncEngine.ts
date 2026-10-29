@@ -733,7 +733,7 @@ export class VaultSyncEngine {
 
   /** `key_required`: make the key ready; the next connect sends it. */
   private requestVaultKey(): void {
-    void this.api.ensureVaultKeyFor(this.vaultId);
+    void this.api.ensureVaultKeyFor?.(this.vaultId);
   }
 
   private async onOpen(): Promise<void> {
@@ -807,7 +807,7 @@ export class VaultSyncEngine {
         // …and the same for the mode: absent means "backfill me", exactly as
         // every older client and server already behave.
         ...(this.liveOnly ? { mode: "live-only" as const } : {}),
-        ...vkField(this.api.vaultKeyFor(this.vaultId)),
+        ...vkField(this.api.vaultKeyFor?.(this.vaultId) ?? null),
         origin: this.api.getClientId(),
         // Opt in to the frame types this build understands. Without it the
         // server withholds them (see `CLIENT_CAPS`).

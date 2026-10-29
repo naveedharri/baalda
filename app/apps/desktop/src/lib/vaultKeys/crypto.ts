@@ -36,6 +36,7 @@
 
 import { x25519 } from "@noble/curves/ed25519.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
+import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { argon2idAsync } from "@noble/hashes/argon2.js";
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
@@ -144,6 +145,25 @@ export async function makeVkCheck(
     ),
   );
   return concat(header, sealed);
+}
+
+/**
+ * A `vk_check` that is the same bytes every time for (VK, vault, generation):
+ * the nonce is HMAC-SHA256(VK, "baalda-vk-check-nonce|<vaultId>|<generation>")
+ * truncated to 12 bytes. Safe because the plaintext is the one fixed constant,
+ * so a repeated nonce only ever re-encrypts the identical message. Lets a
+ * conversion that crashed resend exactly the check it registered.
+ */
+export async function makeStableVkCheck(vk: Uint8Array, vaultId: string, generation: number): Promise<Uint8Array> {
+  assertVk(vk);
+  const nonce = hmac(sha256, vk, enc.encode(`baalda-vk-check-nonce|${vaultId}|${generation}`)).slice(0, GCM_NONCE);
+  return makeVkCheck(vk, vaultId, generation, nonce);
+}
+
+/** Allowlist proof for one credential: HMAC-SHA256(VK, utf8(id) || utf8(hash)). */
+export function allowlistMac(vk: Uint8Array, id: string, hash: string): Uint8Array {
+  assertVk(vk);
+  return hmac(sha256, vk, concat(enc.encode(id), enc.encode(hash)));
 }
 
 /** The generation a `vk_check` was made for, or null when it is malformed. */
