@@ -2240,3 +2240,12 @@ html[data-theme="dark"] .vault-picker::before {
   font: 500 11.5px var(--font-mono); padding: 1px 5px; border-radius: 5px;
   background: rgba(var(--rd-ink), 0.06); color: var(--text-secondary);
 }
+
+/* Welcome: the wordmark spans exactly the button row. The card becomes one
+   centred column as wide as its widest real content (the buttons); the
+   wordmark has no width of its own and fills that column. */
+.vault-picker-card { display: grid; grid-template-columns: max-content; justify-content: center; }
+.vault-picker-card > * { min-width: 0; }
+.vault-picker-card .product-name { margin-bottom: clamp(36px, 6vh, 64px); }
+.vault-picker-card .product-name .wordmark { display: block; width: 100%; }
+.vault-picker-card > .recent-list { width: 100%; max-width: none; justify-self: stretch; }
