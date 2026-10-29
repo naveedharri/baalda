@@ -552,3 +552,95 @@ html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-
 html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: 0; }
 html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { content: "Manage"; font-size: 12px; }
 html:not([data-theme="dark"]) .vault-switcher .menu-item:hover { background: var(--bg-hover); }
+
+/* ============================================================
+   Sizes follow the app's global scale (tokens.css), not the
+   enlarged mockup render. Overrides the bigger values above.
+   ============================================================ */
+html:not([data-theme="dark"]) {
+  --editor-font-size: var(--fs-lg);
+  --inline-title-size: 1.75em;
+  --inline-title-weight: 700;
+}
+html:not([data-theme="dark"]) .cm-editor .cm-line { line-height: var(--lh-body); }
+
+/* Sidebar */
+.rd-new-note { height: 32px; margin: 0 var(--sp-3) var(--sp-2); padding: 0 var(--sp-3); border-radius: var(--radius-md); font-size: var(--fs-md); }
+.rd-new-note svg { width: 14px; height: 14px; }
+html:not([data-theme="dark"]) .sidebar-header-id { padding: 8px 10px 8px 8px; border-radius: var(--radius-lg); }
+html:not([data-theme="dark"]) .vault-name { font-size: var(--fs-md); }
+html:not([data-theme="dark"]) .home-sidebar-row { min-height: 30px; border-radius: var(--radius-md); }
+html:not([data-theme="dark"]) .tree-row { min-height: 0; border-radius: var(--radius-sm); }
+html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph,
+html:not([data-theme="dark"]) .pinned-row.is-dir .tree-glyph { width: 20px; height: 20px; border-radius: 6px; }
+html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph svg { width: 12px; height: 12px; }
+html:not([data-theme="dark"]) .tree-row.selected::before { top: 6px; bottom: 6px; }
+
+/* Page top row */
+.rd-crumb { height: 24px; padding: 0 var(--sp-2); font-size: var(--fs-sm); gap: 5px; }
+.rd-crumb svg { width: 13px; height: 13px; }
+html:not([data-theme="dark"]) .editor-wrap .cm-scroller { padding-top: 28px; }
+html:not([data-theme="dark"]) .header-actions { top: calc(var(--chrome-row-h) + 10px); right: 24px; }
+.tab-label::before { width: 12px; height: 12px; margin-right: 6px; }
+html:not([data-theme="dark"]) .editor-wrap { border-radius: var(--radius-xl); }
+
+/* Account menu */
+.rd-prof { padding: 8px; gap: var(--sp-2); border-radius: var(--radius-md); }
+.rd-prof .avatar { width: 32px !important; height: 32px !important; font-size: var(--fs-xs); }
+.rd-prof-text b { font-size: var(--fs-md); }
+.rd-prof-text small { font-size: var(--fs-xs); }
+html:not([data-theme="dark"]) .account-popover,
+html:not([data-theme="dark"]) .vault-popover { border-radius: var(--radius-lg); padding: var(--sp-2); }
+html:not([data-theme="dark"]) .account-popover .menu-item,
+html:not([data-theme="dark"]) .vault-switcher .menu-item {
+  min-height: 32px;
+  padding: 4px var(--sp-2);
+  gap: var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+}
+html:not([data-theme="dark"]) .account-popover .menu-hint { font-size: var(--fs-xs); }
+html:not([data-theme="dark"]) .account-popover .menu-icon,
+html:not([data-theme="dark"]) .settings-nav .menu-icon {
+  width: 13px !important;
+  height: 13px !important;
+  padding: 5px;
+  border-radius: 6px;
+}
+
+/* Vault switcher */
+html:not([data-theme="dark"]) .vault-switcher { width: 300px; gap: 2px 6px; }
+html:not([data-theme="dark"]) .vault-switcher::before { padding: 4px 8px; font-size: 10px; }
+html:not([data-theme="dark"]) .vault-switcher .vault-card { min-height: 44px; padding: 0 var(--sp-2); gap: var(--sp-2); border-radius: var(--radius-md); }
+html:not([data-theme="dark"]) .vault-switcher .vault-card .vault-tile { width: 28px; height: 28px; border-radius: 8px; }
+html:not([data-theme="dark"]) .vault-switcher .vault-card-name { font-size: var(--fs-sm); }
+html:not([data-theme="dark"]) .vault-switcher .vault-card-sub { font-size: var(--fs-xs); }
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
+  padding: 8px 4px 7px;
+  gap: 5px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-xs);
+}
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
+  width: 13px !important;
+  height: 13px !important;
+  padding: 6px;
+  border-radius: 7px;
+}
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { font-size: var(--fs-xs); }
+
+/* Folder icons as in the mockup: a thin outline in the deep tone on a soft
+   pastel square, instead of a filled folder shape. */
+html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph,
+html:not([data-theme="dark"]) .pinned-row.is-dir .tree-glyph {
+  background: color-mix(in srgb, var(--glyph-fill, currentColor) 60%, transparent);
+}
+html:not([data-theme="dark"]) .tree-row.is-dir .tree-glyph.colored svg,
+html:not([data-theme="dark"]) .pinned-row.is-dir .tree-glyph.colored svg {
+  fill: none !important;
+  stroke-width: 2;
+}
