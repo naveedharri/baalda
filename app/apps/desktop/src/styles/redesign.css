@@ -1242,3 +1242,39 @@ html:not([data-theme="dark"]) .account-popover .menu-item { min-height: 30px; pa
 html:not([data-theme="dark"]) .account-popover .menu-hint { display: none; }
 html:not([data-theme="dark"]) .account-popover .menu-icon { width: 12px !important; height: 12px !important; padding: 4px; border-radius: 6px; }
 html:not([data-theme="dark"]) .account-popover .menu-sep { margin: 4px 6px; }
+
+/* ---- Vault switcher: compact, no wider than the sidebar ---- */
+html:not([data-theme="dark"]) .vault-switcher {
+  width: calc(var(--sidebar-layout-w, 264px) - 16px) !important;
+  min-width: 248px;
+  display: flex !important;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px;
+  border-radius: var(--radius-lg);
+}
+html:not([data-theme="dark"]) .vault-switcher::before { padding: 4px 6px 4px; }
+html:not([data-theme="dark"]) .vault-switcher .vault-card { min-height: 38px; padding: 0 6px; gap: 8px; border-radius: 8px; }
+html:not([data-theme="dark"]) .vault-switcher .vault-card .vault-tile { width: 24px !important; height: 24px !important; border-radius: 6px !important; }
+html:not([data-theme="dark"]) .vault-switcher .vault-card.current { box-shadow: none; }
+html:not([data-theme="dark"]) .vault-switcher .vault-card-sub { font-size: 11px; }
+html:not([data-theme="dark"]) .vault-switcher .vault-card-kbd { background: none; padding: 0; font-size: 10.5px; }
+html:not([data-theme="dark"]) .vault-switcher .menu-sep { margin: 4px 6px; }
+/* The three tiles go back to slim rows. */
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
+  flex-direction: row !important; justify-content: flex-start; gap: 8px;
+  padding: 3px 6px !important; min-height: 30px; background: transparent !important;
+  font-size: var(--fs-sm) !important; text-align: left; border-radius: 8px;
+}
+html:not([data-theme="dark"]) .vault-switcher .menu-item .menu-icon,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
+  width: 12px !important; height: 12px !important; padding: 4px !important; border-radius: 6px !important;
+}
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: var(--fs-sm); }
+html:not([data-theme="dark"]) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { content: none; }
+html:not([data-theme="dark"]) .vault-switcher .menu-item { min-height: 30px; padding: 3px 6px; font-size: var(--fs-sm); }
+html:not([data-theme="dark"]) .vault-switcher .menu-hint { font-size: 11px; }
