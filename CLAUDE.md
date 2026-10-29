@@ -686,16 +686,16 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   always persists the provider's returned state. One vault = one subscription (409 `already_subscribed`).
   `BILLING_MODEL=vault|team` (default `vault` until the production flip) picks the model. **`team`
   (the shipped model):** Free = 2 people per account (owner counts), 1 synced vault, MCP included,
-  no Assistant, no standalone-file sync (embeds under `attachments/` still sync), "unlimited"
+  no standalone-file sync (embeds under `attachments/` still sync), "unlimited"
   notes/storage under hidden per-vault ceilings `ABUSE_MAX_NOTES` (100000) / `ABUSE_MAX_STORAGE_MB`
   (10240). Team = $10/seat/month or $110/seat/year, `TEAM_MIN_SEATS` 3, owner buys N seats upfront
   (402 `seat_limit_reached {seats, used, pending, message}` when full; pending unexpired invites
-  reserve a seat), unlimited vaults on one account, Assistant + file sync included; managed in
+  reserve a seat), unlimited vaults on one account, file sync included; managed in
   Account Settings → Plan & Billing (per-vault usage: Vault Settings → Usage), plan named "Team" in-app (was "Pro"). Existing subscribers keep
   their price via a Polar discount on the Team seat product (ops scripts
   `scripts/billing/move-legacy-subs.ts`, `polar-spike.ts`). Old 402 codes stay emitted for old
-  desktops (`attachment_sync_requires_pro`, `housekeeper_requires_pro`, `vault_limit_reached`,
-  `member_limit_reached` now `{limit: 2, scope: 'account'}`); new: `housekeeper_requires_team`,
+  desktops (`attachment_sync_requires_pro`, `vault_limit_reached`,
+  `member_limit_reached` now `{limit: 2, scope: 'account'}`); new:
   `account_read_only`, `upgrade_in_new_app`, `transfer_retired`. **`vault` (legacy):** per-vault
   Pro; new accounts get `FREE_MAX_VAULTS` (2) unsubscribed vaults, migration 031 keeps three for
   older accounts, and an active or past-due Pro vault unlocks standalone-file sync for its members.
@@ -1076,24 +1076,6 @@ restored even if identical bytes already exist at another local path, without
 overwriting occupied paths. Legacy whole-list Pro refusals can be re-probed on
 a sync pass after a one-minute cooldown, allowing a running updated desktop to
 recover when its server is upgraded.
-
-### Baalda Assistant engine
-
-AI’s Baalda Assistant provides user-reviewed agent repairs. `http/routes/housekeeper.ts` hosts the optional
-`app/apps/server/housekeeper/index.mjs` module (override with `HOUSEKEEPER_MODULE`) without a
-static build dependency. Every request checks vault membership and a non-deleted
-`pro` subscription in `active`/`past_due` on Cloud. Self-hosters with
-`BAALDA_DEPLOYMENT=self-hosted` have access. The Apache-2.0 module uses the server-side
-OpenRouter SDK through swappable Decisions/chat adapters. Personal provider keys live in the desktop OS keychain and are supplied per inference request; the server does not persist them. Candidate reads use per-note permissions and apply/undo use
-`DocWriter.editContent` with revision/span guards under its lock. Preview tokens
-are scoped to user/vault, expire, and live in bounded process memory. No sync wire
-format or bridge timing changes. Setup, limits and isolated tests:
-[Baalda Assistant](docs/HOUSEKEEPER.md). Keys are user-owned and stored in the desktop OS keychain; inference supplies them per request. Diagnostic review sends aggregate counts only and returns allowlisted next-step recommendations. Advanced diagnostic tools live in AI (the Health tab is gone).
-
-Baalda Agents follow observe → investigate → propose → approve → execute → verify.
-Finding cards are data-driven; models choose allowlisted capabilities, while
-existing permission-checked tools own changes. Link and filename changes require
-concrete previews. Never interpret generated text as executable tool authority.
 
 On Cloud servers with billing on, Free vaults can register up to `ABUSE_MAX_NOTES` (100000) live
 notes under `BILLING_MODEL=team` (a hidden abuse ceiling; Free is marketed unlimited) and 20,000

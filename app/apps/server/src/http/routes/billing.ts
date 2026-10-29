@@ -1782,7 +1782,6 @@ async function readAccountBody(accountId: string, canManage: boolean) {
     limits: {
       people: plan.limits.people,
       vaults: plan.limits.vaults,
-      assistant: plan.limits.assistant,
       fileSync: plan.limits.fileSync,
     },
     lapsed: plan.lapsed,

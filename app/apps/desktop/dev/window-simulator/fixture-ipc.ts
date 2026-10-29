@@ -191,15 +191,6 @@ export function fixtureIpc(
         { name: "meeting", count: 2 },
         { name: "decision", count: 1 },
       ]);
-    case "keychain_get": {
-      const service = String(args.serviceKey ?? "");
-      if (!service.startsWith("steward:openrouter:")) return { handled: false };
-      return yes(
-        services.has(service)
-          ? (services.get(service) ?? null)
-          : "DEMO_ONLY_NOT_A_VALID_API_KEY",
-      );
-    }
     case "keychain_set":
       services.set(String(args.serviceKey), String(args.value));
       return yes();

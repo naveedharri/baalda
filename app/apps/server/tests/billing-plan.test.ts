@@ -98,7 +98,7 @@ describe("team model, billing not enforced", () => {
     const acct = await account(owner);
     const org = await vaultOn(acct, owner);
     const plan = await resolveAccountPlan(pool, { orgId: org });
-    expect(plan.limits).toEqual({ people: null, vaults: null, storageBytes: null, notesPerVault: null, assistant: true, fileSync: true });
+    expect(plan.limits).toEqual({ people: null, vaults: null, storageBytes: null, notesPerVault: null, fileSync: true });
     expect(await checkInviteSeat(pool, org, "a@x.com")).toBeNull();
     expect(await canSyncAttachments(org)).toBe(true);
   });
@@ -138,7 +138,6 @@ describe("team model, enforced", () => {
     expect(plan.seatsUsed).toBe(2);
     expect(plan.vaultsAttached).toBe(2);
     expect(plan.limits.people).toBe(2);
-    expect(plan.limits.assistant).toBe(false);
     expect(plan.limits.fileSync).toBe(false);
     expect(plan.limits.notesPerVault).toBe(config.abuseMaxNotes);
     expect(plan.limits.storageBytes).toBe(config.abuseMaxStorageMb * 1024 * 1024);
@@ -169,7 +168,6 @@ describe("team model, enforced", () => {
     const org = await vaultOn(acct, owner);
     const plan = await resolveAccountPlan(pool, { userId: owner });
     expect(plan.plan).toBe("team");
-    expect(plan.limits.assistant).toBe(true);
     expect(plan.limits.fileSync).toBe(true);
     expect(plan.limits.people).toBeNull();
     await pool.query(`UPDATE billing_accounts SET complimentary_until = now() - interval '1 day' WHERE id = $1`, [acct]);
