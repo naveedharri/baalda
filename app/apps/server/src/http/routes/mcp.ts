@@ -200,6 +200,9 @@ export function createMcpRoutes(deps: McpDeps): Hono {
       );
     }
 
+    // The per-call vault keys this token unwrapped (auth.vaultKeys) live only
+    // for this request: zero them however it ends.
+    try {
     let body: unknown;
     try {
       body = await c.req.json();
@@ -289,6 +292,9 @@ export function createMcpRoutes(deps: McpDeps): Hono {
 
     if (responses.length === 0) return c.body(null, 202); // notifications only
     return c.json(Array.isArray(body) ? responses : responses[0]);
+    } finally {
+      zeroAuthKeys(auth);
+    }
   });
 
   // No server-initiated stream; be explicit so clients fall back to POST-only.
@@ -327,6 +333,7 @@ export function createMcpRoutes(deps: McpDeps): Hono {
     // the new token's secret so it works with no desktop online. Refused
     // before anything is minted when a keyed vault's key is missing.
     let vaultKeys: Array<{ vaultId: string; key: Buffer; generation: number }> = [];
+    try {
     if (vaultKeysEnabled()) {
       const mint = await keysForMint(org, c.req.header(VK_HEADER), pool);
       if (mint.missing.length > 0) {
@@ -345,6 +352,9 @@ export function createMcpRoutes(deps: McpDeps): Hono {
     );
     // The plaintext token is returned exactly once.
     return c.json({ token, ...row }, 201);
+    } finally {
+      for (const k of vaultKeys) k.key.fill(0);
+    }
   });
 
   app.delete("/mcp/tokens/:id", async (c) => {
@@ -356,4 +366,11 @@ export function createMcpRoutes(deps: McpDeps): Hono {
   });
 
   return app;
+}
+
+/** Zero the vault keys an MCP request unwrapped for itself (never the cache's). */
+export function zeroAuthKeys(auth: { vaultKeys?: Map<string, { key: Buffer }> } | null): void {
+  if (!auth?.vaultKeys) return;
+  for (const held of auth.vaultKeys.values()) held.key.fill(0);
+  auth.vaultKeys.clear();
 }
