@@ -8,6 +8,7 @@ import {
   loadBootstrapPage,
 } from "../../yjs/bootstrap.js";
 import { getSession } from "../session.js";
+import { docCryptoOf, requireVaultKey } from "../../crypto/transport.js";
 
 /**
  * Whole-vault bootstrap download.
@@ -89,6 +90,9 @@ bootstrapRoutes.get("/vaults/:vaultId/bootstrap/:sessionId", async (c) => {
   const cursor = Number.isFinite(cursorRaw) && cursorRaw > 0 ? cursorRaw : 0;
   const maxRaw = Number.parseInt(c.req.query("maxBytes") ?? "", 10);
   const maxBytes = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : undefined;
+  // W3: a keyed vault's content needs this request's own verified key.
+  const vkr = await requireVaultKey(c, auth.vaultId);
+  if (!vkr.ok) return vkr.response;
 
   try {
     const page = await loadBootstrapPage({
@@ -97,6 +101,7 @@ bootstrapRoutes.get("/vaults/:vaultId/bootstrap/:sessionId", async (c) => {
       userId: auth.userId,
       cursor,
       maxBytes,
+      crypto: docCryptoOf(auth.vaultId, vkr),
     });
     c.header("Content-Type", BOOTSTRAP_CONTENT_TYPE);
     // ABSENT means drained — the client stops rather than having to compare a

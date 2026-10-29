@@ -9,6 +9,11 @@ import { listReadableDocsInVault, type SharedVaultReads } from "../permissions/v
 import { listEmptyDocs, loadDocDiff } from "../yjs/persistence.js";
 import { deletedNotesAmong } from "../trash/access.js";
 import { pool } from "../db/pool.js";
+import { vaultKeysEnabled } from "../crypto/config.js";
+import { vaultKeyCache } from "../crypto/key-cache.js";
+import { CLOSE_KEY_REQUIRED, KEY_REQUIRED_CODE, decodeVk, loadVkCheck } from "../crypto/transport.js";
+import { verifyVk } from "../crypto/vk-check.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
 import { observeCount } from "../metrics/sync-metrics.js";
 import {
   parseHello,
@@ -533,6 +538,10 @@ class VaultConnection {
   private unsubscribe: (() => void) | null = null;
   /** The user-addressed topic (`invitations` cap only, sync/user-events.ts). */
   private unsubscribeUser: (() => void) | null = null;
+  /** W3: releases this connection's hold on the vault key cache entry. */
+  private releaseKey: (() => void) | null = null;
+  /** W3: the key this connection verified at hello; zeroed on cleanup. */
+  private docCrypto: DocCrypto | null = null;
   private helloSeen = false;
   // Set once by cleanup(). `close` fires exactly once, so anything that outlives
   // it (an in-flight hello await) must consult this instead of relying on
@@ -659,6 +668,35 @@ class VaultConnection {
       // never let a "last active" stamp affect the handshake
     }
     if (this.closed) return; // closed while verifying — don't run the ACL query
+
+    // W3: a hello may carry the vault key. Verified against `vk_check`, it is
+    // held in the process cache for this connection (background work only);
+    // released in cleanup(). Flag off or no key: exactly today's path.
+    // A keyed vault without a valid key is refused: close 4409, err frame
+    // message `key_required` (the desktop asks a member's device for the key).
+    if (vaultKeysEnabled()) {
+      let state;
+      try {
+        state = await loadVkCheck(this.vaultId, pool);
+      } catch (err) {
+        console.error("Vault channel key check failed:", (err as Error)?.message ?? err);
+        return this.fail("key check failed");
+      }
+      if (this.closed) return;
+      if (state) {
+        const vk = decodeVk(hello.vk);
+        try {
+          if (!vk || !verifyVk(vk, this.vaultId, state.vkCheck)) {
+            return this.fail(KEY_REQUIRED_CODE, CLOSE_KEY_REQUIRED);
+          }
+          this.releaseKey = vaultKeyCache.acquire(this.vaultId, vk, state.generation);
+          // This connection's own copy for its backfill reads (never the cache).
+          this.docCrypto = { vaultId: this.vaultId, key: Buffer.from(vk), generation: state.generation };
+        } finally {
+          vk?.fill(0);
+        }
+      }
+    }
 
     try {
       this.readable = await this.deps.listReadableDocs(this.userId, this.vaultId);
@@ -1057,7 +1095,7 @@ class VaultConnection {
     const clientSv = clientSvB64 ? new Uint8Array(Buffer.from(clientSvB64, "base64")) : null;
     let diff;
     try {
-      diff = await this.deps.loadDiff(docId, clientSv);
+      diff = await this.deps.loadDiff(docId, clientSv, undefined, this.docCrypto ?? undefined);
     } catch (err) {
       console.error(`Vault channel backfill failed for ${docId}:`, err);
       return;
@@ -1598,6 +1636,14 @@ class VaultConnection {
         encodePubsubPresence({ userId: this.userId, docId: null, name, color, status }),
       );
       this.announced = false;
+    }
+    if (this.releaseKey) {
+      this.releaseKey();
+      this.releaseKey = null;
+    }
+    if (this.docCrypto) {
+      this.docCrypto.key.fill(0);
+      this.docCrypto = null;
     }
     if (this.unsubscribeUser) {
       this.unsubscribeUser();

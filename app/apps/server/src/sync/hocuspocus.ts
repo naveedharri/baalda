@@ -10,6 +10,10 @@ import { scheduleIndex } from "../index/indexer.js";
 import { formatDocName, parseDocName } from "./doc-name.js";
 import { redisExtensions } from "./redis-extension.js";
 import { isShrinkHeld, reportShrink } from "../versions/shrink-guard.js";
+import { vaultKeysEnabled } from "../crypto/config.js";
+import { KeyRequiredError, loadVkCheck, redactToken, splitSyncToken } from "../crypto/transport.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { verifyVk } from "../crypto/vk-check.js";
 
 /**
  * Hocuspocus sync server (spec 03 §3, 04 §4).
@@ -58,6 +62,8 @@ class NoteTooLargeError extends Error {
   }
 }
 
+export { KeyRequiredError };
+
 export interface SyncContext {
   docId: string;
   vaultId: string;
@@ -71,6 +77,15 @@ export interface SyncContext {
    * `context`, so `onChange` can read one field regardless of who wrote.
    */
   userId: string | null;
+  /**
+   * The vault key this socket presented (`<jwt>.<vk-b64>`), verified against
+   * `vaults.vk_check` at connect. Only for this socket's own hooks; never
+   * logged, never put in the process cache from here. Absent for an unkeyed
+   * vault or with BAALDA_VAULT_KEYS off.
+   */
+  vaultKey?: Buffer;
+  /** Generation recorded in `vaults.key_generation` when `vaultKey` was verified. */
+  vaultKeyGeneration?: number;
   /** Throttle for {@link RejectedHook}: last time this connection reported a
    *  dropped read-only edit (ms epoch). */
   lastRejectedAt?: number;
@@ -166,6 +181,9 @@ export function noteSizeRefusal(
   return null;
 }
 
+/** W3: the key a keyed doc was loaded with, per in-memory Y.Doc. */
+const docCrypto = new WeakMap<Y.Doc, DocCrypto>();
+
 export function createSyncServer(
   port: number = config.hocuspocusPort,
   onDocChanged?: DocChangedHook,
@@ -241,19 +259,24 @@ export function createSyncServer(
         throw new Error(`Unrecognized document name: ${data.documentName}`);
       }
 
+      // W3: the token may carry the vault key as `<jwt>.<vk-b64>`. Split only
+      // with the flag on; off, the token is verified exactly as before.
+      const keysOn = vaultKeysEnabled();
+      const { jwt, vk } = keysOn ? splitSyncToken(data.token) : { jwt: data.token, vk: null };
+
       let claims;
       try {
-        claims = await verifySyncToken(data.token);
+        claims = await verifySyncToken(jwt);
       } catch (err) {
         // Log WHY, not just that it failed: an empty token (the client couldn't
         // mint one) and an expired or wrong-secret token are completely different
         // faults, and "Invalid or expired sync token" alone can't tell them apart
         // — which turned a client-side retry storm into thousands of identical,
         // undiagnosable log lines.
-        const len = typeof data.token === "string" ? data.token.length : -1;
+        // Never the raw token: it may carry the vault key as a suffix.
         const code = (err as { code?: string })?.code ?? (err as Error)?.name;
         console.warn(
-          `[onAuthenticate] rejected token for ${data.documentName}: ${code} (token length ${len})`,
+          `[onAuthenticate] rejected token for ${data.documentName}: ${code} (${redactToken(data.token)})`,
         );
         throw new Error("Invalid or expired sync token");
       }
@@ -319,12 +342,26 @@ export function createSyncServer(
         data.connectionConfig.readOnly = true;
       }
 
+      // W3: a keyed vault needs this socket's own key, checked against
+      // `vk_check` (never the process cache). Unkeyed vault: today's path.
+      let vaultKey: Buffer | undefined;
+      let vaultKeyGeneration: number | undefined;
+      if (keysOn) {
+        const state = await loadVkCheck(parsed.vaultId, pool);
+        if (state) {
+          if (!vk || !verifyVk(vk, parsed.vaultId, state.vkCheck)) throw new KeyRequiredError();
+          vaultKey = vk;
+          vaultKeyGeneration = state.generation;
+        }
+      }
+
       const context: SyncContext = {
         docId: parsed.docId,
         vaultId: parsed.vaultId,
         readOnly: readOnly || shrinkHeld,
         userId: claims.userId ?? null,
         ...(shrinkHeld ? { shrinkHeld: true } : {}),
+        ...(vaultKey ? { vaultKey, vaultKeyGeneration } : {}),
       };
       return context;
     },
@@ -333,7 +370,15 @@ export function createSyncServer(
       const parsed = parseDocName(data.documentName);
       if (!parsed) return data.document;
       try {
-        const state = await loadDocState(parsed.docId);
+        // W3: a keyed vault's log is sealed; the loading connection's verified
+        // key opens it and is remembered for this in-memory doc, so every later
+        // write (any connection, or a server-side writer) seals with it.
+        const loadCtx = data.context as Partial<SyncContext> | undefined;
+        const crypto: DocCrypto | undefined = loadCtx?.vaultKey
+          ? { vaultId: parsed.vaultId, key: Buffer.from(loadCtx.vaultKey), generation: loadCtx.vaultKeyGeneration ?? 1 }
+          : undefined;
+        if (crypto) docCrypto.set(data.document, crypto);
+        const state = await loadDocState(parsed.docId, pool, crypto);
         if (state) {
           Y.applyUpdate(data.document, state, LOAD_ORIGIN);
         }
@@ -401,7 +446,13 @@ export function createSyncServer(
       // named on `ready.behind` and re-pushed. A crash loses that signal for
       // every other doc too.
       try {
-        await appendUpdate(parsed.docId, data.update);
+        // Captured synchronously above any await: the doc's remembered key, or
+        // this connection's own. Unkeyed vault: undefined, today's path.
+        const ctxKey = (data.context as Partial<SyncContext> | undefined)?.vaultKey;
+        const crypto =
+          docCrypto.get(data.document) ??
+          (ctxKey ? { vaultId: parsed.vaultId, key: Buffer.from(ctxKey), generation: (data.context as Partial<SyncContext>).vaultKeyGeneration ?? 1 } : undefined);
+        await appendUpdate(parsed.docId, data.update, pool, config.compactionThreshold, crypto);
       } catch (err) {
         console.error(
           `[sync] failed to persist an update for ${data.documentName}; the client stays ahead and will re-push:`,
