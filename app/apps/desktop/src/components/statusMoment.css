@@ -86,3 +86,9 @@
   box-shadow: 0 6px 14px -6px rgba(11, 10, 16, 0.5);
 }
 @media (prefers-reduced-motion: reduce) { .sm-pop { transition: opacity 120ms ease; } }
+
+/* Editor faces: the pop-out drops down right-aligned so it stays in the window,
+   and hides while the roster (click) is open. */
+.sm-pop-down { left: auto; right: -6px; align-items: flex-end; transform: translate(0, -12px) scale(0.3); transform-origin: 85% 0%; }
+.sm-host:hover > .sm-pop-down { transform: translate(0, 0) scale(1); }
+.presence-bar.open .sm-pop { opacity: 0 !important; transform: translate(0, -12px) scale(0.3) !important; }

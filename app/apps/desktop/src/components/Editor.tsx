@@ -955,8 +955,8 @@ export function Editor() {
               <div
                 className="presence-controls"
                 ref={presenceRef}
-                onMouseEnter={openRoster}
-                onMouseLeave={scheduleCloseRoster}
+                // Redesign preview: hover shows the status pop-out; the roster
+                // (and Ping) opens on click.
                 onFocus={openRoster}
                 onBlur={(e) => {
                   // Ignore focus moving between the stack and a Ping button
