@@ -1983,3 +1983,13 @@ html:not([data-theme="dark"]) .account-vault-page > .subhead { margin: 22px 0 8p
   .settings-content.rd-tab-in { animation: rd-tab-glide 170ms var(--ease) both; }
   .settings-nav .menu-item { transition: background-color 120ms var(--ease), color 120ms var(--ease); }
 }
+
+/* ---- Folder open / close: no sliding rows over each other ----
+   App.css glides every row's `top`, but a folder's new children appear at
+   once in their final slot, so the sliding siblings pass over them (rows
+   drawn twice). Rows now settle instantly and only the new children fade in. */
+.filetree-scroll .tree-rowwrap { transition: none !important; will-change: auto; }
+@keyframes rd-row-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: no-preference) {
+  .filetree-scroll .tree-row.rd-row-new { animation: rd-row-in 170ms var(--ease) both; }
+}

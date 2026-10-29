@@ -86,6 +86,28 @@ import type { ShareTarget } from "./ShareDialog";
  *  Members and access is where access is managed meanwhile. */
 const SHOW_SHARE_ITEM = false;
 
+/**
+ * Redesign: give a just-opened folder's child rows `.rd-row-new` (a short fade,
+ * redesign.css) as they mount. Watches for ~400ms so lazily loaded children
+ * fade too; each row fades once. Scrolling and other rows are untouched.
+ */
+function fadeInChildren(folder: string): void {
+  const prefix = `${folder}/`;
+  const seen = new Set<string>();
+  const until = performance.now() + 400;
+  const tick = () => {
+    for (const row of document.querySelectorAll<HTMLElement>(".filetree-scroll [data-tree-path]")) {
+      const path = row.dataset.treePath ?? "";
+      if (!path.startsWith(prefix) || seen.has(path)) continue;
+      seen.add(path);
+      row.classList.add("rd-row-new");
+      window.setTimeout(() => row.classList.remove("rd-row-new"), 260);
+    }
+    if (performance.now() < until) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
 const ShareDialog = lazy(() =>
   import("./ShareDialog").then((m) => ({ default: m.ShareDialog })),
 );
@@ -609,6 +631,8 @@ export function FileTree() {
     }
     // Arborist applies the fold after this callback; read it next frame.
     requestAnimationFrame(() => setTreeCollapsed(!anyFolderOpen()));
+    // Redesign: the folder's children fade in as they appear (redesign.css).
+    fadeInChildren(id);
   };
 
   // Stable: it goes into the row context (`rowShared`), whose identity must
