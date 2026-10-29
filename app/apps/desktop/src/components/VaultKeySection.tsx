@@ -52,6 +52,13 @@ export function VaultKeySection({
   const [confirmEncrypt, setConfirmEncrypt] = useState(false);
   const [fullyEncrypted, setFullyEncrypted] = useState<boolean | undefined>(undefined);
   const [, bump] = useState(0);
+  // Revealed words belong to ONE vault: a vault switch hides them (they must
+  // never be shown under another vault's name).
+  useEffect(() => {
+    setShown(null);
+    setRestoreText("");
+    setRestoring(false);
+  }, [vaultId]);
   useEffect(() => {
     const off = onVaultKeyEvent((e) => {
       if (e.kind === "vault") bump((n) => n + 1);
@@ -188,7 +195,15 @@ export function VaultKeySection({
                   filters: [{ name: "Text", extensions: ["txt"] }],
                 });
                 if (!dest) return;
-                await ipc.saveTextFile(dest, vaultKeyFileText(vaultName, vaultId, vk));
+                try {
+                  await ipc.saveTextFile(dest, vaultKeyFileText(vaultName, vaultId, vk));
+                } catch (e) {
+                  // The refusal (inside a vault folder, a link) is plain words.
+                  toast(e instanceof Error ? e.message : String(e), "error");
+                  return;
+                } finally {
+                  vk.fill(0);
+                }
                 toast("Vault key saved.");
               }}
             >
