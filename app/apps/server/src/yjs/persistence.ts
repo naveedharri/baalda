@@ -3,6 +3,7 @@ import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { config } from "../config.js";
 import { vaultKeyCache } from "../crypto/key-cache.js";
+import { KeyRequiredError } from "../crypto/transport.js";
 import {
   assertWritableWithoutKey,
   openDocBytes,
@@ -709,8 +710,53 @@ async function compactOnce(docId: string, db: Queryable, given?: DocCrypto): Pro
   }
   try {
     await compactLocked(docId, db, crypto);
+  } catch (err) {
+    // Fail closed, keep everything: a seal that does not verify leaves the log
+    // untouched (the check runs before any write). Compaction retries later.
+    if (err instanceof SealVerifyError) {
+      console.error(`[compact] ${err.message}`);
+      return;
+    }
+    throw err;
   } finally {
     cachedCopy?.fill(0);
+  }
+}
+
+/** Thrown when a sealed snapshot does not round-trip; nothing is written. */
+export class SealVerifyError extends Error {
+  constructor(docId: string) {
+    super(`sealed snapshot for ${docId} failed verification; compaction skipped`);
+    this.name = "SealVerifyError";
+  }
+}
+
+/** Exposed for tests: replace to simulate a bad seal. */
+export const sealVerifyHooks = { open: openDocBytes };
+
+function verifySealedSnapshot(
+  crypto: DocCrypto,
+  docId: string,
+  sealed: Buffer,
+  plain: Buffer,
+  expected: Y.Doc,
+): void {
+  let opened: Buffer | null;
+  try {
+    opened = sealVerifyHooks.open(crypto, "doc_snapshots.snapshot", docId, sealed, null);
+  } catch {
+    throw new SealVerifyError(docId);
+  }
+  if (!opened || !opened.equals(plain)) throw new SealVerifyError(docId);
+  const check = new Y.Doc();
+  try {
+    Y.applyUpdate(check, new Uint8Array(opened));
+    const same =
+      bytesEqual(Y.encodeStateVector(check), Y.encodeStateVector(expected)) &&
+      check.getText("content").toString() === expected.getText("content").toString();
+    if (!same) throw new SealVerifyError(docId);
+  } finally {
+    check.destroy();
   }
 }
 
@@ -727,6 +773,17 @@ async function compactLocked(docId: string, db: Queryable, crypto: DocCrypto | u
       [docId],
     );
     if (raw.rows.length === 0) return;
+    // W3 data-loss rule: a keyed compaction never deletes PLAINTEXT rows.
+    // Folding a legacy plaintext row into a sealed snapshot would null the
+    // plaintext, which is a separate, delayed, reversible step (not built).
+    // Mixed logs therefore stay as they are; reads still work.
+    if (crypto) {
+      const snapRow = snap.rows[0];
+      const plaintextLeft =
+        (snapRow && snapRow.snapshot !== null && !snapRow.snapshot_enc) ||
+        raw.rows.some((r) => !r.update_enc);
+      if (plaintextLeft) return;
+    }
     const opened = openParts(docId, crypto, snap.rows[0], raw.rows);
     const updates = { rows: opened.rows };
 
@@ -744,6 +801,11 @@ async function compactLocked(docId: string, db: Queryable, crypto: DocCrypto | u
       // W3: a keyed doc's snapshot goes only into `snapshot_enc`.
       const merged = crypto ? null : mergedPlain;
       const mergedEnc = crypto ? sealDocBytes(crypto, "doc_snapshots.snapshot", docId, mergedPlain) : null;
+      // Verify before replace: the sealed snapshot must decrypt to exactly the
+      // merged bytes AND decode to the same doc (state vector + text) before
+      // any row is replaced or deleted. Any mismatch throws, so the
+      // transaction rolls back and the log stays as it was.
+      if (mergedEnc && crypto) verifySealedSnapshot(crypto, docId, mergedEnc, mergedPlain, doc);
 
       // THIRD belt: never move the snapshot BACKWARDS. `seq` is the
       // `doc_updates.id` high-water mark the snapshot absorbed, so a merge that
@@ -822,8 +884,16 @@ export async function resetDocCrdt(
     if (content.length > 0) doc.getText("content").insert(0, content);
     const snapshot = Buffer.from(Y.encodeStateAsUpdate(doc));
     const stateVector = Buffer.from(Y.encodeStateVector(doc));
-    // W3: no sealed reset yet; refuse rather than write plaintext into a keyed vault.
+    // W3: no sealed reset yet; refuse rather than write plaintext into a keyed
+    // vault. Also refuse whenever sealed rows exist, flag on or off: deleting
+    // rows nobody here can read is never a reset this server may do.
     await assertWritableWithoutKey(docId, undefined, db);
+    const sealed = await db.query<{ sealed: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM doc_updates WHERE doc_id = $1 AND update_enc IS NOT NULL)
+           OR EXISTS (SELECT 1 FROM doc_snapshots WHERE doc_id = $1 AND snapshot_enc IS NOT NULL) AS sealed`,
+      [docId],
+    );
+    if (sealed.rows[0]?.sealed) throw new KeyRequiredError();
     await db.query("DELETE FROM doc_updates WHERE doc_id = $1", [docId]);
     await db.query(
       `INSERT INTO doc_snapshots (doc_id, snapshot, state_vector, seq, updated_at)

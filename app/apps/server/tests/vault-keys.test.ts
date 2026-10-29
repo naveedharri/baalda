@@ -120,6 +120,27 @@ describe("vault key routes", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("never overwrites key material (wraps, account keys, device keys)", async () => {
+    const s = await setup();
+    await init(s);
+    const path = `/vaults/${s.vaultId}/keys/wraps`;
+    const first = b64(randomBytes(80));
+    await call(s.owner, "POST", path, { userId: s.member.userId, generation: 1, sealedVk: first }, s.vk);
+    await call(s.owner, "POST", path, { userId: s.member.userId, generation: 1, sealedVk: b64(randomBytes(80)) }, s.vk);
+    const mine = await (await call(s.member, "GET", `/vaults/${s.vaultId}/keys/mine`)).json();
+    expect(mine.wraps[0].sealedVk).toBe(first);
+
+    const pk = b64(randomBytes(32));
+    expect((await call(s.owner, "PUT", "/me/keys", { publicKey: pk })).status).toBe(200);
+    expect((await call(s.owner, "PUT", "/me/keys", { publicKey: pk })).status).toBe(200);
+    expect((await call(s.owner, "PUT", "/me/keys", { publicKey: b64(randomBytes(32)) })).status).toBe(409);
+    expect((await (await call(s.owner, "GET", "/me/keys")).json()).publicKey).toBe(pk);
+
+    const dk = b64(randomBytes(64));
+    expect((await call(s.owner, "PUT", "/me/devices/d1/key", { privWrapped: dk })).status).toBe(200);
+    expect((await call(s.owner, "PUT", "/me/devices/d1/key", { privWrapped: b64(randomBytes(64)) })).status).toBe(409);
+  });
+
   it("me/keys and device keys round-trip", async () => {
     const s = await setup();
     const pk = b64(randomBytes(32));

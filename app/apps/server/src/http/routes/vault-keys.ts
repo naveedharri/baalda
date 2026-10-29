@@ -204,8 +204,7 @@ export function createVaultKeyRoutes(): Hono {
     await pool.query(
       `INSERT INTO vault_key_wraps (vault_id, user_id, generation, sealed_vk, sealed_by_user_id)
        VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (vault_id, user_id, generation)
-       DO UPDATE SET sealed_vk = EXCLUDED.sealed_vk, sealed_by_user_id = EXCLUDED.sealed_by_user_id, created_at = now()`,
+       ON CONFLICT (vault_id, user_id, generation) DO NOTHING`,
       [vaultId, userId, body.generation, sealedVk, session.userId],
     );
     await pool.query("DELETE FROM vault_key_requests WHERE vault_id = $1 AND user_id = $2", [vaultId, userId]);
@@ -242,10 +241,18 @@ export function createVaultKeyRoutes(): Hono {
     }
     await pool.query(
       `INSERT INTO user_keys (user_id, public_key, priv_wrapped_recovery) VALUES ($1, $2, $3)
-       ON CONFLICT (user_id) DO UPDATE SET public_key = EXCLUDED.public_key,
-         priv_wrapped_recovery = EXCLUDED.priv_wrapped_recovery`,
+       ON CONFLICT (user_id) DO NOTHING`,
       [session.userId, publicKey, recovery],
     );
+    // Never replace key material: wraps sealed to the old public key would be
+    // orphaned. Same key again = idempotent success; a different one = 409.
+    const { rows: cur } = await pool.query<{ public_key: Buffer }>(
+      "SELECT public_key FROM user_keys WHERE user_id = $1",
+      [session.userId],
+    );
+    if (!cur[0]?.public_key.equals(publicKey)) {
+      return c.json({ error: "Your account already has keys", code: "keys_exist" }, 409);
+    }
     return c.json({ saved: true });
   });
 
@@ -261,9 +268,16 @@ export function createVaultKeyRoutes(): Hono {
     if (!privWrapped) return c.json({ error: "privWrapped is required", code: "invalid_argument" }, 400);
     await pool.query(
       `INSERT INTO user_device_keys (user_id, device_id, priv_wrapped) VALUES ($1, $2, $3)
-       ON CONFLICT (user_id, device_id) DO UPDATE SET priv_wrapped = EXCLUDED.priv_wrapped`,
+       ON CONFLICT (user_id, device_id) DO NOTHING`,
       [session.userId, deviceId, privWrapped],
     );
+    const { rows: cur } = await pool.query<{ priv_wrapped: Buffer }>(
+      "SELECT priv_wrapped FROM user_device_keys WHERE user_id = $1 AND device_id = $2",
+      [session.userId, deviceId],
+    );
+    if (!cur[0]?.priv_wrapped.equals(privWrapped)) {
+      return c.json({ error: "This device already has a key", code: "device_key_exists" }, 409);
+    }
     return c.json({ saved: true });
   });
 

@@ -1,3 +1,4 @@
+import { openDocBytes, type DocCrypto } from "../crypto/doc-crypto.js";
 import { randomUUID } from "node:crypto";
 import { gzip } from "node:zlib";
 import { promisify } from "node:util";
@@ -138,8 +139,8 @@ export async function createBootstrapSession(input: CreateSessionInput): Promise
           sized AS (
             SELECT n.id AS doc_id,
                    n.rel_path,
-                   COALESCE(octet_length(s.snapshot), 0)
-                     + COALESCE((SELECT sum(octet_length(u.update))
+                   COALESCE(octet_length(COALESCE(s.snapshot_enc, s.snapshot)), 0)
+                     + COALESCE((SELECT sum(octet_length(COALESCE(u.update_enc, u.update)))
                                    FROM doc_updates u WHERE u.doc_id = n.id), 0) AS bytes
               FROM ids i
               JOIN notes n ON n.id = i.doc_id AND n.vault_id = $3 AND n.deleted_at IS NULL
@@ -212,6 +213,8 @@ export interface LoadPageInput {
   cursor: number;
   maxBytes?: number;
   db?: pg.Pool;
+  /** W3: this request's verified vault key; sealed rows need it (else key_required). */
+  crypto?: DocCrypto;
   /** Test seam: counts statements to prove a page is O(1) queries, not O(docs). */
   onQuery?: (sql: string) => void;
 }
@@ -276,14 +279,20 @@ async function loadPageLocked(input: LoadPageInput): Promise<BootstrapPageResult
 
     const ids = take.map((t) => t.doc_id);
     const [snapshots, updates, paths] = [
-      await q<{ doc_id: string; snapshot: Buffer }>(
-        "SELECT doc_id, snapshot FROM doc_snapshots WHERE doc_id = ANY($1::text[])",
+      (await q<{ doc_id: string; snapshot: Buffer | null; snapshot_enc: Buffer | null }>(
+        "SELECT doc_id, snapshot, snapshot_enc FROM doc_snapshots WHERE doc_id = ANY($1::text[])",
         [ids],
-      ),
-      await q<{ doc_id: string; update: Buffer }>(
-        "SELECT doc_id, update FROM doc_updates WHERE doc_id = ANY($1::text[]) ORDER BY doc_id, id",
+      )).map((r) => ({
+        doc_id: r.doc_id,
+        snapshot: openDocBytes(input.crypto, "doc_snapshots.snapshot", r.doc_id, r.snapshot_enc, r.snapshot),
+      })),
+      (await q<{ doc_id: string; update: Buffer | null; update_enc: Buffer | null }>(
+        "SELECT doc_id, update, update_enc FROM doc_updates WHERE doc_id = ANY($1::text[]) ORDER BY doc_id, id",
         [ids],
-      ),
+      )).map((r) => ({
+        doc_id: r.doc_id,
+        update: openDocBytes(input.crypto, "doc_updates.update", r.doc_id, r.update_enc, r.update) ?? Buffer.alloc(0),
+      })),
       await q<{ id: string; rel_path: string }>(
         "SELECT id, rel_path FROM notes WHERE id = ANY($1::text[])",
         [ids],

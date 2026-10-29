@@ -13,6 +13,7 @@ import { vaultKeysEnabled } from "../crypto/config.js";
 import { vaultKeyCache } from "../crypto/key-cache.js";
 import { CLOSE_KEY_REQUIRED, KEY_REQUIRED_CODE, decodeVk, loadVkCheck } from "../crypto/transport.js";
 import { verifyVk } from "../crypto/vk-check.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
 import { observeCount } from "../metrics/sync-metrics.js";
 import {
   parseHello,
@@ -539,6 +540,8 @@ class VaultConnection {
   private unsubscribeUser: (() => void) | null = null;
   /** W3: releases this connection's hold on the vault key cache entry. */
   private releaseKey: (() => void) | null = null;
+  /** W3: the key this connection verified at hello; zeroed on cleanup. */
+  private docCrypto: DocCrypto | null = null;
   private helloSeen = false;
   // Set once by cleanup(). `close` fires exactly once, so anything that outlives
   // it (an in-flight hello await) must consult this instead of relying on
@@ -687,6 +690,8 @@ class VaultConnection {
             return this.fail(KEY_REQUIRED_CODE, CLOSE_KEY_REQUIRED);
           }
           this.releaseKey = vaultKeyCache.acquire(this.vaultId, vk, state.generation);
+          // This connection's own copy for its backfill reads (never the cache).
+          this.docCrypto = { vaultId: this.vaultId, key: Buffer.from(vk), generation: state.generation };
         } finally {
           vk?.fill(0);
         }
@@ -1090,7 +1095,7 @@ class VaultConnection {
     const clientSv = clientSvB64 ? new Uint8Array(Buffer.from(clientSvB64, "base64")) : null;
     let diff;
     try {
-      diff = await this.deps.loadDiff(docId, clientSv);
+      diff = await this.deps.loadDiff(docId, clientSv, undefined, this.docCrypto ?? undefined);
     } catch (err) {
       console.error(`Vault channel backfill failed for ${docId}:`, err);
       return;
@@ -1635,6 +1640,10 @@ class VaultConnection {
     if (this.releaseKey) {
       this.releaseKey();
       this.releaseKey = null;
+    }
+    if (this.docCrypto) {
+      this.docCrypto.key.fill(0);
+      this.docCrypto = null;
     }
     if (this.unsubscribeUser) {
       this.unsubscribeUser();

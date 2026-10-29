@@ -23,6 +23,8 @@ import {
   type DocApplyItem,
 } from "../../sync/doc-batch.js";
 import { getSession } from "../session.js";
+import { docCryptoOf, requireVaultKey } from "../../crypto/transport.js";
+import type { DocCrypto } from "../../crypto/doc-crypto.js";
 import { ACCOUNT_READ_ONLY_BODY, ACCOUNT_READ_ONLY_MESSAGE, refusedForBilling } from "../../permissions/http-gates.js";
 import { ORIGIN_HEADER } from "./registry.js";
 import type {
@@ -332,6 +334,14 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
     const body = await c.req.json().catch(() => null);
     const items = readItems(body, config.batchMaxNotes);
     if (!Array.isArray(items)) return c.json(items, 400);
+    // W3: any item carrying state into a keyed vault needs this request's key,
+    // checked BEFORE registration so a refusal registers nothing.
+    let seedCrypto: DocCrypto | undefined;
+    if (items.some((raw) => (raw as { state?: unknown } | null)?.state != null)) {
+      const vkr = await requireVaultKey(c, auth.vaultId);
+      if (!vkr.ok) return vkr.response;
+      seedCrypto = docCryptoOf(auth.vaultId, vkr);
+    }
 
     const parsed = items.map((raw, index) => {
       const it = (raw ?? {}) as Partial<NoteBatchItemWithState>;
@@ -523,7 +533,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
     // guard, seed origin, indexing). Quota and permission refusals above never
     // reach this point, so they wrote neither a row nor state.
     if (seedCandidates.length > 0) {
-      const seeded = await seedRegistered(auth.vaultId, auth.userId, seedCandidates);
+      const seeded = await seedRegistered(auth.vaultId, auth.userId, seedCandidates, seedCrypto);
       for (const [index, fields] of seeded) results[index] = { ...results[index], ...fields };
     }
 
@@ -644,6 +654,11 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
     async (c) => {
       const auth = await gate(c);
       if (auth instanceof Response) return auth;
+      // W3: a keyed vault's push needs this request's own verified key
+      // (409 key_required, nothing written). Unkeyed: undefined, today's path.
+      const vkr = await requireVaultKey(c, auth.vaultId);
+      if (!vkr.ok) return vkr.response;
+      const crypto = docCryptoOf(auth.vaultId, vkr);
       const body = await c.req.json().catch(() => null);
       const items = readItems(body, config.batchMaxDocs);
       if (!Array.isArray(items)) return c.json(items, 400);
@@ -760,7 +775,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       await runPool(readOnly, config.backfillConcurrency, async (p) => {
         let covered = false;
         try {
-          covered = await serverDocCoversUpdate(auth.vaultId, p.item.docId, p.item.update);
+          covered = await serverDocCoversUpdate(auth.vaultId, p.item.docId, p.item.update, crypto);
         } catch {
           covered = false;
         }
@@ -777,7 +792,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       const applied = await applyDocPushBatch(
         auth.vaultId,
         permitted.map((p) => p.item),
-        { userId: auth.userId },
+        { userId: auth.userId, crypto },
       );
       applied.forEach((out, i) => {
         const index = permitted[i].index;

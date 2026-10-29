@@ -92,7 +92,7 @@ export const vaultKeyHeader: MiddlewareHandler = async (c, next) => {
 };
 
 export type VaultKeyResult =
-  | { ok: true; key: Buffer | null; keyed: boolean }
+  | { ok: true; key: Buffer | null; keyed: boolean; generation?: number }
   | { ok: false; response: Response };
 
 /**
@@ -109,7 +109,9 @@ export async function requireVaultKey(
   const state = await loadVkCheck(vaultId, db);
   if (!state) return { ok: true, key: null, keyed: false };
   const vk = (c.get("presentedVk" as never) as Buffer | undefined) ?? decodeVk(c.req.header(VK_HEADER));
-  if (vk && verifyVk(vk, vaultId, state.vkCheck)) return { ok: true, key: vk, keyed: true };
+  if (vk && verifyVk(vk, vaultId, state.vkCheck)) {
+    return { ok: true, key: vk, keyed: true, generation: state.generation };
+  }
   return {
     ok: false,
     response: c.json(
@@ -117,4 +119,12 @@ export async function requireVaultKey(
       409,
     ),
   };
+}
+
+/** The request's verified key as a persistence `DocCrypto`, or undefined (unkeyed). */
+export function docCryptoOf(
+  vaultId: string,
+  r: { key: Buffer | null; generation?: number },
+): { vaultId: string; key: Buffer; generation: number } | undefined {
+  return r.key ? { vaultId, key: r.key, generation: r.generation ?? 1 } : undefined;
 }
