@@ -73,6 +73,15 @@ describe("keyed index catch-up drain", () => {
     expect(await pendingCount(vaultId)).toBe(150);
   });
 
+  it("a batch whose notes were all deleted meanwhile does not stop the drain", async () => {
+    const { vaultId, key, ids } = await keyedVaultWithQueue(250);
+    // The oldest 100 (the whole first batch) were deleted before the drain.
+    await pool.query("UPDATE notes SET deleted_at = now() WHERE id = ANY($1::text[])", [ids.slice(0, 100)]);
+    vaultKeyCache.acquire(vaultId, key, 1);
+    expect(await catchUpIndex(vaultId, pool, { batchSize: 100, throttleMs: 0 })).toBe(150);
+    expect(await pendingCount(vaultId)).toBe(0);
+  });
+
   it("a note that keeps failing is passed over, not retried forever", async () => {
     const { vaultId, key, ids } = await keyedVaultWithQueue(30);
     vaultKeyCache.acquire(vaultId, key, 1);

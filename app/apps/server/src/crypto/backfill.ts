@@ -534,6 +534,7 @@ export async function catchUpIndex(
     if (!crypto) break;
     let n = 0;
     let read = 0;
+    let removed = 0;
     try {
       // queued_at as TEXT: a JS Date would drop the microseconds the delete matches on.
       const { rows }: { rows: { doc_id: string; queued_at: string }[] } = await db.query<{ doc_id: string; queued_at: string }>(
@@ -552,10 +553,11 @@ export async function catchUpIndex(
           if (await indexDoc(doc_id, db, crypto)) n += 1;
           // A deferral inside indexDoc re-queued with a newer queued_at, so this
           // delete matches nothing and the row survives for the next run.
-          await db.query("DELETE FROM index_pending WHERE doc_id = $1 AND queued_at = $2::timestamptz", [
+          const del = await db.query("DELETE FROM index_pending WHERE doc_id = $1 AND queued_at = $2::timestamptz", [
             doc_id,
             queued_at,
           ]);
+          removed += del.rowCount ?? 0;
         } catch (err) {
           console.error(`[backfill] index catch-up failed for ${doc_id}:`, err);
         }
@@ -565,9 +567,11 @@ export async function catchUpIndex(
     }
     total += n;
     if (n > 0) inc("backfill.index_catchup", n);
-    // The end of the queue, or a batch that indexed nothing (every row failed
-    // or was deferred again): stop, the next kick or tick tries again.
-    if (read < limit || n === 0) break;
+    // The end of the queue, or a batch that made no progress (every row failed
+    // or was deferred again): stop, the next kick or tick tries again. A row
+    // handled without an index write (its note was deleted meanwhile) is
+    // progress too, so a batch of deleted notes does not stop the drain.
+    if (read < limit || (n === 0 && removed === 0)) break;
   }
   return total;
 }
