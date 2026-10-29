@@ -1575,3 +1575,22 @@ html:not([data-theme="dark"]) .account-popover .menu-hint { display: inline !imp
 /* Synced badge: same breathing room on the left as above and below. */
 html:not([data-theme="dark"]) .header-actions { padding-left: 8px !important; }
 html:not([data-theme="dark"]) .header-actions .sync-badge { padding-left: 11px; padding-right: 12px; gap: 6px; }
+.rd-status-field.is-set .rd-status-field-main { color: var(--text-primary); }
+.rd-status-field.is-set .rd-status-set-icon { color: var(--accent); }
+.rd-status-set-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rd-status-set-text b { font-weight: 500; }
+.rd-status-set-text small { color: var(--text-tertiary); font-size: 12.5px; }
+/* Menu labels never truncate; the grey hint gives way first. */
+html:not([data-theme="dark"]) .account-popover .menu-item-label { flex: none; }
+html:not([data-theme="dark"]) .account-popover .menu-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* View-only chip: warm amber instead of black. */
+.rd-viewonly {
+  background: #fff4d9 !important; color: #5c3d00 !important;
+  box-shadow: 0 0 0 1px #f0d48f, 0 12px 28px -14px rgba(122, 78, 0, 0.45) !important;
+}
+.rd-viewonly svg { color: #c98a12 !important; }
+.rd-viewonly-msg { color: #8a6a2a !important; }
+.rd-viewonly-who { color: #8a6a2a !important; border-left-color: #f0d48f !important; }
+.rd-viewonly-ask { background: #c98a12 !important; color: #fff !important; }
+.rd-viewonly-ask:hover:not(:disabled) { background: #b07a10 !important; }

@@ -46,14 +46,18 @@ export function StatusPicker() {
           ))}
         </div>
       ) : (
-        <button type="button" className="rd-status-chip" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: ICONS[status] ?? ICONS.online }} />
-          <span className="rd-status-chip-text">
-            <b>{current!.label}</b>
-            <small>{left !== null ? `Clears in ${left >= 60 ? `${Math.round(left / 60)} h` : `${left} min`}` : "Until you change it"}</small>
-          </span>
-          <em>{open ? "Done" : "Change"}</em>
-        </button>
+        <div className="rd-status-field is-set">
+          <button type="button" className="rd-status-field-main" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+            <svg className="rd-status-set-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: ICONS[status] ?? ICONS.online }} />
+            <span className="rd-status-set-text">
+              <b>{current!.label}</b>
+              {left !== null && <small> · {left >= 60 ? `${Math.round(left / 60)} h` : `${left} min`}</small>}
+            </span>
+          </button>
+          <button type="button" className="rd-status-quick" title="Clear status" onClick={() => { set("online", null); setOpen(false); }}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
+        </div>
       )}
       {open && (<>
       <div className="rd-status-row" role="radiogroup" aria-label="Status">
