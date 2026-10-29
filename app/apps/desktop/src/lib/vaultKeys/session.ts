@@ -278,6 +278,15 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
   }
 
   /**
+   * The code teammates see in "<name>'s security key changed" for OUR account
+   * key (`shortFingerprint`), or null when this device holds none. Read-only.
+   */
+  async function accountKeyCode(): Promise<string | null> {
+    const priv = await keys.getAccountPrivateKey();
+    return priv ? shortFingerprint(publicKeyFromPrivate(priv)) : null;
+  }
+
+  /**
    * "<name>'s security key changed": the ONE human override of a pin, after
    * the person confirmed the code with them. Updates the pin, then seals.
    */
@@ -568,6 +577,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     approveDevice,
     denyDevice,
     startFreshAccountKey,
+    accountKeyCode,
     approveChangedKey,
     ensureVaultKey,
     serviceKeyRequests,

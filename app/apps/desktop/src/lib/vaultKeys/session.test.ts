@@ -406,6 +406,49 @@ describe("vault key session", () => {
     expect(await old.pendingDevices()).toEqual([]);
   });
 
+  it("lost every device from the approval wait: awaiting → fresh key → ready, vault keys untouched", async () => {
+    const srv = fakeServer();
+    srv.as("u2");
+    srv.setMe({ publicKey: toBase64(generateAccountKeypair().publicKey) }); // the lost devices' key
+    const keys = fakeKeys();
+    keys.vks.set("v9", generateVaultKey()); // a vault key held here must survive
+    const heldBefore = keys.vks.get("v9");
+    const member = session({ api: srv.api, keys, selfUserId: () => "u2", keysAllowed: () => false });
+
+    const waiting = await member.ensureAccountKeys();
+    expect(waiting.state).toBe("awaiting-device-approval");
+    expect(await member.accountKeyCode()).toBeNull();
+
+    expect(await member.startFreshAccountKey()).toBe(true);
+    const code = await member.accountKeyCode();
+    const published = fromBase64((await srv.api.getMyKeys())!.publicKey);
+    // The code the person shares is exactly what teammates' "key changed" shows.
+    expect(code).toBe(shortFingerprint(published));
+    expect(await keys.getDeviceLinkKey()).toBeNull();
+    expect(await member.ensureAccountKeys()).toEqual({ state: "ready", isNew: false });
+    expect(keys.vks.get("v9")).toBe(heldBefore);
+    expect(keys.deleteVaultKey).not.toHaveBeenCalled();
+    expect(keys.setVaultKey).not.toHaveBeenCalled();
+  });
+
+  it("a refused fresh key (429 rate_limited) stores nothing locally", async () => {
+    const srv = fakeServer();
+    srv.as("u2");
+    const old = toBase64(generateAccountKeypair().publicKey);
+    srv.setMe({ publicKey: old });
+    srv.api.putMyKeys.mockRejectedValueOnce(
+      new ApiError(429, "x", { error: "Try again in about 20 hours.", code: "rate_limited", retryAfter: 72000 }),
+    );
+    const keys = fakeKeys();
+    const member = session({ api: srv.api, keys, selfUserId: () => "u2", keysAllowed: () => false });
+    await member.ensureAccountKeys();
+    await expect(member.startFreshAccountKey()).rejects.toBeInstanceOf(ApiError);
+    expect(await keys.getAccountPrivateKey()).toBeNull();
+    expect(await member.accountKeyCode()).toBeNull();
+    expect((await srv.api.getMyKeys())!.publicKey).toBe(old);
+    expect((await member.ensureAccountKeys()).state).toBe("awaiting-device-approval");
+  });
+
   it("lost every device: a fresh account key, and a teammate approves the changed key by code", async () => {
     const srv = fakeServer();
     const pins = memPins();

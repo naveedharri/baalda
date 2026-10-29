@@ -1,4 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+import { ApiError } from "../../lib/api";
+import {
+  FRESH_KEY_EXPLAINER,
+  lostDevicesStep,
+  offersLostDevices,
+  offersRestoreInstead,
+  runFreshAccountKey,
+  waitingNoticeCode,
+  type LostDevicesStep,
+} from "../../lib/vaultKeys/recovery";
 
 import { NOTICE_PRIORITY, pickNotice } from "../../lib/noticeSlot";
 import { memberDisplayName } from "../../lib/vaultKeys/names";
@@ -61,5 +72,72 @@ describe("vault key UI", () => {
     expect(conversionLine({ ...base, isOwner: false, canManage: false, fullyEncrypted: false })).toBeNull();
     // Not keyed: nothing to convert.
     expect(conversionLine({ ...base, state: { state: "unkeyed", encryptionRequested: true }, fullyEncrypted: false })).toBeNull();
+  });
+});
+
+describe("lost every device", () => {
+  it("offers the path only while waiting for another device's approval", () => {
+    expect(offersLostDevices({ state: "awaiting-device-approval", code: "ab12 cd34" })).toBe(true);
+    expect(offersLostDevices({ state: "ready", isNew: false })).toBe(false);
+    expect(offersLostDevices({ state: "security-warning" })).toBe(false);
+    expect(offersLostDevices(null)).toBe(false);
+  });
+
+  it("restore-instead is owner-only and needs an open vault", () => {
+    expect(offersRestoreInstead({ isOwner: true, vaultId: "v1" })).toBe(true);
+    expect(offersRestoreInstead({ isOwner: false, vaultId: "v1" })).toBe(false);
+    expect(offersRestoreInstead({ isOwner: true, vaultId: null })).toBe(false);
+  });
+
+  it("steps: open, confirm, started, waiting with the code; refusals close", () => {
+    const closed: LostDevicesStep = { step: "closed" };
+    const confirm = lostDevicesStep(closed, { type: "open" });
+    expect(confirm).toEqual({ step: "confirm" });
+    expect(lostDevicesStep(confirm, { type: "started", code: "1a2b 3c4d 5e6f 7a8b" })).toEqual({
+      step: "waiting",
+      code: "1a2b 3c4d 5e6f 7a8b",
+    });
+    expect(lostDevicesStep(confirm, { type: "refused" })).toEqual(closed);
+    expect(lostDevicesStep(confirm, { type: "cancel" })).toEqual(closed);
+    expect(lostDevicesStep(confirm, { type: "restore" })).toEqual({ step: "restore" });
+    // A late "started" never reopens a closed or restoring flow.
+    expect(lostDevicesStep(closed, { type: "started", code: "x" })).toEqual(closed);
+    expect(lostDevicesStep({ step: "restore" }, { type: "started", code: "x" })).toEqual({ step: "restore" });
+  });
+
+  it("runFreshAccountKey: started with the code, not-allowed, rate-limited message, other errors rethrown", async () => {
+    const fake = (start: () => Promise<boolean>, code: string | null = "1a2b 3c4d 5e6f 7a8b") => ({
+      startFreshAccountKey: vi.fn(start),
+      accountKeyCode: vi.fn(async () => code),
+    });
+    expect(await runFreshAccountKey(fake(async () => true))).toEqual({ kind: "started", code: "1a2b 3c4d 5e6f 7a8b" });
+    const refused = fake(async () => false);
+    expect(await runFreshAccountKey(refused)).toEqual({ kind: "not-allowed" });
+    expect(refused.accountKeyCode).not.toHaveBeenCalled();
+    const msg = "Your security key was replaced 3 times in the last day. Try again in about 20 hours.";
+    expect(
+      await runFreshAccountKey(
+        fake(async () => {
+          throw new ApiError(429, "x", { error: msg, code: "rate_limited", retryAfter: 72000 });
+        }),
+      ),
+    ).toEqual({ kind: "rate-limited", message: msg });
+    await expect(
+      runFreshAccountKey(
+        fake(async () => {
+          throw new Error("network");
+        }),
+      ),
+    ).rejects.toThrow("network");
+  });
+
+  it("the waiting notice shows the new key's code only while a teammate must re-seal", () => {
+    expect(waitingNoticeCode({ freshCode: "1a2b 3c4d 5e6f 7a8b", vaultState: "waiting-for-teammate" })).toBe(
+      "1a2b 3c4d 5e6f 7a8b",
+    );
+    expect(waitingNoticeCode({ freshCode: "1a2b 3c4d 5e6f 7a8b", vaultState: "key-mismatch" })).toBeNull();
+    expect(waitingNoticeCode({ freshCode: "1a2b 3c4d 5e6f 7a8b", vaultState: null })).toBeNull();
+    expect(waitingNoticeCode({ freshCode: null, vaultState: "waiting-for-teammate" })).toBeNull();
+    expect(FRESH_KEY_EXPLAINER).toContain("Your notes on the server are not affected.");
   });
 });

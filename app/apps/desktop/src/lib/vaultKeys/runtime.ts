@@ -8,6 +8,7 @@
 
 import { api } from "../auth/authManager";
 import { rateLimitedMessage } from "../api";
+import { runFreshAccountKey, type FreshKeyResult } from "./recovery";
 import {
   createVaultKeySession,
   type AccountKeysState,
@@ -58,7 +59,9 @@ export type VaultKeyEvent =
   /** Another device asks to sign in as us: "Approve?" with its code. */
   | { kind: "pending-devices"; devices: PendingDeviceView[] }
   /** The server's churn brake refused a key step (429 rate_limited): its plain message. */
-  | { kind: "rate-limited"; message: string };
+  | { kind: "rate-limited"; message: string }
+  /** Lost every device: a new account key exists; teammates confirm `code`. */
+  | { kind: "fresh-key"; code: string };
 
 const listeners = new Set<(e: VaultKeyEvent) => void>();
 /** UI: recovery kit, "<name>'s security key changed", the "given access" toast. */
@@ -129,6 +132,7 @@ let current: {
   conversionTimer: ReturnType<typeof setTimeout> | null;
   running: Promise<void> | null;
   again: boolean;
+  account: AccountKeysState | null;
 } | null = null;
 
 function sessionFor(userId: string) {
@@ -161,7 +165,7 @@ function sessionFor(userId: string) {
   });
   api.setVaultKeyResolver((vaultId) => session.headerFor(vaultId));
   api.setKeyRequiredHandler((vaultId) => vaultKeysEnsure(vaultId));
-  current = { key, session, vaultId: null, orgId: null, timer: null, conversionTimer: null, running: null, again: false };
+  current = { key, session, vaultId: null, orgId: null, timer: null, conversionTimer: null, running: null, again: false, account: null };
   return current;
 }
 
@@ -172,6 +176,12 @@ async function runOnce(): Promise<void> {
   if (!c?.vaultId) return;
   const vaultId = c.vaultId;
   const account = await c.session.ensureAccountKeys();
+  c.account = account;
+  if (account.state === "ready") {
+    // A remembered fresh-key code that is no longer this device's key is stale.
+    const remembered = freshAccountKeyCode();
+    if (remembered && remembered !== (await c.session.accountKeyCode())) rememberFreshCode(c.key, null);
+  }
   emit({ kind: "account", state: account });
   if (account.state === "ready") {
     const devices = await c.session.pendingDevices();
@@ -341,21 +351,60 @@ export function currentVaultKeySession(): VaultKeySession | null {
 /**
  * Lost every device: start a new account key (`session.startFreshAccountKey`).
  * The server is asked first, so a churn-brake refusal (429 rate_limited)
- * changes nothing locally; its plain message goes to the toast.
+ * changes nothing locally; its plain message goes to the toast. On success the
+ * new key's code is remembered (it is a public fingerprint, not a secret) so
+ * the waiting notice can keep showing it across restarts, and the run is
+ * nudged so the vault moves to "waiting for a teammate". Local files and any
+ * vault key this device holds are never touched.
  */
-export async function startFreshAccountKey(): Promise<boolean> {
-  const session = current?.session;
-  if (!session) return false;
-  try {
-    return await session.startFreshAccountKey();
-  } catch (e) {
-    const limited = rateLimitedMessage(e);
-    if (limited) {
-      emit({ kind: "rate-limited", message: limited });
-      return false;
-    }
-    throw e;
+export async function startFreshAccountKey(): Promise<FreshKeyResult> {
+  const c = current;
+  if (!c) return { kind: "not-allowed" };
+  const result = await runFreshAccountKey(c.session);
+  if (result.kind === "rate-limited") emit({ kind: "rate-limited", message: result.message });
+  if (result.kind === "started") {
+    rememberFreshCode(c.key, result.code);
+    emit({ kind: "fresh-key", code: result.code });
+    vaultKeysNudge();
   }
+  return result;
+}
+
+const FRESH_CODES_KEY = "context.vaultKeys.freshKeyCodes.v1";
+function readFreshCodes(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(FRESH_CODES_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+const memoFreshCodes = new Map<string, string | null>();
+function rememberFreshCode(scope: string, code: string | null): void {
+  memoFreshCodes.set(scope, code);
+  try {
+    const all = readFreshCodes();
+    if (code) all[scope] = code;
+    else delete all[scope];
+    localStorage.setItem(FRESH_CODES_KEY, JSON.stringify(all));
+  } catch {
+    /* memory copy only */
+  }
+}
+
+/** The code of a fresh account key started on this computer (for this server
+ *  and user) that teammates still have to confirm, else null. */
+export function freshAccountKeyCode(): string | null {
+  const scope = current?.key;
+  if (!scope) return null;
+  if (memoFreshCodes.has(scope)) return memoFreshCodes.get(scope) ?? null;
+  return readFreshCodes()[scope] ?? null;
+}
+
+/** The last account state the open session reported (null = not asked yet). */
+export function accountKeyStateNow(): AccountKeysState | null {
+  return current?.account ?? null;
 }
 
 /**
