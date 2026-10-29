@@ -1157,3 +1157,11 @@ html:not([data-theme="dark"]) .editor-lockbanner-icon svg { width: 14px !importa
 html:not([data-theme="dark"]) .editor-lockbanner-text { display: flex !important; flex-direction: row !important; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 html:not([data-theme="dark"]) .editor-lockbanner-text strong { font-size: var(--fs-sm) !important; font-weight: 600; }
 html:not([data-theme="dark"]) .editor-lockbanner-sub { font-size: var(--fs-sm) !important; color: var(--text-secondary) !important; }
+
+/* Sidebar back to the old, roomier scale: 14px names, 36px slots. */
+html:not([data-theme="dark"]) .sidebar .tree-row,
+html:not([data-theme="dark"]) .home-sidebar-row,
+html:not([data-theme="dark"]) .pinned-name { font-size: var(--fs-md); }
+html:not([data-theme="dark"]) .sidebar .filetree-scroll .tree-row { height: 34px; margin-top: 1px; margin-bottom: 1px; }
+html:not([data-theme="dark"]) .vault-name { font-size: var(--fs-lg); }
+html:not([data-theme="dark"]) .identity-line1 { font-size: var(--fs-md); }

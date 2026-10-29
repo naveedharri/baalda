@@ -1957,7 +1957,7 @@ export function FileTree() {
             width={dim.width}
             height={dim.height - 34 - (selectMode ? 36 : 0)}
             indent={14}
-            rowHeight={38}
+            rowHeight={36}
             onToggle={onToggle}
             onActivate={onActivate}
             onRename={onRename}
