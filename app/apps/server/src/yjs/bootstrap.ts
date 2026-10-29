@@ -277,7 +277,13 @@ async function loadPageLocked(input: LoadPageInput): Promise<BootstrapPageResult
       return { body: await gzipAsync(encodeBootstrapPage([])), nextCursor: null, docs: 0, bytes: 0 };
     }
 
-    const ids = take.map((t) => t.doc_id);
+    // The plan was the readable set when the session was MADE, and a session
+    // lives `bootstrapTtlHours`: re-judge it now, so access removed since
+    // (a folder set to No access, a share revoked) is not still served by a
+    // replayed session id. Dropped docs still advance the cursor below. One
+    // readable-set read per page, on this page's snapshot.
+    const readableNow = await listReadableDocsInVault(input.userId, input.vaultId, client);
+    const ids = take.map((t) => t.doc_id).filter((id) => readableNow.has(id));
     const [snapshots, updates, paths] = [
       (await q<{ doc_id: string; snapshot: Buffer | null; snapshot_enc: Buffer | null }>(
         "SELECT doc_id, snapshot, snapshot_enc FROM doc_snapshots WHERE doc_id = ANY($1::text[])",
