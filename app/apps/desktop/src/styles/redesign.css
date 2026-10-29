@@ -893,3 +893,20 @@ html:not([data-theme="dark"]) .access-board-icon { color: #0b0a1070; }
 html:not([data-theme="dark"]) .access-board-empty { border-radius: var(--radius-lg); }
 html:not([data-theme="dark"]) .member-access-view { background: rgba(11, 10, 16, 0.05); border: 0; border-radius: var(--radius-md); padding: 3px; }
 html:not([data-theme="dark"]) .member-access-view-btn.is-active { background: #fff; box-shadow: 0 1px 3px rgba(11, 10, 16, 0.1); }
+
+/* Name and icon card, lighter: small preview inline, compact picker. */
+html:not([data-theme="dark"]) .settings-content > .vault-icon-settings { display: block; padding: var(--sp-4); }
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head { display: flex; align-items: center; gap: var(--sp-3); }
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-preview {
+  min-height: 0; background: none; box-shadow: none; border-radius: 0; display: block;
+}
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-preview .vault-tile { width: 40px; height: 40px; border-radius: 11px; box-shadow: none; }
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-text { flex: 1; }
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-actions { margin-left: auto; align-self: center; }
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-head-actions button { height: 30px; padding: 0 12px; font-size: var(--fs-sm); }
+html:not([data-theme="dark"]) .vault-icon-settings .vault-icon-customise { margin-top: var(--sp-3); }
+html:not([data-theme="dark"]) .vault-icon-colors { gap: 6px; }
+html:not([data-theme="dark"]) .vault-icon-colors .swatch { width: 16px; height: 16px; }
+html:not([data-theme="dark"]) .vault-icon-grid { grid-template-columns: repeat(auto-fill, 30px); gap: 5px; }
+html:not([data-theme="dark"]) .vault-icon-option { width: 30px; height: 30px; border-radius: 8px; }
+html:not([data-theme="dark"]) .vault-icon-option svg { width: 15px; height: 15px; }
