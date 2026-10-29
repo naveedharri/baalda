@@ -112,6 +112,12 @@ export function setLiveDocLookup(fn: LiveDocLookup | null): void {
 export async function indexDoc(
   docId: string,
   db: Queryable = defaultPool,
+  /**
+   * W3: a key the CURRENT request presented and the server verified (e.g. an
+   * MCP token's own wrap), so a keyed vault's write is searchable with no
+   * member connected. Never zeroed here; the caller owns it.
+   */
+  given?: DocCrypto,
 ): Promise<boolean> {
   const { rows } = await db.query<{
     vault_id: string;
@@ -136,6 +142,7 @@ export async function indexDoc(
   // W3: a keyed vault indexes only with a key a connected member supplied
   // (process cache COPY, zeroed below). No key held: defer, writing nothing —
   // the existing row stays as it was and the next edit or connect re-indexes.
+  if (given && given.vaultId === note.vault_id) return indexNoteRow(docId, note, given, db);
   const crypto = await indexCryptoFor(note.vault_id, db);
   if (crypto === null) return false;
   try {

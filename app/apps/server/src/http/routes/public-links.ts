@@ -13,6 +13,17 @@ import { effectivePermission } from "../../permissions/resolver.js";
 import { getSession } from "../session.js";
 import { renderNoteHtml } from "../../render/note-html.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
+import { vaultKeysEnabled } from "../../crypto/config.js";
+import { vaultCheckState, type VaultCheckState } from "../../crypto/conversion.js";
+import { decodeVk, KEY_REQUIRED_CODE, KeyRequiredError, VK_HEADER } from "../../crypto/transport.js";
+import { verifyVk } from "../../crypto/vk-check.js";
+import {
+  linkCrypto,
+  linkTokenHash,
+  openLinkToken,
+  sealLinkToken,
+  wrapLinkVk,
+} from "../../crypto/link-keys.js";
 import {
   NEVER_INLINE_MIME,
   SAFE_INLINE_MIME,
@@ -130,9 +141,41 @@ async function gate(
 interface LinkRow {
   id: string;
   doc_id: string;
-  token: string;
+  /** NULL for a link minted in a keyed vault (W3): read `token_enc` instead. */
+  token: string | null;
+  token_enc: Buffer | null;
   created_at: string;
 }
+
+const LINK_COLS = "id, doc_id, token, token_enc, created_at";
+
+/**
+ * W3: the caller's verified VK for this vault, from `X-Baalda-VK`, checked
+ * against the keyed (or pending) check. `state` null = the vault has no key in
+ * play (or the flag is off): today's path.
+ */
+async function presentedLinkKey(
+  c: Context,
+  vaultId: string,
+): Promise<{ state: VaultCheckState | null; vk: Buffer | null }> {
+  if (!vaultKeysEnabled()) return { state: null, vk: null };
+  const state = await vaultCheckState(vaultId, pool);
+  if (!state) return { state: null, vk: null };
+  const vk = decodeVk(c.req.header(VK_HEADER));
+  return { state, vk: vk && verifyVk(vk, vaultId, state.check) ? vk : null };
+}
+
+/** The link's token for a member: plaintext column, else opened from `token_enc`. */
+function readableToken(row: LinkRow, vaultId: string, vk: Buffer | null): string | null {
+  if (row.token) return row.token;
+  if (row.token_enc && vk) return openLinkToken(vk, vaultId, row.id, row.token_enc);
+  return null;
+}
+
+const KEY_REQUIRED_BODY = {
+  error: "This vault needs its key. Open Baalda on a device that has it.",
+  code: KEY_REQUIRED_CODE,
+};
 
 publicLinkApiRoutes.post("/notes/:docId/public-link", async (c) => {
   const session = await getSession(c);
@@ -144,32 +187,51 @@ publicLinkApiRoutes.post("/notes/:docId/public-link", async (c) => {
   // (DELETE below) stays allowed, since it only narrows exposure.
   if (await refusedForBilling(g.note.organizationId)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
 
+  // W3: a keyed vault needs the caller's VK (refused before anything is
+  // written); a pending vault takes it when offered, so the link is wrapped
+  // from birth and never holds up the conversion.
+  const { state, vk } = await presentedLinkKey(c, g.note.vaultId);
+  if (state && !state.pending && !vk) return c.json(KEY_REQUIRED_BODY, 409);
+
   // Create-or-get: repeated copies must return the SAME url. The unique
   // doc_id key makes the race harmless — the loser's insert is a no-op and
   // both callers read back the one surviving row.
+  const id = randomUUID();
+  const fresh = mintToken();
+  const keyed = Boolean(state && !state.pending);
   const inserted = await pool.query<LinkRow>(
-    `INSERT INTO public_links (id, doc_id, vault_id, org_id, token, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO public_links
+       (id, doc_id, vault_id, org_id, token, token_hash, token_enc, wrapped_vk, wrap_generation, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      ON CONFLICT (doc_id) DO NOTHING
-     RETURNING id, doc_id, token, created_at`,
-    [randomUUID(), docId, g.note.vaultId, g.note.organizationId, mintToken(), session.userId],
+     RETURNING ${LINK_COLS}`,
+    [
+      id,
+      docId,
+      g.note.vaultId,
+      g.note.organizationId,
+      // Keyed: never the plaintext token, only its hash + sealed copy.
+      keyed ? null : fresh,
+      linkTokenHash(fresh),
+      state && vk ? sealLinkToken(vk, g.note.vaultId, id, fresh, state.generation) : null,
+      state && vk ? wrapLinkVk(fresh, g.note.vaultId, id, vk, state.generation) : null,
+      state && vk ? state.generation : null,
+      session.userId,
+    ],
   );
   const created = inserted.rows[0] ?? null;
   const row =
     created ??
-    (
-      await pool.query<LinkRow>(
-        "SELECT id, doc_id, token, created_at FROM public_links WHERE doc_id = $1",
-        [docId],
-      )
-    ).rows[0];
+    (await pool.query<LinkRow>(`SELECT ${LINK_COLS} FROM public_links WHERE doc_id = $1`, [docId])).rows[0];
   if (!row) return c.json({ error: "Unknown note" }, 404);
+  const token = created ? fresh : readableToken(row, g.note.vaultId, vk);
+  if (!token) return c.json(KEY_REQUIRED_BODY, 409);
   return c.json(
     {
       id: row.id,
       docId: row.doc_id,
-      token: row.token,
-      url: linkUrl(row.token),
+      token,
+      url: linkUrl(token),
       createdAt: row.created_at,
       existing: created === null,
     },
@@ -184,21 +246,20 @@ publicLinkApiRoutes.get("/notes/:docId/public-link", async (c) => {
   const g = await gate(session.userId, docId);
   if (!g.ok) return c.json({ error: g.error }, g.status);
 
-  const { rows } = await pool.query<LinkRow>(
-    "SELECT id, doc_id, token, created_at FROM public_links WHERE doc_id = $1",
-    [docId],
-  );
+  const { rows } = await pool.query<LinkRow>(`SELECT ${LINK_COLS} FROM public_links WHERE doc_id = $1`, [docId]);
   const row = rows[0];
+  if (!row) return c.json({ link: null });
+  const { vk } = row.token ? { vk: null } : await presentedLinkKey(c, g.note.vaultId);
+  const token = readableToken(row, g.note.vaultId, vk);
+  if (!token) return c.json(KEY_REQUIRED_BODY, 409);
   return c.json({
-    link: row
-      ? {
-          id: row.id,
-          docId: row.doc_id,
-          token: row.token,
-          url: linkUrl(row.token),
-          createdAt: row.created_at,
-        }
-      : null,
+    link: {
+      id: row.id,
+      docId: row.doc_id,
+      token,
+      url: linkUrl(token),
+      createdAt: row.created_at,
+    },
   });
 });
 
@@ -386,23 +447,65 @@ const NOT_FOUND_HTML = pageShell(
 );
 
 interface PublicNoteRow {
+  id: string;
   doc_id: string;
   vault_id: string;
   org_id: string;
   title: string | null;
   rel_path: string;
+  token_enc: Buffer | null;
+  wrapped_vk: Buffer | null;
+  wrap_generation: number | null;
+  allow_mac: Buffer | null;
 }
 
+/** Found by the token's sha256 (migration 076 backfilled every existing row). */
 async function noteForToken(token: string): Promise<PublicNoteRow | null> {
   if (!TOKEN_RE.test(token)) return null;
   const { rows } = await pool.query<PublicNoteRow>(
-    `SELECT pl.doc_id, pl.vault_id, pl.org_id, n.title, n.rel_path
+    `SELECT pl.id, pl.doc_id, pl.vault_id, pl.org_id, n.title, n.rel_path,
+            pl.token_enc, pl.wrapped_vk, pl.wrap_generation, pl.allow_mac
        FROM public_links pl
        JOIN notes n ON n.id = pl.doc_id AND n.deleted_at IS NULL
-      WHERE pl.token = $1`,
-    [token],
+      WHERE pl.token_hash = $1
+         -- A row an older server minted during a rolling deploy has no hash yet.
+         OR (pl.token_hash IS NULL AND pl.token = $2)`,
+    [linkTokenHash(token), token],
   );
   return rows[0] ?? null;
+}
+
+/**
+ * The note's markdown for a view, or null when the link cannot be read (a
+ * keyed vault and no usable key): a miss, never an empty page. W3 only: also
+ * stamps `last_viewed_at` (hourly at most) for the conversion gate.
+ */
+async function viewMarkdown(
+  deps: PublicPageDeps,
+  row: PublicNoteRow,
+  token: string,
+): Promise<{ md: string | null } | null> {
+  const k = await linkCrypto(row, token, pool);
+  if (k === "unavailable") return null;
+  if (vaultKeysEnabled()) {
+    pool
+      .query(
+        `UPDATE public_links SET last_viewed_at = now()
+          WHERE id = $1 AND (last_viewed_at IS NULL OR last_viewed_at < now() - interval '1 hour')`,
+        [row.id],
+      )
+      .catch(() => {});
+  }
+  try {
+    return { md: await deps.docWriter.peekContent(row.vault_id, row.doc_id, k.crypto) };
+  } catch (err) {
+    // A sealed doc this view could not open is a miss; anything else is the
+    // same error as before W3.
+    if (err instanceof KeyRequiredError) return null;
+    throw err;
+  } finally {
+    k.crypto?.key.fill(0);
+  }
 }
 
 /** Display title: stored title, else the filename without extension. */
@@ -454,7 +557,9 @@ export function createPublicPageRoutes(deps: PublicPageDeps): Hono {
 
     // null = content never reached this server; render as empty, not a miss —
     // the link is real and the note exists.
-    const md = (await deps.docWriter.peekContent(row.vault_id, row.doc_id)) ?? "";
+    const view = await viewMarkdown(deps, row, token);
+    if (!view) return miss(c);
+    const md = view.md ?? "";
     const { bodyHtml } = renderNoteHtml(md, {
       assetUrl: (rel) =>
         `/p/${token}/a/${rel.split("/").map(encodeURIComponent).join("/")}`,
@@ -499,7 +604,7 @@ export function createPublicPageRoutes(deps: PublicPageDeps): Hono {
       return miss(c);
     }
 
-    const md = await deps.docWriter.peekContent(row.vault_id, row.doc_id);
+    const md = (await viewMarkdown(deps, row, token))?.md;
     if (!md || !md.includes(relPath)) return miss(c);
 
     const { rows } = await pool.query<{

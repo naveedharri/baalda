@@ -17,6 +17,7 @@ import type pg from "pg";
 import { pool } from "../../db/pool.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
 import { requireVaultKey } from "../../crypto/transport.js";
+import { initGate } from "../../crypto/conversion.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
 import { CLIENT_VERSION_HEADER, clientVersionPolicy, judgeClientVersion } from "../client-version.js";
@@ -93,6 +94,10 @@ export function createVaultKeyRoutes(): Hono {
       return c.json({ error: "vkCheck, generation and sealedVkForSelf are required", code: "invalid_argument" }, 400);
     }
     const generation = body.generation as number;
+    // MCP/links conversion gate (crypto/conversion.ts): no active token, link
+    // or OAuth grant may be cut off by keying the vault.
+    const gated = await initGate(vaultId, vkCheck, generation, pool);
+    if (gated) return c.json(gated, 409);
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -123,6 +128,7 @@ export function createVaultKeyRoutes(): Hono {
          ON CONFLICT (vault_id) DO UPDATE SET phase = 'keyed', generation = $2, updated_at = now()`,
         [vaultId, generation],
       );
+      await client.query("DELETE FROM vault_pending_keys WHERE vault_id = $1", [vaultId]);
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK");

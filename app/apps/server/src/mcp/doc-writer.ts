@@ -145,6 +145,11 @@ export interface DocWriter {
     actor?: DocActor,
   ): Promise<void>;
   /** Read the current note body (from the live doc if open, else from storage). */
+  /**
+   * W3: `crypto` is the CALLER's verified key for a keyed vault. A sealed doc
+   * read without it throws `KeyRequiredError` — never "" (an empty answer would
+   * let a caller write over text it could not see).
+   */
   readContent(vaultId: string, docId: string, crypto?: DocCrypto): Promise<string>;
   /**
    * Like {@link readContent}, but `null` when the doc has NO live session and NO
