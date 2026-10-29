@@ -16,6 +16,7 @@ The feature is **off by default**. With it off, the server behaves exactly as it
 | Variable | Default | Meaning |
 |---|---|---|
 | `BAALDA_VAULT_KEYS` | off | `on` enables vault keys: the key routes, the `vault-keys` feature in `GET /health`, and sealed storage for keyed vaults. Off: nothing in `src/crypto/` is consulted. Any value other than on/off (`1/true/on/yes`, `0/false/off/no`, empty) stops the server at first use. |
+| `VAULT_PLAINTEXT_RETENTION_DAYS` | 30 | Days between a verified-complete conversion and removing the old plaintext (see "Removing the old plaintext"). `0` is allowed; an invalid value falls back to 30. |
 | `VAULT_KEY_CONVERSION` | off | `on` lets desktops key vaults that asked for it (see below). Also requires the desktop to report a version at or above the `MIN_CLIENT_VERSION` floor. Keep it off until every member runs a desktop that supports vault keys. |
 
 Turn on `BAALDA_VAULT_KEYS` first, upgrade desktops, raise `MIN_CLIENT_VERSION`, and only then turn on
@@ -50,10 +51,27 @@ ciphertext cannot be moved to another row.
 - **Attachment and file bytes.** With `BLOB_STORAGE=s3` (S3, R2, MinIO) uploads and downloads go straight to
   the bucket through presigned URLs and are **not** encrypted with the vault key. They are protected only by
   the storage provider's own encryption at rest. With `BLOB_STORAGE=postgres` they sit in Postgres without
-  vault-key encryption.
+  vault-key encryption (`blobs.data`), and so do the file bytes pinned by checkpoints
+  (`checkpoint_blob_bytes`). The null-out does not touch either: they have no sealed copy.
+- Team skill files (`skill_version_files`, `skill_draft_files`).
+- Wikilink targets (`note_links`), which are note titles.
 - Note titles, file and folder paths and names, sizes, timestamps, membership, sharing rules and audit rows.
 - Rows written before a vault was keyed stay as they were until a separate, delayed null-out step has checked
   every row. Database backups taken before then keep the plaintext until they age out under your retention.
+
+## Removing the old plaintext
+
+Once every older row has a verified sealed copy, the server waits `VAULT_PLAINTEXT_RETENTION_DAYS` (default
+30; `0` is allowed, for testing) and then, only while a member's key is held, opens each sealed copy and
+compares it byte for byte with the plaintext. Only an exact match clears the plaintext, in a statement that
+also checks the row has not changed since. A row that does not match keeps both copies and is logged by id.
+Until then, compaction of a converting note keeps exactly its old plaintext in one checked row and stores
+everything newer encrypted only. Vault Settings shows "Older content is being encrypted; new edits are
+already encrypted." until no plaintext is left. A search row re-indexed after keying keeps its older plaintext
+beside the newer sealed entry, so the two never match. That plaintext is derived (rebuilt from the note), so
+it is cleared too, with the same guarded statement, but only when the sealed entry is current: for a note,
+its text equals the note's text right now; for a file, it is the entry every reader uses. A note edited
+since its last re-index waits for the next one.
 
 ## How it works
 

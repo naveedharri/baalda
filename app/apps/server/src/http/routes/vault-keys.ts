@@ -20,6 +20,7 @@ import { vaultKeysEnabled } from "../../crypto/config.js";
 import { VK_HEADER, decodeVk, requireVaultKey } from "../../crypto/transport.js";
 import { vaultKeyCache } from "../../crypto/key-cache.js";
 import { verifyVk } from "../../crypto/vk-check.js";
+import { encryptionProgress } from "../../crypto/null-out.js";
 import {
   ENCRYPTION_NOT_REQUESTED,
   KEY_MATERIAL_EXISTS,
@@ -222,10 +223,15 @@ export function createVaultKeyRoutes(): Hono {
         202,
       );
     }
+    // Conversion progress for the UI, as last recorded by the background
+    // worker (never counted per request).
+    const progress = await encryptionProgress(vaultId);
     return c.json({
       keyed: true,
       generation: v[0].key_generation ?? 1,
       vkCheck: v[0].vk_check.toString("base64"),
+      fullyEncrypted: progress.fullyEncrypted,
+      plaintextRemaining: progress.plaintextRemaining,
       wraps: rows.map((r) => ({
         generation: r.generation,
         sealedVk: r.sealed_vk.toString("base64"),

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { NOTICE_PRIORITY, pickNotice } from "../../lib/noticeSlot";
 import { memberDisplayName } from "../../lib/vaultKeys/names";
-import { vaultKeySectionView } from "../../lib/vaultKeys/sectionView";
+import { CONVERTING_LINE, conversionLine, vaultKeySectionView } from "../../lib/vaultKeys/sectionView";
 import type { VaultKeyState } from "../../lib/vaultKeys/session";
 
 describe("vault key UI", () => {
@@ -47,5 +47,19 @@ describe("vault key UI", () => {
     expect(at("vault-key-waiting")).toBe(at("closed-app-changes") + 1);
     expect(at("not-syncing")).toBe(at("vault-key-waiting") + 1);
     expect(pickNotice(new Set(["vault-key-waiting", "root-missing"]))).toBe("root-missing");
+  });
+
+  it("says older content is still being encrypted only while the server reports it", () => {
+    const ready: VaultKeyState = { state: "ready", generation: 1 };
+    const base = { state: ready, isOwner: true, canManage: true };
+    expect(conversionLine({ ...base, fullyEncrypted: false })).toBe(CONVERTING_LINE);
+    expect(conversionLine({ ...base, fullyEncrypted: true })).toBeNull();
+    // An older server that does not report it: no claim either way.
+    expect(conversionLine({ ...base, fullyEncrypted: undefined })).toBeNull();
+    // Admins see it too; plain members never do.
+    expect(conversionLine({ ...base, isOwner: false, fullyEncrypted: false })).toBe(CONVERTING_LINE);
+    expect(conversionLine({ ...base, isOwner: false, canManage: false, fullyEncrypted: false })).toBeNull();
+    // Not keyed: nothing to convert.
+    expect(conversionLine({ ...base, state: { state: "unkeyed", encryptionRequested: true }, fullyEncrypted: false })).toBeNull();
   });
 });

@@ -338,18 +338,25 @@ describe("database attacker without a vault key (W3)", () => {
     expect(textOf(await loadDocState(k.docId, pool, k.crypto))).toBe(SECRET);
   });
 
-  it("11. RESIDUAL: a plaintext row inserted into a keyed doc is read as content; compaction does not launder it", async () => {
+  it("11. RESIDUAL: a plaintext row inserted into a keyed doc is read as content and treated as legacy plaintext", async () => {
     const k = await keyedVault();
     await pool.query("INSERT INTO doc_updates (doc_id, update) VALUES ($1, $2)", [k.docId, Buffer.from(updateWith("INJECTED"))]);
     // Integrity gap (documented): the legacy plaintext region of a keyed doc
     // is not authenticated, so attacker text merges into the note.
     expect(textOf(await loadDocState(k.docId, pool, k.crypto))).toContain("INJECTED");
-    // Keyed compaction refuses a log with plaintext left: nothing is folded
-    // into a sealed snapshot and nothing is deleted.
-    const rows = (await pool.query("SELECT count(*)::int AS n FROM doc_updates WHERE doc_id = $1", [k.docId])).rows[0].n;
+    // RESIDUAL: a converting compaction treats it as pre-keying plaintext like
+    // the backfill does: folded into the sealed snapshot, and kept as the
+    // doc's one dual plaintext row (never dropped, never re-written).
     await compact(k.docId, pool, k.crypto);
-    expect((await pool.query("SELECT count(*)::int AS n FROM doc_updates WHERE doc_id = $1", [k.docId])).rows[0].n).toBe(rows);
-    expect((await pool.query("SELECT 1 FROM doc_snapshots WHERE doc_id = $1", [k.docId])).rowCount).toBe(0);
+    const plain = await pool.query<{ update: Buffer; update_enc: Buffer | null }>(
+      "SELECT update, update_enc FROM doc_updates WHERE doc_id = $1 AND update IS NOT NULL",
+      [k.docId],
+    );
+    expect(plain.rowCount).toBe(1);
+    expect(textOf(new Uint8Array(plain.rows[0].update))).toContain("INJECTED");
+    expect(plain.rows[0].update_enc).not.toBeNull();
+    expect((await pool.query("SELECT snapshot FROM doc_snapshots WHERE doc_id = $1", [k.docId])).rows[0].snapshot).toBeNull();
+    expect(textOf(await loadDocState(k.docId, pool, k.crypto))).toContain("INJECTED");
 
     // RESIDUAL: the backfill treats it as legacy plaintext and dual-writes a
     // sealed copy (plaintext kept), i.e. it launders the injected row.

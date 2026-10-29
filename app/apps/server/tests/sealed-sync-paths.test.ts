@@ -150,7 +150,7 @@ describe("sealed sync paths (W3)", () => {
     expect(text).toContain("more");
   });
 
-  it("keyed compaction never deletes legacy plaintext rows", async () => {
+  it("keyed compaction keeps exactly the legacy plaintext, in one verified dual row", async () => {
     const s = await setup(false);
     await appendUpdate(s.docId, updateWith("legacy"), pool, 1000); // written before keying
     await pool.query("UPDATE vaults SET vk_check = $2, key_generation = 1 WHERE id = $1", [
@@ -159,9 +159,15 @@ describe("sealed sync paths (W3)", () => {
     ]);
     await appendUpdate(s.docId, updateWith("sealed"), pool, 1000, s.crypto);
     await compact(s.docId, pool, s.crypto);
-    const { rows } = await pool.query("SELECT update, update_enc FROM doc_updates ORDER BY id");
-    expect(rows).toHaveLength(2);
-    expect(rows[0].update).not.toBeNull();
+    const { rows } = await pool.query("SELECT update, update_enc FROM doc_updates WHERE update IS NOT NULL ORDER BY id");
+    expect(rows).toHaveLength(1);
+    // The plaintext kept is the pre-keying text only, with an equal sealed copy.
+    expect(textOf(rows[0].update)).toContain("legacy");
+    expect(textOf(rows[0].update)).not.toContain("sealed");
+    const { openDocBytes } = await import("../src/crypto/doc-crypto.js");
+    expect(openDocBytes(s.crypto, "doc_updates.update", s.docId, rows[0].update_enc, null)!.equals(rows[0].update)).toBe(true);
+    const { rows: snap } = await pool.query("SELECT snapshot FROM doc_snapshots WHERE doc_id = $1", [s.docId]);
+    expect(snap[0].snapshot).toBeNull();
     const text = textOf(await loadDocState(s.docId, pool, s.crypto));
     expect(text).toContain("legacy");
     expect(text).toContain("sealed");
