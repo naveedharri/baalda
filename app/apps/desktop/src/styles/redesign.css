@@ -1970,3 +1970,16 @@ html:not([data-theme="dark"]) .upgrade-tier-cta.primary:hover:not(:disabled) {
    squashed under the cards below. */
 html:not([data-theme="dark"]) .account-vault-page > * { flex-shrink: 0; }
 html:not([data-theme="dark"]) .account-vault-page > .subhead { margin: 22px 0 8px 2px; line-height: 1.4; min-height: 16px; }
+
+/* ---- Motion: dialogs leave as softly as they arrive; settings tabs glide ---- */
+@keyframes rd-out-fade { to { opacity: 0; } }
+@keyframes rd-out-sink { to { opacity: 0; transform: translateY(6px) scale(0.985); } }
+@keyframes rd-tab-glide { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: no-preference) {
+  .modal-backdrop.rd-exit { animation: rd-out-fade 150ms var(--ease) both; pointer-events: none; }
+  .modal-backdrop.rd-exit > * { animation: rd-out-sink 150ms var(--ease) both; }
+  .settings-backdrop { animation: rd-fade 170ms var(--ease) both; }
+  .settings-backdrop > * { animation: rd-rise 210ms var(--ease) both; }
+  .settings-content.rd-tab-in { animation: rd-tab-glide 170ms var(--ease) both; }
+  .settings-nav .menu-item { transition: background-color 120ms var(--ease), color 120ms var(--ease); }
+}

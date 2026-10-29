@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { exitThen } from "../lib/exitMotion";
 import { createPortal } from "react-dom";
 import { authManager } from "../lib/auth/authManager";
 import * as ipc from "../lib/ipc";
@@ -621,7 +622,7 @@ export function UpgradeDialogHost() {
       key={request.token}
       orgId={request.orgId}
       reason={request.reason}
-      onClose={() => useStore.getState().clearUpgradeDialogRequest()}
+      onClose={() => exitThen(() => useStore.getState().clearUpgradeDialogRequest())}
     />
   );
 }

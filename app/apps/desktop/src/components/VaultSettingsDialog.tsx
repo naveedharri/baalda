@@ -353,7 +353,7 @@ export function VaultSettingsDialog({
           )}
         </nav>
 
-        <section ref={contentRef} className="settings-content" aria-label={activeTab.label}>
+        <section key={shown} ref={contentRef} className="settings-content rd-tab-in" aria-label={activeTab.label}>
           {/* Members and access (and Skills) swap the title for a back link
               while a profile (or a skill) is open. */}
           {!((shown === "members" || shown === "skills") && !lockedTab) && <h2 className="settings-section-title">{rdLabel(activeTab)}</h2>}

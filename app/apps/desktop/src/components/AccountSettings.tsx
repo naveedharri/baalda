@@ -199,7 +199,7 @@ export function AccountSettings({
           )}
         </nav>
 
-        <section className="settings-content" aria-label={activeTab.label}>
+        <section key={tab} className="settings-content rd-tab-in" aria-label={activeTab.label}>
           <h2 className="settings-section-title">{activeTab.label}</h2>
           {tab === "profile" ? (
             <ProfileTab />

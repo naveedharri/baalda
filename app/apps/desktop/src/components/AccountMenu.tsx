@@ -14,6 +14,7 @@ import { StatusMoment } from "./StatusMoment";
 import { StatusPicker } from "./StatusPicker";
 import { MenuIcon } from "./MenuIcon";
 import { BugReportDialog } from "./BugReportDialog";
+import { exitThen } from "../lib/exitMotion";
 import { useHoverMenu } from "./useHoverMenu";
 import { createFetchThrottle, isForcedMenuOpen } from "../lib/menuFetchThrottle";
 import {
@@ -377,7 +378,7 @@ export function AccountMenu() {
           <Suspense fallback={null}>
             <VaultSettingsDialog
               key={settingsRequest?.token ?? 0}
-              onClose={() => closeSettingsDialog("vault")}
+              onClose={() => exitThen(() => closeSettingsDialog("vault"))}
               onRequestSignIn={() => setAuthOpen(true)}
               initialTab={settingsTab}
             />
@@ -511,7 +512,7 @@ export function AccountMenu() {
         <Suspense fallback={null}>
           <VaultSettingsDialog
             key={settingsRequest?.token ?? 0}
-            onClose={() => closeSettingsDialog("vault")}
+            onClose={() => exitThen(() => closeSettingsDialog("vault"))}
             initialTab={settingsTab}
           />
         </Suspense>
@@ -520,7 +521,7 @@ export function AccountMenu() {
         <Suspense fallback={null}>
           <AccountSettings
             key={accountSettingsRequest?.token ?? 0}
-            onClose={() => closeSettingsDialog("account")}
+            onClose={() => exitThen(() => closeSettingsDialog("account"))}
             initialTab={accountSettingsTab}
           />
         </Suspense>
