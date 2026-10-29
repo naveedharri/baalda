@@ -9,11 +9,10 @@ import {
   sealVkTo,
   shortFingerprint,
   toBase64,
-  unwrapPrivateKeyWithPhrase,
+  vaultKeyToWords,
 } from "./crypto";
+import { publicKeyFromPrivate as generateAccountKeypairPub } from "./crypto";
 import { createVaultKeySession, resetVaultKeySessions, type VaultKeySessionDeps } from "./session";
-
-const FAST = { m: 256, t: 1, p: 1 };
 
 /** A fake server that holds only what the real one would: blobs, never keys. */
 function fakeServer() {
@@ -81,7 +80,7 @@ function session(over: Partial<VaultKeySessionDeps> & Pick<VaultKeySessionDeps, 
     keysAllowed: () => true,
     isMember: async () => true,
     pins: memPins(),
-    argon2: FAST,
+    selfUserId: () => "u1",
     ...over,
   });
 }
@@ -96,22 +95,22 @@ describe("vault key session", () => {
     expect(srv.api.getMyVaultKeys).not.toHaveBeenCalled();
   });
 
-  it("first run: makes a keypair, a recovery phrase, publishes, and keys a vault", async () => {
+  it("first run: makes a keypair, publishes it, keys a vault and reveals its words", async () => {
     const srv = fakeServer();
     const keys = fakeKeys();
     const s = session({ api: srv.api, keys });
-    const acct = await s.ensureAccountKeys();
-    expect(acct.state).toBe("ready");
-    if (acct.state !== "ready" || !acct.isNew) throw new Error("expected a new account");
-    expect(acct.phrase.split(" ")).toHaveLength(24);
-    const priv = await keys.getAccountPrivateKey();
+    expect(await s.ensureAccountKeys()).toEqual({ state: "ready", isNew: true });
+    const priv = (await keys.getAccountPrivateKey())!;
     const published = (await srv.api.getMyKeys())!;
-    expect(await unwrapPrivateKeyWithPhrase(acct.phrase, fromBase64(published.privWrappedRecovery))).toEqual(priv);
-    // Second run on the same device: nothing new to show.
+    expect(fromBase64(published.publicKey)).toEqual(generateAccountKeypairPub(priv));
     expect(await s.ensureAccountKeys()).toEqual({ state: "ready", isNew: false });
 
-    expect(await s.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1, created: true });
     expect(s.headerFor("v1")).toBe(toBase64(keys.vks.get("v1")!));
+    expect(s.revealVaultKey("v1")).toBe(vaultKeyToWords(keys.vks.get("v1")!));
+    expect(s.revealVaultKey("v2")).toBeNull();
+    // Next launch: the same key, not "created" again.
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
   });
 
   it("leaves an unkeyed vault alone when keying is not allowed", async () => {
@@ -124,19 +123,48 @@ describe("vault key session", () => {
     expect(s.headerFor("v1")).toBeNull();
   });
 
-  it("new device without the private key needs recovery, and recovers with the phrase", async () => {
+  it("new device: restores with the owner's vault key words; a wrong key is never stored", async () => {
     const srv = fakeServer();
-    const first = session({ api: srv.api, keys: fakeKeys() });
-    const acct = await first.ensureAccountKeys();
-    if (acct.state !== "ready" || !acct.isNew) throw new Error("expected a new account");
+    const ownerKeys = fakeKeys();
+    const owner = session({ api: srv.api, keys: ownerKeys });
+    await owner.ensureAccountKeys();
+    await owner.ensureVaultKey("v1");
+    const words = owner.revealVaultKey("v1")!;
 
+    // The same account on a new device: server has keys, device has none.
     const keys = fakeKeys();
-    const second = session({ api: srv.api, keys });
-    expect(await second.ensureAccountKeys()).toEqual({ state: "needs-recovery-or-approval" });
-    expect(srv.api.putMyKeys).toHaveBeenCalledTimes(1);
-    expect(await second.recoverWithPhrase("abandon ".repeat(23) + "art")).toBe(false);
-    expect(await second.recoverWithPhrase(acct.phrase)).toBe(true);
-    expect(await second.ensureAccountKeys()).toEqual({ state: "ready", isNew: false });
+    const device = session({ api: srv.api, keys });
+    expect(await device.ensureAccountKeys()).toEqual({ state: "needs-recovery-or-approval" });
+    expect(await device.restoreWithVaultKey("v1", "abandon ".repeat(23) + "zoo")).toBe("invalid-words");
+    expect(await device.restoreWithVaultKey("v1", vaultKeyToWords(generateVaultKey()))).toBe("wrong-key");
+    expect(keys.setVaultKey).not.toHaveBeenCalled();
+    expect(await device.restoreWithVaultKey("v1", ` ${words.toUpperCase()} `)).toBe("restored");
+    expect(keys.vks.get("v1")).toEqual(ownerKeys.vks.get("v1"));
+    expect(device.headerFor("v1")).toBe(toBase64(ownerKeys.vks.get("v1")!));
+    // No account key on this device: nothing sealed on its behalf.
+    expect(srv.api.postVaultKeyWrap).not.toHaveBeenCalled();
+  });
+
+  it("restore seals the key to ourselves when the account key is ready", async () => {
+    const srv = fakeServer();
+    const owner = session({ api: srv.api, keys: fakeKeys() });
+    await owner.ensureAccountKeys();
+    await owner.ensureVaultKey("v1");
+    const words = owner.revealVaultKey("v1")!;
+    srv.as("u2");
+    srv.setMe(null);
+    const keys = fakeKeys();
+    const member = session({ api: srv.api, keys, selfUserId: () => "u2", keysAllowed: () => false });
+    await member.ensureAccountKeys();
+    // Pending answer still carries vk_check, so the typed key can be verified.
+    srv.api.getMyVaultKeys.mockResolvedValueOnce({
+      pending: true,
+      vkCheck: srv.vaults.get("v1")!.vkCheck,
+      generation: 1,
+    });
+    expect(await member.restoreWithVaultKey("v1", words)).toBe("restored");
+    expect(srv.posted.map((p) => p.userId)).toEqual(["u2"]);
+    expect(await member.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
   });
 
   it("waits for a teammate, then the holder seals for a member and refuses a non-member", async () => {
@@ -254,16 +282,6 @@ describe("vault key session", () => {
     srv.vaults.set("v1", { vkCheck: toBase64(await makeVkCheck(generateVaultKey(), "v1", 1)), generation: 1, wraps: new Map() });
     expect(await s.ensureVaultKey("v1")).toEqual({ state: "waiting-for-teammate" });
     expect(keys.setVaultKey).not.toHaveBeenCalled();
-  });
-
-  it("recovery never replaces a private key the device holds", async () => {
-    const srv = fakeServer();
-    const keys = fakeKeys();
-    const s = session({ api: srv.api, keys });
-    const acct = await s.ensureAccountKeys();
-    if (acct.state !== "ready" || !acct.isNew) throw new Error("expected a new account");
-    expect(await s.recoverWithPhrase(acct.phrase)).toBe(false);
-    expect(keys.setAccountPrivateKey).toHaveBeenCalledTimes(1);
   });
 
   it("sign-out clears every verified key", async () => {

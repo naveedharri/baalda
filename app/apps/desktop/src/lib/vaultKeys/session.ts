@@ -29,16 +29,14 @@ import {
   generateVaultKey,
   keyFingerprint,
   makeVkCheck,
-  newRecoveryPhrase,
   openSealedVk,
   publicKeyFromPrivate,
   sealVkTo,
   shortFingerprint,
   toBase64,
-  unwrapPrivateKeyWithPhrase,
   verifyVk,
-  wrapPrivateKeyWithPhrase,
-  type Argon2Params,
+  vaultKeyToWords,
+  wordsToVaultKey,
 } from "./crypto";
 
 export interface VaultKeysApi {
@@ -75,15 +73,13 @@ export interface VaultKeySessionDeps {
   keysAllowed(vaultId: string): boolean;
   /** Is `userId` a CURRENT member of the vault, per the members API? */
   isMember(vaultId: string, userId: string): Promise<boolean>;
-  /** Tests pass cheap Argon2 parameters. */
-  argon2?: Argon2Params;
+  /** The signed-in user's id (to seal a restored key to ourselves). */
+  selfUserId(): string | null;
 }
 
 export type AccountKeysState =
   | { state: "disabled" }
-  | { state: "ready"; isNew: false }
-  /** First run: show the recovery kit ONCE, then drop the phrase. */
-  | { state: "ready"; isNew: true; phrase: string }
+  | { state: "ready"; isNew: boolean }
   | { state: "needs-recovery-or-approval" }
   /** The server's public key for this account is not this device's: refuse keys. */
   | { state: "security-warning" };
@@ -91,12 +87,21 @@ export type AccountKeysState =
 export type VaultKeyState =
   | { state: "disabled" }
   | { state: "security-warning" }
-  | { state: "ready"; generation: number }
+  /** `created`: this device just keyed the vault: show "Save your vault key". */
+  | { state: "ready"; generation: number; created?: true }
   | { state: "waiting-for-teammate" }
   | { state: "unkeyed" }
   | { state: "needs-account-key" }
   /** The only key on offer does not open `vk_check`: never used. */
   | { state: "key-mismatch" };
+
+export type RestoreResult =
+  | "restored"
+  | "invalid-words"
+  | "wrong-key"
+  | "cannot-verify"
+  | "disabled"
+  | "security-warning";
 
 export type SealedFor = { userId: string; fingerprint: string };
 export type ServiceResult = {
@@ -137,32 +142,47 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     if (!local && remote) return { state: "needs-recovery-or-approval" };
     // No server keys: publish (a fresh keypair, or the one this device holds).
     const privateKey = local ?? generateAccountKeypair().privateKey;
-    const phrase = newRecoveryPhrase();
-    const privWrappedRecovery = await wrapPrivateKeyWithPhrase(phrase, privateKey, deps.argon2);
     // Keychain first: a failed PUT retries next run with the same key.
     if (!local) await keys.setAccountPrivateKey(privateKey);
-    await api.putMyKeys({
-      publicKey: toBase64(publicKeyFromPrivate(privateKey)),
-      privWrappedRecovery: toBase64(privWrappedRecovery),
-    });
-    return { state: "ready", isNew: true, phrase };
+    await api.putMyKeys({ publicKey: toBase64(publicKeyFromPrivate(privateKey)) });
+    return { state: "ready", isNew: true };
   }
 
-  /** New device: restore the account private key from the recovery phrase. */
-  async function recoverWithPhrase(phrase: string): Promise<boolean> {
-    // Never replace a private key this device already holds.
-    if (await keys.getAccountPrivateKey()) return false;
-    const remote = await api.getMyKeys();
-    if (!remote) return false;
-    let priv: Uint8Array;
-    try {
-      priv = await unwrapPrivateKeyWithPhrase(phrase, fromBase64(remote.privWrappedRecovery));
-    } catch {
-      return false;
+  /**
+   * "Restore with vault key": the owner's 24 words, checked against the
+   * server's `vk_check` before anything is stored. A wrong key is refused and
+   * never stored; a stored key that still verifies is never replaced. With a
+   * ready account key the VK is also sealed to ourselves for other devices.
+   */
+  async function restoreWithVaultKey(vaultId: string, words: string): Promise<RestoreResult> {
+    if (!(await enabled())) return "disabled";
+    if (accountMismatch) return "security-warning";
+    const vk = wordsToVaultKey(words);
+    if (!vk) return "invalid-words";
+    const mine = await api.getMyVaultKeys(vaultId);
+    if (!mine.vkCheck || mine.generation === undefined) return "cannot-verify";
+    const vkCheck = fromBase64(mine.vkCheck);
+    if (!(await verifyVk(vk, vaultId, vkCheck))) return "wrong-key";
+    const held = await keys.getVaultKey(vaultId);
+    if (!held || !(await verifyVk(held, vaultId, vkCheck))) await keys.setVaultKey(vaultId, vk);
+    accept(vaultId, vk, mine.generation);
+    const self = deps.selfUserId();
+    const priv = await keys.getAccountPrivateKey();
+    const remote = priv ? await api.getMyKeys() : null;
+    if (self && priv && remote && sameKey(publicKeyFromPrivate(priv), remote.publicKey)) {
+      await api.postVaultKeyWrap(
+        vaultId,
+        { userId: self, generation: mine.generation, sealedVk: toBase64(sealVkTo(publicKeyFromPrivate(priv), vk)) },
+        toBase64(vk),
+      );
     }
-    if (!sameKey(publicKeyFromPrivate(priv), remote.publicKey)) return false;
-    await keys.setAccountPrivateKey(priv);
-    return true;
+    return "restored";
+  }
+
+  /** Owner's Settings → Security: the verified key as 24 words, else null. */
+  function revealVaultKey(vaultId: string): string | null {
+    const held = verified.get(vaultId);
+    return held ? vaultKeyToWords(held.vk) : null;
   }
 
   async function ensureVaultKey(vaultId: string): Promise<VaultKeyState> {
@@ -176,7 +196,14 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       mine = null;
     }
     if (mine === null) return keyUnkeyedVault(vaultId);
-    if (mine.pending) return { state: "waiting-for-teammate" };
+    if (mine.pending) {
+      // A key restored on this device earlier still counts when it verifies.
+      const held = mine.vkCheck ? await keys.getVaultKey(vaultId) : null;
+      if (held && mine.vkCheck && mine.generation !== undefined && (await verifyVk(held, vaultId, fromBase64(mine.vkCheck)))) {
+        return accept(vaultId, held, mine.generation);
+      }
+      return { state: "waiting-for-teammate" };
+    }
     const vkCheck = fromBase64(mine.vkCheck);
 
     const local = await keys.getVaultKey(vaultId);
@@ -219,7 +246,8 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const result = await api.initVaultKeys(vaultId, body);
     if (result === "already-keyed") return ensureVaultKey(vaultId);
     await keys.setVaultKey(vaultId, vk);
-    return accept(vaultId, vk, generation);
+    accept(vaultId, vk, generation);
+    return { state: "ready", generation, created: true };
   }
 
   function accept(vaultId: string, vk: Uint8Array, generation: number): VaultKeyState {
@@ -269,7 +297,8 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
 
   const session = {
     ensureAccountKeys,
-    recoverWithPhrase,
+    restoreWithVaultKey,
+    revealVaultKey,
     ensureVaultKey,
     serviceKeyRequests,
     headerFor,

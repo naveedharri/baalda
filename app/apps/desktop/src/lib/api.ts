@@ -1460,7 +1460,10 @@ interface MyVaultKeysBody {
   generation: number;
   wraps: VaultKeyWrap[];
 }
-export type MyVaultKeys = { pending: true } | ({ pending: false } & MyVaultKeysBody);
+/** A pending answer may still carry `vkCheck`, so a restore can verify a typed key. */
+export type MyVaultKeys =
+  | { pending: true; vkCheck?: string; generation?: number }
+  | ({ pending: false } & MyVaultKeysBody);
 export interface VaultKeyRequest {
   userId: string;
   publicKey: string;
@@ -1471,7 +1474,8 @@ export interface VaultKeyWrapPost extends VaultKeyWrap {
 }
 export interface AccountKeysBody {
   publicKey: string;
-  privWrappedRecovery: string;
+  /** Optional since the owner decision: the VAULT key is the recovery path. */
+  privWrappedRecovery?: string;
 }
 
 export class ApiClient {
@@ -1611,7 +1615,10 @@ export class ApiClient {
       "GET",
       `/api/vaults/${encodeURIComponent(vaultId)}/keys/mine`,
     );
-    if (status === 202 || (data as { pending?: boolean })?.pending) return { pending: true };
+    if (status === 202 || (data as { pending?: boolean })?.pending) {
+      const d = (data ?? {}) as { vkCheck?: string; generation?: number };
+      return { pending: true, vkCheck: d.vkCheck, generation: d.generation };
+    }
     return { pending: false, ...(data as MyVaultKeysBody) };
   }
 

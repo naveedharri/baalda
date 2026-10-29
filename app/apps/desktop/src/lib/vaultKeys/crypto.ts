@@ -40,7 +40,9 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { argon2idAsync } from "@noble/hashes/argon2.js";
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import {
+  entropyToMnemonic,
   generateMnemonic,
+  mnemonicToEntropy,
   validateMnemonic,
 } from "@scure/bip39";
 import { wordlist as english } from "@scure/bip39/wordlists/english.js";
@@ -238,6 +240,40 @@ export function openSealedVk(privateKey: Uint8Array, sealed: Uint8Array): Uint8A
   const vk = openSealed(privateKey, sealed);
   assertVk(vk);
   return vk;
+}
+
+// ---- vault key as words (owner-visible recovery) ----------------------------
+//
+// The 32-byte VK is BIP39 entropy: exactly 24 English words, the last carrying
+// an 8-bit SHA-256 checksum, so a mistyped word is refused before any server
+// check. The words ARE the key: whoever holds them can read the vault.
+
+export function vaultKeyToWords(vk: Uint8Array): string {
+  assertVk(vk);
+  return entropyToMnemonic(vk, english);
+}
+
+/** The VK the words encode, or null for anything that is not 24 valid words. */
+export function wordsToVaultKey(words: string): Uint8Array | null {
+  const p = normalizePhrase(words);
+  if (p.split(" ").length !== 24 || !validateMnemonic(p, english)) return null;
+  const vk = mnemonicToEntropy(p, english);
+  return vk.length === VK_BYTES ? vk : null;
+}
+
+/** Text for "Save to file": vault name, id and the 24 numbered words. */
+export function vaultKeyFileText(vaultName: string, vaultId: string, vk: Uint8Array): string {
+  const words = vaultKeyToWords(vk).split(" ");
+  const lines = words.map((w, i) => `${String(i + 1).padStart(2, " ")}. ${w}`);
+  return [
+    `Baalda vault key for "${vaultName}"`,
+    `Vault id: ${vaultId}`,
+    "",
+    "Anyone with these 24 words can read this vault. Keep them somewhere safe.",
+    "",
+    ...lines,
+    "",
+  ].join("\n");
 }
 
 // ---- recovery phrase --------------------------------------------------------

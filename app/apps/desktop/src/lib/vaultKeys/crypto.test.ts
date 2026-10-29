@@ -12,7 +12,10 @@ import {
   sealVkTo,
   toBase64,
   unwrapPrivateKeyWithPhrase,
+  vaultKeyFileText,
+  vaultKeyToWords,
   verifyVk,
+  wordsToVaultKey,
   vkCheckGeneration,
   wrapPrivateKeyWithPhrase,
 } from "./crypto";
@@ -144,5 +147,21 @@ describe("recovery phrase", () => {
     const ms = performance.now() - t0;
     console.info(`[vaultKeys] argon2id m=64MiB t=3 p=1: ${Math.round(ms)} ms`);
     expect(await unwrapPrivateKeyWithPhrase(phrase, wrapped)).toEqual(privateKey);
+  });
+});
+
+describe("vault key words", () => {
+  it("encodes 32 bytes as 24 words and back; a mistyped word is refused", () => {
+    const vk = generateVaultKey();
+    const words = vaultKeyToWords(vk);
+    expect(words.split(" ")).toHaveLength(24);
+    expect(wordsToVaultKey(`  ${words.toUpperCase()}\n`)).toEqual(vk);
+    const list = words.split(" ");
+    list[3] = list[3] === "abandon" ? "ability" : "abandon";
+    expect(wordsToVaultKey(list.join(" "))).toBeNull();
+    expect(wordsToVaultKey(words.split(" ").slice(0, 12).join(" "))).toBeNull();
+    const file = vaultKeyFileText("Team notes", "v1", vk);
+    expect(file).toContain('"Team notes"');
+    expect(file).toContain(" 1. " + words.split(" ")[0]);
   });
 });

@@ -62,6 +62,7 @@ function sessionFor(userId: string) {
     pins: keychainPinStore(serverUrl, userId),
     features: () => serverFeatures(serverUrl, () => api.getHealth()),
     keysAllowed: () => keysAllowed,
+    selfUserId: () => userId,
     isMember: async (_vaultId, memberId) => {
       const orgId = current?.orgId;
       if (!orgId) return false;
