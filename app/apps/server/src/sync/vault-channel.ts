@@ -10,6 +10,7 @@ import { listEmptyDocs, loadDocDiff } from "../yjs/persistence.js";
 import { deletedNotesAmong } from "../trash/access.js";
 import { pool } from "../db/pool.js";
 import { vaultKeysEnabled } from "../crypto/config.js";
+import { kickVaultBackfill } from "../crypto/backfill.js";
 import { vaultKeyCache } from "../crypto/key-cache.js";
 import { CLOSE_KEY_REQUIRED, KEY_REQUIRED_CODE, decodeVk, loadVkCheck } from "../crypto/transport.js";
 import { verifyVk } from "../crypto/vk-check.js";
@@ -690,6 +691,8 @@ class VaultConnection {
             return this.fail(KEY_REQUIRED_CODE, CLOSE_KEY_REQUIRED);
           }
           this.releaseKey = vaultKeyCache.acquire(this.vaultId, vk, state.generation);
+          // Index notes skipped while no key was held, and seal old rows.
+          void kickVaultBackfill(this.vaultId);
           // This connection's own copy for its backfill reads (never the cache).
           this.docCrypto = { vaultId: this.vaultId, key: Buffer.from(vk), generation: state.generation };
         } finally {
