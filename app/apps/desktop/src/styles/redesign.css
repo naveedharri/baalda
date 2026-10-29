@@ -2249,3 +2249,69 @@ html[data-theme="dark"] .vault-picker::before {
 .vault-picker-card .product-name { margin-bottom: clamp(36px, 6vh, 64px); }
 .vault-picker-card .product-name .wordmark { display: block; width: 100%; }
 .vault-picker-card > .recent-list { width: 100%; max-width: none; justify-self: stretch; }
+
+/* ---- Sign in / Create account: a frosted glass card over the welcome glow ---- */
+html:not(.rd-off) .modal-backdrop:has(> .auth-dialog) {
+  background: rgba(255, 255, 255, 0.18) !important;
+  backdrop-filter: blur(10px) saturate(150%);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+}
+html[data-theme="dark"]:not(.rd-off) .modal-backdrop:has(> .auth-dialog) { background: rgba(0, 0, 0, 0.32) !important; }
+.modal.auth-dialog {
+  width: min(400px, calc(100vw - 32px)) !important; max-width: none;
+  padding: 30px 28px 24px !important; border-radius: 22px !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+  backdrop-filter: blur(28px) saturate(170%);
+  -webkit-backdrop-filter: blur(28px) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.7) !important;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset, 0 30px 70px -24px rgba(40, 24, 90, 0.35), 0 0 0 1px rgba(var(--rd-ink), 0.04) !important;
+}
+.auth-dialog .modal-header {
+  position: relative; justify-content: center; padding: 0 0 18px !important; border: 0 !important; background: none !important;
+}
+.auth-dialog .modal-header > span {
+  font: 600 21px/1.25 var(--font-body); letter-spacing: -0.02em; color: var(--text-primary); text-align: center;
+}
+.auth-dialog .modal-header .icon-btn {
+  position: absolute; top: -14px; right: -12px; width: 28px; height: 28px; border-radius: 50%;
+  font-size: 12px; color: var(--text-tertiary); background: transparent;
+}
+.auth-dialog .modal-header .icon-btn:hover { background: rgba(var(--rd-ink), 0.06); color: var(--text-primary); }
+html:not(.rd-off) .modal.auth-dialog .segmented {
+  display: flex; padding: 3px; border-radius: 11px; margin-bottom: 18px;
+  background: var(--rd-fill) !important; border: 0; box-shadow: none;
+}
+html:not(.rd-off) .modal.auth-dialog .segmented button { flex: 1; height: 32px; border-radius: 8px; font: 500 13px var(--font-body); color: var(--text-secondary); }
+html:not(.rd-off) .modal.auth-dialog .segmented button.active { background: var(--rd-surface); color: var(--text-primary); box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.12); }
+.auth-dialog .oauth-btn {
+  width: 100%; height: 44px; display: flex; align-items: center; justify-content: center; gap: 10px;
+  border-radius: 12px; background: var(--rd-surface) !important; color: var(--text-primary) !important;
+  font: 500 14px var(--font-body); border: 0 !important;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1), 0 1px 2px rgba(var(--rd-ink), 0.06) !important;
+  transition: box-shadow 140ms var(--ease), transform 140ms var(--ease);
+}
+.auth-dialog .oauth-btn:hover:not(:disabled) { box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.14), 0 6px 16px -8px rgba(var(--rd-ink), 0.25) !important; transform: translateY(-1px); }
+.auth-dialog .oauth-btn svg { width: 18px; height: 18px; }
+.auth-dialog .auth-divider { display: flex; align-items: center; gap: 12px; margin: 16px 0; color: var(--text-tertiary); font-size: 12px; }
+.auth-dialog .auth-divider::before, .auth-dialog .auth-divider::after { content: ""; flex: 1; height: 1px; background: rgba(var(--rd-ink), 0.1); }
+.auth-dialog .auth-divider span { background: none !important; padding: 0 !important; }
+.auth-dialog .auth-form { display: flex; flex-direction: column; gap: 10px; }
+html:not(.rd-off) .modal.auth-dialog .auth-form input:not([type="checkbox"]) {
+  height: 44px !important; min-height: 44px; padding: 0 14px !important; border-radius: 12px !important;
+  font-size: 14px !important; background: var(--rd-surface) !important; border: 0 !important;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1) !important;
+}
+html:not(.rd-off) .modal.auth-dialog .auth-form input:not([type="checkbox"]):focus { box-shadow: 0 0 0 1.5px var(--accent), 0 0 0 5px var(--accent-soft) !important; }
+.auth-dialog .auth-form-options { margin: 2px 0 4px; font-size: 13px; color: var(--text-secondary); }
+.auth-dialog .auth-form button.primary, .auth-dialog .auth-form .primary {
+  height: 44px; border-radius: 12px; font: 500 14px var(--font-body); margin-top: 4px;
+}
+.auth-dialog .auth-server-note { margin-top: 16px; text-align: center; font-size: 12px; color: var(--text-tertiary); }
+.auth-dialog .auth-server-note strong, .auth-dialog .auth-server-note b { color: var(--text-secondary); font-weight: 500; }
+.auth-dialog .auth-server-note .linkish, .auth-dialog .auth-server-note .link-btn,
+.auth-dialog .auth-server-note a { font: inherit; font-weight: 500; color: var(--accent); text-decoration: none; }
+html[data-theme="dark"] .modal.auth-dialog {
+  background: rgba(34, 32, 30, 0.9) !important;
+  border-color: rgba(255, 248, 236, 0.08) !important;
+  box-shadow: 0 1px 0 rgba(255, 248, 236, 0.05) inset, 0 30px 70px -24px rgba(0, 0, 0, 0.7) !important;
+}
