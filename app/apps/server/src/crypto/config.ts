@@ -12,3 +12,6 @@ export function vaultKeysEnabled(): boolean {
   if (OFF.has(raw)) return false;
   throw new Error(`BAALDA_VAULT_KEYS must be on or off, got "${process.env.BAALDA_VAULT_KEYS}"`);
 }
+
+/** `/health` feature name advertised while the flag is on. */
+export const VAULT_KEYS_FEATURE = "vault-keys";

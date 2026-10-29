@@ -104,7 +104,7 @@ describe("vault key routes", () => {
 
     expect((await call(s.owner, "POST", path, body(s.member.userId))).status).toBe(409);
     expect((await call(s.owner, "POST", path, body(s.member.userId), randomBytes(32))).status).toBe(409);
-    expect((await call(s.member, "POST", path, body(s.member.userId), s.vk)).status).toBe(403);
+    expect((await call(s.member, "POST", path, body(s.owner.userId), s.vk)).status).toBe(403);
     expect((await call(s.owner, "POST", path, body(s.outsider.userId), s.vk)).status).toBe(404);
 
     const ok = await call(s.owner, "POST", path, body(s.member.userId), s.vk);
@@ -140,19 +140,112 @@ describe("vault key routes", () => {
     // No recovery wrap (account kit dropped): accepted, stored as null.
     expect((await call(s.owner, "PUT", "/me/keys", { publicKey: pk, privWrappedRecovery: null })).status).toBe(200);
     expect((await (await call(s.owner, "GET", "/me/keys")).json()).privWrappedRecovery).toBeNull();
-    expect((await call(s.owner, "PUT", "/me/keys", { publicKey: pk })).status).toBe(200);
-    expect((await call(s.owner, "PUT", "/me/keys", { publicKey: b64(randomBytes(32)) })).status).toBe(409);
-    expect((await (await call(s.owner, "GET", "/me/keys")).json()).publicKey).toBe(pk);
+    const same = await call(s.owner, "PUT", "/me/keys", { publicKey: pk });
+    expect(await same.json()).toEqual({ saved: true, replaced: false });
 
+    // Replacing the account key (lost every device) keeps the old one in history.
+    const pk2 = b64(randomBytes(32));
+    const rep = await call(s.owner, "PUT", "/me/keys", { publicKey: pk2 });
+    expect(await rep.json()).toEqual({ saved: true, replaced: true });
+    const me = await (await call(s.owner, "GET", "/me/keys")).json();
+    expect(me.publicKey).toBe(pk2);
+    expect(me.keyChangedAt).not.toBeNull();
+    const hist = await pool.query("SELECT public_key FROM user_key_history WHERE user_id = $1", [s.owner.userId]);
+    expect(hist.rows.map((r) => b64(r.public_key))).toEqual([pk]);
+
+    await call(s.owner, "POST", "/me/devices", { deviceId: "d1", publicKey: b64(randomBytes(32)) });
     const dk = b64(randomBytes(64));
     expect((await call(s.owner, "PUT", "/me/devices/d1/key", { privWrapped: dk })).status).toBe(200);
     expect((await call(s.owner, "PUT", "/me/devices/d1/key", { privWrapped: b64(randomBytes(64)) })).status).toBe(409);
+  });
+
+  it("device links: register, list pending, approve, fetch, revoke; never another user's", async () => {
+    const s = await setup();
+    const devPk = b64(randomBytes(32));
+    expect((await call(s.member, "POST", "/me/devices", { deviceId: "laptop", publicKey: devPk, name: "Laptop" })).status).toBe(201);
+    // Idempotent; a different key for the same device is refused.
+    expect((await call(s.member, "POST", "/me/devices", { deviceId: "laptop", publicKey: devPk })).status).toBe(200);
+    expect((await call(s.member, "POST", "/me/devices", { deviceId: "laptop", publicKey: b64(randomBytes(32)) })).status).toBe(409);
+
+    const pending = await (await call(s.member, "GET", "/me/devices/pending")).json();
+    expect(pending.devices).toMatchObject([{ deviceId: "laptop", publicKey: devPk, name: "Laptop" }]);
+    // Another user sees nothing and cannot approve it.
+    expect((await (await call(s.owner, "GET", "/me/devices/pending")).json()).devices).toEqual([]);
+    expect((await call(s.owner, "PUT", "/me/devices/laptop/key", { privWrapped: b64(randomBytes(64)) })).status).toBe(404);
+
+    expect((await call(s.member, "GET", "/me/devices/laptop/key")).status).toBe(404);
+    const wrapped = b64(randomBytes(64));
+    expect((await call(s.member, "PUT", "/me/devices/laptop/key", { privWrapped: wrapped })).status).toBe(200);
+    const got = await call(s.member, "GET", "/me/devices/laptop/key");
+    expect(await got.json()).toEqual({ privWrapped: wrapped });
+    expect((await (await call(s.member, "GET", "/me/devices/pending")).json()).devices).toEqual([]);
+    expect((await call(s.owner, "GET", "/me/devices/laptop/key")).status).toBe(404);
+
+    // Remove: the wrap is kept (revoked), never deleted, and no longer served.
+    expect((await call(s.member, "DELETE", "/me/devices/laptop")).status).toBe(200);
+    expect((await call(s.member, "GET", "/me/devices/laptop/key")).status).toBe(404);
+    const kept = await pool.query("SELECT revoked_at FROM user_device_keys WHERE user_id = $1", [s.member.userId]);
+    expect(kept.rows).toHaveLength(1);
+    expect(kept.rows[0].revoked_at).not.toBeNull();
+
+    // Pending cap.
+    for (let i = 0; i < 5; i++) {
+      expect((await call(s.member, "POST", "/me/devices", { deviceId: `d${i}`, publicKey: b64(randomBytes(32)) })).status).toBe(201);
+    }
+    expect((await call(s.member, "POST", "/me/devices", { deviceId: "d9", publicKey: b64(randomBytes(32)) })).status).toBe(429);
+  });
+
+  it("self-wrap with a valid key; a re-seal after a key change keeps the old wrap in history", async () => {
+    const s = await setup();
+    await init(s);
+    const path = `/vaults/${s.vaultId}/keys/wraps`;
+    // A member with no wrap cannot wrap for others, but may self-wrap with the key.
+    expect((await call(s.member, "POST", path, { userId: s.owner.userId, generation: 1, sealedVk: b64(randomBytes(80)) }, s.vk)).status).toBe(403);
+    expect((await call(s.member, "POST", path, { userId: s.member.userId, generation: 1, sealedVk: b64(randomBytes(80)) })).status).toBe(409);
+    const own = b64(randomBytes(80));
+    expect((await call(s.member, "POST", path, { userId: s.member.userId, generation: 1, sealedVk: own }, s.vk)).status).toBe(201);
+
+    await call(s.member, "PUT", "/me/keys", { publicKey: b64(randomBytes(32)) });
+    await new Promise((r) => setTimeout(r, 5));
+    await call(s.member, "PUT", "/me/keys", { publicKey: b64(randomBytes(32)) }); // replaced
+    const mine = await call(s.member, "GET", `/vaults/${s.vaultId}/keys/mine`);
+    expect(mine.status).toBe(202);
+    const reqs = await (await call(s.owner, "GET", `/vaults/${s.vaultId}/keys/requests`)).json();
+    expect(reqs.requests[0].keyChangedAt).not.toBeNull();
+
+    const fresh = b64(randomBytes(80));
+    expect((await call(s.owner, "POST", path, { userId: s.member.userId, generation: 1, sealedVk: fresh }, s.vk)).status).toBe(201);
+    const after = await (await call(s.member, "GET", `/vaults/${s.vaultId}/keys/mine`)).json();
+    expect(after.wraps.map((w: { sealedVk: string }) => w.sealedVk)).toEqual([fresh]);
+    const hist = await pool.query("SELECT sealed_vk FROM vault_key_wrap_history WHERE user_id = $1", [s.member.userId]);
+    expect(hist.rows.map((r) => b64(r.sealed_vk))).toEqual([own]);
+  });
+
+  it("keys/mine on an unkeyed vault reports the conversion gate (default off)", async () => {
+    const s = await setup();
+    const res = await call(s.owner, "GET", `/vaults/${s.vaultId}/keys/mine`);
+    expect(await res.json()).toEqual({ keyed: false, conversionAllowed: false });
+    vi.stubEnv("VAULT_KEY_CONVERSION", "on");
+    vi.stubEnv("MIN_CLIENT_VERSION", "0.1.90");
+    const old = await app.request(`/api/vaults/${s.vaultId}/keys/mine`, { headers: { ...authHeaders(s.owner), "x-baalda-version": "0.1.80" } });
+    expect((await old.json()).conversionAllowed).toBe(false);
+    const cur = await app.request(`/api/vaults/${s.vaultId}/keys/mine`, { headers: { ...authHeaders(s.owner), "x-baalda-version": "0.1.95" } });
+    expect((await cur.json()).conversionAllowed).toBe(true);
+    const none = await app.request(`/api/vaults/${s.vaultId}/keys/mine`, { headers: authHeaders(s.owner) });
+    expect((await none.json()).conversionAllowed).toBe(false);
+  });
+
+  it("/health advertises vault-keys only with the flag on", async () => {
+    expect((await (await app.request("/health")).json()).features).toContain("vault-keys");
+    vi.stubEnv("BAALDA_VAULT_KEYS", "off");
+    expect((await (await app.request("/health")).json()).features).not.toContain("vault-keys");
   });
 
   it("me/keys and device keys round-trip", async () => {
     const s = await setup();
     const pk = b64(randomBytes(32));
     await call(s.owner, "PUT", "/me/keys", { publicKey: pk, privWrappedRecovery: b64(randomBytes(64)) });
+    await call(s.owner, "POST", "/me/devices", { deviceId: "mac-1", publicKey: b64(randomBytes(32)) });
     expect((await call(s.owner, "PUT", "/me/devices/mac-1/key", { privWrapped: b64(randomBytes(64)) })).status).toBe(200);
     const me = await (await call(s.owner, "GET", "/me/keys")).json();
     expect(me.publicKey).toBe(pk);
