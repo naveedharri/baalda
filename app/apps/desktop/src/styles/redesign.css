@@ -926,3 +926,79 @@ html:not([data-theme="dark"]) .vault-icon-option .vault-tile {
 }
 html:not([data-theme="dark"]) .vault-icon-option .vault-icon-svg { width: 16px; height: 16px; display: grid; place-items: center; }
 html:not([data-theme="dark"]) .vault-icon-option .vault-icon-svg svg * { stroke: currentColor; }
+
+/* ============================================================
+   Small dialogs (Invite people, confirms, prompts)
+   ============================================================ */
+html:not([data-theme="dark"]) .modal {
+  padding: var(--sp-6);
+  background: #fff;
+}
+html:not([data-theme="dark"]) .modal .confirm-title,
+html:not([data-theme="dark"]) .modal .modal-header h2 {
+  font: 600 var(--fs-xl) var(--font-display);
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--sp-4);
+}
+html:not([data-theme="dark"]) .modal .confirm-body { color: var(--text-secondary); font-size: var(--fs-md); line-height: 1.55; }
+
+/* Inputs: soft cream fill, no hard border, violet focus ring. */
+html:not([data-theme="dark"]) .modal input[type="text"],
+html:not([data-theme="dark"]) .modal input[type="email"],
+html:not([data-theme="dark"]) .modal input[type="password"],
+html:not([data-theme="dark"]) .modal input:not([type]),
+html:not([data-theme="dark"]) .modal textarea,
+html:not([data-theme="dark"]) .invite-chips {
+  background: var(--bg-app) !important;
+  border: 0 !important;
+  box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06) !important;
+  border-radius: var(--radius-md) !important;
+  min-height: 42px;
+  font-size: var(--fs-md);
+}
+html:not([data-theme="dark"]) .modal input:focus,
+html:not([data-theme="dark"]) .modal textarea:focus,
+html:not([data-theme="dark"]) .invite-chips:focus-within {
+  background: #fff !important;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft) !important;
+  outline: none;
+}
+
+/* Role / Access pickers: two soft tiles, text never spills out. */
+html:not([data-theme="dark"]) .invite-people-fields { gap: var(--sp-2); }
+html:not([data-theme="dark"]) .invite-field {
+  background: var(--bg-app);
+  border: 0 !important;
+  box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.06);
+  border-radius: var(--radius-md);
+  min-width: 0;
+  overflow: hidden;
+}
+html:not([data-theme="dark"]) .invite-field > *:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html:not([data-theme="dark"]) .invite-field-label {
+  font: 500 10px var(--font-mono); letter-spacing: 0.6px; text-transform: uppercase; color: #0b0a1088;
+}
+
+/* Join code: a quiet panel with the code in mono. */
+html:not([data-theme="dark"]) .invite-people-code {
+  margin-top: var(--sp-4);
+  padding: 10px var(--sp-3);
+  border: 0 !important;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+html:not([data-theme="dark"]) .invite-people-code-value { font-family: var(--font-mono); letter-spacing: 2px; color: #4a2fc7; font-weight: 500; }
+
+/* Footer buttons: a quiet Cancel and a solid primary. */
+html:not([data-theme="dark"]) .confirm-actions { margin-top: var(--sp-5); gap: var(--sp-2); }
+html:not([data-theme="dark"]) .confirm-actions .ghost-pill,
+html:not([data-theme="dark"]) .confirm-actions button.primary {
+  height: 36px; padding: 0 var(--sp-4); border-radius: var(--radius-md); font-weight: 500; font-size: var(--fs-sm);
+}
+html:not([data-theme="dark"]) .confirm-actions .ghost-pill { border: 0; box-shadow: inset 0 0 0 1px rgba(11, 10, 16, 0.1); background: #fff; color: var(--text-primary); }
+html:not([data-theme="dark"]) .confirm-actions button.primary { box-shadow: 0 8px 18px -8px rgba(124, 92, 255, 0.6); }
+html:not([data-theme="dark"]) .confirm-actions button.primary:disabled { background: var(--accent); opacity: 0.4; box-shadow: none; }
+html:not([data-theme="dark"]) .confirm-actions button.danger,
+html:not([data-theme="dark"]) .confirm-actions button.primary.danger { background: #bb433a; box-shadow: 0 8px 18px -8px rgba(187, 67, 58, 0.55); }
