@@ -95,7 +95,7 @@ export interface McpTool {
 function reqStr(args: Args, key: string): string {
   const v = args[key];
   if (typeof v !== "string" || v.length === 0) {
-    throw new McpToolError(`Missing required string argument: ${key}`);
+    throw new McpToolError(`Missing required string argument: ${key}`, "invalid_argument");
   }
   return v;
 }
@@ -103,22 +103,27 @@ function reqStr(args: Args, key: string): string {
 function optStr(args: Args, key: string): string | undefined {
   const v = args[key];
   if (v === undefined || v === null) return undefined;
-  if (typeof v !== "string") throw new McpToolError(`Argument ${key} must be a string`);
+  if (typeof v !== "string") throw new McpToolError(`Argument ${key} must be a string`, "invalid_argument");
   return v;
 }
 
+// Numbers and booleans are accepted in their string spelling too ("10",
+// "true"): clients serialise them that way often enough, and there is no doubt
+// about what was meant, so refusing bought nothing but a failed call.
 function optNum(args: Args, key: string): number | undefined {
   const v = args[key];
   if (v === undefined || v === null) return undefined;
-  if (typeof v !== "number") throw new McpToolError(`Argument ${key} must be a number`);
-  return v;
+  if (typeof v === "number") return v;
+  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+  throw new McpToolError(`Argument ${key} must be a number`, "invalid_argument");
 }
 
 function optBool(args: Args, key: string): boolean | undefined {
   const v = args[key];
   if (v === undefined || v === null) return undefined;
-  if (typeof v !== "boolean") throw new McpToolError(`Argument ${key} must be a boolean`);
-  return v;
+  if (typeof v === "boolean") return v;
+  if (v === "true" || v === "false") return v === "true";
+  throw new McpToolError(`Argument ${key} must be a boolean`, "invalid_argument");
 }
 
 /**
@@ -133,7 +138,7 @@ function optStrOrNull(args: Args, key: string): string | null | undefined {
   const v = args[key];
   if (v === null) return null;
   if (v === undefined) return undefined;
-  if (typeof v !== "string") throw new McpToolError(`Argument ${key} must be a string or null`);
+  if (typeof v !== "string") throw new McpToolError(`Argument ${key} must be a string or null`, "invalid_argument");
   return v;
 }
 
@@ -142,38 +147,38 @@ const S = (description: string) => ({ type: "string", description });
 function accessMode(args: Args): AccessMode {
   const mode = reqStr(args, "mode");
   if (mode !== "private" && mode !== "readonly" && mode !== "open") {
-    throw new McpToolError("mode must be private, readonly, or open");
+    throw new McpToolError("mode must be private, readonly, or open", "invalid_argument");
   }
   return mode;
 }
 
 function accessResources(raw: unknown): AccessResource[] {
   if (!Array.isArray(raw) || raw.length === 0) {
-    throw new McpToolError("resources must be a non-empty array");
+    throw new McpToolError("resources must be a non-empty array", "invalid_argument");
   }
   return raw.map((value, index) => {
     if (!value || typeof value !== "object") {
-      throw new McpToolError(`resources[${index}] must be an object`);
+      throw new McpToolError(`resources[${index}] must be an object`, "invalid_argument");
     }
     const row = value as Args;
     const resourceType = reqStr(row, "resourceType");
     if (resourceType !== "folder" && resourceType !== "file" && resourceType !== "vault") {
-      throw new McpToolError(`resources[${index}].resourceType is invalid`);
+      throw new McpToolError(`resources[${index}].resourceType is invalid`, "invalid_argument");
     }
     return { resourceType, resourceId: reqStr(row, "resourceId") };
   });
 }
 
 function accessAudience(raw: unknown): AccessAudience {
-  if (!raw || typeof raw !== "object") throw new McpToolError("audience is required");
+  if (!raw || typeof raw !== "object") throw new McpToolError("audience is required", "invalid_argument");
   const row = raw as Args;
   const type = reqStr(row, "type");
   if (type === "org") return { type };
   if (type !== "users" || !Array.isArray(row.userIds)) {
-    throw new McpToolError("audience must be org or users with userIds");
+    throw new McpToolError("audience must be org or users with userIds", "invalid_argument");
   }
   if (row.userIds.some((id) => typeof id !== "string" || !id)) {
-    throw new McpToolError("audience.userIds must contain non-empty strings");
+    throw new McpToolError("audience.userIds must contain non-empty strings", "invalid_argument");
   }
   return { type, userIds: row.userIds as string[] };
 }
@@ -183,9 +188,19 @@ function accessAudience(raw: unknown): AccessAudience {
  * shape). The schema names the anchor `find` for replace/delete and `anchor` for
  * the inserts, and the new text `replace` vs `text`; agents mix those up often
  * enough that each is accepted under either name — there is no ambiguity in
- * what was meant, so refusing bought nothing but an error.
+ * what was meant, so refusing bought nothing but an error. The same goes for
+ * `edits` sent as a JSON string or as one bare edit object, and for an edit
+ * with no `type` that carries both a find and a replacement (a replace).
  */
 export function parseEdits(raw: unknown): NoteEdit[] {
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      throw new McpToolError("`edits` must be an array of edit objects, not text", "bad_edit");
+    }
+  }
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) raw = [raw];
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new McpToolError("edit_note requires a non-empty `edits` array", "bad_edit");
   }
@@ -200,7 +215,9 @@ export function parseEdits(raw: unknown): NoteEdit[] {
       return v;
     };
     const all = optBool(o, "all");
-    switch (o.type) {
+    const has = (a: string, b: string) => typeof (o[a] ?? o[b]) === "string";
+    const type = o.type ?? (has("find", "anchor") && has("replace", "text") ? "replace" : undefined);
+    switch (type) {
       case "replace":
         return {
           type: "replace",
@@ -216,7 +233,7 @@ export function parseEdits(raw: unknown): NoteEdit[] {
         return { type: "insert_after", anchor: str("anchor", "find"), text: str("text", "replace") };
       default:
         throw new McpToolError(
-          `edits[${i}].type must be one of replace, insert_before, insert_after, delete`,
+          `edits[${i}].type must be one of replace, insert_before, insert_after, delete (e.g. {"type":"replace","find":"old text","replace":"new text"})`,
           "bad_edit",
         );
     }
@@ -272,7 +289,7 @@ export const TOOLS: McpTool[] = [
     handler: (ctx, args) => {
       const resourceType = reqStr(args, "resourceType");
       if (resourceType !== "folder" && resourceType !== "file") {
-        throw new McpToolError("resourceType must be folder or file");
+        throw new McpToolError("resourceType must be folder or file", "invalid_argument");
       }
       return listResourceAccessTool(ctx, resourceType, reqStr(args, "resourceId"));
     },
@@ -538,7 +555,8 @@ export const TOOLS: McpTool[] = [
         edits: {
           type: "array",
           minItems: 1,
-          description: "Edits to apply in order, each matched against the text as left by the previous one.",
+          description:
+            'Edits to apply in order, each matched against the text as left by the previous one. A JSON array of objects, e.g. [{"type":"replace","find":"old text","replace":"new text"},{"type":"insert_after","anchor":"## Notes","text":"\\n- new item"}].',
           items: {
             type: "object",
             properties: {
@@ -624,11 +642,11 @@ export const TOOLS: McpTool[] = [
       try {
         return await listAccessAudit(ctx.auth.organizationId, ctx.auth.userId, {
           before: optStr(a, "before"),
-          limit: typeof a.limit === "number" ? a.limit : undefined,
+          limit: optNum(a, "limit"),
         });
       } catch (error) {
         if (["access_manager_required", "invalid_cursor", "invalid_limit"].includes((error as Error).message)) {
-          throw new McpToolError((error as Error).message);
+          throw new McpToolError((error as Error).message, (error as Error).message);
         }
         throw error;
       }

@@ -6,6 +6,8 @@ import { resetDb } from "./helpers/db.js";
 import { testAppDeps, memoryDocWriter } from "./helpers/app.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
 import { seedMember, seedNote, seedVault, seedVaultGrant } from "./helpers/seed.js";
+import { bucketImageOrigins } from "../src/http/routes/public-links.js";
+import type { S3Config } from "../src/blobs/config.js";
 
 /**
  * Public note links: /api/notes/:docId/public-link (mint/inspect/revoke, gated
@@ -28,6 +30,37 @@ async function mint(user: TestUser, docId: string) {
     }),
   );
 }
+
+// On S3/R2 an embedded image is a 302 to the bucket, and the page's img-src is
+// applied to that redirect: the bucket's origin has to be on it, or every image
+// on a shared page is a broken placeholder.
+describe("bucketImageOrigins", () => {
+  const base = {
+    bucket: "baalda",
+    region: "auto",
+    forcePathStyle: false,
+    proxyDownloads: false,
+  } as S3Config;
+
+  it("allows the R2 bucket host the presigned redirect points at", () => {
+    const origins = bucketImageOrigins({ ...base, endpoint: "https://acct.r2.cloudflarestorage.com" });
+    expect(origins).toContain("https://baalda.acct.r2.cloudflarestorage.com");
+  });
+
+  it("allows the endpoint itself for path-style gateways, and AWS hosts without an endpoint", () => {
+    expect(
+      bucketImageOrigins({ ...base, endpoint: "http://minio:9000", forcePathStyle: true }),
+    ).toEqual(["http://minio:9000"]);
+    expect(bucketImageOrigins({ ...base, region: "eu-west-2" })).toContain(
+      "https://baalda.s3.eu-west-2.amazonaws.com",
+    );
+  });
+
+  it("adds nothing when bytes never leave this server", () => {
+    expect(bucketImageOrigins(null)).toEqual([]);
+    expect(bucketImageOrigins({ ...base, endpoint: "https://x.example", proxyDownloads: true })).toEqual([]);
+  });
+});
 
 describe("public note links", () => {
   let owner: TestUser;

@@ -5,6 +5,7 @@ import type { Context } from "hono";
 import { pool } from "../../db/pool.js";
 import { config } from "../../config.js";
 import { BRAND_NAME } from "../../brand.js";
+import { WORDMARK_INK_DATA_URI } from "../../brand-assets.js";
 import { orgRole } from "../../permissions/lookup.js";
 import { ACCOUNT_READ_ONLY_BODY, refusedForBilling } from "../../permissions/http-gates.js";
 import { effectivePermission } from "../../permissions/resolver.js";
@@ -18,6 +19,7 @@ import {
   normalizeMime,
 } from "../../blobs/formats.js";
 import { resolveStoreForRow, storageKeyForRow } from "../../blobs/store.js";
+import { s3Config, type S3Config } from "../../blobs/config.js";
 
 /**
  * Public note links — the "anyone with the link can view" sibling of the
@@ -223,81 +225,93 @@ function esc(s: string): string {
 }
 
 const PAGE_CSS = `
-  /* baalda.com's palette: warm beige page, white sheet, near-black ink, the
-     brand violet for links and the tinted wikilink chip. */
+  /* baalda.com's design system, light only: warm off-white page with the
+     violet glow at the top, a white sheet, ink type (Radio Canada Big for
+     headings, Inter for text), black pill buttons and the violet accent. */
   :root {
-    --bg-page: #fcf9f7; --bg-sheet: #ffffff; --bg-soft: #f6f2ee;
-    --ink: #1c1c1a; --ink-soft: #57564f; --ink-faint: #8a8984;
-    --border: rgba(3, 3, 2, 0.08); --violet: #7c5cff; --violet-tint: rgba(124, 92, 255, 0.09);
-    --button-bg: #030302; --button-ink: #ffffff;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg-page: #141413; --bg-sheet: #1c1c1a; --bg-soft: #252522;
-      --ink: #eceae6; --ink-soft: #b3b1aa; --ink-faint: #85837d;
-      --border: rgba(255, 255, 255, 0.08); --violet: #a28dff; --violet-tint: rgba(162, 141, 255, 0.14);
-      --button-bg: #eceae6; --button-ink: #141413;
-    }
+    color-scheme: light;
+    --bg-page: #fcf9f7; --bg-sheet: #ffffff; --bg-soft: #f7f4f1;
+    --ink: #030302; --ink-soft: #404040; --ink-muted: #737373; --ink-faint: #a3a3a3;
+    --border: rgba(3, 3, 2, 0.08); --violet: #7c5cff; --violet-tint: rgba(124, 92, 255, 0.08);
+    --display: "Radio Canada Big", "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+    --mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg-page); color: var(--ink);
-         font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
-         font-size: 17px; line-height: 1.7; -webkit-font-smoothing: antialiased; }
-  .wrap { max-width: 1060px; margin: 0 auto; padding: 20px 24px 40px; }
+  body { margin: 0; min-height: 100vh; background: var(--bg-page); color: var(--ink-soft);
+         background-image: radial-gradient(70% 520px at 50% 0%, rgba(124, 92, 255, 0.14), transparent 70%);
+         background-repeat: no-repeat;
+         font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+         font-size: 16.5px; line-height: 1.75; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 20px 24px 48px; }
   .site-top { display: flex; align-items: center; justify-content: space-between;
-              gap: 12px; padding: 8px 4px 20px; }
-  a.brand { color: var(--ink); text-decoration: none; font-weight: 700;
-            letter-spacing: 0.2em; font-size: 0.92rem; }
-  a.open-app { display: inline-block; padding: 9px 18px; border-radius: 999px;
-               background: var(--button-bg); color: var(--button-ink);
-               text-decoration: none; font-weight: 600; font-size: 0.88rem; white-space: nowrap; }
-  a.open-app:hover { opacity: 0.88; }
-  main { background: var(--bg-sheet); border: 1px solid var(--border); border-radius: 22px;
-         padding: 64px 88px 72px; box-shadow: 0 1px 2px rgba(3, 3, 2, 0.03), 0 12px 32px rgba(3, 3, 2, 0.04); }
-  @media (max-width: 640px) { main { padding: 32px 22px 36px; border-radius: 16px; } }
-  h1.doc-title { font-size: 2.1rem; line-height: 1.2; letter-spacing: -0.02em;
-                 margin: 0 0 28px; font-weight: 700; }
+              gap: 12px; padding: 10px 4px 24px; }
+  a.brand { display: inline-flex; align-items: center; }
+  a.brand img { height: 18px; width: auto; display: block; }
+  a.open-app { display: inline-flex; align-items: center; height: 40px; padding: 0 20px; border-radius: 999px;
+               background: var(--ink); color: #fff; text-decoration: none; font-weight: 500;
+               font-size: 14px; white-space: nowrap;
+               box-shadow: 0 8px 16px -6px rgba(3, 3, 2, 0.35);
+               transition: background .15s, box-shadow .2s, transform .15s; }
+  a.open-app:hover { background: #262624; box-shadow: 0 12px 22px -8px rgba(3, 3, 2, 0.4); transform: translateY(-1px); }
+  main { background: var(--bg-sheet); border: 1px solid rgba(3, 3, 2, 0.06); border-radius: 24px;
+         padding: 72px 96px 80px;
+         box-shadow: 0 30px 60px -24px rgba(48, 32, 140, 0.16), 0 2px 6px rgba(3, 3, 2, 0.04); }
+  @media (max-width: 720px) {
+    .wrap { padding: 12px 16px 36px; }
+    main { padding: 36px 22px 40px; border-radius: 18px; }
+    a.open-app { height: 36px; padding: 0 16px; font-size: 13px; }
+  }
+  h1.doc-title { font-family: var(--display); color: var(--ink); font-size: clamp(2rem, 4.5vw, 2.75rem);
+                 line-height: 1.1; letter-spacing: -0.03em; margin: 0 0 32px; font-weight: 600; }
   article > :first-child { margin-top: 0; }
-  article h1, article h2, article h3, article h4 { line-height: 1.3; letter-spacing: -0.01em;
-                                                  margin: 1.8em 0 0.5em; }
-  article h1 { font-size: 1.6rem; } article h2 { font-size: 1.3rem; } article h3 { font-size: 1.1rem; }
-  article p, article ul, article ol { margin: 0 0 1em; }
-  article li { margin: 0.2em 0; }
+  article h1, article h2, article h3, article h4 { font-family: var(--display); color: var(--ink);
+                                                  font-weight: 600; line-height: 1.25; letter-spacing: -0.02em;
+                                                  margin: 1.9em 0 0.55em; }
+  article h1 { font-size: 1.75rem; } article h2 { font-size: 1.4rem; }
+  article h3 { font-size: 1.15rem; } article h4 { font-size: 1rem; }
+  article strong { color: var(--ink); font-weight: 600; }
+  article p, article ul, article ol { margin: 0 0 1.1em; }
+  article ul, article ol { padding-left: 1.4em; }
+  article li { margin: 0.3em 0; }
   article li::marker { color: var(--ink-faint); }
-  article img { max-width: 100%; height: auto; border-radius: 12px; }
-  article hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
+  article img { display: block; max-width: 100%; height: auto; border-radius: 14px; margin: 0.4em 0 1.1em; }
+  article hr { border: 0; border-top: 1px solid var(--border); margin: 2.4em 0; }
   article a { color: var(--violet); text-decoration: underline; text-decoration-thickness: 1px;
-              text-underline-offset: 3px; text-decoration-color: color-mix(in srgb, var(--violet) 40%, transparent); }
+              text-underline-offset: 3px; text-decoration-color: rgba(124, 92, 255, 0.4); }
   article a:hover { text-decoration-color: var(--violet); }
   /* A [[wikilink]] points at a note this page does not carry: the site's
      violet chip, not a link. */
-  .wikilink { color: var(--violet); background: var(--violet-tint); padding: 0.05em 0.35em;
-              border-radius: 6px; }
-  article pre { background: var(--bg-soft); padding: 14px 16px; border-radius: 12px;
-                overflow-x: auto; font-size: 0.88em; line-height: 1.55; }
-  article code { background: var(--bg-soft); padding: 0.12em 0.4em; border-radius: 6px; font-size: 0.88em;
-                 font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace; }
+  .wikilink { color: var(--violet); background: var(--violet-tint); padding: 0.1em 0.45em;
+              border-radius: 7px; font-weight: 500; }
+  article pre { background: var(--bg-soft); border: 1px solid var(--border); padding: 16px 18px;
+                border-radius: 14px; overflow-x: auto; font-size: 0.86em; line-height: 1.6; }
+  article code { background: var(--bg-soft); padding: 0.14em 0.42em; border-radius: 6px; font-size: 0.86em;
+                 font-family: var(--mono); color: var(--ink); }
   article pre code { background: none; padding: 0; }
-  article blockquote { margin: 0 0 1em; padding: 10px 18px; border-left: 3px solid var(--violet);
-                       background: var(--violet-tint); border-radius: 0 10px 10px 0; color: var(--ink-soft); }
+  article blockquote { margin: 0 0 1.1em; padding: 14px 20px; border-left: 3px solid var(--violet);
+                       background: #faf8ff; border-radius: 0 14px 14px 0; color: var(--ink-soft); }
   article blockquote > :last-child { margin-bottom: 0; }
   /* Tables — the editor's exact treatment: natural column widths, cells wrap
      at a readable measure, a wide table scrolls in its wrapper. */
-  .md-table { margin: 12px 0 1em; overflow-x: auto; contain: inline-size; }
-  .md-table table { border-collapse: collapse; width: max-content; font-size: 0.92em; }
-  .md-table th, .md-table td { border: 1px solid var(--border); padding: 6px 12px;
+  .md-table { margin: 14px 0 1.1em; overflow-x: auto; contain: inline-size;
+              border: 1px solid var(--border); border-radius: 14px; }
+  .md-table table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 0.92em; }
+  .md-table th, .md-table td { border-bottom: 1px solid var(--border); padding: 9px 14px;
                                text-align: left; vertical-align: top; max-width: 42ch; }
-  .md-table th { font-weight: 600; background: var(--bg-soft); }
+  .md-table tr:last-child td { border-bottom: 0; }
+  .md-table th { font-weight: 600; color: var(--ink); background: var(--bg-soft); }
   .md-table::-webkit-scrollbar { height: 8px; }
   .md-table::-webkit-scrollbar-thumb { background-color: var(--border); border-radius: 4px; }
   .md-table::-webkit-scrollbar-track { background: transparent; }
-  footer { text-align: center; margin-top: 22px; font-size: 0.82rem; color: var(--ink-faint); }
-  footer a { color: var(--ink-soft); }
+  footer { text-align: center; margin-top: 28px; font-family: var(--mono); font-size: 11px;
+           letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); }
+  footer a { color: var(--ink-muted); text-decoration: none; }
+  footer a:hover { color: var(--ink); }
 `;
 
 /** The page frame: brand bar (with "Open in Baalda" when there is a note to
  *  open), the white sheet, and a quiet footer under it. */
-function pageShell(title: string, inner: string, openHref?: string): string {
+export function pageShell(title: string, inner: string, openHref?: string): string {
   const open = openHref
     ? `<a class="open-app" href="${esc(openHref)}">Open in ${esc(BRAND_NAME)}</a>`
     : "";
@@ -308,18 +322,45 @@ function pageShell(title: string, inner: string, openHref?: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex" />
 <title>${esc(title)} · ${esc(BRAND_NAME)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Radio+Canada+Big:wght@500;600&display=swap" />
 <style>${PAGE_CSS}</style>
 </head>
 <body>
 <div class="wrap">
-<header class="site-top"><a class="brand" href="https://baalda.com" rel="noopener noreferrer">${esc(BRAND_NAME.toUpperCase())}</a>${open}</header>
+<header class="site-top"><a class="brand" href="https://baalda.com" rel="noopener noreferrer"><img src="${WORDMARK_INK_DATA_URI}" alt="${esc(BRAND_NAME)}" /></a>${open}</header>
 <main>
 ${inner}
 </main>
-<footer>Shared with ${esc(BRAND_NAME)} · <a href="https://baalda.com" rel="noopener noreferrer">Get ${esc(BRAND_NAME)}</a></footer>
+<footer>Shared with ${esc(BRAND_NAME)} · <a href="https://baalda.com" rel="noopener noreferrer">Get ${esc(BRAND_NAME)} →</a></footer>
 </div>
 </body>
 </html>`;
+}
+
+/**
+ * Where an embedded image's bytes actually come from. On S3/R2 the asset route
+ * answers with a 302 to a presigned bucket URL, and a browser applies the
+ * page's `img-src` to the redirect target too — with only `'self'` allowed,
+ * every image on a shared page rendered as a broken placeholder in production
+ * while working on a Postgres-stored self-host. Origins only, derived from the
+ * same settings the S3 client signs with (virtual-hosted and path-style).
+ */
+export function bucketImageOrigins(cfg: S3Config | null = s3Config()): string[] {
+  if (!cfg || cfg.proxyDownloads) return [];
+  if (cfg.endpoint) {
+    let url: URL;
+    try {
+      url = new URL(cfg.endpoint);
+    } catch {
+      return [];
+    }
+    return cfg.forcePathStyle ? [url.origin] : [`${url.protocol}//${cfg.bucket}.${url.host}`, url.origin];
+  }
+  return cfg.forcePathStyle
+    ? [`https://s3.${cfg.region}.amazonaws.com`]
+    : [`https://${cfg.bucket}.s3.${cfg.region}.amazonaws.com`, `https://${cfg.bucket}.s3.amazonaws.com`];
 }
 
 /** Headers every /p/* response carries — misses included, so 404s don't
@@ -331,7 +372,10 @@ const PAGE_HEADERS: Record<string, string> = {
   "X-Robots-Tag": "noindex",
   "X-Content-Type-Options": "nosniff",
   "Content-Security-Policy":
-    "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'",
+    // data: for the embedded wordmark, the bucket for redirected images (see
+    // `bucketImageOrigins`), Google Fonts for baalda.com's type.
+    `default-src 'none'; img-src ${["'self'", "data:", ...bucketImageOrigins()].join(" ")}; ` +
+    "style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com",
 };
 
 /** One generic page for malformed/unknown/revoked/deleted — byte-identical on
