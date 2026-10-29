@@ -1405,7 +1405,11 @@ html:not([data-theme="dark"]) .vault-grid-card {
   transition: box-shadow 140ms ease, transform 140ms ease; min-height: 0;
 }
 html:not([data-theme="dark"]) .vault-grid-card:hover { box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.1), 0 10px 24px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px); }
-html:not([data-theme="dark"]) .vault-grid-card.current { box-shadow: 0 0 0 1.5px var(--text-primary), 0 1px 2px rgba(11, 10, 16, 0.04); }
+html:not([data-theme="dark"]) .vault-grid-card.current {
+  border-color: transparent !important; outline: 0;
+  box-shadow: 0 0 0 1.5px var(--accent), 0 12px 28px -16px rgba(124, 92, 255, 0.45);
+}
+html:not([data-theme="dark"]) .vault-grid-card.current .vault-switch-chip { background: #e4f3e6; color: #2f8a4a; }
 html:not([data-theme="dark"]) .vault-grid-card .vault-tile { width: 36px !important; height: 36px !important; border-radius: 9px !important; }
 html:not([data-theme="dark"]) .vault-grid-name { font: 600 14px var(--font-body); margin-top: 12px; }
 html:not([data-theme="dark"]) .vault-grid-foot { margin-top: 8px; }
