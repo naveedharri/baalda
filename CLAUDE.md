@@ -1015,7 +1015,48 @@ billing (managed/Polar only; self-hosters leave all unset ⇒ unlimited): `POLAR
 `POLAR_PRODUCT_TEAM_MONTHLY_ID`/`POLAR_PRODUCT_TEAM_YEARLY_ID` · `TEAM_PRICE_MONTHLY_CENTS` (1000) ·
 `TEAM_PRICE_YEARLY_CENTS` (11000) · `TEAM_MIN_SEATS` (3) · `ABUSE_MAX_NOTES` (100000) ·
 `ABUSE_MAX_STORAGE_MB` (10240) · `FREE_MAX_VAULTS`/`FREE_MAX_MEMBERS`/`FREE_MAX_STORAGE_MB`
-(per-vault model only).
+(per-vault model only) ·
+vault keys: `BAALDA_VAULT_KEYS` (off) · `VAULT_KEY_CONVERSION` (off) — see "Vault keys" below.
+
+## Vault keys (`src/crypto/`, `docs/VAULT_KEYS.md`)
+
+Encryption at rest with **client-held** keys. **It is NOT end-to-end encryption**: a running server
+process sees plaintext and keys in memory while it works; the database, backups and admin tools alone
+yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-knowledge.
+- **Who holds keys.** Each vault has a random 32-byte key (VK) that only members' devices keep (OS
+  keychain). Users have X25519 key pairs (`user_keys`); VK is sealed to each member per generation
+  (`vault_key_wraps`). The server keeps only `vaults.vk_check` to verify a presented key.
+- **Transport.** HTTP: `X-Baalda-VK` (`crypto/transport.ts vaultKeyHeader`/`requireVaultKey`); per-doc
+  sockets: token `<jwt>.<vk-b64>` (`splitSyncToken`); vault channel: `hello`. Neither may ever be logged
+  (`redactToken`; `tests/vk-redaction.test.ts`).
+- **Sealed columns** (AES-256-GCM, AAD = table|column|vault|row): `doc_updates.update_enc`,
+  `doc_snapshots.snapshot_enc`, `note_index.search_enc`, `blob_text.search_enc`,
+  `note_texts.content_enc`, `public_links.token_enc` (+ `token_hash`). **Not encrypted:** attachment/file
+  BYTES (S3/R2 uploads go presigned straight to the bucket and rely only on the provider's at-rest
+  encryption; Postgres-stored bytes are not sealed either), titles, paths, folder names, sizes,
+  timestamps, membership and ACL rows.
+- **Rule 1:** every request/socket that reads or writes content presents VK itself, checked against
+  `vk_check`. `key-cache.ts` serves ONLY server-internal background work (index, compaction,
+  checkpoints, backfill), never a user request; `get()` returns a copy the caller zeroes.
+- **Rule 2:** only a member's device seals VK to a new member or device; the server only queues the
+  request. Devices pin each member's key fingerprint on first seal (TOFU) and refuse a changed key until
+  a person approves it.
+- **Rule 3:** MCP tokens and public links store hashes only, plus VK wrapped under an HKDF key from the
+  token secret (`mcp_token_keys`, `public_links.wrapped_vk`); unwrapped per call, never cached, zeroed
+  after the request. MCP and links work with no desktop online.
+- **Device linking:** a new device of the same account shows a code that an existing device approves;
+  a session alone never yields keys. There is no account recovery kit.
+- **Owner vault key:** owners reveal it in Vault Settings → General ("Show vault key"); no popup, never
+  emailed. "Restore with vault key" verifies against `vk_check`.
+- **Conversion gate + MCP upgrade** (`crypto/conversion.ts`): a device registers a pending key,
+  allow-lists existing tokens/links with an HMAC under VK, and they upgrade on next use. `keys/init`
+  accepts only when nothing used in 30 days lacks a wrap and the check bytes match the pending row; the
+  gate runs inside the init transaction under row locks (`lockGateRows`). `VAULT_KEY_CONVERSION` plus
+  the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all.
+- **Zero data loss:** plaintext is never removed before a per-row decrypt-and-compare check (a separate,
+  delayed, reversible step); `key_required` changes nothing server-side and never drops local edits;
+  compaction verifies the sealed snapshot first; key generations are never destroyed; when in doubt,
+  refuse and let the client retry.
 
 ## Conventions & gotchas
 
