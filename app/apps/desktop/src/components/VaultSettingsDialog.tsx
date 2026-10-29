@@ -537,7 +537,9 @@ function GeneralTab({
         </code>
       </div>
 
-      {isSynced && isOwner && <VaultKeySection vaultName={activeOrgName ?? "Vault"} />}
+      {isSynced && canManage && (
+        <VaultKeySection vaultName={activeOrgName ?? "Vault"} isOwner={isOwner} canManage={canManage} />
+      )}
 
       {isSynced && isOwner && <UnsyncDangerZone />}
 

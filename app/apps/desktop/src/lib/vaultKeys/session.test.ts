@@ -48,7 +48,7 @@ function fakeServer() {
     }),
     getMyVaultKeys: vi.fn(async (vaultId: string): Promise<MyVaultKeys> => {
       const v = vaults.get(vaultId);
-      if (!v) return { keyed: false, pending: false, conversionAllowed: conv.allowed };
+      if (!v) return { keyed: false, pending: false, conversionAllowed: conv.allowed, encryptionRequested: conv.allowed };
       const w = v.wraps.get(caller);
       if (!w) return { keyed: true, pending: true };
       return {
@@ -176,7 +176,7 @@ describe("vault key session", () => {
     const keys = fakeKeys();
     await keys.setAccountPrivateKey(generateAccountKeypair().privateKey);
     const s = session({ api: srv.api, keys, keysAllowed: () => false });
-    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed", conversionAllowed: false });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed", conversionAllowed: false, encryptionRequested: false });
     expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
     expect(s.headerFor("v1")).toBeNull();
   });
@@ -329,7 +329,7 @@ describe("vault key session", () => {
     await expect(s.ensureVaultKey("v1")).rejects.toThrow();
     const held = generateVaultKey();
     keys.vks.set("v1", held);
-    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed", conversionAllowed: false });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed", conversionAllowed: false, encryptionRequested: false });
     expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
     expect(keys.vks.get("v1")).toBe(held);
   });
@@ -339,7 +339,7 @@ describe("vault key session", () => {
     const keys = fakeKeys();
     await keys.setAccountPrivateKey(generateAccountKeypair().privateKey);
     const s = session({ api: srv.api, keys });
-    srv.api.getMyVaultKeys.mockResolvedValueOnce({ keyed: false, pending: false, conversionAllowed: false });
+    srv.api.getMyVaultKeys.mockResolvedValueOnce({ keyed: false, pending: false, conversionAllowed: false, encryptionRequested: false });
     srv.api.initVaultKeys.mockResolvedValueOnce("already-keyed");
     // Then the real answer: keyed, no wrap for us yet.
     srv.vaults.set("v1", { vkCheck: toBase64(await makeVkCheck(generateVaultKey(), "v1", 1)), generation: 1, wraps: new Map() });
@@ -459,7 +459,7 @@ describe("converting an existing vault", () => {
     expect(await s.convertVault("v1")).toBe("not-allowed");
     expect(keys.setVaultKey).not.toHaveBeenCalled();
     expect(srv.api.registerPendingVaultKey).not.toHaveBeenCalled();
-    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed", conversionAllowed: false });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed", conversionAllowed: false, encryptionRequested: false });
   });
 
   it("a member (not owner/admin) never converts", async () => {

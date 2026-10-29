@@ -1,20 +1,27 @@
-// Vault Settings → General → Vault key (owner only).
+// Vault Settings → General → Vault key / Encryption (owners and admins).
 //
 // Hidden by default; "Show vault key" reveals the 24 words inline with Copy
-// and Save to file. Never emailed or sent anywhere: the words leave this
-// screen only through the clipboard or a file the owner picks.
+// and Save to file (owner only). Never emailed or sent anywhere: the words
+// leave this screen only through the clipboard or a file the owner picks.
 // When the vault is keyed but this device has no verified key for it, the same
-// place offers "Restore with vault key" (a wrong key is refused, never stored).
-// A vault that is not keyed yet shows one line; an unknown state shows nothing.
+// place offers the owner "Restore with vault key" (a wrong key is refused,
+// never stored).
+// An EXISTING vault is encrypted only when an owner/admin clicks "Encrypt this
+// vault" (one-way, confirmed); new vaults are requested at creation. Once
+// requested but not keyed yet it shows one line. What to show is decided by
+// `vaultKeySectionView`; an unknown state shows nothing.
 
 import { useEffect, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import * as ipc from "../lib/ipc";
 import { toast } from "../lib/toast";
 import { syncManager } from "../lib/sync/docSession";
-import { blocksStructure, currentVaultKeySession, onVaultKeyEvent, vaultKeyStateFor } from "../lib/vaultKeys/runtime";
+import { api } from "../lib/auth/authManager";
+import { currentVaultKeySession, onVaultKeyEvent, vaultKeysNudge, vaultKeyStateFor } from "../lib/vaultKeys/runtime";
+import { vaultKeySectionView } from "../lib/vaultKeys/sectionView";
 import { vaultKeyFileText, wordsToVaultKey } from "../lib/vaultKeys/crypto";
 import { AsyncButton } from "./AsyncButton";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { CopyField } from "./McpTab";
 
 const RESTORE_MESSAGES: Record<string, string> = {
@@ -26,12 +33,21 @@ const RESTORE_MESSAGES: Record<string, string> = {
   disabled: "This server does not support vault keys yet.",
 };
 
-export function VaultKeySection({ vaultName }: { vaultName: string }) {
+export function VaultKeySection({
+  vaultName,
+  isOwner,
+  canManage,
+}: {
+  vaultName: string;
+  isOwner: boolean;
+  canManage: boolean;
+}) {
   const vaultId = syncManager.registry.vaultId;
   const session = currentVaultKeySession();
   const [shown, setShown] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
   const [restoreText, setRestoreText] = useState("");
+  const [confirmEncrypt, setConfirmEncrypt] = useState(false);
   const [, bump] = useState(0);
   useEffect(() => {
     const off = onVaultKeyEvent((e) => {
@@ -40,20 +56,65 @@ export function VaultKeySection({ vaultName }: { vaultName: string }) {
     return () => void off();
   }, []);
   if (!vaultId || !session) return null;
-  const words = session.revealVaultKey(vaultId);
+  const words = isOwner ? session.revealVaultKey(vaultId) : null;
   const state = vaultKeyStateFor(vaultId);
+  const view = vaultKeySectionView({ hasWords: !!words, state, isOwner, canManage });
 
-  if (!words) {
-    if (state?.state === "unkeyed") {
-      return (
-        <>
-          <div className="menu-sep" />
-          <div className="muted">Encryption is being set up for this vault.</div>
-        </>
-      );
-    }
-    // Keyed, but this computer cannot open it (a security warning has its own notice).
-    if (!state || !blocksStructure(state) || state.state === "security-warning") return null;
+  if (view === "hidden") return null;
+  if (view === "setting-up") {
+    return (
+      <>
+        <div className="menu-sep" />
+        <div className="muted">Encryption is being set up for this vault.</div>
+      </>
+    );
+  }
+  if (view === "encrypt-offer") {
+    return (
+      <>
+        <div className="menu-sep" />
+        <div className="menu-row vault-key-row">
+          <span className="menu-row-label">
+            Encryption
+            <span className="field-hint">
+              Encrypt this vault with a key only your team&apos;s devices hold. Baalda&apos;s database, backups and
+              admins will only see scrambled data. This can&apos;t be undone.
+            </span>
+          </span>
+          <button type="button" className="secondary sm" onClick={() => setConfirmEncrypt(true)}>
+            Encrypt this vault
+          </button>
+        </div>
+        {confirmEncrypt && (
+          <ConfirmDialog
+            tone="accent"
+            title={`Encrypt ${vaultName}?`}
+            confirmLabel="Encrypt this vault"
+            onCancel={() => setConfirmEncrypt(false)}
+            onConfirm={async () => {
+              try {
+                await api.requestVaultEncryption(vaultId);
+              } catch {
+                // Nothing changed on the server; the dialog stays open to retry.
+                toast("Couldn't start encrypting this vault. Try again.", "error");
+                return;
+              }
+              setConfirmEncrypt(false);
+              toast("Encryption is being set up for this vault.");
+              vaultKeysNudge();
+            }}
+          >
+            <p>
+              Its notes, search index and version history will be stored encrypted with a key that only your
+              team&apos;s devices hold. Everything keeps working as it does today.
+            </p>
+            <p>
+              <strong>This is one-way.</strong> Once a vault is encrypted it can&apos;t be turned back off.
+            </p>
+          </ConfirmDialog>
+        )}
+      </>
+    );
   }
 
   return (
