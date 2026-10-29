@@ -21,6 +21,8 @@
  * (unit tests that build a bare sync server) it is a no-op.
  */
 
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+
 /** Below this many characters a note is too small for a shrink to mean much. */
 export const SHRINK_MIN_CHARS = 200;
 /** An update is a sharp shrink when it leaves at most this share of the text. */
@@ -37,6 +39,14 @@ export type ShrinkHook = (
   docId: string,
   previousText: string,
   userId: string | null,
+  /**
+   * W3: the key the shrinking write itself carried (connection, request or
+   * MCP call key). The `pre-shrink` text is sealed with it, never with the
+   * process cache. The hook must COPY it synchronously: the writer zeroes its
+   * own key when its request ends. Undefined = unkeyed vault (or a keyless
+   * write, which the store refuses with `key_required` anyway).
+   */
+  crypto?: DocCrypto,
 ) => void;
 
 let hook: ShrinkHook | null = null;
@@ -56,11 +66,13 @@ export function reportShrink(
    *  MCP tool call is an explicit request, not a misbehaving client, so it is
    *  versioned like any shrink but never counted towards the burst brake. */
   source?: string | null,
+  /** The writer's own key on a keyed vault — see {@link ShrinkHook}. */
+  crypto?: DocCrypto,
 ): void {
   if (!isSharpShrink(before, after)) return;
   if (hook) {
     try {
-      hook(vaultId, docId, before, userId);
+      hook(vaultId, docId, before, userId, crypto);
     } catch (err) {
       console.error(`[versions] shrink hook failed for ${docId}:`, err);
     }

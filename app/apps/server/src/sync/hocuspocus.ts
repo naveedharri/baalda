@@ -422,6 +422,15 @@ export function createSyncServer(
       if (data.transactionOrigin === LOAD_ORIGIN) return;
       const parsed = parseDocName(data.documentName);
       if (!parsed) return;
+      // Captured synchronously above any await: the doc's remembered key, or
+      // this connection's own. Unkeyed vault: undefined, today's path. The
+      // SAME key seals the update below and the pre-shrink text; a keyed doc
+      // with neither has its update refused by `appendUpdate` (key_required),
+      // so the stored state keeps the prior text and nothing is lost.
+      const ctxKey = (data.context as Partial<SyncContext> | undefined)?.vaultKey;
+      const crypto: DocCrypto | undefined =
+        docCrypto.get(data.document) ??
+        (ctxKey ? { vaultId: parsed.vaultId, key: Buffer.from(ctxKey), generation: (data.context as Partial<SyncContext>).vaultKeyGeneration ?? 1 } : undefined);
       if (before !== undefined) {
         const ctx = data.context as (Partial<SyncContext> & { source?: string }) | undefined;
         reportShrink(
@@ -431,6 +440,7 @@ export function createSyncServer(
           text,
           ctx?.userId ?? null,
           ctx?.source ?? null,
+          crypto,
         );
       }
       // NEVER let this reject. Hocuspocus calls `onChange` unawaited AND
@@ -446,12 +456,7 @@ export function createSyncServer(
       // named on `ready.behind` and re-pushed. A crash loses that signal for
       // every other doc too.
       try {
-        // Captured synchronously above any await: the doc's remembered key, or
-        // this connection's own. Unkeyed vault: undefined, today's path.
-        const ctxKey = (data.context as Partial<SyncContext> | undefined)?.vaultKey;
-        const crypto =
-          docCrypto.get(data.document) ??
-          (ctxKey ? { vaultId: parsed.vaultId, key: Buffer.from(ctxKey), generation: (data.context as Partial<SyncContext>).vaultKeyGeneration ?? 1 } : undefined);
+        // `crypto` was captured synchronously above (before any await).
         await appendUpdate(parsed.docId, data.update, pool, config.compactionThreshold, crypto);
       } catch (err) {
         console.error(

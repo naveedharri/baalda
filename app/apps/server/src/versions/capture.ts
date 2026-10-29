@@ -285,7 +285,7 @@ export interface VersionCapture {
    * keep `previousText` — the note as it stood right before — as a
    * `pre-shrink` version. Authored by whoever edited the doc before the shrink.
    */
-  preShrink(vaultId: string, docId: string, previousText: string): Promise<void>;
+  preShrink(vaultId: string, docId: string, previousText: string, crypto?: DocCrypto): Promise<void>;
   /** Run a doc's pending idle capture NOW (test hook / shutdown). */
   flush(docId: string): Promise<void>;
   /** Run a vault's pending checkpoint top-up NOW (test hook). */
@@ -690,22 +690,32 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
       }
     },
 
-    async preShrink(vaultId, docId, previousText) {
+    async preShrink(vaultId, docId, previousText, crypto) {
       // Read the author synchronously: the shrinking edit's own `touch` follows
       // this call and would overwrite it. The checkpoint hold is set
       // synchronously for the same reason: that `touch` is what would otherwise
       // fire the daily checkpoint over the freshly emptied note.
       const authorId = sessions.get(docId)?.userId ?? null;
       vaultShrunkAt.set(vaultId, Date.now());
+      // W3: seal with the WRITER's key (never the cache), copied before the
+      // first await: the writer zeroes its own buffer when its request ends.
+      const own: DocCrypto | undefined = crypto
+        ? { vaultId: crypto.vaultId, key: Buffer.from(crypto.key), generation: crypto.generation }
+        : undefined;
       try {
         const { rows } = await db.query<{ id: string }>(
           "SELECT id FROM notes WHERE id = $1 AND vault_id = $2 AND deleted_at IS NULL",
           [docId, vaultId],
         );
         if (!rows[0]) return;
-        await recordVersion({ vaultId, docId, content: previousText, cause: "pre-shrink", authorId }, db);
+        await recordVersion(
+          { vaultId, docId, content: previousText, cause: "pre-shrink", authorId, crypto: own },
+          db,
+        );
       } catch (err) {
         console.error(`[versions] pre-shrink capture failed for ${docId}:`, err);
+      } finally {
+        own?.key.fill(0);
       }
     },
 
