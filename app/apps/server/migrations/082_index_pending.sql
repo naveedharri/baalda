@@ -1,6 +1,8 @@
 -- Notes a keyed vault's indexer had to DEFER (no member held the key). The
 -- index catch-up drains exactly these rows when a key arrives, instead of
 -- scanning every live note of the vault for staleness on every connect.
+SET LOCAL lock_timeout = '10s';
+
 CREATE TABLE IF NOT EXISTS index_pending (
   doc_id    TEXT PRIMARY KEY,
   vault_id  TEXT NOT NULL,

@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { refuseKeyIncapableClient } from "../../crypto/transport.js";
 import { pool } from "../../db/pool.js";
 import { createResolverCache } from "../../permissions/resolver.js";
 import { syncPermission } from "../../trash/access.js";
@@ -95,6 +96,11 @@ syncTokenRoutes.post("/sync-token", async (c) => {
     logSyncTokenRefusal(session.userId, docId, 404, "unknown_doc");
     return c.json({ error: "Unknown document" }, 404);
   }
+  // A keyed vault mints no socket for a build without vault keys (426, the
+  // refusal it already treats as "update"): the socket is where it would meet
+  // `key_required`, which it has never seen.
+  const outdated = await refuseKeyIncapableClient(c, vaultId);
+  if (outdated) return outdated;
 
   // A note in Trash (inside its retention window) still mints: pushes into it
   // are accepted so offline edits reach the server; the note stays deleted.

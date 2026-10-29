@@ -112,6 +112,7 @@ function fakeServer() {
 function fakeKeys() {
   let account: Uint8Array | null = null;
   const vks = new Map<string, Uint8Array>();
+  const provisional = new Set<string>();
   let link: Uint8Array | null = null;
   return {
     vks,
@@ -122,6 +123,9 @@ function fakeKeys() {
     setAccountPrivateKey: vi.fn(async (k: Uint8Array) => void (account = k)),
     getVaultKey: vi.fn(async (id: string) => vks.get(id) ?? null),
     setVaultKey: vi.fn(async (id: string, vk: Uint8Array) => void vks.set(id, vk)),
+    provisional,
+    isVaultKeyProvisional: vi.fn(async (id: string) => provisional.has(id)),
+    setVaultKeyProvisional: vi.fn(async (id: string, on: boolean) => void (on ? provisional.add(id) : provisional.delete(id))),
     clearCache: vi.fn(),
   };
 }
@@ -329,7 +333,9 @@ describe("vault key session", () => {
     await expect(s.ensureVaultKey("v1")).rejects.toThrow();
     const held = generateVaultKey();
     keys.vks.set("v1", held);
-    expect(await s.ensureVaultKey("v1")).toEqual({ state: "unkeyed", conversionAllowed: false, encryptionRequested: false });
+    // A confirmed held key + a server that says "unkeyed" is a wiped vk_check
+    // until proven otherwise: refused (never synced as plaintext), key kept.
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "key-mismatch" });
     expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
     expect(keys.vks.get("v1")).toBe(held);
   });
@@ -580,5 +586,137 @@ describe("first sync pass gate", () => {
 
     const off = session({ api: srv.api, keys, features: async () => new Set() });
     expect(await off.gateVaultOpen("v1")).toBe("proceed"); // server without vault keys
+  });
+});
+
+// A malicious operator with full database read/write but no vault key. Every
+// server answer below is something they can make the real server return.
+describe("database attacker (no vault key)", () => {
+  async function keyedOwner() {
+    const srv = fakeServer();
+    const keys = fakeKeys();
+    const pins = memPins();
+    const s = session({ api: srv.api, keys, pins, keysAllowed: () => false });
+    await s.ensureAccountKeys();
+    // Keyed the normal way; this device holds the confirmed key.
+    const real = generateVaultKey();
+    const pub = generateAccountKeypairPub((await keys.getAccountPrivateKey())!);
+    srv.vaults.set("v1", {
+      vkCheck: toBase64(await makeVkCheck(real, "v1", 1)),
+      generation: 1,
+      wraps: new Map([["u1", toBase64(sealVkTo(pub, real))]]),
+    });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
+    expect(keys.vks.get("v1")).toEqual(real);
+    keys.setVaultKey.mockClear();
+    return { srv, keys, pins, s, real, pub };
+  }
+
+  it("vk_check wiped (server says unkeyed): refuses, never re-keys, never syncs as plaintext", async () => {
+    const { srv, keys, s, real } = await keyedOwner();
+    srv.vaults.delete("v1"); // keys/mine now answers keyed:false
+    srv.conv.allowed = true; // even with the rollout gate and the opt-in on
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "key-mismatch" });
+    expect(await s.gateVaultOpen("v1")).toBe("paused");
+    expect(s.headerFor("v1")).toBeNull();
+    expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
+    expect(keys.setVaultKey).not.toHaveBeenCalled();
+    expect(keys.vks.get("v1")).toEqual(real);
+  });
+
+  it("vk_check swapped for the attacker's own key + a forged wrap: refused, real key kept", async () => {
+    const { srv, keys, s, real, pub } = await keyedOwner();
+    const theirs = generateVaultKey();
+    // Anyone can seal to a public key, so the attacker forges our wrap too,
+    // and bumps the generation so it is the one picked.
+    srv.vaults.set("v1", {
+      vkCheck: toBase64(await makeVkCheck(theirs, "v1", 2)),
+      generation: 2,
+      wraps: new Map([["u1", toBase64(sealVkTo(pub, theirs))]]),
+    });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "key-mismatch" });
+    expect(await s.gateVaultOpen("v1")).toBe("paused");
+    expect(s.headerFor("v1")).toBeNull();
+    expect(keys.setVaultKey).not.toHaveBeenCalled();
+    expect(keys.vks.get("v1")).toEqual(real);
+    // Nothing is sealed to anyone under the attacker's key either.
+    srv.requests.set("v1", [{ userId: "u2", publicKey: toBase64(generateAccountKeypair().publicKey), requestedAt: "" }]);
+    expect((await s.serviceKeyRequests("v1")).sealed).toEqual([]);
+  });
+
+  it("wrap deleted (server says pending) with a swapped check: refused, not 'waiting'", async () => {
+    const { srv, keys, s, real } = await keyedOwner();
+    srv.vaults.set("v1", { vkCheck: toBase64(await makeVkCheck(generateVaultKey(), "v1", 1)), generation: 1, wraps: new Map() });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "key-mismatch" });
+    expect(keys.vks.get("v1")).toEqual(real);
+  });
+
+  it("a member's public key replaced in the database: TOFU refuses, never seals", async () => {
+    const { srv, s, pins } = await keyedOwner();
+    const member = generateAccountKeypair();
+    srv.requests.set("v1", [{ userId: "u2", publicKey: toBase64(member.publicKey), requestedAt: "" }]);
+    expect((await s.serviceKeyRequests("v1")).sealed).toHaveLength(1);
+    expect(pins.m.get("u2")).toBe(keyFingerprint(member.publicKey));
+    srv.posted.length = 0;
+    // The attacker deletes u2's wrap and re-queues the request with their own key.
+    const attacker = generateAccountKeypair();
+    srv.requests.set("v1", [{ userId: "u2", publicKey: toBase64(attacker.publicKey), requestedAt: "" }]);
+    const res = await s.serviceKeyRequests("v1");
+    expect(res.sealed).toEqual([]);
+    expect(res.keyChanged.map((k) => k.userId)).toEqual(["u2"]);
+    expect(srv.posted).toEqual([]);
+  });
+
+  it("RESIDUAL: a member row + key inserted before any seal is sealed to (first use), and surfaced", async () => {
+    // Membership is judged from server data (the members API), which the
+    // attacker controls, and there is no pin yet: trust on first use seals.
+    // The result names the person (the app shows "<name> was given access").
+    // Documented residual; key transparency is the full fix.
+    const { srv, s } = await keyedOwner();
+    const fake = generateAccountKeypair();
+    srv.requests.set("v1", [{ userId: "inserted", publicKey: toBase64(fake.publicKey), requestedAt: "" }]);
+    const res = await s.serviceKeyRequests("v1");
+    expect(res.sealed.map((x) => x.userId)).toEqual(["inserted"]);
+  });
+
+  it("a member check that says no never seals", async () => {
+    const { srv, keys } = await keyedOwner();
+    const s = session({ api: srv.api, keys, isMember: async () => false });
+    await s.ensureVaultKey("v1");
+    srv.requests.set("v1", [{ userId: "ghost", publicKey: toBase64(generateAccountKeypair().publicKey), requestedAt: "" }]);
+    const res = await s.serviceKeyRequests("v1");
+    expect(res.sealed).toEqual([]);
+    expect(res.refused).toEqual(["ghost"]);
+  });
+
+  it("only a provisional (unconfirmed conversion) key may be replaced by a wrap", async () => {
+    const srv = fakeServer();
+    const keys = fakeKeys();
+    const s = session({ api: srv.api, keys, keysAllowed: () => false, canConvert: async () => true });
+    await s.ensureAccountKeys();
+    srv.conv.allowed = true;
+    srv.conv.claims.set("v1", { vkCheck: "someone-else", deviceId: "d9" });
+    expect(await s.convertVault("v1")).toBe("claimed-elsewhere");
+    expect(keys.provisional.has("v1")).toBe(true);
+    // While still unkeyed a provisional key does not block (conversion in progress).
+    expect(await s.gateVaultOpen("v1")).toBe("proceed");
+    const theirs = generateVaultKey();
+    const pub = generateAccountKeypairPub((await keys.getAccountPrivateKey())!);
+    srv.vaults.set("v1", {
+      vkCheck: toBase64(await makeVkCheck(theirs, "v1", 1)),
+      generation: 1,
+      wraps: new Map([["u1", toBase64(sealVkTo(pub, theirs))]]),
+    });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
+    expect(keys.provisional.has("v1")).toBe(false);
+    // Now confirmed: a later swap is refused like any other.
+    const evil = generateVaultKey();
+    srv.vaults.set("v1", {
+      vkCheck: toBase64(await makeVkCheck(evil, "v1", 1)),
+      generation: 1,
+      wraps: new Map([["u1", toBase64(sealVkTo(pub, evil))]]),
+    });
+    expect(await s.ensureVaultKey("v1")).toEqual({ state: "key-mismatch" });
+    expect(keys.vks.get("v1")).toEqual(theirs);
   });
 });

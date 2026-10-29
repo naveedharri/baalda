@@ -47,7 +47,7 @@ import {
   tombstoneFile,
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
-import { docCryptoOf, requireVaultKey } from "../../crypto/transport.js";
+import { docCryptoOf, refuseKeyIncapableClient, requireVaultKey } from "../../crypto/transport.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
 import type { DocCrypto } from "../../crypto/doc-crypto.js";
 import { softDeleteSet } from "../../trash/retention.js";
@@ -905,6 +905,10 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
+    // A build without vault keys registers nothing in a keyed vault (426),
+    // with or without state.
+    const outdated = await refuseKeyIncapableClient(c, vaultId);
+    if (outdated) return outdated;
     // W3: content into a keyed vault needs this request's key, checked BEFORE
     // registration so a refusal registers nothing.
     let seedCrypto: DocCrypto | undefined;

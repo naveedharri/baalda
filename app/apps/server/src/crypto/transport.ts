@@ -10,6 +10,11 @@
 import type { Context, MiddlewareHandler } from "hono";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
+import {
+  isVaultKeyCapableVersion,
+  reportedClientVersion,
+  vaultKeysOutdatedBody,
+} from "../http/client-version.js";
 import { vaultKeysEnabled } from "./config.js";
 import { KEY_BYTES } from "./envelope.js";
 import { verifyVk } from "./vk-check.js";
@@ -65,16 +70,31 @@ export function redactToken(token: unknown): string {
   return `<token length ${splitSyncToken(token).jwt.length}>`;
 }
 
-/** The vault's key state: null when the vault is not keyed (today's path). */
+/**
+ * The vault's key state: null when the vault is not keyed (today's path).
+ *
+ * A NULL `vk_check` beside key material the vault can only have once keyed
+ * (wraps, wrap history, a `vault_crypto_state` row) is a wiped check, never an
+ * unkeyed vault: none of those exist without the check in normal operation.
+ * Treating it as unkeyed would accept plaintext writes into a sealed vault, so
+ * it answers an empty check that no key opens, and every path fails closed
+ * with `key_required`.
+ */
 export async function loadVkCheck(
   vaultId: string,
   db: Queryable = defaultPool,
 ): Promise<{ vkCheck: Buffer; generation: number } | null> {
-  const { rows } = await db.query<{ vk_check: Buffer | null; key_generation: number | null }>(
-    "SELECT vk_check, key_generation FROM vaults WHERE id = $1",
+  const { rows } = await db.query<{ vk_check: Buffer | null; key_generation: number | null; orphaned: boolean }>(
+    `SELECT v.vk_check, v.key_generation,
+            (v.vk_check IS NULL AND (
+               EXISTS (SELECT 1 FROM vault_key_wraps w WHERE w.vault_id = v.id)
+            OR EXISTS (SELECT 1 FROM vault_key_wrap_history h WHERE h.vault_id = v.id)
+            OR EXISTS (SELECT 1 FROM vault_crypto_state s WHERE s.vault_id = v.id))) AS orphaned
+       FROM vaults v WHERE v.id = $1`,
     [vaultId],
   );
   const row = rows[0];
+  if (row?.orphaned) return { vkCheck: Buffer.alloc(0), generation: row.key_generation ?? 1 };
   if (!row?.vk_check) return null;
   return { vkCheck: row.vk_check, generation: row.key_generation ?? 1 };
 }
@@ -117,6 +137,11 @@ export async function requireVaultKey(
     vaultKeyCache.holdForRequest(vaultId, vk, state.generation);
     return { ok: true, key: vk, keyed: true, generation: state.generation };
   }
+  // A build that predates vault keys never sees `key_required` (it has never
+  // handled it): it gets the 426 it already treats as "stop and update".
+  if (!isVaultKeyCapableVersion(reportedClientVersion(c))) {
+    return { ok: false, response: c.json(vaultKeysOutdatedBody(), 426) };
+  }
   return {
     ok: false,
     response: c.json(
@@ -124,6 +149,30 @@ export async function requireVaultKey(
       409,
     ),
   };
+}
+
+/**
+ * For the routes that do not read the key themselves but lead to content of a
+ * keyed vault (the sync and vault-channel token mints, registration without
+ * state, bootstrap session create, blob intent/complete): a 426
+ * `client_outdated` response when `vaultId` is keyed and this request comes
+ * from a build without vault keys, else null. "Capable" = a verified
+ * `X-Baalda-VK` OR a reported version >= `VAULT_KEYS_MIN_DESKTOP`; a missing
+ * version is old. Unkeyed vault or flag off: null, at the cost of nothing
+ * (unkeyed vaults behave exactly as before for every client).
+ */
+export async function refuseKeyIncapableClient(
+  c: Context,
+  vaultId: string,
+  db: Queryable = defaultPool,
+): Promise<Response | null> {
+  if (!vaultKeysEnabled()) return null;
+  if (isVaultKeyCapableVersion(reportedClientVersion(c))) return null;
+  const state = await loadVkCheck(vaultId, db);
+  if (!state) return null;
+  const vk = (c.get("presentedVk" as never) as Buffer | undefined) ?? decodeVk(c.req.header(VK_HEADER));
+  if (vk && verifyVk(vk, vaultId, state.vkCheck)) return null;
+  return c.json(vaultKeysOutdatedBody(), 426);
 }
 
 /** The request's verified key as a persistence `DocCrypto`, or undefined (unkeyed). */

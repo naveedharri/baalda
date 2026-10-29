@@ -1065,6 +1065,17 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   `access_audit` row `vault`/`encryption_requested`). Enforced server-side: `keys/pending` and `keys/init` answer
   409 `encryption_not_requested` and store nothing until it is set (`crypto/conversion.ts`). Desktop: `VaultKeySection` (shown to owners and
   admins; key reveal/restore stay owner-only), view logic in `lib/vaultKeys/sectionView.ts`.
+- **Desktops without vault keys** (`http/client-version.ts VAULT_KEYS_MIN_DESKTOP` = 0.1.98, no env
+  override, no grace, missing version = old): on a KEYED vault every entry point (`requireVaultKey`'s
+  refusal, plus `crypto/transport.ts refuseKeyIncapableClient` on the sync/vault-channel token mints,
+  bootstrap create, notes/batch and `POST /api/notes` with or without state, blob legacy POST/intent/
+  complete) answers them `426 client_outdated` (`reason: vault_keys`) instead of `key_required`, and
+  writes nothing — the refusal 0.1.97 and older already turn into "stop syncing, update". A verified
+  `X-Baalda-VK` also counts as capable. Sockets are gated at the mint (an old build never gets a token).
+  The desktop sends `clientVersion` on EVERY `/api/*` call except `/api/auth/*` (`api.ts
+  withClientVersion`, raw fetches included), and its key on both token mints. Unkeyed vaults: unchanged.
+  Ships only together with the 0.1.98 version bump (an unbumped build reports 0.1.97 and is refused
+  wherever it presents no key).
 - **Zero data loss:** plaintext is never removed before a per-row decrypt-and-compare check (a separate,
   delayed, reversible step); `key_required` changes nothing server-side and never drops local edits;
   compaction verifies the sealed snapshot first; key generations are never destroyed; when in doubt,

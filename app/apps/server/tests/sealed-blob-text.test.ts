@@ -6,6 +6,7 @@ import { pool } from "../src/db/pool.js";
 import { searchNoteIndex } from "../src/index/indexer.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { KeyRequiredError } from "../src/crypto/transport.js";
+import { VAULT_KEYS_MIN_DESKTOP } from "../src/http/client-version.js";
 import { testAppDeps } from "./helpers/app.js";
 import { resetDb } from "./helpers/db.js";
 import { signUp, type TestUser } from "./helpers/auth.js";
@@ -33,6 +34,7 @@ function putText(token: string, vaultId: string, blob: { id: string; sha256: str
       headers: {
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
+        "x-baalda-version": VAULT_KEYS_MIN_DESKTOP,
         ...(vk ? { "x-baalda-vk": vk.toString("base64") } : {}),
       },
       body: JSON.stringify({ content: TEXT, sha256: blob.sha256, source: "client" }),

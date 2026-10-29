@@ -21,6 +21,7 @@ import { openSearchRow } from "../src/index/sealed-index.js";
 import { resetMcpBadTokens } from "../src/http/routes/mcp.js";
 import { testAppDeps } from "./helpers/app.js";
 import { resetDb } from "./helpers/db.js";
+import { CLIENT_VERSION_HEADER, VAULT_KEYS_MIN_DESKTOP } from "../src/http/client-version.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
 import { markEncryptionRequested, seedNote, seedVault } from "./helpers/seed.js";
 
@@ -29,10 +30,15 @@ const docWriter = createDocWriter(server);
 const app = createApp(testAppDeps({ docWriter }));
 const b64 = (b: Buffer) => b.toString("base64");
 
-function api(user: TestUser, method: string, path: string, body?: unknown, vk?: Buffer) {
+/** A vault-key capable desktop unless `old` (no version reported). */
+function api(user: TestUser, method: string, path: string, body?: unknown, vk?: Buffer, old = false) {
   return app.request(`/api${path}`, {
     method,
-    headers: { ...authHeaders(user), ...(vk ? { "x-baalda-vk": b64(vk) } : {}) },
+    headers: {
+      ...authHeaders(user),
+      ...(old ? {} : { [CLIENT_VERSION_HEADER]: VAULT_KEYS_MIN_DESKTOP }),
+      ...(vk ? { "x-baalda-vk": b64(vk) } : {}),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
@@ -183,6 +189,10 @@ describe("request keys warm the cache (no vault channel)", () => {
     noDesktops();
     const wrong = await api(s.owner, "GET", `/vaults/${s.vaultId}/search?q=x`, undefined, randomBytes(32));
     expect(wrong.status).toBe(409);
+    expect(vaultKeyCache.has(s.vaultId)).toBe(false);
+    // An old build (no version) with a wrong key is told to update instead.
+    const old = await api(s.owner, "GET", `/vaults/${s.vaultId}/search?q=x`, undefined, randomBytes(32), true);
+    expect(old.status).toBe(426);
     expect(vaultKeyCache.has(s.vaultId)).toBe(false);
     const right = await api(s.owner, "GET", `/vaults/${s.vaultId}/search?q=x`, undefined, s.vk);
     expect(right.status).toBe(200);

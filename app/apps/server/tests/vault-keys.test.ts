@@ -6,6 +6,7 @@ import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { redactToken, requireVaultKey, splitSyncToken } from "../src/crypto/transport.js";
+import { VAULT_KEYS_MIN_DESKTOP } from "../src/http/client-version.js";
 import { testAppDeps } from "./helpers/app.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
@@ -20,6 +21,8 @@ function call(user: TestUser, method: string, path: string, body?: unknown, vk?:
     headers: {
       ...authHeaders(user),
       "content-type": "application/json",
+      // A vault-key build reports its version (`VAULT_KEYS_MIN_DESKTOP`).
+      "x-baalda-version": VAULT_KEYS_MIN_DESKTOP,
       ...(vk ? { "x-baalda-vk": b64(vk) } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -361,7 +364,10 @@ describe("vault key routes", () => {
       const r = await requireVaultKey(c, s.vaultId);
       return r.ok ? c.json({ keyed: r.keyed, hasKey: !!r.key }) : r.response;
     });
-    const hit = (vk?: Buffer) => probe.request("/p", { headers: vk ? { "x-baalda-vk": b64(vk) } : {} });
+    const hit = (vk?: Buffer) =>
+      probe.request("/p", {
+        headers: { "x-baalda-version": VAULT_KEYS_MIN_DESKTOP, ...(vk ? { "x-baalda-vk": b64(vk) } : {}) },
+      });
     expect(await (await hit()).json()).toEqual({ keyed: false, hasKey: false });
     await init(s);
     const none = await hit();

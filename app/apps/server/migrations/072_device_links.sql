@@ -6,6 +6,8 @@
 -- Additive only, and key material is never deleted: a removed device is
 -- marked revoked (its wrap is kept, just no longer served), and a replaced
 -- account key moves to `user_key_history`.
+SET LOCAL lock_timeout = '10s';
+
 CREATE TABLE user_device_registrations (
   user_id      TEXT NOT NULL,
   device_id    TEXT NOT NULL,

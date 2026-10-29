@@ -6,4 +6,6 @@
 -- nulls a plaintext column. A keyed re-index writes `search_enc` and leaves the
 -- old plaintext columns as they were; nulling them is a later, separate,
 -- reversible step.
+SET LOCAL lock_timeout = '10s';
+
 ALTER TABLE note_index ADD COLUMN IF NOT EXISTS search_enc BYTEA;
