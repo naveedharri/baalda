@@ -64,6 +64,7 @@ import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
 import type { StructureNotice, VoiceSpeaker } from "./lib/sync/docSession";
 import type { SyncPause } from "./lib/sync/syncPause";
+import type { OAuthConsentLink } from "./lib/oauthConsentLink";
 import { MicPermissionError } from "./lib/voice/capture";
 import * as perf from "./lib/perf";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
@@ -716,6 +717,14 @@ interface AppStore {
   upgradeDialogRequest: { reason?: string; orgId?: string; token: number } | null;
   requestUpgradeDialog: (opts?: { reason?: string; orgId?: string }) => void;
   clearUpgradeDialogRequest: () => void;
+  /**
+   * A `baalda://oauth-consent` hand-off: claude.ai / ChatGPT asking to connect
+   * to a keyed vault (W3). Parked until the person confirms in
+   * `OAuthConsentHost` (main.tsx); a deep link never presents a key on its own.
+   */
+  oauthConsentLink: OAuthConsentLink | null;
+  promptOAuthConsent: (link: OAuthConsentLink) => void;
+  clearOAuthConsent: () => void;
   /**
    * Whether the connected server lacks features this app needs (UI mirror
    * only; `lib/serverFeatures.ts`). Null = unknown or not checked yet, which
@@ -2147,6 +2156,9 @@ export const useStore = create<AppStore>((set, get) => ({
   closeSettingsDialog: (which) =>
     set((s) => (which && s.settingsDialog !== which ? {} : { settingsDialog: null })),
   upgradeDialogRequest: null,
+  oauthConsentLink: null,
+  promptOAuthConsent: (link) => set({ oauthConsentLink: link }),
+  clearOAuthConsent: () => set({ oauthConsentLink: null }),
   backendStatus: null,
   setBackendStatus: (backendStatus) => set({ backendStatus }),
   revealedPath: null,

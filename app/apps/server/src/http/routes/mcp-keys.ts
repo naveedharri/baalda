@@ -14,7 +14,7 @@
 //
 // "(VK)" = the request must carry `X-Baalda-VK`, verified against the vault's
 // check (keyed, or pending). Never logged.
-import { createHash } from "node:crypto";
+import { bareHashHex } from "../../mcp/oauth-token-hash.js";
 import { Hono, type Context } from "hono";
 import { pool } from "../../db/pool.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
@@ -64,8 +64,8 @@ const KINDS: Record<string, "mcp_token" | "oauth_grant" | "public_link"> = {
 
 /**
  * The org's OAuth grants that can still act (refresh token unexpired), with
- * hash = sha256 hex of the refresh token (Better Auth stores it plaintext
- * today; slice 2 replaces that). Optionally one grant by id.
+ * hash = bare sha256 hex of the refresh token (never the stored `h1:` form).
+ * Optionally one grant by id.
  */
 async function oauthGrants(orgId: string, id?: string): Promise<Array<{ id: string; hash: string }>> {
   const { rows } = await pool.query<{ id: string; refresh: string }>(
@@ -77,7 +77,9 @@ async function oauthGrants(orgId: string, id?: string): Promise<Array<{ id: stri
       ORDER BY a."createdAt", a.id`,
     [orgId, id ?? null],
   );
-  return rows.map((r) => ({ id: r.id, hash: createHash("sha256").update(r.refresh).digest("hex") }));
+  // The stored refresh token is legacy plaintext or `h1:` + hex sha256 (lazy
+  // hashing); either way the MAC input is the bare hex sha256.
+  return rows.map((r) => ({ id: r.id, hash: bareHashHex(r.refresh) }));
 }
 
 const keyRequired = (c: Context) =>

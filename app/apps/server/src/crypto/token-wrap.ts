@@ -14,7 +14,7 @@
 import { createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 import { KEY_BYTES, aadFor, open, seal } from "./envelope.js";
 
-export type WrapPurpose = "mcp-vk" | "link";
+export type WrapPurpose = "mcp-vk" | "link" | "oauth-access" | "oauth-refresh" | "oauth-consent";
 
 const SALT = Buffer.from("baalda-token-wrap-v1", "ascii");
 
