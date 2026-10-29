@@ -11,6 +11,7 @@ import { canAddMember, canCreateOrganization } from "../billing/entitlements.js"
 import { checkInviteSeat, checkJoinSeat, seatRefusalBody, teamModel, type SeatRefusal } from "../billing/plan.js";
 import { ensureAccountForOrg } from "../billing/accounts.js";
 import { onMembershipTrimmed } from "../billing/lapse.js";
+import { forgetMemberKeys } from "../crypto/member-keys.js";
 import { announceMemberJoined, announceMemberRemoved, announceOrgChanged } from "../sync/member-events.js";
 import { dispatchMail, emailEnabled } from "../email/mailer.js";
 import { verifyEmailEmail } from "../email/templates.js";
@@ -391,6 +392,8 @@ export const auth = betterAuth({
         afterRemoveMember: async ({ organization, member }) => {
           await attributeMembershipEvent(member.id, "delete", auditRequestActor.getStore() ?? null);
           await onMembershipTrimmed(authPool, organization.id);
+          // Client-held vault keys (W3): drop their sealed keys + requests.
+          await forgetMemberKeys(organization.id, member.userId, authPool);
           // Better Auth's own remove-member endpoint: close the removed user's
           // live vault-channel sockets like DELETE /api/orgs/:orgId/members/:userId.
           await announceMemberRemoved(organization.id, member.userId, "removed");

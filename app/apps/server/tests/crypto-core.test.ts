@@ -59,6 +59,17 @@ describe("envelope", () => {
 });
 
 describe("vk_check", () => {
+  it("matches the desktop interop vector byte-for-byte", () => {
+    // VK = 32×0x01, vault "vault-test", generation 1, nonce = 12×0x02.
+    // GCM additional data = header (01 0001 nonce) || "bd1|vaults|vk_check|vault-test|vault-test".
+    const vk = Buffer.alloc(32, 1);
+    const check = makeVkCheck(vk, "vault-test", 1, Buffer.alloc(12, 2));
+    expect(check.toString("hex")).toBe(
+      "01000102020202020202020202020265b7a8252e36ec8bb8e1dfa039c4a99fd4848d5c82188690770e1fd0970fb3d74f7a",
+    );
+    expect(verifyVk(vk, "vault-test", check)).toBe(true);
+  });
+
   it("verifies the right key and refuses the wrong one, another vault, or garbage", () => {
     const vk = key();
     const check = makeVkCheck(vk, "vault-1");
@@ -77,9 +88,10 @@ describe("VaultKeyCache", () => {
     const vk = key();
     const r1 = cache.acquire("v", vk);
     const r2 = cache.acquire("v", vk);
-    const cached = cache.get("v")!.key;
-    expect(cached.equals(vk)).toBe(true);
-    expect(cached).not.toBe(vk);
+    const internal = (c: VaultKeyCache) => (c as unknown as { entries: Map<string, { key: Buffer }> }).entries.get("v")!.key;
+    const cached = internal(cache);
+    expect(cache.get("v")!.key.equals(vk)).toBe(true);
+    expect(cache.get("v")!.key).not.toBe(cached);
     r1();
     r1(); // idempotent
     t = 5000;
@@ -112,7 +124,7 @@ describe("VaultKeyCache", () => {
     const a = key();
     const b = key();
     cache.acquire("v", a, 1);
-    const old = cache.get("v")!.key;
+    const old = (cache as unknown as { entries: Map<string, { key: Buffer }> }).entries.get("v")!.key;
     cache.acquire("v", b, 2);
     expect(old.every((x) => x === 0)).toBe(true);
     expect(cache.get("v")).toMatchObject({ generation: 2 });
@@ -125,7 +137,7 @@ describe("VaultKeyCache", () => {
   it("evict and clear zero the key at once", () => {
     const cache = new VaultKeyCache();
     cache.acquire("v", key());
-    const k = cache.get("v")!.key;
+    const k = (cache as unknown as { entries: Map<string, { key: Buffer }> }).entries.get("v")!.key;
     cache.clear();
     expect(cache.size).toBe(0);
     expect(k.every((x) => x === 0)).toBe(true);

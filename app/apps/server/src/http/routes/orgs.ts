@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole } from "../../permissions/lookup.js";
+import { forgetMemberKeys } from "../../crypto/member-keys.js";
 import { getSession } from "../session.js";
 import { canAddMember } from "../../billing/entitlements.js";
 import { checkJoinSeat, seatRefusalBody, teamModel } from "../../billing/plan.js";
@@ -177,6 +178,9 @@ async function revokeMembership(
         WHERE org_id = $1 AND principal_type = 'user' AND principal_id = $2`,
       [orgId, userId],
     );
+    // Client-held vault keys (W3): the departed member's sealed keys and
+    // pending requests go with the membership (no-op when none exist).
+    await forgetMemberKeys(orgId, userId, client);
     await client.query(
       `UPDATE session SET "activeOrganizationId" = NULL
         WHERE "userId" = $1 AND "activeOrganizationId" = $2`,

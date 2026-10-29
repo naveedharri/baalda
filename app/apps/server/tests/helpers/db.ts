@@ -53,6 +53,11 @@ const TABLES = [
   "account",
   "verification",
   "signin_throttle",
+  "user_keys",
+  "user_device_keys",
+  "vault_key_wraps",
+  "vault_key_requests",
+  "vault_crypto_state",
   '"user"',
 ];
 

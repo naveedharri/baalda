@@ -37,12 +37,27 @@ function checkKey(key: Buffer): void {
   if (key.length !== KEY_BYTES) throw new Error(`vault key must be ${KEY_BYTES} bytes`);
 }
 
-export function seal(key: Buffer, aad: Buffer, plaintext: Buffer, generation = 1): Buffer {
+/**
+ * GCM's additional data is `header || aad`: the 15 header bytes (version,
+ * generation big-endian, nonce) followed by the `aadFor` bytes, one buffer.
+ * The desktop must authenticate exactly the same concatenation.
+ *
+ * `nonceForTest` exists only for fixed interop vectors; production callers
+ * never pass it (a reused GCM nonce under one key breaks confidentiality).
+ */
+export function seal(
+  key: Buffer,
+  aad: Buffer,
+  plaintext: Buffer,
+  generation = 1,
+  nonceForTest?: Buffer,
+): Buffer {
   checkKey(key);
   if (!Number.isInteger(generation) || generation < 0 || generation > MAX_GENERATION) {
     throw new Error("seal: generation must be an integer in 0..65535");
   }
-  const nonce = randomBytes(NONCE_BYTES);
+  if (nonceForTest && nonceForTest.length !== NONCE_BYTES) throw new Error("seal: nonce must be 12 bytes");
+  const nonce = nonceForTest ?? randomBytes(NONCE_BYTES);
   const header = Buffer.alloc(HEADER_BYTES);
   header[0] = ENVELOPE_VERSION;
   header.writeUInt16BE(generation, 1);

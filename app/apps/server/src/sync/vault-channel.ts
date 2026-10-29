@@ -9,6 +9,10 @@ import { listReadableDocsInVault, type SharedVaultReads } from "../permissions/v
 import { listEmptyDocs, loadDocDiff } from "../yjs/persistence.js";
 import { deletedNotesAmong } from "../trash/access.js";
 import { pool } from "../db/pool.js";
+import { vaultKeysEnabled } from "../crypto/config.js";
+import { vaultKeyCache } from "../crypto/key-cache.js";
+import { decodeVk, loadVkCheck } from "../crypto/transport.js";
+import { verifyVk } from "../crypto/vk-check.js";
 import { observeCount } from "../metrics/sync-metrics.js";
 import {
   parseHello,
@@ -533,6 +537,8 @@ class VaultConnection {
   private unsubscribe: (() => void) | null = null;
   /** The user-addressed topic (`invitations` cap only, sync/user-events.ts). */
   private unsubscribeUser: (() => void) | null = null;
+  /** W3: releases this connection's hold on the vault key cache entry. */
+  private releaseKey: (() => void) | null = null;
   private helloSeen = false;
   // Set once by cleanup(). `close` fires exactly once, so anything that outlives
   // it (an in-flight hello await) must consult this instead of relying on
@@ -659,6 +665,24 @@ class VaultConnection {
       // never let a "last active" stamp affect the handshake
     }
     if (this.closed) return; // closed while verifying — don't run the ACL query
+
+    // W3: a hello may carry the vault key. Verified against `vk_check`, it is
+    // held in the process cache for this connection (background work only);
+    // released in cleanup(). Flag off or no key: exactly today's path.
+    if (hello.vk && vaultKeysEnabled()) {
+      const vk = decodeVk(hello.vk);
+      try {
+        const state = await loadVkCheck(this.vaultId, pool);
+        if (vk && state && verifyVk(vk, this.vaultId, state.vkCheck) && !this.closed) {
+          this.releaseKey = vaultKeyCache.acquire(this.vaultId, vk, state.generation);
+        }
+      } catch (err) {
+        console.error("Vault channel key check failed:", (err as Error)?.message ?? err);
+      } finally {
+        vk?.fill(0);
+      }
+      if (this.closed) return;
+    }
 
     try {
       this.readable = await this.deps.listReadableDocs(this.userId, this.vaultId);
@@ -1598,6 +1622,10 @@ class VaultConnection {
         encodePubsubPresence({ userId: this.userId, docId: null, name, color, status }),
       );
       this.announced = false;
+    }
+    if (this.releaseKey) {
+      this.releaseKey();
+      this.releaseKey = null;
     }
     if (this.unsubscribeUser) {
       this.unsubscribeUser();

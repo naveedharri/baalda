@@ -71,11 +71,21 @@ export class VaultKeyCache {
     };
   }
 
-  /** INTERNAL background work only — see the header note. */
+  /**
+   * INTERNAL background work only — see the header note. Returns a COPY, so an
+   * eviction mid-job cannot zero the key under a running batch; the caller
+   * zeroes its copy (`key.fill(0)`) when done.
+   */
   get(vaultId: string): { key: Buffer; generation: number } | null {
     this.sweep();
     const entry = this.entries.get(vaultId);
-    return entry ? { key: entry.key, generation: entry.generation } : null;
+    return entry ? { key: Buffer.from(entry.key), generation: entry.generation } : null;
+  }
+
+  /** Whether a key is held for `vaultId` (no copy made). */
+  has(vaultId: string): boolean {
+    this.sweep();
+    return this.entries.has(vaultId);
   }
 
   /** Evict every entry whose grace period has passed. */
