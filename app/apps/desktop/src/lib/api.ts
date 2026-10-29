@@ -1537,6 +1537,16 @@ export interface AllowlistCandidate {
   kind: string;
   id: string;
   hash: string;
+  /** Owner/admin review (newer servers): token name, OAuth app name, or note path. */
+  label?: string | null;
+  /** Who made it (display name, else email). */
+  createdBy?: string | null;
+  createdAt?: string | null;
+  lastUsedAt?: string | null;
+  /** Already allow-listed for this vault. */
+  allowed?: boolean;
+  /** Unchecked in an earlier review: never allow-listed. */
+  excluded?: boolean;
 }
 export interface AllowlistEntry {
   kind: string;
@@ -1782,12 +1792,18 @@ export class ApiClient {
     return list.filter((c) => typeof c?.id === "string" && typeof c?.hash === "string");
   }
 
-  /** `rejected`: ids whose MAC the server could not verify (logged, retried next poll). */
-  async postAllowlist(vaultId: string, entries: AllowlistEntry[], vkBase64: string): Promise<{ rejected: string[] }> {
+  /** `rejected`: ids whose MAC the server could not verify (logged, retried next poll).
+   *  `excluded`: what the owner unchecked in the conversion review (never allow-listed). */
+  async postAllowlist(
+    vaultId: string,
+    entries: AllowlistEntry[],
+    vkBase64: string,
+    excluded: Array<{ kind: string; id: string }> = [],
+  ): Promise<{ rejected: string[] }> {
     const { data } = await this.request<{ accepted?: number; rejected?: string[] }>(
       "POST",
       `/api/vaults/${encodeURIComponent(vaultId)}/keys/allowlist`,
-      { body: { entries }, headers: { [VAULT_KEY_HEADER]: vkBase64 } },
+      { body: excluded.length ? { entries, excluded } : { entries }, headers: { [VAULT_KEY_HEADER]: vkBase64 } },
     );
     return { rejected: Array.isArray(data?.rejected) ? data.rejected : [] };
   }

@@ -25,6 +25,7 @@ import type {
   VaultKeyWrapPost,
 } from "../api";
 import { VAULT_KEYS } from "../serverFeatures";
+import { candidateKey, splitForReview } from "./conversionReview";
 import {
   fromBase64,
   deviceCode,
@@ -67,7 +68,12 @@ export interface VaultKeysApi {
     vkBase64: string,
   ): Promise<"registered" | "claimed">;
   getAllowlistCandidates(vaultId: string, vkBase64: string): Promise<AllowlistCandidate[]>;
-  postAllowlist(vaultId: string, entries: AllowlistEntry[], vkBase64: string): Promise<{ rejected: string[] }>;
+  postAllowlist(
+    vaultId: string,
+    entries: AllowlistEntry[],
+    vkBase64: string,
+    excluded?: Array<{ kind: string; id: string }>,
+  ): Promise<{ rejected: string[] }>;
   getConversionReady(vaultId: string, vkBase64: string): Promise<boolean>;
 }
 
@@ -110,6 +116,11 @@ export interface VaultKeySessionDeps {
   deviceId(): string;
   /** May this user convert the vault (owner/admin)? Default: no. */
   canConvert?(vaultId: string): Promise<boolean>;
+  /**
+   * Show the owner's review before allow-listing (production: on). Off, every
+   * candidate is allow-listed without asking (the older flow, kept for tests).
+   */
+  reviewConnections?: boolean;
 }
 
 export type AccountKeysState =
@@ -136,6 +147,8 @@ export type VaultKeyState =
 export type ConvertResult =
   | "converted"
   | "waiting-ready"
+  /** Connections nobody reviewed yet: `pendingConversionReview` lists them. */
+  | "needs-review"
   | "claimed-elsewhere"
   | "already-keyed"
   | "needs-account-key"
@@ -177,6 +190,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
   /** Ids already offered / handled this session: listed after new ones. */
   const offeredDevices = new Set<string>();
   const handledRequests = new Set<string>();
+  /** vaultId → (candidateKey → keep?) from the owner's review on this device. */
+  const reviewDecisions = new Map<string, Map<string, boolean>>();
+  /** vaultId → candidates waiting for the owner's review. */
+  const pendingReviews = new Map<string, AllowlistCandidate[]>();
 
   /** Set when the server's account key is not ours: every key step refuses. */
   let accountMismatch = false;
@@ -394,17 +411,31 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const claim = await api.registerPendingVaultKey(vaultId, { vkCheck, generation, deviceId: deps.deviceId() }, vkB64);
     if (claim === "claimed") return "claimed-elsewhere";
 
-    // Re-run on every poll: credentials minted while pending must be listed too.
+    // Re-run on every poll: credentials minted while pending must be listed too
+    // (and reviewed: a new one is undecided until the owner answers).
     const candidates = await api.getAllowlistCandidates(vaultId, vkB64);
-    const entries: AllowlistEntry[] = candidates.map((c) => ({
+    const { keep, exclude, undecided } = splitForReview(
+      candidates,
+      reviewDecisions.get(vaultId),
+      deps.reviewConnections === true,
+    );
+    const entries: AllowlistEntry[] = keep.map((c) => ({
       kind: c.kind,
       id: c.id,
       mac: toBase64(allowlistMac(vk!, c.id, c.hash)),
     }));
-    if (entries.length) {
-      const { rejected } = await api.postAllowlist(vaultId, entries, vkB64);
+    if (entries.length || exclude.length) {
+      const excluded = exclude.map((c) => ({ kind: c.kind, id: c.id }));
+      const { rejected } = await api.postAllowlist(vaultId, entries, vkB64, excluded);
       if (rejected.length) console.warn(`[vault-keys] ${rejected.length} allowlist entr(y/ies) rejected; retrying next poll`);
     }
+    // Nothing is allow-listed or converted past a connection the owner has
+    // not seen: unreviewed ones would silently need reconnecting afterwards.
+    if (undecided.length) {
+      pendingReviews.set(vaultId, undecided);
+      return "needs-review";
+    }
+    pendingReviews.delete(vaultId);
     if (!(await api.getConversionReady(vaultId, vkB64))) return "waiting-ready";
 
     const result = await api.initVaultKeys(vaultId, {
@@ -424,6 +455,25 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     await confirmed(vaultId);
     accept(vaultId, vk, generation);
     return "converted";
+  }
+
+  /** Candidates waiting for the owner's review of this vault, else null. */
+  function pendingConversionReview(vaultId: string): AllowlistCandidate[] | null {
+    return pendingReviews.get(vaultId) ?? null;
+  }
+
+  /**
+   * The owner answered the review: `keep` holds the candidate keys they left
+   * checked; every other listed candidate is excluded. Recorded here only; the
+   * next `convertVault` run posts it (allow-list MACs + `excluded`).
+   */
+  function submitConversionReview(vaultId: string, keep: ReadonlySet<string>): void {
+    const listed = pendingReviews.get(vaultId);
+    if (!listed) return;
+    const decisions = reviewDecisions.get(vaultId) ?? new Map<string, boolean>();
+    for (const c of listed) decisions.set(candidateKey(c), keep.has(candidateKey(c)));
+    reviewDecisions.set(vaultId, decisions);
+    pendingReviews.delete(vaultId);
   }
 
   /**
@@ -621,6 +671,8 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     restoreWithVaultKey,
     revealVaultKey,
     convertVault,
+    pendingConversionReview,
+    submitConversionReview,
     gateVaultOpen,
     pendingDevices,
     approveDevice,
@@ -640,6 +692,8 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       verified.clear();
       offeredDevices.clear();
       handledRequests.clear();
+      reviewDecisions.clear();
+      pendingReviews.clear();
       accountMismatch = false;
       keys.clearCache();
     },

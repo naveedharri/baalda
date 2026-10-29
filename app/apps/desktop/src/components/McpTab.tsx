@@ -509,7 +509,7 @@ function isConnected(lastUsedAt: string | null): boolean {
 }
 
 /** Compact relative time: "just now", "5m ago", "3h ago", "2d ago", else a date. */
-function relTime(iso: string): string {
+export function relTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
   if (diff < 60_000) return "just now";
   const m = Math.floor(diff / 60_000);
