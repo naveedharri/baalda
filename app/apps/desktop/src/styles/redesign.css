@@ -1501,3 +1501,5 @@ html:not([data-theme="dark"]) .editor-wrap .editor-column,
 html:not([data-theme="dark"]) .editor-wrap .editor-topbar,
 html:not([data-theme="dark"]) .editor-wrap .editor-slot { position: static; }
 .rd-viewonly { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); }
+/* No amber frame: the chip alone says view only. */
+html:not([data-theme="dark"]) .editor-wrap:has(.rd-viewonly)::after { content: none; }
