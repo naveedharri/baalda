@@ -20,7 +20,7 @@ import { requireVaultKey } from "../../crypto/transport.js";
 import { initGate } from "../../crypto/conversion.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
-import { CLIENT_VERSION_HEADER, clientVersionPolicy, judgeClientVersion } from "../client-version.js";
+import { CLIENT_VERSION_HEADER, CLIENT_VERSION_PARAM, clientVersionPolicy, judgeClientVersion } from "../client-version.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -149,7 +149,7 @@ export function createVaultKeyRoutes(): Hono {
       [vaultId],
     );
     if (!v[0]?.vk_check) {
-      return c.json({ keyed: false, conversionAllowed: conversionAllowed(c.req.header(CLIENT_VERSION_HEADER)) });
+      return c.json({ keyed: false, conversionAllowed: conversionAllowed(c.req.header(CLIENT_VERSION_HEADER) ?? c.req.query(CLIENT_VERSION_PARAM)) });
     }
     // Wraps sealed before the caller last replaced their account key cannot be
     // opened by them any more; they are kept (never deleted) but do not count.

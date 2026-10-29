@@ -1617,6 +1617,7 @@ export class ApiClient {
     const { data, status } = await this.request<Partial<MyVaultKeysBody> & { keyed?: boolean; pending?: boolean }>(
       "GET",
       `/api/vaults/${encodeURIComponent(vaultId)}/keys/mine`,
+      { query: { [CLIENT_VERSION_PARAM]: CLIENT_VERSION } },
     );
     // Only an explicit `keyed: false` means unkeyed; anything unexpected throws
     // (the caller then does nothing rather than keying a vault that has a key).
