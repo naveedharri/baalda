@@ -741,6 +741,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       {inviteOpen && orgId && (
         <InvitePeopleDialog
           orgId={orgId}
+          vaultName={vaultName}
+          newMembersAccess={accessDefault?.mode ?? null}
+          onNewMembersAccess={manage ? (mode) => void chooseDefault(mode) : undefined}
           canManageBilling={myRole === "owner"}
           seatAccount={seatAccount}
           ownerName={ownerName(members)}

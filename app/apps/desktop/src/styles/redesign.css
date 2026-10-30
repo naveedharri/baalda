@@ -2533,3 +2533,50 @@ html:not(.rd-off) .switch.is-disabled { opacity: 0.45; }
 html:not(.rd-off) .switch .switch-input:focus-visible + .switch-track {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
 }
+
+/* Invite people, two tabs (chosen 2026-10-30): a header with a close button,
+   By email / Join code as equal segments, the code as large tiles with one copy
+   button that confirms, the New members setting beside it, and a quiet footer
+   hint. No rules between sections. */
+html:not(.rd-off) .modal.invite-people { width: 480px; padding: 22px 22px 18px; border-radius: 22px; }
+html:not(.rd-off) .invite-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+html:not(.rd-off) .invite-head .confirm-title { margin: 0; font-size: 19px; }
+html:not(.rd-off) .invite-close {
+  width: 30px; height: 30px; border: 0; border-radius: 9px; display: grid; place-items: center;
+  background: rgba(var(--rd-ink), 0.04); color: var(--text-tertiary); font-size: 16px; cursor: pointer;
+}
+html:not(.rd-off) .invite-close:hover { background: rgba(var(--rd-ink), 0.08); color: var(--text-primary); }
+html:not(.rd-off) .invite-tabs {
+  display: grid; grid-template-columns: 1fr 1fr; padding: 3px; margin-bottom: 18px;
+  border-radius: 12px; background: rgba(var(--rd-ink), 0.05);
+}
+html:not(.rd-off) .invite-tabs button {
+  border: 0; background: transparent; padding: 8px 0; border-radius: 10px; cursor: pointer;
+  font: 400 13.5px var(--font-body); color: var(--text-tertiary);
+}
+html:not(.rd-off) .invite-tabs button.on {
+  background: var(--rd-surface); color: var(--text-primary); font-weight: 500; box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.12);
+}
+html:not(.rd-off) .invite-code-card {
+  display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 22px 18px 18px;
+  border-radius: 18px; background: var(--bg-app); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06);
+}
+html:not(.rd-off) .invite-code-lead { margin: 0; font-size: 12.5px; color: var(--text-tertiary); text-align: center; }
+html:not(.rd-off) .invite-code-tiles { display: flex; gap: 6px; }
+html:not(.rd-off) .invite-code-tiles span {
+  width: 38px; height: 48px; display: grid; place-items: center; border-radius: 10px;
+  background: var(--rd-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.08), 0 2px 6px -3px rgba(var(--rd-ink), 0.15);
+  font: 500 22px var(--font-mono); color: var(--text-primary);
+}
+html:not(.rd-off) .invite-code-tiles span.gap { margin-left: 10px; }
+html:not(.rd-off) .invite-copy { min-width: 132px; }
+html:not(.rd-off) .invite-copy.is-copied,
+html:not(.rd-off) .invite-copy.is-copied:hover { background: var(--rdc-2f7a46, #2f7a46); box-shadow: 0 8px 18px -8px rgba(47, 122, 70, 0.55); }
+html:not(.rd-off) .invite-code-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 4px 0;
+  font-size: 13.5px; color: var(--text-primary);
+}
+html:not(.rd-off) .invite-code-row small { display: block; margin-top: 2px; font-size: 12px; color: var(--text-tertiary); }
+html:not(.rd-off) .invite-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; }
+html:not(.rd-off) .invite-foot-hint { font-size: 12.5px; color: var(--text-tertiary); }
+html:not(.rd-off) .invite-foot .confirm-actions { margin: 0; display: flex; gap: 8px; }
