@@ -701,79 +701,104 @@ export function ConnectionTab() {
     }
   };
 
+  // Redesign: two clear choices. Baalda Cloud is the managed server; anything
+  // else is "your own", which is the only case that needs an address typed.
+  const cloudUrl = normalizeServerUrl(DEFAULT_SERVER_URL);
+  const isCloud = draftUrl === cloudUrl;
+  const pick = (url: string) => {
+    setDraft(url);
+    setSaved(false);
+    setError(null);
+  };
+
   return (
-    <div className="connection-tab">
-      <p className="field-hint">
-        One server is active at a time. Switching pauses sync with the previous
-        server. Choose a vault on the new server to resume syncing.
-      </p>
-      {recent.length > 0 && (
-        <div className="field">
-          <span className="field-label">Recent connections</span>
-          {/* The app's one popover select (as in Appearance and Members), not
-              a native <select>: that was the last OS-chrome dropdown here. */}
-          <div className="connection-recent-row">
-            <MenuSelect<string>
-              value={selectedRecent}
-              options={recent.map((url) => ({
-                value: url,
-                label: serverHost(url),
-                hint: url === activeUrl ? "Active" : undefined,
-              }))}
-              onSelect={(url) => {
-                setDraft(url);
+    <div className="connection-tab conn-b">
+      <p className="field-hint">Choose where your notes sync. You sign in separately on each server.</p>
+      <div className="conn-options" role="radiogroup" aria-label="Server">
+        <button
+          type="button"
+          role="radio"
+          aria-checked={isCloud}
+          className={`conn-option${isCloud ? " is-selected" : ""}`}
+          disabled={busy}
+          onClick={() => pick(DEFAULT_SERVER_URL)}
+        >
+          <span className="conn-radio" aria-hidden="true" />
+          <span className="conn-tile is-cloud" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 18a5 5 0 0 0-1-9.9 7 7 0 0 0-13 3.4A4 4 0 0 0 4 18h13z" /></svg>
+          </span>
+          <b>Baalda Cloud</b>
+          <span className="conn-option-hint">Managed by us. Nothing to set up.</span>
+        </button>
+        <div
+          role="radio"
+          aria-checked={!isCloud}
+          tabIndex={0}
+          className={`conn-option${!isCloud ? " is-selected" : ""}`}
+          onClick={() => {
+            if (isCloud) pick(selectedRecent && selectedRecent !== cloudUrl ? selectedRecent : "");
+            window.setTimeout(() => addressInput.current?.focus(), 0);
+          }}
+          onKeyDown={(e) => {
+            if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+              e.preventDefault();
+              if (isCloud) pick("");
+              addressInput.current?.focus();
+            }
+          }}
+        >
+          <span className="conn-radio" aria-hidden="true" />
+          <span className="conn-tile is-own" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" /><path d="M7 7.5h.01M7 16.5h.01" /></svg>
+          </span>
+          <b>Your own server</b>
+          <span className="conn-option-hint">Self-hosted Baalda. Your data, your machine.</span>
+          {!isCloud && (
+            <input
+              ref={addressInput}
+              className="conn-address"
+              value={draft}
+              disabled={busy}
+              onChange={(e) => {
+                setDraft(e.target.value);
                 setSaved(false);
                 setError(null);
               }}
-              disabled={busy}
-              ariaLabel="Recent connections"
-              direction="down"
-              triggerClassName="role-field-trigger connection-recent-trigger"
-              menuClassName="connection-recent-menu"
-              triggerContent={
-                <span className="role-trigger-label">
-                  {selectedRecent ? serverHost(selectedRecent) : "Choose a recent server"}
-                  {selectedRecent && selectedRecent === activeUrl && (
-                    <span className="appearance-tag connection-active-tag">Active</span>
-                  )}
-                </span>
-              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void save();
+              }}
+              placeholder="https://notes.example.com"
+              aria-label="Server address"
+              spellCheck={false}
+              autoCapitalize="off"
             />
-            <button
-              type="button"
-              className="secondary sm"
-              disabled={busy}
-              onClick={() => {
-                setDraft("");
-                setSaved(false);
-                setError(null);
-                addressInput.current?.focus();
-              }}
-            >
-              Add server
-            </button>
+          )}
+        </div>
+      </div>
+      {recent.length > 0 && (
+        <div className="conn-recent">
+          <span className="conn-recent-label">Recent</span>
+          <div className="conn-chips" role="group" aria-label="Recent connections">
+            {recent.map((url) => (
+              <button
+                key={url}
+                type="button"
+                className={`conn-chip${url === draftUrl ? " is-picked" : ""}${url === activeUrl ? " is-active" : ""}`}
+                disabled={busy}
+                aria-pressed={url === draftUrl}
+                title={url === activeUrl ? `${url} (active)` : url}
+                onClick={() => pick(url)}
+              >
+                {serverHost(url)}
+              </button>
+            ))}
           </div>
         </div>
       )}
-      <label className="field">
-        <span className="field-label">Server URL</span>
-        <input
-          ref={addressInput}
-          value={draft}
-          disabled={busy}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="https://notes.example.com"
-          spellCheck={false}
-          autoCapitalize="off"
-        />
-        <span className="field-hint">
-          The Baalda server this device syncs against, currently{" "}
-          <strong>{serverHost(serverUrl)}</strong>. Use the managed service or
-          point at your own. Your account is per-server, so switching signs you
-          in to that server's session instead.
+      <div className="conn-foot">
+        <span className="conn-status" role="status">
+          {saved ? "Reconnected." : `Connected to ${serverHost(serverUrl)}`}
         </span>
-      </label>
-      <div className="update-actions">
         <button
           type="button"
           className="primary sm"
@@ -781,13 +806,8 @@ export function ConnectionTab() {
           onClick={() => void save()}
         >
           {busy && <span className="btn-spinner" aria-hidden="true" />}
-          <span>Save &amp; reconnect</span>
+          <span>Connect</span>
         </button>
-        {saved && (
-          <span className="update-status" role="status">
-            Reconnected.
-          </span>
-        )}
       </div>
       {error && <div className="auth-error">{error}</div>}
     </div>

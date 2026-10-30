@@ -2699,3 +2699,42 @@ html:not(.rd-off) .whats-new-cta:focus-visible {
   box-shadow: 0 0 0 3px #fff, 0 14px 30px -10px rgba(11, 10, 16, 0.45);
 }
 .join-avatar-drop .avatar { width: 100% !important; height: 100% !important; }
+
+/* Connection, "Cloud or your own" (chosen 2026-10-30): two choice cards, the
+   address only for your own server, recent servers as chips, one Connect. */
+html:not(.rd-off) .conn-b { display: flex; flex-direction: column; gap: 16px; max-width: 720px; }
+html:not(.rd-off) .conn-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+html:not(.rd-off) .conn-option {
+  position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left;
+  padding: 18px; border: 0; border-radius: 16px; cursor: pointer; font: inherit; color: var(--text-primary);
+  background: var(--rd-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.03);
+  transition: box-shadow var(--t-fast) var(--ease);
+}
+html:not(.rd-off) .conn-option:hover { box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.14); }
+html:not(.rd-off) .conn-option.is-selected { box-shadow: 0 0 0 2px var(--accent), 0 12px 28px -18px color-mix(in srgb, var(--accent) 60%, transparent); }
+html:not(.rd-off) .conn-option b { font-size: 15px; font-weight: 600; margin-top: 10px; }
+html:not(.rd-off) .conn-option-hint { font-size: 12.5px; color: var(--text-tertiary); line-height: 1.45; }
+html:not(.rd-off) .conn-radio {
+  position: absolute; top: 16px; right: 16px; width: 18px; height: 18px; border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px rgba(var(--rd-ink), 0.25); transition: box-shadow var(--t-fast) var(--ease);
+}
+html:not(.rd-off) .conn-option.is-selected .conn-radio { box-shadow: inset 0 0 0 5px var(--accent); }
+html:not(.rd-off) .conn-tile { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; }
+html:not(.rd-off) .conn-tile.is-cloud { background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6); }
+html:not(.rd-off) .conn-tile.is-own { background: var(--rdc-e4f3e8, #e4f3e8); color: var(--rdc-2f7a46, #2f7a46); }
+html:not(.rd-off) .conn-address {
+  width: 100%; margin-top: 12px; padding: 10px 12px; border: 0; border-radius: 10px;
+  background: var(--bg-app); font: 13px var(--font-mono); color: var(--text-primary);
+}
+html:not(.rd-off) .conn-address:focus { outline: none; box-shadow: 0 0 0 1.5px var(--accent), 0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent); }
+html:not(.rd-off) .conn-recent-label { display: block; font: 500 11px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 8px; }
+html:not(.rd-off) .conn-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+html:not(.rd-off) .conn-chip {
+  display: inline-flex; align-items: center; gap: 6px; border: 0; cursor: pointer;
+  padding: 5px 11px; border-radius: 99px; font: 500 12.5px var(--font-body);
+  background: rgba(var(--rd-ink), 0.05); color: var(--text-secondary);
+}
+html:not(.rd-off) .conn-chip.is-active::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--rdc-3f9a5c, #3f9a5c); }
+html:not(.rd-off) .conn-chip.is-picked { background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6); box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent); }
+html:not(.rd-off) .conn-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+html:not(.rd-off) .conn-status { font-size: 12.5px; color: var(--text-tertiary); }
