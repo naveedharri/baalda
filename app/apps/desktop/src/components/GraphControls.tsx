@@ -4,7 +4,7 @@
 // styling lives in graph.css (plus the app-wide `.range-input` / `.range-value`
 // in App.css); this file just emits the agreed class names.
 
-import type { GraphSettings, ColorMode } from "../lib/graph/graphSettings";
+import type { GraphSettings, ColorMode, GraphShape } from "../lib/graph/graphSettings";
 import { SETTING_RANGES } from "../lib/graph/graphSettings";
 import type { LegendEntry } from "../lib/graph/graphColor";
 
@@ -28,6 +28,11 @@ const SLIDER_LABELS: Record<SliderKey, string> = {
   labelScale: "Labels",
   minDegree: "Min links",
 };
+
+const SHAPES: { shape: GraphShape; label: string }[] = [
+  { shape: "globe", label: "Globe" },
+  { shape: "flat", label: "Flat" },
+];
 
 const COLOR_MODES: { mode: ColorMode; label: string }[] = [
   { mode: "folder", label: "Folder" },
@@ -85,6 +90,22 @@ export function GraphControls(props: GraphControlsProps): React.JSX.Element {
 
       <div className="graph-control-group">
         <div className="graph-control-group-title">Appearance</div>
+        <div className="graph-control-row">
+          <label>Shape</label>
+          <div className="graph-seg" role="group" aria-label="Graph shape">
+            {SHAPES.map(({ shape, label }) => (
+              <button
+                key={shape}
+                type="button"
+                className={"graph-seg-btn" + (settings.shape === shape ? " is-active" : "")}
+                aria-pressed={settings.shape === shape}
+                onClick={() => onChange({ shape })}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
         {slider("nodeSize")}
         {slider("edgeThickness")}
         {slider("labelScale")}

@@ -5,6 +5,9 @@
 // Settings persist to localStorage under SETTINGS_STORAGE_KEY so a user's tuned
 // physics/visual preferences survive app restarts.
 
+/** How the whole graph is shaped: wrapped on a sphere, or laid flat. */
+export type GraphShape = "globe" | "flat";
+
 /** How node fill colors are derived. */
 export type ColorMode = "folder" | "degree" | "uniform";
 
@@ -45,6 +48,8 @@ export interface GraphSettings {
   labelScale: number;
   /** Node fill color strategy. */
   colorMode: ColorMode;
+  /** Globe (the default) or the flat map. Small vaults always draw flat. */
+  shape: GraphShape;
 
   // ---- Filter ----
   /** Case-insensitive title substring; non-matches are dimmed (empty = no filter). */
@@ -70,6 +75,7 @@ export const DEFAULT_SETTINGS: GraphSettings = {
   edgeThickness: 2.7,
   labelScale: 0.4,
   colorMode: "folder",
+  shape: "globe",
   search: "",
   minDegree: 0,
   hideOrphans: true,
