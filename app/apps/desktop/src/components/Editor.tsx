@@ -437,7 +437,35 @@ export function Editor() {
   const lineNumbersRef = useRef<Compartment | null>(null);
   const lineNumbers = useStore((s) => s.lineNumbers);
   const editorMeasure = useStore((s) => s.editorMeasure);
+  const editorFontSize = useStore((s) => s.editorFontSize);
+  const editorFont = useStore((s) => s.editorFont);
   const previewHostRef = useRef<HTMLDivElement | null>(null);
+
+  // Text size, note font and content width change every line's height through
+  // CSS alone, which CodeMirror does not observe: its height map went stale, so
+  // a click or drag was mapped to the wrong line and selected the wrong
+  // paragraph until something else forced a re-measure. Same when a web font
+  // finishes loading after the note opened.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const frame = requestAnimationFrame(() => {
+      if (viewRef.current === view) view.requestMeasure();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [editorFontSize, editorFont, editorMeasure, lineNumbers]);
+  useEffect(() => {
+    let live = true;
+    void document.fonts?.ready.then(() => {
+      if (live) viewRef.current?.requestMeasure();
+    });
+    const onLoaded = () => viewRef.current?.requestMeasure();
+    document.fonts?.addEventListener?.("loadingdone", onLoaded);
+    return () => {
+      live = false;
+      document.fonts?.removeEventListener?.("loadingdone", onLoaded);
+    };
+  }, []);
   const [rosterOpen, setRosterOpen] = useState(false);
   // Wraps the presence stack + its roster popover so an outside click can be
   // told apart from a click on the controls themselves.
