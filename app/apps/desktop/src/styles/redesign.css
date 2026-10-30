@@ -2684,3 +2684,10 @@ html:not(.rd-off) .whats-new-text { flex: 1; min-width: 0; font-size: 12.5px; co
 html:not(.rd-off) .whats-new-text b { display: block; font-size: 13.5px; font-weight: 600; color: var(--text-primary); margin-bottom: 1px; }
 html:not(.rd-off) .whats-new-tag { flex: none; align-self: center; font: 600 10px var(--font-body); color: #fff; background: #7f73ff; border-radius: 99px; padding: 2px 7px; }
 html:not(.rd-off) .whats-new-cta { width: 100%; height: 42px; border-radius: 12px; }
+/* The CTA takes focus when the card opens (Enter closes it); show that as a
+   soft glow in its own violet, not the app's green double focus ring. */
+html:not(.rd-off) .whats-new-cta:focus,
+html:not(.rd-off) .whats-new-cta:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(127, 115, 255, 0.18), 0 10px 22px -10px rgba(127, 115, 255, 0.7);
+}
