@@ -46,10 +46,12 @@ export const SPOKE_LENGTH = 44;
 export const SPOKE_STRENGTH = 0.5;
 /** Note–note ties: weak, so a cross-cluster link can't haul clusters together. */
 const NOTE_LINK_STRENGTH = 0.3;
+/** A link between notes of two different clusters (see configureForces). */
+const CROSS_CLUSTER_STRENGTH = 0.06;
 /** How far one note's repulsion reaches, in world units. */
 const CHARGE_REACH = 90;
 /** Push of a note that is not a hub (see configureForces). */
-const LEAF_CHARGE = -70;
+const LEAF_CHARGE = -45;
 const SMALL_VAULT_FULL = 5000;
 /**
  * Collision radius. Capped: d3's collide visits every quadtree cell within the
@@ -411,9 +413,21 @@ const HUB_SEPARATION_STRENGTH = 0.5;
 const HUB_CENTER_MAX = 0.06;
 const NOTE_CENTER_MAX = 0.02;
 /** World units of cluster radius per √(links): leaves pack a disc around the hub. */
-const CLUSTER_SPREAD = 15;
+const CLUSTER_SPREAD = 13;
 /** Clear space kept between neighbouring clusters, in world units. */
-const CLUSTER_GAP = 160;
+const CLUSTER_GAP = 0;
+/** How far past SPOKE_LENGTH the longest spokes reach (see configureForces). */
+const SPOKE_REACH = 1.9;
+/** A stable 0..1 per note, so a leaf keeps its spoke length between runs. */
+function spokeJitter(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619);
+  return ((h >>> 0) % 1000) / 1000;
+}
+/** How much room a hub's whole cluster claims, gap included. */
+function clusterReach(n: SimNode): number {
+  return n.radius + SPOKE_LENGTH + CLUSTER_SPREAD * Math.sqrt(n.linkCount) + CLUSTER_GAP / 2;
+}
 function createHubSeparation() {
   let hubs: SimNode[] = [];
   let members: SimNode[] = [];
@@ -466,12 +480,26 @@ function createHubSeparation() {
       .slice(0, HUB_MAX);
     push = new Map(hubs.map((h) => [h, { x: 0, y: 0 }]));
     members = ns.filter((n) => !n.hub && n.cluster && push.has(n.cluster));
-    reach = Float32Array.from(
-      hubs,
-      (n) => n.radius + SPOKE_LENGTH + CLUSTER_SPREAD * Math.sqrt(n.linkCount) + CLUSTER_GAP / 2,
-    );
+    reach = Float32Array.from(hubs, clusterReach);
   };
   return force;
+}
+
+/**
+ * Centring only while the layout forms. Left on at rest it kept drawing hubs
+ * inward after hub separation had switched off, and over half a minute the
+ * middle clusters slid back together into one compact ball.
+ */
+function formingOnly<F extends ForceX<SimNode> | ForceY<SimNode>>(f: F): F {
+  const gated = ((alpha: number) => {
+    if (alpha > IDLE_ALPHA * 2) f(alpha);
+  }) as unknown as F;
+  gated.initialize = (nodes: SimNode[], random: () => number) => f.initialize!(nodes, random);
+  (gated as { strength: unknown }).strength = (...args: unknown[]) => {
+    const r = (f.strength as (...a: unknown[]) => unknown)(...args);
+    return r === f ? gated : r;
+  };
+  return gated;
 }
 
 export function createSimulation(
@@ -486,8 +514,8 @@ export function createSimulation(
     // Centering: gravity toward the ONE center point (0,0), with per-node
     // strength scaled by mass (weight). Heavier nodes are pulled harder and
     // settle dead-center; light ones barely feel it and stay out.
-    .force("x", forceX<SimNode>(0))
-    .force("y", forceY<SimNode>(0))
+    .force("x", formingOnly(forceX<SimNode>(0)))
+    .force("y", formingOnly(forceY<SimNode>(0)))
     .force("collide", forceCollide<SimNode>())
     // The one force that never converges — see createFlow(). Starts disabled;
     // the renderer sizes it to the layout on every rebuild.
@@ -576,13 +604,28 @@ export function configureForces(
   link
     .distance((l) => {
       const [s, t] = ends(l);
-      if (s.hub && t.hub) return settings.linkDistance;
-      if (s.hub || t.hub) return (s.hub ? s : t).radius * 1.6 + SPOKE_LENGTH;
+      // Never shorter than the room both clusters claim: a shorter hub link
+      // undid hub separation the moment the layout came to rest.
+      if (s.hub && t.hub) return Math.max(settings.linkDistance, clusterReach(s) + clusterReach(t));
+      if (s.hub || t.hub) {
+        const hub = s.hub ? s : t;
+        const leaf = s.hub ? t : s;
+        // Each leaf gets its own spoke length, most short and a few long, so a
+        // cluster is dense at the hub and thins out into loose rays at the
+        // edge instead of ending in a hard rim.
+        return hub.radius * 1.6 + SPOKE_LENGTH * (0.7 + SPOKE_REACH * spokeJitter(leaf.id) ** 2);
+      }
       return SPOKE_LENGTH * 1.5;
     })
     .strength((l) => {
       const [s, t] = ends(l);
       if (s.hub && t.hub) return settings.linkStrength;
+      // A tie that crosses into another cluster stays a hint: at full strength
+      // hundreds of them hauled every cluster back into one compact ball once
+      // the layout came to rest.
+      const sc = s.hub ? s : s.cluster;
+      const tc = t.hub ? t : t.cluster;
+      if (sc && tc && sc !== tc) return CROSS_CLUSTER_STRENGTH;
       if (s.hub || t.hub) return SPOKE_STRENGTH;
       return NOTE_LINK_STRENGTH;
     });
