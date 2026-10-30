@@ -35,7 +35,6 @@ import {
   faceRotation,
   facing,
   frameOf,
-  rotate,
   toSphere,
   yawToward,
   type GlobeFrame,
@@ -574,6 +573,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // their finished spots (positions are final; only the view animates in).
     assemble: null as { t0: number; nodes: SimNode[]; to: Float32Array } | null,
     cameraFitted: false,
+    // Bumped whenever note positions change (a sim tick, a worker frame, the
+    // assemble step). Per-frame caches compare against it, so a spinning globe
+    // or a resting template reuses work instead of redoing it every frame.
+    layoutRev: 0,
+    lastSpinDraw: 0,
     // The camera re-frames until this time after a shape switch, even at rest.
     fitUntil: 0,
     // The shape drawn last frame; a change starts a morph from where notes were.
@@ -641,6 +645,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           const vn = S.visNodes;
           if (buf.length !== vn.length * 2) return; // set changed under us
           for (let i = 0; i < vn.length; i++) {
+            S.layoutRev++;
             vn[i].x = buf[i * 2];
             vn[i].y = buf[i * 2 + 1];
           }
@@ -1060,11 +1065,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       let bestDist = Infinity;
       const onGlobe = S.globe.on;
       for (const node of S.visNodes) {
-        const at = viewPos(node);
+        const p = node as Placed;
         // The far side of the globe is out of reach: spin to it instead.
-        if (onGlobe && at.z < 0) continue;
-        const dx = at.x - wx;
-        const dy = at.y - wy;
+        if (onGlobe && (p.gz ?? 1) < 0) continue;
+        const dx = (p.gx ?? node.x) - wx;
+        const dy = (p.gy ?? node.y) - wy;
         const d = Math.sqrt(dx * dx + dy * dy);
         const hitRadius = drawRadius(node) * nodeScale + 4 / S.camera.k;
         if (d <= hitRadius && d < bestDist) {
@@ -1171,7 +1176,6 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     let frameXs = new Float32Array(0);
     let frameYs = new Float32Array(0);
     const unit: SpherePoint = { x: 0, y: 0, z: 0 };
-    const turned: SpherePoint = { x: 0, y: 0, z: 0 };
     /** Advance the rotation and place every note on the sphere for this frame. */
     function placeOnGlobe() {
       const g = S.globe;
@@ -1188,6 +1192,43 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       } else if (globeMoving()) {
         g.rot.yaw += GLOBE_SPIN * dt;
       }
+      // Unfolding onto the sphere is the costly part (several trig calls per
+      // note) and depends only on positions and the frame, so it is cached and
+      // a plain spin only re-rotates.
+      const cache = sphereCache;
+      const fresh =
+        cache.nodes === nodes && cache.rev === S.layoutRev && g.frame != null && cache.frame === g.frame;
+      if (!fresh) unfoldOntoSphere(nodes);
+      const fr = g.frame!;
+      const R = fr.r * GLOBE_SCALE;
+      const cyw = Math.cos(g.rot.yaw);
+      const syw = Math.sin(g.rot.yaw);
+      const cp = Math.cos(g.rot.pitch);
+      const sp = Math.sin(g.rot.pitch);
+      const ux = cache.x;
+      const uy = cache.y;
+      const uz = cache.z;
+      for (let i = 0; i < nodes.length; i++) {
+        const x = ux[i] * cyw + uz[i] * syw;
+        const z1 = -ux[i] * syw + uz[i] * cyw;
+        const p = nodes[i] as Placed;
+        p.gx = fr.cx + x * R;
+        p.gy = fr.cy + (uy[i] * cp - z1 * sp) * R;
+        p.gz = uy[i] * sp + z1 * cp;
+      }
+    }
+
+    const sphereCache = {
+      nodes: null as SimNode[] | null,
+      rev: -1,
+      frame: null as GlobeFrame | null,
+      x: new Float32Array(0),
+      y: new Float32Array(0),
+      z: new Float32Array(0),
+    };
+    /** Recompute the frame (smoothed) and every note's unrotated sphere point. */
+    function unfoldOntoSphere(nodes: SimNode[]) {
+      const g = S.globe;
       // The frame is the finished shape while it assembles, so the notes gather
       // from the front of the globe out over its whole surface. At rest it is
       // smoothed, so the gentle drift cannot make the globe breathe.
@@ -1214,20 +1255,29 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       }
       if (!g.frame || S.assemble) g.frame = f;
       else {
-        g.frame.cx += (f.cx - g.frame.cx) * 0.05;
-        g.frame.cy += (f.cy - g.frame.cy) * 0.05;
-        g.frame.r += (f.r - g.frame.r) * 0.05;
+        // Ease toward the new frame, and land on it once close: an endless
+        // asymptote would count as a change every frame and defeat the cache.
+        const fr = g.frame;
+        const d = Math.abs(f.cx - fr.cx) + Math.abs(f.cy - fr.cy) + Math.abs(f.r - fr.r);
+        if (d < 0.5) g.frame = f;
+        else g.frame = { cx: fr.cx + (f.cx - fr.cx) * 0.05, cy: fr.cy + (f.cy - fr.cy) * 0.05, r: fr.r + (f.r - fr.r) * 0.05 };
       }
       const fr = g.frame;
-      const R = fr.r * GLOBE_SCALE;
-      for (const n of nodes) {
-        toSphere(n.x, n.y, fr, unit);
-        rotate(unit, g.rot, turned);
-        const p = n as Placed;
-        p.gx = fr.cx + turned.x * R;
-        p.gy = fr.cy + turned.y * R;
-        p.gz = turned.z;
+      const c = sphereCache;
+      if (c.x.length !== nodes.length) {
+        c.x = new Float32Array(nodes.length);
+        c.y = new Float32Array(nodes.length);
+        c.z = new Float32Array(nodes.length);
       }
+      for (let i = 0; i < nodes.length; i++) {
+        toSphere(nodes[i].x, nodes[i].y, fr, unit);
+        c.x[i] = unit.x;
+        c.y[i] = unit.y;
+        c.z[i] = unit.z;
+      }
+      c.nodes = nodes;
+      c.rev = S.layoutRev;
+      c.frame = fr;
     }
 
     /** Turn the globe so this note faces the viewer. */
@@ -1472,6 +1522,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
      * with a hairline rim, so the notes read as lying on a globe rather than
      * as a round scatter.
      */
+    let sphereKey = "";
     function drawSphere(fr: GlobeFrame, cam: Camera) {
       const c = ctx!;
       const R = fr.r * GLOBE_SCALE * cam.k;
@@ -1479,6 +1530,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const cy = height / 2 + cam.y + fr.cy * cam.k;
       const bg = graphTheme().mid ?? [1, 1, 1];
       const dark = bg[0] * 0.3 + bg[1] * 0.59 + bg[2] * 0.11 < 0.5;
+      // The sphere does not change as the globe turns: repaint only when the
+      // camera, the size, the canvas or the theme does.
+      const key = `${cx.toFixed(1)}|${cy.toFixed(1)}|${R.toFixed(1)}|${width}x${height}@${dpr}|${dark}`;
+      if (key === sphereKey) return;
+      sphereKey = key;
       c.setTransform(dpr, 0, 0, dpr, 0, 0);
       c.clearRect(0, 0, width, height);
       const g = c.createRadialGradient(cx - R * 0.35, cy - R * 0.4, R * 0.05, cx, cy, R * 1.02);
@@ -1503,13 +1559,38 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     const webglNodes: RenderNode[] = [];
     let depthOrder = new Uint32Array(0);
     /** Note indices from the far side of the globe to the near side. */
+    // A counting sort into depth buckets: linear, allocation-free, and fine
+    // enough that no two visibly overlapping notes paint in the wrong order.
+    const DEPTH_BUCKETS = 512;
+    const bucketCount = new Uint32Array(DEPTH_BUCKETS + 1);
+    let bucketOf = new Uint16Array(0);
     function globeOrder(): Uint32Array {
       const nodes = S.visNodes as Placed[];
-      if (depthOrder.length !== nodes.length) depthOrder = new Uint32Array(nodes.length);
-      for (let i = 0; i < nodes.length; i++) depthOrder[i] = i;
-      depthOrder.sort((a, b) => nodes[a].gz! - nodes[b].gz!);
+      const n = nodes.length;
+      if (depthOrder.length !== n) {
+        depthOrder = new Uint32Array(n);
+        bucketOf = new Uint16Array(n);
+      }
+      bucketCount.fill(0);
+      for (let i = 0; i < n; i++) {
+        const b = Math.min(DEPTH_BUCKETS - 1, Math.max(0, ((nodes[i].gz! + 1) / 2) * DEPTH_BUCKETS) | 0);
+        bucketOf[i] = b;
+        bucketCount[b + 1]++;
+      }
+      for (let b = 0; b < DEPTH_BUCKETS; b++) bucketCount[b + 1] += bucketCount[b];
+      for (let i = 0; i < n; i++) depthOrder[bucketCount[bucketOf[i]]++] = i;
       return depthOrder;
     }
+    const hoverCache = {
+      id: null as string | null,
+      graph: null as Graph | null,
+      set: null as Set<string> | null,
+    };
+    // What the uploaded links were built from; unchanged means skip the rebuild
+    // and the upload (Radial and Ring never move, so they upload once).
+    let edgeKey = "";
+    let highlightKey = "";
+    const curveScratch = new Float32Array(CURVE_SEGMENTS * 4);
     let edgePositions = new Float32Array(0);
     function drawWebGL() {
       if (!webgl || !webglCanvas) return;
@@ -1522,6 +1603,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       if (!S.cleared2d && ctx) {
         ctx.clearRect(0, 0, canvas!.width, canvas!.height);
         S.cleared2d = true;
+        sphereKey = ""; // the sphere was wiped with it
       }
       const fallback = S.colors.nodeFallback;
       const nodeScale = settingsRef.current.nodeSize;
@@ -1536,10 +1618,15 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // Hover: light up the hovered node + its direct neighbors, dim the rest,
       // so you can see a note's connections at a glance.
       const hoveredId = S.hoveredId;
-      const hlSet =
-        hoveredId && graphRef.current
-          ? neighborhoodIds(graphRef.current, hoveredId, 1)
-          : null;
+      // A note's neighbours only change with the hover or the data, never per
+      // frame, so the lookup is kept between frames.
+      if (hoverCache.id !== hoveredId || hoverCache.graph !== graphRef.current) {
+        hoverCache.id = hoveredId;
+        hoverCache.graph = graphRef.current;
+        hoverCache.set =
+          hoveredId && graphRef.current ? neighborhoodIds(graphRef.current, hoveredId, 1) : null;
+      }
+      const hlSet = hoverCache.set;
       const bg = graphTheme().mid ?? [1, 1, 1];
       const view = viewWanted();
       if (view !== S.view) {
@@ -1605,9 +1692,15 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // shows as faded notes alone, which is what reads as a sphere.
       // Radial and Ring bend each link toward the middle (Ring bundles the
       // links between folders across it).
+      const moving = morphing() || S.assemble != null;
+      const nextEdgeKey = onGlobe
+        ? `g${S.layoutRev}:${S.globe.rot.yaw}:${S.globe.rot.pitch}:${moving ? performance.now() : 0}`
+        : `${view}${S.layoutRev}:${edges.length}:${moving ? performance.now() : 0}:${curved ? S.template?.pos.length : 0}`;
+      const edgesChanged = nextEdgeKey !== edgeKey || S.needsDraw;
+      edgeKey = nextEdgeKey;
       let w = 0;
       const tpl = curved ? S.template : null;
-      for (let i = 0; i < edges.length; i++) {
+      for (let i = 0; edgesChanged && i < edges.length; i++) {
         const src = edges[i].source as Placed;
         const tgt = edges[i].target as Placed;
         if (onGlobe && src.gz! + tgt.gz! < 0.1) continue;
@@ -1623,10 +1716,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         edgePositions[w++] = tgt.gx!;
         edgePositions[w++] = tgt.gy!;
       }
-      webgl.setEdges(edgePositions.subarray(0, w));
+      if (edgesChanged) webgl.setEdges(edgePositions.subarray(0, w));
       // Hover: bright rays from the hovered node to each of its neighbors, so
       // connections are traceable even in a huge cloud.
-      if (hoveredId) {
+      const nextHighlightKey = `${hoveredId}|${edgeKey}`;
+      if (nextHighlightKey === highlightKey && !edgesChanged) {
+        // Same hover over the same positions: the uploaded rays still stand.
+      } else if (hoveredId) {
+        highlightKey = nextHighlightKey;
         const hl: number[] = [];
         for (let i = 0; i < edges.length; i++) {
           const s = edges[i].source as SimNode;
@@ -1636,9 +1733,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
             const b = viewPos(t);
             if (a.z < 0 || b.z < 0) continue;
             if (curved) {
-              const seg = new Float32Array(CURVE_SEGMENTS * 4);
-              writeCurve(a.x, a.y, b.x, b.y, curvePull(curved, false), seg, 0);
-              for (const v of seg) hl.push(v);
+              writeCurve(a.x, a.y, b.x, b.y, curvePull(curved, false), curveScratch, 0);
+              for (const v of curveScratch) hl.push(v);
             } else {
               hl.push(a.x, a.y, b.x, b.y);
             }
@@ -1646,6 +1742,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         }
         webgl.setHighlightEdges(new Float32Array(hl));
       } else {
+        highlightKey = nextHighlightKey;
         webgl.setHighlightEdges(new Float32Array(0));
       }
       // One-shot: fit the shared camera to the graph. After that the user's
@@ -1755,6 +1852,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // mounted so the lighting keeps breathing and the scene feels alive at rest.
     // Ease each note from near the middle to its finished spot; true while running.
     function stepAssemble(): boolean {
+      S.layoutRev++;
       const a = S.assemble!;
       const t = clamp((performance.now() - a.t0) / ASSEMBLE_MS, 0, 1);
       const e = 1 - Math.pow(1 - t, 4); // fast out, soft landing
@@ -1800,7 +1898,10 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // Resting also ends the camera's auto-fit, or a later wake would re-fit
         // and nudge the whole view.
         if (!active) webglNeedsFitRef.current = false;
-        if (active && !assembling) sim.tick();
+        if (active && !assembling) {
+          sim.tick();
+          S.layoutRev++;
+        }
         // Once the layout stops visibly moving into place, stop chasing it with
         // the camera — otherwise the drift breathes the bounding box and the
         // auto-fit turns that into a wobble of the whole view.
@@ -1811,7 +1912,16 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // The globe keeps turning after the layout rests. That costs drawing only:
       // the physics stays asleep, so an idle spin never re-runs the layout.
       const spinning = globeMoving() || morphing();
-      if (settingsRef.current.scope === "global" && webgl) {
+      // The idle spin alone is slow enough to draw at 30 fps; anything else
+      // (settling, a turn, a morph, a hover) draws every frame.
+      const idleSpinOnly =
+        spinning && !active && !S.needsDraw && !morphing() && S.globe.target == null;
+      const nowMs = performance.now();
+      const skipFrame = idleSpinOnly && nowMs - S.lastSpinDraw < 30;
+      if (!skipFrame && spinning) S.lastSpinDraw = nowMs;
+      if (skipFrame) {
+        // Nothing to draw this frame.
+      } else if (settingsRef.current.scope === "global" && webgl) {
         // Only rebuild + re-upload + redraw while the layout is moving (or on an
         // explicit request). Once settled the last frame stands, so idle cost is
         // ~zero — this is what keeps the app responsive instead of re-uploading
