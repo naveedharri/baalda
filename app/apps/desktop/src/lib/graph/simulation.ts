@@ -41,15 +41,15 @@ export const MIN_RADIUS = 3.2;
 export const MAX_RADIUS = 40;
 
 /** Spoke length past the hub's own edge, in world units. */
-export const SPOKE_LENGTH = 34;
+export const SPOKE_LENGTH = 44;
 /** Spokes are stiff so leaves ring their hub instead of trailing off. */
 export const SPOKE_STRENGTH = 0.5;
 /** Note–note ties: weak, so a cross-cluster link can't haul clusters together. */
 const NOTE_LINK_STRENGTH = 0.3;
 /** How far one note's repulsion reaches, in world units. */
-const CHARGE_REACH = 70;
+const CHARGE_REACH = 90;
 /** Push of a note that is not a hub (see configureForces). */
-const LEAF_CHARGE = -40;
+const LEAF_CHARGE = -70;
 const SMALL_VAULT_FULL = 5000;
 /**
  * Collision radius. Capped: d3's collide visits every quadtree cell within the
@@ -407,11 +407,13 @@ export function markHubs(nodes: SimNode[]): void {
   for (const n of nodes) n.hub = (n.linkCount ?? 0) >= bar;
 }
 const HUB_MAX = 80;
-const HUB_SEPARATION_STRENGTH = 0.35;
+const HUB_SEPARATION_STRENGTH = 0.5;
 const HUB_CENTER_MAX = 0.06;
 const NOTE_CENTER_MAX = 0.02;
 /** World units of cluster radius per √(links): leaves pack a disc around the hub. */
-const CLUSTER_SPREAD = 11;
+const CLUSTER_SPREAD = 15;
+/** Clear space kept between neighbouring clusters, in world units. */
+const CLUSTER_GAP = 160;
 function createHubSeparation() {
   let hubs: SimNode[] = [];
   let members: SimNode[] = [];
@@ -466,7 +468,7 @@ function createHubSeparation() {
     members = ns.filter((n) => !n.hub && n.cluster && push.has(n.cluster));
     reach = Float32Array.from(
       hubs,
-      (n) => n.radius + SPOKE_LENGTH + CLUSTER_SPREAD * Math.sqrt(n.linkCount),
+      (n) => n.radius + SPOKE_LENGTH + CLUSTER_SPREAD * Math.sqrt(n.linkCount) + CLUSTER_GAP / 2,
     );
   };
   return force;
