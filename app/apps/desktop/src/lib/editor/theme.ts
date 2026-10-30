@@ -20,12 +20,12 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     height: "100%",
     color: "var(--text-primary)",
     backgroundColor: "var(--bg-surface)",
-    fontFamily: "var(--font-body)",
+    fontFamily: "var(--editor-font-family, var(--font-body))",
     fontSize: "var(--editor-font-size, var(--fs-lg))",
   },
   // The prose column: a calm sheet, generous padding, comfortable measure.
   ".cm-scroller": {
-    fontFamily: "var(--font-body)",
+    fontFamily: "var(--editor-font-family, var(--font-body))",
     lineHeight: "var(--lh-body)",
     overflowX: "hidden",
   },

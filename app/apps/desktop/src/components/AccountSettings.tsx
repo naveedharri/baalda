@@ -7,6 +7,8 @@ import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
 import {
   ACTIVITY_STATUSES,
   STATUS_MOMENTS,
+  EDITOR_FONTS,
+  type EditorFont,
   type ActivityStatus,
   writeServerChoice,
 } from "../lib/prefs";
@@ -543,6 +545,7 @@ function StatusTab() {
 }
 
 function AppearanceTab() {
+  const editorFont = useStore((s) => s.editorFont);
   const homeSectionHidden = useStore((s) => s.homeSectionHidden);
   const overrides = useStore((s) => s.appearanceOverrides);
   const vaultAppearance = useStore((s) => s.vaultAppearance);
@@ -605,6 +608,19 @@ function AppearanceTab() {
         return null;
       }}
     />
+    <div className="menu-row">
+      <span className="menu-row-label">
+        Note font
+        <span className="field-hint">The typeface notes are written in, on this device.</span>
+      </span>
+      <MenuSelect<EditorFont>
+        value={editorFont}
+        options={EDITOR_FONTS.map((f) => ({ value: f.id, label: f.label, hint: f.hint }))}
+        onSelect={(f) => useStore.getState().setEditorFont(f)}
+        ariaLabel="Note font"
+        triggerClassName="role-field-trigger"
+      />
+    </div>
     </>
   );
 }

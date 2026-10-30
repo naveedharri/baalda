@@ -6077,7 +6077,7 @@ button.secondary:disabled {
 /* Real sample text in the editor's font, scaled with the column (inline
    font-size), so it wraps exactly where a note would at this width. */
 .width-preview-text {
-  font-family: var(--font-body);
+  font-family: var(--editor-font-family, var(--font-body));
   line-height: 1.55;
   color: var(--text-secondary);
 }

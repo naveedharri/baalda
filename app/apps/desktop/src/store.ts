@@ -88,6 +88,10 @@ import {
   readEditorFontSize,
   writeEditorFontSize,
   applyEditorFontSize,
+  readEditorFont,
+  writeEditorFont,
+  applyEditorFont,
+  type EditorFont,
   readLineNumbers,
   readHomeSectionHidden,
   writeHomeSectionHidden,
@@ -598,6 +602,8 @@ interface AppStore {
   editorMeasure: EditorMeasure;
   /** Note editor text size in px (Settings → Appearance). Device-local. */
   editorFontSize: number;
+  /** Personal, device-local note font (lib/prefs.ts EDITOR_FONTS). */
+  editorFont: EditorFont;
   /** Show the editor's line-number gutter. Off by default. */
   lineNumbers: boolean;
   homeSectionHidden: boolean;
@@ -830,6 +836,7 @@ interface AppStore {
   setPropertiesMode: (mode: PropertiesMode) => void;
   setEditorMeasure: (measure: EditorMeasure) => void;
   setEditorFontSize: (px: number) => void;
+  setEditorFont: (font: EditorFont) => void;
   setLineNumbers: (on: boolean) => void;
   /** Set (value) or clear back to "inherit" (undefined) one personal override. */
   setAppearanceOverride: <K extends AppearanceKey>(key: K, value: AppearanceSettings[K] | undefined) => void;
@@ -2123,6 +2130,9 @@ function scheduleStatusClear(until: number | null): void {
   }, Math.min(wait, 2_000_000_000));
 }
 
+// The note font is device-local; publish it before the first editor paints.
+applyEditorFont(readEditorFont());
+
 // W3: the first sync pass of a vault waits for a known vault-key state.
 syncManager.setVaultKeyGate?.(vaultKeysGate);
 syncManager.setEarlyVaultChannelCheck?.(vaultKeysEarlyChannel);
@@ -2261,6 +2271,7 @@ export const useStore = create<AppStore>((set, get) => ({
   propertiesMode: readPropertiesMode(),
   editorMeasure: readEditorMeasure(),
   editorFontSize: readEditorFontSize(),
+  editorFont: readEditorFont(),
   lineNumbers: readLineNumbers(),
   homeSectionHidden: readHomeSectionHidden(),
   setHomeSectionHidden: (hidden) => {
@@ -3754,6 +3765,11 @@ export const useStore = create<AppStore>((set, get) => ({
   setEditorFontSize: (px) => {
     writeEditorFontSize(px);
     get().setAppearanceOverride("textSize", px);
+  },
+  setEditorFont: (font) => {
+    writeEditorFont(font);
+    applyEditorFont(font);
+    set({ editorFont: font });
   },
 
   setLineNumbers: (on) => {

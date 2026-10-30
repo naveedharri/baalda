@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { computePreviewColumn } from "../lib/editorMeasure";
+import { useStore } from "../store";
 import type { EditorMeasure } from "../lib/prefs";
 
 /**
@@ -49,7 +50,8 @@ function measureFont(): { chPx: number; fontPx: number } {
   probe.setAttribute("aria-hidden", "true");
   probe.style.cssText =
     "position:absolute;top:0;left:-9999px;white-space:pre;visibility:hidden;" +
-    "pointer-events:none;font-family:var(--font-body);font-size:var(--fs-lg)";
+    "pointer-events:none;font-family:var(--editor-font-family, var(--font-body));" +
+    "font-size:var(--editor-font-size, var(--fs-lg))";
   probe.textContent = "0".repeat(PROBE_CHARS);
   document.body.appendChild(probe);
   const width = probe.getBoundingClientRect().width / PROBE_CHARS;
@@ -86,9 +88,13 @@ export function ContentWidthPreview({ measure }: { measure: EditorMeasure }) {
   const [scale, setScale] = useState<Scale | null>(null);
   const [widths, setWidths] = useState<Widths | null>(null);
 
+  // Re-measured when the note font or size changes: `ch` is the width of a
+  // character in THAT font at THAT size.
+  const editorFont = useStore((s) => s.editorFont);
+  const editorFontSize = useStore((s) => s.editorFontSize);
   useEffect(() => {
     setScale({ ...measureFont(), gutterPx: readGutterPx() });
-  }, []);
+  }, [editorFont, editorFontSize]);
 
   useEffect(() => {
     const page = pageRef.current;
