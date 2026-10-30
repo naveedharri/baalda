@@ -1091,6 +1091,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       );
     }
 
+    let frameXs = new Float32Array(0);
+    let frameYs = new Float32Array(0);
     const unit: SpherePoint = { x: 0, y: 0, z: 0 };
     const turned: SpherePoint = { x: 0, y: 0, z: 0 };
     /** Advance the rotation and place every note on the sphere for this frame. */
@@ -1123,9 +1125,15 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         }
         f = frameOf(xs, ys, xs.length);
       } else {
-        const xs = nodes.map((n) => n.x);
-        const ys = nodes.map((n) => n.y);
-        f = frameOf(xs, ys, nodes.length);
+        if (frameXs.length < nodes.length) {
+          frameXs = new Float32Array(nodes.length);
+          frameYs = new Float32Array(nodes.length);
+        }
+        for (let i = 0; i < nodes.length; i++) {
+          frameXs[i] = nodes[i].x;
+          frameYs[i] = nodes[i].y;
+        }
+        f = frameOf(frameXs, frameYs, nodes.length);
       }
       if (!g.frame || S.assemble) g.frame = f;
       else {
@@ -1382,6 +1390,39 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       setHoverTips([]);
     }
 
+    /**
+     * The sphere itself, on the 2D canvas under the GPU one: a soft lit disc
+     * with a hairline rim, so the notes read as lying on a globe rather than
+     * as a round scatter.
+     */
+    function drawSphere(fr: GlobeFrame, cam: Camera) {
+      const c = ctx!;
+      const R = fr.r * GLOBE_SCALE * cam.k;
+      const cx = width / 2 + cam.x + fr.cx * cam.k;
+      const cy = height / 2 + cam.y + fr.cy * cam.k;
+      const bg = graphTheme().mid ?? [1, 1, 1];
+      const dark = bg[0] * 0.3 + bg[1] * 0.59 + bg[2] * 0.11 < 0.5;
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.clearRect(0, 0, width, height);
+      const g = c.createRadialGradient(cx - R * 0.35, cy - R * 0.4, R * 0.05, cx, cy, R * 1.02);
+      if (dark) {
+        g.addColorStop(0, "rgba(255,255,255,0.07)");
+        g.addColorStop(0.7, "rgba(255,255,255,0.025)");
+        g.addColorStop(1, "rgba(255,255,255,0.01)");
+      } else {
+        g.addColorStop(0, "rgba(255,255,255,0.75)");
+        g.addColorStop(0.7, "rgba(120,100,70,0.04)");
+        g.addColorStop(1, "rgba(90,70,40,0.1)");
+      }
+      c.fillStyle = g;
+      c.beginPath();
+      c.arc(cx, cy, R * 1.02, 0, Math.PI * 2);
+      c.fill();
+      c.lineWidth = 1;
+      c.strokeStyle = dark ? "rgba(255,255,255,0.08)" : "rgba(40,34,28,0.08)";
+      c.stroke();
+    }
+
     const webglNodes: RenderNode[] = [];
     let depthOrder = new Uint32Array(0);
     /** Note indices from the far side of the globe to the near side. */
@@ -1427,6 +1468,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       if (onGlobe !== S.globe.on) {
         S.globe.on = onGlobe;
         S.globe.frame = null;
+        // Leaving the globe: wipe its sphere off the 2D canvas underneath.
+        S.cleared2d = false;
       }
       if (onGlobe) placeOnGlobe();
       // On the globe the far side paints first, so the near side covers it.
@@ -1515,7 +1558,16 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // Keep the graph framed as the layout expands during settle; the flag is
         // cleared the moment the user pans/zooms (in the interaction handlers).
         // While it assembles, frame the finished shape so it grows into view.
-        if (S.assemble && !onGlobe) {
+        if (onGlobe && S.globe.frame) {
+          // Frame the whole sphere, not the notes: while it forms the notes
+          // cover only its front, and fitting to them made the globe shrink.
+          const fr = S.globe.frame;
+          const R = fr.r * GLOBE_SCALE;
+          minX = fr.cx - R;
+          maxX = fr.cx + R;
+          minY = fr.cy - R;
+          maxY = fr.cy + R;
+        } else if (S.assemble) {
           const to = S.assemble.to;
           minX = minY = Infinity;
           maxX = maxY = -Infinity;
@@ -1543,6 +1595,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // Same transform as the 2D path: screen_css = width/2 + cam.x + world·cam.k,
       // then scaled by dpr into the device-pixel drawing buffer.
       const cam = S.camera;
+      if (onGlobe && S.globe.frame && ctx) drawSphere(S.globe.frame, cam);
       // Hub tags, busiest first; one that would cover a tag already placed (or
       // a hover tag) is hidden this frame rather than drawn on top of it.
       const placed: Box[] = [];
