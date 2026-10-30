@@ -436,13 +436,13 @@ export function applyEditorFontSize(px: number): void {
  * with the app or built into the OS, so no font is ever fetched. Only the note
  * editor reads it (`--editor-font-family`); the chrome keeps the UI font.
  */
-export type EditorFont = "sauce" | "system" | "serif" | "radio" | "mono";
+export type EditorFont = "sauce" | "inter" | "literata" | "atkinson" | "plexmono";
 export const EDITOR_FONTS: ReadonlyArray<{ id: EditorFont; label: string; hint: string; stack: string }> = [
   { id: "sauce", label: "Open Sauce", hint: "Baalda's own, clean and friendly", stack: "var(--font-body)" },
-  { id: "system", label: "System", hint: "Your computer's interface font", stack: 'system-ui, -apple-system, "Segoe UI", sans-serif' },
-  { id: "serif", label: "Serif", hint: "Bookish, for long reading", stack: 'ui-serif, "New York", Charter, "Iowan Old Style", Georgia, serif' },
-  { id: "radio", label: "Radio Canada", hint: "Rounder and more open", stack: '"Radio Canada Big", var(--font-body)' },
-  { id: "mono", label: "Mono", hint: "Every letter the same width", stack: "var(--font-mono)" },
+  { id: "inter", label: "Inter", hint: "The most legible screen sans", stack: '"Inter", var(--font-body)' },
+  { id: "literata", label: "Literata", hint: "A serif made for long reading", stack: '"Literata", Georgia, serif' },
+  { id: "atkinson", label: "Atkinson Hyperlegible", hint: "Every letter unmistakable, for low vision", stack: '"Atkinson Hyperlegible", var(--font-body)' },
+  { id: "plexmono", label: "IBM Plex Mono", hint: "A warm typewriter feel for drafting", stack: '"IBM Plex Mono", var(--font-mono)' },
 ];
 export const EDITOR_FONT_DEFAULT: EditorFont = "sauce";
 const EDITOR_FONT_KEY = "context.editorFont";
