@@ -47,7 +47,7 @@ export const SPOKE_STRENGTH = 0.5;
 /** Note–note ties: weak, so a cross-cluster link can't haul clusters together. */
 const NOTE_LINK_STRENGTH = 0.3;
 /** A link between notes of two different clusters (see configureForces). */
-const CROSS_CLUSTER_STRENGTH = 0.06;
+const CROSS_CLUSTER_STRENGTH = 0.1;
 /** How far one note's repulsion reaches, in world units. */
 const CHARGE_REACH = 90;
 /** Push of a note that is not a hub (see configureForces). */
@@ -415,7 +415,7 @@ const NOTE_CENTER_MAX = 0.02;
 /** World units of cluster radius per √(links): leaves pack a disc around the hub. */
 const CLUSTER_SPREAD = 13;
 /** Clear space kept between neighbouring clusters, in world units. */
-const CLUSTER_GAP = 0;
+const CLUSTER_GAP = -120;
 /** How far past SPOKE_LENGTH the longest spokes reach (see configureForces). */
 const SPOKE_REACH = 1.9;
 /** A stable 0..1 per note, so a leaf keeps its spoke length between runs. */
@@ -502,6 +502,49 @@ function formingOnly<F extends ForceX<SimNode> | ForceY<SimNode>>(f: F): F {
   return gated;
 }
 
+/** Pull toward the middle of a note's own folder (see createFolderCohesion). */
+const FOLDER_PULL = 0.2;
+/**
+ * Folder regions. Without it a vault whose notes link across folders became one
+ * mixed web with the same colour scattered in several places. Each note is
+ * drawn gently toward the centre of its folder, so the web stays one blended
+ * whole but every folder holds its own region, sharing borders with the next.
+ * Notes at the vault root form no region. O(n) per tick.
+ */
+function createFolderCohesion() {
+  let groups: SimNode[][] = [];
+  const force = (alpha: number) => {
+    const k = FOLDER_PULL * alpha;
+    for (const g of groups) {
+      let cx = 0;
+      let cy = 0;
+      for (const n of g) {
+        cx += n.x;
+        cy += n.y;
+      }
+      cx /= g.length;
+      cy /= g.length;
+      for (const n of g) {
+        n.vx += (cx - n.x) * k;
+        n.vy += (cy - n.y) * k;
+      }
+    }
+  };
+  force.initialize = (ns: SimNode[]) => {
+    const by = new Map<string, SimNode[]>();
+    for (const n of ns) {
+      const cut = n.path.lastIndexOf("/");
+      if (cut <= 0) continue;
+      const dir = n.path.slice(0, cut);
+      let g = by.get(dir);
+      if (!g) by.set(dir, (g = []));
+      g.push(n);
+    }
+    groups = [...by.values()].filter((g) => g.length > 1);
+  };
+  return force;
+}
+
 export function createSimulation(
   settings: GraphSettings,
 ): Simulation<SimNode, SimLink> {
@@ -525,6 +568,8 @@ export function createSimulation(
     .force("flow", createFlow())
     // Keeps whole starbursts apart, not just their nodes.
     .force("hubs", createHubSeparation())
+    // Groups each folder into its own region of the one shared web.
+    .force("folders", createFolderCohesion())
     // Slow, calm cooling (~650 ticks to settle). Stretched 1.5x vs the baseline
     // 0.0155 so the (now more damped) motion still reaches equilibrium.
     .alphaDecay(0.0103)
