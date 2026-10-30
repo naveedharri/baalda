@@ -528,6 +528,7 @@ export class WebGLGraphRenderer {
    * per-node breathing, and `glow` scales the halos (turned down as the node
    * count rises so a dense vault doesn't bloom into a single white cloud).
    */
+  private uBgStops: (WebGLUniformLocation | null)[] | null = null;
   private theme = {
     core: [0.094, 0.09, 0.082] as [number, number, number],
     mid: [0.078, 0.075, 0.07] as [number, number, number],
@@ -559,9 +560,10 @@ export class WebGLGraphRenderer {
     gl.useProgram(this.bgProgram);
     gl.bindVertexArray(this.bgVao);
     gl.uniform2f(this.uBgViewport, vw, vh);
-    gl.uniform3fv(gl.getUniformLocation(this.bgProgram, "C_CORE"), this.theme.core);
-    gl.uniform3fv(gl.getUniformLocation(this.bgProgram, "C_MID"), this.theme.mid);
-    gl.uniform3fv(gl.getUniformLocation(this.bgProgram, "C_RIM"), this.theme.rim);
+    this.uBgStops ??= ["C_CORE", "C_MID", "C_RIM"].map((n) => gl.getUniformLocation(this.bgProgram, n));
+    gl.uniform3fv(this.uBgStops[0], this.theme.core);
+    gl.uniform3fv(this.uBgStops[1], this.theme.mid);
+    gl.uniform3fv(this.uBgStops[2], this.theme.rim);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(null);
     gl.enable(gl.BLEND);

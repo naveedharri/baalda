@@ -181,7 +181,6 @@ const SPRITE_SIZE = 256; // resolution of the baked shading / shadow / glow spri
 
 // Edges are quiet connective threads (source-over), not the old additive bloom
 // that washed the whole field into a purple haze.
-const EDGE_REST = "rgba(128,146,196,1)";
 
 function smoothstep(edge0: number, edge1: number, x: number): number {
   const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
@@ -285,54 +284,6 @@ function parseColor(c: string): [number, number, number] {
   return [150, 150, 160];
 }
 
-/**
- * Bake diffuse sphere lighting into two grayscale alpha sprites: `light` (white,
- * the lit cap) and `shadow` (black, the shadowed side plus a rim of ambient
- * occlusion). Stamping a flat disc → shadow → light turns any color into a matte
- * 3D sphere, independent of the node's own hue, for one drawImage each.
- */
-function makeShadeSprites(size: number): {
-  light: HTMLCanvasElement;
-  shadow: HTMLCanvasElement;
-} {
-  const light = document.createElement("canvas");
-  const shadow = document.createElement("canvas");
-  light.width = light.height = shadow.width = shadow.height = size;
-  const lg = light.getContext("2d")!;
-  const sg = shadow.getContext("2d")!;
-  const li = lg.createImageData(size, size);
-  const si = sg.createImageData(size, size);
-  const R = size / 2;
-  const mid = 0.12; // diffuse level treated as neutral (neither lit nor shadowed)
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const idx = (y * size + x) * 4;
-      const nx = (x + 0.5 - R) / R;
-      const ny = (y + 0.5 - R) / R;
-      const r2 = nx * nx + ny * ny;
-      if (r2 >= 1) continue; // outside the sphere → transparent (buffer is zeroed)
-      const nz = Math.sqrt(1 - r2);
-      const diff = nx * LIGHT.x + ny * LIGHT.y + nz * LIGHT.z; // Lambert term
-      const rn = Math.sqrt(r2);
-      const edgeAA = clamp((1 - rn) * R, 0, 1); // ~1px feather at the circumference
-      // Lit cap: matte, so modest and capped, and eased off at the very rim so
-      // there is no bright specular edge.
-      const la =
-        clamp(diff - mid, 0, 1) * 0.5 * (1 - smoothstep(0.6, 1, rn) * 0.7) * edgeAA;
-      // Shadow side + a ring of ambient occlusion that seats the sphere.
-      const occ = smoothstep(0.66, 1, rn) * 0.5;
-      const sa = clamp(clamp(mid - diff, 0, 1) * 0.9 + occ, 0, 0.92) * edgeAA;
-      li.data[idx] = 255;
-      li.data[idx + 1] = 255;
-      li.data[idx + 2] = 255;
-      li.data[idx + 3] = Math.round(la * 255);
-      si.data[idx + 3] = Math.round(sa * 255); // RGB already 0 → pure black
-    }
-  }
-  lg.putImageData(li, 0, 0);
-  sg.putImageData(si, 0, 0);
-  return { light, shadow };
-}
 
 /** A soft radial sprite (used for contact shadows and ambient glow). */
 function makeRadialSprite(
@@ -914,9 +865,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     }
     webglOkRef.current = webgl !== null;
 
-    // Baked lighting sprites (color-independent) + a tiny color-parse cache so
-    // the per-frame draw stays allocation-free even with continuous animation.
-    const shade = makeShadeSprites(SPRITE_SIZE);
+    // A tiny color-parse cache so the per-frame draw stays allocation-free.
+    // (Redesign: the baked gloss sprites are no longer drawn.)
     const shadowSprite = makeRadialSprite(
       SPRITE_SIZE,
       [4, 5, 11],
@@ -1089,10 +1039,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // ---- Edges: quiet connective threads (source-over, batched) ----
       ctx!.globalCompositeOperation = "source-over";
       const edgeWidth = s.edgeThickness / k;
-      ctx!.strokeStyle = EDGE_REST;
+      {
+        const L = graphTheme().line!;
+        ctx!.strokeStyle = `rgb(${Math.round(L[0] * 255)},${Math.round(L[1] * 255)},${Math.round(L[2] * 255)})`;
+      }
       // Matched to the GPU path's edge alpha so the WebGL-unavailable fallback
       // doesn't look like a different, dimmer product.
-      ctx!.globalAlpha = hovered ? 0.05 : 0.18 * (0.5 + 0.5 * introEase);
+      ctx!.globalAlpha = (hovered ? 0.3 : 1) * graphTheme().line![3] * (0.5 + 0.5 * introEase);
       ctx!.lineWidth = edgeWidth;
       ctx!.beginPath();
       for (const e of S.visEdges) {
@@ -1157,26 +1110,6 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           : S.colorById.get(node.id) ?? colors.nodeFallback;
 
         // A colored bloom for the open note / hovered orb — a little extra life.
-        if ((isOpen || isHovered) && !dimBySearch) {
-          const [cr, cg, cb] = getRgb(color);
-          const gg = ctx!.createRadialGradient(
-            node.x,
-            node.y,
-            0,
-            node.x,
-            node.y,
-            r * 3,
-          );
-          gg.addColorStop(0, `rgba(${cr},${cg},${cb},0.55)`);
-          gg.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
-          ctx!.globalCompositeOperation = "lighter";
-          ctx!.globalAlpha = 1;
-          ctx!.fillStyle = gg;
-          ctx!.beginPath();
-          ctx!.arc(node.x, node.y, r * 3, 0, Math.PI * 2);
-          ctx!.fill();
-          ctx!.globalCompositeOperation = "source-over";
-        }
 
         // Flat base disc, then the baked shadow + light sprites stamp matte
         // volume onto it. globalAlpha carries into the sprites, so a dimmed orb
@@ -1186,9 +1119,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         ctx!.beginPath();
         ctx!.arc(node.x, node.y, r, 0, Math.PI * 2);
         ctx!.fill();
-        const d = r * 2;
-        ctx!.drawImage(shade.shadow, node.x - r, node.y - r, d, d);
-        ctx!.drawImage(shade.light, node.x - r, node.y - r, d, d);
+        // Redesign: flat matte discs (the baked gloss sprites are skipped).
 
         // The open note gets an accent ring so it's findable at a glance.
         if (isOpen) {
@@ -1390,6 +1321,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           !S.drag && !introActive && sim.alpha() <= REST_ALPHA;
         S.restFrames = settled ? (S.restFrames ?? 0) + 1 : 0;
         active = S.restFrames < 45;
+        // Resting also ends the camera's auto-fit, or a later wake would re-fit
+        // and nudge the whole view.
+        if (!active) webglNeedsFitRef.current = false;
         if (active) {
           flow.energy(introEnergy(introSeconds()));
           sim.tick();
@@ -1430,7 +1364,6 @@ export function GraphView({ onClose }: { onClose: () => void }) {
 
     function requestDraw() {
       S.needsDraw = true;
-      S.restFrames = 0;
       if (S.rafId == null) S.rafId = requestAnimationFrame(loop);
     }
     requestDrawRef.current = requestDraw;
