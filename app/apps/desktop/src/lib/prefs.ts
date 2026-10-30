@@ -29,12 +29,29 @@ export const STATUS_MOMENTS: Array<{
   { id: "coffee", emoji: "☕", label: "Coffee break", hint: "Grabbing a coffee", tone: "away" },
   { id: "lunch", emoji: "🍜", label: "At lunch", hint: "Eating, back soon", tone: "away" },
   { id: "meeting", emoji: "🎧", label: "In a meeting", hint: "On a call", tone: "busy" },
-  { id: "focus", emoji: "🌙", label: "Focusing", hint: "Notifications paused", tone: "busy" },
+  { id: "focus", emoji: "🌙", label: "Focusing", hint: "Heads down, replies later", tone: "busy" },
   { id: "brb", emoji: "⏱️", label: "Back in 10", hint: "Short break", tone: "away" },
 ];
 
 export function isMoment(v: unknown): v is MomentStatus {
   return STATUS_MOMENTS.some((m) => m.id === v);
+}
+
+/**
+ * How a status travels to teammates. A moment goes out as its plain tone
+ * (away/busy) in `status`, which every app version understands, plus the moment
+ * itself in `moment` for apps that show one. Sent raw, an older app read
+ * "coffee" as an unknown status and showed the person as online.
+ */
+export function statusToWire(status: ActivityStatus): { status: ActivityStatus; moment?: MomentStatus } {
+  const m = STATUS_MOMENTS.find((x) => x.id === status);
+  return m ? { status: m.tone, moment: m.id } : { status };
+}
+
+/** The status to show for a teammate: their moment when they sent one we know. */
+export function statusFromWire(status: unknown, moment: unknown): ActivityStatus | undefined {
+  if (isMoment(moment)) return moment;
+  return typeof status === "string" ? (status as ActivityStatus) : undefined;
 }
 
 /** Clear-after choices, in minutes (null = never). */

@@ -25,7 +25,7 @@ import { syncManager } from "../lib/sync/docSession";
 import { colorForUser, PRESENCE_OFFLINE, statusTone, ringShowsColor } from "../lib/presence/color";
 import type { ActivityStatus } from "../lib/prefs";
 import { StatusMoment } from "./StatusMoment";
-import { isMoment } from "../lib/prefs";
+import { isMoment, statusFromWire } from "../lib/prefs";
 import { useStore } from "../store";
 import * as ipc from "../lib/ipc";
 import { FilePreview } from "./FilePreview";
@@ -52,7 +52,7 @@ interface Peer {
 }
 
 interface AwarenessPeerState {
-  user?: { id?: string; name?: string; color?: string; status?: ActivityStatus; image?: string };
+  user?: { id?: string; name?: string; color?: string; status?: ActivityStatus; moment?: string; image?: string };
   activity?: { line?: number; at?: number };
   ping?: { to?: string; name?: string; at?: number };
 }
@@ -73,13 +73,13 @@ function readPeers(awareness: Awareness): Peer[] {
         name: u.name ?? "Someone",
         color: u.color ?? colorForUser(u.id),
         ...(typeof u.image === "string" && u.image ? { image: u.image } : {}),
-        status: u.status,
+        status: statusFromWire(u.status, u.moment),
         line,
         lastActive: at,
       });
     } else {
       if (prev.line == null && line != null) prev.line = line;
-      if (prev.status == null && u.status != null) prev.status = u.status;
+      if (prev.status == null && u.status != null) prev.status = statusFromWire(u.status, u.moment);
       if (prev.image == null && typeof u.image === "string" && u.image) prev.image = u.image;
       if (at != null && (prev.lastActive == null || at > prev.lastActive)) {
         prev.lastActive = at;

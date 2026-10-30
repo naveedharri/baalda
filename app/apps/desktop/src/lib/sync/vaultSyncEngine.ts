@@ -14,7 +14,7 @@ import type { VaultAppearanceSettings } from "../appearanceSettings";
 import { ApiClient, ApiError } from "../api";
 import { markOnce } from "../perf";
 import { notifyInvitationFrame } from "../invitationLive";
-import type { ActivityStatus } from "../prefs";
+import { statusFromWire, type ActivityStatus } from "../prefs";
 import {
   bytesToBase64,
   decodeUpdateFrame,
@@ -45,6 +45,7 @@ export interface LocalPresence {
   name: string;
   color: string;
   status: ActivityStatus;
+  moment?: string;
 }
 
 export type VaultSyncStatus =
@@ -949,7 +950,7 @@ export class VaultSyncEngine {
           docId: control.docId,
           name: control.name,
           color: control.color,
-          status: control.status as ActivityStatus,
+          status: statusFromWire(control.status, control.moment) as ActivityStatus,
         });
       } else if (control.t === "err") {
         if (control.message === KEY_REQUIRED_MESSAGE) this.requestVaultKey();

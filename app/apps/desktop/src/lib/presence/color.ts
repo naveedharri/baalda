@@ -3,7 +3,7 @@
 // session — no server round-trip, no per-connection randomness.
 
 import { selfAvatarImage } from "../avatarIdentity";
-import { STATUS_MOMENTS, type ActivityStatus } from "../prefs";
+import { STATUS_MOMENTS, statusToWire, type ActivityStatus } from "../prefs";
 
 /**
  * A curated palette of bright, cheerful hues harmonized with the violet accent.
@@ -54,6 +54,8 @@ export interface PresenceUser {
   color: string;
   /** The user's chosen activity status, so peers can show it beside cursors. */
   status?: ActivityStatus;
+  /** Their status moment, when `status` carries only its tone (statusToWire). */
+  moment?: string;
   /** Their picked character (`character:<seed>`) or photo URL, when small
    *  enough to broadcast (`wireAvatarImage`). Older builds omit it; readers
    *  then fall back to the user-id seed. */
@@ -70,7 +72,7 @@ export function presenceUser(
     id: userId,
     name,
     color: colorForUser(userId),
-    ...(status ? { status } : {}),
+    ...(status ? statusToWire(status) : {}),
     ...(image ? { image } : {}),
   };
 }

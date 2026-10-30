@@ -40,7 +40,7 @@ import {
 } from "../vaultKeys/runtime";
 import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
-import type { ActivityStatus } from "../prefs";
+import { statusToWire, type ActivityStatus } from "../prefs";
 import { toast } from "../toast";
 import { AttachmentSync, routesToAttachmentSync } from "./attachments";
 import { applySkippingUnsafe } from "./windowsPaths";
@@ -6819,7 +6819,7 @@ export class SyncManager implements InboundHost {
       docId,
       name: this.presence.name,
       color: colorForUser(this.presence.id),
-      status: this.status,
+      ...statusToWire(this.status),
     });
   }
 

@@ -69,6 +69,8 @@ export interface PresenceState {
   name: string;
   color: string;
   status: string;
+  /** Optional status moment; see `statusToWire` in lib/prefs.ts. */
+  moment?: string;
 }
 
 export type ServerControl =
@@ -310,6 +312,7 @@ export function parseServerControl(text: string): ServerControl | null {
         name: o.name,
         color: o.color,
         status: o.status,
+        ...(typeof o.moment === "string" ? { moment: o.moment } : {}),
       };
     }
     return null;

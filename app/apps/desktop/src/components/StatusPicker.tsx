@@ -3,7 +3,7 @@
    emoji, so they look the same on macOS, Windows and Linux. */
 import { useState } from "react";
 import { useStore } from "../store";
-import { STATUS_CLEAR_AFTER, STATUS_MOMENTS, statusUntilFrom, type ActivityStatus } from "../lib/prefs";
+import { ACTIVITY_STATUSES, STATUS_CLEAR_AFTER, STATUS_MOMENTS, statusUntilFrom, type ActivityStatus } from "../lib/prefs";
 
 const ICONS: Record<string, string> = {
   online: '<circle cx="12" cy="12" r="5" fill="currentColor" stroke="none"/>',
@@ -13,19 +13,29 @@ const ICONS: Record<string, string> = {
   meeting: '<path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="2" y="14" width="5" height="7" rx="2"/><rect x="17" y="14" width="5" height="7" rx="2"/>',
   focus: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
   brb: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2M9 2h6"/>',
+  away: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 1.5"/>',
+  busy: '<circle cx="12" cy="12" r="8"/><path d="M8 12h8"/>',
+  invisible: '<circle cx="12" cy="12" r="8" stroke-dasharray="3 3"/>',
 };
 
 export function StatusPicker() {
   const status = useStore((s) => s.activityStatus);
   const until = useStore((s) => s.activityStatusUntil);
-  const [clearAfter, setClearAfter] = useState<number | null>(60);
+  // A status already set with no end time was set to "Never"; keep showing that.
+  const [clearAfter, setClearAfter] = useState<number | null>(() =>
+    status !== "online" && until == null ? null : 60,
+  );
   const items: Array<{ id: ActivityStatus; label: string }> = [
     { id: "online", label: "Online" },
     ...STATUS_MOMENTS.map((m) => ({ id: m.id, label: m.label })),
   ];
   const set = (id: ActivityStatus, minutes: number | null) =>
     useStore.getState().setActivityStatus(id, id === "online" ? null : statusUntilFrom(minutes));
-  const current = items.find((i) => i.id === status);
+  // Away / Busy / Invisible are set from Account Settings, not this row, but
+  // the picker must still name them rather than offer "Update your status"
+  // (one tap on a quick moment there used to drop Invisible without a word).
+  const current =
+    items.find((i) => i.id === status) ?? ACTIVITY_STATUSES.find((i) => i.id === status);
   const left = until ? Math.max(0, Math.round((until - Date.now()) / 60_000)) : null;
   const [open, setOpen] = useState(false);
   const isOnline = status === "online" || !current;

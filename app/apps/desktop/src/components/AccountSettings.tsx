@@ -6,6 +6,7 @@ import { readRecentServers, switchServer } from "../lib/auth/recentServers";
 import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
 import {
   ACTIVITY_STATUSES,
+  STATUS_MOMENTS,
   type ActivityStatus,
   writeServerChoice,
 } from "../lib/prefs";
@@ -488,12 +489,20 @@ function ProfileCharacterGrid({
 
 function StatusTab() {
   const activityStatus = useStore((s) => s.activityStatus);
+  // A status moment ("Coffee break") is none of the four options below, which
+  // left every radio unticked with no word about what was actually set.
+  const moment = STATUS_MOMENTS.find((m) => m.id === activityStatus);
 
   return (
     <div className="status-tab">
       <p className="muted">
         Your status shows next to your cursor for teammates working in the same note.
       </p>
+      {moment && (
+        <p className="field-hint">
+          Right now: {moment.label}, set from the account menu. Pick a status below to replace it.
+        </p>
+      )}
       <div className="status-options">
         {ACTIVITY_STATUSES.map((s) => {
           const active = s.id === activityStatus;

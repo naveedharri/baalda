@@ -103,6 +103,9 @@ export interface PresenceState {
   name: string;
   color: string;
   status: string;
+  /** Optional status moment ("coffee", "meeting"…) for clients that show one;
+   *  `status` then carries its plain tone (away/busy) for clients that don't. */
+  moment?: string;
 }
 
 export type ServerControl =
@@ -275,7 +278,12 @@ export interface PresenceFrame {
   name: string;
   color: string;
   status: string;
+  /** See {@link PresenceState.moment}. */
+  moment?: string;
 }
+
+/** A moment id is a short lowercase word; anything else is dropped, never relayed. */
+const MOMENT_RE = /^[a-z]{1,16}$/;
 
 /** Parse a client presence text frame; null if it isn't one. */
 export function parsePresence(text: string): PresenceFrame | null {
@@ -298,6 +306,7 @@ export function parsePresence(text: string): PresenceFrame | null {
     name: o.name,
     color: o.color,
     status: o.status,
+    ...(typeof o.moment === "string" && MOMENT_RE.test(o.moment) ? { moment: o.moment } : {}),
   };
 }
 

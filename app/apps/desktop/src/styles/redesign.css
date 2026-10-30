@@ -1938,7 +1938,30 @@ html:not(.rd-off) .settings-content > .menu-row:not(:has(+ .menu-row)) { border-
 html:not(.rd-off) .menu-row-label { font-size: 14px; color: var(--text-primary); }
 html:not(.rd-off) .menu-row-label .field-hint,
 html:not(.rd-off) .menu-row .field-hint { font-size: 12px; color: var(--text-tertiary); }
-html:not(.rd-off) .width-preview { background: var(--bg-app); border: 0; border-radius: 10px; }
+/* Content width preview: one soft tray holding a miniature page, like the
+   settings cards around it. The text column is a faint accent band (an outline,
+   so it never changes the wrap), and the bottom of the page fades out instead
+   of being cut. The caption sits outside the tray as a plain hint. */
+html:not(.rd-off) .width-preview { background: transparent; border: 0; gap: 8px; }
+html:not(.rd-off) .width-preview-frame {
+  background: var(--bg-app); border: 0; border-radius: 12px; padding: 10px;
+}
+html:not(.rd-off) .width-preview-page {
+  height: 92px; padding: 14px 0; border-radius: 8px;
+  background: var(--rd-surface);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 1px 2px rgba(var(--rd-ink), 0.04);
+  -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
+  mask-image: linear-gradient(to bottom, #000 70%, transparent);
+}
+html:not(.rd-off) .width-preview-col {
+  border-inline: 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  outline: 6px solid color-mix(in srgb, var(--accent) 6%, transparent);
+}
+html:not(.rd-off) .width-preview-text { color: var(--text-tertiary); }
+html:not(.rd-off) .width-preview-text strong { font-weight: 600; color: var(--text-primary); }
+html:not(.rd-off) .width-preview-caption { text-align: left; font-size: 12px; color: var(--text-tertiary); padding-left: 2px; }
 html:not(.rd-off) .appearance-tag { font: 500 11px var(--font-body); color: var(--rdc-5b3fd6, #5b3fd6); background: var(--rdc-f1edff, #f1edff); border-radius: 99px; padding: 2px 8px; }
 
 /* Generic card helper used below */
