@@ -4110,7 +4110,9 @@ export const useStore = create<AppStore>((set, get) => ({
               : undefined,
         });
       } else {
-        toast(`Couldn't turn on sync: ${errMsg(e)}`, "error");
+        toast(`Couldn't turn on sync: ${errMsg(e)}`, "error", {
+          action: { label: "Retry", run: () => void get().turnOnSyncNow(name) },
+        });
       }
       return false;
     } finally {

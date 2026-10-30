@@ -2487,3 +2487,30 @@ html[data-theme="dark"]:not(.rd-off) .graph-seg-btn.is-active { background: #343
 html:not(.rd-off) .graph-legend-row { font-size: 12.5px; color: var(--text-secondary); }
 html:not(.rd-off) .graph-legend-count { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 html:not(.rd-off) .graph-control-reset { height: 30px; border-radius: 8px; font-size: 12.5px; }
+
+/* Toasts, "icon chip" (chosen 2026-10-30): a white card, a tinted icon tile per
+   tone (green tick, violet info, red alert; no yellow), the message, then an
+   optional violet action and the close. The tile reuses `.toast-dot`, so the
+   base styles' tone hooks still apply. */
+html:not(.rd-off) .toast-viewport { gap: 10px; max-width: min(400px, calc(100vw - var(--sp-8))); }
+html:not(.rd-off) .toast {
+  min-width: 300px; gap: 12px; padding: 10px 10px 10px 10px; border: 0; border-radius: 16px;
+  background: var(--rd-surface);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 1px 2px rgba(var(--rd-ink), 0.04), 0 16px 34px -18px rgba(var(--rd-ink), 0.38);
+  font-size: 13.5px; line-height: 1.4;
+}
+html:not(.rd-off) .toast-error { border: 0; }
+html:not(.rd-off) .toast .toast-dot {
+  width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center;
+  background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6);
+}
+html:not(.rd-off) .toast-success .toast-dot { background: var(--rdc-e4f3e8, #e4f3e8); color: var(--rdc-2f7a46, #2f7a46); }
+html:not(.rd-off) .toast-error .toast-dot { background: var(--rdc-fbe9e6, #fbe9e6); color: var(--rdc-b3392f, #b3392f); }
+html:not(.rd-off) .toast-text { color: var(--text-primary); }
+html:not(.rd-off) .toast-action {
+  flex: none; border: 0; cursor: pointer; font: 600 13px var(--font-body);
+  padding: 7px 12px; border-radius: 10px;
+  background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6);
+}
+html:not(.rd-off) .toast-action:hover { background: var(--rdc-e6dfff, #e6dfff); }
+html:not(.rd-off) .toast-close { width: 26px; height: 26px; border-radius: 8px; color: var(--text-tertiary); }
