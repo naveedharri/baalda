@@ -500,13 +500,20 @@ function JoinAvatarDrop({ name }: { name: string }) {
       setDone(true);
       return;
     }
-    const target =
-      document.querySelector<HTMLElement>(".presence-bar") ??
-      document.querySelector<HTMLElement>(".header-actions") ??
-      null;
+    // The VISIBLE stack: hidden tabs keep their own (zero-sized) copies, and
+    // landing on one of those sent the avatar to the top-left corner.
+    const visible = (sel: string) =>
+      [...document.querySelectorAll<HTMLElement>(sel)].find((e) => {
+        const b = e.getBoundingClientRect();
+        return b.width > 0 && b.height > 0;
+      }) ?? null;
+    const avatar = visible(".presence-bar .presence-avatar");
+    const target = avatar ?? visible(".header-actions");
     const r = target?.getBoundingClientRect();
-    const size = 36;
-    const endX = r ? r.left + r.width / 2 - size / 2 : window.innerWidth - 80;
+    const size = avatar ? Math.round(r!.width) : 36;
+    el.style.width = el.style.height = `${size}px`;
+    // Land just left of the first avatar, as the newest face in the row.
+    const endX = r ? (avatar ? r.left - size * 0.72 : r.left + r.width / 2 - size / 2) : window.innerWidth - 80;
     const endY = r ? r.top + r.height / 2 - size / 2 : 20;
     const startX = window.innerWidth / 2 - size / 2;
     const startY = -80;
