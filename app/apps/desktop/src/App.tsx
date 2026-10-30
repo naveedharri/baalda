@@ -6,6 +6,8 @@ import { BackendBehindNotice } from "./components/BackendBehindNotice";
 import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
 import { Avatar } from "./components/Avatar";
+import { forgetLayouts, prewarmGraphLayout } from "./lib/graph/prelayout";
+import { loadSettings as loadGraphSettings } from "./lib/graph/graphSettings";
 import { ReconcileBanner } from "./components/ReconcileBanner";
 import { HeldDeleteNotice } from "./components/HeldDeleteNotice";
 import { NoteRemovedNotice } from "./components/NoteRemovedNotice";
@@ -938,6 +940,28 @@ function UpdateGate({ launchVersion = null }: { launchVersion?: string | null })
 const loadMemberPictures = createMemberPicturesLoader({
   fetch: (orgId) => authManager.api.getMembersOverview(orgId),
 });
+
+/**
+ * Lays the graph out in the background (lib/graph/prelayout.ts) a few seconds
+ * after a vault opens or its notes change, while the graph is closed, so
+ * opening it shows the finished shape. Renders nothing.
+ */
+function GraphPrewarm({ paused }: { paused: boolean }) {
+  const vaultPath = useStore((s) => s.vault?.path ?? null);
+  const noteCount = useStore((s) => s.titles.length);
+  useEffect(() => {
+    forgetLayouts();
+  }, [vaultPath]);
+  useEffect(() => {
+    if (!vaultPath || paused || noteCount === 0) return;
+    const id = window.setTimeout(() => {
+      void prewarmGraphLayout(vaultPath, loadGraphSettings());
+    }, GRAPH_PREWARM_DELAY_MS);
+    return () => window.clearTimeout(id);
+  }, [vaultPath, noteCount, paused]);
+  return null;
+}
+const GRAPH_PREWARM_DELAY_MS = 4000;
 
 /** Folder colours for the change tiles, in order (lib/appearance.ts ITEM_COLORS). */
 const WHATS_NEW_TONES = ["violet", "green", "orange", "sky", "pink"] as const;
@@ -1960,6 +1984,7 @@ export default function App() {
         )}
         <VaultFolderPrompt />
         <VaultKeyPrompts />
+        <GraphPrewarm paused={graphOpen} />
         {/* Last child so it layers over everything without a z-index race. */}
         <Toasts />
       </div>

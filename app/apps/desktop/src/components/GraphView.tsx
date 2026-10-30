@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Simulation, ForceLink } from "d3-force";
 import type { Graph } from "../lib/graph/buildGraph";
 import { beginBloom, bloomStep, seedByCluster, type BloomJob } from "../lib/graph/formation";
+import { saveLayout, takeLayout } from "../lib/graph/prelayout";
 import {
   createSimulation,
   configureForces,
@@ -62,6 +63,10 @@ const INTRO_MS = 1150;
 
 
 const CAMERA_EASE = 0.08;
+// Opening from a ready layout: how long the notes take to grow into place, and
+// how close to the middle they start.
+const ASSEMBLE_MS = 900;
+const ASSEMBLE_FROM = 0.35;
 
 // Below this alpha the layout is done moving into place, so the auto-fit camera
 // locks — a couple of seconds after open, or immediately after a refresh. Without the lock the ambient drift keeps nudging the
@@ -489,6 +494,20 @@ export function GraphView({ onClose }: { onClose: () => void }) {
   }
 
   const graphRef = useRef<Graph | null>(null);
+  const vaultPath = useStore((st) => st.vault?.path ?? null);
+  const vaultPathRef = useRef(vaultPath);
+  vaultPathRef.current = vaultPath;
+  // Closing keeps this layout, so the next open is the same shape at once.
+  useEffect(
+    () => () => {
+      const g = graphRef.current;
+      const nodes = S.visNodes;
+      if (!vaultPathRef.current || !g || S.bloom || S.assemble || settingsRef.current.scope !== "global") return;
+      saveLayout(vaultPathRef.current, g, settingsRef.current, nodes);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   // Mutable, non-reactive state driving the canvas.
   const S = useRef({
@@ -512,6 +531,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     needsDraw: true,
     restFrames: 0,
     bloom: null as BloomJob | null,
+    // Opening from a background layout: notes grow from near the middle to
+    // their finished spots (positions are final; only the view animates in).
+    assemble: null as { t0: number; nodes: SimNode[]; to: Float32Array } | null,
     cameraFitted: false,
     seededEdges: 0,
     idleTimer: 0,
@@ -661,7 +683,27 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     if ((first || reseeded) && visNodes.length > 0) {
       const willUseWorker =
         !openNode && workerRef.current !== null && visNodes.length > WORKER_THRESHOLD;
-      if (!willUseWorker) S.bloom = beginBloom(sim, S.bloom);
+      const ready =
+        !willUseWorker && !openNode && vaultPathRef.current
+          ? takeLayout(vaultPathRef.current, g, s)
+          : null;
+      const covered = ready ? visNodes.filter((n) => ready.has(n.id)).length : 0;
+      if (ready && covered >= visNodes.length * 0.95) {
+        // The background layout is finished: open straight into it.
+        const to = new Float32Array(visNodes.length * 2);
+        visNodes.forEach((n, i) => {
+          const p = ready.get(n.id);
+          if (p) { n.x = p.x; n.y = p.y; }
+          n.vx = n.vy = 0;
+          to[i * 2] = n.x;
+          to[i * 2 + 1] = n.y;
+        });
+        sim.alpha(IDLE_ALPHA);
+        S.bloom = null;
+        S.assemble = { t0: performance.now(), nodes: visNodes, to };
+      } else if (!willUseWorker) {
+        S.bloom = beginBloom(sim, S.bloom);
+      }
       S.introKicked = true;
       S.introStart = performance.now();
     }
@@ -1289,6 +1331,19 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       if (webglNeedsFitRef.current && webglNodes.length > 0) {
         // Keep the graph framed as the layout expands during settle; the flag is
         // cleared the moment the user pans/zooms (in the interaction handlers).
+        // While it assembles, frame the finished shape so it grows into view.
+        if (S.assemble) {
+          const to = S.assemble.to;
+          minX = minY = Infinity;
+          maxX = maxY = -Infinity;
+          for (let i = 0; i < to.length; i += 2) {
+            if (to[i] < minX) minX = to[i];
+            if (to[i] > maxX) maxX = to[i];
+            if (to[i + 1] < minY) minY = to[i + 1];
+            if (to[i + 1] > maxY) maxY = to[i + 1];
+          }
+          S.cameraFitted = false;
+        }
         const bw = Math.max(1, maxX - minX);
         const bh = Math.max(1, maxY - minY);
         // Ease toward the fit rather than snapping: as the clusters bloom the
@@ -1357,6 +1412,22 @@ export function GraphView({ onClose }: { onClose: () => void }) {
 
     // Single frame clock. The loop stays alive the whole time the graph is
     // mounted so the lighting keeps breathing and the scene feels alive at rest.
+    // Ease each note from near the middle to its finished spot; true while running.
+    function stepAssemble(): boolean {
+      const a = S.assemble!;
+      const t = clamp((performance.now() - a.t0) / ASSEMBLE_MS, 0, 1);
+      const e = 1 - Math.pow(1 - t, 4); // fast out, soft landing
+      for (let i = 0; i < a.nodes.length; i++) {
+        const n = a.nodes[i];
+        const k = ASSEMBLE_FROM + (1 - ASSEMBLE_FROM) * e;
+        n.x = a.to[i * 2] * k;
+        n.y = a.to[i * 2 + 1] * k;
+        n.vx = n.vy = 0;
+      }
+      if (t >= 1) S.assemble = null;
+      return t < 1;
+    }
+
     function loop() {
       S.rafId = null;
       const introActive =
@@ -1379,7 +1450,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // idle floor with nothing dragged and the intro over, stop ticking and
         // repainting; a drag, reheat or hover wakes it (see the idle check below).
         if (S.bloom && bloomStep(sim, S.bloom)) S.bloom = null;
-        const forming = S.bloom != null;
+        const assembling = S.assemble != null && stepAssemble();
+        const forming = S.bloom != null || assembling;
         const settled =
           !forming && !S.drag && !introActive && sim.alpha() <= REST_ALPHA;
         S.restFrames = settled ? (S.restFrames ?? 0) + 1 : 0;
@@ -1387,7 +1459,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // Resting also ends the camera's auto-fit, or a later wake would re-fit
         // and nudge the whole view.
         if (!active) webglNeedsFitRef.current = false;
-        if (active) sim.tick();
+        if (active && !assembling) sim.tick();
         // Once the layout stops visibly moving into place, stop chasing it with
         // the camera — otherwise the drift breathes the bounding box and the
         // auto-fit turns that into a wobble of the whole view.
