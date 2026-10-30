@@ -2514,3 +2514,18 @@ html:not(.rd-off) .toast-action {
 }
 html:not(.rd-off) .toast-action:hover { background: var(--rdc-e6dfff, #e6dfff); }
 html:not(.rd-off) .toast-close { width: 26px; height: 26px; border-radius: 8px; color: var(--text-tertiary); }
+
+/* Toggles, "ink" (chosen 2026-10-30): a rounded-square track with a white
+   rounded-square knob, black when on (cream in dark), no rim. Same geometry as
+   the base switch so nothing around it moves. */
+html:not(.rd-off) .switch-track { border-radius: 8px; background: rgba(var(--rd-ink), 0.08); box-shadow: none; }
+html:not(.rd-off) .switch-knob {
+  border-radius: 6px; background: #fff;
+  box-shadow: 0 1px 3px rgba(11, 10, 16, 0.18), 0 0 0 0.5px rgba(11, 10, 16, 0.04);
+}
+html:not(.rd-off) .switch.on .switch-track { background: var(--text-primary); box-shadow: none; }
+html:not(.rd-off)[data-theme="dark"] .switch.on .switch-knob { background: var(--rd-surface); }
+html:not(.rd-off) .switch.is-disabled { opacity: 0.45; }
+html:not(.rd-off) .switch .switch-input:focus-visible + .switch-track {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+}
