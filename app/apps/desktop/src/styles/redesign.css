@@ -1356,9 +1356,9 @@ html:not(.rd-off) .mcp-token-dialog .confirm-actions {
 }
 html:not(.rd-off) .mcp-token-dialog > .confirm-actions { margin-left: 0; margin-right: 0; }
 html:not(.rd-off) .mcp-token-dialog input { margin-top: var(--sp-3); width: calc(100% - 2 * var(--sp-5)); box-sizing: border-box; }
-/* Wrap the command at spaces, never inside a URL or token (it used to break
-   "htt|p://" and the token mid-word). */
-html:not(.rd-off) .mcp-token-dialog .mcp-block-value { padding-right: 40px; white-space: pre-wrap; word-break: normal; overflow-wrap: normal; overflow-x: auto; }
+/* Wrap the command at spaces; a word is split only when it cannot fit on a
+   line of its own (a long token), never mid-URL as before ("htt|p://"). */
+html:not(.rd-off) .mcp-token-dialog .mcp-block-value { padding-right: 40px; white-space: pre-wrap; word-break: normal; overflow-wrap: break-word; }
 
 /* View-only banner: a slim, quiet pill instead of a full-width yellow block. */
 html:not(.rd-off) .editor-lockbanner {
