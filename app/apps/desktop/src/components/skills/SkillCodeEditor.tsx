@@ -12,7 +12,7 @@
 
 import { useEffect, useRef } from "react";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { Compartment, EditorState, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, Prec, type Extension } from "@codemirror/state";
 import {
   drawSelection,
   EditorView,
@@ -23,6 +23,7 @@ import {
 } from "@codemirror/view";
 import { codeLanguages } from "../../lib/editor/codeLanguages";
 import { markdownHighlight } from "../../lib/editor/theme";
+import { baseExtensions } from "../../lib/editor";
 import { formatFor } from "../../lib/formats";
 
 /** A path may carry a `#view` suffix (SKILL.md's body) to get its own history. */
@@ -45,6 +46,15 @@ async function languageFor(path: string): Promise<Extension> {
     return [];
   }
 }
+
+/** The note editor's sheet inside the skill pane: no centring measure, a
+ *  comfortable inset, and its own scroll. */
+const skillProseTheme = EditorView.theme({
+  "&": { height: "100%" },
+  ".cm-scroller": { overflow: "auto" },
+  ".cm-content": { padding: "18px 0 40px" },
+  ".cm-line": { paddingLeft: "22px !important", paddingRight: "22px !important" },
+});
 
 const shared = {
   "&": { height: "100%", backgroundColor: "var(--bg-surface)", color: "var(--text-primary)" },
@@ -125,6 +135,25 @@ export function SkillCodeEditor({
   onSaveRef.current = onSave;
 
   const create = (p: string, doc: string): EditorState => {
+    // Markdown (SKILL.md, references) gets the note editor itself in live
+    // preview: rendered tables, markers hidden off the caret's line, code
+    // fences with copy, and the note editor's formatting keys. Code files keep
+    // the plain code editor below.
+    if (isProse(p)) {
+      return EditorState.create({
+        doc,
+        extensions: [
+          Prec.highest(keymap.of([{ key: "Mod-s", preventDefault: true, run: () => (onSaveRef.current(), true) }])),
+          baseExtensions({ doc, getTitles: () => [], onNavigate: () => {} }),
+          EditorState.readOnly.of(readOnly),
+          EditorView.editable.of(!readOnly),
+          skillProseTheme,
+          EditorView.updateListener.of((u) => {
+            if (u.docChanged && !external.current && pathRef.current === p) onChangeRef.current(u.state.doc.toString());
+          }),
+        ],
+      });
+    }
     const lang = new Compartment();
     const state = EditorState.create({
       doc,
