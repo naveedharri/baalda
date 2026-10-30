@@ -63,16 +63,19 @@ export interface GraphSettings {
 export const DEFAULT_SETTINGS: GraphSettings = {
   scope: "global",
   localDepth: 1, // vestigial; `scope` is pinned to global
-  charge: -10.8,
-  linkDistance: 337,
+  // Redesign (2026-10-30): tuned by eye on a 5k-note vault with the starburst
+  // layout (spokes, hub separation, cluster carry in simulation.ts). Strong,
+  // long-range spacing and no extra centre pull give distinct starbursts.
+  charge: -1500,
+  linkDistance: 400,
   linkStrength: 0.44,
-  gravity: 0.21,
+  gravity: 0,
   nodeSize: 0.4,
-  edgeThickness: 1.3,
-  labelScale: 0.25,
-  colorMode: "degree",
+  edgeThickness: 2.7,
+  labelScale: 0.4,
+  colorMode: "folder",
   search: "",
-  minDegree: 1,
+  minDegree: 0,
   hideOrphans: true,
 };
 
@@ -88,10 +91,10 @@ export const SETTING_RANGES = {
   minDegree: { min: 0, max: 20, step: 1 },
 } as const;
 
-// Bumped to v5 so the new physics/appearance defaults take effect over any saved
+// Bumped to v6 (was v5) so the new physics/appearance defaults take effect over any saved
 // values — a persisted v4 blob would otherwise pin every existing install to the
 // old look, which is precisely what re-tuning the defaults is meant to fix.
-export const SETTINGS_STORAGE_KEY = "context.graph.settings.v5";
+export const SETTINGS_STORAGE_KEY = "context.graph.settings.v6";
 
 /** Load persisted settings, merged over defaults (tolerant of missing/old keys). */
 export function loadSettings(): GraphSettings {

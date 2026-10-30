@@ -194,6 +194,11 @@ void main() {
   float d = sqrt(d2);
   float aa = clamp(1.0 / max(vPx, 1.0), 0.02, 0.5);
   float alpha = 1.0 - smoothstep(1.0 - aa, 1.0, d);
+  // Redesign: hubs (big on screen) read as a ringed disc: solid core, a thin
+  // clear gap, then an outer ring. Leaves stay solid dots.
+  float ringOn = smoothstep(8.0, 11.0, vPx);
+  float gap = smoothstep(0.66 - aa, 0.66, d) * (1.0 - smoothstep(0.78, 0.78 + aa, d));
+  alpha *= 1.0 - gap * ringOn;
   fragColor = vec4(lit, alpha);
 }`;
 

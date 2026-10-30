@@ -40,6 +40,27 @@ import type { GraphNode } from "./buildGraph";
 export const MIN_RADIUS = 3.2;
 export const MAX_RADIUS = 40;
 
+/** Spoke length past the hub's own edge, in world units. */
+export const SPOKE_LENGTH = 34;
+/** Spokes are stiff so leaves ring their hub instead of trailing off. */
+export const SPOKE_STRENGTH = 0.9;
+/** Note–note ties: weak, so a cross-cluster link can't haul clusters together. */
+const NOTE_LINK_STRENGTH = 0.3;
+/** How far one note's repulsion reaches, in world units. */
+const CHARGE_REACH = 140;
+const SMALL_VAULT_FULL = 5000;
+/**
+ * Collision radius. Capped: d3's collide visits every quadtree cell within the
+ * LARGEST radius in it, so a few 40-unit hubs made each tick scan a wide area
+ * around every note (~35ms at 5k). Spokes and hub separation already keep space
+ * around hubs, so collision only has to stop neighbours overlapping.
+ */
+const COLLIDE_MAX = 18;
+function collideRadius(r: number): number {
+  const c = Math.min(r, COLLIDE_MAX);
+  return c + 4 + c * 0.35;
+}
+
 export interface SimNode extends GraphNode {
   x: number;
   y: number;
@@ -56,6 +77,10 @@ export interface SimNode extends GraphNode {
    * edge. Set by the renderer on (re)build; consumed by the x/y forces.
    */
   weight: number;
+  /** One of the vault's busiest notes (see markHubs): a starburst centre. */
+  hub?: boolean;
+  /** The hub this note's cluster belongs to (set by the seed); moves with it. */
+  cluster?: SimNode;
 }
 
 export interface SimLink {
@@ -312,6 +337,139 @@ export function centerWeight(linkCount: number, maxDegree: number): number {
   return 0.12 + Math.pow(importance, 0.45) * 1.9;
 }
 
+/**
+ * Inertia by weight. d3 treats every node as the same mass, so a 300-link hub
+ * gets shoved around by its leaves exactly as hard as they get shoved by it.
+ * Dividing each node's velocity change this tick by a mass that grows with its
+ * size makes a hub hold its ground and the leaves do the moving around it.
+ * Area-proportional like the charge, capped so a giant hub is not immovable.
+ */
+export const MASS_MAX = 5;
+function createMass() {
+  let nodes: SimNode[] = [];
+  let mass = new Float32Array(0);
+  let lastVx = new Float32Array(0);
+  let lastVy = new Float32Array(0);
+  const force = (alpha: number) => {
+    // At rest the layout only drifts; weight there would just make hubs lag.
+    const active = alpha > IDLE_ALPHA * 2;
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      const m = active ? mass[i] : 1;
+      if (m <= 1) {
+        lastVx[i] = n.vx * VELOCITY_RETAINED;
+        lastVy[i] = n.vy * VELOCITY_RETAINED;
+        continue;
+      }
+      // Only the change since last tick is scaled, so a heavy node keeps its
+      // momentum (and its share of the drift) instead of being frozen.
+      n.vx = lastVx[i] + (n.vx - lastVx[i]) / m;
+      n.vy = lastVy[i] + (n.vy - lastVy[i]) / m;
+      lastVx[i] = n.vx * VELOCITY_RETAINED;
+      lastVy[i] = n.vy * VELOCITY_RETAINED;
+    }
+  };
+  force.initialize = (ns: SimNode[]) => {
+    nodes = ns;
+    mass = new Float32Array(ns.length);
+    lastVx = new Float32Array(ns.length);
+    lastVy = new Float32Array(ns.length);
+    for (let i = 0; i < ns.length; i++) {
+      const rel = ((ns[i].radius || MIN_RADIUS) / MIN_RADIUS) ** 2;
+      mass[i] = Math.min(MASS_MAX, Math.max(1, Math.sqrt(rel)));
+    }
+  };
+  return force;
+}
+
+/**
+ * Hub separation. Repulsion is cut off at a short range (see configureForces),
+ * which keeps a big cloud filled but lets whole clusters slide over each other,
+ * and gravity pulls the heaviest hubs hardest to the centre: together that
+ * stacks every starburst into one round mass. This pushes the hubs (the most
+ * linked notes, few enough for an O(h²) pass) apart until each one's cluster
+ * has room, sized from how many leaves it has to hold.
+ */
+export const HUB_MIN_LINKS = 6;
+
+/**
+ * Mark the hubs: the busiest notes BY RANK, not every note past a fixed link
+ * count. With a fixed bar a 5k vault had hundreds of "hubs", each drawn big and
+ * each pushing the others away, which is a fog, not a set of starbursts. About
+ * √n/2 of them (6..60), and never one with fewer than HUB_MIN_LINKS links.
+ */
+export function markHubs(nodes: SimNode[]): void {
+  const want = Math.max(6, Math.min(60, Math.round(Math.sqrt(nodes.length) * 0.5)));
+  const degrees = nodes.map((n) => n.linkCount ?? 0).sort((a, b) => b - a);
+  const bar = Math.max(HUB_MIN_LINKS, degrees[Math.min(want, degrees.length) - 1] ?? Infinity);
+  for (const n of nodes) n.hub = (n.linkCount ?? 0) >= bar;
+}
+const HUB_MAX = 80;
+const HUB_SEPARATION_STRENGTH = 0.35;
+const HUB_CENTER_MAX = 0.06;
+const NOTE_CENTER_MAX = 0.02;
+/** World units of cluster radius per √(links): leaves pack a disc around the hub. */
+const CLUSTER_SPREAD = 11;
+function createHubSeparation() {
+  let hubs: SimNode[] = [];
+  let members: SimNode[] = [];
+  let reach = new Float32Array(0);
+  let push = new Map<SimNode, { x: number; y: number }>();
+  const force = (alpha: number) => {
+    // Shapes the layout while it forms; at rest it would only fight the drift.
+    if (alpha <= IDLE_ALPHA * 2) return;
+    for (const p of push.values()) p.x = p.y = 0;
+    for (let i = 0; i < hubs.length; i++) {
+      for (let j = i + 1; j < hubs.length; j++) {
+        const a = hubs[i];
+        const b = hubs[j];
+        let dx = b.x + b.vx - a.x - a.vx;
+        let dy = b.y + b.vy - a.y - a.vy;
+        let d = Math.hypot(dx, dy);
+        const want = reach[i] + reach[j];
+        if (d >= want) continue;
+        if (d < 1e-3) {
+          dx = Math.random() - 0.5;
+          dy = Math.random() - 0.5;
+          d = Math.hypot(dx, dy);
+        }
+        const k = ((want - d) / d) * HUB_SEPARATION_STRENGTH * alpha * 0.5;
+        const pa = push.get(a)!;
+        const pb = push.get(b)!;
+        pa.x -= dx * k;
+        pa.y -= dy * k;
+        pb.x += dx * k;
+        pb.y += dy * k;
+      }
+    }
+    // Move each cluster as one body: a hub pushed alone left its notes trailing
+    // behind it, and every starburst read as a comet with the hub on its rim.
+    for (const [h, p] of push) {
+      h.vx += p.x;
+      h.vy += p.y;
+    }
+    for (const n of members) {
+      const p = push.get(n.cluster!);
+      if (!p) continue;
+      n.vx += p.x;
+      n.vy += p.y;
+    }
+  };
+  force.initialize = (ns: SimNode[]) => {
+    hubs = ns
+      .filter((n) => n.hub)
+      .sort((a, b) => b.linkCount - a.linkCount)
+      .slice(0, HUB_MAX);
+    push = new Map(hubs.map((h) => [h, { x: 0, y: 0 }]));
+    members = ns.filter((n) => !n.hub && n.cluster && push.has(n.cluster));
+    reach = Float32Array.from(
+      hubs,
+      (n) => n.radius + SPOKE_LENGTH + CLUSTER_SPREAD * Math.sqrt(n.linkCount),
+    );
+  };
+  return force;
+}
+
 export function createSimulation(
   settings: GraphSettings,
 ): Simulation<SimNode, SimLink> {
@@ -329,7 +487,12 @@ export function createSimulation(
     .force("collide", forceCollide<SimNode>())
     // The one force that never converges — see createFlow(). Starts disabled;
     // the renderer sizes it to the layout on every rebuild.
+    // After the layout forces, before the drift: heavy notes resist being
+    // pushed, but the ambient drift carries every note alike.
+    .force("mass", createMass())
     .force("flow", createFlow())
+    // Keeps whole starbursts apart, not just their nodes.
+    .force("hubs", createHubSeparation())
     // Slow, calm cooling (~650 ticks to settle). Stretched 1.5x vs the baseline
     // 0.0155 so the (now more damped) motion still reaches equilibrium.
     .alphaDecay(0.0103)
@@ -360,7 +523,12 @@ export function configureForces(
   const chargeScale = Math.max(1, Math.sqrt(n) / 3);
   // Clamp the scaled repulsion so an extreme slider value on a big graph can't
   // send nodes to infinity (with weak/zero gravity the layout would explode).
-  const scaledCharge = Math.max(-6000, settings.charge * chargeScale);
+  // The clamp grows with the vault: the default repulsion is tuned on a 5k
+  // vault, where it sits at the full -6000, and at that strength a few dozen
+  // notes buzz instead of settling. Below SMALL_VAULT_FULL notes the ceiling
+  // shrinks in proportion, so a small vault keeps the calm it always had.
+  const ceiling = 6000 * Math.min(1, n / SMALL_VAULT_FULL);
+  const scaledCharge = Math.max(-ceiling, settings.charge * chargeScale);
   const charge = sim.force("charge") as ForceManyBody<SimNode>;
   // Repulsion PER NODE, scaled by its own size — the solar-system half of the
   // model. A uniform charge made every node push equally hard, so a hub and a
@@ -381,19 +549,47 @@ export function configureForces(
   // the cloud filled and lets it settle quickly. Scaled to the natural node
   // spacing (collide keeps nodes ~radius+5 apart) so it stays local as the
   // graph grows; floored so tiny graphs still get a sensible neighborhood.
-  const spacing = MAX_RADIUS + 5;
-  charge.distanceMin(1).distanceMax(Math.max(120, spacing * 8));
+  // Redesign: hub separation (createHubSeparation) now keeps whole clusters
+  // apart, so repulsion only has to space neighbours. A short reach and a
+  // coarser Barnes–Hut cut it from ~40ms to a few ms a tick on 5k notes, which
+  // is what lets the graph settle in about a second instead of tens.
+  charge.distanceMin(1).distanceMax(CHARGE_REACH).theta(1.2);
 
+  // Starburst layout: a link that ends at a leaf (one or two links) is a short,
+  // stiff spoke that holds the leaf close around its hub; links between two
+  // connected notes keep the long, soft spring so clusters sit well apart.
   const link = sim.force("link") as ForceLink<SimNode, SimLink>;
-  link.distance(settings.linkDistance).strength(settings.linkStrength);
+  // Three kinds of link: hub–hub keeps the long soft spring (clusters apart),
+  // hub–note is a short stiff spoke (notes hug their hub), and note–note is a
+  // short weak tie so neighbours sit near each other without dragging clusters
+  // together across the map.
+  const ends = (l: SimLink) => [l.source as SimNode, l.target as SimNode] as const;
+  link
+    .distance((l) => {
+      const [s, t] = ends(l);
+      if (s.hub && t.hub) return settings.linkDistance;
+      if (s.hub || t.hub) return (s.hub ? s : t).radius * 1.6 + SPOKE_LENGTH;
+      return SPOKE_LENGTH * 1.5;
+    })
+    .strength((l) => {
+      const [s, t] = ends(l);
+      if (s.hub && t.hub) return settings.linkStrength;
+      if (s.hub || t.hub) return SPOKE_STRENGTH;
+      return NOTE_LINK_STRENGTH;
+    });
 
   // Gravity slider scales the center pull; each node's own mass (weight) makes
   // heavier nodes pull harder toward the single center point. A small floor
   // keeps *some* centering even at gravity 0, so strong repulsion can't fling
   // the graph off-screen. Clamp to [0,1] so the force never overshoots.
   const gravity = Math.max(0.04, settings.gravity);
+  // Hubs get a capped pull: weight made the busiest hubs the most strongly
+  // centred, which beat hub separation and stacked every cluster into a ball.
+  // Like the reference apps, centring is only there to stop drift off-screen.
+  // Leaves are capped too: pulled harder than their hub, they trailed inward
+  // and every starburst became a comet with its hub on the rim.
   const centerStrength = (d: SimNode) =>
-    Math.max(0, Math.min(1, gravity * (d.weight ?? 0.12)));
+    Math.min(d.hub ? HUB_CENTER_MAX : NOTE_CENTER_MAX, gravity * (d.weight ?? 0.12));
   (sim.force("x") as ForceX<SimNode>).strength(centerStrength);
   (sim.force("y") as ForceY<SimNode>).strength(centerStrength);
 
@@ -407,6 +603,6 @@ export function configureForces(
   // every tick, which is felt as vibration; easing them apart over several ticks
   // reads as weight instead.
   (sim.force("collide") as ForceCollide<SimNode>)
-    .radius((d) => d.radius + 4 + d.radius * 0.35)
+    .radius((d) => collideRadius(d.radius))
     .strength(0.7);
 }

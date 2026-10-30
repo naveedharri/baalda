@@ -508,3 +508,22 @@ html[data-platform="windows"] .graph-floating-controls {
   gap: var(--sp-2);
   padding: var(--sp-4) var(--sp-6);
 }
+
+/* Redesign: always-on name tags under hub nodes, tinted with the hub's colour. */
+.graph-hub-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  max-width: 180px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--hub-color) 22%, var(--bg-surface, #fff));
+  border: 1px solid color-mix(in srgb, var(--hub-color) 55%, transparent);
+  color: var(--text-primary, #1a1920);
+  font: 500 11px/1.3 var(--font-body, ui-sans-serif);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  will-change: transform;
+  transition: opacity 120ms ease;
+}

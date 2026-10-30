@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Simulation, ForceLink } from "d3-force";
 import type { Graph } from "../lib/graph/buildGraph";
+import { beginBloom, bloomStep, seedByCluster, type BloomJob } from "../lib/graph/formation";
 import {
   createSimulation,
   configureForces,
   nodeRadius,
+  markHubs,
   centerWeight,
   layoutScale,
   IDLE_ALPHA,
@@ -80,7 +82,9 @@ const INTRO_MS = 1150;
 // out of step.
 const BEAT_PERIOD_S = INTRO_MS / 1000;
 // Peak multiplier on the resting drift speed at t = 0.
-const INTRO_GAIN = 5;
+// Redesign: 0. The boosted drift swirled notes while the clusters were still
+// forming and smeared each starburst into a comet; the bloom is the entrance.
+const INTRO_GAIN = 0;
 // e-folding time of the decay: strong for a few seconds, clearly settling by
 // ten, indistinguishable from rest by the time INTRO_SECONDS is up.
 const INTRO_TAU_S = 6;
@@ -92,11 +96,13 @@ const INTRO_SECONDS = 26;
 // ~650 ticks is full convergence at alphaDecay 0.0103 (see simulation.ts);
 // PRESETTLE_TARGET_ALPHA is reached in ~315, so a normal vault arrives settled
 // well inside the budget.
-const PRESETTLE_BUDGET_MS = 420;
+const PRESETTLE_BUDGET_MS = 900;
 const PRESETTLE_MAX_TICKS = 700;
 // Low enough that the layout is done moving on its own by the first frame. The
 // entrance is the flow's job now, not the settle's.
 const PRESETTLE_TARGET_ALPHA = 0.04;
+const FORM_ON_SCREEN = true;
+const CAMERA_EASE = 0.08;
 
 // Below this alpha the layout is done moving into place, so the auto-fit camera
 // locks — a couple of seconds after open, or immediately after a refresh. Without the lock the ambient drift keeps nudging the
@@ -121,6 +127,19 @@ const REHEAT_REFRESH = 0.1;
 // leaves rather than a ceiling everything piles up against.
 const MIN_NODE_PX = 2.1;
 
+// Largest a node is DRAWN, in world units. The physics radius (MAX_RADIUS in
+// simulation.ts) also sets collision clearance and the repulsion range, so it
+// stays large to keep clusters apart; only the painted disc is capped.
+const DRAW_MAX_RADIUS = 40;
+// Hubs (the notes the others connect to) are drawn this much bigger than their
+// physics radius alone would make them, so each starburst has an obvious centre.
+// Collision clearance (simulation.ts) already leaves this much room around them.
+const HUB_DRAW_BOOST = 2.6;
+function drawRadius(n: SimNode): number {
+  const r = Math.min(n.radius, DRAW_MAX_RADIUS);
+  return n.hub ? r * HUB_DRAW_BOOST : r;
+}
+
 // Fallback cap for the global scope on the 2D canvas, which only stays smooth
 // up to a few hundred nodes. The GPU (WebGL) renderer draws the whole vault, so
 // this cap only applies when WebGL is unavailable.
@@ -143,17 +162,38 @@ function graphTheme(): GraphTheme {
         core: [0.106, 0.1, 0.094], // #1b1a18
         mid: [0.09, 0.086, 0.078],
         rim: [0.071, 0.067, 0.062],
-        line: [1, 0.97, 0.925, 0.17],
+        line: [1, 0.97, 0.925, 0.3],
         hl: [0.65, 0.59, 1, 0.85],
       }
     : {
         core: [1, 1, 1],
         mid: [0.992, 0.984, 0.969],
         rim: [0.976, 0.965, 0.945],
-        line: [0.043, 0.039, 0.063, 0.14],
+        line: [0.043, 0.039, 0.063, 0.38],
         hl: [0.486, 0.361, 1, 0.75],
       };
   graphThemeCache = { key, value };
+  return value;
+}
+
+// Links thin out as their number grows. Every line at one fixed opacity piles
+// up: a few hundred read as crisp threads, ten thousand as a grey haze that
+// hides where one cluster ends and the next begins. √ falloff from
+// EDGE_DENSITY_REF links, floored so a huge vault keeps visible connections.
+const EDGE_DENSITY_REF = 800;
+const EDGE_DENSITY_FLOOR = 0.5;
+function edgeDensityScale(edges: number): number {
+  return Math.max(EDGE_DENSITY_FLOOR, Math.min(1, Math.sqrt(EDGE_DENSITY_REF / Math.max(1, edges))));
+}
+let densityThemeCache: { base: GraphTheme; edges: number; value: GraphTheme } | null = null;
+function themeForEdges(edges: number): GraphTheme {
+  const base = graphTheme();
+  if (densityThemeCache?.base === base && densityThemeCache.edges === edges) {
+    return densityThemeCache.value;
+  }
+  const [r, g, b, a] = base.line!;
+  const value = { ...base, line: [r, g, b, a * edgeDensityScale(edges)] as typeof base.line };
+  densityThemeCache = { base, edges, value };
   return value;
 }
 
@@ -165,27 +205,10 @@ function graphTheme(): GraphTheme {
 const WORKER_THRESHOLD = 8000;
 
 
-// Matte-sphere lighting. A single soft key light from the upper-left, tilted
-// toward the viewer, is baked once into grayscale alpha sprites (makeShadeSprites)
-// and stamped over each flat-colored disc. That gives real diffuse volume — no
-// glossy specular hotspot, no per-node gradient cost — so nodes read as lit
-// objects with depth instead of flat stickers.
-const LIGHT = (() => {
-  const x = -0.5;
-  const y = -0.62;
-  const z = 0.6;
-  const len = Math.hypot(x, y, z);
-  return { x: x / len, y: y / len, z: z / len };
-})();
 const SPRITE_SIZE = 256; // resolution of the baked shading / shadow / glow sprites
 
 // Edges are quiet connective threads (source-over), not the old additive bloom
 // that washed the whole field into a purple haze.
-
-function smoothstep(edge0: number, edge1: number, x: number): number {
-  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
-  return t * t * (3 - 2 * t);
-}
 
 /**
  * Advance the force layout synchronously, before anything is drawn, so the
@@ -249,6 +272,50 @@ function introEnergy(seconds: number): number {
   if (s <= 0) return 1;
   const beat = heartbeatEnvelope(beatPhase(seconds));
   return 1 + INTRO_GAIN * s * (0.45 + 0.55 * beat);
+}
+
+// Hubs that carry an always-on name tag: the most-linked notes, so each
+// starburst is named the way a map names its cities.
+const HUB_LABEL_MAX = 24;
+
+/** Rebuild the hub name tags in `layer`; positions are set per frame. */
+function syncHubLabels(
+  layer: HTMLDivElement | null,
+  nodes: SimNode[],
+  colorById: Map<string, string>,
+): { node: SimNode; el: HTMLDivElement; w: number; h: number }[] {
+  if (!layer) return [];
+  layer.replaceChildren();
+  const hubs = nodes
+    .filter((n) => n.hub)
+    .sort((a, b) => b.linkCount - a.linkCount)
+    .slice(0, HUB_LABEL_MAX);
+  return hubs.map((node) => {
+    const el = document.createElement("div");
+    el.className = "graph-hub-label";
+    el.textContent = node.title;
+    el.style.setProperty("--hub-color", colorById.get(node.id) ?? "var(--accent)");
+    layer.appendChild(el);
+    return { node, el, w: 0, h: 0 };
+  }).map((label) => {
+    // Measured once per rebuild; the per-frame pass only moves them.
+    label.w = label.el.offsetWidth;
+    label.h = label.el.offsetHeight;
+    return label;
+  });
+}
+
+type Box = { x0: number; x1: number; y0: number; y1: number };
+
+function boxesOverlap(a: Box, b: Box): boolean {
+  return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+}
+
+/** Screen box of a hover tag (centred under its node, `top: y + 10`). */
+function tipBox(x: number, y: number, title: string, main: boolean): Box {
+  const w = Math.min(220, title.length * (main ? 7 : 6.4) + (main ? 18 : 14));
+  const h = main ? 22 : 19;
+  return { x0: x - w / 2 - 2, x1: x + w / 2 + 2, y0: y + 10, y1: y + 10 + h };
 }
 
 function presettle(sim: Simulation<SimNode, SimLink>): void {
@@ -362,7 +429,27 @@ function readColors(el: Element): Colors {
  * golden-angle spiral near the origin (never all stacked at 0,0, which would
  * blow up the repulsion force on the first tick).
  */
-function buildSimNodes(graph: Graph, previous: Map<string, SimNode>): SimNode[] {
+function buildSimNodes(
+  graph: Graph,
+  previous: Map<string, SimNode>,
+  seededEdges: number,
+): { nodes: SimNode[]; reseeded: boolean } {
+  const built = buildSimNodesRaw(graph, previous);
+  markHubs(built);
+  // Reseed when most of the graph is new, not only on the very first build:
+  // the vault index often lands in stages (an empty or partial first answer,
+  // then the rest), and notes arriving after the seed used to be dropped on
+  // the old spiral with no cluster, settling into a cloud instead of flowers.
+  const arrived = built.reduce((c, n) => c + (previous.has(n.id) ? 0 : 1), 0);
+  // Same for links: notes can land before their links do, and a seed with no
+  // links has no hubs to gather around.
+  const linksArrived = graph.edges.length > seededEdges * 2 + 10;
+  const reseeded = FORM_ON_SCREEN && (arrived > built.length * 0.5 || linksArrived);
+  if (reseeded) seedByCluster(built, graph);
+  return { nodes: built, reseeded };
+}
+
+function buildSimNodesRaw(graph: Graph, previous: Map<string, SimNode>): SimNode[] {
   const n = Math.max(graph.nodes.length, 1);
   const spread = 60 + Math.sqrt(n) * 40;
   const maxDegree = graph.nodes.reduce((m, node) => Math.max(m, node.linkCount), 0);
@@ -443,6 +530,7 @@ function neighborhoodIds(graph: Graph, startId: string, depth: number): Set<stri
 
 export function GraphView({ onClose }: { onClose: () => void }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const hubLayerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // Separate GPU canvas for the global scope (a canvas can hold only one context
   // type, so WebGL gets its own; the 2D canvas keeps the local view).
@@ -458,7 +546,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
   const [diag, setDiag] = useState("");
   // Hover tooltip for the WebGL global view: the hovered note's name + position
   // (canvas-local px). Set only when the hovered node changes.
-  const [hoverTip, setHoverTip] = useState<{ title: string; x: number; y: number } | null>(null);
+  // Hover: the hovered note's name plus one tag per linked note, at each
+  // node's screen position (canvas-local px). Set only when the hovered node changes.
+  const [hoverTips, setHoverTips] = useState<
+    { id: string; title: string; x: number; y: number; main: boolean }[]
+  >([]);
   // Bounded self-heal: the graph can mount before the vault is fully open and
   // come back empty; retry a few times so it fills in instead of getting stuck.
   const emptyRetriesRef = useRef(0);
@@ -512,12 +604,16 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // One-shot: has the 2D canvas been wiped since the GPU renderer took over?
     cleared2d: false,
     colorById: new Map<string, string>(),
+    hubLabels: [] as { node: SimNode; el: HTMLDivElement; w: number; h: number }[],
     camera: { x: 0, y: 0, k: 1 } as Camera,
     hoveredId: null as string | null,
     drag: null as Drag | null,
     rafId: null as number | null,
     needsDraw: true,
     restFrames: 0,
+    bloom: null as BloomJob | null,
+    cameraFitted: false,
+    seededEdges: 0,
     idleTimer: 0,
     // Large global graphs offload the force sim to a Web Worker so the UI thread
     // never blocks. `useWorker` is set per-rebuild; `workerActive` mirrors the
@@ -599,7 +695,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     if (!sim || !g) return;
     const s = settingsRef.current;
 
-    const all = buildSimNodes(g, S.nodesById);
+    const { nodes: all, reseeded } = buildSimNodes(g, S.nodesById, S.seededEdges);
+    if (reseeded) S.seededEdges = g.edges.length;
     S.nodesById = new Map(all.map((n) => [n.id, n]));
 
     // Local scope: draw only the open note's neighborhood (a handful of nodes,
@@ -664,10 +761,18 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // 8k+ node layout on this thread would freeze the window, and blocking here
     // would be the same freeze by another name. The worker settles it off-thread
     // instead (see `worker.init(..., first)` below).
-    if (first && visNodes.length > 0) {
+    if ((first || reseeded) && visNodes.length > 0) {
       const willUseWorker =
         !openNode && workerRef.current !== null && visNodes.length > WORKER_THRESHOLD;
-      if (!willUseWorker) presettle(sim);
+      // Redesign: let the layout form on screen from the seed spiral instead of
+      // arriving finished. Flip FORM_ON_SCREEN off to restore the pre-settle.
+      if (!willUseWorker && FORM_ON_SCREEN) {
+        // The seed already has the cluster skeleton; a short warm-up takes out
+        // the first jolt, then the loop blooms it live, one tick per frame.
+        S.bloom = beginBloom(sim);
+      } else if (!willUseWorker) {
+        presettle(sim);
+      }
       S.introKicked = true;
       S.introStart = performance.now();
     }
@@ -721,6 +826,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     const accent = S.colors.accent || FALLBACK_ACCENT;
     const { colorById, legend: lg } = assignColors(visNodes, s.colorMode, accent);
     S.colorById = colorById;
+    S.hubLabels = syncHubLabels(hubLayerRef.current, visNodes, colorById);
     setLegend(lg);
     setCounts({ nodes: visNodes.length, edges: links.length, total: g.nodes.length });
 
@@ -930,6 +1036,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         accent,
       );
       S.colorById = colorById;
+      S.hubLabels = syncHubLabels(hubLayerRef.current, S.visNodes, colorById);
       setLegend(lg);
     }
     recolorRef.current = recolor;
@@ -970,7 +1077,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         const dx = node.x - wx;
         const dy = node.y - wy;
         const d = Math.sqrt(dx * dx + dy * dy);
-        const hitRadius = node.radius * nodeScale + 4 / S.camera.k;
+        const hitRadius = drawRadius(node) * nodeScale + 4 / S.camera.k;
         if (d <= hitRadius && d < bestDist) {
           best = node;
           bestDist = d;
@@ -1045,7 +1152,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       }
       // Matched to the GPU path's edge alpha so the WebGL-unavailable fallback
       // doesn't look like a different, dimmer product.
-      ctx!.globalAlpha = (hovered ? 0.3 : 1) * graphTheme().line![3] * (0.5 + 0.5 * introEase);
+      ctx!.globalAlpha =
+        (hovered ? 0.3 : 1) * graphTheme().line![3] * edgeDensityScale(S.visEdges.length) * (0.5 + 0.5 * introEase);
       ctx!.lineWidth = edgeWidth;
       ctx!.beginPath();
       for (const e of S.visEdges) {
@@ -1077,7 +1185,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       for (const node of drawNodes) {
         if (!matches(node)) continue;
         const dimmed = hovered != null && !neighbors.has(node.id);
-        const base = node.radius * nodeScale;
+        const base = drawRadius(node) * nodeScale;
         ctx!.globalAlpha = dimmed ? 0.12 : 0.4;
         stamp(shadowSprite, node.x + base * 0.16, node.y + base * 0.5, base * 2.3);
       }
@@ -1088,7 +1196,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         const node = drawNodes[i];
         if (!matches(node)) continue;
         if (hovered != null && !neighbors.has(node.id)) continue;
-        const base = node.radius * nodeScale;
+        const base = drawRadius(node) * nodeScale;
         const breathe = 0.82 + 0.18 * Math.sin(time * 0.8 + i * 0.7);
         ctx!.globalAlpha = clamp(0.15 * glowBoost * breathe, 0, 0.7);
         stamp(glowSprite, node.x, node.y, base * 3);
@@ -1103,8 +1211,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         const dimBySearch = !matches(node);
         const dimmed = dimByHover || dimBySearch;
 
-        const base = node.radius * nodeScale;
-        const r = isHovered ? base * 1.32 : base;
+        const base = drawRadius(node) * nodeScale;
+        const r = isHovered ? base * 1.3 : base;
         const color = isOpen
           ? colors.accent
           : S.colorById.get(node.id) ?? colors.nodeFallback;
@@ -1132,9 +1240,10 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         }
 
         // Labels: fade in with zoom, always shown on hover and for the open note.
-        const wantLabel = isHovered || isOpen || zoomLabelAlpha > 0.01;
+        const isLinked = hovered != null && !isHovered && neighbors.has(node.id);
+        const wantLabel = isHovered || isOpen || isLinked || zoomLabelAlpha > 0.01;
         if (wantLabel) {
-          let alpha = isHovered || isOpen ? 1 : zoomLabelAlpha;
+          let alpha = isHovered || isOpen ? 1 : isLinked ? 0.9 : zoomLabelAlpha;
           if (dimBySearch && !isHovered) alpha *= 0.2;
           else if (dimByHover) alpha *= 0.25;
           if (alpha > 0.01) {
@@ -1163,6 +1272,46 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // are POOLED and mutated in place — allocating a few thousand objects plus
     // their color arrays 60 times a second would hand the GC a steady diet for
     // as long as the graph is open.
+    // Screen positions for the hovered note and every note it links to, capped
+    // so a hub with hundreds of links doesn't bury the canvas in text.
+    const HOVER_TIP_CAP = 40;
+    function hoverTipsFor(hit: SimNode) {
+      const cam = S.camera;
+      const w = canvas!.clientWidth;
+      const h = canvas!.clientHeight;
+      const toScreen = (n: SimNode) => ({
+        x: w / 2 + cam.x + n.x * cam.k,
+        y: h / 2 + cam.y + n.y * cam.k,
+      });
+      const tips = [{ id: hit.id, title: hit.title, main: true, ...toScreen(hit) }];
+      const taken = [tipBox(tips[0].x, tips[0].y, hit.title, true)];
+      const ids = graphRef.current ? neighborhoodIds(graphRef.current, hit.id, 1) : new Set<string>();
+      // S.indexById is only filled for the worker path, so scan the visible nodes.
+      // Busiest neighbours first, and a tag that would cover one already placed
+      // is skipped: a hub with hundreds of links must not stack its names.
+      const linked = S.visNodes
+        .filter((n) => n.id !== hit.id && ids.has(n.id))
+        .sort((a, b) => b.linkCount - a.linkCount);
+      for (const n of linked) {
+        if (tips.length > HOVER_TIP_CAP) break;
+        const pos = toScreen(n);
+        const box = tipBox(pos.x, pos.y, n.title, false);
+        if (taken.some((t) => boxesOverlap(t, box))) continue;
+        taken.push(box);
+        tips.push({ id: n.id, title: n.title, main: false, ...pos });
+      }
+      return tips;
+    }
+
+    // The tags sit at screen positions, so a pan or zoom would leave them
+    // behind; drop them and let the next pointer move hover afresh.
+    function clearHoverTips() {
+      if (S.hoveredId == null) return;
+      S.hoveredId = null;
+      canvas!.classList.remove("is-hovering-node");
+      setHoverTips([]);
+    }
+
     const webglNodes: RenderNode[] = [];
     let edgePositions = new Float32Array(0);
     function drawWebGL() {
@@ -1194,6 +1343,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         hoveredId && graphRef.current
           ? neighborhoodIds(graphRef.current, hoveredId, 1)
           : null;
+      const bg = graphTheme().mid ?? [1, 1, 1];
       webglNodes.length = S.visNodes.length;
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (let i = 0; i < S.visNodes.length; i++) {
@@ -1201,7 +1351,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         const c = getRgb(S.colorById.get(n.id) ?? fallback);
         const dim = hlSet && !hlSet.has(n.id) ? 0.16 : 1;
         const big =
-          n.id === hoveredId ? 2.4 : hlSet && hlSet.has(n.id) ? 1.8 : 1;
+          n.id === hoveredId ? 1.3 : hlSet && hlSet.has(n.id) ? 1.1 : 1;
         let rn = webglNodes[i];
         if (!rn) {
           rn = { x: 0, y: 0, r: 0, color: [0, 0, 0] };
@@ -1209,10 +1359,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         }
         rn.x = n.x;
         rn.y = n.y;
-        rn.r = n.radius * nodeScale * countScale * big;
-        rn.color[0] = (c[0] / 255) * dim;
-        rn.color[1] = (c[1] / 255) * dim;
-        rn.color[2] = (c[2] / 255) * dim;
+        // Hubs skip the crowd shrink so the heavy centres stay heavy-looking.
+        const crowd = n.hub ? 1 : countScale;
+        rn.r = drawRadius(n) * nodeScale * crowd * big;
+        // Dim toward the canvas, not toward black: on the cream light theme a
+        // plain multiply turned every unrelated note into a black dot.
+        rn.color[0] = (c[0] / 255) * dim + bg[0] * (1 - dim);
+        rn.color[1] = (c[1] / 255) * dim + bg[1] * (1 - dim);
+        rn.color[2] = (c[2] / 255) * dim + bg[2] * (1 - dim);
         if (n.x < minX) minX = n.x;
         if (n.y < minY) minY = n.y;
         if (n.x > maxX) maxX = n.x;
@@ -1257,14 +1411,41 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // cleared the moment the user pans/zooms (in the interaction handlers).
         const bw = Math.max(1, maxX - minX);
         const bh = Math.max(1, maxY - minY);
-        S.camera.k = Math.min((width - 80) / bw, (height - 80) / bh);
-        S.camera.x = -((minX + maxX) / 2) * S.camera.k;
-        S.camera.y = -((minY + maxY) / 2) * S.camera.k;
+        // Ease toward the fit rather than snapping: as the clusters bloom the
+        // box grows every frame, and a snap turns that into a jittery zoom.
+        const k = Math.min((width - 80) / bw, (height - 80) / bh);
+        const x = -((minX + maxX) / 2) * k;
+        const y = -((minY + maxY) / 2) * k;
+        const ease = S.cameraFitted ? CAMERA_EASE : 1;
+        S.camera.k += (k - S.camera.k) * ease;
+        S.camera.x += (x - S.camera.x) * ease;
+        S.camera.y += (y - S.camera.y) * ease;
+        S.cameraFitted = true;
       }
       // Same transform as the 2D path: screen_css = width/2 + cam.x + world·cam.k,
       // then scaled by dpr into the device-pixel drawing buffer.
       const cam = S.camera;
-      webgl.setTheme(graphTheme());
+      // Hub tags, busiest first; one that would cover a tag already placed (or
+      // a hover tag) is hidden this frame rather than drawn on top of it.
+      const placed: Box[] = [];
+      for (const label of S.hubLabels) {
+        const { node, el } = label;
+        const sx = width / 2 + cam.x + node.x * cam.k;
+        const sy = height / 2 + cam.y + node.y * cam.k + drawRadius(node) * nodeScale * cam.k + 6;
+        el.style.transform = `translate(${sx}px, ${sy}px) translateX(-50%)`;
+        const box = {
+          x0: sx - label.w / 2,
+          x1: sx + label.w / 2,
+          y0: sy,
+          y1: sy + label.h,
+        };
+        const hidden =
+          (hlSet != null && node.id !== hoveredId) ||
+          placed.some((b) => boxesOverlap(b, box));
+        if (!hidden) placed.push(box);
+        el.style.opacity = hidden ? "0" : "1";
+      }
+      webgl.setTheme(themeForEdges(S.visEdges.length));
       webgl.draw(
         cam.k * dpr,
         (width / 2 + cam.x) * dpr,
@@ -1317,8 +1498,10 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // Redesign: let a settled graph rest. Once the layout has cooled to the
         // idle floor with nothing dragged and the intro over, stop ticking and
         // repainting; a drag, reheat or hover wakes it (see the idle check below).
+        if (S.bloom && bloomStep(sim, S.bloom)) S.bloom = null;
+        const forming = S.bloom != null;
         const settled =
-          !S.drag && !introActive && sim.alpha() <= REST_ALPHA;
+          !forming && !S.drag && !introActive && sim.alpha() <= REST_ALPHA;
         S.restFrames = settled ? (S.restFrames ?? 0) + 1 : 0;
         active = S.restFrames < 45;
         // Resting also ends the camera's auto-fit, or a later wake would re-fit
@@ -1331,7 +1514,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // Once the layout stops visibly moving into place, stop chasing it with
         // the camera — otherwise the drift breathes the bounding box and the
         // auto-fit turns that into a wobble of the whole view.
-        if (webglNeedsFitRef.current && sim.alpha() <= FIT_LOCK_ALPHA) {
+        if (!forming && webglNeedsFitRef.current && sim.alpha() <= FIT_LOCK_ALPHA) {
           webglNeedsFitRef.current = false;
         }
       }
@@ -1377,6 +1560,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     function handleWheel(e: WheelEvent) {
       e.preventDefault();
       webglNeedsFitRef.current = false; // user is driving the camera now
+      clearHoverTips();
       const rect = canvas!.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
@@ -1430,6 +1614,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
               drag.moved || Math.hypot(dx, dy) > CLICK_DRAG_THRESHOLD;
             S.camera.x += dx;
             S.camera.y += dy;
+            clearHoverTips();
             drag.lastX = e.clientX;
             drag.lastY = e.clientY;
             requestDraw();
@@ -1465,7 +1650,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         canvas!.classList.toggle("is-hovering-node", hitId != null);
         // Name tooltip near the cursor (canvas-local coords). Only updated on
         // change of hovered node, so mousemove itself stays cheap.
-        setHoverTip(hit ? { title: hit.title, x: sx, y: sy } : null);
+        setHoverTips(hit ? hoverTipsFor(hit) : []);
         requestDraw();
       }
     }
@@ -1556,8 +1741,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     setTimeout(() => setRefreshSpin(false), 700);
   };
 
+  // Only once the self-heal retries are spent: an empty first answer usually
+  // means the index isn't ready yet, and flashing the card then is wrong.
   const showEmpty =
-    !loading && !error && graph != null && counts.nodes === 0;
+    !loading &&
+    !error &&
+    graph != null &&
+    graph.nodes.length === 0 &&
+    emptyRetriesRef.current >= 3;
 
   return (
     <div className="graph-view" ref={wrapRef}>
@@ -1658,29 +1849,44 @@ export function GraphView({ onClose }: { onClose: () => void }) {
             {diag}
           </div>
         )}
-        {settings.scope === "global" && hoverTip && (
-          <div
-            style={{
-              position: "absolute",
-              left: hoverTip.x + 12,
-              top: hoverTip.y + 12,
-              maxWidth: 260,
-              padding: "3px 8px",
-              borderRadius: 6,
-              background: "rgba(18,18,26,0.94)",
-              color: "#fff",
-              font: "12px/1.3 var(--font-body, ui-sans-serif)",
-              border: "1px solid rgba(255,255,255,0.14)",
-              pointerEvents: "none",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              zIndex: 6,
-            }}
-          >
-            {hoverTip.title}
-          </div>
-        )}
+        <div
+          ref={hubLayerRef}
+          aria-hidden="true"
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            overflow: "hidden",
+            zIndex: 5,
+            display: settings.scope === "global" ? "block" : "none",
+          }}
+        />
+        {settings.scope === "global" &&
+          hoverTips.map((t) => (
+            <div
+              key={t.id}
+              style={{
+                position: "absolute",
+                left: t.x,
+                top: t.y + 10,
+                transform: "translateX(-50%)",
+                maxWidth: 220,
+                padding: t.main ? "3px 8px" : "2px 6px",
+                borderRadius: 6,
+                background: t.main ? "rgba(18,18,26,0.94)" : "rgba(18,18,26,0.72)",
+                color: "#fff",
+                font: `${t.main ? 12 : 11}px/1.3 var(--font-body, ui-sans-serif)`,
+                border: "1px solid rgba(255,255,255,0.14)",
+                pointerEvents: "none",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                zIndex: t.main ? 7 : 6,
+              }}
+            >
+              {t.title}
+            </div>
+          ))}
 
         {showControls && (
           <GraphControls
