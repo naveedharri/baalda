@@ -18,7 +18,7 @@ const ACCESS_OPTIONS: ReadonlyArray<{ value: InviteAccess; label: string; hint?:
   { value: "open", label: "Can edit" },
   { value: "readonly", label: "Can view" },
   { value: "private", label: "No access" },
-  { value: "default", label: "Default for new members", hint: "Whatever the New members setting says" },
+  { value: "default", label: "Vault default", hint: "Whatever the New members setting says" },
 ];
 
 /** Add typed or pasted text to the chip list, de-duplicated case-insensitively. */

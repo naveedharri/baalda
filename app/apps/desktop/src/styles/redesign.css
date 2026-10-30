@@ -1142,7 +1142,7 @@ html:not(.rd-off) .invite-chips:focus-within {
 }
 
 /* Role / Access pickers: two soft tiles, text never spills out. */
-html:not(.rd-off) .invite-people-fields { gap: var(--sp-2); }
+html:not(.rd-off) .invite-people-fields { gap: var(--sp-2); display: grid; grid-template-columns: 1fr 1.5fr; margin-top: 12px; }
 html:not(.rd-off) .invite-field {
   background: var(--bg-app);
   border: 0 !important;
@@ -1153,7 +1153,7 @@ html:not(.rd-off) .invite-field {
 }
 html:not(.rd-off) .invite-field > *:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 html:not(.rd-off) .invite-field-label {
-  font: 500 10px var(--font-mono); letter-spacing: 0.6px; text-transform: uppercase; color: rgba(var(--rd-ink), 0.53);
+  font: 400 12px var(--font-body); letter-spacing: 0; text-transform: none; color: var(--text-tertiary);
 }
 
 /* Join code: a quiet panel with the code in mono. */

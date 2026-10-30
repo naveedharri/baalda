@@ -49,7 +49,7 @@ describe("Invite people dialog", () => {
     await act(async () => root.render(createElement(InvitePeopleDialog, { orgId: "org-1", onClose: vi.fn(), onInvited: vi.fn() })));
     const fields = [...document.body.querySelectorAll(".invite-field")];
     expect(fields.map((f) => f.querySelector(".invite-field-label")?.textContent)).toEqual(["Role", "Access"]);
-    expect(fields[1].querySelector(".invite-field-trigger")?.textContent).toContain("Default for new members");
+    expect(fields[1].querySelector(".invite-field-trigger")?.textContent).toContain("Vault default");
     expect(send().textContent).toBe("Send invite");
     expect(send().disabled).toBe(true);
     await type("maya@team.com, jo@team.com ");
