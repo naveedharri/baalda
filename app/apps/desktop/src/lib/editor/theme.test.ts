@@ -164,18 +164,23 @@ describe("dark palette contrast", () => {
 });
 
 describe("editor theme tiers", () => {
-  it("uses distinct active and inactive drawSelection tokens", () => {
+  it("uses distinct active and inactive selection tokens", () => {
     expect(
-      editorThemeSpec["& > .cm-scroller > .cm-selectionLayer .cm-selectionBackground"]
+      editorThemeSpec["& > .cm-scroller > .cm-proseSelectionLayer .cm-proseSelection"]
         .backgroundColor,
     ).toBe(
       "var(--editor-selection-bg-inactive)",
     );
     expect(
       editorThemeSpec[
-        "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground"
+        "&.cm-focused > .cm-scroller > .cm-proseSelectionLayer .cm-proseSelection"
       ].backgroundColor,
     ).toBe("var(--editor-selection-bg)");
+    // drawSelection's block-shaped wash stays hidden; proseSelection hugs text.
+    expect(
+      editorThemeSpec["& > .cm-scroller > .cm-selectionLayer .cm-selectionBackground"]
+        .backgroundColor,
+    ).toBe("transparent");
     // The title is the file name, never part of a text selection: no wash.
     expect(editorThemeSpec[".cm-note-title.is-selected"]).toBeUndefined();
   });

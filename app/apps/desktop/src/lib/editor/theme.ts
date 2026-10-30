@@ -79,10 +79,20 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // These differ from native selection because this layer sits above the text.
   // (No `::selection` clause: drawSelection blanks the native one with a
   // `Prec.highest` rule of its own, so styling it here would be dead CSS.)
+  // The wash itself is drawn by proseSelection (selection.ts), which hugs each
+  // line's text; drawSelection's own block-shaped wash is hidden.
   "& > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
-    backgroundColor: "var(--editor-selection-bg-inactive)",
+    backgroundColor: "transparent",
   },
-  "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
+  "& > .cm-scroller > .cm-proseSelectionLayer": {
+    zIndex: "1",
+    pointerEvents: "none",
+  },
+  "& > .cm-scroller > .cm-proseSelectionLayer .cm-proseSelection": {
+    backgroundColor: "var(--editor-selection-bg-inactive)",
+    borderRadius: "3px",
+  },
+  "&.cm-focused > .cm-scroller > .cm-proseSelectionLayer .cm-proseSelection": {
     backgroundColor: "var(--editor-selection-bg)",
   },
   // drawSelection() paints in a layer BEHIND the content by default, so opaque
