@@ -255,7 +255,8 @@ html:not(.rd-off) .cm-editor .cm-line {
   line-height: 1.75;
 }
 
-/* Bullets: a short violet dash in place of the dot. */
+/* Bullets: a small, quiet round dot in soft ink (the violet dash read as a
+   rule, not a list). Drawn, so its size is steady across fonts. */
 html:not(.rd-off) .cm-editor .cm-bullet {
   color: transparent !important;
   position: relative;
@@ -266,12 +267,12 @@ html:not(.rd-off) .cm-editor .cm-bullet::after {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 9px;
-  height: 1.6px;
-  margin-left: -4.5px;
-  border-radius: 2px;
-  background: var(--accent);
-  opacity: 0.85;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  opacity: 0.45;
 }
 
 /* [[links]]: violet text with a thin underline, no chip. */
