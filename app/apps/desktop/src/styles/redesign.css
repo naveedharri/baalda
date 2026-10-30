@@ -2602,3 +2602,17 @@ html:not(.rd-off) .io-tip { margin: 0; padding-left: 4px; font-size: 12.5px; col
 /* Dropdown options with a hint line: the tick sits on the label's line, not
    beside the hint. */
 html:not(.rd-off) .context-menu.role-menu li .menu-tick { align-self: flex-start; line-height: 1.4; }
+
+/* "No access" reads as the soft red it is in the confirm dialogs, not as a
+   disabled-looking grey. Can edit and Can view are unchanged. Light and dark. */
+html:not(.rd-off) { --access-none-bg: #fbe9e6; --access-none-fg: #a8352b; }
+html:not(.rd-off)[data-theme="dark"] { --access-none-bg: rgba(240, 139, 128, 0.14); --access-none-fg: #f08b80; }
+
+/* Copy buttons in the token dialog and MCP tab: the redesign's tinted icon
+   tile (as in toasts and Import and export), green once copied. */
+html:not(.rd-off) .mcp-copy-btn {
+  width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; flex: none;
+  background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6); border: 0; box-shadow: none;
+}
+html:not(.rd-off) .mcp-copy-btn:hover { background: var(--rdc-e6dfff, #e6dfff); }
+html:not(.rd-off) .mcp-copy-btn.is-copied { background: var(--rdc-e4f3e8, #e4f3e8); color: var(--rdc-2f7a46, #2f7a46); }
