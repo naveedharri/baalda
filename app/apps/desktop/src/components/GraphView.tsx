@@ -42,6 +42,14 @@ import {
   type GlobeRotation,
   type SpherePoint,
 } from "../lib/graph/globe";
+import {
+  CURVE_SEGMENTS,
+  curvePull,
+  templateLayout,
+  writeCurve,
+  type TemplateShape,
+} from "../lib/graph/templates";
+import type { GraphShape } from "../lib/graph/graphSettings";
 import { useStore } from "../store";
 import { GraphControls } from "./GraphControls";
 import { Spinner } from "./Spinner";
@@ -310,6 +318,9 @@ type Drag =
 /** A note's place on the globe this frame: screen-world position and depth. */
 type Placed = SimNode & { gx?: number; gy?: number; gz?: number };
 
+/** Switching shape glides every note from where it was to where it goes. */
+const MORPH_MS = 850;
+
 /** A note this far round the edge is turned to face you before it opens. */
 const GLOBE_FACE_TO_OPEN = 0.55;
 /** Spin rests this long after the last touch before turning again. */
@@ -563,8 +574,15 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // their finished spots (positions are final; only the view animates in).
     assemble: null as { t0: number; nodes: SimNode[]; to: Float32Array } | null,
     cameraFitted: false,
-    // One frame of camera fit on request (a shape switch), even at rest.
-    refitOnce: false,
+    // The camera re-frames until this time after a shape switch, even at rest.
+    fitUntil: 0,
+    // The shape drawn last frame; a change starts a morph from where notes were.
+    view: "flat" as GraphShape,
+    morph: null as { t0: number; from: Float32Array; nodes: SimNode[] } | null,
+    // Radial / Ring positions for the current visible set (they never move).
+    template: null as
+      | { shape: TemplateShape; nodes: SimNode[]; pos: Float32Array; group: Int32Array; r: number; index: Map<SimNode, number> }
+      | null,
     seededEdges: 0,
     idleTimer: 0,
     // Large global graphs offload the force sim to a Web Worker so the UI thread
@@ -856,7 +874,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       if (keys.includes("colorMode")) recolorRef.current();
       if (keys.includes("shape")) {
         S.globe.frame = null;
-        S.refitOnce = true;
+        S.fitUntil = performance.now() + MORPH_MS + 150;
+        S.cameraFitted = true;
       }
       requestDrawRef.current();
     },
@@ -1061,20 +1080,78 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    function globeWanted(): boolean {
+    /** The shape to draw: the chosen one, or Flat where it cannot apply. */
+    function viewWanted(): GraphShape {
       const s = settingsRef.current;
-      return (
-        s.shape === "globe" &&
-        s.scope === "global" &&
-        webgl != null &&
-        S.visNodes.length >= GLOBE_MIN_NODES
-      );
+      if (s.scope !== "global" || webgl == null) return "flat";
+      if (s.shape === "globe" && S.visNodes.length < GLOBE_MIN_NODES) return "flat";
+      return s.shape ?? "globe";
+    }
+
+    function morphing(): boolean {
+      return S.morph != null && performance.now() - S.morph.t0 < MORPH_MS;
+    }
+
+    /** Radial / Ring: fixed spots from folder and link count, computed once per set. */
+    function placeTemplate(shape: TemplateShape) {
+      const nodes = S.visNodes;
+      let t = S.template;
+      if (!t || t.shape !== shape || t.nodes !== nodes) {
+        const L = templateLayout(nodes, shape);
+        t = { shape, nodes, ...L, index: new Map(nodes.map((n, i) => [n, i])) };
+        S.template = t;
+      }
+      for (let i = 0; i < nodes.length; i++) {
+        const p = nodes[i] as Placed;
+        p.gx = t.pos[i * 2];
+        p.gy = t.pos[i * 2 + 1];
+        p.gz = 1;
+      }
+    }
+
+    function placeFlat() {
+      for (const n of S.visNodes) {
+        const p = n as Placed;
+        p.gx = n.x;
+        p.gy = n.y;
+        p.gz = 1;
+      }
+    }
+
+    /** Capture where every note is drawn now, as the start of a morph. */
+    function startMorph() {
+      const nodes = S.visNodes;
+      const from = new Float32Array(nodes.length * 2);
+      for (let i = 0; i < nodes.length; i++) {
+        const p = nodes[i] as Placed;
+        from[i * 2] = p.gx ?? p.x;
+        from[i * 2 + 1] = p.gy ?? p.y;
+      }
+      S.morph = { t0: performance.now(), from, nodes };
+    }
+
+    /** Blend this frame's spots with where the morph started. */
+    function applyMorph() {
+      const m = S.morph;
+      if (!m) return;
+      if (m.nodes !== S.visNodes || !morphing()) {
+        S.morph = null;
+        return;
+      }
+      const t = (performance.now() - m.t0) / MORPH_MS;
+      const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      const nodes = S.visNodes;
+      for (let i = 0; i < nodes.length; i++) {
+        const p = nodes[i] as Placed;
+        p.gx = m.from[i * 2] + (p.gx! - m.from[i * 2]) * e;
+        p.gy = m.from[i * 2 + 1] + (p.gy! - m.from[i * 2 + 1]) * e;
+      }
     }
 
     /** Where a note is drawn this frame: on the globe, or its flat spot. */
     function viewPos(n: SimNode): { x: number; y: number; z: number } {
       const p = n as Placed;
-      if (S.globe.on && p.gx !== undefined) return { x: p.gx, y: p.gy!, z: p.gz! };
+      if (p.gx !== undefined) return { x: p.gx, y: p.gy!, z: p.gz ?? 1 };
       return { x: n.x, y: n.y, z: 1 };
     }
 
@@ -1464,14 +1541,21 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           ? neighborhoodIds(graphRef.current, hoveredId, 1)
           : null;
       const bg = graphTheme().mid ?? [1, 1, 1];
-      const onGlobe = globeWanted();
-      if (onGlobe !== S.globe.on) {
-        S.globe.on = onGlobe;
+      const view = viewWanted();
+      if (view !== S.view) {
+        // Only a change between two drawn frames glides; the first frame just lands.
+        if (S.visNodes.length > 0 && (S.visNodes[0] as Placed).gx !== undefined) startMorph();
+        S.view = view;
         S.globe.frame = null;
         // Leaving the globe: wipe its sphere off the 2D canvas underneath.
         S.cleared2d = false;
       }
+      const onGlobe = view === "globe";
+      S.globe.on = onGlobe;
       if (onGlobe) placeOnGlobe();
+      else if (view === "radial" || view === "ring") placeTemplate(view);
+      else placeFlat();
+      applyMorph();
       // On the globe the far side paints first, so the near side covers it.
       const order = onGlobe ? globeOrder() : null;
       webglNodes.length = S.visNodes.length;
@@ -1491,8 +1575,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           rn = { x: 0, y: 0, r: 0, color: [0, 0, 0] };
           webglNodes[j] = rn;
         }
-        const px = onGlobe ? n.gx! : n.x;
-        const py = onGlobe ? n.gy! : n.y;
+        const px = n.gx!;
+        const py = n.gy!;
         rn.x = px;
         rn.y = py;
         // Hubs skip the crowd shrink so the heavy centres stay heavy-looking.
@@ -1512,24 +1596,34 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // Edges: two world-space vertices per link (source → target), read from
       // the sim nodes forceLink resolved in place.
       const edges = S.visEdges;
-      if (edgePositions.length < edges.length * 4) {
-        edgePositions = new Float32Array(edges.length * 4);
+      const curved = view === "radial" || view === "ring" ? (view as TemplateShape) : null;
+      const per = curved ? CURVE_SEGMENTS * 4 : 4;
+      if (edgePositions.length < edges.length * per) {
+        edgePositions = new Float32Array(edges.length * per);
       }
       // On the globe only links on the visible side are drawn; the far side
       // shows as faded notes alone, which is what reads as a sphere.
-      let drawn = 0;
+      // Radial and Ring bend each link toward the middle (Ring bundles the
+      // links between folders across it).
+      let w = 0;
+      const tpl = curved ? S.template : null;
       for (let i = 0; i < edges.length; i++) {
         const src = edges[i].source as Placed;
         const tgt = edges[i].target as Placed;
         if (onGlobe && src.gz! + tgt.gz! < 0.1) continue;
-        const o = drawn * 4;
-        edgePositions[o] = onGlobe ? src.gx! : src.x;
-        edgePositions[o + 1] = onGlobe ? src.gy! : src.y;
-        edgePositions[o + 2] = onGlobe ? tgt.gx! : tgt.x;
-        edgePositions[o + 3] = onGlobe ? tgt.gy! : tgt.y;
-        drawn++;
+        if (curved && tpl) {
+          const a = tpl.index.get(src);
+          const b = tpl.index.get(tgt);
+          const same = a !== undefined && b !== undefined && tpl.group[a] === tpl.group[b];
+          w = writeCurve(src.gx!, src.gy!, tgt.gx!, tgt.gy!, curvePull(curved, same), edgePositions, w);
+          continue;
+        }
+        edgePositions[w++] = src.gx!;
+        edgePositions[w++] = src.gy!;
+        edgePositions[w++] = tgt.gx!;
+        edgePositions[w++] = tgt.gy!;
       }
-      webgl.setEdges(edgePositions.subarray(0, drawn * 4));
+      webgl.setEdges(edgePositions.subarray(0, w));
       // Hover: bright rays from the hovered node to each of its neighbors, so
       // connections are traceable even in a huge cloud.
       if (hoveredId) {
@@ -1541,7 +1635,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
             const a = viewPos(s);
             const b = viewPos(t);
             if (a.z < 0 || b.z < 0) continue;
-            hl.push(a.x, a.y, b.x, b.y);
+            if (curved) {
+              const seg = new Float32Array(CURVE_SEGMENTS * 4);
+              writeCurve(a.x, a.y, b.x, b.y, curvePull(curved, false), seg, 0);
+              for (const v of seg) hl.push(v);
+            } else {
+              hl.push(a.x, a.y, b.x, b.y);
+            }
           }
         }
         webgl.setHighlightEdges(new Float32Array(hl));
@@ -1550,11 +1650,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       }
       // One-shot: fit the shared camera to the graph. After that the user's
       // pan/zoom (which mutates S.camera via the 2D handlers) drives the view.
-      if ((webglNeedsFitRef.current || S.refitOnce) && webglNodes.length > 0) {
-        if (S.refitOnce) {
-          S.refitOnce = false;
-          S.cameraFitted = false;
-        }
+      const refitting = performance.now() < S.fitUntil;
+      if ((webglNeedsFitRef.current || refitting) && webglNodes.length > 0) {
         // Keep the graph framed as the layout expands during settle; the flag is
         // cleared the moment the user pans/zooms (in the interaction handlers).
         // While it assembles, frame the finished shape so it grows into view.
@@ -1567,6 +1664,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           maxX = fr.cx + R;
           minY = fr.cy - R;
           maxY = fr.cy + R;
+        } else if (curved && S.template) {
+          // The finished shape, so the camera does not chase the glide.
+          const R = S.template.r * 1.14;
+          minX = minY = -R;
+          maxX = maxY = R;
         } else if (S.assemble) {
           const to = S.assemble.to;
           minX = minY = Infinity;
@@ -1586,7 +1688,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         const k = Math.min((width - 80) / bw, (height - 80) / bh);
         const x = -((minX + maxX) / 2) * k;
         const y = -((minY + maxY) / 2) * k;
-        const ease = S.cameraFitted ? CAMERA_EASE : 1;
+        const ease = !S.cameraFitted ? 1 : refitting ? 0.12 : CAMERA_EASE;
         S.camera.k += (k - S.camera.k) * ease;
         S.camera.x += (x - S.camera.x) * ease;
         S.camera.y += (y - S.camera.y) * ease;
@@ -1708,7 +1810,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       }
       // The globe keeps turning after the layout rests. That costs drawing only:
       // the physics stays asleep, so an idle spin never re-runs the layout.
-      const spinning = globeMoving();
+      const spinning = globeMoving() || morphing();
       if (settingsRef.current.scope === "global" && webgl) {
         // Only rebuild + re-upload + redraw while the layout is moving (or on an
         // explicit request). Once settled the last frame stands, so idle cost is
@@ -1727,7 +1829,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // a reheat (data refresh, rearrange) that didn't come with a draw request.
         window.clearTimeout(S.idleTimer);
         S.idleTimer = window.setTimeout(() => {
-          if (S.rafId == null && (sim.alpha() > REST_ALPHA || S.drag || globeMoving())) {
+          if (S.rafId == null && (sim.alpha() > REST_ALPHA || S.drag || globeMoving() || morphing())) {
             S.restFrames = 0;
             S.rafId = requestAnimationFrame(loop);
           } else if (S.rafId == null) {
@@ -1771,8 +1873,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const hit = nodeAt(sx, sy);
       canvas!.setPointerCapture(e.pointerId);
       canvas!.classList.add("is-dragging");
-      if (S.globe.on) {
-        // A press on the globe spins it; nothing is pinned or pulled.
+      if (S.view !== "flat") {
+        // A press on the globe spins it, and on Radial / Ring it pans: those
+        // shapes are fixed, so nothing is pinned or pulled.
         S.globe.target = null;
         S.globe.lastTouch = performance.now();
         S.drag = { type: "pan", lastX: e.clientX, lastY: e.clientY, moved: false, pick: hit };
@@ -1864,12 +1967,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const drag = S.drag;
       canvas!.classList.remove("is-dragging");
       S.drag = null;
-      if (drag?.type === "pan" && S.globe.on) {
+      if (drag?.type === "pan" && S.view !== "flat") {
         S.globe.lastTouch = performance.now();
         const pick = drag.pick;
         if (!drag.moved && pick) {
-          // A note round the edge turns to face you first; one in front opens.
-          if (viewPos(pick).z < GLOBE_FACE_TO_OPEN) turnToFace(pick);
+          // On the globe a note round the edge turns to face you first; one in
+          // front (or any note on the other shapes) opens.
+          if (S.globe.on && viewPos(pick).z < GLOBE_FACE_TO_OPEN) turnToFace(pick);
           else useStore.getState().openNoteByPath(pick.path).then(onClose);
         }
         requestDraw();

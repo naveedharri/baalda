@@ -5,8 +5,11 @@
 // Settings persist to localStorage under SETTINGS_STORAGE_KEY so a user's tuned
 // physics/visual preferences survive app restarts.
 
-/** How the whole graph is shaped: wrapped on a sphere, or laid flat. */
-export type GraphShape = "globe" | "flat";
+/**
+ * How the whole graph is shaped: wrapped on a sphere, laid flat, folders as
+ * slices of a disc, or every note on one ring.
+ */
+export type GraphShape = "globe" | "flat" | "radial" | "ring";
 
 /** How node fill colors are derived. */
 export type ColorMode = "folder" | "degree" | "uniform";
@@ -48,7 +51,7 @@ export interface GraphSettings {
   labelScale: number;
   /** Node fill color strategy. */
   colorMode: ColorMode;
-  /** Globe (the default) or the flat map. Small vaults always draw flat. */
+  /** Globe is the default; a globe of a small vault draws flat. */
   shape: GraphShape;
 
   // ---- Filter ----

@@ -2487,6 +2487,30 @@ html:not(.rd-off) .graph-seg { background: var(--rd-fill); border: 0; padding: 3
 html:not(.rd-off) .graph-seg-btn { border-radius: 7px; font-size: 12px; color: var(--text-secondary); }
 html:not(.rd-off) .graph-seg-btn.is-active { background: var(--rd-surface); color: var(--text-primary); box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.12); }
 html[data-theme="dark"]:not(.rd-off) .graph-seg-btn.is-active { background: #34312d; }
+/* The panel stays clear of the window's traffic lights and scrolls instead of
+   growing up under them. */
+html:not(.rd-off) .graph-controls { max-height: calc(100% - 72px); overflow-y: auto; overscroll-behavior: contain; }
+/* A segmented row whose options need the full width: label above, control below. */
+html:not(.rd-off) .graph-control-row.is-stacked { grid-template-columns: 1fr; gap: 6px; }
+html:not(.rd-off) .graph-control-row.is-stacked .graph-seg { grid-column: 1 / -1; }
+html:not(.rd-off) .graph-seg-btn { padding: 5px 4px; }
+/* Shape templates: four picture tiles. */
+html:not(.rd-off) .graph-shape-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 4px; }
+html:not(.rd-off) .graph-shape-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 8px 0 6px; border: 0; border-radius: 10px; cursor: pointer;
+  background: var(--rd-fill-soft); color: var(--text-tertiary);
+  font: 500 11.5px var(--font-body);
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.05);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+html:not(.rd-off) .graph-shape-btn svg { width: 26px; height: 26px; }
+html:not(.rd-off) .graph-shape-btn:hover { color: var(--text-primary); }
+html:not(.rd-off) .graph-shape-btn.is-active {
+  background: var(--accent-soft); color: var(--accent);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+html:not(.rd-off) .graph-shape-btn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
 html:not(.rd-off) .graph-legend-row { font-size: 12.5px; color: var(--text-secondary); }
 html:not(.rd-off) .graph-legend-count { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 html:not(.rd-off) .graph-control-reset { height: 30px; border-radius: 8px; font-size: 12.5px; }
