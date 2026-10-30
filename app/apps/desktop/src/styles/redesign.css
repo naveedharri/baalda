@@ -1336,29 +1336,35 @@ html:not(.rd-off) .mcp-token-dialog .mcp-setup-head { margin-top: var(--sp-5); }
 html:not(.rd-off) .mcp-token-dialog .mcp-setup-title { font: 500 10.5px var(--font-mono); letter-spacing: 0.7px; text-transform: uppercase; color: rgba(var(--rd-ink), 0.53); }
 html:not(.rd-off) .mcp-token-dialog .mcp-client-tab { font-size: var(--fs-sm); padding: 5px 12px; border-radius: 8px; color: var(--text-secondary); }
 html:not(.rd-off) .mcp-token-dialog .mcp-client-tab.is-active { color: var(--text-primary); font-weight: 500; }
-/* Command: a dark terminal block. */
+/* Command block (redesign): light and quiet, a header with the label and copy,
+   then one line per command with a `$` prompt (continuations are indented). */
 html:not(.rd-off) .mcp-token-dialog .mcp-block {
-  margin-top: var(--sp-2);
-  background: var(--rdc-16151c, #16151c); border: 0; border-radius: var(--radius-lg);
-  box-shadow: 0 12px 28px -14px rgba(11, 10, 16, 0.6);
-  padding-top: 30px; position: relative;
+  margin-top: var(--sp-2); padding: 0; display: block; position: relative;
+  background: var(--bg-app); border: 0; border-radius: 14px;
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.07);
 }
-html:not(.rd-off) .mcp-token-dialog .mcp-block::before {
-  content: ""; position: absolute; left: 14px; top: 12px; width: 8px; height: 8px; border-radius: 50%;
-  background: var(--rdc-ff5f57, #ff5f57); box-shadow: 14px 0 0 var(--rdc-febc2e, #febc2e), 28px 0 0 var(--rdc-28c840, #28c840);
+html:not(.rd-off) .mcp-block-head {
+  display: flex; align-items: center; justify-content: space-between; padding: 6px 6px 0 14px;
 }
-html:not(.rd-off) .mcp-token-dialog .mcp-block-value { color: var(--rdc-e9e6ff, #e9e6ff); font-size: 12.5px; line-height: 1.7; }
-html:not(.rd-off) .mcp-token-dialog .mcp-block button { color: var(--rdc-b9b4d6, #b9b4d6); }
-html:not(.rd-off) .mcp-token-dialog .mcp-block button:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+html:not(.rd-off) .mcp-block-label { font: 500 11px var(--font-body); color: var(--text-tertiary); }
+html:not(.rd-off) .mcp-token-dialog .mcp-block-value {
+  display: block; padding: 6px 14px 14px; color: var(--text-primary); font: 12.5px/1.7 var(--font-mono);
+  white-space: normal;
+}
+html:not(.rd-off) .mcp-block-line {
+  display: block; position: relative; padding-left: 16px;
+  white-space: pre-wrap; word-break: normal; overflow-wrap: break-word;
+}
+html:not(.rd-off) .mcp-block-line::before { content: "$"; position: absolute; left: 0; color: var(--accent); opacity: 0.8; }
+html:not(.rd-off) .mcp-block-line.is-cont { padding-left: 32px; }
+html:not(.rd-off) .mcp-block-line.is-cont::before { content: none; }
 html:not(.rd-off) .mcp-token-dialog .mcp-setup-hint { margin-top: 8px; font-size: var(--fs-xs); color: var(--text-tertiary); }
 html:not(.rd-off) .mcp-token-dialog .confirm-actions {
   margin: var(--sp-5) 0 0; padding: 0 var(--sp-5) var(--sp-5); background: none; border-top: 0;
 }
 html:not(.rd-off) .mcp-token-dialog > .confirm-actions { margin-left: 0; margin-right: 0; }
 html:not(.rd-off) .mcp-token-dialog input { margin-top: var(--sp-3); width: calc(100% - 2 * var(--sp-5)); box-sizing: border-box; }
-/* Wrap the command at spaces; a word is split only when it cannot fit on a
-   line of its own (a long token), never mid-URL as before ("htt|p://"). */
-html:not(.rd-off) .mcp-token-dialog .mcp-block-value { padding-right: 40px; white-space: pre-wrap; word-break: normal; overflow-wrap: break-word; }
+
 
 /* View-only banner: a slim, quiet pill instead of a full-width yellow block. */
 html:not(.rd-off) .editor-lockbanner {
