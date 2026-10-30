@@ -2645,3 +2645,42 @@ html:not(.rd-off) .banner-slot > .banner .banner-actions button:not(.primary):no
   border: 0; background: rgba(var(--rd-ink), 0.05); border-radius: 10px;
 }
 html:not(.rd-off) .banner-slot > .banner .banner-actions button.primary { border-radius: 10px; }
+
+/* What's new, "glow badge" (chosen 2026-10-30): a sparkle in a ring of the
+   sidebar's folder colours, "Baalda v0.1.98" with the version in ink-to-violet,
+   and each change as a soft row with a folder-colour tile, title and detail. */
+html:not(.rd-off) .modal.whats-new { width: 460px; padding: 26px 24px 22px; border-radius: 24px; text-align: center; }
+html:not(.rd-off) .whats-new-glyph { display: none; }
+html:not(.rd-off) .whats-new-version { display: none; }
+html:not(.rd-off) .whats-new-badge {
+  width: 76px; height: 76px; margin: 0 auto 14px; border-radius: 24px; display: grid; place-items: center;
+  background: conic-gradient(from 200deg, #7c5cff, #dc5f97, #d9773a, #3f8850, #2f86bf, #7c5cff);
+  box-shadow: 0 16px 34px -12px rgba(124, 92, 255, 0.6);
+}
+html:not(.rd-off) .whats-new-badge > div {
+  width: 66px; height: 66px; border-radius: 20px; display: grid; place-items: center;
+  background: var(--rd-surface); color: #7c5cff;
+}
+html:not(.rd-off) .whats-new-title { font: 700 28px var(--font-display); letter-spacing: -0.02em; margin: 0 0 6px; }
+html:not(.rd-off) .whats-new-title-version {
+  background: linear-gradient(90deg, var(--text-primary), #7f73ff); -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+html:not(.rd-off) .whats-new-sub { color: var(--text-tertiary); font-size: 13.5px; margin: 0 0 16px; }
+html:not(.rd-off) .whats-new-notes { list-style: none; margin: 0 0 18px; padding: 0; display: grid; gap: 8px; text-align: left; }
+html:not(.rd-off) .whats-new-notes li {
+  display: flex; align-items: flex-start; gap: 12px; padding: 10px 12px; border-radius: 14px;
+  background: var(--bg-app); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.04);
+}
+html:not(.rd-off) .whats-new-tile {
+  flex: none; width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center;
+  background: color-mix(in srgb, var(--tile-fill) 40%, transparent); color: var(--tile-ink);
+}
+html:not(.rd-off) .whats-new-notes li.tone-violet { --tile-fill: #cbbcf6; --tile-ink: #7c5cff; }
+html:not(.rd-off) .whats-new-notes li.tone-green { --tile-fill: #9bd8a9; --tile-ink: #3f8850; }
+html:not(.rd-off) .whats-new-notes li.tone-orange { --tile-fill: #f7d9be; --tile-ink: #d9773a; }
+html:not(.rd-off) .whats-new-notes li.tone-sky { --tile-fill: #9ed4ef; --tile-ink: #2f86bf; }
+html:not(.rd-off) .whats-new-notes li.tone-pink { --tile-fill: #fac6dc; --tile-ink: #dc5f97; }
+html:not(.rd-off) .whats-new-text { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-tertiary); line-height: 1.45; }
+html:not(.rd-off) .whats-new-text b { display: block; font-size: 13.5px; font-weight: 600; color: var(--text-primary); margin-bottom: 1px; }
+html:not(.rd-off) .whats-new-tag { flex: none; align-self: center; font: 600 10px var(--font-body); color: #fff; background: #7f73ff; border-radius: 99px; padding: 2px 7px; }
+html:not(.rd-off) .whats-new-cta { width: 100%; height: 42px; border-radius: 12px; }

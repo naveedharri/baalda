@@ -76,7 +76,7 @@ import {
 } from "./lib/updater";
 import { onClientOutdated } from "./lib/api";
 import { setUpdateHintHandler } from "./lib/updateHint";
-import { isSilentRelease, notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
+import { isSilentRelease, notesForVersion, releaseNoteItems } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { viewerFor } from "./lib/formats";
 import { effectiveHomeNote, homeSidebarVisitKey } from "./lib/pins";
@@ -883,8 +883,11 @@ const loadMemberPictures = createMemberPicturesLoader({
   fetch: (orgId) => authManager.api.getMembersOverview(orgId),
 });
 
+/** Folder colours for the change tiles, in order (lib/appearance.ts ITEM_COLORS). */
+const WHATS_NEW_TONES = ["violet", "green", "orange", "sky", "pink"] as const;
+
 function WhatsNewModal() {
-  const [updated, setUpdated] = useState<{ version: string; notes: string[] } | null>(
+  const [updated, setUpdated] = useState<{ version: string; notes: { title: string; detail: string }[] } | null>(
     null,
   );
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -904,7 +907,7 @@ function WhatsNewModal() {
       // installed; the workflow ships one section now and this is the backstop.
       setUpdated({
         version: stash.version,
-        notes: releaseNoteLines(notesForVersion(stash.notes, stash.version), 5),
+        notes: releaseNoteItems(notesForVersion(stash.notes, stash.version), 5),
       });
     });
     return () => {
@@ -945,52 +948,39 @@ function WhatsNewModal() {
           onClick={(e) => e.stopPropagation()}
         >
           <div className="whats-new-hero">
-            <div className="whats-new-glyph" aria-hidden="true">
-              <svg
-                width="26"
-                height="26"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
-                <path d="M19 15l.7 1.8L21.5 17.5l-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7L19 15z" />
-              </svg>
+            {/* Redesign: a ring in the sidebar's folder colours around the sparkle. */}
+            <div className="whats-new-badge" aria-hidden="true">
+              <div>
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
+                </svg>
+              </div>
             </div>
-            <h2 className="whats-new-title">What&rsquo;s New</h2>
-            <span className="whats-new-version">v{updated.version}</span>
-            <p className="whats-new-sub">
-              {BRAND_NAME} updated itself to the latest version. Here&rsquo;s what
-              changed.
-            </p>
+            <h2 className="whats-new-title">
+              {BRAND_NAME} <span className="whats-new-title-version">v{updated.version}</span>
+            </h2>
+            <p className="whats-new-sub">Updated and ready. Here&rsquo;s what&rsquo;s new.</p>
           </div>
           {updated.notes.length > 0 && (
             <ul className="whats-new-notes">
-              {updated.notes.map((line, i) => (
-                <li key={i} style={{ animationDelay: `${120 + i * 70}ms` }}>
-                  <svg
-                    width="15"
-                    height="15"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2.4"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M20 6L9 17l-5-5" />
-                  </svg>
-                  <span>{line}</span>
+              {updated.notes.map((n, i) => (
+                <li key={i} className={`tone-${WHATS_NEW_TONES[i % WHATS_NEW_TONES.length]}`} style={{ animationDelay: `${120 + i * 70}ms` }}>
+                  <span className="whats-new-tile" aria-hidden="true">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                  </span>
+                  <span className="whats-new-text">
+                    {n.title && <b>{n.title}</b>}
+                    {n.detail && <span>{n.detail}</span>}
+                  </span>
+                  {i === 0 && <span className="whats-new-tag">NEW</span>}
                 </li>
               ))}
             </ul>
           )}
           <button className="primary whats-new-cta" autoFocus onClick={close}>
-            Nice, let&rsquo;s go
+            Awesome
           </button>
         </div>
       </div>
