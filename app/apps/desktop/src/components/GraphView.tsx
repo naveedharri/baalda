@@ -1776,7 +1776,10 @@ export function GraphView({ onClose }: { onClose: () => void }) {
 
         {loading && (
           <div className="graph-state">
-            <div className="graph-state-card">Loading graph…</div>
+            <div className="graph-state-card graph-loading">
+              <Spinner size="sm" tone="accent" />
+              Loading graph…
+            </div>
           </div>
         )}
         {settling && !loading && (

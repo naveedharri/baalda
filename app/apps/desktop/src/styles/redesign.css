@@ -2738,3 +2738,19 @@ html:not(.rd-off) .conn-chip.is-active::before { content: ""; width: 6px; height
 html:not(.rd-off) .conn-chip.is-picked { background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6); box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent); }
 html:not(.rd-off) .conn-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 html:not(.rd-off) .conn-status { font-size: 12.5px; color: var(--text-tertiary); }
+
+/* Graph loading / arranging: a small white pill with a spinner on the light
+   canvas, not the dark-void grey slab (the canvas follows the theme now). */
+html:not(.rd-off) .graph-state-card.graph-loading,
+html:not(.rd-off) .graph-state-card.graph-settling {
+  flex-direction: row; gap: 10px; padding: 10px 16px; border-radius: 99px;
+  background: var(--rd-surface); color: var(--text-secondary); font-size: 13px;
+  border: 0; backdrop-filter: none;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 12px 28px -16px rgba(var(--rd-ink), 0.35);
+}
+
+/* Skill "needs a look" badge: violet (something to choose), not amber. */
+html:not(.rd-off) .skills-install.is-warn {
+  background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
