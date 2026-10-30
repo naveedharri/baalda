@@ -458,6 +458,10 @@ export const SIDEBAR_WIDTH_DEFAULT = 300;
  *  the width the layout was designed at. */
 export const SIDEBAR_WIDTH_MIN = SIDEBAR_WIDTH_DEFAULT;
 export const SIDEBAR_WIDTH_MAX = 560;
+/** Redesign: the wider 300px floor gives way on a window too small to hold it
+ *  next to the editor (or, on Windows, the caption buttons), down to the 264px
+ *  the sidebar was originally designed at — never below. */
+export const SIDEBAR_WIDTH_SQUEEZED = 264;
 
 /** Clamp a width to the usable range, also refusing to eat the whole window on
  *  a small screen. NaN (a corrupted stored value) falls back to the default. */
@@ -469,8 +473,10 @@ export function clampSidebarWidth(px: number, viewport = 1200): number {
   // the editor alone to keep all actions reachable at the minimum window size.
   const mainMinimum = typeof document !== "undefined" &&
     document.documentElement.dataset.platform === "windows" ? 440 : 320;
-  const max = Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, viewport - mainMinimum));
-  return Math.round(Math.min(max, Math.max(SIDEBAR_WIDTH_MIN, px)));
+  const room = viewport - mainMinimum;
+  const min = Math.min(SIDEBAR_WIDTH_MIN, Math.max(SIDEBAR_WIDTH_SQUEEZED, room));
+  const max = Math.max(min, Math.min(SIDEBAR_WIDTH_MAX, room));
+  return Math.round(Math.min(max, Math.max(min, px)));
 }
 
 export function readSidebarWidth(): number {

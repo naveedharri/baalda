@@ -55,17 +55,13 @@ export interface GraphSettings {
   hideOrphans: boolean;
 }
 
-// Tuned by hand against a real ~3.4k-note vault rather than derived: long links
-// with a soft spring and light gravity let the hubs separate into distinct
-// clusters instead of packing into one ball, and small nodes with `minDegree: 1`
-// keep the field readable at that size. These are the values the graph is
-// actually designed to look right at, so they are the defaults.
+// The values the redesign's starburst layout is designed to look right at
+// (tuned by eye on a 5k-note vault, 2026-10-30). Repulsion is at its strongest,
+// but simulation.ts scales its ceiling with vault size, so small vaults stay
+// calm; gravity 0 leaves centring to the small built-in floor.
 export const DEFAULT_SETTINGS: GraphSettings = {
   scope: "global",
   localDepth: 1, // vestigial; `scope` is pinned to global
-  // Redesign (2026-10-30): tuned by eye on a 5k-note vault with the starburst
-  // layout (spokes, hub separation, cluster carry in simulation.ts). Strong,
-  // long-range spacing and no extra centre pull give distinct starbursts.
   charge: -1500,
   linkDistance: 400,
   linkStrength: 0.44,

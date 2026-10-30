@@ -85,8 +85,19 @@ export type BloomJob = {
   scale: number;
 };
 
-export function beginBloom(sim: Simulation<SimNode, SimLink>): BloomJob {
-  const job: BloomJob = { decay: sim.alphaDecay(), collide: sim.force("collide"), held: 0, scale: 0 };
+export function beginBloom(
+  sim: Simulation<SimNode, SimLink>,
+  running?: BloomJob | null,
+): BloomJob {
+  // A reseed can start a new bloom while one is still running, when collision is
+  // detached and the cooling sped up: carry the originals over, or collision
+  // would be lost for the rest of the session.
+  const job: BloomJob = {
+    decay: running?.decay ?? sim.alphaDecay(),
+    collide: running?.collide ?? sim.force("collide"),
+    held: 0,
+    scale: 0,
+  };
   sim.force("collide", null);
   sim.alpha(BLOOM_ALPHA).alphaDecay(BLOOM_DECAY);
   sim.tick(BLOOM_WARMUP_TICKS);

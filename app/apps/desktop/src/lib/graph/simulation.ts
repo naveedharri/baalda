@@ -43,7 +43,7 @@ export const MAX_RADIUS = 40;
 /** Spoke length past the hub's own edge, in world units. */
 export const SPOKE_LENGTH = 34;
 /** Spokes are stiff so leaves ring their hub instead of trailing off. */
-export const SPOKE_STRENGTH = 0.9;
+export const SPOKE_STRENGTH = 0.5;
 /** Note–note ties: weak, so a cross-cluster link can't haul clusters together. */
 const NOTE_LINK_STRENGTH = 0.3;
 /** How far one note's repulsion reaches, in world units. */
@@ -527,7 +527,7 @@ export function configureForces(
   // vault, where it sits at the full -6000, and at that strength a few dozen
   // notes buzz instead of settling. Below SMALL_VAULT_FULL notes the ceiling
   // shrinks in proportion, so a small vault keeps the calm it always had.
-  const ceiling = 6000 * Math.min(1, n / SMALL_VAULT_FULL);
+  const ceiling = 6000 * Math.min(1, n / SMALL_VAULT_FULL) ** 1.25;
   const scaledCharge = Math.max(-ceiling, settings.charge * chargeScale);
   const charge = sim.force("charge") as ForceManyBody<SimNode>;
   // Repulsion PER NODE, scaled by its own size — the solar-system half of the
