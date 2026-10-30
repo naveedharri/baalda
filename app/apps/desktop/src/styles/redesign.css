@@ -2691,3 +2691,11 @@ html:not(.rd-off) .whats-new-cta:focus-visible {
   outline: none;
   box-shadow: 0 0 0 4px rgba(127, 115, 255, 0.18), 0 10px 22px -10px rgba(127, 115, 255, 0.7);
 }
+
+/* The joining teammate's avatar on its way into the team stack. */
+.join-avatar-drop {
+  position: fixed; left: 0; top: 0; z-index: var(--z-toast, 9000); pointer-events: none;
+  width: 36px; height: 36px; border-radius: 50%; will-change: transform, opacity;
+  box-shadow: 0 0 0 3px #fff, 0 14px 30px -10px rgba(11, 10, 16, 0.45);
+}
+.join-avatar-drop .avatar { width: 36px !important; height: 36px !important; }

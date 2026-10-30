@@ -5,6 +5,7 @@ import { AccountMenu } from "./components/AccountMenu";
 import { BackendBehindNotice } from "./components/BackendBehindNotice";
 import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
+import { Avatar } from "./components/Avatar";
 import { ReconcileBanner } from "./components/ReconcileBanner";
 import { HeldDeleteNotice } from "./components/HeldDeleteNotice";
 import { NoteRemovedNotice } from "./components/NoteRemovedNotice";
@@ -483,6 +484,53 @@ function ClosedAppChangesBanner() {
  * after a few seconds) plus a one-shot confetti burst over the whole window.
  * The chime is played by the store when the celebration is triggered.
  */
+/**
+ * The new teammate's avatar drops from the top of the window and lands in the
+ * team's avatar stack beside the open note (or by the header buttons when no
+ * note is open), with a small bounce, then hands over to the real stack.
+ * Decorative only; skipped entirely when the OS asks for reduced motion.
+ */
+function JoinAvatarDrop({ name }: { name: string }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      setDone(true);
+      return;
+    }
+    const target =
+      document.querySelector<HTMLElement>(".presence-bar") ??
+      document.querySelector<HTMLElement>(".header-actions") ??
+      null;
+    const r = target?.getBoundingClientRect();
+    const size = 36;
+    const endX = r ? r.left + r.width / 2 - size / 2 : window.innerWidth - 80;
+    const endY = r ? r.top + r.height / 2 - size / 2 : 20;
+    const startX = window.innerWidth / 2 - size / 2;
+    const startY = -80;
+    const anim = el.animate(
+      [
+        { transform: `translate(${startX}px, ${startY}px) scale(2.2) rotate(-12deg)`, opacity: 0 },
+        { transform: `translate(${startX}px, ${window.innerHeight * 0.32}px) scale(2.2) rotate(6deg)`, opacity: 1, offset: 0.35 },
+        { transform: `translate(${endX}px, ${endY}px) scale(1.15) rotate(0deg)`, opacity: 1, offset: 0.78 },
+        { transform: `translate(${endX}px, ${endY - 8}px) scale(1)`, opacity: 1, offset: 0.88 },
+        { transform: `translate(${endX}px, ${endY}px) scale(1)`, opacity: 0 },
+      ],
+      { duration: 2200, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "forwards" },
+    );
+    anim.onfinish = () => setDone(true);
+    return () => anim.cancel();
+  }, []);
+  if (done) return null;
+  return (
+    <div ref={ref} className="join-avatar-drop" aria-hidden="true">
+      <Avatar label={name} />
+    </div>
+  );
+}
+
 function MemberJoinedBanner() {
   const memberJoined = useStore((s) => s.memberJoined);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -499,6 +547,7 @@ function MemberJoinedBanner() {
       {memberJoined && (
         <canvas ref={canvasRef} className="celebrate-confetti" aria-hidden="true" />
       )}
+      {memberJoined && <JoinAvatarDrop key={memberJoined.at} name={memberJoined.name} />}
       <Banner show={!!memberJoined} className="celebrate-banner" role="status">
         <span>
           🎉 <strong>{memberJoined?.name}</strong> joined the vault
