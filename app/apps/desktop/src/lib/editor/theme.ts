@@ -80,10 +80,9 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // (No `::selection` clause: drawSelection blanks the native one with a
   // `Prec.highest` rule of its own, so styling it here would be dead CSS.)
   // The wash itself is drawn by proseSelection (selection.ts), which hugs each
-  // line's text; drawSelection's own block-shaped wash is hidden.
-  "& > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
-    backgroundColor: "transparent",
-  },
+  // line's text. drawSelection's own block-shaped layer is hidden outright: a
+  // transparent background lost to CodeMirror's focused base rule, which then
+  // painted an opaque block over the text.
   "& > .cm-scroller > .cm-proseSelectionLayer": {
     zIndex: "1",
     pointerEvents: "none",
@@ -107,8 +106,7 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // (`-1 - position`, i.e. -2), which silently beats a plain theme rule and
   // left selections inside a code block invisible under the well.
   ".cm-selectionLayer": {
-    zIndex: "1 !important",
-    pointerEvents: "none",
+    display: "none",
   },
 
   // Search / highlight matches in soft warning.

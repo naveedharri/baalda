@@ -177,10 +177,7 @@ describe("editor theme tiers", () => {
       ].backgroundColor,
     ).toBe("var(--editor-selection-bg)");
     // drawSelection's block-shaped wash stays hidden; proseSelection hugs text.
-    expect(
-      editorThemeSpec["& > .cm-scroller > .cm-selectionLayer .cm-selectionBackground"]
-        .backgroundColor,
-    ).toBe("transparent");
+    expect(editorThemeSpec[".cm-selectionLayer"].display).toBe("none");
     // The title is the file name, never part of a text selection: no wash.
     expect(editorThemeSpec[".cm-note-title.is-selected"]).toBeUndefined();
   });
