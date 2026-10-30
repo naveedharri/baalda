@@ -255,3 +255,26 @@ describe("the badge after a vault switch", () => {
     expect(seen.filter((s) => s === "synced")).toHaveLength(2);
   });
 });
+
+describe("W3: the first pass waits for the vault key state", () => {
+  it("a paused gate stops before the reconcile; nothing is materialized", async () => {
+    const sm = new SyncManager();
+    const asked: string[] = [];
+    sm.setVaultKeyGate(async ({ vaultId }) => {
+      asked.push(vaultId);
+      return "paused";
+    });
+    const out = await sm.enable(session(), { orgId: "org-a", name: "a", path: "/vaults/a", epoch: 1 });
+    expect(asked).toEqual([COLLECTION]);
+    expect(out).toMatchObject({ ok: false, reason: "vault-key" });
+    expect(fakeRegistry.reconcile).not.toHaveBeenCalled();
+  });
+
+  it("a known safe answer proceeds exactly as before", async () => {
+    const sm = new SyncManager();
+    sm.setVaultKeyGate(async () => "proceed");
+    const out = await sm.enable(session(), { orgId: "org-a", name: "a", path: "/vaults/a", epoch: 1 });
+    expect(out.ok).toBe(true);
+    expect(fakeRegistry.reconcile).toHaveBeenCalledTimes(1);
+  });
+});

@@ -18,6 +18,7 @@ import { useStore } from "../store";
 import { parseConnectLink } from "./connectLink";
 import { parseAccountLink } from "./accountLink";
 import { parseBillingLink } from "./billingLink";
+import { parseOAuthConsentLink } from "./oauthConsentLink";
 import { parseInviteDeepLink } from "./inviteLink";
 import { parseNoteLink } from "./shareLink";
 
@@ -84,6 +85,15 @@ async function handle(urls: string[] | null): Promise<void> {
     } catch (e) {
       console.error("[deeplink] billing link failed", url, e);
     }
+    return;
+  }
+  // A connector (claude.ai, ChatGPT) waiting for this app to finish connecting
+  // a keyed vault: parked for an explicit click, never acted on here.
+  for (const url of urls ?? []) {
+    const consent = parseOAuthConsentLink(url);
+    if (!consent) continue;
+    await focusWindow();
+    useStore.getState().promptOAuthConsent(consent);
     return;
   }
   for (const url of urls ?? []) {

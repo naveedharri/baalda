@@ -45,3 +45,35 @@ pub async fn clipboard_write(app: AppHandle, text: String, html: Option<String>)
     .map_err(|e| AppError(e.to_string()))?;
     rx.await.map_err(|_| AppError("clipboard write was dropped".into()))?
 }
+
+fn clear_if(state: &ClipboardState, expected_sha256: &str) -> AppResult<bool> {
+    let mut slot = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = Some(arboard::Clipboard::new().map_err(|e| AppError(e.to_string()))?);
+    }
+    let clipboard = slot.as_mut().expect("clipboard initialised above");
+    // Not text (an image, a file, empty): someone copied something else since.
+    let Ok(current) = clipboard.get_text() else { return Ok(false) };
+    if crate::notefile::sha256_hex(&current) != expected_sha256.to_ascii_lowercase() {
+        return Ok(false);
+    }
+    clipboard.clear().map_err(|e| AppError(e.to_string()))?;
+    Ok(true)
+}
+
+/// Clear the clipboard only if it still holds the text whose sha256 (hex) is
+/// `expected_sha256`: the timed wipe after copying a vault key. Answers only
+/// whether it cleared; the clipboard's contents never reach the webview, so
+/// this is still no read command. Main thread, like `clipboard_write`.
+#[tauri::command]
+pub async fn clipboard_clear_if(app: AppHandle, expected_sha256: String) -> AppResult<bool> {
+    use tauri::Manager;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let state = handle.state::<ClipboardState>();
+        let _ = tx.send(clear_if(&state, &expected_sha256));
+    })
+    .map_err(|e| AppError(e.to_string()))?;
+    rx.await.map_err(|_| AppError("clipboard clear was dropped".into()))?
+}

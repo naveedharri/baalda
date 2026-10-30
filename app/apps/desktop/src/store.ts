@@ -8,6 +8,15 @@ import { create } from "zustand";
 import * as ipc from "./lib/ipc";
 import { DOCUMENTS_BLOCKED_TEXT, isDocumentsDenied } from "./lib/vault/folderErrors";
 import { bridgeManager } from "./lib/bridge";
+import { resetVaultKeySessions } from "./lib/vaultKeys/session";
+import {
+  onVaultKeyBlockChange,
+  VAULT_KEY_PAUSE_REASON,
+  vaultKeysEarlyChannel,
+  vaultKeysGate,
+  vaultKeysMembershipEnded,
+} from "./lib/vaultKeys/runtime";
+import { clearVaultKeyCache } from "./lib/vaultKeys/store";
 import {
   colorsAdopted,
   markColorsAdopted,
@@ -61,6 +70,7 @@ import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
 import type { StructureNotice, VoiceSpeaker } from "./lib/sync/docSession";
 import type { SyncPause } from "./lib/sync/syncPause";
+import type { OAuthConsentLink } from "./lib/oauthConsentLink";
 import { MicPermissionError } from "./lib/voice/capture";
 import * as perf from "./lib/perf";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
@@ -715,6 +725,14 @@ interface AppStore {
   requestUpgradeDialog: (opts?: { reason?: string; orgId?: string }) => void;
   clearUpgradeDialogRequest: () => void;
   /**
+   * A `baalda://oauth-consent` hand-off: claude.ai / ChatGPT asking to connect
+   * to a keyed vault (W3). Parked until the person confirms in
+   * `OAuthConsentHost` (main.tsx); a deep link never presents a key on its own.
+   */
+  oauthConsentLink: OAuthConsentLink | null;
+  promptOAuthConsent: (link: OAuthConsentLink) => void;
+  clearOAuthConsent: () => void;
+  /**
    * Whether the connected server lacks features this app needs (UI mirror
    * only; `lib/serverFeatures.ts`). Null = unknown or not checked yet, which
    * shows nothing. Written by `BackendBehindNotice`'s health poll.
@@ -1230,6 +1248,29 @@ async function findExistingVaultFolder(orgId: string): Promise<string | null> {
 async function peekStampedOrgId(path: string): Promise<string | null> {
   const stamp = await ipc.peekVaultStamp(path).catch(() => null);
   return stamp?.organizationId ?? null;
+}
+
+/** The collection id `path`'s stamp names for `orgId` (else null). */
+async function stampedVaultIdFor(path: string | null, orgId: string): Promise<string | null> {
+  if (!path) return null;
+  const stamp = await ipc.peekVaultStamp(path).catch(() => null);
+  return stamp?.organizationId === orgId ? (stamp.serverVaultId ?? null) : null;
+}
+
+/**
+ * Membership of `orgId` ended or the vault is gone, per a definitive server
+ * answer the CALLER already has: forget this device's key for it (never the
+ * account key). Never throws; local files are untouched here.
+ */
+async function forgetVaultKeysForOrg(
+  userId: string | null | undefined,
+  orgId: string,
+  vaultIdHint: string | null,
+): Promise<void> {
+  if (!userId) return;
+  await vaultKeysMembershipEnded({ userId, orgId, vaultIdHint }).catch((e: unknown) =>
+    console.warn("[vault-keys] could not forget the vault key", e instanceof Error ? e.message : e),
+  );
 }
 
 /**
@@ -2027,11 +2068,15 @@ async function unsyncLocalTeardown(
 ): Promise<void> {
   const vault = get().vault;
   const isOpenFolder = vault != null && folderPath != null && vault.path === folderPath;
+  // Read BEFORE the stamp is cleared below. Every caller holds a definitive
+  // answer (the server confirmed the unsync, or `vault_not_found`).
+  const keyHint = await stampedVaultIdFor(folderPath, organizationId);
 
   if (isOpenFolder) {
     leaveVaultSync();
     await clearVaultStamp(vault, organizationId);
   }
+  await forgetVaultKeysForOrg(get().session?.user.id, organizationId, keyHint);
   forgetOrgVault(organizationId);
   forgetLastVault(organizationId);
   forgetTeamAccessCache(get().serverUrl, organizationId);
@@ -2077,6 +2122,10 @@ function scheduleStatusClear(until: number | null): void {
     if (useStore.getState().activityStatusUntil === until) useStore.getState().setActivityStatus("online", null);
   }, Math.min(wait, 2_000_000_000));
 }
+
+// W3: the first sync pass of a vault waits for a known vault-key state.
+syncManager.setVaultKeyGate?.(vaultKeysGate);
+syncManager.setEarlyVaultChannelCheck?.(vaultKeysEarlyChannel);
 
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
@@ -2156,6 +2205,9 @@ export const useStore = create<AppStore>((set, get) => ({
   closeSettingsDialog: (which) =>
     set((s) => (which && s.settingsDialog !== which ? {} : { settingsDialog: null })),
   upgradeDialogRequest: null,
+  oauthConsentLink: null,
+  promptOAuthConsent: (link) => set({ oauthConsentLink: link }),
+  clearOAuthConsent: () => set({ oauthConsentLink: null }),
   backendStatus: null,
   setBackendStatus: (backendStatus) => set({ backendStatus }),
   revealedPath: null,
@@ -3510,6 +3562,9 @@ export const useStore = create<AppStore>((set, get) => ({
     // reconcile/pull with a token that is about to be revoked.
     leaveVaultSync();
     await authManager.signOut();
+    // Vault keys belong to the account: drop every in-memory copy.
+    resetVaultKeySessions();
+    clearVaultKeyCache();
     // A queued shared link belongs to the account that clicked it.
     clearPendingNoteLink();
     // Ditto a queued invitation and the card describing it: an invitation is
@@ -3609,6 +3664,9 @@ export const useStore = create<AppStore>((set, get) => ({
       // fails (the address could not be saved) falls back to it intact.
       leaveVaultSync();
       set({ syncEnabled: false });
+      // Vault keys are per server: drop every in-memory copy before switching.
+      resetVaultKeySessions();
+      clearVaultKeyCache();
       let session: SessionInfo | null;
       try {
         // Clears the old bearer before exposing the new base URL.
@@ -4592,6 +4650,8 @@ export const useStore = create<AppStore>((set, get) => ({
       .refreshVault()
       .catch((e: unknown) => console.warn("[vault] refresh before membership cleanup failed", e));
     if (get().organizations.some((o) => o.id === organizationId)) return;
+    // Read before the folder (and its stamp) is deleted below.
+    const keyHint = await stampedVaultIdFor(path, organizationId);
 
     const vault = get().vault;
     const isOpen =
@@ -4617,6 +4677,9 @@ export const useStore = create<AppStore>((set, get) => ({
     forgetTeamAccessCache(get().serverUrl, organizationId);
     const userId = get().session?.user.id;
     if (userId) forgetMembership(get().serverUrl, userId, organizationId);
+    // The membership is confirmed gone (re-listed above): this device's key for
+    // the vault goes too. Wraps are deleted server-side; the account key stays.
+    await forgetVaultKeysForOrg(userId, organizationId, keyHint);
 
     if (path) {
       // Rust refuses links, roots, the home and vaults folders, and any folder
@@ -4682,6 +4745,12 @@ export const useStore = create<AppStore>((set, get) => ({
     const result = await authManager.api.deleteRemoteVault(organizationId);
     // This device's folder, captured BEFORE the teardown forgets the binding.
     const folderPath = readOrgVaults()[organizationId] ?? null;
+    // The vault is gone for everyone (server confirmed): forget its key here.
+    await forgetVaultKeysForOrg(
+      get().session?.user.id,
+      organizationId,
+      await stampedVaultIdFor(folderPath, organizationId),
+    );
     // Then tear down the same local state as a device-level removal.
     await get().removeVaultLocally(organizationId);
     // The vault is gone for everyone, so this device's copy goes to the Trash
@@ -5522,6 +5591,15 @@ export const useStore = create<AppStore>((set, get) => ({
       } else {
         set({ locks: [] });
         if (result.reason) console.warn("[sync] not enabled:", result.reason);
+        // W3: paused for the vault key. Nothing on disk was touched; run the
+        // whole enable again once the key state is known and safe.
+        if (result.reason === VAULT_KEY_PAUSE_REASON) {
+          const off = onVaultKeyBlockChange((_vaultId, blocked) => {
+            if (blocked) return;
+            off();
+            if (!stale()) void get().enableSyncForVault(opts);
+          });
+        }
       }
     })().finally(resolvePrimed);
 

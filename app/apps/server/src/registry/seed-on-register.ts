@@ -5,6 +5,7 @@ import { pool } from "../db/pool.js";
 import { createResolverCache } from "../permissions/resolver.js";
 import { syncPermission } from "../trash/access.js";
 import { applyDocPushBatch, serverStateCovers, type DocApplyItem } from "../sync/doc-batch.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
 import { inc } from "../metrics/sync-metrics.js";
 
 /**
@@ -138,6 +139,7 @@ export async function seedRegistered(
   vaultId: string,
   userId: string,
   candidates: SeedCandidate[],
+  crypto?: DocCrypto,
 ): Promise<Map<number, SeedFields>> {
   const out = new Map<number, SeedFields>();
   if (candidates.length === 0) return out;
@@ -167,7 +169,7 @@ export async function seedRegistered(
     if (!c.created) {
       let covered = false;
       try {
-        covered = await serverStateCovers(vaultId, c.docId, c.state.bytes);
+        covered = await serverStateCovers(vaultId, c.docId, c.state.bytes, crypto);
       } catch {
         covered = false;
       }
@@ -189,7 +191,7 @@ export async function seedRegistered(
     expectEmpty: true,
   }));
   const startedAt = Date.now();
-  const applied = await applyDocPushBatch(vaultId, items, { userId });
+  const applied = await applyDocPushBatch(vaultId, items, { userId, crypto });
   let appliedBytes = 0;
   applied.forEach((res, i) => {
     const c = toApply[i];

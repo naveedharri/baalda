@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { syncManager } from "../lib/sync/docSession";
 import { createPortal } from "react-dom";
 import { ApiError, type PublicLink } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
@@ -91,7 +92,7 @@ function ShareNoteDialog({
   useEffect(() => {
     let alive = true;
     authManager.api
-      .getPublicLink(docId)
+      .getPublicLink(docId, syncManager.registry.vaultId)
       .then((link) => {
         if (alive) setPublicLink(link);
       })
@@ -129,7 +130,7 @@ function ShareNoteDialog({
     setPublicBusy(true);
     try {
       if (next) {
-        const link = await authManager.api.createPublicLink(docId);
+        const link = await authManager.api.createPublicLink(docId, syncManager.registry.vaultId);
         setPublicLink(link);
         // Publishing is almost always followed by pasting it somewhere. If the
         // clipboard refuses, the url is on screen with its own Copy button.

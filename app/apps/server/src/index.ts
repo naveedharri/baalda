@@ -23,6 +23,7 @@ import { backfillIndex, setLiveDocLookup } from "./index/indexer.js";
 import { backfillRefWindows } from "./blobs/ref-windows.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
+import { startCryptoBackfill, stopCryptoBackfill } from "./crypto/backfill.js";
 import { setLapseNotifier, startLapseScheduler, stopLapseScheduler } from "./billing/lapse.js";
 import { formatDocName } from "./sync/doc-name.js";
 import { setTrashActivityPublisher } from "./trash/activity.js";
@@ -120,6 +121,12 @@ async function main() {
   });
   // A removed/departed member's vault-channel sockets are told and closed.
   setMemberRemovedPublisher((vaultId, orgId, userId, reason) => {
+    // …and their per-doc sockets too. Our own DELETE route kicks every doc,
+    // but Better Auth's remove-member / leave paths only reach this publisher:
+    // without this an open note kept streaming to a removed member until the
+    // token expired. A reconnect fails at onAuthenticate (no membership).
+    // (`sync` is created below; this only runs on a request, after startup.)
+    disconnectUserInVault(sync, vaultId, userId);
     void vaultChannel
       .publishMemberRemoved(vaultId, orgId, userId, reason)
       .catch(broadcastFailed("member-removed"));
@@ -203,8 +210,9 @@ async function main() {
   // A single update that wipes most of a note keeps the text it replaced (#200).
   // …and every open Activity feed in the vault refetches once it is stored
   // (#260), instead of polling for it.
-  setShrinkHook((vaultId, docId, previousText) => {
-    void (versionCapture?.preShrink(vaultId, docId, previousText) ?? Promise.resolve())
+  // The writer's own key rides along (W3); `preShrink` copies it synchronously.
+  setShrinkHook((vaultId, docId, previousText, _userId, crypto) => {
+    void (versionCapture?.preShrink(vaultId, docId, previousText, crypto) ?? Promise.resolve())
       .then(() => vaultChannel.publishActivityChanged(vaultId))
       .catch(broadcastFailed("activity-changed"));
   });
@@ -396,6 +404,9 @@ async function main() {
   startBlobGc();
   // Trash retention: notes past `purge_after` lose their CRDT, versions and row.
   startTrashPurge();
+  // W3: seals a keyed vault's pre-existing plaintext rows while a member's
+  // key is held. No-op with BAALDA_VAULT_KEYS off.
+  startCryptoBackfill();
   // Billing lapse (account read-only): on a flip, the same ACL fan-out as
   // PUT team-access, and close the collection's live sockets so
   // `onAuthenticate` re-admits them with the new readOnly.
@@ -418,6 +429,7 @@ async function main() {
     versionCapture?.stop();
     stopBlobGc();
     stopTrashPurge();
+    stopCryptoBackfill();
     stopLapseScheduler();
     stopInvitationSweep();
     syncWss.close();

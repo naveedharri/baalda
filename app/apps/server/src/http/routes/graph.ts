@@ -4,6 +4,7 @@ import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { listReadableDocsInVault, vaultAccess } from "../../permissions/vault-docs.js";
 import { getSession } from "../session.js";
 import { searchNoteIndex } from "../../index/indexer.js";
+import { docCryptoOf, requireVaultKey } from "../../crypto/transport.js";
 
 /**
  * Read-only views over the note index (spec: links + vectors).
@@ -123,6 +124,9 @@ graphRoutes.get("/vaults/:vaultId/search", async (c) => {
 
   const gate = await gateVaultMember(vaultId, session.userId);
   if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+  // W3: a keyed vault's search rows are sealed; this request's own key opens them.
+  const vkr = await requireVaultKey(c, vaultId);
+  if (!vkr.ok) return vkr.response;
 
   const q = (c.req.query("q") ?? "").trim();
   if (!q) return c.json({ error: "q query param required" }, 400);
@@ -148,6 +152,7 @@ graphRoutes.get("/vaults/:vaultId/search", async (c) => {
     k,
     readableDocIds: readable,
     vaultWideReader: access?.vaultWide === true,
+    crypto: docCryptoOf(vaultId, vkr),
   });
 
   return c.json({ results });

@@ -8,7 +8,8 @@ import { deletedReadableDocsForActivity, readableDocsForActivity } from "../../p
 import { extractDocText } from "../../index/indexer.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
 import { recordVersion, sha256Hex, stampLastEdited, type VersionCause } from "../../versions/capture.js";
-import { VERSION_CONTENT, VERSION_TEXT_JOIN } from "../../versions/texts.js";
+import { resolveText, VERSION_CONTENT, VERSION_CONTENT_ENC, VERSION_SIZE, VERSION_TEXT_JOIN } from "../../versions/texts.js";
+import { docCryptoOf, requireVaultKey } from "../../crypto/transport.js";
 import {
   captureCheckpoint,
   getCheckpointSummary,
@@ -154,7 +155,7 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
 
     const { rows } = await pool.query<VersionRow>(
       `SELECT v.id, v.doc_id, v.created_at, v.cause, v.author_id,
-              u.name AS author_name, v.sha256, octet_length(${VERSION_CONTENT}) AS size
+              u.name AS author_name, v.sha256, ${VERSION_SIZE} AS size
          FROM note_versions v
          ${VERSION_TEXT_JOIN}
          LEFT JOIN "user" u ON u.id = v.author_id
@@ -177,10 +178,10 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
 
     const versionId = Number.parseInt(c.req.param("versionId"), 10);
     if (!Number.isFinite(versionId)) return c.json({ error: "Unknown version" }, 404);
-    const { rows } = await pool.query<VersionRow & { content: string }>(
-      `SELECT v.id, v.doc_id, v.created_at, v.cause, v.author_id,
-              u.name AS author_name, v.sha256, octet_length(${VERSION_CONTENT}) AS size,
-              ${VERSION_CONTENT} AS content
+    const { rows } = await pool.query<VersionRow & { content: string; content_enc: Buffer | null; vault_id: string }>(
+      `SELECT v.id, v.doc_id, v.vault_id, v.created_at, v.cause, v.author_id,
+              u.name AS author_name, v.sha256, ${VERSION_SIZE} AS size,
+              ${VERSION_CONTENT} AS content, ${VERSION_CONTENT_ENC} AS content_enc
          FROM note_versions v
          ${VERSION_TEXT_JOIN}
          LEFT JOIN "user" u ON u.id = v.author_id
@@ -191,7 +192,11 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     // A version id belongs to exactly one doc; asking for it under another note
     // is a 404, not a peek at someone else's content.
     if (!row || row.doc_id !== docId) return c.json({ error: "Unknown version" }, 404);
-    return c.json({ ...versionSummary(row), content: row.content });
+    // W3: a sealed text needs this request's key (409 key_required).
+    const vkr = await requireVaultKey(c, row.vault_id);
+    if (!vkr.ok) return vkr.response;
+    const content = resolveText(row, { vaultId: row.vault_id, docId, sha: row.sha256 }, docCryptoOf(row.vault_id, vkr));
+    return c.json({ ...versionSummary(row), content });
   });
 
   routes.post("/notes/:id/versions/:versionId/revert", async (c) => {
@@ -213,13 +218,19 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
 
     const versionId = Number.parseInt(c.req.param("versionId"), 10);
     if (!Number.isFinite(versionId)) return c.json({ error: "Unknown version" }, 404);
-    const { rows } = await pool.query<{ doc_id: string; content: string }>(
-      `SELECT v.doc_id, ${VERSION_CONTENT} AS content
+    // W3: reverting a keyed vault's note reads sealed text and the sealed log
+    // with THIS request's key; refused (nothing written) without it.
+    const vkr = await requireVaultKey(c, vaultId);
+    if (!vkr.ok) return vkr.response;
+    const crypto = docCryptoOf(vaultId, vkr);
+    const { rows: rawRows } = await pool.query<{ doc_id: string; content: string; content_enc: Buffer | null; sha256: string }>(
+      `SELECT v.doc_id, v.sha256, ${VERSION_CONTENT} AS content, ${VERSION_CONTENT_ENC} AS content_enc
          FROM note_versions v ${VERSION_TEXT_JOIN} WHERE v.id = $1`,
       [versionId],
     );
-    const version = rows[0];
-    if (!version || version.doc_id !== docId) return c.json({ error: "Unknown version" }, 404);
+    const raw = rawRows[0];
+    if (!raw || raw.doc_id !== docId) return c.json({ error: "Unknown version" }, 404);
+    const version = { doc_id: raw.doc_id, content: resolveText(raw, { vaultId, docId, sha: raw.sha256 }, crypto) };
     // Fail safe: a version whose text cannot be resolved is never "restored"
     // as an empty note.
     if (version.content == null) return c.json({ error: "Version content unavailable" }, 409);
@@ -227,13 +238,14 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     // Capture where we are BEFORE overwriting it, so a revert is itself
     // undoable. `recordVersion` dedupes against the newest stored version, so
     // this is a no-op (null) when nothing has changed since the last capture.
-    const current = await deps.docWriter.readContent(vaultId, docId);
+    const current = await deps.docWriter.readContent(vaultId, docId, crypto);
     const preRevertVersionId = await recordVersion({
       vaultId,
       docId,
       content: current,
       cause: "pre-revert",
       authorId: session.userId,
+      crypto,
     });
 
     // Forward-only: set the target text as a normal transaction so live editors
@@ -241,6 +253,7 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     if (sha256Hex(current) !== sha256Hex(version.content)) {
       await deps.docWriter.setContent(vaultId, docId, version.content, {
         userId: session.userId,
+        crypto,
       });
     }
     await stampLastEdited(docId, session.userId);
@@ -271,9 +284,12 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     if (role !== "owner" && role !== "admin") {
       return c.json({ error: "Only a vault owner/admin can review recovery" }, 403);
     }
+    const vkr = await requireVaultKey(c, vaultId);
+    if (!vkr.ok) return vkr.response;
     const candidates = await listRecoveryCandidates(vaultId, {
       docWriter: deps.docWriter,
       canEdit: (docId) => canEditDoc(session.userId, docId),
+      crypto: docCryptoOf(vaultId, vkr),
     });
     if (c.req.query("format") === "csv") {
       c.header("Content-Type", "text/csv; charset=utf-8");
@@ -309,9 +325,12 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     if (items.length > RECOVERY_APPLY_MAX) {
       return c.json({ error: `At most ${RECOVERY_APPLY_MAX} items per call` }, 400);
     }
+    const vkr = await requireVaultKey(c, vaultId);
+    if (!vkr.ok) return vkr.response;
     const results = await applyRecovery(vaultId, items, session.userId, {
       docWriter: deps.docWriter,
       canEdit: (docId) => canEditDoc(session.userId, docId),
+      crypto: docCryptoOf(vaultId, vkr),
     });
     if (results.some((r) => r.ok)) deps.onRegistryChanged(vaultId, null);
     return c.json({ results });
@@ -367,7 +386,8 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
       deleted: boolean;
     }>(
       `SELECT v.id, v.doc_id, n.rel_path, v.created_at,
-              char_length(${VERSION_CONTENT})::int AS before_chars,
+              (CASE WHEN ${VERSION_CONTENT_ENC} IS NULL THEN char_length(${VERSION_CONTENT}) END)::int AS before_chars,
+              ${VERSION_CONTENT_ENC} AS content_enc, v.sha256,
               n.deleted_at IS NOT NULL AS deleted
          FROM note_versions v
          ${VERSION_TEXT_JOIN}
@@ -434,6 +454,8 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     const body = await c.req.json().catch(() => ({}));
     const label = typeof body.label === "string" && body.label.trim() ? body.label.trim() : null;
 
+    const vkr = await requireVaultKey(c, vaultId);
+    if (!vkr.ok) return vkr.response;
     const schedule = await checkpointSchedule(pool, vaultId, { fresh: true });
     const outcome = await withVaultCheckpointLock(vaultId, async (db) => {
       // Judged under the lock, so two clicks cannot both pass the window.
@@ -442,6 +464,7 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
       return captureCheckpoint({
         db,
         docWriter: deps.docWriter,
+        crypto: docCryptoOf(vaultId, vkr),
         vaultId,
         kind: "manual",
         label,
@@ -524,12 +547,15 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     );
     if (!rows[0]) return c.json({ error: "Unknown checkpoint" }, 404);
 
+    const vkr = await requireVaultKey(c, vaultId);
+    if (!vkr.ok) return vkr.response;
     try {
       const outcome = await revertVaultToCheckpoint({
         vaultId,
         checkpointId,
         userId: session.userId,
         docWriter: deps.docWriter,
+        crypto: docCryptoOf(vaultId, vkr),
         onRegistryChanged: deps.onRegistryChanged,
       });
       if (!outcome.acquired) return c.json({ error: "Vault is busy, try again" }, 409);

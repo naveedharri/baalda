@@ -20,6 +20,7 @@ pub mod extract_worker;
 pub mod import_export;
 pub mod index;
 pub mod keychain;
+pub mod text_export;
 pub mod notefile;
 pub mod oauth;
 pub mod parse;
@@ -232,6 +233,7 @@ pub fn run() {
             dashboard_remote::update_dashboard_link,
             dashboard_remote::unmount_dashboard_link,
             clipboard::clipboard_write,
+            clipboard::clipboard_clear_if,
             relaunch::set_background_relaunch,
             relaunch::launched_in_background,
             commands::pick_vault,
@@ -330,6 +332,10 @@ pub fn run() {
             keychain::keychain_set,
             keychain::keychain_get,
             keychain::keychain_delete,
+            keychain::vault_secret_set,
+            keychain::vault_secret_get,
+            keychain::vault_secret_delete,
+            text_export::save_text_file,
             oauth::google_oauth_listen,
             oauth::google_oauth_await,
             oauth::google_oauth_return_to_app,

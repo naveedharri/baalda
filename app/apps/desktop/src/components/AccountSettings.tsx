@@ -30,6 +30,7 @@ import { AccountVaultsTab } from "./AccountVaultsTab";
 import { AiToolsTab } from "./skills/AiToolsTab";
 import { Avatar } from "./Avatar";
 import { serverFailureMessage } from "./serverFailureMessage";
+import { SecurityCodeField } from "./SecurityCodeField";
 import { SettingsModal } from "./SettingsModal";
 import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
@@ -379,6 +380,8 @@ function ProfileTab() {
           </span>
         )}
       </label>
+
+      <SecurityCodeField />
 
       {error && <div className="auth-error">{error}</div>}
 

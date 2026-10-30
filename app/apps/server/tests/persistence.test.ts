@@ -278,7 +278,7 @@ function countingDb(): { db: Queryable; sql: string[] } {
   return { db: db as unknown as Queryable, sql };
 }
 
-const SNAPSHOT_READ = "SELECT snapshot FROM doc_snapshots";
+const SNAPSHOT_READ = "SELECT snapshot, snapshot_enc FROM doc_snapshots";
 
 /** Seed DOC from a fresh single-client history; returns the authoritative doc. */
 async function seedDoc(text: string, docId = DOC): Promise<Y.Doc> {
@@ -410,7 +410,7 @@ describe("loadDocDiff (vault-channel backfill)", () => {
     expect(warm!.update.length).toBe(0);
     // Neither the log nor the snapshot was touched.
     expect(sql.some((q) => q.includes(SNAPSHOT_READ))).toBe(false);
-    expect(sql.some((q) => q.includes("SELECT id, update FROM doc_updates"))).toBe(false);
+    expect(sql.some((q) => q.includes("SELECT id, update, update_enc FROM doc_updates"))).toBe(false);
     expect(sql).toHaveLength(1);
   });
 
@@ -755,7 +755,7 @@ describe("per-doc serialisation of compact + reads", () => {
     // Park the reader between its snapshot SELECT and its log SELECT — the exact
     // window a compact used to slip through.
     const clientSv = Y.encodeStateVector(new Y.Doc());
-    const reading = loadDocDiff(DOC, clientSv, gatedPool("SELECT id, update FROM doc_updates", gate));
+    const reading = loadDocDiff(DOC, clientSv, gatedPool("SELECT id, update, update_enc FROM doc_updates", gate));
     await new Promise((r) => setTimeout(r, 150));
 
     let compacted = false;

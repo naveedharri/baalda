@@ -241,3 +241,52 @@ export function requireSupportedClient(): MiddlewareHandler {
     );
   };
 }
+
+/**
+ * The first desktop release that understands vault keys (`crypto/`,
+ * `docs/VAULT_KEYS.md`). A KEYED vault answers anything older with the same
+ * `426 client_outdated` the version floor uses, because that is the one
+ * refusal every older build already handles safely: it stops syncing, keeps
+ * its local files and CRDT exactly as they are, and asks its updater for the
+ * current build. The responses only a vault-key build understands
+ * (`409 key_required`, vault-channel close 4409, a per-doc `key_required`
+ * denial) never reach an old build through a gated route.
+ *
+ * Deliberately NOT {@link judgeClientVersion}: here a missing version always
+ * means old (no `UNVERSIONED_CLIENTS=allow`) and there is no post-deploy grace
+ * (the grace is exactly when old builds meet newly keyed vaults). No env var
+ * lowers it. Unkeyed vaults never consult it. A request that presents a
+ * VERIFIED vault key is capable whatever it reports (an old build cannot
+ * forge one), see `crypto/transport.ts refuseKeyIncapableClient`.
+ */
+export const VAULT_KEYS_MIN_DESKTOP = "0.1.98";
+
+const VAULT_KEYS_MIN = parseClientVersion(VAULT_KEYS_MIN_DESKTOP) as Version;
+
+/** Does this reported version (query param or header) understand vault keys? Pure. */
+export function isVaultKeyCapableVersion(raw: string | null | undefined): boolean {
+  const v = parseClientVersion(raw);
+  return v !== null && !below(v, VAULT_KEYS_MIN);
+}
+
+/** The version a request reports: the header first, then the query parameter. */
+export function reportedClientVersion(c: {
+  req: { header(name: string): string | undefined; query(name: string): string | undefined };
+}): string | undefined {
+  return c.req.header(CLIENT_VERSION_HEADER) ?? c.req.query(CLIENT_VERSION_PARAM);
+}
+
+/** The 426 body a keyed vault gives a build without vault keys. */
+export function vaultKeysOutdatedBody(): {
+  error: string;
+  code: string;
+  reason: "vault_keys";
+  minVersion: string;
+} {
+  return {
+    error: "This vault needs a newer version of Baalda. Update the app to continue.",
+    code: CLIENT_OUTDATED_CODE,
+    reason: "vault_keys",
+    minVersion: VAULT_KEYS_MIN_DESKTOP,
+  };
+}

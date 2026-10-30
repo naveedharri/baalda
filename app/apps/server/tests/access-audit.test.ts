@@ -115,3 +115,25 @@ it("Better Auth's own role endpoint stays refused and leaves no unattributed rol
   expect((await listAccessAudit(org.id, owner.userId)).events.find(e => e.entityId === memberId && e.action === "update"))
     .toMatchObject({ actorUserId: owner.userId, before: { role: "member" }, after: { role: "admin" } });
 });
+
+it("keeps access history after the vault is deleted, closed by a delete row", async () => {
+  const owner = await signUp("owner-del@audit.test");
+  const member = await signUp("member-del@audit.test");
+  const org = await createOrg(owner, "Gone", "gone-audit");
+  await seedMember(org.id, member.userId, "member");
+  await seedVault(org.id);
+  const count = async () =>
+    Number((await pool.query("SELECT count(*) FROM access_audit WHERE organization_id = $1", [org.id])).rows[0].count);
+  const before = await count();
+  expect(before).toBeGreaterThan(0);
+  const res = await app.fetch(new Request(`http://local/api/orgs/${org.id}`, { method: "DELETE", headers: authHeaders(owner) }));
+  expect(res.status).toBe(200);
+  expect((await pool.query("SELECT 1 FROM organization WHERE id = $1", [org.id])).rowCount).toBe(0);
+  // Nothing cascaded away, and the cascade itself logged no per-row noise.
+  expect(await count()).toBe(before + 1);
+  const last = (await pool.query(
+    "SELECT entity_type, action, actor_user_id, before_state FROM access_audit WHERE organization_id = $1 ORDER BY id DESC LIMIT 1",
+    [org.id],
+  )).rows[0];
+  expect(last).toMatchObject({ entity_type: "organization", action: "delete", actor_user_id: owner.userId, before_state: { name: "Gone" } });
+});

@@ -1,3 +1,5 @@
+import { sealBlobTextRow } from "../../index/sealed-index.js";
+import { docCryptoOf, refuseKeyIncapableClient, requireVaultKey } from "../../crypto/transport.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Readable, Transform } from "node:stream";
 import { Hono } from "hono";
@@ -17,6 +19,7 @@ import { relAssetPath } from "../../render/note-html.js";
 import { config } from "../../config.js";
 import { pgText } from "../../db/text.js";
 import { embed } from "../../index/embedder.js";
+import { searchTokenSet } from "../../index/search-tokens.js";
 import { ByteBudget } from "../../blobs/admission.js";
 import {
   BLOB_MIME_ENFORCE,
@@ -434,6 +437,9 @@ blobRoutes.post(
     if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
+    // Keyed vault + a build without vault keys: 426, nothing stored.
+    const outdated = await refuseKeyIncapableClient(c, vaultId);
+    if (outdated) return outdated;
     // ── validation, all of it before a single byte of body is read ──────────
     const filename = c.req.header("x-file-name") ?? c.req.query("filename") ?? null;
     // `x-doc-id`: these bytes are a registered tree file, not an anonymous
@@ -987,6 +993,9 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   if (!(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
+  // Keyed vault + a build without vault keys: 426, no intent, no row.
+  const outdated = await refuseKeyIncapableClient(c, vaultId);
+  if (outdated) return outdated;
 
   let body: Record<string, unknown>;
   try {
@@ -1613,6 +1622,11 @@ blobRoutes.post("/blobs/:id/complete", async (c) => {
   if (!org || !(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
+  // Keyed vault + a build without vault keys: 426, the row stays pending.
+  if (row.vault_id) {
+    const outdated = await refuseKeyIncapableClient(c, row.vault_id);
+    if (outdated) return outdated;
+  }
   // A one-step upload's registration (migration 048). Its `files` row does not
   // exist yet, so `canWriteBlob` has nothing to resolve: the CREATE gate runs
   // instead, inside the transaction below that creates the row.
@@ -1868,9 +1882,42 @@ blobRoutes.put("/vaults/:vaultId/blobs/:blobId/text", async (c) => {
     : stored.length;
   const source = typeof body.source === "string" && body.source ? body.source : "client";
 
+  // W3: a keyed vault's text is sealed with THIS request's key (409
+  // key_required without it; nothing stored). Only `search_enc` is written:
+  // an existing row's plaintext columns are left exactly as they were.
+  const vkr = await requireVaultKey(c, vaultId);
+  if (!vkr.ok) return vkr.response;
+  const textCrypto = docCryptoOf(vaultId, vkr);
+  if (textCrypto) {
+    await pool.query(
+      `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, source, updated_at, search_enc)
+       VALUES ($1, $2, $3, $4, '', $5, now(), $6)
+       ON CONFLICT (blob_id) DO UPDATE
+         SET vault_id = EXCLUDED.vault_id,
+             doc_id = EXCLUDED.doc_id,
+             chars = EXCLUDED.chars,
+             source = EXCLUDED.source,
+             updated_at = now(),
+             search_enc = EXCLUDED.search_enc`,
+      [
+        row.id,
+        vaultId,
+        row.doc_id,
+        chars,
+        source,
+        sealBlobTextRow(textCrypto, row.id, {
+          body: stored,
+          vector: embed(stored),
+          tokens: searchTokenSet(stored) ?? null,
+        }),
+      ],
+    );
+    return c.body(null, 204);
+  }
+
   await pool.query(
-    `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, vector, source, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, now())
+    `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, vector, source, updated_at, search_tokens)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, now(), $8)
      ON CONFLICT (blob_id) DO UPDATE
        SET vault_id = EXCLUDED.vault_id,
            doc_id = EXCLUDED.doc_id,
@@ -1878,8 +1925,9 @@ blobRoutes.put("/vaults/:vaultId/blobs/:blobId/text", async (c) => {
            content = EXCLUDED.content,
            vector = EXCLUDED.vector,
            source = EXCLUDED.source,
-           updated_at = now()`,
-    [row.id, vaultId, row.doc_id, chars, stored, JSON.stringify(embed(stored)), source],
+           updated_at = now(),
+           search_tokens = EXCLUDED.search_tokens`,
+    [row.id, vaultId, row.doc_id, chars, stored, JSON.stringify(embed(stored)), source, searchTokenSet(stored)],
   );
 
   return c.body(null, 204);
@@ -1934,7 +1982,11 @@ blobRoutes.get("/vaults/:vaultId/blobs", async (c) => {
   );
   // Private-by-default: a scoped member only sees blobs referenced by notes
   // they can read (owner/admin + Open vaults see all). Mirrors the download gate.
-  const visible = await filterReadableBlobs(session.userId, vaultId, rows);
+  // W3: a keyed vault's reference rule reads sealed note text with THIS
+  // request's key (409 key_required without one; nothing changes).
+  const vkr = await requireVaultKey(c, vaultId);
+  if (!vkr.ok) return vkr.response;
+  const visible = await filterReadableBlobs(session.userId, vaultId, rows, undefined, docCryptoOf(vaultId, vkr));
   return c.json({ blobs: visible.map(toMeta) });
 });
 
@@ -2009,9 +2061,15 @@ async function authorizeDownload(
   // Per-attachment ACL: a scoped member may only download a blob referenced by
   // a note they can read (owner/admin + Open vaults are allowed everything).
   // Legacy rows without a vault_id keep membership-only access (no note to gate on).
+  let blobCrypto: ReturnType<typeof docCryptoOf>;
+  if (blob.vault_id) {
+    const vkr = await requireVaultKey(c, blob.vault_id);
+    if (!vkr.ok) return { deny: vkr.response };
+    blobCrypto = docCryptoOf(blob.vault_id, vkr);
+  }
   if (
     blob.vault_id &&
-    !(await canReadAttachment(session.userId, blob.vault_id, blob.rel_path, blob.doc_id))
+    !(await canReadAttachment(session.userId, blob.vault_id, blob.rel_path, blob.doc_id, undefined, blobCrypto))
   ) {
     return { deny: c.json({ error: "You do not have access to this attachment" }, 403) };
   }

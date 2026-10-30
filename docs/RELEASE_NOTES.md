@@ -21,6 +21,13 @@
     (every app still installs it). Ask before each release: silent, or notes?
 -->
 
+## 0.1.98
+
+- **Encrypted vaults.** New vaults are encrypted with a key only your team's devices hold, so Baalda's database, backups and staff see only scrambled data. Existing vaults can turn it on in Vault Settings.
+- **Your vault key.** Owners can view and save their vault key in Vault Settings → General, to get back in on a new computer.
+- **Approve new computers.** Signing in on another computer now asks you to confirm it from one you already use, by typing a short code.
+- **Safer and steadier**, with security fixes for shared links and access changes, and faster search in large vaults.
+
 ## 0.1.94
 
 - **Choose who gets each skill.** Share an Agent Skill with your whole team, or only with the people you pick. You can see who has it on every skill, and each person's skills on their profile.

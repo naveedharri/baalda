@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole } from "../../permissions/lookup.js";
+import { forgetMemberKeys } from "../../crypto/member-keys.js";
 import { getSession } from "../session.js";
 import { canAddMember } from "../../billing/entitlements.js";
 import { checkJoinSeat, seatRefusalBody, teamModel } from "../../billing/plan.js";
@@ -177,6 +178,9 @@ async function revokeMembership(
         WHERE org_id = $1 AND principal_type = 'user' AND principal_id = $2`,
       [orgId, userId],
     );
+    // Client-held vault keys (W3): the departed member's sealed keys and
+    // pending requests go with the membership (no-op when none exist).
+    await forgetMemberKeys(orgId, userId, client);
     await client.query(
       `UPDATE session SET "activeOrganizationId" = NULL
         WHERE "userId" = $1 AND "activeOrganizationId" = $2`,
@@ -452,6 +456,13 @@ async function deleteVaultEverywhere(
           SET deleted_at = now(), org_name = $2, owner_user_id = $3, updated_at = now()
         WHERE organization_id = $1 AND NOT ($4::boolean AND billing_account_id IS NOT NULL)`,
       [orgId, orgName, actorUserId, teamModel()],
+    );
+    // Access history survives the vault (migration 065 dropped its FK); close
+    // it with one row saying who deleted the vault.
+    await client.query(
+      `INSERT INTO access_audit (organization_id, actor_user_id, actor_name, entity_type, entity_id, action, before_state)
+       VALUES ($1, $2, (SELECT name FROM "user" WHERE id = $2), 'organization', $1, 'delete', jsonb_build_object('name', $3::text))`,
+      [orgId, actorUserId, orgName],
     );
     // Cascades: member, invitation, vaults→(folders, notes, files), shares,
     // org_join_codes, mcp_tokens, public_links.

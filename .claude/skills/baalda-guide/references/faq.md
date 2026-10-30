@@ -17,7 +17,7 @@ the AI connection point (MCP) included. Past that, upgrade to Team from inside t
 Yes, today. Sign up in the app, turn on sync, invite the team. Free covers 2 people and 1 synced
 vault. For more, the owner opens Account Settings → Plan & Billing and buys Team: $10 per seat per
 month or $110 per seat per year, minimum 3 seats, one seat per person including the owner. One
-Team account covers all the owner's vaults, and adds the Baalda Assistant and standalone file
+Team account covers all the owner's vaults, and adds standalone file
 sync. baalda.com/pricing is the place to ask questions or talk to the team, but nobody has to wait
 for a call to get started.
 

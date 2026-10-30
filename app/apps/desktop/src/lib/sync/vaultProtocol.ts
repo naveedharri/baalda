@@ -27,6 +27,8 @@ export interface HelloFrame {
   files?: string[];
   /** Mapped notes held locally, including those with no CRDT state vector yet. */
   held?: string[];
+  /** W3: the vault key (base64), only for a keyed vault whose key verified. */
+  vk?: string;
   /**
    * This app instance's id (`ApiClient.getClientId()`), the same value sent as
    * `x-baalda-origin` on registry writes. Lets the server skip telling us to

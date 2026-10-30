@@ -295,6 +295,9 @@ export const INBOUND_QUEUE_MAX_BYTES = 8 * 1024 * 1024;
  * Keep in lockstep with `server/src/sync/vault-channel.ts`.
  */
 export const WS_CLOSE_UNAUTHORIZED = 4401;
+/** W3: a keyed vault refused us for want of its key. Never no-access. */
+export const WS_CLOSE_KEY_REQUIRED = 4409;
+export const KEY_REQUIRED_MESSAGE = "key_required";
 export const WS_CLOSE_PROTOCOL = 4400;
 
 /**
@@ -722,7 +725,25 @@ export class VaultSyncEngine {
       this.setStatus("no-access");
       return true;
     }
+    // Missing/stale vault key: fetch it, then the ordinary reconnect ladder.
+    // Membership is intact and the server is not empty, so nothing else moves.
+    if (e?.code === WS_CLOSE_KEY_REQUIRED) this.requestVaultKey();
     return false;
+  }
+
+  /**
+   * `key_required`: make the key ready; the next connect sends it. The reconnect
+   * WAITS for this answer (see `scheduleReconnect`) and never takes the
+   * near-immediate first lap: reconnecting before the key is held only earns
+   * another 4409, which is the startup loop this guards against.
+   */
+  private keyWait: Promise<boolean> | null = null;
+  private requestVaultKey(): void {
+    this.attempt = Math.max(this.attempt, 1);
+    if (this.keyWait) return;
+    const ensure = this.api.ensureVaultKeyFor;
+    if (!ensure) return;
+    this.keyWait = ensure.call(this.api, this.vaultId).catch(() => false);
   }
 
   private async onOpen(): Promise<void> {
@@ -796,6 +817,7 @@ export class VaultSyncEngine {
         // …and the same for the mode: absent means "backfill me", exactly as
         // every older client and server already behave.
         ...(this.liveOnly ? { mode: "live-only" as const } : {}),
+        ...vkField(this.api.vaultKeyFor?.(this.vaultId) ?? null),
         origin: this.api.getClientId(),
         // Opt in to the frame types this build understands. Without it the
         // server withholds them (see `CLIENT_CAPS`).
@@ -930,6 +952,7 @@ export class VaultSyncEngine {
           status: control.status as ActivityStatus,
         });
       } else if (control.t === "err") {
+        if (control.message === KEY_REQUIRED_MESSAGE) this.requestVaultKey();
         // Server refused us mid-session (e.g. bad token) — reconnect fresh.
         this.onDisconnect();
       }
@@ -1094,7 +1117,23 @@ export class VaultSyncEngine {
     this.attempt++;
     this.reconnectTimer = this.setTimeoutImpl(() => {
       this.reconnectTimer = null;
-      if (!this.stopped) this.connect();
+      if (this.stopped) return;
+      const waiting = this.keyWait;
+      if (!waiting) {
+        this.connect();
+        return;
+      }
+      // A key refusal is pending: connect only once the key is ready. A key
+      // that is still not ready backs off and asks again on the next lap.
+      void waiting.then((ok) => {
+        if (this.keyWait === waiting) this.keyWait = null;
+        if (this.stopped || this.ws || this.reconnectTimer) return;
+        if (ok) this.connect();
+        else {
+          this.requestVaultKey();
+          this.scheduleReconnect();
+        }
+      });
     }, delay);
   }
 
@@ -1133,4 +1172,10 @@ function toUint8Array(data: unknown): Uint8Array | null {
     return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
   }
   return null;
+}
+
+/** `hello.vk` only when a verified key is held: an unkeyed vault's hello stays
+ *  byte-identical to today's. */
+export function vkField(vk: string | null): { vk?: string } {
+  return vk ? { vk } : {};
 }
