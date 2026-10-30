@@ -47,7 +47,9 @@ export const SPOKE_STRENGTH = 0.5;
 /** Note–note ties: weak, so a cross-cluster link can't haul clusters together. */
 const NOTE_LINK_STRENGTH = 0.3;
 /** How far one note's repulsion reaches, in world units. */
-const CHARGE_REACH = 140;
+const CHARGE_REACH = 70;
+/** Push of a note that is not a hub (see configureForces). */
+const LEAF_CHARGE = -40;
 const SMALL_VAULT_FULL = 5000;
 /**
  * Collision radius. Capped: d3's collide visits every quadtree cell within the
@@ -537,7 +539,12 @@ export function configureForces(
   // ones settle into orbit around them. Area-proportional (r²/rMin², capped) so
   // it tracks the visual size rather than fighting it.
   const rMin = MIN_RADIUS;
+  // Starburst layout: only hubs carry the strong, size-scaled push. A note
+  // inside a cluster gets a small one, just enough to keep its neighbours off
+  // it; a strong push on every note made neighbouring flowers' notes shove each
+  // other harder than their spokes could hold them, and the flowers blended.
   charge.strength((d: SimNode) => {
+    if (!d.hub) return Math.max(scaledCharge, LEAF_CHARGE);
     const rel = Math.min(6, ((d.radius || rMin) / rMin) ** 2);
     return scaledCharge * (0.5 + rel * 0.5);
   });
@@ -588,8 +595,11 @@ export function configureForces(
   // Like the reference apps, centring is only there to stop drift off-screen.
   // Leaves are capped too: pulled harder than their hub, they trailed inward
   // and every starburst became a comet with its hub on the rim.
+  // A note that belongs to a cluster feels no centre pull: it moves with its
+  // hub (hub separation carries the cluster), so gravity can't drag it out of
+  // its flower toward the middle. Hubs and loose notes keep a capped pull.
   const centerStrength = (d: SimNode) =>
-    Math.min(d.hub ? HUB_CENTER_MAX : NOTE_CENTER_MAX, gravity * (d.weight ?? 0.12));
+    d.cluster && !d.hub ? 0 : Math.min(d.hub ? HUB_CENTER_MAX : NOTE_CENTER_MAX, gravity * (d.weight ?? 0.12));
   (sim.force("x") as ForceX<SimNode>).strength(centerStrength);
   (sim.force("y") as ForceY<SimNode>).strength(centerStrength);
 
