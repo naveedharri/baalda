@@ -1311,9 +1311,10 @@ html:not(.rd-off) .mcp-token-dialog .skills-form-head {
   background: var(--rd-surface);
 }
 html:not(.rd-off) .mcp-token-dialog .skills-form-head::before {
-  content: ""; width: 38px; height: 38px; flex: none; border-radius: 11px;
-  background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='15' r='4'/%3E%3Cpath d='m11 12 9-9M17 6l3 3M15 8l2 2'/%3E%3C/svg%3E") center / 18px no-repeat;
-  box-shadow: 0 8px 18px -8px rgba(124, 92, 255, 0.7);
+  content: ""; width: 36px; height: 36px; flex: none; border-radius: 10px;
+  /* The redesign's tinted icon tile, like toasts and Import and export. */
+  background: var(--rdc-f1edff, #f1edff) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235b3fd6' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='15' r='4'/%3E%3Cpath d='m11 12 9-9M17 6l3 3M15 8l2 2'/%3E%3C/svg%3E") center / 18px no-repeat;
+  box-shadow: none;
 }
 html:not(.rd-off) .mcp-token-dialog .skills-form-head .confirm-title { margin: 0; flex: 1; font-size: var(--fs-lg); }
 html:not(.rd-off) .mcp-token-dialog .skills-form-head .icon-btn {
