@@ -24,7 +24,8 @@ import { createAccessSummaryBatcher } from "../lib/accessSummaryBatch";
 import { ACCESS_MAP_REREAD_MAX, patchCachedAccessModes } from "../lib/accessBoardLoad";
 import { useAccessMap, type AccessMap } from "./useAccessMap";
 import { accessResourceType, ancestorPaths, entriesFromServer, rowsFromEntries, type AccessRow } from "../lib/accessTree";
-import { needsAccessConfirm, reduceAccessCopy, type ReduceScope } from "../lib/membersAccess";
+import { needsAccessConfirm, reduceAccessCopy,
+  accessChangeFor, type ReduceScope } from "../lib/membersAccess";
 import { markSelfAccessChange } from "../lib/sync/selfAccessChanges";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { iconForPath } from "./FileTree";
@@ -65,6 +66,7 @@ interface Confirm {
   title: string;
   button: string;
   outcome: string;
+  change?: ReturnType<typeof accessChangeFor>;
   danger: boolean;
   apply: () => Promise<void>;
 }
@@ -367,7 +369,7 @@ export function MemberAccessBoard({
   /** Ask before taking access away; widening runs at once. */
   const guarded = (from: TeamAccessMode | "custom" | null, to: TeamAccessMode, scope: ReduceScope, run: () => Promise<void>) => {
     if (to === "open" || !needsAccessConfirm(from, to)) return void run();
-    setConfirm({ ...reduceAccessCopy(scope, to), danger: to === "private", apply: run });
+    setConfirm({ ...reduceAccessCopy(scope, to), danger: to === "private", apply: run, change: accessChangeFor(scope, from, to) });
   };
 
   /** Play the move: the row lands in its new column, its old slot closes. */
@@ -862,12 +864,13 @@ export function MemberAccessBoard({
       {confirm && (
         <ConfirmDialog
           title={confirm.title}
+          change={confirm.change}
           confirmLabel={confirm.button}
           tone={confirm.danger ? "danger" : "accent"}
           onCancel={() => setConfirm(null)}
           onConfirm={async () => { await confirm.apply(); setConfirm(null); }}
         >
-          <p>{confirm.outcome}</p>
+          <p className="confirm-note">{confirm.outcome}</p>
         </ConfirmDialog>
       )}
     </div>

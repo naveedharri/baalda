@@ -1186,6 +1186,48 @@ html:not(.rd-off) .confirm-actions button.primary:disabled {
   opacity: 1; background: var(--rdc-d9d0ff, #d9d0ff); color: #fff !important;
 }
 html:not(.rd-off) .confirm-actions button.primary:disabled * { color: #fff !important; opacity: 1 !important; }
+
+/* Confirm dialogs, "before and after" (chosen 2026-10-30): left aligned, no
+   warning tile, a quiet subtitle, the change itself as a card (who, then the
+   level now -> the level after), the outcome as one small info line, and two
+   equal buttons that each name their result. Every ConfirmDialog takes the
+   layout; access confirms also pass `change`. */
+html:not(.rd-off) .confirm-dialog { width: 460px; padding: 26px 26px 24px; text-align: left; border-radius: 20px; }
+html:not(.rd-off) .confirm-dialog .confirm-badge { display: none; }
+html:not(.rd-off) .modal .confirm-dialog .confirm-title,
+html:not(.rd-off) .confirm-dialog .confirm-title { font: 600 18px var(--font-display); margin: 0 0 6px; }
+html:not(.rd-off) .confirm-subtitle { margin: 0 0 18px; font-size: 14px; line-height: 1.5; color: var(--text-tertiary); }
+html:not(.rd-off) .confirm-dialog .confirm-body {
+  margin: 0 0 22px; max-width: none; font-size: 14px; line-height: 1.55; color: var(--text-secondary);
+}
+html:not(.rd-off) .confirm-dialog .confirm-title + .confirm-body { margin-top: 10px; }
+html:not(.rd-off) .confirm-change {
+  display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 14px 16px;
+  background: var(--bg-app); border-radius: 14px;
+}
+html:not(.rd-off) .confirm-change-who { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+html:not(.rd-off) .confirm-change-who .avatar { width: 32px; height: 32px; flex: none; }
+html:not(.rd-off) .confirm-change-name { display: flex; flex-direction: column; min-width: 0; font-size: 14px; font-weight: 500; color: var(--text-primary); }
+html:not(.rd-off) .confirm-change-name > span,
+html:not(.rd-off) .confirm-change-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html:not(.rd-off) .confirm-change-name small { font-size: 12px; font-weight: 400; color: var(--text-tertiary); }
+html:not(.rd-off) .confirm-change-arrow { color: var(--text-tertiary); font-size: 13px; }
+html:not(.rd-off) .confirm-level {
+  flex: none; font: 600 12px var(--font-body); border-radius: 99px; padding: 4px 10px; white-space: nowrap;
+  background: rgba(var(--rd-ink), 0.06); color: var(--text-secondary);
+}
+html:not(.rd-off) .confirm-level.is-edit { background: var(--access-edit-bg); color: var(--access-edit-fg); }
+html:not(.rd-off) .confirm-level.is-view { background: var(--access-view-bg); color: var(--access-view-fg); }
+html:not(.rd-off) .confirm-level.is-none { background: var(--rdc-fbe9e6, #fbe9e6); color: var(--rdc-a8352b, #a8352b); }
+html:not(.rd-off) .confirm-note {
+  position: relative; padding-left: 22px; font-size: 12.5px; line-height: 1.5; color: var(--text-tertiary);
+}
+html:not(.rd-off) .confirm-note::before {
+  content: "i"; position: absolute; left: 0; top: 2px; width: 14px; height: 14px; border-radius: 50%;
+  box-shadow: inset 0 0 0 1.2px currentColor; font: 600 9px/14px var(--font-body); text-align: center;
+}
+html:not(.rd-off) .confirm-dialog .confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 0; }
+html:not(.rd-off) .confirm-dialog .confirm-actions > * { width: 100%; justify-content: center; }
 html:not(.rd-off) .modal .invite-chips input:not([type]),
 html:not(.rd-off) .modal .invite-chips input:not([type]):focus,
 html:not(.rd-off) .modal .skills-prefix-input input,
