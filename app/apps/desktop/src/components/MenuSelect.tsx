@@ -53,6 +53,7 @@ export function MenuSelect<T extends string>({
   triggerContent,
   caret = true,
   direction = "auto",
+  anchorClosest,
 }: {
   value: T;
   options: ReadonlyArray<MenuSelectOption<T>>;
@@ -68,6 +69,12 @@ export function MenuSelect<T extends string>({
    * control rather than becoming two that drift.
    */
   triggerContent?: React.ReactNode;
+  /**
+   * Anchor the menu to the nearest ancestor matching this selector (e.g. the
+   * labelled field box the trigger sits in) instead of the bare trigger: the
+   * menu then lines up with the box's edges and is at least as wide as it.
+   */
+  anchorClosest?: string;
   /** Icon triggers have no room for the caret. */
   caret?: boolean;
   direction?: "auto" | "down";
@@ -120,7 +127,9 @@ export function MenuSelect<T extends string>({
     const menu = menuRef.current;
     const trigger = triggerRef.current;
     if (!menu || !trigger) return;
-    const anchor = trigger.getBoundingClientRect();
+    const box = anchorClosest ? trigger.closest<HTMLElement>(anchorClosest) : null;
+    const anchor = (box ?? trigger).getBoundingClientRect();
+    if (box) menu.style.minWidth = `${Math.round(anchor.width)}px`;
     const size = { width: menu.offsetWidth, height: menu.offsetHeight };
     if (direction === "down") {
       setPos({ left: Math.max(8, Math.min(anchor.left, window.innerWidth - size.width - 8)), top: anchor.bottom + OFFSET,
@@ -139,7 +148,7 @@ export function MenuSelect<T extends string>({
         { width: window.innerWidth, height: window.innerHeight },
       ),
     );
-  }, [open, options.length, direction]);
+  }, [open, options.length, direction, anchorClosest]);
 
   // A value with no matching option still has to render something — falling
   // back to the raw value beats an empty trigger that looks broken.

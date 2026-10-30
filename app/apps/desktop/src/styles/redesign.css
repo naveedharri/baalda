@@ -1308,8 +1308,7 @@ html:not(.rd-off) .mcp-token-dialog { width: 520px; padding: 0; overflow: hidden
 html:not(.rd-off) .mcp-token-dialog .skills-form-head {
   display: flex; align-items: center; gap: 12px;
   padding: var(--sp-5) var(--sp-5) var(--sp-4);
-  background: linear-gradient(180deg, var(--rdc-f6f3ff, #f6f3ff), var(--rd-surface));
-  border-bottom: 1px solid rgba(var(--rd-ink), 0.05);
+  background: var(--rd-surface);
 }
 html:not(.rd-off) .mcp-token-dialog .skills-form-head::before {
   content: ""; width: 38px; height: 38px; flex: none; border-radius: 11px;
@@ -1322,8 +1321,8 @@ html:not(.rd-off) .mcp-token-dialog .skills-form-head .icon-btn {
 }
 html:not(.rd-off) .mcp-token-dialog > :not(.skills-form-head) { margin-left: var(--sp-5); margin-right: var(--sp-5); }
 html:not(.rd-off) .mcp-token-dialog .skills-form-intro {
-  margin-top: var(--sp-4); font-size: var(--fs-sm); color: var(--rdc-8a5a00, #8a5a00);
-  background: var(--rdc-fff6e0, #fff6e0); border-radius: var(--radius-md); padding: 8px 12px;
+  margin-top: 0; font-size: var(--fs-sm); line-height: 1.5; color: var(--text-tertiary);
+  background: none; border-radius: 0; padding: 0;
 }
 /* Token: a clean mono chip. */
 html:not(.rd-off) .mcp-token-dialog .mcp-field {
@@ -1353,11 +1352,13 @@ html:not(.rd-off) .mcp-token-dialog .mcp-block button { color: var(--rdc-b9b4d6,
 html:not(.rd-off) .mcp-token-dialog .mcp-block button:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
 html:not(.rd-off) .mcp-token-dialog .mcp-setup-hint { margin-top: 8px; font-size: var(--fs-xs); color: var(--text-tertiary); }
 html:not(.rd-off) .mcp-token-dialog .confirm-actions {
-  margin: var(--sp-5) 0 0; padding: var(--sp-4) var(--sp-5); background: var(--bg-app); border-top: 1px solid rgba(var(--rd-ink), 0.05);
+  margin: var(--sp-5) 0 0; padding: 0 var(--sp-5) var(--sp-5); background: none; border-top: 0;
 }
 html:not(.rd-off) .mcp-token-dialog > .confirm-actions { margin-left: 0; margin-right: 0; }
-html:not(.rd-off) .mcp-token-dialog input { margin-top: var(--sp-3); }
-html:not(.rd-off) .mcp-token-dialog .mcp-block-value { padding-right: 40px; }
+html:not(.rd-off) .mcp-token-dialog input { margin-top: var(--sp-3); width: calc(100% - 2 * var(--sp-5)); box-sizing: border-box; }
+/* Wrap the command at spaces, never inside a URL or token (it used to break
+   "htt|p://" and the token mid-word). */
+html:not(.rd-off) .mcp-token-dialog .mcp-block-value { padding-right: 40px; white-space: pre-wrap; word-break: normal; overflow-wrap: normal; overflow-x: auto; }
 
 /* View-only banner: a slim, quiet pill instead of a full-width yellow block. */
 html:not(.rd-off) .editor-lockbanner {
@@ -2591,3 +2592,7 @@ html:not(.rd-off) .io-text { flex: 1; min-width: 0; font-size: 14px; font-weight
 html:not(.rd-off) .io-text small { display: block; margin-top: 2px; font-size: 12.5px; font-weight: 400; color: var(--text-tertiary); line-height: 1.45; }
 html:not(.rd-off) .io-row .ghost-pill { flex: none; height: 34px; padding: 0 14px; border-radius: 10px; font-weight: 500; }
 html:not(.rd-off) .io-tip { margin: 0; padding-left: 4px; font-size: 12.5px; color: var(--text-tertiary); }
+
+/* Dropdown options with a hint line: the tick sits on the label's line, not
+   beside the hint. */
+html:not(.rd-off) .context-menu.role-menu li .menu-tick { align-self: flex-start; line-height: 1.4; }

@@ -232,6 +232,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
               ariaLabel="Role"
               triggerClassName="invite-field-trigger"
               menuClassName="access-menu"
+              anchorClosest=".invite-field"
             />
           </label>
           <label className="invite-field">
@@ -243,6 +244,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
               ariaLabel="Access"
               triggerClassName="invite-field-trigger"
               menuClassName="access-menu"
+              anchorClosest=".invite-field"
               disabled={role === "admin"}
             />
           </label>
