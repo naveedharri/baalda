@@ -2617,3 +2617,31 @@ html:not(.rd-off) .mcp-copy-btn {
 }
 html:not(.rd-off) .mcp-copy-btn:hover { background: var(--rdc-e6dfff, #e6dfff); }
 html:not(.rd-off) .mcp-copy-btn.is-copied { background: var(--rdc-e4f3e8, #e4f3e8); color: var(--rdc-2f7a46, #2f7a46); }
+
+/* Alert banners, "floating cards" (chosen 2026-10-30): a white rounded card
+   inside the note area, a tinted icon tile by tone (red: something stopped or
+   was removed; violet: an action to take; green: good news; neutral:
+   information), the message, then its buttons. Overrides every variant's tint;
+   no yellow. */
+html:not(.rd-off) .banner-slot > .banner {
+  margin: 8px 16px 0; padding: 10px 10px 10px 12px; gap: 12px; justify-content: flex-start;
+  background: var(--rd-surface) !important; border: 0 !important; border-radius: 16px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 14px 30px -18px rgba(var(--rd-ink), 0.35) !important;
+  font-size: 13.5px; line-height: 1.45; color: var(--text-secondary);
+}
+html:not(.rd-off) .banner-slot > .banner > :not(.banner-icon):not(.banner-actions) { flex: 1; min-width: 0; }
+html:not(.rd-off) .banner-slot > .banner strong,
+html:not(.rd-off) .banner-slot > .banner b { color: var(--text-primary) !important; font-weight: 600; }
+html:not(.rd-off) .banner-icon {
+  flex: none; width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center;
+  background: var(--rdc-f1efeb, #f1efeb); color: var(--text-tertiary);
+}
+html:not(.rd-off) .banner.tone-danger .banner-icon { background: var(--rdc-fbe9e6, #fbe9e6); color: var(--rdc-b3392f, #b3392f); }
+html:not(.rd-off) .banner.tone-action .banner-icon { background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6); }
+html:not(.rd-off) .banner.tone-good .banner-icon { background: var(--rdc-e4f3e8, #e4f3e8); color: var(--rdc-2f7a46, #2f7a46); }
+html:not(.rd-off)[data-theme="dark"] .banner-icon { background: rgba(255, 250, 240, 0.08); }
+html:not(.rd-off) .banner-slot > .banner .banner-actions { margin-left: auto; }
+html:not(.rd-off) .banner-slot > .banner .banner-actions button:not(.primary):not(.link-btn) {
+  border: 0; background: rgba(var(--rd-ink), 0.05); border-radius: 10px;
+}
+html:not(.rd-off) .banner-slot > .banner .banner-actions button.primary { border-radius: 10px; }
