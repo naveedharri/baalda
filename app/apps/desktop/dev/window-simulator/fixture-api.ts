@@ -294,7 +294,7 @@ export async function previewFetch(
   if (p === "/api/auth-methods")
     return ok({
       emailPassword: true,
-      google: false,
+      google: true,
       passwordReset: false,
       invitationEmail: false,
       bugReport: true,

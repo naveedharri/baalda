@@ -106,9 +106,21 @@ importers:
       '@dicebear/core':
         specifier: ^9.4.3
         version: 9.4.3
+      '@fontsource/atkinson-hyperlegible':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/ibm-plex-mono':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/inter':
+        specifier: ^5.3.0
+        version: 5.3.0
       '@fontsource/jetbrains-mono':
         specifier: ^5.2.8
         version: 5.2.8
+      '@fontsource/literata':
+        specifier: ^5.3.0
+        version: 5.3.0
       '@fontsource/radio-canada-big':
         specifier: ^5.2.7
         version: 5.2.7
@@ -1096,8 +1108,20 @@ packages:
   '@fontsource-variable/radio-canada-big@5.3.0':
     resolution: {integrity: sha512-/FeAm/7zKWokLGpXKJXga307K/ZOOO08t8ldHKQuemPucgjRcLBqLA5dZFY1QQsIK+j2XBMyWfk0Z6hHN/rNpw==}
 
+  '@fontsource/atkinson-hyperlegible@5.3.0':
+    resolution: {integrity: sha512-Sp8Ve8+rQmENY2Lv02VH7sLpntzTTvnncnJMTbRE7DX6TLxGraN4ykZfzaUWIoCFmaomwkvNiqmlPkrKBuDoSA==}
+
+  '@fontsource/ibm-plex-mono@5.3.0':
+    resolution: {integrity: sha512-eTgnZjZEGk1QtD3ZstF+Vclo2HLAni8YMy34/DxllwZvyz1lR/1RF/xTiAquOBO7MvqBx8D2Ig2WCPMVfdZu7Q==}
+
+  '@fontsource/inter@5.3.0':
+    resolution: {integrity: sha512-RofMylZmjlJEfELXeNHFWBRcSs75rGU/6bV2S2jfnvv/3rPXPGe0LgUJTklcHZ9lM4OZmAVFhcJPnACfb91A3g==}
+
   '@fontsource/jetbrains-mono@5.2.8':
     resolution: {integrity: sha512-6w8/SG4kqvIMu7xd7wt6x3idn1Qux3p9N62s6G3rfldOUYHpWcc2FKrqf+Vo44jRvqWj2oAtTHrZXEP23oSKwQ==}
+
+  '@fontsource/literata@5.3.0':
+    resolution: {integrity: sha512-9JGMT5+YfBK49thoMq9ASaMRJErHT4V4QuMhAEwKHRLreOsIMP2xP6ZRLhPJ0e6YlET+kjWTJuN7LAxt9/gWGQ==}
 
   '@fontsource/radio-canada-big@5.2.7':
     resolution: {integrity: sha512-FbFwPzj/PsWA9s0/V5Zol4GlfECeFHYby9f6UkX5+vG7IL40SXQff0SpzlR5984gXQ77NXlOffV7gmtC9g1nvw==}
@@ -3849,7 +3873,15 @@ snapshots:
 
   '@fontsource-variable/radio-canada-big@5.3.0': {}
 
+  '@fontsource/atkinson-hyperlegible@5.3.0': {}
+
+  '@fontsource/ibm-plex-mono@5.3.0': {}
+
+  '@fontsource/inter@5.3.0': {}
+
   '@fontsource/jetbrains-mono@5.2.8': {}
+
+  '@fontsource/literata@5.3.0': {}
 
   '@fontsource/radio-canada-big@5.2.7': {}
 

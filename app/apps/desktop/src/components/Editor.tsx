@@ -24,6 +24,8 @@ import { playPingSound } from "../lib/presence/ping";
 import { syncManager } from "../lib/sync/docSession";
 import { colorForUser, PRESENCE_OFFLINE, statusTone, ringShowsColor } from "../lib/presence/color";
 import type { ActivityStatus } from "../lib/prefs";
+import { StatusMoment } from "./StatusMoment";
+import { isMoment, statusFromWire } from "../lib/prefs";
 import { useStore } from "../store";
 import * as ipc from "../lib/ipc";
 import { FilePreview } from "./FilePreview";
@@ -50,7 +52,7 @@ interface Peer {
 }
 
 interface AwarenessPeerState {
-  user?: { id?: string; name?: string; color?: string; status?: ActivityStatus; image?: string };
+  user?: { id?: string; name?: string; color?: string; status?: ActivityStatus; moment?: string; image?: string };
   activity?: { line?: number; at?: number };
   ping?: { to?: string; name?: string; at?: number };
 }
@@ -71,13 +73,13 @@ function readPeers(awareness: Awareness): Peer[] {
         name: u.name ?? "Someone",
         color: u.color ?? colorForUser(u.id),
         ...(typeof u.image === "string" && u.image ? { image: u.image } : {}),
-        status: u.status,
+        status: statusFromWire(u.status, u.moment),
         line,
         lastActive: at,
       });
     } else {
       if (prev.line == null && line != null) prev.line = line;
-      if (prev.status == null && u.status != null) prev.status = u.status;
+      if (prev.status == null && u.status != null) prev.status = statusFromWire(u.status, u.moment);
       if (prev.image == null && typeof u.image === "string" && u.image) prev.image = u.image;
       if (at != null && (prev.lastActive == null || at > prev.lastActive)) {
         prev.lastActive = at;
@@ -144,14 +146,17 @@ function PresenceAvatar({
   const tone = statusTone(peer.status);
   const live = online && ringShowsColor(tone);
   return (
-    <FaceSvg
-      userId={peer.id}
-      name={peer.name}
-      image={peer.image}
-      className={`presence-avatar tone-${tone}${live ? "" : " offline"}${className ? ` ${className}` : ""}`}
-      style={{ "--user-color": live ? peer.color : PRESENCE_OFFLINE } as CSSProperties}
-      ariaHidden
-    />
+    <span className="sm-host">
+      <FaceSvg
+        userId={peer.id}
+        name={peer.name}
+        image={peer.image}
+        className={`presence-avatar tone-${tone}${live ? "" : " offline"}${className ? ` ${className}` : ""}`}
+        style={{ "--user-color": live ? peer.color : PRESENCE_OFFLINE } as CSSProperties}
+        ariaHidden
+      />
+      <StatusMoment status={peer.status} size={30} image={peer.image} userId={peer.id} name={peer.name} pop="down" />
+    </span>
   );
 }
 
@@ -329,6 +334,53 @@ function PeerRoster({
  * doc is shared, a HocuspocusProvider syncs it to the server and supplies live
  * cursors + presence; a view-only grant makes the editor read-only.
  */
+/** Redesign preview: view-only as a floating dark chip with who can edit and,
+ *  when the owner is on this note right now, an Ask button that pings them. */
+function ViewOnlyChip({
+  reason,
+  peers,
+  onAsk,
+}: {
+  reason: "view" | "removed" | "lapsed";
+  peers: Peer[];
+  onAsk: (peer: Peer) => void;
+}) {
+  const members = useStore((s) => s.members);
+  const myId = useStore((s) => s.session?.user.id);
+  const owner = members.find((m) => m.role === "owner" && m.userId !== myId);
+  const ownerName = owner?.user?.name || owner?.user?.email?.split("@")[0] || null;
+  const ownerHere = owner ? peers.find((p) => p.id === owner.userId) : undefined;
+  const [asked, setAsked] = useState(false);
+  const label = reason === "removed" ? "Access removed" : reason === "lapsed" ? "Read only" : "View only";
+  return (
+    <div className="rd-viewonly" role="status">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="5" y="10" width="14" height="10" rx="2" />
+        <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+      </svg>
+      <span className="rd-viewonly-label">{label}</span>
+      <span className="rd-viewonly-msg">
+        {reason === "removed"
+          ? "This local copy is not syncing. Editing is disabled."
+          : reason === "lapsed"
+            ? "The Team subscription for this vault ended."
+            : "You can read this note, but you can’t edit it."}
+      </span>
+      {reason === "view" && ownerName && (
+        <span className="rd-viewonly-who">
+          <span className="rd-viewonly-dot">{ownerName.slice(0, 1).toUpperCase()}</span>
+          {ownerName} can edit
+        </span>
+      )}
+      {reason === "view" && ownerHere && (
+        <button type="button" className="rd-viewonly-ask" disabled={asked} onClick={() => { onAsk(ownerHere); setAsked(true); }}>
+          {asked ? "Asked" : "Ask"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function Editor() {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -385,7 +437,35 @@ export function Editor() {
   const lineNumbersRef = useRef<Compartment | null>(null);
   const lineNumbers = useStore((s) => s.lineNumbers);
   const editorMeasure = useStore((s) => s.editorMeasure);
+  const editorFontSize = useStore((s) => s.editorFontSize);
+  const editorFont = useStore((s) => s.editorFont);
   const previewHostRef = useRef<HTMLDivElement | null>(null);
+
+  // Text size, note font and content width change every line's height through
+  // CSS alone, which CodeMirror does not observe: its height map went stale, so
+  // a click or drag was mapped to the wrong line and selected the wrong
+  // paragraph until something else forced a re-measure. Same when a web font
+  // finishes loading after the note opened.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const frame = requestAnimationFrame(() => {
+      if (viewRef.current === view) view.requestMeasure();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [editorFontSize, editorFont, editorMeasure, lineNumbers]);
+  useEffect(() => {
+    let live = true;
+    void document.fonts?.ready.then(() => {
+      if (live) viewRef.current?.requestMeasure();
+    });
+    const onLoaded = () => viewRef.current?.requestMeasure();
+    document.fonts?.addEventListener?.("loadingdone", onLoaded);
+    return () => {
+      live = false;
+      document.fonts?.removeEventListener?.("loadingdone", onLoaded);
+    };
+  }, []);
   const [rosterOpen, setRosterOpen] = useState(false);
   // Wraps the presence stack + its roster popover so an outside click can be
   // told apart from a click on the controls themselves.
@@ -909,49 +989,21 @@ export function Editor() {
       {(readOnly || showToolbar) && (
         <div className="editor-topbar">
           {readOnly && (
-            // ONE banner for every read-only reason (lock, Read-only posture, a
-            // per-user view grant, a server readOnly token): the reason never
-            // changes what the reader can do, so it never changes the copy —
-            // except a lapsed Team subscription, whose fix is not an access
-            // setting anyone can look for.
-            <div className="editor-lockbanner" role="status">
-              <span className="editor-lockbanner-icon" aria-hidden="true">
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <rect x="4" y="11" width="16" height="10" rx="2" />
-                  <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-                </svg>
-              </span>
-              <span className="editor-lockbanner-text">
-                <strong>
-                  {syncStatus === "no-access"
-                    ? "Access removed"
-                    : billingLapsed
-                      ? "Read-only:"
-                      : "View-only access"}
-                </strong>
-                <span className="editor-lockbanner-sub">
-                  {syncStatus === "no-access"
-                    ? "This local copy is not syncing. Editing is disabled."
-                    : billingLapsed
-                      ? "the Team subscription for this vault ended."
-                      : "You can read this note, but you can’t edit it."}
-                </span>
-              </span>
-            </div>
+            <ViewOnlyChip
+              reason={syncStatus === "no-access" ? "removed" : billingLapsed ? "lapsed" : "view"}
+              peers={peers}
+              onAsk={sendPing}
+            />
           )}
           {showToolbar && (
             <div className="editor-toolbar">
               <div
                 className="presence-controls"
                 ref={presenceRef}
-                onMouseEnter={openRoster}
+                // Redesign preview: when someone here has a status moment, hover
+                // plays it and the roster (with Ping) opens on click. Otherwise
+                // hover opens the roster as before.
+                onMouseEnter={() => { if (!peers.some((p) => isMoment(p.status))) openRoster(); }}
                 onMouseLeave={scheduleCloseRoster}
                 onFocus={openRoster}
                 onBlur={(e) => {

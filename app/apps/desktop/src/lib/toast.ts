@@ -27,6 +27,13 @@ export interface Toast {
   tone: ToastTone;
   /** ms until auto-dismiss; 0 = sticky (errors). */
   ttl: number;
+  /** One optional action ("Retry", "Undo"): runs, then the toast closes. */
+  action?: ToastAction;
+}
+
+export interface ToastAction {
+  label: string;
+  run: () => void;
 }
 
 const DEFAULT_TTL = 4200;
@@ -43,11 +50,16 @@ function emit(): void {
 }
 
 /** Raise a toast. Returns its id so a caller can dismiss it early. */
-export function toast(text: string, tone: ToastTone = "success"): number {
+export function toast(
+  text: string,
+  tone: ToastTone = "success",
+  opts: { action?: ToastAction } = {},
+): number {
   const id = nextId++;
   // Errors stay until dismissed; everything else fades on its own.
   const ttl = tone === "error" ? 0 : DEFAULT_TTL;
-  toasts = [...toasts, { id, text, tone, ttl }].slice(-MAX_VISIBLE);
+  const next: Toast = { id, text, tone, ttl, ...(opts.action ? { action: opts.action } : {}) };
+  toasts = [...toasts, next].slice(-MAX_VISIBLE);
   emit();
   return id;
 }

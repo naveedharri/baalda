@@ -13,7 +13,74 @@ import {
   type AppearanceSettings,
 } from "./appearanceSettings";
 
-export type ActivityStatus = "online" | "away" | "busy" | "invisible";
+/** Status moments: a status your avatar acts out (redesign preview). */
+export type MomentStatus = "smoke" | "coffee" | "lunch" | "meeting" | "focus" | "brb";
+export type ActivityStatus = "online" | "away" | "busy" | "invisible" | MomentStatus;
+
+export const STATUS_MOMENTS: Array<{
+  id: MomentStatus;
+  emoji: string;
+  label: string;
+  hint: string;
+  /** How older apps (and the presence ring) read it. */
+  tone: "away" | "busy";
+}> = [
+  { id: "smoke", emoji: "🚬", label: "Out for a smoke", hint: "Back in a few minutes", tone: "away" },
+  { id: "coffee", emoji: "☕", label: "Coffee break", hint: "Grabbing a coffee", tone: "away" },
+  { id: "lunch", emoji: "🍜", label: "At lunch", hint: "Eating, back soon", tone: "away" },
+  { id: "meeting", emoji: "🎧", label: "In a meeting", hint: "On a call", tone: "busy" },
+  { id: "focus", emoji: "🌙", label: "Focusing", hint: "Heads down, replies later", tone: "busy" },
+  { id: "brb", emoji: "⏱️", label: "Back in 10", hint: "Short break", tone: "away" },
+];
+
+export function isMoment(v: unknown): v is MomentStatus {
+  return STATUS_MOMENTS.some((m) => m.id === v);
+}
+
+/**
+ * How a status travels to teammates. A moment goes out as its plain tone
+ * (away/busy) in `status`, which every app version understands, plus the moment
+ * itself in `moment` for apps that show one. Sent raw, an older app read
+ * "coffee" as an unknown status and showed the person as online.
+ */
+export function statusToWire(status: ActivityStatus): { status: ActivityStatus; moment?: MomentStatus } {
+  const m = STATUS_MOMENTS.find((x) => x.id === status);
+  return m ? { status: m.tone, moment: m.id } : { status };
+}
+
+/** The status to show for a teammate: their moment when they sent one we know. */
+export function statusFromWire(status: unknown, moment: unknown): ActivityStatus | undefined {
+  if (isMoment(moment)) return moment;
+  return typeof status === "string" ? (status as ActivityStatus) : undefined;
+}
+
+/** Clear-after choices, in minutes (null = never). */
+export const STATUS_CLEAR_AFTER: Array<{ label: string; minutes: number | null }> = [
+  { label: "30 min", minutes: 30 },
+  { label: "1 hour", minutes: 60 },
+  { label: "Today", minutes: -1 },
+  { label: "Never", minutes: null },
+];
+const STATUS_UNTIL_KEY = "context.activityStatusUntil";
+
+export function statusUntilFrom(minutes: number | null, now = Date.now()): number | null {
+  if (minutes === null) return null;
+  if (minutes === -1) {
+    const end = new Date(now);
+    end.setHours(23, 59, 59, 999);
+    return end.getTime();
+  }
+  return now + minutes * 60_000;
+}
+
+export function readActivityStatusUntil(): number | null {
+  try {
+    const v = Number(localStorage.getItem(STATUS_UNTIL_KEY));
+    return Number.isFinite(v) && v > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 export const ACTIVITY_STATUSES: Array<{
   id: ActivityStatus;
@@ -31,21 +98,25 @@ const MENTION_SOUND_KEY = "context.mentionSound";
 const AUTOMATIC_ITEM_COLORS_KEY = "context.automaticItemColors:";
 
 function isActivityStatus(v: unknown): v is ActivityStatus {
-  return v === "online" || v === "away" || v === "busy" || v === "invisible";
+  return v === "online" || v === "away" || v === "busy" || v === "invisible" || isMoment(v);
 }
 
 export function readActivityStatus(): ActivityStatus {
   try {
     const v = localStorage.getItem(STATUS_KEY);
+    const until = readActivityStatusUntil();
+    if (until !== null && until <= Date.now()) return "online";
     return isActivityStatus(v) ? v : "online";
   } catch {
     return "online";
   }
 }
 
-export function writeActivityStatus(status: ActivityStatus): void {
+export function writeActivityStatus(status: ActivityStatus, until: number | null = null): void {
   try {
     localStorage.setItem(STATUS_KEY, status);
+    if (until === null) localStorage.removeItem(STATUS_UNTIL_KEY);
+    else localStorage.setItem(STATUS_UNTIL_KEY, String(until));
   } catch {
     /* localStorage unavailable — status stays in-memory only */
   }
@@ -359,6 +430,48 @@ export function applyEditorFontSize(px: number): void {
 }
 
 /**
+ * The note font: a personal, device-local choice (never a vault default — the
+ * server refuses appearance keys it does not know, so a vault-wide font would
+ * fail every appearance save on servers without it). Every option is bundled
+ * with the app or built into the OS, so no font is ever fetched. Only the note
+ * editor reads it (`--editor-font-family`); the chrome keeps the UI font.
+ */
+export type EditorFont = "sauce" | "inter" | "literata" | "atkinson" | "plexmono";
+export const EDITOR_FONTS: ReadonlyArray<{ id: EditorFont; label: string; hint: string; stack: string }> = [
+  { id: "sauce", label: "Open Sauce", hint: "Baalda's own, clean and friendly", stack: "var(--font-body)" },
+  { id: "inter", label: "Inter", hint: "The most legible screen sans", stack: '"Inter", var(--font-body)' },
+  { id: "literata", label: "Literata", hint: "A serif made for long reading", stack: '"Literata", Georgia, serif' },
+  { id: "atkinson", label: "Atkinson Hyperlegible", hint: "Every letter unmistakable, for low vision", stack: '"Atkinson Hyperlegible", var(--font-body)' },
+  { id: "plexmono", label: "IBM Plex Mono", hint: "A warm typewriter feel for drafting", stack: '"IBM Plex Mono", var(--font-mono)' },
+];
+export const EDITOR_FONT_DEFAULT: EditorFont = "sauce";
+const EDITOR_FONT_KEY = "context.editorFont";
+
+export function readEditorFont(): EditorFont {
+  try {
+    const raw = localStorage.getItem(EDITOR_FONT_KEY);
+    return EDITOR_FONTS.some((f) => f.id === raw) ? (raw as EditorFont) : EDITOR_FONT_DEFAULT;
+  } catch {
+    return EDITOR_FONT_DEFAULT;
+  }
+}
+
+export function writeEditorFont(font: EditorFont): void {
+  try {
+    localStorage.setItem(EDITOR_FONT_KEY, font);
+  } catch {
+    /* localStorage unavailable — the choice stays in-memory only */
+  }
+}
+
+/** Publish the font as the token the editor theme reads. */
+export function applyEditorFont(font: EditorFont): void {
+  if (typeof document === "undefined") return;
+  const stack = (EDITOR_FONTS.find((f) => f.id === font) ?? EDITOR_FONTS[0]).stack;
+  document.documentElement.style.setProperty("--editor-font-family", stack);
+}
+
+/**
  * Show the line-number gutter. OFF by default, unlike everything else here: the
  * gutter takes real width from the prose column, and a second brain is a place
  * you write prose, not a place you cite line 42.
@@ -397,13 +510,17 @@ export function writeHomeSectionHidden(hidden: boolean): void {
 
 /** The width the sidebar starts at, and what a double-click on the divider
  *  restores. */
-export const SIDEBAR_WIDTH_DEFAULT = 264;
+export const SIDEBAR_WIDTH_DEFAULT = 300;
 /** The default is also the floor: the resizer only ever widens the sidebar.
  *  Narrower than this and the tree header's toolbar runs out of room and pushes
  *  its last button out past the edge — so there is nothing to be gained below
  *  the width the layout was designed at. */
 export const SIDEBAR_WIDTH_MIN = SIDEBAR_WIDTH_DEFAULT;
 export const SIDEBAR_WIDTH_MAX = 560;
+/** Redesign: the wider 300px floor gives way on a window too small to hold it
+ *  next to the editor (or, on Windows, the caption buttons), down to the 264px
+ *  the sidebar was originally designed at — never below. */
+export const SIDEBAR_WIDTH_SQUEEZED = 264;
 
 /** Clamp a width to the usable range, also refusing to eat the whole window on
  *  a small screen. NaN (a corrupted stored value) falls back to the default. */
@@ -415,8 +532,10 @@ export function clampSidebarWidth(px: number, viewport = 1200): number {
   // the editor alone to keep all actions reachable at the minimum window size.
   const mainMinimum = typeof document !== "undefined" &&
     document.documentElement.dataset.platform === "windows" ? 440 : 320;
-  const max = Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, viewport - mainMinimum));
-  return Math.round(Math.min(max, Math.max(SIDEBAR_WIDTH_MIN, px)));
+  const room = viewport - mainMinimum;
+  const min = Math.min(SIDEBAR_WIDTH_MIN, Math.max(SIDEBAR_WIDTH_SQUEEZED, room));
+  const max = Math.max(min, Math.min(SIDEBAR_WIDTH_MAX, room));
+  return Math.round(Math.min(max, Math.max(min, px)));
 }
 
 export function readSidebarWidth(): number {

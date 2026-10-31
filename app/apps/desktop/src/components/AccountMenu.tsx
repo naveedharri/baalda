@@ -10,8 +10,11 @@ import {
 } from "../lib/inviteSeen";
 import { InvitationRows, useFreshInvitations } from "./InvitationRows";
 import { LazyAvatar } from "./Face";
+import { StatusMoment } from "./StatusMoment";
+import { StatusPicker } from "./StatusPicker";
 import { MenuIcon } from "./MenuIcon";
 import { BugReportDialog } from "./BugReportDialog";
+import { exitThen } from "../lib/exitMotion";
 import { useHoverMenu } from "./useHoverMenu";
 import { createFetchThrottle, isForcedMenuOpen } from "../lib/menuFetchThrottle";
 import {
@@ -76,7 +79,8 @@ function LocalVaultSyncRow({ onTurnOnSync }: { onTurnOnSync: () => void }) {
         <path d="M3 19h18" />
       </svg>
       <span className="local-sync-label" title="This vault lives only on this computer">
-        On this device only
+        <b>On this device only</b>
+        <small>Sync to back up and share</small>
       </span>
       <button
         type="button"
@@ -374,7 +378,7 @@ export function AccountMenu() {
           <Suspense fallback={null}>
             <VaultSettingsDialog
               key={settingsRequest?.token ?? 0}
-              onClose={() => closeSettingsDialog("vault")}
+              onClose={() => exitThen(() => closeSettingsDialog("vault"))}
               onRequestSignIn={() => setAuthOpen(true)}
               initialTab={settingsTab}
             />
@@ -441,6 +445,7 @@ export function AccountMenu() {
         >
           <span className="identity-avatar-wrap">
             <LazyAvatar label={userLabel} image={session.user.image} userId={session.user.id} />
+            <StatusMoment status={activityStatus} size={34} image={session.user.image} />
             <span className={`presence-light ${presence}`} aria-label={presenceLabel} />
           </span>
           <span className="identity-meta">
@@ -507,7 +512,7 @@ export function AccountMenu() {
         <Suspense fallback={null}>
           <VaultSettingsDialog
             key={settingsRequest?.token ?? 0}
-            onClose={() => closeSettingsDialog("vault")}
+            onClose={() => exitThen(() => closeSettingsDialog("vault"))}
             initialTab={settingsTab}
           />
         </Suspense>
@@ -516,7 +521,7 @@ export function AccountMenu() {
         <Suspense fallback={null}>
           <AccountSettings
             key={accountSettingsRequest?.token ?? 0}
-            onClose={() => closeSettingsDialog("account")}
+            onClose={() => exitThen(() => closeSettingsDialog("account"))}
             initialTab={accountSettingsTab}
           />
         </Suspense>
@@ -610,6 +615,7 @@ function AccountPopover({
   // the list changes while open (so an arrival during it counts as seen, and
   // answered invitations are pruned).
   const freshIds = useFreshInvitations(userInvitations, seenInvites);
+  const activityStatus = useStore((s) => s.activityStatus);
 
   if (!session) return null;
 
@@ -626,6 +632,14 @@ function AccountPopover({
       onPointerDownCapture={onPin}
       onFocusCapture={onPin}
     >
+      <div className="rd-prof">
+        <span className="sm-host"><LazyAvatar label={session.user.name || session.user.email} image={session.user.image} userId={session.user.id} /><StatusMoment status={activityStatus} size={44} image={session.user.image} /></span>
+        <div className="rd-prof-text">
+          <b>{session.user.name || session.user.email}</b>
+          {session.user.name && <small>{session.user.email}</small>}
+        </div>
+      </div>
+      <StatusPicker />
       {userInvitations.length > 0 && (
         <>
           {/* Pending invitations as plain menu rows, a hairline above the

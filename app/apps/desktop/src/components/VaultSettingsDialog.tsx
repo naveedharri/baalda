@@ -189,6 +189,15 @@ const BILLING_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
  * here. Members (roster + join code + invites), Permissions (RBAC locks), and
  * Appearance (the vault's appearance defaults).
  */
+/** Redesign preview: plain-word names for a few tabs. */
+const RD_LABEL: Partial<Record<string, string>> = {
+  members: "People and access",
+  versioning: "Version history",
+  "import-export": "Import and export",
+  mcp: "Connect AI apps",
+};
+const rdLabel = (t: { id: string; label: string }) => RD_LABEL[t.id] ?? t.label;
+
 export function VaultSettingsDialog({
   onClose,
   onRequestSignIn,
@@ -309,7 +318,7 @@ export function VaultSettingsDialog({
                 title={locked ? "Turn on sync to unlock" : undefined}
               >
                 {t.icon}
-                <span className="menu-item-label">{t.label}</span>
+                <span className="menu-item-label">{rdLabel(t)}</span>
                 {locked && (
                   <svg
                     className="nav-lock"
@@ -336,10 +345,10 @@ export function VaultSettingsDialog({
           )}
         </nav>
 
-        <section ref={contentRef} className="settings-content" aria-label={activeTab.label}>
+        <section key={shown} ref={contentRef} className="settings-content rd-tab-in" aria-label={activeTab.label}>
           {/* Members and access (and Skills) swap the title for a back link
               while a profile (or a skill) is open. */}
-          {!((shown === "members" || shown === "skills") && !lockedTab) && <h2 className="settings-section-title">{activeTab.label}</h2>}
+          {!((shown === "members" || shown === "skills") && !lockedTab) && <h2 className="settings-section-title">{rdLabel(activeTab)}</h2>}
           {shown === "general" ? (
             <GeneralTab
               isSynced={isSynced}
@@ -1994,38 +2003,45 @@ function ImportExportTab() {
 
   return (
     <div className="io-tab">
-      <section className="io-section">
-        <h3 className="io-heading">Import</h3>
-        <p className="io-desc">
-          Bring existing files and folders into this vault, in any format. Markdown and text
-          become notes; everything else is kept as-is, with its folder structure. Existing
-          names are never overwritten.
-        </p>
-        <div className="io-actions">
-          <button className="primary" disabled={busy !== null} onClick={() => void importFiles()}>
-            {busy === "files" ? "Importing…" : "Import files…"}
-          </button>
-          <button className="primary" disabled={busy !== null} onClick={() => void importFolder()}>
-            {busy === "folder" ? "Importing…" : "Import folder…"}
+      <div className="io-list">
+        <div className="io-row">
+          <span className="io-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5M12 18v-6M9 15l3 3 3-3" /></svg>
+          </span>
+          <span className="io-text">
+            Import files
+            <small>Markdown and text become notes; anything else is kept as is.</small>
+          </span>
+          <button className="ghost-pill" disabled={busy !== null} onClick={() => void importFiles()}>
+            {busy === "files" ? "Importing…" : "Choose files…"}
           </button>
         </div>
-        <p className="io-hint">
-          You can also right-click any folder in the sidebar, or drag files straight onto it.
-        </p>
-      </section>
-
-      <section className="io-section">
-        <h3 className="io-heading">Export</h3>
-        <p className="io-desc">
-          Save a copy of this whole vault to a folder on your computer. The hidden{" "}
-          <code>.context</code> index is skipped.
-        </p>
-        <div className="io-actions">
-          <button className="primary" disabled={busy !== null} onClick={() => void exportVault()}>
-            {busy === "export" ? "Exporting…" : "Export entire vault…"}
+        <div className="io-row">
+          <span className="io-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M12 10v6M9 13l3 3 3-3" /></svg>
+          </span>
+          <span className="io-text">
+            Import a folder
+            <small>Keeps its folder structure. Existing names are never overwritten.</small>
+          </span>
+          <button className="ghost-pill" disabled={busy !== null} onClick={() => void importFolder()}>
+            {busy === "folder" ? "Importing…" : "Choose folder…"}
           </button>
         </div>
-      </section>
+        <div className="io-row">
+          <span className="io-icon is-export" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4M12 15V4M8 8l4-4 4 4" /></svg>
+          </span>
+          <span className="io-text">
+            Export this vault
+            <small>Saves a copy of every note and file to a folder on your computer.</small>
+          </span>
+          <button className="ghost-pill" disabled={busy !== null} onClick={() => void exportVault()}>
+            {busy === "export" ? "Exporting…" : "Export…"}
+          </button>
+        </div>
+      </div>
+      <p className="io-tip">Tip: drag files onto any folder in the sidebar, or right-click it to import there.</p>
 
       {error ? (
         <div className="auth-error">{error}</div>

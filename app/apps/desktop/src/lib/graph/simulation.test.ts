@@ -5,6 +5,7 @@ import {
   layoutScale,
   nodeRadius,
   centerWeight,
+  markHubs,
   IDLE_ALPHA,
   DRAG_ALPHA,
   type FlowForce,
@@ -48,6 +49,9 @@ function makeSim(count = 60) {
     });
   }
 
+  // Mark hubs the way the renderer does, so the links take the same spoke /
+  // hub-hub / note-note paths a real vault does.
+  markHubs(nodes);
   const sim = createSimulation(DEFAULT_SETTINGS).alphaTarget(IDLE_ALPHA);
   sim.nodes(nodes);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

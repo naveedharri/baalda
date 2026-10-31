@@ -28,7 +28,7 @@ export function SyncPausedBannerView({
   const show = pause != null && dismissed !== pause.since;
   const remaining = pause ? syncPauseRemaining(pause, now) : null;
   return (
-    <Banner show={show} className="not-syncing-banner" role="status">
+    <Banner show={show} className="not-syncing-banner" role="status" tone="action">
       {pause && (
         <span>
           <strong>{syncPauseText(pause)}</strong>. Your edits are safe on this device and

@@ -191,7 +191,18 @@ export function TipAnchor({ content, children }: { content: TipContent; children
   const tip = useAnchoredTip<HTMLSpanElement>();
   return (
     <>
-      <span ref={tip.ref} className="skills-tip-anchor" {...tip.handlers}>
+      {/* A press opens the button's own menu: the hover tip steps aside rather
+          than covering it, and its focus-show is ignored while that menu is up. */}
+      <span
+        ref={tip.ref}
+        className="skills-tip-anchor"
+        {...tip.handlers}
+        onFocus={(e) => {
+          if (!tip.ref.current?.querySelector('[aria-expanded="true"]')) tip.handlers.onFocus();
+          void e;
+        }}
+        onPointerDownCapture={tip.handlers.onMouseLeave}
+      >
         {children}
       </span>
       {tip.hover && <TipCard anchor={tip.ref.current} content={content} />}

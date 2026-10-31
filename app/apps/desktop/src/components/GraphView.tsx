@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Simulation, ForceLink } from "d3-force";
 import type { Graph } from "../lib/graph/buildGraph";
+import { beginBloom, bloomStep, seedByCluster, type BloomJob } from "../lib/graph/formation";
+import { saveLayout, takeLayout } from "../lib/graph/prelayout";
 import {
   createSimulation,
   configureForces,
   nodeRadius,
+  markHubs,
   centerWeight,
   layoutScale,
   IDLE_ALPHA,
@@ -25,6 +28,27 @@ import { useGraphData } from "../lib/graph/useGraphData";
 import { WebGLGraphRenderer, type RenderNode } from "../lib/graph/webglRenderer";
 import { SimClient } from "../lib/graph/simClient";
 import { graphDebugEnabled } from "../lib/graph/graphDebug";
+import {
+  GLOBE_MIN_NODES,
+  GLOBE_SPIN,
+  clampPitch,
+  faceRotation,
+  facing,
+  frameOf,
+  toSphere,
+  yawToward,
+  type GlobeFrame,
+  type GlobeRotation,
+  type SpherePoint,
+} from "../lib/graph/globe";
+import {
+  CURVE_SEGMENTS,
+  curvePull,
+  templateLayout,
+  writeCurve,
+  type TemplateShape,
+} from "../lib/graph/templates";
+import type { GraphShape } from "../lib/graph/graphSettings";
 import { useStore } from "../store";
 import { GraphControls } from "./GraphControls";
 import { Spinner } from "./Spinner";
@@ -47,62 +71,32 @@ const LABEL_FADE_END = 2.4; // camera.k at which labels are fully opaque (labelS
 const DEFAULT_FONT_FAMILY = "sans-serif";
 const FALLBACK_ACCENT = "#7f73ff";
 
-// The graph opens IN MOTION, but never out of shape, and the motion is never the
-// physics. Three attempts got here:
-//   - It used to seed positions, kick every node and animate the whole layout
-//     finding its shape on screen. That reads as the view detonating and
-//     reassembling itself, every time you press ⌘G on a graph you already know.
-//   - Then it settled the layout fully before the first frame — and arrived as a
-//     photograph. A converged force layout is motionless (the forces cancel), so
-//     it stayed a photograph until you grabbed a node and woke the sim up.
-//   - Then it stopped the settle early so the tail end played out live. That is
-//     motion, but it is the WRONG motion: a force layout doing real work at a
-//     working alpha buzzes, because d3 integrates with a plain explicit step and
-//     a stiff spring system overshoots.
-// So the layout is settled before the first paint, the physics is kept at a
-// whisper (IDLE_ALPHA / DRAG_ALPHA), and every bit of movement you see comes
-// from the flow field in simulation.ts — one smooth velocity field the whole
-// graph floats in. Alive on frame one, alive at rest, and laminar throughout.
+// How the graph opens (redesign): every note starts where its cluster will be
+// (seedByCluster in lib/graph/formation.ts), and the forces then bloom the
+// clusters open live on screen, one tick per frame (beginBloom / bloomStep), the
+// way force-graph and Obsidian do it. The bloom ends once the notes have stopped
+// moving, after which the physics rests at a whisper (IDLE_ALPHA / DRAG_ALPHA)
+// and the flow field in simulation.ts carries the gentle resting drift.
 // Must match the `graph-heartbeat` keyframes duration in graph.css — the CSS
 // drives the scale pulse, this drives the light pulse, and they have to peak
 // together or the graph reads as two effects rather than one heartbeat.
 const INTRO_MS = 1150;
 
-// ---- The entrance heartbeat -------------------------------------------------
-// The graph arrives with more current in it than it will keep, pulsing on a slow
-// beat, and comes down to its resting drift over the better part of half a
-// minute. A single short burst reads as a loading animation finishing; a long
-// exponential settle reads as something calming down, which is the difference
-// between "it played its intro" and "it's alive".
-//
-// BEAT_PERIOD_S is the same 1.15s as INTRO_MS, so the extra motion, the CSS
-// scale pulse and the glow all swell on the same beat rather than three times
-// out of step.
-const BEAT_PERIOD_S = INTRO_MS / 1000;
-// Peak multiplier on the resting drift speed at t = 0.
-const INTRO_GAIN = 5;
-// e-folding time of the decay: strong for a few seconds, clearly settling by
-// ten, indistinguishable from rest by the time INTRO_SECONDS is up.
-const INTRO_TAU_S = 6;
-const INTRO_SECONDS = 26;
 
-// Time budget for settling the layout before the first paint. This blocks the
-// UI thread, so it is a budget and not a tick count: small vaults converge in
-// well under it, and a big one stops early.
-// ~650 ticks is full convergence at alphaDecay 0.0103 (see simulation.ts);
-// PRESETTLE_TARGET_ALPHA is reached in ~315, so a normal vault arrives settled
-// well inside the budget.
-const PRESETTLE_BUDGET_MS = 420;
-const PRESETTLE_MAX_TICKS = 700;
-// Low enough that the layout is done moving on its own by the first frame. The
-// entrance is the flow's job now, not the settle's.
-const PRESETTLE_TARGET_ALPHA = 0.04;
+const CAMERA_EASE = 0.08;
+// Opening from a ready layout: how long the notes take to grow into place, and
+// how close to the middle they start.
+const ASSEMBLE_MS = 900;
+const ASSEMBLE_FROM = 0.35;
 
 // Below this alpha the layout is done moving into place, so the auto-fit camera
 // locks — a couple of seconds after open, or immediately after a refresh. Without the lock the ambient drift keeps nudging the
 // bounding box and the whole viewport breathes its zoom by a percent or two,
 // which reads as the picture wobbling rather than the nodes drifting.
 const FIT_LOCK_ALPHA = 0.02;
+// Redesign: below this the layout's motion is invisible, so the graph rests
+// (no ticks, no frames) until something wakes it.
+const REST_ALPHA = 0.025;
 
 // How hard a *data refresh* re-energizes the layout. The first build needs real
 // energy to find a shape from seeded positions; later rebuilds already have a
@@ -117,15 +111,76 @@ const REHEAT_REFRESH = 0.1;
 // quadrature by the shader (see webglRenderer's VERT), so it is a lift for the
 // leaves rather than a ceiling everything piles up against.
 const MIN_NODE_PX = 2.1;
-// Baseline strength of the additive halo around each node, before the
-// node-count falloff applied at draw time.
-const GLOW_BASE = 1.3;
+
+// Largest a node is DRAWN, in world units. The physics radius (MAX_RADIUS in
+// simulation.ts) also sets collision clearance and the repulsion range, so it
+// stays large to keep clusters apart; only the painted disc is capped.
+const DRAW_MAX_RADIUS = 40;
+// Hubs (the notes the others connect to) are drawn this much bigger than their
+// physics radius alone would make them, so each starburst has an obvious centre.
+// Collision clearance (simulation.ts) already leaves this much room around them.
+const HUB_DRAW_BOOST = 2.6;
+function drawRadius(n: SimNode): number {
+  const r = Math.min(n.radius, DRAW_MAX_RADIUS);
+  return n.hub ? r * HUB_DRAW_BOOST : r;
+}
 
 // Fallback cap for the global scope on the 2D canvas, which only stays smooth
 // up to a few hundred nodes. The GPU (WebGL) renderer draws the whole vault, so
 // this cap only applies when WebGL is unavailable.
 const GLOBAL_2D_CAP = 600;
 const WEBGL_ENABLED = true;
+
+/**
+ * Redesign: the graph's backdrop and edge colours follow the page theme (warm
+ * charcoal in dark, cream in light), cached per theme so a frame never reads
+ * computed styles.
+ */
+type GraphTheme = Parameters<WebGLGraphRenderer["setTheme"]>[0];
+let graphThemeCache: { key: string; value: GraphTheme } | null = null;
+function graphTheme(): GraphTheme {
+  const key = document.documentElement.dataset.theme ?? "light";
+  if (graphThemeCache?.key === key) return graphThemeCache.value;
+  const dark = key === "dark";
+  const value: GraphTheme = dark
+    ? {
+        core: [0.106, 0.1, 0.094], // #1b1a18
+        mid: [0.09, 0.086, 0.078],
+        rim: [0.071, 0.067, 0.062],
+        line: [1, 0.97, 0.925, 0.3],
+        hl: [0.65, 0.59, 1, 0.85],
+      }
+    : {
+        core: [1, 1, 1],
+        mid: [0.992, 0.984, 0.969],
+        rim: [0.976, 0.965, 0.945],
+        line: [0.043, 0.039, 0.063, 0.38],
+        hl: [0.486, 0.361, 1, 0.75],
+      };
+  graphThemeCache = { key, value };
+  return value;
+}
+
+// Links thin out as their number grows. Every line at one fixed opacity piles
+// up: a few hundred read as crisp threads, ten thousand as a grey haze that
+// hides where one cluster ends and the next begins. √ falloff from
+// EDGE_DENSITY_REF links, floored so a huge vault keeps visible connections.
+const EDGE_DENSITY_REF = 800;
+const EDGE_DENSITY_FLOOR = 0.5;
+function edgeDensityScale(edges: number): number {
+  return Math.max(EDGE_DENSITY_FLOOR, Math.min(1, Math.sqrt(EDGE_DENSITY_REF / Math.max(1, edges))));
+}
+let densityThemeCache: { base: GraphTheme; edges: number; value: GraphTheme } | null = null;
+function themeForEdges(edges: number): GraphTheme {
+  const base = graphTheme();
+  if (densityThemeCache?.base === base && densityThemeCache.edges === edges) {
+    return densityThemeCache.value;
+  }
+  const [r, g, b, a] = base.line!;
+  const value = { ...base, line: [r, g, b, a * edgeDensityScale(edges)] as typeof base.line };
+  densityThemeCache = { base, edges, value };
+  return value;
+}
 
 // Above this node count, the global graph runs its force layout in a Web Worker
 // (see simWorker.ts) so a huge vault (50k+) can settle without freezing the UI
@@ -135,47 +190,11 @@ const WEBGL_ENABLED = true;
 const WORKER_THRESHOLD = 8000;
 
 
-// Matte-sphere lighting. A single soft key light from the upper-left, tilted
-// toward the viewer, is baked once into grayscale alpha sprites (makeShadeSprites)
-// and stamped over each flat-colored disc. That gives real diffuse volume — no
-// glossy specular hotspot, no per-node gradient cost — so nodes read as lit
-// objects with depth instead of flat stickers.
-const LIGHT = (() => {
-  const x = -0.5;
-  const y = -0.62;
-  const z = 0.6;
-  const len = Math.hypot(x, y, z);
-  return { x: x / len, y: y / len, z: z / len };
-})();
 const SPRITE_SIZE = 256; // resolution of the baked shading / shadow / glow sprites
 
 // Edges are quiet connective threads (source-over), not the old additive bloom
 // that washed the whole field into a purple haze.
-const EDGE_REST = "rgba(128,146,196,1)";
 
-function smoothstep(edge0: number, edge1: number, x: number): number {
-  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
-  return t * t * (3 - 2 * t);
-}
-
-/**
- * Advance the force layout synchronously, before anything is drawn, so the
- * graph's first frame is already essentially its final shape — the user never
- * watches it assemble from a seed spiral.
- *
- * It runs to PRESETTLE_TARGET_ALPHA rather than all the way to alphaMin purely
- * to bound the cost; by that point the layout has stopped visibly moving.
- *
- * `sim.tick(n)` is d3's own batch form — it advances the layout without
- * dispatching tick events, which is exactly what a pre-settle wants (our
- * renderer drives painting from its own rAF loop and must not run yet).
- *
- * Ticks are taken in small batches so the elapsed-time check is cheap relative
- * to the work: `performance.now()` per tick would measure the clock as much as
- * the physics. When the budget runs out we stop and leave the layout where it
- * is — alpha is monotonically decreasing, so an early exit just means a little
- * more of the settle happens on screen.
- */
 /**
  * The heartbeat envelope, 0 at rest and peaking on each beat. Two Gaussian bumps
  * at the same instants as the `graph-heartbeat` keyframes: a strong one at 16%
@@ -191,46 +210,49 @@ function heartbeatEnvelope(t: number): number {
   return Math.min(1, bump(0.16, 0.075) + 0.55 * bump(0.4, 0.06));
 }
 
-/**
- * Where we are in the current beat, 0..1, for a clock in seconds. Feeding this
- * to `heartbeatEnvelope` gives a continuous pulse train rather than the single
- * beat the original one-shot intro played.
- */
-function beatPhase(seconds: number): number {
-  return (seconds % BEAT_PERIOD_S) / BEAT_PERIOD_S;
+
+// Hubs that carry an always-on name tag: the most-linked notes, so each
+// starburst is named the way a map names its cities.
+const HUB_LABEL_MAX = 24;
+
+/** Rebuild the hub name tags in `layer`; positions are set per frame. */
+function syncHubLabels(
+  layer: HTMLDivElement | null,
+  nodes: SimNode[],
+  colorById: Map<string, string>,
+): { node: SimNode; el: HTMLDivElement; w: number; h: number }[] {
+  if (!layer) return [];
+  layer.replaceChildren();
+  const hubs = nodes
+    .filter((n) => n.hub)
+    .sort((a, b) => b.linkCount - a.linkCount)
+    .slice(0, HUB_LABEL_MAX);
+  return hubs.map((node) => {
+    const el = document.createElement("div");
+    el.className = "graph-hub-label";
+    el.textContent = node.title;
+    el.style.setProperty("--hub-color", colorById.get(node.id) ?? "var(--accent)");
+    layer.appendChild(el);
+    return { node, el, w: 0, h: 0 };
+  }).map((label) => {
+    // Measured once per rebuild; the per-frame pass only moves them.
+    label.w = label.el.offsetWidth;
+    label.h = label.el.offsetHeight;
+    return label;
+  });
 }
 
-/**
- * Strength of the entrance, 0 at rest and 1 at the instant the data lands. The
- * decay is exponential — it fades fastest when it is strongest, which is what
- * makes the calming-down read as natural rather than as a timer running out.
- */
-function introStrength(seconds: number): number {
-  if (seconds < 0 || seconds >= INTRO_SECONDS) return 0;
-  return Math.exp(-seconds / INTRO_TAU_S);
+type Box = { x0: number; x1: number; y0: number; y1: number };
+
+function boxesOverlap(a: Box, b: Box): boolean {
+  return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
 }
 
-/**
- * Multiplier on the resting drift speed: extra current on arrival, pulsing on
- * the beat, easing down to exactly 1. The floor term (0.45) is what keeps the
- * graph moving *between* beats — a pure pulse train would freeze in the gaps.
- */
-function introEnergy(seconds: number): number {
-  const s = introStrength(seconds);
-  if (s <= 0) return 1;
-  const beat = heartbeatEnvelope(beatPhase(seconds));
-  return 1 + INTRO_GAIN * s * (0.45 + 0.55 * beat);
-}
-
-function presettle(sim: Simulation<SimNode, SimLink>): void {
-  const deadline = performance.now() + PRESETTLE_BUDGET_MS;
-  const BATCH = 20;
-  let ticks = 0;
-  while (ticks < PRESETTLE_MAX_TICKS && sim.alpha() > PRESETTLE_TARGET_ALPHA) {
-    sim.tick(BATCH);
-    ticks += BATCH;
-    if (performance.now() >= deadline) break;
-  }
+/** Screen box of a hover tag (centred under its node, `top: y + 10`). */
+function tipBox(x: number, y: number, title: string, main: boolean): Box {
+  const w = Math.min(220, title.length * (main ? 7 : 6.4) + (main ? 18 : 14));
+  const h = main ? 22 : 19;
+  return { x0: x - w / 2 - 2, x1: x + w / 2 + 2, y0: y + 10, y1: y + 10 + h };
 }
 
 /** Parse "#rgb"/"#rrggbb" or "rgb()/rgba()" into [r,g,b] 0–255; grey on failure. */
@@ -255,54 +277,6 @@ function parseColor(c: string): [number, number, number] {
   return [150, 150, 160];
 }
 
-/**
- * Bake diffuse sphere lighting into two grayscale alpha sprites: `light` (white,
- * the lit cap) and `shadow` (black, the shadowed side plus a rim of ambient
- * occlusion). Stamping a flat disc → shadow → light turns any color into a matte
- * 3D sphere, independent of the node's own hue, for one drawImage each.
- */
-function makeShadeSprites(size: number): {
-  light: HTMLCanvasElement;
-  shadow: HTMLCanvasElement;
-} {
-  const light = document.createElement("canvas");
-  const shadow = document.createElement("canvas");
-  light.width = light.height = shadow.width = shadow.height = size;
-  const lg = light.getContext("2d")!;
-  const sg = shadow.getContext("2d")!;
-  const li = lg.createImageData(size, size);
-  const si = sg.createImageData(size, size);
-  const R = size / 2;
-  const mid = 0.12; // diffuse level treated as neutral (neither lit nor shadowed)
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const idx = (y * size + x) * 4;
-      const nx = (x + 0.5 - R) / R;
-      const ny = (y + 0.5 - R) / R;
-      const r2 = nx * nx + ny * ny;
-      if (r2 >= 1) continue; // outside the sphere → transparent (buffer is zeroed)
-      const nz = Math.sqrt(1 - r2);
-      const diff = nx * LIGHT.x + ny * LIGHT.y + nz * LIGHT.z; // Lambert term
-      const rn = Math.sqrt(r2);
-      const edgeAA = clamp((1 - rn) * R, 0, 1); // ~1px feather at the circumference
-      // Lit cap: matte, so modest and capped, and eased off at the very rim so
-      // there is no bright specular edge.
-      const la =
-        clamp(diff - mid, 0, 1) * 0.5 * (1 - smoothstep(0.6, 1, rn) * 0.7) * edgeAA;
-      // Shadow side + a ring of ambient occlusion that seats the sphere.
-      const occ = smoothstep(0.66, 1, rn) * 0.5;
-      const sa = clamp(clamp(mid - diff, 0, 1) * 0.9 + occ, 0, 0.92) * edgeAA;
-      li.data[idx] = 255;
-      li.data[idx + 1] = 255;
-      li.data[idx + 2] = 255;
-      li.data[idx + 3] = Math.round(la * 255);
-      si.data[idx + 3] = Math.round(sa * 255); // RGB already 0 → pure black
-    }
-  }
-  lg.putImageData(li, 0, 0);
-  sg.putImageData(si, 0, 0);
-  return { light, shadow };
-}
 
 /** A soft radial sprite (used for contact shadows and ambient glow). */
 function makeRadialSprite(
@@ -329,7 +303,9 @@ function makeRadialSprite(
 }
 
 type Drag =
-  | { type: "pan"; lastX: number; lastY: number; moved: boolean }
+  // On the globe a press never grabs a note: dragging spins the globe, and
+  // `pick` is the note under the press, opened if the press turns out a click.
+  | { type: "pan"; lastX: number; lastY: number; moved: boolean; pick?: SimNode | null }
   | {
       type: "node";
       node: SimNode;
@@ -337,6 +313,21 @@ type Drag =
       startY: number;
       moved: boolean;
     };
+
+/** A note's place on the globe this frame: screen-world position and depth. */
+type Placed = SimNode & { gx?: number; gy?: number; gz?: number };
+
+/** Switching shape glides every note from where it was to where it goes. */
+const MORPH_MS = 850;
+
+/** A note this far round the edge is turned to face you before it opens. */
+const GLOBE_FACE_TO_OPEN = 0.55;
+/** Spin rests this long after the last touch before turning again. */
+const GLOBE_SPIN_REST_MS = 3500;
+/** Radians of turn per pixel dragged. */
+const GLOBE_DRAG_TURN = 0.006;
+/** The sphere is drawn at this share of the flat layout's radius. */
+const GLOBE_SCALE = 0.92;
 
 interface Camera {
   x: number;
@@ -369,8 +360,9 @@ function readColors(el: Element): Colors {
     // Labels sit on the always-dark void, so they use fixed light-on-dark tones
     // (not theme text vars, which are dark in light mode → invisible). Resting
     // labels stay muted; the open/hover label brightens to full.
-    label: "rgba(205, 210, 224, 0.6)",
-    labelActive: "#f2f4fb",
+    // Redesign: the canvas follows the theme now (cream in light), so labels do too.
+    label: document.documentElement.dataset.theme === "dark" ? "rgba(231, 226, 217, 0.55)" : "rgba(26, 25, 32, 0.55)",
+    labelActive: document.documentElement.dataset.theme === "dark" ? "#f3eee6" : "#1a1920",
   };
 }
 
@@ -380,7 +372,27 @@ function readColors(el: Element): Colors {
  * golden-angle spiral near the origin (never all stacked at 0,0, which would
  * blow up the repulsion force on the first tick).
  */
-function buildSimNodes(graph: Graph, previous: Map<string, SimNode>): SimNode[] {
+function buildSimNodes(
+  graph: Graph,
+  previous: Map<string, SimNode>,
+  seededEdges: number,
+): { nodes: SimNode[]; reseeded: boolean } {
+  const built = buildSimNodesRaw(graph, previous);
+  markHubs(built);
+  // Reseed when most of the graph is new, not only on the very first build:
+  // the vault index often lands in stages (an empty or partial first answer,
+  // then the rest), and notes arriving after the seed used to be dropped on
+  // the old spiral with no cluster, settling into a cloud instead of flowers.
+  const arrived = built.reduce((c, n) => c + (previous.has(n.id) ? 0 : 1), 0);
+  // Same for links: notes can land before their links do, and a seed with no
+  // links has no hubs to gather around.
+  const linksArrived = graph.edges.length > seededEdges * 2 + 10;
+  const reseeded = arrived > built.length * 0.5 || linksArrived;
+  if (reseeded) seedByCluster(built, graph);
+  return { nodes: built, reseeded };
+}
+
+function buildSimNodesRaw(graph: Graph, previous: Map<string, SimNode>): SimNode[] {
   const n = Math.max(graph.nodes.length, 1);
   const spread = 60 + Math.sqrt(n) * 40;
   const maxDegree = graph.nodes.reduce((m, node) => Math.max(m, node.linkCount), 0);
@@ -461,6 +473,7 @@ function neighborhoodIds(graph: Graph, startId: string, depth: number): Set<stri
 
 export function GraphView({ onClose }: { onClose: () => void }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const hubLayerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // Separate GPU canvas for the global scope (a canvas can hold only one context
   // type, so WebGL gets its own; the 2D canvas keeps the local view).
@@ -476,7 +489,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
   const [diag, setDiag] = useState("");
   // Hover tooltip for the WebGL global view: the hovered note's name + position
   // (canvas-local px). Set only when the hovered node changes.
-  const [hoverTip, setHoverTip] = useState<{ title: string; x: number; y: number } | null>(null);
+  // Hover: the hovered note's name plus one tag per linked note, at each
+  // node's screen position (canvas-local px). Set only when the hovered node changes.
+  const [hoverTips, setHoverTips] = useState<
+    { id: string; title: string; x: number; y: number; main: boolean }[]
+  >([]);
   // Bounded self-heal: the graph can mount before the vault is fully open and
   // come back empty; retry a few times so it fills in instead of getting stuck.
   const emptyRetriesRef = useRef(0);
@@ -515,6 +532,20 @@ export function GraphView({ onClose }: { onClose: () => void }) {
   }
 
   const graphRef = useRef<Graph | null>(null);
+  const vaultPath = useStore((st) => st.vault?.path ?? null);
+  const vaultPathRef = useRef(vaultPath);
+  vaultPathRef.current = vaultPath;
+  // Closing keeps this layout, so the next open is the same shape at once.
+  useEffect(
+    () => () => {
+      const g = graphRef.current;
+      const nodes = S.visNodes;
+      if (!vaultPathRef.current || !g || S.bloom || S.assemble || settingsRef.current.scope !== "global") return;
+      saveLayout(vaultPathRef.current, g, settingsRef.current, nodes);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   // Mutable, non-reactive state driving the canvas.
   const S = useRef({
@@ -530,11 +561,34 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // One-shot: has the 2D canvas been wiped since the GPU renderer took over?
     cleared2d: false,
     colorById: new Map<string, string>(),
+    hubLabels: [] as { node: SimNode; el: HTMLDivElement; w: number; h: number }[],
     camera: { x: 0, y: 0, k: 1 } as Camera,
     hoveredId: null as string | null,
     drag: null as Drag | null,
     rafId: null as number | null,
     needsDraw: true,
+    restFrames: 0,
+    bloom: null as BloomJob | null,
+    // Opening from a background layout: notes grow from near the middle to
+    // their finished spots (positions are final; only the view animates in).
+    assemble: null as { t0: number; nodes: SimNode[]; to: Float32Array } | null,
+    cameraFitted: false,
+    // Bumped whenever note positions change (a sim tick, a worker frame, the
+    // assemble step). Per-frame caches compare against it, so a spinning globe
+    // or a resting template reuses work instead of redoing it every frame.
+    layoutRev: 0,
+    lastSpinDraw: 0,
+    // The camera re-frames until this time after a shape switch, even at rest.
+    fitUntil: 0,
+    // The shape drawn last frame; a change starts a morph from where notes were.
+    view: "flat" as GraphShape,
+    morph: null as { t0: number; from: Float32Array; nodes: SimNode[] } | null,
+    // Radial / Ring positions for the current visible set (they never move).
+    template: null as
+      | { shape: TemplateShape; nodes: SimNode[]; pos: Float32Array; group: Int32Array; r: number; index: Map<SimNode, number> }
+      | null,
+    seededEdges: 0,
+    idleTimer: 0,
     // Large global graphs offload the force sim to a Web Worker so the UI thread
     // never blocks. `useWorker` is set per-rebuild; `workerActive` mirrors the
     // worker's "still settling" state (drives redraws); `workerGen` drops stale
@@ -557,6 +611,16 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       labelActive: "#f2f4fb",
     } as Colors,
     fontFamily: DEFAULT_FONT_FAMILY,
+    // Globe view: rotation, an eased turn toward a note, the smoothed frame the
+    // flat layout is unfolded in, and when the person last touched it.
+    globe: {
+      rot: { yaw: 0.35, pitch: -0.22 } as GlobeRotation,
+      target: null as GlobeRotation | null,
+      frame: null as GlobeFrame | null,
+      lastTouch: 0,
+      lastT: 0,
+      on: false,
+    },
   }).current;
 
   // Set by the canvas effect once it defines the real draw scheduler. Starts as
@@ -581,6 +645,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           const vn = S.visNodes;
           if (buf.length !== vn.length * 2) return; // set changed under us
           for (let i = 0; i < vn.length; i++) {
+            S.layoutRev++;
             vn[i].x = buf[i * 2];
             vn[i].y = buf[i * 2 + 1];
           }
@@ -615,7 +680,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     if (!sim || !g) return;
     const s = settingsRef.current;
 
-    const all = buildSimNodes(g, S.nodesById);
+    const { nodes: all, reseeded } = buildSimNodes(g, S.nodesById, S.seededEdges);
+    if (reseeded) S.seededEdges = g.edges.length;
     S.nodesById = new Map(all.map((n) => [n.id, n]));
 
     // Local scope: draw only the open note's neighborhood (a handful of nodes,
@@ -672,18 +738,35 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     const first = !S.introKicked;
     sim.alpha(first ? REHEAT_FIRST : Math.max(sim.alpha(), REHEAT_REFRESH));
 
-    // First time real data lands: settle the layout NOW, off-screen, so the
-    // first painted frame is the finished shape. The intro clock then drives a
-    // fade + hairline scale only — the graph does not move.
-    //
-    // Not done for the worker path: that exists precisely because ticking a
-    // 8k+ node layout on this thread would freeze the window, and blocking here
-    // would be the same freeze by another name. The worker settles it off-thread
-    // instead (see `worker.init(..., first)` below).
-    if (first && visNodes.length > 0) {
+    // When real data lands (or most of it arrives late and was reseeded), the
+    // seed already holds the cluster skeleton: a short warm-up takes out the
+    // first jolt, then the loop blooms it live, one tick per frame. Not for the
+    // worker path (8k+ notes), which settles off-thread instead (see
+    // `worker.init(..., first)` below).
+    if ((first || reseeded) && visNodes.length > 0) {
       const willUseWorker =
         !openNode && workerRef.current !== null && visNodes.length > WORKER_THRESHOLD;
-      if (!willUseWorker) presettle(sim);
+      const ready =
+        !willUseWorker && !openNode && vaultPathRef.current
+          ? takeLayout(vaultPathRef.current, g, s)
+          : null;
+      const covered = ready ? visNodes.filter((n) => ready.has(n.id)).length : 0;
+      if (ready && covered >= visNodes.length * 0.95) {
+        // The background layout is finished: open straight into it.
+        const to = new Float32Array(visNodes.length * 2);
+        visNodes.forEach((n, i) => {
+          const p = ready.get(n.id);
+          if (p) { n.x = p.x; n.y = p.y; }
+          n.vx = n.vy = 0;
+          to[i * 2] = n.x;
+          to[i * 2 + 1] = n.y;
+        });
+        sim.alpha(IDLE_ALPHA);
+        S.bloom = null;
+        S.assemble = { t0: performance.now(), nodes: visNodes, to };
+      } else if (!willUseWorker) {
+        S.bloom = beginBloom(sim, S.bloom);
+      }
       S.introKicked = true;
       S.introStart = performance.now();
     }
@@ -737,6 +820,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     const accent = S.colors.accent || FALLBACK_ACCENT;
     const { colorById, legend: lg } = assignColors(visNodes, s.colorMode, accent);
     S.colorById = colorById;
+    S.hubLabels = syncHubLabels(hubLayerRef.current, visNodes, colorById);
     setLegend(lg);
     setCounts({ nodes: visNodes.length, edges: links.length, total: g.nodes.length });
 
@@ -793,6 +877,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // Visual-only (nodeSize / edgeThickness / labelScale / colorMode / search):
       // no reheat — just recolor if needed and repaint one frame.
       if (keys.includes("colorMode")) recolorRef.current();
+      if (keys.includes("shape")) {
+        S.globe.frame = null;
+        S.fitUntil = performance.now() + MORPH_MS + 150;
+        S.cameraFitted = true;
+      }
       requestDrawRef.current();
     },
     [rebuild],
@@ -863,7 +952,6 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const sim = simRef.current!;
-    const flow = sim.force("flow") as FlowForce;
 
     // GPU renderer for the global scope (best-effort; if WebGL2 is unavailable
     // we simply never switch to it). Its own canvas — a canvas can hold only one
@@ -881,9 +969,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     }
     webglOkRef.current = webgl !== null;
 
-    // Baked lighting sprites (color-independent) + a tiny color-parse cache so
-    // the per-frame draw stays allocation-free even with continuous animation.
-    const shade = makeShadeSprites(SPRITE_SIZE);
+    // A tiny color-parse cache so the per-frame draw stays allocation-free.
+    // (Redesign: the baked gloss sprites are no longer drawn.)
     const shadowSprite = makeRadialSprite(
       SPRITE_SIZE,
       [4, 5, 11],
@@ -947,6 +1034,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         accent,
       );
       S.colorById = colorById;
+      S.hubLabels = syncHubLabels(hubLayerRef.current, S.visNodes, colorById);
       setLegend(lg);
     }
     recolorRef.current = recolor;
@@ -963,14 +1051,6 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       attributeFilter: ["data-theme"],
     });
 
-    // Seconds since this graph's data landed — the entrance clock, shared by the
-    // extra drift, the glow swell and the CSS pulse. Clamped to the end of the
-    // entrance when there isn't one, so callers never see a non-finite phase.
-    const introSeconds = () =>
-      S.introStart > 0
-        ? (performance.now() - S.introStart) / 1000
-        : INTRO_SECONDS;
-
     function screenToWorld(sx: number, sy: number) {
       return {
         x: (sx - width / 2 - S.camera.x) / S.camera.k,
@@ -983,17 +1063,232 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const nodeScale = settingsRef.current.nodeSize;
       let best: SimNode | null = null;
       let bestDist = Infinity;
+      const onGlobe = S.globe.on;
       for (const node of S.visNodes) {
-        const dx = node.x - wx;
-        const dy = node.y - wy;
+        const p = node as Placed;
+        // The far side of the globe is out of reach: spin to it instead.
+        if (onGlobe && (p.gz ?? 1) < 0) continue;
+        const dx = (p.gx ?? node.x) - wx;
+        const dy = (p.gy ?? node.y) - wy;
         const d = Math.sqrt(dx * dx + dy * dy);
-        const hitRadius = node.radius * nodeScale + 4 / S.camera.k;
+        const hitRadius = drawRadius(node) * nodeScale + 4 / S.camera.k;
         if (d <= hitRadius && d < bestDist) {
           best = node;
           bestDist = d;
         }
       }
       return best;
+    }
+
+    // ---- Globe ----
+    const reducedMotion =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    /** The shape to draw: the chosen one, or Flat where it cannot apply. */
+    function viewWanted(): GraphShape {
+      const s = settingsRef.current;
+      if (s.scope !== "global" || webgl == null) return "flat";
+      if (s.shape === "globe" && S.visNodes.length < GLOBE_MIN_NODES) return "flat";
+      return s.shape ?? "globe";
+    }
+
+    function morphing(): boolean {
+      return S.morph != null && performance.now() - S.morph.t0 < MORPH_MS;
+    }
+
+    /** Radial / Ring: fixed spots from folder and link count, computed once per set. */
+    function placeTemplate(shape: TemplateShape) {
+      const nodes = S.visNodes;
+      let t = S.template;
+      if (!t || t.shape !== shape || t.nodes !== nodes) {
+        const L = templateLayout(nodes, shape);
+        t = { shape, nodes, ...L, index: new Map(nodes.map((n, i) => [n, i])) };
+        S.template = t;
+      }
+      for (let i = 0; i < nodes.length; i++) {
+        const p = nodes[i] as Placed;
+        p.gx = t.pos[i * 2];
+        p.gy = t.pos[i * 2 + 1];
+        p.gz = 1;
+      }
+    }
+
+    function placeFlat() {
+      for (const n of S.visNodes) {
+        const p = n as Placed;
+        p.gx = n.x;
+        p.gy = n.y;
+        p.gz = 1;
+      }
+    }
+
+    /** Capture where every note is drawn now, as the start of a morph. */
+    function startMorph() {
+      const nodes = S.visNodes;
+      const from = new Float32Array(nodes.length * 2);
+      for (let i = 0; i < nodes.length; i++) {
+        const p = nodes[i] as Placed;
+        from[i * 2] = p.gx ?? p.x;
+        from[i * 2 + 1] = p.gy ?? p.y;
+      }
+      S.morph = { t0: performance.now(), from, nodes };
+    }
+
+    /** Blend this frame's spots with where the morph started. */
+    function applyMorph() {
+      const m = S.morph;
+      if (!m) return;
+      if (m.nodes !== S.visNodes || !morphing()) {
+        S.morph = null;
+        return;
+      }
+      const t = (performance.now() - m.t0) / MORPH_MS;
+      const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      const nodes = S.visNodes;
+      for (let i = 0; i < nodes.length; i++) {
+        const p = nodes[i] as Placed;
+        p.gx = m.from[i * 2] + (p.gx! - m.from[i * 2]) * e;
+        p.gy = m.from[i * 2 + 1] + (p.gy! - m.from[i * 2 + 1]) * e;
+      }
+    }
+
+    /** Where a note is drawn this frame: on the globe, or its flat spot. */
+    function viewPos(n: SimNode): { x: number; y: number; z: number } {
+      const p = n as Placed;
+      if (p.gx !== undefined) return { x: p.gx, y: p.gy!, z: p.gz ?? 1 };
+      return { x: n.x, y: n.y, z: 1 };
+    }
+
+    /** True while the globe still has motion to show: a turn or the idle spin. */
+    function globeMoving(): boolean {
+      if (!S.globe.on) return false;
+      if (S.globe.target) return true;
+      // Hovering a note holds it still, so its tags stay on the notes they name.
+      return (
+        !reducedMotion &&
+        !S.drag &&
+        S.hoveredId == null &&
+        performance.now() - S.globe.lastTouch > GLOBE_SPIN_REST_MS
+      );
+    }
+
+    let frameXs = new Float32Array(0);
+    let frameYs = new Float32Array(0);
+    const unit: SpherePoint = { x: 0, y: 0, z: 0 };
+    /** Advance the rotation and place every note on the sphere for this frame. */
+    function placeOnGlobe() {
+      const g = S.globe;
+      const nodes = S.visNodes;
+      const now = performance.now();
+      const dt = g.lastT ? Math.min(0.1, (now - g.lastT) / 1000) : 0;
+      g.lastT = now;
+      if (g.target) {
+        g.rot.yaw += (g.target.yaw - g.rot.yaw) * 0.14;
+        g.rot.pitch += (g.target.pitch - g.rot.pitch) * 0.14;
+        if (Math.abs(g.target.yaw - g.rot.yaw) + Math.abs(g.target.pitch - g.rot.pitch) < 0.002) {
+          g.target = null;
+        }
+      } else if (globeMoving()) {
+        g.rot.yaw += GLOBE_SPIN * dt;
+      }
+      // Unfolding onto the sphere is the costly part (several trig calls per
+      // note) and depends only on positions and the frame, so it is cached and
+      // a plain spin only re-rotates.
+      const cache = sphereCache;
+      const fresh =
+        cache.nodes === nodes && cache.rev === S.layoutRev && g.frame != null && cache.frame === g.frame;
+      if (!fresh) unfoldOntoSphere(nodes);
+      const fr = g.frame!;
+      const R = fr.r * GLOBE_SCALE;
+      const cyw = Math.cos(g.rot.yaw);
+      const syw = Math.sin(g.rot.yaw);
+      const cp = Math.cos(g.rot.pitch);
+      const sp = Math.sin(g.rot.pitch);
+      const ux = cache.x;
+      const uy = cache.y;
+      const uz = cache.z;
+      for (let i = 0; i < nodes.length; i++) {
+        const x = ux[i] * cyw + uz[i] * syw;
+        const z1 = -ux[i] * syw + uz[i] * cyw;
+        const p = nodes[i] as Placed;
+        p.gx = fr.cx + x * R;
+        p.gy = fr.cy + (uy[i] * cp - z1 * sp) * R;
+        p.gz = uy[i] * sp + z1 * cp;
+      }
+    }
+
+    const sphereCache = {
+      nodes: null as SimNode[] | null,
+      rev: -1,
+      frame: null as GlobeFrame | null,
+      x: new Float32Array(0),
+      y: new Float32Array(0),
+      z: new Float32Array(0),
+    };
+    /** Recompute the frame (smoothed) and every note's unrotated sphere point. */
+    function unfoldOntoSphere(nodes: SimNode[]) {
+      const g = S.globe;
+      // The frame is the finished shape while it assembles, so the notes gather
+      // from the front of the globe out over its whole surface. At rest it is
+      // smoothed, so the gentle drift cannot make the globe breathe.
+      let f: GlobeFrame;
+      if (S.assemble) {
+        const to = S.assemble.to;
+        const xs = new Float32Array(to.length / 2);
+        const ys = new Float32Array(to.length / 2);
+        for (let i = 0; i < xs.length; i++) {
+          xs[i] = to[i * 2];
+          ys[i] = to[i * 2 + 1];
+        }
+        f = frameOf(xs, ys, xs.length);
+      } else {
+        if (frameXs.length < nodes.length) {
+          frameXs = new Float32Array(nodes.length);
+          frameYs = new Float32Array(nodes.length);
+        }
+        for (let i = 0; i < nodes.length; i++) {
+          frameXs[i] = nodes[i].x;
+          frameYs[i] = nodes[i].y;
+        }
+        f = frameOf(frameXs, frameYs, nodes.length);
+      }
+      if (!g.frame || S.assemble) g.frame = f;
+      else {
+        // Ease toward the new frame, and land on it once close: an endless
+        // asymptote would count as a change every frame and defeat the cache.
+        const fr = g.frame;
+        const d = Math.abs(f.cx - fr.cx) + Math.abs(f.cy - fr.cy) + Math.abs(f.r - fr.r);
+        if (d < 0.5) g.frame = f;
+        else g.frame = { cx: fr.cx + (f.cx - fr.cx) * 0.05, cy: fr.cy + (f.cy - fr.cy) * 0.05, r: fr.r + (f.r - fr.r) * 0.05 };
+      }
+      const fr = g.frame;
+      const c = sphereCache;
+      if (c.x.length !== nodes.length) {
+        c.x = new Float32Array(nodes.length);
+        c.y = new Float32Array(nodes.length);
+        c.z = new Float32Array(nodes.length);
+      }
+      for (let i = 0; i < nodes.length; i++) {
+        toSphere(nodes[i].x, nodes[i].y, fr, unit);
+        c.x[i] = unit.x;
+        c.y[i] = unit.y;
+        c.z[i] = unit.z;
+      }
+      c.nodes = nodes;
+      c.rev = S.layoutRev;
+      c.frame = fr;
+    }
+
+    /** Turn the globe so this note faces the viewer. */
+    function turnToFace(n: SimNode) {
+      const fr = S.globe.frame;
+      if (!fr) return;
+      const target = faceRotation(toSphere(n.x, n.y, fr, { x: 0, y: 0, z: 0 }));
+      target.yaw = yawToward(S.globe.rot.yaw, target.yaw);
+      S.globe.target = target;
+      S.globe.lastTouch = performance.now();
+      requestDraw();
     }
 
     // ---- Drawing ----
@@ -1056,10 +1351,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // ---- Edges: quiet connective threads (source-over, batched) ----
       ctx!.globalCompositeOperation = "source-over";
       const edgeWidth = s.edgeThickness / k;
-      ctx!.strokeStyle = EDGE_REST;
+      {
+        const L = graphTheme().line!;
+        ctx!.strokeStyle = `rgb(${Math.round(L[0] * 255)},${Math.round(L[1] * 255)},${Math.round(L[2] * 255)})`;
+      }
       // Matched to the GPU path's edge alpha so the WebGL-unavailable fallback
       // doesn't look like a different, dimmer product.
-      ctx!.globalAlpha = hovered ? 0.05 : 0.18 * (0.5 + 0.5 * introEase);
+      ctx!.globalAlpha =
+        (hovered ? 0.3 : 1) * graphTheme().line![3] * edgeDensityScale(S.visEdges.length) * (0.5 + 0.5 * introEase);
       ctx!.lineWidth = edgeWidth;
       ctx!.beginPath();
       for (const e of S.visEdges) {
@@ -1091,7 +1390,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       for (const node of drawNodes) {
         if (!matches(node)) continue;
         const dimmed = hovered != null && !neighbors.has(node.id);
-        const base = node.radius * nodeScale;
+        const base = drawRadius(node) * nodeScale;
         ctx!.globalAlpha = dimmed ? 0.12 : 0.4;
         stamp(shadowSprite, node.x + base * 0.16, node.y + base * 0.5, base * 2.3);
       }
@@ -1102,7 +1401,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         const node = drawNodes[i];
         if (!matches(node)) continue;
         if (hovered != null && !neighbors.has(node.id)) continue;
-        const base = node.radius * nodeScale;
+        const base = drawRadius(node) * nodeScale;
         const breathe = 0.82 + 0.18 * Math.sin(time * 0.8 + i * 0.7);
         ctx!.globalAlpha = clamp(0.15 * glowBoost * breathe, 0, 0.7);
         stamp(glowSprite, node.x, node.y, base * 3);
@@ -1117,33 +1416,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         const dimBySearch = !matches(node);
         const dimmed = dimByHover || dimBySearch;
 
-        const base = node.radius * nodeScale;
-        const r = isHovered ? base * 1.32 : base;
+        const base = drawRadius(node) * nodeScale;
+        const r = isHovered ? base * 1.3 : base;
         const color = isOpen
           ? colors.accent
           : S.colorById.get(node.id) ?? colors.nodeFallback;
 
         // A colored bloom for the open note / hovered orb — a little extra life.
-        if ((isOpen || isHovered) && !dimBySearch) {
-          const [cr, cg, cb] = getRgb(color);
-          const gg = ctx!.createRadialGradient(
-            node.x,
-            node.y,
-            0,
-            node.x,
-            node.y,
-            r * 3,
-          );
-          gg.addColorStop(0, `rgba(${cr},${cg},${cb},0.55)`);
-          gg.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
-          ctx!.globalCompositeOperation = "lighter";
-          ctx!.globalAlpha = 1;
-          ctx!.fillStyle = gg;
-          ctx!.beginPath();
-          ctx!.arc(node.x, node.y, r * 3, 0, Math.PI * 2);
-          ctx!.fill();
-          ctx!.globalCompositeOperation = "source-over";
-        }
 
         // Flat base disc, then the baked shadow + light sprites stamp matte
         // volume onto it. globalAlpha carries into the sprites, so a dimmed orb
@@ -1153,9 +1432,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         ctx!.beginPath();
         ctx!.arc(node.x, node.y, r, 0, Math.PI * 2);
         ctx!.fill();
-        const d = r * 2;
-        ctx!.drawImage(shade.shadow, node.x - r, node.y - r, d, d);
-        ctx!.drawImage(shade.light, node.x - r, node.y - r, d, d);
+        // Redesign: flat matte discs (the baked gloss sprites are skipped).
 
         // The open note gets an accent ring so it's findable at a glance.
         if (isOpen) {
@@ -1168,9 +1445,10 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         }
 
         // Labels: fade in with zoom, always shown on hover and for the open note.
-        const wantLabel = isHovered || isOpen || zoomLabelAlpha > 0.01;
+        const isLinked = hovered != null && !isHovered && neighbors.has(node.id);
+        const wantLabel = isHovered || isOpen || isLinked || zoomLabelAlpha > 0.01;
         if (wantLabel) {
-          let alpha = isHovered || isOpen ? 1 : zoomLabelAlpha;
+          let alpha = isHovered || isOpen ? 1 : isLinked ? 0.9 : zoomLabelAlpha;
           if (dimBySearch && !isHovered) alpha *= 0.2;
           else if (dimByHover) alpha *= 0.25;
           if (alpha > 0.01) {
@@ -1199,7 +1477,120 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // are POOLED and mutated in place — allocating a few thousand objects plus
     // their color arrays 60 times a second would hand the GC a steady diet for
     // as long as the graph is open.
+    // Screen positions for the hovered note and every note it links to, capped
+    // so a hub with hundreds of links doesn't bury the canvas in text.
+    const HOVER_TIP_CAP = 40;
+    function hoverTipsFor(hit: SimNode) {
+      const cam = S.camera;
+      const w = canvas!.clientWidth;
+      const h = canvas!.clientHeight;
+      const toScreen = (n: SimNode) => {
+        const at = viewPos(n);
+        return { x: w / 2 + cam.x + at.x * cam.k, y: h / 2 + cam.y + at.y * cam.k };
+      };
+      const tips = [{ id: hit.id, title: hit.title, main: true, ...toScreen(hit) }];
+      const taken = [tipBox(tips[0].x, tips[0].y, hit.title, true)];
+      const ids = graphRef.current ? neighborhoodIds(graphRef.current, hit.id, 1) : new Set<string>();
+      // S.indexById is only filled for the worker path, so scan the visible nodes.
+      // Busiest neighbours first, and a tag that would cover one already placed
+      // is skipped: a hub with hundreds of links must not stack its names.
+      const linked = S.visNodes
+        .filter((n) => n.id !== hit.id && ids.has(n.id) && viewPos(n).z >= 0)
+        .sort((a, b) => b.linkCount - a.linkCount);
+      for (const n of linked) {
+        if (tips.length > HOVER_TIP_CAP) break;
+        const pos = toScreen(n);
+        const box = tipBox(pos.x, pos.y, n.title, false);
+        if (taken.some((t) => boxesOverlap(t, box))) continue;
+        taken.push(box);
+        tips.push({ id: n.id, title: n.title, main: false, ...pos });
+      }
+      return tips;
+    }
+
+    // The tags sit at screen positions, so a pan or zoom would leave them
+    // behind; drop them and let the next pointer move hover afresh.
+    function clearHoverTips() {
+      if (S.hoveredId == null) return;
+      S.hoveredId = null;
+      canvas!.classList.remove("is-hovering-node");
+      setHoverTips([]);
+    }
+
+    /**
+     * The sphere itself, on the 2D canvas under the GPU one: a soft lit disc
+     * with a hairline rim, so the notes read as lying on a globe rather than
+     * as a round scatter.
+     */
+    let sphereKey = "";
+    function drawSphere(fr: GlobeFrame, cam: Camera) {
+      const c = ctx!;
+      const R = fr.r * GLOBE_SCALE * cam.k;
+      const cx = width / 2 + cam.x + fr.cx * cam.k;
+      const cy = height / 2 + cam.y + fr.cy * cam.k;
+      const bg = graphTheme().mid ?? [1, 1, 1];
+      const dark = bg[0] * 0.3 + bg[1] * 0.59 + bg[2] * 0.11 < 0.5;
+      // The sphere does not change as the globe turns: repaint only when the
+      // camera, the size, the canvas or the theme does.
+      const key = `${cx.toFixed(1)}|${cy.toFixed(1)}|${R.toFixed(1)}|${width}x${height}@${dpr}|${dark}`;
+      if (key === sphereKey) return;
+      sphereKey = key;
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.clearRect(0, 0, width, height);
+      const g = c.createRadialGradient(cx - R * 0.35, cy - R * 0.4, R * 0.05, cx, cy, R * 1.02);
+      if (dark) {
+        g.addColorStop(0, "rgba(255,255,255,0.07)");
+        g.addColorStop(0.7, "rgba(255,255,255,0.025)");
+        g.addColorStop(1, "rgba(255,255,255,0.01)");
+      } else {
+        g.addColorStop(0, "rgba(255,255,255,0.75)");
+        g.addColorStop(0.7, "rgba(120,100,70,0.04)");
+        g.addColorStop(1, "rgba(90,70,40,0.1)");
+      }
+      c.fillStyle = g;
+      c.beginPath();
+      c.arc(cx, cy, R * 1.02, 0, Math.PI * 2);
+      c.fill();
+      c.lineWidth = 1;
+      c.strokeStyle = dark ? "rgba(255,255,255,0.08)" : "rgba(40,34,28,0.08)";
+      c.stroke();
+    }
+
     const webglNodes: RenderNode[] = [];
+    let depthOrder = new Uint32Array(0);
+    /** Note indices from the far side of the globe to the near side. */
+    // A counting sort into depth buckets: linear, allocation-free, and fine
+    // enough that no two visibly overlapping notes paint in the wrong order.
+    const DEPTH_BUCKETS = 512;
+    const bucketCount = new Uint32Array(DEPTH_BUCKETS + 1);
+    let bucketOf = new Uint16Array(0);
+    function globeOrder(): Uint32Array {
+      const nodes = S.visNodes as Placed[];
+      const n = nodes.length;
+      if (depthOrder.length !== n) {
+        depthOrder = new Uint32Array(n);
+        bucketOf = new Uint16Array(n);
+      }
+      bucketCount.fill(0);
+      for (let i = 0; i < n; i++) {
+        const b = Math.min(DEPTH_BUCKETS - 1, Math.max(0, ((nodes[i].gz! + 1) / 2) * DEPTH_BUCKETS) | 0);
+        bucketOf[i] = b;
+        bucketCount[b + 1]++;
+      }
+      for (let b = 0; b < DEPTH_BUCKETS; b++) bucketCount[b + 1] += bucketCount[b];
+      for (let i = 0; i < n; i++) depthOrder[bucketCount[bucketOf[i]]++] = i;
+      return depthOrder;
+    }
+    const hoverCache = {
+      id: null as string | null,
+      graph: null as Graph | null,
+      set: null as Set<string> | null,
+    };
+    // What the uploaded links were built from; unchanged means skip the rebuild
+    // and the upload (Radial and Ring never move, so they upload once).
+    let edgeKey = "";
+    let highlightKey = "";
+    const curveScratch = new Float32Array(CURVE_SEGMENTS * 4);
     let edgePositions = new Float32Array(0);
     function drawWebGL() {
       if (!webgl || !webglCanvas) return;
@@ -1212,6 +1603,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       if (!S.cleared2d && ctx) {
         ctx.clearRect(0, 0, canvas!.width, canvas!.height);
         S.cleared2d = true;
+        sphereKey = ""; // the sphere was wiped with it
       }
       const fallback = S.colors.nodeFallback;
       const nodeScale = settingsRef.current.nodeSize;
@@ -1226,80 +1618,207 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // Hover: light up the hovered node + its direct neighbors, dim the rest,
       // so you can see a note's connections at a glance.
       const hoveredId = S.hoveredId;
-      const hlSet =
-        hoveredId && graphRef.current
-          ? neighborhoodIds(graphRef.current, hoveredId, 1)
-          : null;
+      // A note's neighbours only change with the hover or the data, never per
+      // frame, so the lookup is kept between frames.
+      if (hoverCache.id !== hoveredId || hoverCache.graph !== graphRef.current) {
+        hoverCache.id = hoveredId;
+        hoverCache.graph = graphRef.current;
+        hoverCache.set =
+          hoveredId && graphRef.current ? neighborhoodIds(graphRef.current, hoveredId, 1) : null;
+      }
+      const hlSet = hoverCache.set;
+      const bg = graphTheme().mid ?? [1, 1, 1];
+      const view = viewWanted();
+      if (view !== S.view) {
+        // Only a change between two drawn frames glides; the first frame just lands.
+        if (S.visNodes.length > 0 && (S.visNodes[0] as Placed).gx !== undefined) startMorph();
+        S.view = view;
+        S.globe.frame = null;
+        // Leaving the globe: wipe its sphere off the 2D canvas underneath.
+        S.cleared2d = false;
+      }
+      const onGlobe = view === "globe";
+      S.globe.on = onGlobe;
+      if (onGlobe) placeOnGlobe();
+      else if (view === "radial" || view === "ring") placeTemplate(view);
+      else placeFlat();
+      applyMorph();
+      // On the globe the far side paints first, so the near side covers it.
+      const order = onGlobe ? globeOrder() : null;
       webglNodes.length = S.visNodes.length;
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (let i = 0; i < S.visNodes.length; i++) {
-        const n = S.visNodes[i];
+      for (let j = 0; j < S.visNodes.length; j++) {
+        const i = order ? order[j] : j;
+        const n = S.visNodes[i] as Placed;
         const c = getRgb(S.colorById.get(n.id) ?? fallback);
-        const dim = hlSet && !hlSet.has(n.id) ? 0.16 : 1;
+        // Facing the viewer: 1 at the front of the globe, 0 at the back.
+        const face = onGlobe ? facing(n.gz!) : 1;
+        const depthFade = onGlobe ? 0.12 + 0.88 * face * face : 1;
+        const dim = (hlSet && !hlSet.has(n.id) ? 0.16 : 1) * depthFade;
         const big =
-          n.id === hoveredId ? 2.4 : hlSet && hlSet.has(n.id) ? 1.8 : 1;
-        let rn = webglNodes[i];
+          n.id === hoveredId ? 1.3 : hlSet && hlSet.has(n.id) ? 1.1 : 1;
+        let rn = webglNodes[j];
         if (!rn) {
           rn = { x: 0, y: 0, r: 0, color: [0, 0, 0] };
-          webglNodes[i] = rn;
+          webglNodes[j] = rn;
         }
-        rn.x = n.x;
-        rn.y = n.y;
-        rn.r = n.radius * nodeScale * countScale * big;
-        rn.color[0] = (c[0] / 255) * dim;
-        rn.color[1] = (c[1] / 255) * dim;
-        rn.color[2] = (c[2] / 255) * dim;
-        if (n.x < minX) minX = n.x;
-        if (n.y < minY) minY = n.y;
-        if (n.x > maxX) maxX = n.x;
-        if (n.y > maxY) maxY = n.y;
+        const px = n.gx!;
+        const py = n.gy!;
+        rn.x = px;
+        rn.y = py;
+        // Hubs skip the crowd shrink so the heavy centres stay heavy-looking.
+        const crowd = n.hub ? 1 : countScale;
+        rn.r = drawRadius(n) * nodeScale * crowd * big * (onGlobe ? 0.5 + 0.65 * face : 1);
+        // Dim toward the canvas, not toward black: on the cream light theme a
+        // plain multiply turned every unrelated note into a black dot.
+        rn.color[0] = (c[0] / 255) * dim + bg[0] * (1 - dim);
+        rn.color[1] = (c[1] / 255) * dim + bg[1] * (1 - dim);
+        rn.color[2] = (c[2] / 255) * dim + bg[2] * (1 - dim);
+        if (px < minX) minX = px;
+        if (py < minY) minY = py;
+        if (px > maxX) maxX = px;
+        if (py > maxY) maxY = py;
       }
       webgl.setNodes(webglNodes);
       // Edges: two world-space vertices per link (source → target), read from
       // the sim nodes forceLink resolved in place.
       const edges = S.visEdges;
-      if (edgePositions.length < edges.length * 4) {
-        edgePositions = new Float32Array(edges.length * 4);
+      const curved = view === "radial" || view === "ring" ? (view as TemplateShape) : null;
+      const per = curved ? CURVE_SEGMENTS * 4 : 4;
+      if (edgePositions.length < edges.length * per) {
+        edgePositions = new Float32Array(edges.length * per);
       }
-      for (let i = 0; i < edges.length; i++) {
-        const src = edges[i].source as SimNode;
-        const tgt = edges[i].target as SimNode;
-        const o = i * 4;
-        edgePositions[o] = src.x;
-        edgePositions[o + 1] = src.y;
-        edgePositions[o + 2] = tgt.x;
-        edgePositions[o + 3] = tgt.y;
+      // On the globe only links on the visible side are drawn; the far side
+      // shows as faded notes alone, which is what reads as a sphere.
+      // Radial and Ring bend each link toward the middle (Ring bundles the
+      // links between folders across it).
+      const moving = morphing() || S.assemble != null;
+      const nextEdgeKey = onGlobe
+        ? `g${S.layoutRev}:${S.globe.rot.yaw}:${S.globe.rot.pitch}:${moving ? performance.now() : 0}`
+        : `${view}${S.layoutRev}:${edges.length}:${moving ? performance.now() : 0}:${curved ? S.template?.pos.length : 0}`;
+      const edgesChanged = nextEdgeKey !== edgeKey || S.needsDraw;
+      edgeKey = nextEdgeKey;
+      let w = 0;
+      const tpl = curved ? S.template : null;
+      for (let i = 0; edgesChanged && i < edges.length; i++) {
+        const src = edges[i].source as Placed;
+        const tgt = edges[i].target as Placed;
+        if (onGlobe && src.gz! + tgt.gz! < 0.1) continue;
+        if (curved && tpl) {
+          const a = tpl.index.get(src);
+          const b = tpl.index.get(tgt);
+          const same = a !== undefined && b !== undefined && tpl.group[a] === tpl.group[b];
+          w = writeCurve(src.gx!, src.gy!, tgt.gx!, tgt.gy!, curvePull(curved, same), edgePositions, w);
+          continue;
+        }
+        edgePositions[w++] = src.gx!;
+        edgePositions[w++] = src.gy!;
+        edgePositions[w++] = tgt.gx!;
+        edgePositions[w++] = tgt.gy!;
       }
-      webgl.setEdges(edgePositions.subarray(0, edges.length * 4));
+      if (edgesChanged) webgl.setEdges(edgePositions.subarray(0, w));
       // Hover: bright rays from the hovered node to each of its neighbors, so
       // connections are traceable even in a huge cloud.
-      if (hoveredId) {
+      const nextHighlightKey = `${hoveredId}|${edgeKey}`;
+      if (nextHighlightKey === highlightKey && !edgesChanged) {
+        // Same hover over the same positions: the uploaded rays still stand.
+      } else if (hoveredId) {
+        highlightKey = nextHighlightKey;
         const hl: number[] = [];
         for (let i = 0; i < edges.length; i++) {
           const s = edges[i].source as SimNode;
           const t = edges[i].target as SimNode;
           if (s.id === hoveredId || t.id === hoveredId) {
-            hl.push(s.x, s.y, t.x, t.y);
+            const a = viewPos(s);
+            const b = viewPos(t);
+            if (a.z < 0 || b.z < 0) continue;
+            if (curved) {
+              writeCurve(a.x, a.y, b.x, b.y, curvePull(curved, false), curveScratch, 0);
+              for (const v of curveScratch) hl.push(v);
+            } else {
+              hl.push(a.x, a.y, b.x, b.y);
+            }
           }
         }
         webgl.setHighlightEdges(new Float32Array(hl));
       } else {
+        highlightKey = nextHighlightKey;
         webgl.setHighlightEdges(new Float32Array(0));
       }
       // One-shot: fit the shared camera to the graph. After that the user's
       // pan/zoom (which mutates S.camera via the 2D handlers) drives the view.
-      if (webglNeedsFitRef.current && webglNodes.length > 0) {
+      const refitting = performance.now() < S.fitUntil;
+      if ((webglNeedsFitRef.current || refitting) && webglNodes.length > 0) {
         // Keep the graph framed as the layout expands during settle; the flag is
         // cleared the moment the user pans/zooms (in the interaction handlers).
+        // While it assembles, frame the finished shape so it grows into view.
+        if (onGlobe && S.globe.frame) {
+          // Frame the whole sphere, not the notes: while it forms the notes
+          // cover only its front, and fitting to them made the globe shrink.
+          const fr = S.globe.frame;
+          const R = fr.r * GLOBE_SCALE;
+          minX = fr.cx - R;
+          maxX = fr.cx + R;
+          minY = fr.cy - R;
+          maxY = fr.cy + R;
+        } else if (curved && S.template) {
+          // The finished shape, so the camera does not chase the glide.
+          const R = S.template.r * 1.14;
+          minX = minY = -R;
+          maxX = maxY = R;
+        } else if (S.assemble) {
+          const to = S.assemble.to;
+          minX = minY = Infinity;
+          maxX = maxY = -Infinity;
+          for (let i = 0; i < to.length; i += 2) {
+            if (to[i] < minX) minX = to[i];
+            if (to[i] > maxX) maxX = to[i];
+            if (to[i + 1] < minY) minY = to[i + 1];
+            if (to[i + 1] > maxY) maxY = to[i + 1];
+          }
+          S.cameraFitted = false;
+        }
         const bw = Math.max(1, maxX - minX);
         const bh = Math.max(1, maxY - minY);
-        S.camera.k = Math.min((width - 80) / bw, (height - 80) / bh);
-        S.camera.x = -((minX + maxX) / 2) * S.camera.k;
-        S.camera.y = -((minY + maxY) / 2) * S.camera.k;
+        // Ease toward the fit rather than snapping: as the clusters bloom the
+        // box grows every frame, and a snap turns that into a jittery zoom.
+        const k = Math.min((width - 80) / bw, (height - 80) / bh);
+        const x = -((minX + maxX) / 2) * k;
+        const y = -((minY + maxY) / 2) * k;
+        const ease = !S.cameraFitted ? 1 : refitting ? 0.12 : CAMERA_EASE;
+        S.camera.k += (k - S.camera.k) * ease;
+        S.camera.x += (x - S.camera.x) * ease;
+        S.camera.y += (y - S.camera.y) * ease;
+        S.cameraFitted = true;
       }
       // Same transform as the 2D path: screen_css = width/2 + cam.x + world·cam.k,
       // then scaled by dpr into the device-pixel drawing buffer.
       const cam = S.camera;
+      if (onGlobe && S.globe.frame && ctx) drawSphere(S.globe.frame, cam);
+      // Hub tags, busiest first; one that would cover a tag already placed (or
+      // a hover tag) is hidden this frame rather than drawn on top of it.
+      const placed: Box[] = [];
+      for (const label of S.hubLabels) {
+        const { node, el } = label;
+        const at = viewPos(node);
+        const sx = width / 2 + cam.x + at.x * cam.k;
+        const sy = height / 2 + cam.y + at.y * cam.k + drawRadius(node) * nodeScale * cam.k + 6;
+        el.style.transform = `translate(${sx}px, ${sy}px) translateX(-50%)`;
+        const box = {
+          x0: sx - label.w / 2,
+          x1: sx + label.w / 2,
+          y0: sy,
+          y1: sy + label.h,
+        };
+        const hidden =
+          (hlSet != null && node.id !== hoveredId) ||
+          // Round the side of the globe a tag would float over nothing.
+          (onGlobe && at.z < 0.35) ||
+          placed.some((b) => boxesOverlap(b, box));
+        if (!hidden) placed.push(box);
+        el.style.opacity = hidden ? "0" : "1";
+      }
+      webgl.setTheme(themeForEdges(S.visEdges.length));
       webgl.draw(
         cam.k * dpr,
         (width / 2 + cam.x) * dpr,
@@ -1318,13 +1837,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // The entrance rides on top: the whole field brightens on each beat and
         // the swell fades out with the extra motion, so the light and the
         // movement are one heartbeat rather than two effects.
-        clamp(
-          GLOW_BASE *
-            (60 / Math.sqrt(Math.max(1, S.visNodes.length))) *
-            (1 + 0.5 * introStrength(introSeconds()) * heartbeatEnvelope(beatPhase(introSeconds()))),
-          0.3,
-          2.2,
-        ),
+        // Redesign: no halos. A calm, matte field reads cleaner and skips a pass.
+        0,
         dpr,
       );
       if (showDiag) diagRef.current =
@@ -1336,6 +1850,23 @@ export function GraphView({ onClose }: { onClose: () => void }) {
 
     // Single frame clock. The loop stays alive the whole time the graph is
     // mounted so the lighting keeps breathing and the scene feels alive at rest.
+    // Ease each note from near the middle to its finished spot; true while running.
+    function stepAssemble(): boolean {
+      S.layoutRev++;
+      const a = S.assemble!;
+      const t = clamp((performance.now() - a.t0) / ASSEMBLE_MS, 0, 1);
+      const e = 1 - Math.pow(1 - t, 4); // fast out, soft landing
+      for (let i = 0; i < a.nodes.length; i++) {
+        const n = a.nodes[i];
+        const k = ASSEMBLE_FROM + (1 - ASSEMBLE_FROM) * e;
+        n.x = a.to[i * 2] * k;
+        n.y = a.to[i * 2 + 1] * k;
+        n.vx = n.vy = 0;
+      }
+      if (t >= 1) S.assemble = null;
+      return t < 1;
+    }
+
     function loop() {
       S.rafId = null;
       const introActive =
@@ -1354,27 +1885,68 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // Only the worker path (8k+ nodes) still settles and stops: perpetually
         // re-uploading an instance buffer that large every frame is exactly the
         // cost the worker exists to avoid.
-        active = true;
-        flow.energy(introEnergy(introSeconds()));
-        sim.tick();
+        // Redesign: let a settled graph rest. Once the layout has cooled to the
+        // idle floor with nothing dragged and the intro over, stop ticking and
+        // repainting; a drag, reheat or hover wakes it (see the idle check below).
+        if (S.bloom && bloomStep(sim, S.bloom)) S.bloom = null;
+        const assembling = S.assemble != null && stepAssemble();
+        const forming = S.bloom != null || assembling;
+        const settled =
+          !forming && !S.drag && !introActive && sim.alpha() <= REST_ALPHA;
+        S.restFrames = settled ? (S.restFrames ?? 0) + 1 : 0;
+        active = S.restFrames < 45;
+        // Resting also ends the camera's auto-fit, or a later wake would re-fit
+        // and nudge the whole view.
+        if (!active) webglNeedsFitRef.current = false;
+        if (active && !assembling) {
+          sim.tick();
+          S.layoutRev++;
+        }
         // Once the layout stops visibly moving into place, stop chasing it with
         // the camera — otherwise the drift breathes the bounding box and the
         // auto-fit turns that into a wobble of the whole view.
-        if (webglNeedsFitRef.current && sim.alpha() <= FIT_LOCK_ALPHA) {
+        if (!forming && webglNeedsFitRef.current && sim.alpha() <= FIT_LOCK_ALPHA) {
           webglNeedsFitRef.current = false;
         }
       }
-      if (settingsRef.current.scope === "global" && webgl) {
+      // The globe keeps turning after the layout rests. That costs drawing only:
+      // the physics stays asleep, so an idle spin never re-runs the layout.
+      const spinning = globeMoving() || morphing();
+      // The idle spin alone is slow enough to draw at 30 fps; anything else
+      // (settling, a turn, a morph, a hover) draws every frame.
+      const idleSpinOnly =
+        spinning && !active && !S.needsDraw && !morphing() && S.globe.target == null;
+      const nowMs = performance.now();
+      const skipFrame = idleSpinOnly && nowMs - S.lastSpinDraw < 30;
+      if (!skipFrame && spinning) S.lastSpinDraw = nowMs;
+      if (skipFrame) {
+        // Nothing to draw this frame.
+      } else if (settingsRef.current.scope === "global" && webgl) {
         // Only rebuild + re-upload + redraw while the layout is moving (or on an
         // explicit request). Once settled the last frame stands, so idle cost is
         // ~zero — this is what keeps the app responsive instead of re-uploading
         // every node every frame forever.
-        if (active || S.needsDraw) drawWebGL();
-      } else {
+        if (active || spinning || S.needsDraw) drawWebGL();
+      } else if (active || S.needsDraw) {
         draw();
       }
       S.needsDraw = false;
-      S.rafId = requestAnimationFrame(loop);
+      if (!spinning) S.globe.lastT = 0;
+      if (active || spinning) {
+        S.rafId = requestAnimationFrame(loop);
+      } else {
+        // Resting: no frames at all. A cheap check four times a second notices
+        // a reheat (data refresh, rearrange) that didn't come with a draw request.
+        window.clearTimeout(S.idleTimer);
+        S.idleTimer = window.setTimeout(() => {
+          if (S.rafId == null && (sim.alpha() > REST_ALPHA || S.drag || globeMoving() || morphing())) {
+            S.restFrames = 0;
+            S.rafId = requestAnimationFrame(loop);
+          } else if (S.rafId == null) {
+            loop();
+          }
+        }, 250);
+      }
     }
 
     function requestDraw() {
@@ -1392,6 +1964,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     function handleWheel(e: WheelEvent) {
       e.preventDefault();
       webglNeedsFitRef.current = false; // user is driving the camera now
+      clearHoverTips();
       const rect = canvas!.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
@@ -1410,6 +1983,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const hit = nodeAt(sx, sy);
       canvas!.setPointerCapture(e.pointerId);
       canvas!.classList.add("is-dragging");
+      if (S.view !== "flat") {
+        // A press on the globe spins it, and on Radial / Ring it pans: those
+        // shapes are fixed, so nothing is pinned or pulled.
+        S.globe.target = null;
+        S.globe.lastTouch = performance.now();
+        S.drag = { type: "pan", lastX: e.clientX, lastY: e.clientY, moved: false, pick: hit };
+        return;
+      }
       if (hit) {
         // Pin the grabbed node and keep the sim warm so neighbors react live.
         hit.fx = hit.x;
@@ -1443,8 +2024,15 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           if (dx !== 0 || dy !== 0) {
             drag.moved =
               drag.moved || Math.hypot(dx, dy) > CLICK_DRAG_THRESHOLD;
-            S.camera.x += dx;
-            S.camera.y += dy;
+            if (S.globe.on) {
+              S.globe.rot.yaw += dx * GLOBE_DRAG_TURN;
+              S.globe.rot.pitch = clampPitch(S.globe.rot.pitch - dy * GLOBE_DRAG_TURN);
+              S.globe.lastTouch = performance.now();
+            } else {
+              S.camera.x += dx;
+              S.camera.y += dy;
+            }
+            clearHoverTips();
             drag.lastX = e.clientX;
             drag.lastY = e.clientY;
             requestDraw();
@@ -1480,7 +2068,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         canvas!.classList.toggle("is-hovering-node", hitId != null);
         // Name tooltip near the cursor (canvas-local coords). Only updated on
         // change of hovered node, so mousemove itself stays cheap.
-        setHoverTip(hit ? { title: hit.title, x: sx, y: sy } : null);
+        setHoverTips(hit ? hoverTipsFor(hit) : []);
         requestDraw();
       }
     }
@@ -1489,6 +2077,17 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const drag = S.drag;
       canvas!.classList.remove("is-dragging");
       S.drag = null;
+      if (drag?.type === "pan" && S.view !== "flat") {
+        S.globe.lastTouch = performance.now();
+        const pick = drag.pick;
+        if (!drag.moved && pick) {
+          // On the globe a note round the edge turns to face you first; one in
+          // front (or any note on the other shapes) opens.
+          if (S.globe.on && viewPos(pick).z < GLOBE_FACE_TO_OPEN) turnToFace(pick);
+          else useStore.getState().openNoteByPath(pick.path).then(onClose);
+        }
+        requestDraw();
+      }
       if (drag?.type === "node") {
         // Release the pin either way — a dropped node is handed back to the
         // forces so gravity pulls it toward the center and the whole graph
@@ -1536,6 +2135,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     return () => {
       ro.disconnect();
       themeObserver.disconnect();
+      window.clearTimeout(S.idleTimer);
       if (S.rafId != null) {
         cancelAnimationFrame(S.rafId);
       }
@@ -1570,8 +2170,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     setTimeout(() => setRefreshSpin(false), 700);
   };
 
+  // Only once the self-heal retries are spent: an empty first answer usually
+  // means the index isn't ready yet, and flashing the card then is wrong.
   const showEmpty =
-    !loading && !error && graph != null && counts.nodes === 0;
+    !loading &&
+    !error &&
+    graph != null &&
+    graph.nodes.length === 0 &&
+    emptyRetriesRef.current >= 3;
 
   return (
     <div className="graph-view" ref={wrapRef}>
@@ -1655,6 +2261,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         )}
         {showDiag && WEBGL_ENABLED && settings.scope === "global" && diag && (
           <div
+            className="graph-diag"
             style={{
               position: "absolute",
               bottom: 8,
@@ -1671,29 +2278,44 @@ export function GraphView({ onClose }: { onClose: () => void }) {
             {diag}
           </div>
         )}
-        {settings.scope === "global" && hoverTip && (
-          <div
-            style={{
-              position: "absolute",
-              left: hoverTip.x + 12,
-              top: hoverTip.y + 12,
-              maxWidth: 260,
-              padding: "3px 8px",
-              borderRadius: 6,
-              background: "rgba(18,18,26,0.94)",
-              color: "#fff",
-              font: "12px/1.3 var(--font-body, ui-sans-serif)",
-              border: "1px solid rgba(255,255,255,0.14)",
-              pointerEvents: "none",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              zIndex: 6,
-            }}
-          >
-            {hoverTip.title}
-          </div>
-        )}
+        <div
+          ref={hubLayerRef}
+          aria-hidden="true"
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            overflow: "hidden",
+            zIndex: 5,
+            display: settings.scope === "global" ? "block" : "none",
+          }}
+        />
+        {settings.scope === "global" &&
+          hoverTips.map((t) => (
+            <div
+              key={t.id}
+              style={{
+                position: "absolute",
+                left: t.x,
+                top: t.y + 10,
+                transform: "translateX(-50%)",
+                maxWidth: 220,
+                padding: t.main ? "3px 8px" : "2px 6px",
+                borderRadius: 6,
+                background: t.main ? "rgba(18,18,26,0.94)" : "rgba(18,18,26,0.72)",
+                color: "#fff",
+                font: `${t.main ? 12 : 11}px/1.3 var(--font-body, ui-sans-serif)`,
+                border: "1px solid rgba(255,255,255,0.14)",
+                pointerEvents: "none",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                zIndex: t.main ? 7 : 6,
+              }}
+            >
+              {t.title}
+            </div>
+          ))}
 
         {showControls && (
           <GraphControls
@@ -1706,7 +2328,10 @@ export function GraphView({ onClose }: { onClose: () => void }) {
 
         {loading && (
           <div className="graph-state">
-            <div className="graph-state-card">Loading graph…</div>
+            <div className="graph-state-card graph-loading">
+              <Spinner size="sm" tone="accent" />
+              Loading graph…
+            </div>
           </div>
         )}
         {settling && !loading && (

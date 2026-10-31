@@ -1,3 +1,4 @@
+import { tagColor } from "../../tagColor";
 // `#tag` — inline tags, parsed and drawn as pills.
 //
 // The rule has to agree, character for character, with Rust's `TAG_RE`
@@ -68,7 +69,17 @@ export const ofmHashtag: MarkdownConfig = {
 
 // ---- The pill -------------------------------------------------------------
 
-const pill = Decoration.mark({ class: "cm-hashtag" });
+const pillCache = new Map<string, Decoration>();
+/** Each tag name keeps one colour (redesign preview, `lib/tagColor.ts`). */
+function pillFor(name: string): Decoration {
+  let d = pillCache.get(name);
+  if (!d) {
+    const { bg, fg } = tagColor(name);
+    d = Decoration.mark({ class: "cm-hashtag", attributes: { style: `--tag-bg:${bg};--tag-fg:${fg}` } });
+    pillCache.set(name, d);
+  }
+  return d;
+}
 
 /**
  * Always-on: a tag is a thing you click, not a marker that folds away, so this
@@ -85,7 +96,7 @@ function buildPills(view: EditorView): DecorationSet {
       from,
       to,
       enter: (node) => {
-        if (node.name === "Hashtag") decos.push(pill.range(node.from, node.to));
+        if (node.name === "Hashtag") decos.push(pillFor(view.state.doc.sliceString(node.from, node.to)).range(node.from, node.to));
       },
     });
   }

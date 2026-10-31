@@ -571,7 +571,13 @@ class VaultConnection {
   private readonly helloTimer: ReturnType<typeof setTimeout>;
   // This connection's last-announced presence (which note the user is viewing),
   // kept so we can re-broadcast it when a newcomer asks, and clear it on close.
-  private myPresence: { docId: string | null; name: string; color: string; status: string } | null =
+  private myPresence: {
+    docId: string | null;
+    name: string;
+    color: string;
+    status: string;
+    moment?: string;
+  } | null =
     null;
   /** A presence frame that arrived before auth finished; replayed right after
    *  the pub/sub subscribe so the announce (and the roster query it triggers)
@@ -991,6 +997,7 @@ class VaultConnection {
       name: frame.name,
       color: frame.color,
       status: frame.status,
+      ...(frame.moment ? { moment: frame.moment } : {}),
     };
     void this.pubsub.publish(
       vaultTopic(this.vaultId),

@@ -490,12 +490,26 @@ export function CopyField({
   );
 }
 
-/** A multi-line command block with its copy button in the corner. */
+/**
+ * A multi-line command block: a small header (label + copy) over the commands,
+ * each starting with a `$` prompt; indented lines are continuations of the one
+ * above and get no prompt. The copied text is exactly `value`.
+ */
 function CopyBlock({ value, label }: { value: string; label: string }) {
+  const lines = value.split("\n");
   return (
     <div className="mcp-field mcp-block">
-      <code className="mcp-block-value">{value}</code>
-      <CopyButton value={value} label={label} />
+      <div className="mcp-block-head">
+        <span className="mcp-block-label">Terminal</span>
+        <CopyButton value={value} label={label} />
+      </div>
+      <code className="mcp-block-value">
+        {lines.map((line, i) => (
+          <span key={i} className={`mcp-block-line${/^\s/.test(line) ? " is-cont" : ""}`}>
+            {line.trimStart()}
+          </span>
+        ))}
+      </code>
     </div>
   );
 }

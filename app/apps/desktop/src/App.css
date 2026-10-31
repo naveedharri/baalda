@@ -736,7 +736,7 @@ button.primary.hero:hover:not(:disabled) {
   display: grid;
   /* Width is user-set (see SidebarResizer); the fallback is the default so the
      layout is correct for one paint before React sets the variable. */
-  --sidebar-layout-w: var(--sidebar-w, 264px);
+  --sidebar-layout-w: var(--sidebar-w, 300px);
   grid-template-columns: var(--sidebar-layout-w) minmax(0, 1fr);
   height: 100%;
   background: var(--bg-app);
@@ -6068,15 +6068,27 @@ button.secondary:disabled {
     width var(--t-med) var(--ease),
     margin var(--t-med) var(--ease);
 }
-/* Borrowed from the editor's loading skeleton, at miniature scale and holding
-   still: a shimmer here would say "loading" on a panel that is not loading. */
-.width-preview .skel-line {
-  height: 6px;
-  animation: none;
+/* The column's edges, so the line length reads as a measured span rather than
+   as text that happens to stop. */
+.width-preview-col {
+  align-self: stretch;
+  border-inline: 1px dashed color-mix(in srgb, var(--accent) 35%, transparent);
 }
-.width-preview .skel-title {
-  height: 9px;
-  margin-bottom: var(--sp-1);
+/* Real sample text in the editor's font, scaled with the column (inline
+   font-size), so it wraps exactly where a note would at this width. */
+.width-preview-text {
+  font-family: var(--editor-font-family, var(--font-body));
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+.width-preview-text strong {
+  display: block;
+  margin-bottom: 0.45em;
+  font-size: 1.35em;
+  color: var(--text-primary);
+}
+.width-preview-text p {
+  margin: 0;
 }
 .width-preview-caption {
   text-align: center;

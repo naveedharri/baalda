@@ -20,12 +20,12 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     height: "100%",
     color: "var(--text-primary)",
     backgroundColor: "var(--bg-surface)",
-    fontFamily: "var(--font-body)",
+    fontFamily: "var(--editor-font-family, var(--font-body))",
     fontSize: "var(--editor-font-size, var(--fs-lg))",
   },
   // The prose column: a calm sheet, generous padding, comfortable measure.
   ".cm-scroller": {
-    fontFamily: "var(--font-body)",
+    fontFamily: "var(--editor-font-family, var(--font-body))",
     lineHeight: "var(--lh-body)",
     overflowX: "hidden",
   },
@@ -79,10 +79,19 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // These differ from native selection because this layer sits above the text.
   // (No `::selection` clause: drawSelection blanks the native one with a
   // `Prec.highest` rule of its own, so styling it here would be dead CSS.)
-  "& > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
-    backgroundColor: "var(--editor-selection-bg-inactive)",
+  // The wash itself is drawn by proseSelection (selection.ts), which hugs each
+  // line's text. drawSelection's own block-shaped layer is hidden outright: a
+  // transparent background lost to CodeMirror's focused base rule, which then
+  // painted an opaque block over the text.
+  "& > .cm-scroller > .cm-proseSelectionLayer": {
+    zIndex: "1",
+    pointerEvents: "none",
   },
-  "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
+  "& > .cm-scroller > .cm-proseSelectionLayer .cm-proseSelection": {
+    backgroundColor: "var(--editor-selection-bg-inactive)",
+    borderRadius: "3px",
+  },
+  "&.cm-focused > .cm-scroller > .cm-proseSelectionLayer .cm-proseSelection": {
     backgroundColor: "var(--editor-selection-bg)",
   },
   // drawSelection() paints in a layer BEHIND the content by default, so opaque
@@ -97,8 +106,7 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // (`-1 - position`, i.e. -2), which silently beats a plain theme rule and
   // left selections inside a code block invisible under the well.
   ".cm-selectionLayer": {
-    zIndex: "1 !important",
-    pointerEvents: "none",
+    display: "none",
   },
 
   // Search / highlight matches in soft warning.
@@ -1018,24 +1026,24 @@ export const markdownHighlightSpec = [
     {
       tag: t.heading1,
       fontFamily: "var(--font-display)",
-      fontSize: "1.75em",
-      fontWeight: "700",
+      fontSize: "1.55em",
+      fontWeight: "600",
       lineHeight: "var(--lh-tight)",
       color: "var(--text-primary)",
     },
     {
       tag: t.heading2,
       fontFamily: "var(--font-display)",
-      fontSize: "1.35em",
-      fontWeight: "700",
+      fontSize: "1.3em",
+      fontWeight: "600",
       lineHeight: "var(--lh-tight)",
       color: "var(--text-primary)",
     },
     {
       tag: t.heading3,
       fontFamily: "var(--font-display)",
-      fontSize: "1.12em",
-      fontWeight: "650",
+      fontSize: "1.1em",
+      fontWeight: "600",
       color: "var(--text-primary)",
     },
     {
@@ -1044,7 +1052,7 @@ export const markdownHighlightSpec = [
       fontWeight: "650",
       color: "var(--text-primary)",
     },
-    { tag: t.strong, fontWeight: "700", color: "var(--text-primary)" },
+    { tag: t.strong, fontWeight: "600", color: "var(--text-primary)" },
     { tag: t.emphasis, fontStyle: "italic", color: "var(--text-primary)" },
     { tag: t.strikethrough, textDecoration: "line-through", color: "var(--text-tertiary)" },
     { tag: [t.link, t.url], color: "var(--link)", textDecoration: "underline", textUnderlineOffset: "2px" },

@@ -79,6 +79,7 @@ import {
   type ActivityStatus,
   type EditorMeasure,
   readActivityStatus,
+  readActivityStatusUntil,
   readAppearanceOverrides,
   writeAppearanceOverrides,
   readAutomaticItemColors,
@@ -87,6 +88,10 @@ import {
   readEditorFontSize,
   writeEditorFontSize,
   applyEditorFontSize,
+  readEditorFont,
+  writeEditorFont,
+  applyEditorFont,
+  type EditorFont,
   readLineNumbers,
   readHomeSectionHidden,
   writeHomeSectionHidden,
@@ -597,6 +602,8 @@ interface AppStore {
   editorMeasure: EditorMeasure;
   /** Note editor text size in px (Settings → Appearance). Device-local. */
   editorFontSize: number;
+  /** Personal, device-local note font (lib/prefs.ts EDITOR_FONTS). */
+  editorFont: EditorFont;
   /** Show the editor's line-number gutter. Off by default. */
   lineNumbers: boolean;
   homeSectionHidden: boolean;
@@ -823,11 +830,13 @@ interface AppStore {
   // Account profile & preferences
   /** Update display name / avatar (server-backed; refreshes the session). */
   updateProfile: (input: { name?: string; image?: string | null }) => Promise<void>;
-  setActivityStatus: (status: ActivityStatus) => void;
+  setActivityStatus: (status: ActivityStatus, until?: number | null) => void;
+  activityStatusUntil: number | null;
   setMentionSound: (enabled: boolean) => void;
   setPropertiesMode: (mode: PropertiesMode) => void;
   setEditorMeasure: (measure: EditorMeasure) => void;
   setEditorFontSize: (px: number) => void;
+  setEditorFont: (font: EditorFont) => void;
   setLineNumbers: (on: boolean) => void;
   /** Set (value) or clear back to "inherit" (undefined) one personal override. */
   setAppearanceOverride: <K extends AppearanceKey>(key: K, value: AppearanceSettings[K] | undefined) => void;
@@ -2108,6 +2117,22 @@ async function unsyncLocalTeardown(
   await get().refreshTitles();
 }
 
+/** Clears a timed status ("Out for a smoke · 30 min") when its time is up. */
+let statusClearTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleStatusClear(until: number | null): void {
+  if (statusClearTimer) clearTimeout(statusClearTimer);
+  statusClearTimer = null;
+  if (until === null) return;
+  const wait = Math.max(0, until - Date.now());
+  // setTimeout caps near 24.8 days; a status never runs that long.
+  statusClearTimer = setTimeout(() => {
+    if (useStore.getState().activityStatusUntil === until) useStore.getState().setActivityStatus("online", null);
+  }, Math.min(wait, 2_000_000_000));
+}
+
+// The note font is device-local; publish it before the first editor paints.
+applyEditorFont(readEditorFont());
+
 // W3: the first sync pass of a vault waits for a known vault-key state.
 syncManager.setVaultKeyGate?.(vaultKeysGate);
 syncManager.setEarlyVaultChannelCheck?.(vaultKeysEarlyChannel);
@@ -2240,11 +2265,13 @@ export const useStore = create<AppStore>((set, get) => ({
   orgBilling: null,
   myBilling: null,
   activityStatus: readActivityStatus(),
+  activityStatusUntil: readActivityStatusUntil(),
   mentionSound: readMentionSound(),
   automaticItemColors: readAutomaticItemColors(null),
   propertiesMode: readPropertiesMode(),
   editorMeasure: readEditorMeasure(),
   editorFontSize: readEditorFontSize(),
+  editorFont: readEditorFont(),
   lineNumbers: readLineNumbers(),
   homeSectionHidden: readHomeSectionHidden(),
   setHomeSectionHidden: (hidden) => {
@@ -3710,9 +3737,10 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ session });
   },
 
-  setActivityStatus: (status) => {
-    writeActivityStatus(status);
-    set({ activityStatus: status });
+  setActivityStatus: (status, until = null) => {
+    writeActivityStatus(status, until);
+    set({ activityStatus: status, activityStatusUntil: until });
+    scheduleStatusClear(until);
     // Re-broadcast immediately on any live note presence.
     syncManager.setPresenceStatus(status);
   },
@@ -3737,6 +3765,11 @@ export const useStore = create<AppStore>((set, get) => ({
   setEditorFontSize: (px) => {
     writeEditorFontSize(px);
     get().setAppearanceOverride("textSize", px);
+  },
+  setEditorFont: (font) => {
+    writeEditorFont(font);
+    applyEditorFont(font);
+    set({ editorFont: font });
   },
 
   setLineNumbers: (on) => {
@@ -4077,7 +4110,9 @@ export const useStore = create<AppStore>((set, get) => ({
               : undefined,
         });
       } else {
-        toast(`Couldn't turn on sync: ${errMsg(e)}`, "error");
+        toast(`Couldn't turn on sync: ${errMsg(e)}`, "error", {
+          action: { label: "Retry", run: () => void get().turnOnSyncNow(name) },
+        });
       }
       return false;
     } finally {
@@ -5703,3 +5738,6 @@ useStore.subscribe((state, prev) => {
 
 // Registry pull → store mirror (see `lib/sync/vaultVisibility`).
 vaultVisibility.subscribe((v) => useStore.setState({ vaultVisibility: v }));
+
+// A timed status set before a restart still clears on time.
+scheduleStatusClear(useStore.getState().activityStatusUntil);
