@@ -308,10 +308,6 @@ html:not(.rd-off) .cm-editor .cm-blockquote::before {
 }
 
 /* ==highlight==: a marker stroke under the words. */
-html:not(.rd-off) .cm-editor .cm-highlight,
-html:not(.rd-off) .cm-editor .cm-hl {
-  background: linear-gradient(transparent 55%, rgba(253, 233, 155, 0.9) 55%) !important;
-}
 
 /* - [ ] tasks: a rounded square that fills violet when done. */
 html:not(.rd-off) .cm-editor .cm-task-checkbox {
@@ -350,28 +346,6 @@ html:not(.rd-off) .cm-editor .cm-task-checkbox:checked::after {
 .titlebar-search { display: none !important; }
 
 /* Full-width New note button under the vault card. */
-.rd-new-note {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 40px;
-  margin: 0 var(--sp-3) var(--sp-3);
-  padding: 0 14px;
-  border: 0;
-  border-radius: 12px;
-  background: var(--accent);
-  color: #fff;
-  font: 500 14px var(--font-body);
-  cursor: pointer;
-  box-shadow: 0 8px 18px -8px rgba(124, 92, 255, 0.65);
-  transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
-}
-.rd-new-note svg { width: 16px; height: 16px; }
-.rd-new-note kbd { margin-left: auto; font: 11px var(--font-mono); color: rgba(255, 255, 255, 0.7); }
-.rd-new-note:hover:not(:disabled) { background: var(--accent-hover); box-shadow: 0 10px 22px -8px rgba(124, 92, 255, 0.75); }
-.rd-new-note:active:not(:disabled) { transform: scale(0.98); }
-.rd-new-note:disabled { opacity: 0.5; cursor: default; }
-.rd-new-note:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 /* Rows sit inside the sidebar, not edge to edge. */
 html:not(.rd-off) .sidebar .tree-row,
@@ -437,7 +411,7 @@ html:not(.rd-off) .modal-backdrop {
   button.primary:active:not(:disabled), .ghost-pill:active:not(:disabled), .rd-status-btn:active { transform: scale(0.97); }
 
   /* Menus and popovers open with a soft pop from the trigger. */
-  .context-menu, .account-menu, .vault-popover, .home-sidebar-menu-items, .menu-select-list {
+  .context-menu, .account-menu, .vault-popover, .home-sidebar-menu-items {
     animation: rd-pop 140ms var(--ease) both;
     transform-origin: top left;
   }
@@ -570,8 +544,7 @@ html:not(.rd-off) .vault-switcher .menu-item {
 }
 html:not(.rd-off) .account-popover .menu-hint { font-size: 12px; color: rgba(var(--rd-ink), 0.60); }
 html:not(.rd-off) .account-popover .menu-icon,
-html:not(.rd-off) .settings-nav .menu-icon,
-html:not(.rd-off) .settings-tabs .menu-icon {
+html:not(.rd-off) .settings-nav .menu-icon {
   box-sizing: content-box;
   width: 15px !important;
   height: 15px !important;
@@ -582,16 +555,11 @@ html:not(.rd-off) .settings-tabs .menu-icon {
   background: var(--rd-tint, rgba(124, 92, 255, 0.12));
 }
 /* A pastel per row, cycling through the site's palette. */
-.account-popover > .menu-item:nth-of-type(5n + 1) .menu-icon,
-.settings-tab:nth-of-type(5n + 1) .menu-icon { --rd-tint: var(--rdc-b8caf566, #b8caf566); --rd-icon-ink: var(--rdc-4b68c3, #4b68c3); }
-.account-popover > .menu-item:nth-of-type(5n + 2) .menu-icon,
-.settings-tab:nth-of-type(5n + 2) .menu-icon { --rd-tint: var(--rdc-fde99baa, #fde99baa); --rd-icon-ink: var(--rdc-987e1b, #987e1b); }
-.account-popover > .menu-item:nth-of-type(5n + 3) .menu-icon,
-.settings-tab:nth-of-type(5n + 3) .menu-icon { --rd-tint: var(--rdc-9ed4ef77, #9ed4ef77); --rd-icon-ink: var(--rdc-427e8a, #427e8a); }
-.account-popover > .menu-item:nth-of-type(5n + 4) .menu-icon,
-.settings-tab:nth-of-type(5n + 4) .menu-icon { --rd-tint: var(--rdc-9bd8a966, #9bd8a966); --rd-icon-ink: var(--rdc-3f8850, #3f8850); }
-.account-popover > .menu-item:nth-of-type(5n + 5) .menu-icon,
-.settings-tab:nth-of-type(5n + 5) .menu-icon { --rd-tint: var(--rdc-f3c4ec88, #f3c4ec88); --rd-icon-ink: var(--rdc-a549ab, #a549ab); }
+.account-popover > .menu-item:nth-of-type(5n + 1) .menu-icon { --rd-tint: var(--rdc-b8caf566, #b8caf566); --rd-icon-ink: var(--rdc-4b68c3, #4b68c3); }
+.account-popover > .menu-item:nth-of-type(5n + 2) .menu-icon { --rd-tint: var(--rdc-fde99baa, #fde99baa); --rd-icon-ink: var(--rdc-987e1b, #987e1b); }
+.account-popover > .menu-item:nth-of-type(5n + 3) .menu-icon { --rd-tint: var(--rdc-9ed4ef77, #9ed4ef77); --rd-icon-ink: var(--rdc-427e8a, #427e8a); }
+.account-popover > .menu-item:nth-of-type(5n + 4) .menu-icon { --rd-tint: var(--rdc-9bd8a966, #9bd8a966); --rd-icon-ink: var(--rdc-3f8850, #3f8850); }
+.account-popover > .menu-item:nth-of-type(5n + 5) .menu-icon { --rd-tint: var(--rdc-f3c4ec88, #f3c4ec88); --rd-icon-ink: var(--rdc-a549ab, #a549ab); }
 .account-popover > .menu-item.danger .menu-icon { --rd-tint: var(--rdc-f4c5c066, #f4c5c066); --rd-icon-ink: var(--rdc-bb433a, #bb433a); }
 html:not(.rd-off) .account-popover .menu-sep { margin: 6px 8px; }
 
@@ -694,8 +662,6 @@ html:not(.rd-off) {
 html:not(.rd-off) .cm-editor .cm-line { line-height: var(--lh-body); }
 
 /* Sidebar */
-.rd-new-note { height: 32px; margin: 0 var(--sp-3) var(--sp-2); padding: 0 var(--sp-3); border-radius: var(--radius-md); font-size: var(--fs-md); }
-.rd-new-note svg { width: 14px; height: 14px; }
 html:not(.rd-off) .sidebar-header-id { padding: 8px 10px 8px 8px; border-radius: var(--radius-lg); }
 html:not(.rd-off) .vault-name { font-size: var(--fs-md); }
 html:not(.rd-off) .home-sidebar-row { min-height: 30px; border-radius: var(--radius-md); }
@@ -877,7 +843,6 @@ html:not(.rd-off) .home-sidebar-row,
 html:not(.rd-off) .pinned-name { font-size: var(--fs-sm); }
 html:not(.rd-off) .sidebar .tree-row { height: 30px; }
 html:not(.rd-off) .vault-name { font-size: 13px; }
-html:not(.rd-off) .rd-new-note { font-size: var(--fs-sm); }
 html:not(.rd-off) .identity-line1 { font-size: var(--fs-sm); }
 
 /* ============================================================
@@ -918,20 +883,6 @@ html:not(.rd-off) .settings-content .subhead * { font-family: var(--font-body); 
 /* ---- Vault settings, mockup layout ---- */
 html:not(.rd-off) .settings-page.settings-modal { position: relative; }
 html:not(.rd-off) .settings-body { padding: var(--sp-6) var(--sp-6) var(--sp-6) var(--sp-5); gap: var(--sp-6); }
-.rd-settings-close {
-  position: absolute; top: var(--sp-5); right: var(--sp-5); z-index: 3;
-  width: 34px; height: 34px; display: grid; place-items: center;
-  background: var(--rd-surface) !important; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
-}
-.rd-settings-id { display: flex; align-items: center; gap: var(--sp-3); padding: 0 var(--sp-1) var(--sp-4); }
-.rd-settings-id .vault-tile { width: 40px; height: 40px; border-radius: 11px; flex: none; }
-.rd-settings-id .settings-title h1 { font-size: var(--fs-md); font-weight: 600; }
-.rd-settings-group {
-  padding: var(--sp-3) var(--sp-2) var(--sp-1);
-  font: 500 10px var(--font-mono); letter-spacing: 0.7px; text-transform: uppercase; color: rgba(var(--rd-ink), 0.53);
-}
-.rd-settings-head { margin-bottom: var(--sp-2); padding-right: 48px; }
-.rd-settings-head p { margin: 4px 0 0; font-size: var(--fs-sm); color: var(--text-secondary); }
 html:not(.rd-off) .settings-section-title { margin: 0; }
 
 /* Name and icon card: a large preview on the left, controls on the right. */
@@ -1157,16 +1108,6 @@ html:not(.rd-off) .invite-field-label {
 }
 
 /* Join code: a quiet panel with the code in mono. */
-html:not(.rd-off) .invite-people-code {
-  margin-top: var(--sp-4);
-  padding: 10px var(--sp-3);
-  border: 0 !important;
-  border-radius: var(--radius-md);
-  background: var(--accent-soft);
-  font-size: var(--fs-sm);
-  color: var(--text-secondary);
-}
-html:not(.rd-off) .invite-people-code-value { font-family: var(--font-mono); letter-spacing: 2px; color: var(--rdc-4a2fc7, #4a2fc7); font-weight: 500; }
 
 /* Footer buttons: a quiet Cancel and a solid primary. */
 html:not(.rd-off) .confirm-actions { margin-top: var(--sp-5); gap: var(--sp-2); }
@@ -1266,7 +1207,6 @@ html:not(.rd-off) .vault-icon-option svg > g > g [stroke]:not([stroke="none"]) {
 html:not(.rd-off) .vault-icon-option svg > g > g [fill]:not([fill="none"]) { fill: currentColor !important; }
 html:not(.rd-off) .vault-icon-option .vault-icon-svg,
 html:not(.rd-off) .vault-icon-option svg { width: 22px !important; height: 22px !important; }
-.rd-settings-id .avatar { width: 40px; height: 40px; flex: none; }
 
 /* ============================================================
    Vault settings follows the Account settings Profile page:
@@ -1368,26 +1308,6 @@ html:not(.rd-off) .mcp-token-dialog input { margin-top: var(--sp-3); width: calc
 
 
 /* View-only banner: a slim, quiet pill instead of a full-width yellow block. */
-html:not(.rd-off) .editor-lockbanner {
-  display: inline-flex !important;
-  align-items: center;
-  gap: 10px;
-  width: auto !important;
-  max-width: 100%;
-  padding: 6px 14px 6px 6px !important;
-  background: var(--rd-surface) !important;
-  border: 0 !important;
-  border-radius: 999px !important;
-  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 4px 14px -6px rgba(11, 10, 16, 0.15) !important;
-}
-html:not(.rd-off) .editor-lockbanner-icon {
-  width: 28px !important; height: 28px !important; border-radius: 50% !important;
-  background: var(--rdc-fde99b, #fde99b) !important; color: var(--rdc-987e1b, #987e1b) !important; flex: none;
-}
-html:not(.rd-off) .editor-lockbanner-icon svg { width: 14px !important; height: 14px !important; }
-html:not(.rd-off) .editor-lockbanner-text { display: flex !important; flex-direction: row !important; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-html:not(.rd-off) .editor-lockbanner-text strong { font-size: var(--fs-sm) !important; font-weight: 600; }
-html:not(.rd-off) .editor-lockbanner-sub { font-size: var(--fs-sm) !important; color: var(--text-secondary) !important; }
 
 /* Sidebar back to the old, roomier scale: 14px names, 36px slots. */
 html:not(.rd-off) .sidebar .tree-row,
@@ -1399,8 +1319,6 @@ html:not(.rd-off) .identity-line1 { font-size: var(--fs-md); }
 
 /* ---- Status picker in the account menu ---- */
 .rd-status { padding: 6px 8px 8px; margin-bottom: 4px; border-bottom: 1px solid var(--border); }
-.rd-status-head { display: flex; align-items: baseline; gap: 6px; font-size: var(--fs-sm); font-weight: 500; color: var(--text-primary); padding: 0 2px 6px; }
-.rd-status-head small { color: var(--text-tertiary); font-weight: 400; font-size: var(--fs-xs); }
 .rd-status-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
 .rd-status-btn {
   height: 34px; border: 0; border-radius: var(--radius-sm); background: var(--bg-subtle);
@@ -1466,7 +1384,6 @@ html:not(.rd-off) .rd-prof .avatar { width: 32px !important; height: 32px !impor
 html:not(.rd-off) .rd-prof-text b { font-size: var(--fs-md); }
 html:not(.rd-off) .rd-prof-text small { font-size: var(--fs-xs); }
 .rd-status { padding: 4px 6px 8px; }
-.rd-status-head { font-size: var(--fs-sm); padding-bottom: 6px; }
 .rd-status-row { gap: 3px; }
 .rd-status-btn { height: 28px; border-radius: 7px; }
 .rd-status-btn svg { width: 15px; height: 15px; }
@@ -1519,17 +1436,6 @@ html:not(.rd-off) .vault-switcher .menu-item:nth-last-of-type(-n + 2) .menu-icon
 html:not(.rd-off) .rd-prof { background: var(--bg-app); border-radius: 10px; padding: 8px; margin-bottom: 6px; }
 html:not(.rd-off) .rd-prof .sm-host .avatar, html:not(.rd-off) .rd-prof .avatar { width: 40px !important; height: 40px !important; }
 .rd-status { padding: 0 0 6px; border-bottom: 0; }
-.rd-status-chip {
-  width: 100%; display: flex; align-items: center; gap: 10px; text-align: left;
-  padding: 8px 10px; border: 0; border-radius: 10px; cursor: pointer;
-  background: var(--accent-soft); color: var(--rdc-4a2fc7, #4a2fc7); font: inherit;
-}
-.rd-status-chip svg { width: 17px; height: 17px; flex: none; }
-.rd-status-chip-text { display: flex; flex-direction: column; min-width: 0; }
-.rd-status-chip-text b { font-weight: 500; font-size: var(--fs-md); color: var(--text-primary); }
-.rd-status-chip-text small { font-size: 11.5px; color: var(--text-secondary); }
-.rd-status-chip em { margin-left: auto; font-style: normal; font-size: var(--fs-sm); font-weight: 500; }
-.rd-status-chip:hover { background: var(--accent-soft-hover); }
 .rd-status.is-open .rd-status-row { margin-top: 6px; }
 html:not(.rd-off) .account-popover > .menu-item .menu-icon { background: none !important; color: var(--text-primary) !important; padding: 2px; }
 
@@ -1577,8 +1483,6 @@ html:not(.rd-off) .home-sidebar-row { margin-left: 0 !important; }
 html:not(.rd-off) .account-popover { padding: 6px; }
 html:not(.rd-off) .rd-prof { padding: 8px; gap: 10px; margin: 0 0 6px; }
 .rd-status { padding: 0 0 6px; }
-.rd-status-chip { padding: 8px 10px 8px 8px; gap: 10px; }
-.rd-status-chip svg { width: 40px; height: 18px; }
 html:not(.rd-off) .account-popover > .menu-item { padding: 4px 8px; gap: 10px; min-height: 32px; }
 html:not(.rd-off) .account-popover > .menu-item .menu-icon { width: 16px !important; height: 16px !important; padding: 0 !important; margin: 0 12px; }
 html:not(.rd-off) .account-popover .menu-sep { margin: 4px 8px; }
@@ -1662,20 +1566,9 @@ html:not(.rd-off) .join-code-row .link-btn:hover { background: var(--bg-subtle);
 html:not(.rd-off) .settings-content .subhead .member-access-view-btn { height: 26px; width: 30px; padding: 0; box-shadow: none; background: transparent; display: grid; place-items: center; }
 html:not(.rd-off) .settings-content .subhead .member-access-view-btn.is-active { background: var(--rd-surface); box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.1); }
 html:not(.rd-off) .settings-content .subhead .member-access-view-btn svg { width: 15px; height: 15px; }
-html:not(.rd-off) .rd-settings-close:focus:not(:focus-visible) { outline: none; box-shadow: var(--rd-card-shadow); }
 
 /* View-only banner: reads as a warning. Soft amber, a strong amber edge,
    amber lock, still slim. */
-html:not(.rd-off) .editor-lockbanner {
-  display: flex !important; width: auto !important;
-  padding: 8px 14px 8px 8px !important;
-  background: var(--rdc-fff7e6, #fff7e6) !important;
-  border-radius: 12px !important;
-  box-shadow: inset 0 0 0 1px var(--rdc-f1d79a, #f1d79a), inset 3px 0 0 var(--rdc-e0a21a, #e0a21a) !important;
-}
-html:not(.rd-off) .editor-lockbanner-icon { background: var(--rdc-fde6a8, #fde6a8) !important; color: var(--rdc-8a5a00, #8a5a00) !important; }
-html:not(.rd-off) .editor-lockbanner-text strong { color: var(--rdc-6b4500, #6b4500); }
-html:not(.rd-off) .editor-lockbanner-sub { color: var(--rdc-8a6a2a, #8a6a2a) !important; }
 
 /* ---- View only: floating dark chip + a thin amber page frame ---- */
 /* The amber frame wraps the whole page, drawn as an overlay so nothing clips it. */
@@ -1732,8 +1625,6 @@ html:not(.rd-off) .local-sync-btn:hover:not(:disabled) { background: rgba(124, 9
 
 .rd-viewonly { padding: 8px 8px 8px 16px; gap: 12px; font-size: 13.5px; }
 .rd-viewonly:not(:has(.rd-viewonly-ask)) { padding-right: 16px; }
-.rd-viewonly-dot.is-lock { background: rgba(251, 198, 74, 0.18); color: var(--rdc-fbc64a, #fbc64a); }
-.rd-viewonly-dot.is-lock svg { width: 11px; height: 11px; color: var(--rdc-fbc64a, #fbc64a); }
 /* Centre the chip on the page itself, not on a computed window offset. */
 html:not(.rd-off) .editor-wrap { position: relative; }
 html:not(.rd-off) .editor-wrap .editor-column,
@@ -1791,7 +1682,6 @@ html:not(.rd-off) .sidebar .filetree-scroll .tree-more { transform: translateX(-
 html:not(.rd-off) .sidebar .filetree-scroll .tree-row:hover .tree-sync { opacity: 0; }
 /* Bring the menu hints back, right-aligned and quiet. */
 html:not(.rd-off) .account-popover .menu-hint { display: inline !important; margin-left: auto; font-size: 11.5px; color: rgba(var(--rd-ink), 0.50); }
-.rd-status-chip-text small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Empty status: a quiet field with three one-tap shortcuts. */
 .rd-status-field {
@@ -1872,8 +1762,7 @@ html:not(.rd-off) .skills-shortcut-row {
   width: calc(var(--sidebar-layout-w, 300px) - 54px); box-sizing: border-box;
 }
 html:not(.rd-off) .skills-shortcut-row:hover { background: rgba(var(--rd-ink), 0.04); }
-html:not(.rd-off) .skills-shortcut-row > svg:first-child,
-html:not(.rd-off) .skills-shortcut-row .skills-shortcut-icon {
+html:not(.rd-off) .skills-shortcut-row > svg:first-child {
   width: 20px; height: 20px; padding: 3px; box-sizing: border-box; border-radius: 6px;
   background: var(--rdc-ece6ff, #ece6ff); color: var(--rdc-5b3fd6, #5b3fd6); flex: none;
 }
@@ -2085,7 +1974,6 @@ html:not(.rd-off) .status-options,
 html:not(.rd-off) .about-update-row,
 html:not(.rd-off) .installed-agents-status,
 html:not(.rd-off) .connection-tab > .field,
-html:not(.rd-off) .io-section,
 html:not(.rd-off) .versioning-tab .invite-bar,
 html:not(.rd-off) .perm-empty {
   background: var(--rd-surface); border: 0 !important; border-radius: 14px; padding: 14px 16px; margin: 0;
@@ -2124,7 +2012,6 @@ html:not(.rd-off) .about-tab > .menu-item.danger { align-self: flex-start; paddi
 html:not(.rd-off) .connection-tab > .field { display: flex; flex-direction: column; gap: 8px; }
 html:not(.rd-off) .connection-tab .field-label { font-size: 12.5px; font-weight: 500; color: var(--text-secondary); }
 html:not(.rd-off) .connection-tab input { height: 38px; border-radius: 9px; background: var(--bg-app) !important; border: 0 !important; box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06) !important; padding: 0 12px; }
-html:not(.rd-off) .update-actions { display: flex; justify-content: flex-end; }
 html:not(.rd-off) .mcp-endpoint { display: flex; align-items: center; gap: 12px; }
 html:not(.rd-off) .mcp-section-head { margin-top: 6px; }
 html:not(.rd-off) .perm-empty { color: var(--text-secondary); font-size: 13px; }
@@ -2268,7 +2155,7 @@ html[data-theme="dark"]:not(.rd-off) .vault-tile svg g g :is(path, circle, rect,
   fill: color-mix(in srgb, var(--tile-fill, #cfc4ff) 55%, #fff) !important;
 }
 /* Dark: menus and popovers float one step above the page. */
-html[data-theme="dark"]:not(.rd-off) :is(.account-popover, .vault-popover, .vault-switcher, .context-menu, .home-sidebar-menu-items, .menu-select-list) {
+html[data-theme="dark"]:not(.rd-off) :is(.account-popover, .vault-popover, .vault-switcher, .context-menu, .home-sidebar-menu-items) {
   background: #262421 !important;
   box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.08), 0 18px 40px -14px rgba(0, 0, 0, 0.7) !important;
 }
@@ -2286,12 +2173,11 @@ html[data-theme="dark"]:not(.rd-off) .pinned-row .tree-glyph svg {
 /* Note icons and toolbar icons: a touch brighter so they don't sink. */
 html[data-theme="dark"]:not(.rd-off) .tree-row:not(.is-dir) .tree-glyph { color: #a7a196; }
 html[data-theme="dark"]:not(.rd-off) .tree-row.selected:not(.is-dir) .tree-glyph { color: var(--accent); }
-html[data-theme="dark"]:not(.rd-off) :is(.header-actions, .notes-header, .sidebar-header, .titlebar-tools) .icon-btn { color: #b5afa4; }
-html[data-theme="dark"]:not(.rd-off) :is(.header-actions, .notes-header, .sidebar-header, .titlebar-tools) .icon-btn:hover { color: var(--text-primary); }
+html[data-theme="dark"]:not(.rd-off) :is(.header-actions, .sidebar-header, .titlebar-tools) .icon-btn { color: #b5afa4; }
+html[data-theme="dark"]:not(.rd-off) :is(.header-actions, .sidebar-header, .titlebar-tools) .icon-btn:hover { color: var(--text-primary); }
 /* Home row icon in violet, the way Set a home reads in light. */
 html[data-theme="dark"]:not(.rd-off) .home-sidebar-row svg { color: var(--accent); }
 /* Highlights: a warm marker, not a yellow block. */
-html[data-theme="dark"]:not(.rd-off) .cm-editor .cm-highlight,
 html[data-theme="dark"]:not(.rd-off) .cm-editor mark {
   background: linear-gradient(transparent 55%, rgba(229, 182, 90, 0.32) 55%) !important;
 }
@@ -2299,12 +2185,12 @@ html[data-theme="dark"]:not(.rd-off) .cm-editor mark {
 /* ---- Dark: buttons sit in the room, they don't glow ----
    A deeper, slightly muted violet with soft off-white text and no coloured
    halo; hover lifts one step. Links keep the lighter --accent. */
-html[data-theme="dark"]:not(.rd-off) :is(button.primary, .primary-btn, .upgrade-tier-cta.primary, .local-sync-btn, .rd-new-note, .account-vaults-head-actions button.primary) {
+html[data-theme="dark"]:not(.rd-off) :is(button.primary, .upgrade-tier-cta.primary, .local-sync-btn, .account-vaults-head-actions button.primary) {
   background: #5f50c4 !important;
   color: #ece8ff !important;
   box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.06) inset !important;
 }
-html[data-theme="dark"]:not(.rd-off) :is(button.primary, .primary-btn, .upgrade-tier-cta.primary, .local-sync-btn, .rd-new-note):hover:not(:disabled) {
+html[data-theme="dark"]:not(.rd-off) :is(button.primary, .upgrade-tier-cta.primary, .local-sync-btn):hover:not(:disabled) {
   background: #6b5cd0 !important;
 }
 html[data-theme="dark"]:not(.rd-off) :is(button.primary, .upgrade-tier-cta.primary):disabled {
@@ -2317,8 +2203,6 @@ html[data-theme="dark"]:not(.rd-off) .switch input:checked + span,
 html[data-theme="dark"]:not(.rd-off) .toggle input:checked + .slider,
 html[data-theme="dark"]:not(.rd-off) [role="switch"][aria-checked="true"] { background: #5f50c4 !important; }
 /* Badges / counts in solid violet: same softer tone. */
-html[data-theme="dark"]:not(.rd-off) .notif-badge,
-html[data-theme="dark"]:not(.rd-off) .badge-count { background: #5f50c4 !important; color: #ece8ff !important; }
 html[data-theme="dark"]:not(.rd-off) .upgrade-tier.is-featured {
   box-shadow: 0 0 0 1px rgba(165, 151, 255, 0.45), 0 18px 40px -20px rgba(0, 0, 0, 0.7) !important;
 }
@@ -2674,8 +2558,6 @@ html:not(.rd-off) .banner-slot > .banner .banner-actions button.primary { border
    sidebar's folder colours, "Baalda v0.1.98" with the version in ink-to-violet,
    and each change as a soft row with a folder-colour tile, title and detail. */
 html:not(.rd-off) .modal.whats-new { width: 460px; padding: 26px 24px 22px; border-radius: 24px; text-align: center; }
-html:not(.rd-off) .whats-new-glyph { display: none; }
-html:not(.rd-off) .whats-new-version { display: none; }
 html:not(.rd-off) .whats-new-badge {
   width: 76px; height: 76px; margin: 0 auto 14px; border-radius: 24px; display: grid; place-items: center;
   background: conic-gradient(from 200deg, #7c5cff, #dc5f97, #d9773a, #3f8850, #2f86bf, #7c5cff);
