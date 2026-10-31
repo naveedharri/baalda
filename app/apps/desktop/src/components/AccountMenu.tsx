@@ -3,12 +3,9 @@ import * as ipc from "../lib/ipc";
 import { requestTurnOnSyncAfterAuth, useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
 import { statusTone } from "../lib/presence/color";
-import {
-  loadSeenInvitations,
-  onSeenInvitationsChanged,
-  unseenInvitations,
-} from "../lib/inviteSeen";
-import { InvitationRows, useFreshInvitations } from "./InvitationRows";
+import { loadSeenInvitations, onSeenInvitationsChanged } from "../lib/inviteSeen";
+import { useFreshInvitations } from "./InvitationRows";
+import { InvitationsTab, InviteArrivalNote, invitationCountLabel } from "./InvitationsTab";
 import { LazyAvatar } from "./Face";
 import { StatusMoment } from "./StatusMoment";
 import { StatusPicker } from "./StatusPicker";
@@ -139,6 +136,11 @@ export function AccountMenu() {
   // Any surface that shows the rows (this menu, Account Settings → Vaults)
   // writes the seen set; follow it so the identity dot settles either way.
   useEffect(() => onSeenInvitationsChanged(setSeenInvites), []);
+  // "View all" on the arrival note opens the menu with its Invitations panel out.
+  const [invitesPanelOnOpen, setInvitesPanelOnOpen] = useState(false);
+  useEffect(() => {
+    if (!open) setInvitesPanelOnOpen(false);
+  }, [open]);
   const [authOpen, setAuthOpen] = useState(false);
   // Which full-screen settings dialog shows lives in the store, so opening one
   // closes the other in the same update (`requestSettings` /
@@ -391,8 +393,7 @@ export function AccountMenu() {
   const activeOrg =
     organizations.find((o) => o.id === session.activeOrganizationId) ?? null;
   const userLabel = session.user.name || session.user.email;
-  const hasInvites = userInvitations.length > 0;
-  const hasNewInvites = unseenInvitations(userInvitations, seenInvites).length > 0;
+  const inviteCount = userInvitations.length;
   // Presence light on the avatar. Connectivity gates it first — no-access is
   // blocked, an in-flight socket is idle. Once we're actually live (synced or
   // read-only), the user's *chosen* availability takes over: online → green,
@@ -426,6 +427,16 @@ export function AccountMenu() {
   return (
     <div className="account-menu" ref={rootRef}>
       <LocalVaultSyncRow onTurnOnSync={() => void useStore.getState().turnOnSyncNow()} />
+      <InviteArrivalNote
+        invitations={userInvitations}
+        seen={seenInvites}
+        hidden={open}
+        onViewAll={() => {
+          setInvitesPanelOnOpen(true);
+          if (open) menu.pin();
+          else menu.toggle();
+        }}
+      />
       <div className="identity-row">
         <button
           className={`identity-bar ${open ? "open" : ""}`}
@@ -447,6 +458,11 @@ export function AccountMenu() {
             <LazyAvatar label={userLabel} image={session.user.image} userId={session.user.id} />
             <StatusMoment status={activityStatus} size={34} image={session.user.image} />
             <span className={`presence-light ${presence}`} aria-label={presenceLabel} />
+            {inviteCount > 0 && (
+              <span className="identity-invite-badge" aria-label={invitationCountLabel(inviteCount)}>
+                {inviteCount > 9 ? "9+" : inviteCount}
+              </span>
+            )}
           </span>
           <span className="identity-meta">
             {/* This bar is the profile control — it names its person. The vault's
@@ -455,16 +471,30 @@ export function AccountMenu() {
                 display name, line 1 is already the email, so line 2 falls back to
                 presence rather than repeating it. */}
             <span className="identity-line1">{userLabel}</span>
-            <span className="identity-line2">
-              {session.user.name ? session.user.email : presenceLabel}
-            </span>
+            {/* Pending invitations take line 2 until they are answered: the
+                menu opens on hover, so this is what says one is waiting. */}
+            {inviteCount > 0 ? (
+              <span className="identity-line2 identity-invites">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="3" y="5" width="18" height="14" rx="2" />
+                  <path d="m3 7 9 6 9-6" />
+                </svg>
+                {invitationCountLabel(inviteCount)}
+              </span>
+            ) : (
+              <span className="identity-line2">
+                {session.user.name ? session.user.email : presenceLabel}
+              </span>
+            )}
           </span>
-          {hasInvites && (
-            <span
-              className={`identity-alert${hasNewInvites ? " is-new" : ""}`}
-              aria-label={hasNewInvites ? "New invitation" : "Pending invitation"}
-            />
-          )}
         </button>
         {bugReport && (
           <button
@@ -503,6 +533,7 @@ export function AccountMenu() {
           onPointerLeave={menu.hoverLeave}
           onPin={menu.pin}
           seenInvites={seenInvites}
+          invitesPanelOpen={invitesPanelOnOpen}
           onOpenAccount={() => {
             useStore.getState().requestAccountSettings("profile");
           }}
@@ -596,6 +627,7 @@ function AccountPopover({
   onClose,
   onOpenAccount,
   seenInvites,
+  invitesPanelOpen,
   onPointerEnter,
   onPointerLeave,
   onPin,
@@ -603,6 +635,8 @@ function AccountPopover({
   onClose: () => void;
   onOpenAccount: () => void;
   seenInvites: Set<string>;
+  /** Open with the Invitations panel already out. */
+  invitesPanelOpen: boolean;
   onPointerEnter: () => void;
   onPointerLeave: () => void;
   /** A press or focus inside pins a hover-opened menu, as on the vault switcher. */
@@ -642,9 +676,13 @@ function AccountPopover({
       <StatusPicker />
       {userInvitations.length > 0 && (
         <>
-          {/* Pending invitations as plain menu rows, a hairline above the
-              account rows; no eyebrow, since nothing else here has one. */}
-          <InvitationRows invitations={userInvitations} freshIds={freshIds} variant="menu" />
+          {/* One Invitations row, first in the menu, whose panel opens beside
+              it; a hairline above the account rows. Absent with none pending. */}
+          <InvitationsTab
+            invitations={userInvitations}
+            freshIds={freshIds}
+            defaultOpen={invitesPanelOpen}
+          />
           <div className="menu-sep" />
         </>
       )}

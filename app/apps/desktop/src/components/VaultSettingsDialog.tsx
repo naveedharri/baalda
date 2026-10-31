@@ -467,6 +467,10 @@ function GeneralTab({
 
   return (
     <>
+      {/* Encryption leads the page: it is the setting with the most weight. */}
+      {isSynced && canManage && (
+        <VaultKeySection vaultName={activeOrgName ?? "Vault"} isOwner={isOwner} canManage={canManage} />
+      )}
       {iconIdentity && (
         <>
           {/* One icon per vault. A synced vault's belongs to the org: members see
@@ -545,10 +549,6 @@ function GeneralTab({
           {vault?.path ?? "—"}
         </code>
       </div>
-
-      {isSynced && canManage && (
-        <VaultKeySection vaultName={activeOrgName ?? "Vault"} isOwner={isOwner} canManage={canManage} />
-      )}
 
       {isSynced && isOwner && <UnsyncDangerZone />}
 

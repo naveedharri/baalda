@@ -121,7 +121,7 @@ accountPageRoutes.get("/reset-password", (c) => {
     </form>
     <div id="done" style="display:none">
       <div class="ok">Your password is updated. Opening ${esc(BRAND_NAME)} so you can sign in with it…</div>
-      <a class="btn primary" href="${esc(SIGNIN_DEEP_LINK)}" style="display:block;text-decoration:none">Open ${esc(
+      <a class="btn primary" href="${esc(SIGNIN_DEEP_LINK)}" style="display:flex;text-decoration:none">Open ${esc(
         BRAND_NAME,
       )}</a>
     </div>
@@ -185,7 +185,7 @@ accountPageRoutes.get("/email-verified", (c) => {
       body: `<h1>Email confirmed</h1><p class="sub">Thanks, your address is verified. Taking you back to ${esc(
         BRAND_NAME,
       )}…</p>
-      <a class="btn primary" href="${esc(VERIFIED_DEEP_LINK)}" style="display:block;text-decoration:none">Open ${esc(
+      <a class="btn primary" href="${esc(VERIFIED_DEEP_LINK)}" style="display:flex;text-decoration:none">Open ${esc(
         BRAND_NAME,
       )}</a>
       <script>location.href = ${JSON.stringify(VERIFIED_DEEP_LINK)};</script>`,
@@ -235,7 +235,7 @@ accountPageRoutes.get("/invite/:id", async (c) => {
     <p class="sub"><b>${esc(who)}</b> invited <b>${esc(inv.email)}</b> to this vault${
       inv.role === "admin" ? " as an admin" : ""
     }.</p>
-    <a class="btn primary" href="${esc(deepLink)}" style="display:block;text-decoration:none">Open in ${esc(
+    <a class="btn primary" href="${esc(deepLink)}" style="display:flex;text-decoration:none">Open in ${esc(
       BRAND_NAME,
     )}</a>
     <p class="sub" style="margin-top:18px">Sign in with <b>${esc(
