@@ -7,6 +7,7 @@ import {
   billingErrorMessage,
   discountLine,
   formatBytes,
+  formatMoney,
   invitedVaultAction,
   invitedVaultFallbackToast,
   type InvitedVault,
@@ -304,9 +305,102 @@ export function AccountPlanTab() {
       ]
     : [];
 
+  // ---- Team with seats bought: plan card + seats card side by side ----
+  const twoCards = isTeam && !legacy && seatsBought != null;
+  const iv = account.interval ?? "month";
+  const perSeat = config.team?.prices.find((p) => p.interval === iv)?.perSeat ?? null;
+  const currency = config.team?.currency ?? "usd";
+  const total = perSeat != null && seatsBought != null ? formatMoney(perSeat * seatsBought, currency) : null;
+  const totalSub = [
+    perSeat != null && seatsBought != null
+      ? `${plural(seatsBought, "seat", "seats")} × ${formatMoney(perSeat, currency)}`
+      : null,
+    account.currentPeriodEnd
+      ? `${account.cancelAtPeriodEnd ? "cancels on" : "renews"} ${formatDate(account.currentPeriodEnd)}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const cancelOrResume =
+    account.cancelAtPeriodEnd || account.lapsed ? (
+      <AsyncButton
+        className="secondary"
+        onClick={() => run(() => authManager.api.accountResume(), "Plan resumed.")}
+      >
+        Resume plan
+      </AsyncButton>
+    ) : (
+      <AsyncButton
+        type="button"
+        className="link-btn plan-cancel"
+        onClick={() => {
+          setActionError(null);
+          setConfirmCancel(true);
+        }}
+      >
+        Cancel plan
+      </AsyncButton>
+    );
+
   return (
     <>
-      {/* ---- Plan: one card, summary left, actions right ---- */}
+      {twoCards ? (
+        <div className="plan-cards">
+          <div className="billing-card plan-card">
+            <div className="billing-plan-head">
+              <span className="billing-plan-name">Team</span>
+              {statusPill && <span className={`billing-status ${statusPill.tone}`}>{statusPill.label}</span>}
+            </div>
+            {total ? (
+              <>
+                <div className="plan-total">
+                  {total}
+                  <span> / {iv}</span>
+                </div>
+                {totalSub && <div className="billing-section-note muted">{totalSub}</div>}
+              </>
+            ) : (
+              <div className="billing-section-note">{summary}</div>
+            )}
+            {discount && <div className="plan-discount">{discount}</div>}
+            {account.lapsed && <div className="auth-error">{LAPSED_COPY}</div>}
+            <div className="plan-card-spacer" />
+            {account.canManage ? (
+              <div className="plan-card-actions">
+                <AsyncButton className="secondary" onClick={openPortal}>
+                  Manage billing
+                </AsyncButton>
+                {cancelOrResume}
+              </div>
+            ) : (
+              <div className="billing-section-note">
+                {ownsVaults
+                  ? "Billing is handled by the vault owner."
+                  : "You don't own any vaults; billing is handled by each vault's owner."}
+              </div>
+            )}
+          </div>
+          <div className="billing-card seats-card">
+            <div className="seats-card-head">
+              <span className="seats-card-title">Seats</span>
+              {account.canManage && (
+                <AsyncButton className="plan-ink-btn" onClick={() => setManagingSeats(true)}>
+                  Add seats
+                </AsyncButton>
+              )}
+            </div>
+            <SeatUsageBreakdown
+              layout="ring"
+              seats={account.seats}
+              canManage={account.canManage}
+              showManage={false}
+              onManage={() => setManagingSeats(true)}
+              invitedByVault={account.invitedByVault}
+              onOpenInvitedVault={(v) => void openInvitedVault(v)}
+            />
+          </div>
+        </div>
+      ) : (
       <div className={`billing-card${isTeam ? " plan-pro" : ""}`}>
         <div className="plan-page-head">
           <div className="plan-page-summary">
@@ -386,6 +480,7 @@ export function AccountPlanTab() {
           </div>
         )}
       </div>
+      )}
       {actionError && !confirmCancel && <div className="auth-error">{actionError}</div>}
 
       {/* ---- Usage on this account ---- */}
