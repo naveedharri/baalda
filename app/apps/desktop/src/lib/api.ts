@@ -1725,11 +1725,15 @@ export class ApiClient {
   }
 
   async listVaultKeyRequests(vaultId: string): Promise<VaultKeyRequest[]> {
-    const { data } = await this.request<VaultKeyRequest[]>(
+    // The server answers `{ requests: [...] }`. Reading only a bare array made
+    // this list always empty, so no key holder ever shared a vault key with a
+    // new member (they stayed "waiting for a teammate" forever).
+    const { data } = await this.request<VaultKeyRequest[] | { requests?: VaultKeyRequest[] }>(
       "GET",
       `/api/vaults/${encodeURIComponent(vaultId)}/keys/requests`,
     );
-    return Array.isArray(data) ? data : [];
+    const list = Array.isArray(data) ? data : data?.requests;
+    return Array.isArray(list) ? list : [];
   }
 
   /** `vkBase64` proves we hold the key; sent only as `X-Baalda-VK`. */
@@ -1824,8 +1828,14 @@ export class ApiClient {
   }
 
   async listPendingDevices(): Promise<PendingDevice[]> {
-    const { data } = await this.request<PendingDevice[]>("GET", "/api/me/devices/pending");
-    return Array.isArray(data) ? data : [];
+    // `{ devices: [...] }` on the wire (same trap as `listVaultKeyRequests`):
+    // a bare-array read meant no computer ever saw a new one waiting to be approved.
+    const { data } = await this.request<PendingDevice[] | { devices?: PendingDevice[] }>(
+      "GET",
+      "/api/me/devices/pending",
+    );
+    const list = Array.isArray(data) ? data : data?.devices;
+    return Array.isArray(list) ? list : [];
   }
 
   /** The approval for this device, or null while none exists (404). */
