@@ -49,13 +49,20 @@ describe("Invite people dialog", () => {
     await act(async () => root.render(createElement(InvitePeopleDialog, { orgId: "org-1", onClose: vi.fn(), onInvited: vi.fn() })));
     const fields = [...document.body.querySelectorAll(".invite-field")];
     expect(fields.map((f) => f.querySelector(".invite-field-label")?.textContent)).toEqual(["Role", "Access"]);
-    expect(fields[1].querySelector(".invite-field-trigger")?.textContent).toContain("Default for new members");
-    expect(document.body.querySelector(".invite-people-code-value")?.textContent).toBe("2TG7KNEA");
+    expect(fields[1].querySelector(".invite-field-trigger")?.textContent).toContain("Vault default");
     expect(send().textContent).toBe("Send invite");
     expect(send().disabled).toBe(true);
     await type("maya@team.com, jo@team.com ");
     expect(document.body.querySelectorAll(".invite-chip")).toHaveLength(2);
-    expect(send().textContent).toBe("Send invites");
+    expect(send().textContent).toBe("Send 2 invites");
     expect(send().disabled).toBe(false);
+  });
+
+  it("shows the join code on its own tab", async () => {
+    await act(async () => root.render(createElement(InvitePeopleDialog, { orgId: "org-1", onClose: vi.fn(), onInvited: vi.fn() })));
+    const codeTab = [...document.body.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Join code")!;
+    await act(async () => codeTab.click());
+    expect(document.body.querySelector(".invite-code-tiles")?.getAttribute("aria-label")).toBe("Join code 2TG7KNEA");
+    expect(document.body.querySelector('input[aria-label="Email addresses"]')).toBeNull();
   });
 });

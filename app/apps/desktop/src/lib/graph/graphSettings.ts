@@ -5,6 +5,12 @@
 // Settings persist to localStorage under SETTINGS_STORAGE_KEY so a user's tuned
 // physics/visual preferences survive app restarts.
 
+/**
+ * How the whole graph is shaped: wrapped on a sphere, laid flat, folders as
+ * slices of a disc, or every note on one ring.
+ */
+export type GraphShape = "globe" | "flat" | "radial" | "ring";
+
 /** How node fill colors are derived. */
 export type ColorMode = "folder" | "degree" | "uniform";
 
@@ -45,6 +51,8 @@ export interface GraphSettings {
   labelScale: number;
   /** Node fill color strategy. */
   colorMode: ColorMode;
+  /** Globe is the default; a globe of a small vault draws flat. */
+  shape: GraphShape;
 
   // ---- Filter ----
   /** Case-insensitive title substring; non-matches are dimmed (empty = no filter). */
@@ -55,24 +63,24 @@ export interface GraphSettings {
   hideOrphans: boolean;
 }
 
-// Tuned by hand against a real ~3.4k-note vault rather than derived: long links
-// with a soft spring and light gravity let the hubs separate into distinct
-// clusters instead of packing into one ball, and small nodes with `minDegree: 1`
-// keep the field readable at that size. These are the values the graph is
-// actually designed to look right at, so they are the defaults.
+// The values the redesign's starburst layout is designed to look right at
+// (tuned by eye on a 5k-note vault, 2026-10-30). Repulsion is at its strongest,
+// but simulation.ts scales its ceiling with vault size, so small vaults stay
+// calm; gravity 0 leaves centring to the small built-in floor.
 export const DEFAULT_SETTINGS: GraphSettings = {
   scope: "global",
   localDepth: 1, // vestigial; `scope` is pinned to global
-  charge: -10.8,
-  linkDistance: 337,
+  charge: -1500,
+  linkDistance: 400,
   linkStrength: 0.44,
-  gravity: 0.21,
+  gravity: 0,
   nodeSize: 0.4,
-  edgeThickness: 1.3,
-  labelScale: 0.25,
-  colorMode: "degree",
+  edgeThickness: 2.7,
+  labelScale: 0.4,
+  colorMode: "folder",
+  shape: "globe",
   search: "",
-  minDegree: 1,
+  minDegree: 0,
   hideOrphans: true,
 };
 
@@ -88,10 +96,10 @@ export const SETTING_RANGES = {
   minDegree: { min: 0, max: 20, step: 1 },
 } as const;
 
-// Bumped to v5 so the new physics/appearance defaults take effect over any saved
+// Bumped to v6 (was v5) so the new physics/appearance defaults take effect over any saved
 // values — a persisted v4 blob would otherwise pin every existing install to the
 // old look, which is precisely what re-tuning the defaults is meant to fix.
-export const SETTINGS_STORAGE_KEY = "context.graph.settings.v5";
+export const SETTINGS_STORAGE_KEY = "context.graph.settings.v6";
 
 /** Load persisted settings, merged over defaults (tolerant of missing/old keys). */
 export function loadSettings(): GraphSettings {

@@ -21,6 +21,7 @@ import { accountPageRoutes } from "./routes/account-pages.js";
 import { invitationRoutes } from "./routes/invitations.js";
 import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
 import { createAppearanceRoutes } from "./routes/appearance.js";
+import { createFontRoutes } from "./fonts.js";
 import { createSkillRoutes } from "./routes/skills.js";
 import { SKILL_ACCESS_FEATURE, SKILLS_FEATURE } from "../skills/feature.js";
 import { passwordResetRoutes } from "./routes/password-reset.js";
@@ -38,7 +39,10 @@ import { SITE_ICON_PNG_BASE64 } from "../site-icon.js";
 import { bugReportRoutes } from "./routes/bug-reports.js";
 import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
-import { createHousekeeperRoutes } from "./routes/housekeeper.js";
+import { createVaultKeyRoutes } from "./routes/vault-keys.js";
+import { createMcpKeyRoutes } from "./routes/mcp-keys.js";
+import { vaultKeyHeader } from "../crypto/transport.js";
+import { vaultKeysEnabled, VAULT_KEYS_FEATURE } from "../crypto/config.js";
 import { graphRoutes } from "./routes/graph.js";
 import { createMcpRoutes } from "./routes/mcp.js";
 import { createRepairRoutes } from "./routes/repair.js";
@@ -49,6 +53,9 @@ import { createBillingRoutes } from "./routes/billing.js";
 import { PolarBillingProvider } from "../billing/polar.js";
 import type { BillingProvider } from "../billing/provider.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
+import { pool } from "../db/pool.js";
+import { handleMcpToken, isMcpGetSessionPath, isMcpTokenPath } from "../mcp/oauth-token-endpoint.js";
+import { rewrapOnIssue } from "../mcp/oauth-grant-keys.js";
 
 
 /**
@@ -148,6 +155,20 @@ function allowedOrigins(): string[] {
  *  - /api/vaults/:id/graph, /api/vaults/:id/search → note index (links+vectors)
  *  - /api/mcp → Model Context Protocol endpoint (AI clients); /api/mcp/tokens → token mgmt
  */
+/** RFC 9116 body for `contact`, or null when no contact is configured. */
+export function securityTxt(contact: string | undefined, now: Date = new Date()): string | null {
+  const value = contact?.trim();
+  if (!value) return null;
+  const expires = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString();
+  return [
+    `Contact: ${value}`,
+    `Expires: ${expires}`,
+    "Policy: https://github.com/naveedharri/baalda/blob/main/SECURITY.md",
+    "Preferred-Languages: en",
+    "",
+  ].join("\n");
+}
+
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
 
@@ -180,6 +201,9 @@ export function createApp(deps: AppDeps): Hono {
         // The desktop's app version on every call, so the content-write routes
         // can refuse a build too old to push safely (`client-version.ts`, #251).
         CLIENT_VERSION_HEADER,
+        // The vault key a device presents for a keyed vault (`crypto/`): a
+        // webview refuses to send it cross-origin unless it is listed here.
+        "x-baalda-vk",
       ],
       // set-auth-token carries the session token the desktop client reads after
       // sign-in/up; without exposing it the browser hides it even on success.
@@ -245,6 +269,8 @@ export function createApp(deps: AppDeps): Hono {
         ACCESS_BOARD_FEATURE,
         SKILLS_FEATURE,
         SKILL_ACCESS_FEATURE,
+        // Client-held vault keys (W3), only while BAALDA_VAULT_KEYS is on.
+        ...(vaultKeysEnabled() ? [VAULT_KEYS_FEATURE] : []),
       ],
     }),
   );
@@ -279,6 +305,15 @@ export function createApp(deps: AppDeps): Hono {
 </html>`),
   );
 
+  // RFC 9116 security.txt, read per request from SECURITY_CONTACT (e.g.
+  // `mailto:security@example.com`). Unset ⇒ 404, so a self-hosted server never
+  // advertises someone else's contact.
+  app.get("/.well-known/security.txt", (c) => {
+    const body = securityTxt(process.env.SECURITY_CONTACT);
+    if (!body) return c.notFound();
+    return c.body(body, 200, { "content-type": "text/plain; charset=utf-8" });
+  });
+
   // ── MCP OAuth discovery (RFC 8414 / RFC 9728) ─────────────────────────────
   // These MUST sit at the origin root: our protected-resource metadata names
   // the origin as the authorization server, so an MCP client (e.g. a Claude
@@ -309,6 +344,8 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/.well-known/oauth-authorization-server/api/mcp", (c) =>
     oAuthDiscoveryMetadata(auth)(c.req.raw),
   );
+  // Self-hosted woff2 fonts for the pages below and the public link page.
+  app.route("/", createFontRoutes());
   // The human-facing login + consent screens of that OAuth flow.
   app.route("/", oauthConnectRoutes);
   // Account pages the emails link to: forgot/reset password, email verified,
@@ -327,6 +364,13 @@ export function createApp(deps: AppDeps): Hono {
   // Email sign-in passes the per-account failure throttle first (#237).
   app.post("/api/auth/sign-in/email", (c) => throttledSignIn(c.req.raw, auth.handler));
   app.on(["GET", "POST"], "/api/auth/*", async (c) => {
+    // OAuth connector tokens are stored as hashes (W3): the token endpoint is
+    // wrapped, and Better Auth's HTTP session probe (which would accept a
+    // stored hash as a bearer) is closed; POST /api/mcp resolves tokens itself.
+    if (isMcpGetSessionPath(c.req.path)) return c.json(null);
+    if (c.req.method === "POST" && isMcpTokenPath(c.req.path)) {
+      return handleMcpToken(c.req.raw, auth.handler, pool, { onIssued: rewrapOnIssue });
+    }
     if (c.req.method !== "POST" || !c.req.path.startsWith("/api/auth/organization/")) {
       return auth.handler(c.req.raw);
     }
@@ -353,6 +397,11 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api", accessAuditRoutes);
   app.route("/api", createAppearanceRoutes(deps));
   app.route("/api", createSkillRoutes());
+  // Client-held vault keys (W3): off unless BAALDA_VAULT_KEYS is on. The
+  // header middleware only decodes X-Baalda-VK; it never logs or caches it.
+  app.use("/api/*", vaultKeyHeader);
+  app.route("/api", createVaultKeyRoutes());
+  app.route("/api", createMcpKeyRoutes());
   app.route(
     "/api",
     createMemberShareRoutes({ disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged }),
@@ -426,7 +475,6 @@ export function createApp(deps: AppDeps): Hono {
   );
   app.route("/api", createBillingRoutes({ provider: billingProvider }));
   app.route("/api", graphRoutes);
-  app.route("/api", createHousekeeperRoutes(deps.docWriter));
   app.route(
     "/api",
     createMcpRoutes({

@@ -21,7 +21,6 @@ const SOURCES = [
   "http/routes/orgs.ts",
   "http/routes/members.ts",
   "http/routes/blobs.ts",
-  "http/routes/housekeeper.ts",
   "http/routes/billing.ts",
   "permissions/resolver.ts",
   "permissions/http-gates.ts",

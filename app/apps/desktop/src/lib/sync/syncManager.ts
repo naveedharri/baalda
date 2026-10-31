@@ -197,6 +197,7 @@ export class DocSync {
 
   private readonly api: ApiClient;
   private readonly docId: string;
+  private readonly vaultId: string;
   private readonly onStatus?: (status: SyncStatus) => void;
   private readonly onSessionRejected?: () => void;
   private readonly onPending?: (pending: boolean) => void;
@@ -241,6 +242,7 @@ export class DocSync {
   constructor(opts: DocSyncOptions) {
     this.api = opts.api;
     this.docId = opts.docId;
+    this.vaultId = opts.vaultId;
     this.onStatus = opts.onStatus;
     this.onSessionRejected = opts.onSessionRejected;
     this.onPending = opts.onPending;
@@ -268,7 +270,10 @@ export class DocSync {
       ...(opts.webSocketPolyfill
         ? { WebSocketPolyfill: opts.webSocketPolyfill as typeof WebSocket }
         : {}),
-      onAuthenticationFailed: () => {
+      onAuthenticationFailed: (data?: { reason?: string }) => {
+        // W3: a keyed vault without a valid key. Not a lost grant: make the key
+        // ready and let the retry below reconnect with it.
+        if (isKeyRequired(data?.reason)) void this.api.ensureVaultKeyFor?.(this.vaultId);
         // Token rejected/expired. If we still have access, a reconnect re-mints;
         // if the mint itself 403s, mintToken() sets 'no-access' and we stop.
         //
@@ -573,7 +578,7 @@ export class DocSync {
 
   private async mintToken(): Promise<string | null> {
     try {
-      const res = await this.api.syncToken(this.docId);
+      const res = await this.api.syncToken(this.docId, this.vaultId);
       this._readOnly = res.readOnly;
       markReadOnlyDoc(this.docId, res.readOnly === true);
       // (Re)arm refresh based on the real token TTL.
@@ -587,7 +592,7 @@ export class DocSync {
       if (!isTerminalSyncStatus(this._status) && res.readOnly) {
         this.setStatus("read-only");
       }
-      return res.token;
+      return withVaultKey(res.token, this.api.vaultKeyFor?.(this.vaultId) ?? null);
     } catch (e) {
       // One verdict for every mint failure (see `mintFailureStatus`), so 403 and
       // 404 cannot drift apart: both are refusals no reconnect can talk its way
@@ -719,4 +724,14 @@ export class DocSync {
       /* ignore */
     }
   }
+}
+
+/** W3: the per-doc token carries the vault key as `<jwt>.<vk-b64>` when held. */
+export function withVaultKey(token: string, vk: string | null): string {
+  return token && vk ? `${token}.${vk}` : token;
+}
+
+/** A Hocuspocus permission-denied reason naming the missing vault key. */
+export function isKeyRequired(reason: string | undefined): boolean {
+  return typeof reason === "string" && reason.includes("key_required");
 }

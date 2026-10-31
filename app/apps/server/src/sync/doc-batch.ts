@@ -3,6 +3,9 @@ import type { LocalTransactionOrigin, Server } from "@hocuspocus/server";
 import { formatDocName } from "./doc-name.js";
 import type { SyncContext } from "./hocuspocus.js";
 import { appendUpdate, compareStateVectors, loadDocState } from "../yjs/persistence.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { pool } from "../db/pool.js";
+import { config } from "../config.js";
 import { indexDoc, scheduleIndex } from "../index/indexer.js";
 import { isShrinkHeld, reportShrink } from "../versions/shrink-guard.js";
 
@@ -60,6 +63,12 @@ export interface DocActor {
    * Attribution (`last_edited_by`) is unchanged either way.
    */
   source?: string | null;
+  /**
+   * W3: the vault key this REQUEST presented and the server verified
+   * (`requireVaultKey`), for a keyed vault. In memory only; never logged.
+   * Absent for an unkeyed vault, which keeps today's plaintext path.
+   */
+  crypto?: DocCrypto;
 }
 
 /**
@@ -187,7 +196,7 @@ export async function applyDetached(
   opts: DetachedOptions = {},
 ): Promise<ApplyOutcome> {
   const userId = actor?.userId ?? null;
-  const state = await loadDocState(docId);
+  const state = await loadDocState(docId, pool, actor?.crypto);
   const doc = new Y.Doc();
   const updates: Uint8Array[] = [];
   const capture = (u: Uint8Array) => updates.push(u);
@@ -204,7 +213,7 @@ export async function applyDetached(
     }
     if (updates.length === 0) return "skipped";
     const merged = updates.length === 1 ? updates[0] : Y.mergeUpdates(updates);
-    await appendUpdate(docId, merged);
+    await appendUpdate(docId, merged, pool, config.compactionThreshold, actor?.crypto);
     reportShrink(
       vaultId,
       docId,
@@ -212,6 +221,9 @@ export async function applyDetached(
       doc.getText(CONTENT_FIELD).toString(),
       userId,
       actor?.source ?? null,
+      // The same key that just sealed the update (a keyless write to a keyed
+      // vault never gets here: `appendUpdate` refused it with key_required).
+      actor?.crypto,
     );
     // Fan out to background subscribers, which the live path gets free from
     // Hocuspocus's onChange. Best-effort like the re-index: the write is already
@@ -224,8 +236,10 @@ export async function applyDetached(
       console.warn(`[doc-batch] failed to publish update for ${docId}`, err);
     }
     // Keep search/graph in sync (best-effort; never fail the write on it).
-    if (opts.deferIndex) scheduleIndex(docId);
-    else await indexDoc(docId).catch(() => {});
+    // W3: the request's own verified key, so a keyed vault's write is
+    // searchable with no member connected (the queue only has their keys).
+    if (opts.deferIndex) scheduleIndex(docId, undefined, actor?.crypto);
+    else await indexDoc(docId, pool, actor?.crypto).catch(() => {});
     // Attribution + version capture, the detached counterpart of the sync
     // server's `onDocEdited`.
     try {
@@ -286,6 +300,7 @@ export async function serverDocCoversUpdate(
   vaultId: string,
   docId: string,
   update: Uint8Array,
+  crypto?: DocCrypto,
 ): Promise<boolean> {
   return withDocLock(docId, async () => {
     const submitted = new Y.Doc();
@@ -293,7 +308,7 @@ export async function serverDocCoversUpdate(
     try {
       Y.applyUpdate(submitted, update);
       const live = runtime?.server.hocuspocus.documents.get(formatDocName(vaultId, docId));
-      const state = live ? Y.encodeStateAsUpdate(live) : await loadDocState(docId);
+      const state = live ? Y.encodeStateAsUpdate(live) : await loadDocState(docId, pool, crypto);
       if (!state) return false;
       Y.applyUpdate(canonical, state);
 
@@ -334,6 +349,7 @@ export async function serverStateCovers(
   vaultId: string,
   docId: string,
   update: Uint8Array,
+  crypto?: DocCrypto,
 ): Promise<boolean> {
   return withDocLock(docId, async () => {
     const submitted = Y.encodeStateVectorFromUpdate(update);
@@ -342,7 +358,7 @@ export async function serverStateCovers(
     if (live) {
       serverSv = Y.encodeStateVector(live);
     } else {
-      const state = await loadDocState(docId);
+      const state = await loadDocState(docId, pool, crypto);
       if (!state) return false;
       serverSv = Y.encodeStateVectorFromUpdate(state);
     }
@@ -427,7 +443,14 @@ export async function applyDocPush(
         // origin.context : {}`, so a string origin is permanently anonymous.
         const origin: LocalTransactionOrigin = {
           source: "local",
-          context: { source, userId: actor?.userId ?? null },
+          // W3: the request's own key rides along (see the doc writer).
+          context: {
+            source,
+            userId: actor?.userId ?? null,
+            ...(actor?.crypto
+              ? { vaultKey: actor.crypto.key, vaultKeyGeneration: actor.crypto.generation }
+              : {}),
+          },
         };
         const captured: Uint8Array[] = [];
         const capture = (u: Uint8Array) => captured.push(u);

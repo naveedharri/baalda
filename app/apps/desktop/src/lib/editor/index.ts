@@ -34,7 +34,7 @@ import { richNoteCopy, type ReadCopyAttachment } from "./copy";
 import { smartPaste, type SaveAttachment } from "./paste";
 import { tableAtomicRanges } from "./table/atomic";
 import { minimalInputChanges } from "./minimalChanges";
-import { tripleClickLine } from "./selection";
+import { proseSelection, tripleClickLine } from "./selection";
 import { slashCompletions } from "./slash";
 import { checkboxes, taskKeymap } from "./tasks";
 import { editorTheme, markdownHighlight } from "./theme";
@@ -147,6 +147,7 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     // Local history only for the non-CRDT path; yCollab supplies undo otherwise.
     ...(collab ? [] : [history()]),
     drawSelection(),
+    proseSelection,
     // Typing over a selection changes only what differs, never a delete and
     // re-insert of text (frontmatter, hidden markers) that came back unchanged.
     minimalInputChanges,
@@ -252,6 +253,7 @@ export function readOnlyEditorExtensions(opts: { path?: string; lineNumbers?: bo
     EditorState.readOnly.of(true),
     EditorView.editable.of(false),
     drawSelection(),
+    proseSelection,
     EditorView.lineWrapping,
     plain
       ? []

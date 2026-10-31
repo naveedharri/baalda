@@ -8,6 +8,15 @@ import { setVaultBinding } from "../../mcp/oauth.js";
 import { BRAND_NAME } from "../../brand.js";
 import { emailEnabled } from "../../email/mailer.js";
 import { esc, page } from "../pages.js";
+import { VK_HEADER } from "../../crypto/transport.js";
+import {
+  completeConsent,
+  consentFor,
+  consentNeedsDesktop,
+  openConsent,
+  readyConsent,
+  redirectHostsOf,
+} from "../../mcp/oauth-consent.js";
 
 /**
  * The human-facing pages of the MCP OAuth flow (the Better Auth `mcp` plugin
@@ -34,6 +43,16 @@ async function clientName(clientId: string | undefined): Promise<string> {
   return rows[0]?.name?.trim() || "An application";
 }
 
+/** The client's registered redirect hosts: its name is self-chosen, the host is not. */
+async function clientRedirectHosts(clientId: string | undefined): Promise<string[]> {
+  if (!clientId) return [];
+  const { rows } = await pool.query<{ redirect_urls: string | null }>(
+    'SELECT "redirectUrls" AS redirect_urls FROM "oauthApplication" WHERE "clientId" = $1',
+    [clientId],
+  );
+  return redirectHostsOf(rows[0]?.redirect_urls);
+}
+
 /** A soft pastel tile (fill + deeper letter of the same hue) that stays the same for a vault. */
 function monogramStyle(id: string): string {
   let h = 0;
@@ -50,8 +69,13 @@ export function consentPage(opts: {
   clientId: string;
   vaults: { id: string; name: string; role: string }[];
   preselect: string;
+  redirectHosts?: string[];
 }): string {
   const { app, email, consentCode, clientId, vaults, preselect } = opts;
+  const hosts = opts.redirectHosts ?? [];
+  const returnsTo = hosts.length
+    ? `<p class="sub">Returns you to <b>${hosts.map(esc).join("</b>, <b>")}</b>. Allow only if you started this from that site.</p>`
+    : "";
   const options = vaults
     .map((w) => {
       const initial = (w.name.trim().match(/\p{L}|\p{N}/u)?.[0] ?? "?").toUpperCase();
@@ -78,6 +102,7 @@ export function consentPage(opts: {
   const body = `
     <h1><b>${esc(app)}</b> wants access</h1>
     <p class="sub">Signed in as <b>${esc(email)}</b></p>
+    ${returnsTo}
     <form method="POST" action="/oauth/consent">
       <input type="hidden" name="consent_code" value="${esc(consentCode)}" />
       <input type="hidden" name="client_id" value="${esc(clientId)}" />
@@ -120,7 +145,82 @@ export function consentPage(opts: {
   return page({ title: "Authorize", body, wide: true });
 }
 
+/** "Open Baalda on your computer to finish connecting": a deep link into the
+ *  desktop, then a poll that re-submits the consent once the desktop is done. */
+export function finishInAppPage(opts: {
+  app: string;
+  consentId: string;
+  consentCode: string;
+  clientId: string;
+  organizationId: string;
+}): string {
+  const link = `${config.deepLinkScheme}://oauth-consent?id=${encodeURIComponent(opts.consentId)}&server=${encodeURIComponent(config.betterAuthUrl)}`;
+  const body = `
+    <h1>Open ${esc(BRAND_NAME)} on your computer to finish connecting</h1>
+    <p class="sub">Your vault's key lives on your devices, so <b>${esc(opts.app)}</b> is connected from the ${esc(
+      BRAND_NAME,
+    )} app. Keep this page open; it continues on its own.</p>
+    <p><a class="btn primary" id="open-app" href="${esc(link)}">Open ${esc(BRAND_NAME)}</a></p>
+    <form method="POST" action="/oauth/consent" id="finish">
+      <input type="hidden" name="consent_code" value="${esc(opts.consentCode)}" />
+      <input type="hidden" name="client_id" value="${esc(opts.clientId)}" />
+      <input type="hidden" name="organization_id" value="${esc(opts.organizationId)}" />
+      <input type="hidden" name="decision" value="allow" />
+    </form>
+    <p class="foot" id="state">Waiting for the ${esc(BRAND_NAME)} app…</p>
+    <script>
+      const id = ${JSON.stringify(opts.consentId).replace(/</g, "\\u003c")};
+      location.href = document.getElementById('open-app').href;
+      const tick = async () => {
+        try {
+          const r = await fetch('/oauth/consent/status?id=' + encodeURIComponent(id), { credentials: 'same-origin' });
+          const s = r.ok ? await r.json() : null;
+          if (s && s.approved) { document.getElementById('finish').submit(); return; }
+          if (r.status === 404) { document.getElementById('state').textContent = 'This request expired. Restart the connection from your app.'; return; }
+        } catch {}
+        setTimeout(tick, 2000);
+      };
+      setTimeout(tick, 2000);
+    </script>`;
+  return page({ title: "Finish in the app", body });
+}
+
 export const oauthConnectRoutes = new Hono();
+
+// ── Desktop-completed consent (W3, rule 2) ──────────────────────────────────
+// The browser page polls this (cookie session); the desktop reads and
+// completes the consent (bearer session + X-Baalda-VK). Same user only.
+oauthConnectRoutes.get("/oauth/consent/status", async (c) => {
+  const session = await getSession(c);
+  if (!session) return c.json({ error: "Authentication required" }, 401);
+  const view = await consentFor(c.req.query("id") ?? "", session.userId);
+  if (!view) return c.json({ error: "Not found" }, 404);
+  return c.json({ approved: view.approved });
+});
+
+oauthConnectRoutes.get("/api/oauth/consents/:id", async (c) => {
+  const session = await getSession(c);
+  if (!session) return c.json({ error: "Authentication required" }, 401);
+  const view = await consentFor(c.req.param("id"), session.userId);
+  if (!view) return c.json({ error: "This connection request expired or is not yours", code: "not_found" }, 404);
+  return c.json(view);
+});
+
+oauthConnectRoutes.post("/api/oauth/consents/:id/complete", async (c) => {
+  const session = await getSession(c);
+  if (!session) return c.json({ error: "Authentication required" }, 401);
+  const result = await completeConsent(c.req.param("id"), session.userId, c.req.header(VK_HEADER));
+  if (!result.ok) {
+    return c.json(
+      {
+        error: result.code === "key_required" ? "This needs the vault's key from your device" : "This connection request expired or is not yours",
+        code: result.code,
+      },
+      result.status,
+    );
+  }
+  return c.json({ ok: true });
+});
 
 // ── Force the vault picker on every authorize (issue #211) ──────────────────
 // The mcp plugin issues a code straight away unless prompt=consent, and a
@@ -272,6 +372,7 @@ oauthConnectRoutes.get("/oauth/consent", async (c) => {
       clientId,
       vaults,
       preselect: session.activeOrganizationId ?? vaults[0].id,
+      redirectHosts: await clientRedirectHosts(clientId),
     }),
   );
 });
@@ -306,6 +407,23 @@ oauthConnectRoutes.post("/oauth/consent", async (c) => {
         }),
         400,
       );
+    }
+    // A keyed (or converting) vault: only the user's desktop can hand over the
+    // vault key (security rule 2). Until it has, show the hand-off page; it
+    // re-submits this same form once the desktop finished.
+    if (await consentNeedsDesktop(organizationId)) {
+      if (!(await readyConsent(session.userId, clientId, organizationId))) {
+        const id = await openConsent(session.userId, clientId, organizationId);
+        return c.html(
+          finishInAppPage({
+            app: await clientName(clientId),
+            consentId: id,
+            consentCode,
+            clientId,
+            organizationId,
+          }),
+        );
+      }
     }
     await setVaultBinding(clientId, session.userId, organizationId);
   }

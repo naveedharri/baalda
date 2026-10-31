@@ -28,7 +28,6 @@ import { APP_CHANNEL, APP_SCHEME } from "./deepLinkScheme";
  * rather than whichever app owns `baalda://`. The server allow-lists the scheme.
  */
 const CHECKOUT_CLIENT = { channel: APP_CHANNEL, scheme: APP_SCHEME } as const;
-import type { AssistantProvider, HousekeeperStatus, HousekeeperScan, HousekeeperEdit, DiagnosticInput, DiagnosticReview } from "./housekeeper";
 // Type-only import: `bulkTypes.ts` is the hand-mirrored copy of the server's
 // wire contract, and importing the TYPES keeps this module a runtime leaf.
 import type {
@@ -951,7 +950,7 @@ export interface MyBillingAccount {
   /** Vaults with pending invitations that hold seats; counts sum to
    *  `seats.reserved`. Absent on older servers. */
   invitedByVault?: { orgId: string; name: string; count: number }[];
-  limits: { people: number | null; vaults: number | null; assistant: boolean; fileSync: boolean };
+  limits: { people: number | null; vaults: number | null; fileSync: boolean };
   lapsed: boolean;
   canManage: boolean;
   complimentaryUntil: string | null;
@@ -1135,6 +1134,22 @@ export type OrgStatus =
   | { kind: "unknown" };
 
 /** A rejected server response — carries the HTTP status for callers to branch on. */
+/** `GET /api/oauth/consents/:id`: a claude.ai / ChatGPT connection to finish. */
+export interface OAuthConsentRequest {
+  id: string;
+  clientId: string;
+  /** The connector's display name ("Claude"). */
+  app: string;
+  organizationId: string;
+  vaultName: string;
+  /** The vault's collections this device must present keys for. */
+  vaultIds: string[];
+  approved: boolean;
+  /** The connector's registered redirect hosts (absent on older servers). The
+   *  name above is self-chosen by whoever registered the client; this is not. */
+  redirectHosts?: string[];
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -1216,6 +1231,17 @@ export function blobErrorCode(e: unknown): string | null {
   if (e instanceof BlobTransportError) return e.code;
   if (e instanceof ApiError) return errorCodeOf(e.body);
   return null;
+}
+
+/**
+ * The server's plain-words refusal when a key-churn brake answered
+ * (`429 rate_limited` on `PUT /api/me/keys`, `POST /api/me/devices`, a device
+ * approval), else null. Nothing was stored server-side; retrying later works.
+ */
+export function rateLimitedMessage(e: unknown): string | null {
+  if (!(e instanceof ApiError) || e.status !== 429 || errorCodeOf(e.body) !== "rate_limited") return null;
+  const b = e.body as { error?: unknown } | undefined;
+  return typeof b?.error === "string" && b.error ? b.error : "Too many security key changes. Try again later.";
 }
 
 function errorCodeOf(body: unknown): string | null {
@@ -1419,39 +1445,130 @@ function newClientId(): string {
  * Stateful client: holds the base URL + bearer token in memory. The auth
  * manager owns persistence (keychain) and calls `setToken`.
  */
+// ---- Client-held vault keys (W3) -------------------------------------------
+
+/** Carries the base64 vault key on every content request for a keyed vault. */
+export const VAULT_KEY_HEADER = "X-Baalda-VK";
+/** 409 code for a content request to a keyed vault without a valid key. */
+export const KEY_REQUIRED_CODE = "key_required";
+
+/** The path of an absolute or relative URL ("" when unparseable). */
+function pathOf(url: string): string {
+  try {
+    return new URL(url, "http://x").pathname;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * `url` with this build's `clientVersion` query parameter, for every call to
+ * our own API (Better Auth's `/api/auth/*` excepted). A server holding a KEYED
+ * vault treats a request that does not report a vault-key version as a build
+ * that predates vault keys and answers `426 client_outdated` instead of
+ * `409 key_required` (`server src/crypto/transport.ts`), so every route that
+ * can reach a keyed vault must carry it, not only the content-write ones of
+ * #251. A query parameter, not a header: an older server ignores it.
+ */
+export function withClientVersion(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url, "http://x");
+  } catch {
+    return url;
+  }
+  const path = parsed.pathname;
+  if (!path.startsWith("/api/") || path.startsWith("/api/auth/")) return url;
+  if (parsed.searchParams.has(CLIENT_VERSION_PARAM)) return url;
+  const param = `${CLIENT_VERSION_PARAM}=${encodeURIComponent(CLIENT_VERSION)}`;
+  const hash = url.indexOf("#");
+  const head = hash === -1 ? url : url.slice(0, hash);
+  const tail = hash === -1 ? "" : url.slice(hash);
+  return `${head}${head.includes("?") ? "&" : "?"}${param}${tail}`;
+}
+
+/** The collection id of a `/api/vaults/:vaultId/...` path, else null. */
+export function vaultIdFromPath(path: string): string | null {
+  const m = /^\/api\/vaults\/([^/?#]+)\//.exec(path);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return null;
+  }
+}
+
+export interface VaultKeyInit {
+  vkCheck: string;
+  generation: number;
+  sealedVkForSelf: string;
+}
+export interface VaultKeyWrap {
+  generation: number;
+  sealedVk: string;
+}
+interface MyVaultKeysBody {
+  vkCheck: string;
+  generation: number;
+  wraps: VaultKeyWrap[];
+  /** Every older plaintext copy has been checked and removed on the server.
+   * Undefined: the server does not report it (older server). */
+  fullyEncrypted?: boolean;
+}
+/** A pending answer may still carry `vkCheck`, so a restore can verify a typed key. */
+export type MyVaultKeys =
+  /** The server's DEFINITIVE "this vault has no key" (`{keyed: false}`). */
+  /** `encryptionRequested`: an owner/admin opted this vault in (or it was created
+   * with vault keys on). `conversionAllowed` already includes it. Undefined: the
+   * server predates opt-in (no request route). */
+  | { keyed: false; pending: false; conversionAllowed: boolean; encryptionRequested?: boolean }
+  | { keyed: true; pending: true; vkCheck?: string; generation?: number }
+  | ({ keyed: true; pending: false } & MyVaultKeysBody);
+export interface VaultKeyRequest {
+  userId: string;
+  publicKey: string;
+  requestedAt: string;
+}
+export interface VaultKeyWrapPost extends VaultKeyWrap {
+  userId: string;
+}
+/** A credential that must keep working after conversion (MCP token, OAuth grant, public link). */
+export interface AllowlistCandidate {
+  kind: string;
+  id: string;
+  hash: string;
+  /** Owner/admin review (newer servers): token name, OAuth app name, or note path. */
+  label?: string | null;
+  /** Who made it (display name, else email). */
+  createdBy?: string | null;
+  createdAt?: string | null;
+  lastUsedAt?: string | null;
+  /** Already allow-listed for this vault. */
+  allowed?: boolean;
+  /** Unchecked in an earlier review: never allow-listed. */
+  excluded?: boolean;
+}
+export interface AllowlistEntry {
+  kind: string;
+  id: string;
+  /** base64 HMAC-SHA256(VK, utf8(id) || utf8(hash)). */
+  mac: string;
+}
+
+export interface PendingDevice {
+  deviceId: string;
+  publicKey: string;
+  requestedAt?: string;
+  /** e.g. "MacBook Pro", when the server knows. */
+  name?: string | null;
+}
+export interface AccountKeysBody {
+  publicKey: string;
+  /** Optional since the owner decision: the VAULT key is the recovery path. */
+  privWrappedRecovery?: string;
+}
+
 export class ApiClient {
-  async housekeeperDiagnose(vaultId: string, diagnostics: DiagnosticInput, provider?: AssistantProvider): Promise<DiagnosticReview> {
-    return (await this.request<DiagnosticReview>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/diagnose`, {
-      body: { diagnostics, consent: true, provider }, timeoutMs: 20_000,
-    })).data;
-  }
-
-  async housekeeperStatus(vaultId: string): Promise<HousekeeperStatus> {
-    return (await this.request<HousekeeperStatus>("GET", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/status`, { timeoutMs: 15_000 })).data;
-  }
-
-  async housekeeperSuggest(vaultId: string, docId: string, offset = 0, provider?: AssistantProvider): Promise<HousekeeperScan> {
-    return (await this.request<HousekeeperScan>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/suggest`, {
-      body: { docId, consent: true, offset, provider }, timeoutMs: 60_000,
-    })).data;
-  }
-
-  async housekeeperRepair(vaultId: string, docId: string, finding: string, provider?: AssistantProvider): Promise<HousekeeperScan> {
-    return (await this.request<HousekeeperScan>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/repair`, {
-      body: { docId, finding, consent: true, provider }, timeoutMs: 30_000,
-    })).data;
-  }
-
-  async housekeeperAuthorize(vaultId: string, docId: string, path: string): Promise<void> {
-    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/authorize`, { body: { docId, path } });
-  }
-
-  async housekeeperEdit(vaultId: string, action: "apply" | "undo", id: string): Promise<HousekeeperEdit> {
-    return (await this.request<HousekeeperEdit>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/${action}`, {
-      body: { id }, timeoutMs: 20_000,
-    })).data;
-  }
-
   private baseUrl: string;
   private token: string | null;
   private readonly fetchImpl: FetchLike;
@@ -1515,6 +1632,220 @@ export class ApiClient {
     this.token = token;
   }
 
+  /**
+   * Client-held vault keys (W3): returns the base64 VK for a keyed vault whose
+   * key this device holds, else null. Synchronous (reads the session cache).
+   * The header value is a secret: never log request headers.
+   */
+  private vaultKeyResolver: ((vaultId: string) => string | null) | null = null;
+  setVaultKeyResolver(fn: ((vaultId: string) => string | null) | null): void {
+    this.vaultKeyResolver = fn;
+  }
+  /** On 409 `key_required`: make the vault key ready; true = retry once. */
+  private keyRequiredHandler: ((vaultId: string) => Promise<boolean>) | null = null;
+  setKeyRequiredHandler(fn: ((vaultId: string) => Promise<boolean>) | null): void {
+    this.keyRequiredHandler = fn;
+  }
+  /** The verified base64 VK for a vault (vault channel `hello.vk`, per-doc
+   *  token suffix), or null. A secret: never log it. */
+  vaultKeyFor(vaultId: string): string | null {
+    return this.vaultKeyResolver ? this.vaultKeyResolver(vaultId) : null;
+  }
+  /** Ask the key session to make a vault's key ready (a socket `key_required`). */
+  async ensureVaultKeyFor(vaultId: string): Promise<boolean> {
+    return this.keyRequiredHandler ? this.keyRequiredHandler(vaultId).catch(() => false) : false;
+  }
+
+  /** `X-Baalda-VK` for a vault-scoped path, or nothing. */
+  private vaultKeyHeaders(path: string, scope?: string | null): Record<string, string> {
+    const id = scope ?? vaultIdFromPath(path);
+    const vk = id && this.vaultKeyResolver ? this.vaultKeyResolver(id) : null;
+    return vk ? { [VAULT_KEY_HEADER]: vk } : {};
+  }
+
+  // ---- Client-held vault keys (W3) ----------------------------------------
+
+  /** 200 = keyed now; 409 = already keyed (caller falls through to `mine`). */
+  async initVaultKeys(
+    vaultId: string,
+    body: VaultKeyInit,
+  ): Promise<"created" | "already-keyed" | "not-ready" | "pending-mismatch"> {
+    try {
+      await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/init`, { body });
+      return "created";
+    } catch (e) {
+      const code = e instanceof ApiError && e.status === 409 ? (e.body as { code?: string })?.code : undefined;
+      if (code === "already_keyed") return "already-keyed";
+      if (code === "conversion_not_ready") return "not-ready";
+      if (code === "pending_mismatch") return "pending-mismatch";
+      throw e;
+    }
+  }
+
+  async getMyVaultKeys(vaultId: string): Promise<MyVaultKeys> {
+    const { data, status } = await this.request<Partial<MyVaultKeysBody> & { keyed?: boolean; pending?: boolean }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/mine`,
+      { query: { [CLIENT_VERSION_PARAM]: CLIENT_VERSION } },
+    );
+    // Only an explicit `keyed: false` means unkeyed; anything unexpected throws
+    // (the caller then does nothing rather than keying a vault that has a key).
+    if (data?.keyed === false && status === 200) {
+      // Rollout gate for converting an existing vault: absent ⇒ false.
+      // `encryptionRequested` absent ⇒ undefined: a server without opt-in
+      // (no migration 081) has no request route, so the UI offers nothing.
+      const d = data as { conversionAllowed?: unknown; encryptionRequested?: unknown };
+      return {
+        keyed: false,
+        pending: false,
+        conversionAllowed: d.conversionAllowed === true,
+        encryptionRequested: typeof d.encryptionRequested === "boolean" ? d.encryptionRequested : undefined,
+      };
+    }
+    if (status === 202 || data?.pending) {
+      return { keyed: true, pending: true, vkCheck: data?.vkCheck, generation: data?.generation };
+    }
+    if (typeof data?.vkCheck !== "string" || typeof data.generation !== "number" || !Array.isArray(data.wraps)) {
+      throw new ApiError(status, "Unexpected vault key answer", data);
+    }
+    return {
+      keyed: true,
+      pending: false,
+      vkCheck: data.vkCheck,
+      generation: data.generation,
+      wraps: data.wraps,
+      fullyEncrypted: typeof data.fullyEncrypted === "boolean" ? data.fullyEncrypted : undefined,
+    };
+  }
+
+  /** "Encrypt this vault" (owner/admin, one-way, idempotent). Only records the
+   * decision; a member's desktop keys the vault once the rollout gate opens. */
+  async requestVaultEncryption(vaultId: string): Promise<void> {
+    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/request-encryption`);
+  }
+
+  async listVaultKeyRequests(vaultId: string): Promise<VaultKeyRequest[]> {
+    const { data } = await this.request<VaultKeyRequest[]>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/requests`,
+    );
+    return Array.isArray(data) ? data : [];
+  }
+
+  /** `vkBase64` proves we hold the key; sent only as `X-Baalda-VK`. */
+  async postVaultKeyWrap(vaultId: string, wrap: VaultKeyWrapPost, vkBase64: string): Promise<void> {
+    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/wraps`, {
+      body: wrap,
+      headers: { [VAULT_KEY_HEADER]: vkBase64 },
+    });
+  }
+
+  async putMyKeys(body: AccountKeysBody): Promise<void> {
+    await this.request("PUT", "/api/me/keys", { body });
+  }
+
+  /** null when this account has no keys yet (404). */
+  async getMyKeys(): Promise<AccountKeysBody | null> {
+    try {
+      // The server answers 200 with `publicKey: null` before any key exists:
+      // that is "no keys", never another device's key to link against.
+      const body = (await this.request<AccountKeysBody>("GET", "/api/me/keys")).data;
+      return body?.publicKey ? body : null;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  /** Approve a pending device: the account private key sealed to its key. */
+  async putDeviceKey(deviceId: string, privWrapped: string): Promise<void> {
+    await this.request("PUT", `/api/me/devices/${encodeURIComponent(deviceId)}/key`, { body: { privWrapped } });
+  }
+
+  // ---- Converting an existing vault (W3) ------------------------------------
+
+  /** Claim the conversion with our check. 409 = another device already holds it. */
+  async registerPendingVaultKey(
+    vaultId: string,
+    body: { vkCheck: string; generation: number; deviceId: string },
+    vkBase64: string,
+  ): Promise<"registered" | "claimed"> {
+    try {
+      await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/pending`, {
+        body,
+        headers: { [VAULT_KEY_HEADER]: vkBase64 },
+      });
+      return "registered";
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) return "claimed";
+      throw e;
+    }
+  }
+
+  async getAllowlistCandidates(vaultId: string, vkBase64: string): Promise<AllowlistCandidate[]> {
+    const { data } = await this.request<AllowlistCandidate[] | { candidates?: AllowlistCandidate[] }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/allowlist-candidates`,
+      { headers: { [VAULT_KEY_HEADER]: vkBase64 } },
+    );
+    const list = Array.isArray(data) ? data : (data?.candidates ?? []);
+    return list.filter((c) => typeof c?.id === "string" && typeof c?.hash === "string");
+  }
+
+  /** `rejected`: ids whose MAC the server could not verify (logged, retried next poll).
+   *  `excluded`: what the owner unchecked in the conversion review (never allow-listed). */
+  async postAllowlist(
+    vaultId: string,
+    entries: AllowlistEntry[],
+    vkBase64: string,
+    excluded: Array<{ kind: string; id: string }> = [],
+  ): Promise<{ rejected: string[] }> {
+    const { data } = await this.request<{ accepted?: number; rejected?: string[] }>(
+      "POST",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/allowlist`,
+      { body: excluded.length ? { entries, excluded } : { entries }, headers: { [VAULT_KEY_HEADER]: vkBase64 } },
+    );
+    return { rejected: Array.isArray(data?.rejected) ? data.rejected : [] };
+  }
+
+  /** Keeps the pending key warm on the server and asks whether init may run. */
+  async getConversionReady(vaultId: string, vkBase64: string): Promise<boolean> {
+    const { data } = await this.request<{ ready?: boolean }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/conversion-ready`,
+      { headers: { [VAULT_KEY_HEADER]: vkBase64 } },
+    );
+    return data?.ready === true;
+  }
+
+  /** Link-a-device: publish this device's ephemeral public key as pending. */
+  async registerPendingDevice(deviceId: string, publicKey: string): Promise<void> {
+    await this.request("POST", "/api/me/devices", { body: { deviceId, publicKey } });
+  }
+
+  async listPendingDevices(): Promise<PendingDevice[]> {
+    const { data } = await this.request<PendingDevice[]>("GET", "/api/me/devices/pending");
+    return Array.isArray(data) ? data : [];
+  }
+
+  /** The approval for this device, or null while none exists (404). */
+  async getDeviceKey(deviceId: string): Promise<string | null> {
+    try {
+      const { data } = await this.request<{ privWrapped?: string }>(
+        "GET",
+        `/api/me/devices/${encodeURIComponent(deviceId)}/key`,
+      );
+      return data?.privWrapped ?? null;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  async denyDevice(deviceId: string): Promise<void> {
+    await this.request("DELETE", `/api/me/devices/${encodeURIComponent(deviceId)}`);
+  }
+
   // ---- low-level request --------------------------------------------------
 
   private async request<T>(
@@ -1535,6 +1866,13 @@ export class ApiClient {
        * that never finishes deciding whether to delete files.
        */
       timeoutMs?: number;
+      /** Extra headers (never logged). */
+      headers?: Record<string, string>;
+      /** Internal: this is the one retry after a `key_required` refusal. */
+      keyRetry?: boolean;
+      /** The keyed vault this request belongs to when the path does not say
+       *  (MCP token mint, a note's public link): carries `X-Baalda-VK`. */
+      vaultScope?: string | null;
     } = {},
   ): Promise<{ data: T; authToken: string | null; status: number }> {
     const url = new URL(this.baseUrl + path);
@@ -1542,6 +1880,14 @@ export class ApiClient {
       for (const [k, v] of Object.entries(opts.query)) {
         if (v !== undefined) url.searchParams.set(k, v);
       }
+    }
+    // Every API call reports this build's version (see `withClientVersion`).
+    if (
+      path.startsWith("/api/") &&
+      !path.startsWith("/api/auth/") &&
+      !url.searchParams.has(CLIENT_VERSION_PARAM)
+    ) {
+      url.searchParams.set(CLIENT_VERSION_PARAM, CLIENT_VERSION);
     }
 
     const headers: Record<string, string> = {
@@ -1558,6 +1904,7 @@ export class ApiClient {
       /* leave unset */
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    Object.assign(headers, this.vaultKeyHeaders(path, opts.vaultScope), opts.headers);
     let bodyInit: string | undefined;
     if (opts.body !== undefined) {
       headers["Content-Type"] = "application/json";
@@ -1608,6 +1955,20 @@ export class ApiClient {
           : undefined) ??
         `HTTP ${res.status}`;
       if (res.status === 426) notifyClientOutdated(parsed);
+      // A keyed vault refused us for want of its key: fetch/verify the key and
+      // retry ONCE. Otherwise it stays an error, never an empty answer, so no
+      // caller can mistake it for an empty server (split-brain rule).
+      if (
+        res.status === 409 &&
+        !opts.keyRetry &&
+        (parsed as { code?: unknown } | undefined)?.code === KEY_REQUIRED_CODE
+      ) {
+        const id = opts.vaultScope ?? vaultIdFromPath(path);
+        const handler = this.keyRequiredHandler;
+        if (id && handler && (await handler(id).catch(() => false))) {
+          return this.request<T>(method, path, { ...opts, keyRetry: true });
+        }
+      }
       throw new ApiError(res.status, msg, parsed);
     }
 
@@ -2210,13 +2571,32 @@ export class ApiClient {
   }
 
   /** Mint a new MCP token. The `token` field is the plaintext — shown once. */
-  async createMcpToken(name: string): Promise<McpTokenRow & { token: string }> {
+  /** `vaultId`: the open keyed vault, so the token is wrapped from birth. */
+  async createMcpToken(name: string, vaultId?: string | null): Promise<McpTokenRow & { token: string }> {
     const { data } = await this.request<McpTokenRow & { token: string }>(
       "POST",
       "/api/mcp/tokens",
-      { body: { name } },
+      { body: { name }, vaultScope: vaultId },
     );
     return data;
+  }
+
+  /** A connector consent waiting for this app (W3): who asks, for which vault. */
+  async getOAuthConsent(id: string): Promise<OAuthConsentRequest> {
+    const { data } = await this.request<OAuthConsentRequest>(
+      "GET",
+      `/api/oauth/consents/${encodeURIComponent(id)}`,
+    );
+    return data;
+  }
+
+  /** Finish a connector consent: `vkHeader` (`vaultId=<b64>` pairs) is sent
+   *  only as `X-Baalda-VK` and never logged. */
+  async completeOAuthConsent(id: string, vkHeader: string): Promise<void> {
+    await this.request("POST", `/api/oauth/consents/${encodeURIComponent(id)}/complete`, {
+      body: {},
+      headers: { [VAULT_KEY_HEADER]: vkHeader },
+    });
   }
 
   async revokeMcpToken(id: string): Promise<void> {
@@ -2242,19 +2622,21 @@ export class ApiClient {
     await this.request<unknown>("POST", "/api/bug-reports", { body: input });
   }
 
-  async createPublicLink(docId: string): Promise<PublicLink> {
+  async createPublicLink(docId: string, vaultId?: string | null): Promise<PublicLink> {
     const { data } = await this.request<PublicLink>(
       "POST",
       `/api/notes/${encodeURIComponent(docId)}/public-link`,
+      { vaultScope: vaultId },
     );
     return data;
   }
 
   /** The note's public link if one exists, else null. */
-  async getPublicLink(docId: string): Promise<PublicLink | null> {
+  async getPublicLink(docId: string, vaultId?: string | null): Promise<PublicLink | null> {
     const { data } = await this.request<{ link: PublicLink | null }>(
       "GET",
       `/api/notes/${encodeURIComponent(docId)}/public-link`,
+      { vaultScope: vaultId },
     );
     return data.link ?? null;
   }
@@ -2970,9 +3352,9 @@ export class ApiClient {
     );
     if (opts.cursor !== undefined) url.searchParams.set("cursor", String(opts.cursor));
     if (opts.maxBytes !== undefined) url.searchParams.set("maxBytes", String(opts.maxBytes));
-    const res = await this.fetchImpl(url.toString(), {
+    const res = await this.fetchImpl(withClientVersion(url.toString()), {
       method: "GET",
-      headers: { ...this.baseHeaders(), [ORIGIN_HEADER]: this.clientId },
+      headers: { ...this.baseHeaders(url.toString()), [ORIGIN_HEADER]: this.clientId },
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -3623,10 +4005,13 @@ export class ApiClient {
   // ---- Sync token ---------------------------------------------------------
 
   /** Mint a per-doc sync JWT. Throws ApiError(403) when the user has no access. */
-  async syncToken(docId: string): Promise<SyncTokenResponse> {
+  async syncToken(docId: string, vaultId?: string): Promise<SyncTokenResponse> {
     const { data } = await this.request<SyncTokenResponse>("POST", "/api/sync-token", {
       body: { docId },
       query: { [CLIENT_VERSION_PARAM]: CLIENT_VERSION },
+      // A keyed vault's key, when held, rides as `X-Baalda-VK`: on its own it
+      // proves a vault-key build to the server's keyed-vault gate.
+      vaultScope: vaultId ?? null,
     });
     return data;
   }
@@ -3637,7 +4022,9 @@ export class ApiClient {
     const { data } = await this.request<VaultSyncTokenResponse>(
       "POST",
       "/api/vault-sync-token",
-      { body: { vaultId }, query: { [CLIENT_VERSION_PARAM]: CLIENT_VERSION } },
+      // `vaultScope`: a keyed vault's key rides as `X-Baalda-VK`, which on its
+      // own proves a vault-key build to the server's keyed-vault gate.
+      { body: { vaultId }, query: { [CLIENT_VERSION_PARAM]: CLIENT_VERSION }, vaultScope: vaultId },
     );
     return data;
   }
@@ -3645,8 +4032,8 @@ export class ApiClient {
   // ---- Attachment blobs (Phase 3 blob store, spec 02 §2/§5A) --------------
 
   /** Common headers (Origin + bearer) shared by the binary blob endpoints. */
-  private baseHeaders(): Record<string, string> {
-    const headers: Record<string, string> = {};
+  private baseHeaders(forUrl?: string): Record<string, string> {
+    const headers: Record<string, string> = forUrl ? this.vaultKeyHeaders(pathOf(forUrl)) : {};
     try {
       headers.Origin = new URL(this.baseUrl).origin;
     } catch {
@@ -3702,7 +4089,7 @@ export class ApiClient {
      *  server answers 409 `stale_base` when the file has moved on since. */
     baseSha?: string | null;
   }): Promise<BlobMeta> {
-    const headers = this.baseHeaders();
+    const headers = this.baseHeaders(`/api/vaults/${encodeURIComponent(input.vaultId)}/blobs`);
     headers["Content-Type"] = input.mime ?? "application/octet-stream";
     headers["x-rel-path"] = input.relPath;
     if (input.fileName) headers["x-file-name"] = input.fileName;
@@ -3716,9 +4103,11 @@ export class ApiClient {
       // `baseSha` rides the query, not a header: a server that predates it
       // would refuse an unknown header at the CORS preflight and fail the
       // upload outright, while an unknown query parameter is simply ignored.
-      `${this.baseUrl}/api/vaults/${encodeURIComponent(input.vaultId)}/blobs${
-        input.docId && input.baseSha ? `?baseSha=${encodeURIComponent(input.baseSha)}` : ""
-      }`,
+      withClientVersion(
+        `${this.baseUrl}/api/vaults/${encodeURIComponent(input.vaultId)}/blobs${
+          input.docId && input.baseSha ? `?baseSha=${encodeURIComponent(input.baseSha)}` : ""
+        }`,
+      ),
       { method: "POST", headers, body: buf },
     );
     const text = await res.text();
@@ -3957,15 +4346,18 @@ export class ApiClient {
       "Content-Type": "application/json",
       [ORIGIN_HEADER]: this.clientId,
     };
-    if (this.isOwnOrigin(url)) {
+    const own = this.isOwnOrigin(url);
+    if (own) {
       try {
         headers.Origin = new URL(this.baseUrl).origin;
       } catch {
         /* leave unset */
       }
       if (this.token) headers.Authorization = `Bearer ${this.token}`;
+      Object.assign(headers, this.vaultKeyHeaders(pathOf(url)));
     }
-    const res = await this.fetchImpl(url, { method, headers, body: JSON.stringify(body) });
+    const target = own ? withClientVersion(url) : url;
+    const res = await this.fetchImpl(target, { method, headers, body: JSON.stringify(body) });
     const text = await res.text();
     let parsed: unknown = undefined;
     if (text) {
@@ -3993,7 +4385,7 @@ export class ApiClient {
 
   /** Download an attachment's bytes by blob id. */
   async downloadBlob(id: string): Promise<Uint8Array> {
-    const res = await this.fetchImpl(`${this.baseUrl}/api/blobs/${encodeURIComponent(id)}`, {
+    const res = await this.fetchImpl(withClientVersion(`${this.baseUrl}/api/blobs/${encodeURIComponent(id)}`), {
       method: "GET",
       headers: this.baseHeaders(),
     });

@@ -18,7 +18,7 @@ const ACCESS_OPTIONS: ReadonlyArray<{ value: InviteAccess; label: string; hint?:
   { value: "open", label: "Can edit" },
   { value: "readonly", label: "Can view" },
   { value: "private", label: "No access" },
-  { value: "default", label: "Default for new members", hint: "Whatever the New members setting says" },
+  { value: "default", label: "Vault default", hint: "Whatever the New members setting says" },
 ];
 
 /** Add typed or pasted text to the chip list, de-duplicated case-insensitively. */
@@ -39,8 +39,14 @@ export function addChips(chips: readonly string[], text: string): string[] {
  * messages the old Members tab showed (emailed / no email server / email
  * failed, with the link to share).
  */
-export function InvitePeopleDialog({ orgId, canManageBilling = false, seatAccount = null, ownerName = null, onClose, onInvited }: {
+export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembersAccess = null, onNewMembersAccess, canManageBilling = false, seatAccount = null, ownerName = null, onClose, onInvited }: {
   orgId: string;
+  /** For the join-code sentence. */
+  vaultName?: string;
+  /** The vault's New members setting: what someone who joins by code gets. */
+  newMembersAccess?: TeamAccessMode | null;
+  /** Change the New members setting from the Join code tab (owners/admins). */
+  onNewMembersAccess?: (mode: TeamAccessMode) => void;
   /** The owner can add seats from the notice. */
   canManageBilling?: boolean;
   /** The account's seats, for the warning shown before anyone types (Team model only). */
@@ -62,6 +68,9 @@ export function InvitePeopleDialog({ orgId, canManageBilling = false, seatAccoun
   const [limit, setLimit] = useState<{ kind: LimitKind; limit: number | null } | null>(null);
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [peopleErr, setPeopleErr] = useState<unknown>(null);
+  // Redesign: email and join code each get a tab of their own.
+  const [tab, setTab] = useState<"email" | "code">("email");
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -119,11 +128,65 @@ export function InvitePeopleDialog({ orgId, canManageBilling = false, seatAccoun
   const copy = async (text: string) => {
     try { await navigator.clipboard.writeText(text); } catch { /* clipboard unavailable */ }
   };
+  const copyCode = async () => {
+    if (!code) return;
+    await copy(code);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  };
 
   return createPortal(
     <div className="modal-backdrop" onClick={(e) => { e.stopPropagation(); onClose(); }}>
       <div className="modal invite-people" role="dialog" aria-modal="true" aria-label="Invite people" onClick={(e) => e.stopPropagation()}>
-        <h2 className="confirm-title">Invite people</h2>
+        <div className="invite-head">
+          <h2 className="confirm-title">Invite people</h2>
+          <button type="button" className="invite-close" aria-label="Close" onClick={onClose}>×</button>
+        </div>
+        <div className="invite-tabs" role="tablist" aria-label="How to invite">
+          <button type="button" role="tab" aria-selected={tab === "email"} className={tab === "email" ? "on" : ""} onClick={() => setTab("email")}>By email</button>
+          <button type="button" role="tab" aria-selected={tab === "code"} className={tab === "code" ? "on" : ""} onClick={() => setTab("code")}>Join code</button>
+        </div>
+        {tab === "code" ? (
+          <>
+            <div className="invite-code-card">
+              <p className="invite-code-lead">Anyone with this code can join {vaultName}</p>
+              {code ? (
+                <div className="invite-code-tiles" aria-label={`Join code ${code}`}>
+                  {code.split("").map((ch, i) => (
+                    <span key={i} className={i === Math.floor(code.length / 2) ? "gap" : undefined}>{ch}</span>
+                  ))}
+                </div>
+              ) : (
+                <p className="invite-code-lead">Loading the code…</p>
+              )}
+              <button type="button" className={`primary invite-copy${copied ? " is-copied" : ""}`} disabled={!code} onClick={() => void copyCode()}>
+                {copied ? "Copied" : "Copy code"}
+              </button>
+            </div>
+            <div className="invite-code-row">
+              <span>
+                People who join get
+                <small>The vault's New members setting</small>
+              </span>
+              {newMembersAccess && onNewMembersAccess ? (
+                <MenuSelect<TeamAccessMode>
+                  value={newMembersAccess}
+                  options={ACCESS_OPTIONS.filter((o): o is { value: TeamAccessMode; label: string } => o.value !== "default")}
+                  onSelect={onNewMembersAccess}
+                  ariaLabel="People who join get"
+                  triggerClassName="invite-field-trigger"
+                  menuClassName="access-menu"
+                />
+              ) : (
+                <span className="muted">{ACCESS_OPTIONS.find((o) => o.value === newMembersAccess)?.label ?? "The New members setting"}</span>
+              )}
+            </div>
+            <div className="invite-foot">
+              <span className="invite-foot-hint">They join as Members.</span>
+              <button type="button" className="ghost-pill" onClick={onClose}>Done</button>
+            </div>
+          </>
+        ) : (<>
         <div className="invite-chips" onClick={(e) => (e.currentTarget.querySelector("input") as HTMLInputElement | null)?.focus()}>
           {chips.map((c) => (
             <span key={c} className={`invite-chip${isValidEmail(c) ? "" : " is-invalid"}`}>
@@ -169,6 +232,7 @@ export function InvitePeopleDialog({ orgId, canManageBilling = false, seatAccoun
               ariaLabel="Role"
               triggerClassName="invite-field-trigger"
               menuClassName="access-menu"
+              anchorClosest=".invite-field"
             />
           </label>
           <label className="invite-field">
@@ -180,17 +244,11 @@ export function InvitePeopleDialog({ orgId, canManageBilling = false, seatAccoun
               ariaLabel="Access"
               triggerClassName="invite-field-trigger"
               menuClassName="access-menu"
+              anchorClosest=".invite-field"
               disabled={role === "admin"}
             />
           </label>
         </div>
-        {code && (
-          <div className="invite-people-code">
-            <span className="muted">Or share the join code</span>
-            <code className="invite-people-code-value">{code}</code>
-            <button type="button" className="link-btn invite-people-copy" onClick={() => void copy(code)}>Copy</button>
-          </div>
-        )}
         {error && <div className="auth-error">{error}</div>}
         {prewarning && !results && peopleNotice == null && (
           <div className="limit-nudge">
@@ -239,17 +297,21 @@ export function InvitePeopleDialog({ orgId, canManageBilling = false, seatAccoun
             </div>
           );
         })}
-        <div className="confirm-actions invite-people-actions">
-          <button type="button" className="ghost-pill" onClick={onClose}>{results ? "Done" : "Cancel"}</button>
-          <AsyncButton
-            className="primary"
-            spinnerTone="on-accent"
-            disabled={all.length === 0 || invalid.length > 0}
-            onClick={send}
-          >
-            {all.length >= 2 ? "Send invites" : "Send invite"}
-          </AsyncButton>
+        <div className="invite-foot">
+          <span className="invite-foot-hint">They get an email with a link.</span>
+          <div className="confirm-actions invite-people-actions">
+            <button type="button" className="ghost-pill" onClick={onClose}>{results ? "Done" : "Cancel"}</button>
+            <AsyncButton
+              className="primary"
+              spinnerTone="on-accent"
+              disabled={all.length === 0 || invalid.length > 0}
+              onClick={send}
+            >
+              {all.length >= 2 ? `Send ${all.length} invites` : "Send invite"}
+            </AsyncButton>
+          </div>
         </div>
+        </>)}
         {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
       </div>
     </div>,

@@ -94,6 +94,8 @@ export async function refreshVaultRefWindows(vaultId: string, db: Queryable = de
       `SELECT doc_id FROM note_index
         WHERE vault_id = $1 AND (ref_heads IS NULL OR NOT (ref_heads @> $2::text[]))
           AND NOT (doc_id = ANY($4::text[]))
+          -- W3: a sealed row has no plaintext excerpt; the rule reads its body in memory.
+          AND search_enc IS NULL
         ORDER BY doc_id LIMIT $3`,
       [vaultId, heads, BATCH, [...seen]],
     );

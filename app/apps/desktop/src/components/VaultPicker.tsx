@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import type { VaultInfo, RecentVault } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
@@ -10,6 +10,7 @@ import {
 } from "../store";
 import { Wordmark } from "./Logo";
 import { Spinner } from "./Spinner";
+import { leaveWithGhost } from "../lib/exitMotion";
 import { useLocalFolderClasses } from "./useVaultLists";
 import { filterRecentsForWelcome } from "../lib/vault/vaultList";
 
@@ -102,6 +103,10 @@ function tidyPath(path: string): string {
 }
 
 export function VaultPicker() {
+  // Redesign: when the workspace replaces this screen, fade a copy of it out
+  // on top instead of cutting straight to the app (lib/exitMotion).
+  const pickerRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => () => leaveWithGhost(pickerRef.current), []);
   const authStatus = useStore((s) => s.authStatus);
   // A link-driven prompt (shared note / server invite / team invitation) mounts
   // its OWN AuthDialog from App.tsx, over this same welcome screen. Two stacked
@@ -567,7 +572,7 @@ export function VaultPicker() {
   };
 
   return (
-    <div className="vault-picker">
+    <div className="vault-picker" ref={pickerRef}>
       {/* The main app is draggable by its two header rows; this screen has no
           chrome of its own, so without a strip here the window couldn't be
           moved at all before a vault is open. */}
@@ -761,18 +766,20 @@ export function VaultPicker() {
                   New vault
                 </motion.button>
                 <motion.button
-                  className={`ghost-pill lg${busy ? " is-busy" : ""}`}
+                  className={`ghost-pill lg${busy && !opening ? " is-busy" : ""}`}
                   disabled={busy}
-                  aria-busy={busy || undefined}
+                  aria-busy={(busy && !opening) || undefined}
                   onClick={pickExisting}
                   whileHover={reduceMotion ? undefined : { scale: 1.03, y: -1 }}
                   whileTap={reduceMotion ? undefined : { scale: 0.97 }}
                   transition={SPRING}
                 >
+                  {/* A recent card opening shows its own spinner; this button
+                      only reports a folder it picked itself. */}
                   <span className="async-btn-label">
-                    {busy ? "Opening…" : "Open existing"}
+                    {busy && !opening ? "Opening…" : "Open existing"}
                   </span>
-                  {busy && <Spinner size="xs" tone="neutral" />}
+                  {busy && !opening && <Spinner size="xs" tone="neutral" />}
                 </motion.button>
                 {/*
                   Third peer action: create / open / JOIN. It sits up here with

@@ -14,6 +14,23 @@ import { dismissToast, useToasts, type Toast } from "../lib/toast";
  *   that then disappears under the cursor is the single most annoying thing a
  *   toast can do, and it's the reason people distrust them.
  */
+/** The glyph in each tone's icon tile: a tick, an info mark, an alert. */
+const TONE_ICON: Record<Toast["tone"], React.ReactNode> = {
+  success: <path d="M20 6 9 17l-5-5" />,
+  neutral: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 8h.01M11 12h1v5h1" />
+    </>
+  ),
+  error: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 8v5M12 16.5h.01" />
+    </>
+  ),
+};
+
 export function Toasts() {
   const toasts = useToasts();
   const hovering = useRef(false);
@@ -81,8 +98,24 @@ function ToastRow({
           : { type: "spring", stiffness: 420, damping: 32 }
       }
     >
-      <span className="toast-dot" aria-hidden="true" />
+      <span className="toast-dot" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          {TONE_ICON[toast.tone]}
+        </svg>
+      </span>
       <span className="toast-text">{toast.text}</span>
+      {toast.action && (
+        <button
+          type="button"
+          className="toast-action"
+          onClick={() => {
+            toast.action!.run();
+            dismissToast(toast.id);
+          }}
+        >
+          {toast.action.label}
+        </button>
+      )}
       <button
         className="toast-close"
         aria-label="Dismiss"

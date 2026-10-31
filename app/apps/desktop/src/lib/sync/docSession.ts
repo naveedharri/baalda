@@ -30,9 +30,17 @@ import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
+import {
+  isVaultKeyBlocked,
+  onVaultKeyEvent,
+  VAULT_KEY_PAUSE_REASON,
+  vaultKeysClosed,
+  vaultKeysNudge,
+  vaultKeysOpened,
+} from "../vaultKeys/runtime";
 import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
-import type { ActivityStatus } from "../prefs";
+import { statusToWire, type ActivityStatus } from "../prefs";
 import { toast } from "../toast";
 import { AttachmentSync, routesToAttachmentSync } from "./attachments";
 import { applySkippingUnsafe } from "./windowsPaths";
@@ -442,6 +450,22 @@ export class SyncManager implements InboundHost {
 
   constructor() {
     this.configureRegistry();
+    // A vault that becomes keyed while its sockets are up (this device just
+    // converted it, restored the key, or a teammate sealed it to us) left the
+    // vault channel and the open note connected WITHOUT the key: the server now
+    // refuses them. Reconnect both once, so the fresh `hello` / token carries
+    // the key. Only on the transition into "ready", never on every 2-min run.
+    // A vault first seen already "ready" connected with its key: no reconnect.
+    const lastState = new Map<string, string>();
+    onVaultKeyEvent((e) => {
+      if (e.kind !== "vault") return;
+      const prev = lastState.get(e.vaultId);
+      lastState.set(e.vaultId, e.state.state);
+      if (e.state.state !== "ready" || prev === undefined || prev === "ready") return;
+      if (e.vaultId !== this.vaultEngineId) return;
+      this.vaultEngine?.reconnect({ liveOnly: this.vaultEngineLiveOnly });
+      this.current?.refreshAccess();
+    });
   }
 
   private configureRegistry(): void {
@@ -1690,7 +1714,7 @@ export class SyncManager implements InboundHost {
       this.registryPullBurstAt = now;
       this.registryPullGapOnly = gapDelayed;
     }
-    if (this.rootMissing) return;
+    if (this.rootMissing || isVaultKeyBlocked(this.registry.vaultId)) return;
     this.registryPullDueAt = dueAt;
     this.registryPullTimer = setTimeout(() => {
       const gapOnly = this.registryPullGapOnly;
@@ -1698,7 +1722,7 @@ export class SyncManager implements InboundHost {
       this.registryPullBurstAt = 0;
       this.registryPullDueAt = 0;
       this.registryPullGapOnly = false;
-      if (!scope.isCurrent() || this.rootMissing) return;
+      if (!scope.isCurrent() || this.structurePaused()) return;
       // Only teammates' frames asked, and a pull is already running: it may
       // have started before their change, so one more is owed — but after it
       // ends (plus the gap), never queued behind it back to back.
@@ -1965,7 +1989,7 @@ export class SyncManager implements InboundHost {
    */
   /** {@link InboundHost.mayRemoveRefusedEmptyFolders}: live, root present. */
   mayRemoveRefusedEmptyFolders(): boolean {
-    return this.isLive() && !this.rootMissing;
+    return this.isLive() && !this.structurePaused();
   }
 
   revocationAuthority(): boolean {
@@ -3379,9 +3403,81 @@ export class SyncManager implements InboundHost {
     return this.rootMissing;
   }
 
-  /** `InboundHost.structurePaused`: the registry's stop signal. */
+  /**
+   * W3 open-time gate, injected (`setVaultKeyGate`) by the app's composition
+   * root (`store.ts`); a SyncManager built without one (tests) has no gate.
+   */
+  private vaultKeyGateFn:
+    | ((opts: { userId: string; vaultId: string; orgId: string }) => Promise<"proceed" | "paused">)
+    | null = null;
+  setVaultKeyGate(fn: typeof this.vaultKeyGateFn): void {
+    this.vaultKeyGateFn = fn;
+  }
+
+  /**
+   * May the vault channel open in the prime window, before the gate? Injected
+   * with the gate (`vaultKeysEarlyChannel`); without one (tests, no key wiring)
+   * the channel opens early exactly as it did before vault keys.
+   */
+  private earlyChannelFn: ((vaultId: string) => boolean | Promise<boolean>) | null = null;
+  setEarlyVaultChannelCheck(fn: typeof this.earlyChannelFn): void {
+    this.earlyChannelFn = fn;
+  }
+
+  /** The prime window's early channel start (see `enable`, PHASE A). */
+  private earlyChannelOpen(scope: VaultScope, registry: VaultRegistry): void {
+    const check = this.earlyChannelFn;
+    const vaultId = registry.vaultId;
+    if (!check || !vaultId) {
+      this.startVaultEngine(scope);
+      return;
+    }
+    let verdict: boolean | Promise<boolean>;
+    try {
+      verdict = check(vaultId);
+    } catch {
+      return; // unknown: the reconcile starts the channel after the gate
+    }
+    if (verdict === true) {
+      this.startVaultEngine(scope);
+      return;
+    }
+    if (verdict === false) return;
+    void verdict.then(
+      (ok) => {
+        // Only while this prime window is still open: once the reconcile ends
+        // (or the vault changes) the enable path owns the channel start.
+        if (ok && this.primed && scope.isCurrent() && this.registry === registry && registry.vaultId === vaultId) {
+          this.startVaultEngine(scope);
+        }
+      },
+      () => undefined,
+    );
+  }
+
+  /** The server collection id this vault opens with, for the key gate. */
+  private async vaultKeyGate(session: SessionInfo, orgId: string): Promise<"proceed" | "paused"> {
+    const gate = this.vaultKeyGateFn;
+    if (!gate) return "proceed";
+    let vaultId = this.registry.vaultId;
+    if (!vaultId) {
+      try {
+        vaultId = (await api.listVaults()).find((v) => v.organization_id === orgId)?.id ?? null;
+      } catch {
+        // The reconcile makes this same call and fails the same way: nothing
+        // structural can run without it, so there is nothing to gate.
+        return "proceed";
+      }
+    }
+    // A collection the server does not have yet is created unkeyed.
+    if (!vaultId) return "proceed";
+    return gate({ userId: session.user.id, vaultId, orgId });
+  }
+
+  /** `InboundHost.structurePaused`: the registry's stop signal. Also held
+   *  while this device knows it lacks the open (keyed) vault's key. */
   structurePaused(): boolean {
-    return this.rootMissing;
+    return this.rootMissing || isVaultKeyBlocked(this.registry.vaultId);
   }
 
   /** `InboundHost.confirmVaultRoot`. */
@@ -5115,12 +5211,30 @@ export class SyncManager implements InboundHost {
         // and disk-delete paths stay inert). All the early socket can do is
         // backfill content for docs the prime already mapped — which is exactly
         // the work we want overlapped.
-        this.startVaultEngine(scope);
+        //
+        // NOT for a vault whose key state is unknown or keyed without the key:
+        // the server closes that hello with 4409 `key_required`, which used to
+        // loop at startup. The reconcile below starts the channel once the gate
+        // proceeds. A server known to lack `vault-keys` (or an unkeyed vault, or
+        // a held key) opens early exactly as before; see `earlyChannelOpen`.
+        this.earlyChannelOpen(scope, registry);
       }
     } catch (e) {
       console.warn("[sync] local prime failed; falling back to reconcile-first", e);
     }
     if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
+    // ---- W3 gate: the first pass waits for a KNOWN vault-key state. ----
+    // A keyed vault this device cannot read yet, or an unknown answer, pauses
+    // here before anything is materialized, registered or removed. The store
+    // re-runs `enable` once the key state is known (`onVaultKeyBlockChange`).
+    if ((await this.vaultKeyGate(session, vault.orgId)) === "paused") {
+      return { ok: false, reason: VAULT_KEY_PAUSE_REASON, scope };
+    }
+    if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
+    // The gate proceeded, so the key state is now KNOWN (no feature, unkeyed, or
+    // the verified key held): a primed vault the early check held back opens its
+    // channel here, still beside the reconcile. Idempotent if it already opened.
+    if (this.primed) this.startVaultEngine(scope);
     // ---- PHASE B: the networked reconcile. Unchanged. ----
     try {
       // The registry reads the vault tree itself (the FULL recursive walk); it
@@ -6705,7 +6819,7 @@ export class SyncManager implements InboundHost {
       docId,
       name: this.presence.name,
       color: colorForUser(this.presence.id),
-      status: this.status,
+      ...statusToWire(this.status),
     });
   }
 
@@ -6756,6 +6870,15 @@ export class SyncManager implements InboundHost {
     this.stopVaultEngine();
     this.vaultEngineId = vaultId;
     markOnce("channel-start");
+    // Client-held vault keys (no-op unless the server has `vault-keys`).
+    // Never allowed to break the channel start.
+    if (this.presence?.id && scope.orgId) {
+      try {
+        vaultKeysOpened({ userId: this.presence.id, vaultId, orgId: scope.orgId });
+      } catch (e) {
+        console.warn("[vault-keys] could not start", e instanceof Error ? e.message : e);
+      }
+    }
     // Reflect "connecting" the moment we switch into a vault, so the light
     // moves off a stale value before the socket reports back.
     this.vaultStatus = "connecting";
@@ -6933,6 +7056,7 @@ export class SyncManager implements InboundHost {
         }
         this.handleRegistryChanged("registry-frame");
         this.notifyActivityChanged(scope);
+        vaultKeysNudge(); // a teammate may be waiting for the vault key
         // An open person Access tab re-reads its tree (a teammate's new file
         // or folder, an MCP create).
         markAccessTreeStale();
@@ -6940,7 +7064,10 @@ export class SyncManager implements InboundHost {
       // Trash / shrink listings moved (#260): refetch instead of polling.
       onActivityChanged: () => this.notifyActivityChanged(scope),
       // A new teammate joined the vault — refresh roster + celebrate.
-      onMemberJoined: (name) => this.onMemberJoined?.(name),
+      onMemberJoined: (name) => {
+        vaultKeysNudge(); // the new member's key request
+        this.onMemberJoined?.(name);
+      },
       onMemberRemoved: (change) => this.onMemberRemoved?.(change),
       // The vault was renamed or got a new icon (#306).
       onOrgChanged: (change) => this.onOrgChanged?.(change),
@@ -7022,6 +7149,7 @@ export class SyncManager implements InboundHost {
     this.deferredArrivalFlush.cancel();
     this.vaultEngine?.stop();
     this.vaultEngine = null;
+    vaultKeysClosed();
     this.vaultEngineId = null;
     // Cut any audio still playing: it belongs to the vault we're leaving, and
     // hearing a teammate from the previous vault after switching would be a bug

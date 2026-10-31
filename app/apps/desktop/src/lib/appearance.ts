@@ -110,19 +110,19 @@ export function automaticItemColorAssignments(
   for (const item of items) {
     let colorId = item.explicitColorId;
     if (!itemColorValue(colorId)) {
-      const preferred = automaticItemColorId(userId, vaultIdentity, item.identity);
-      const start = ITEM_COLORS.findIndex((color) => color.id === preferred);
-      colorId = preferred;
-      for (let offset = 0; offset < ITEM_COLORS.length; offset++) {
-        // Seven is coprime with the 22-entry palette and jumps between hue
-        // families instead of resolving a pink collision with another pink.
-        const index = (start + 7 * offset) % ITEM_COLORS.length;
-        const candidate = ITEM_COLORS[index].id;
-        if (!recentFamilies.includes(ITEM_COLORS[index].family)) {
-          colorId = candidate;
-          break;
-        }
+      // Redesign: a short set of clearly different hues, still chosen by the
+      // item's own identity so a folder keeps its colour when siblings are
+      // added, removed or renamed. A clash with the two rows above steps on
+      // through the set rather than repeating a hue.
+      const start = colorHash(`${userId}\0${vaultIdentity}\0${item.identity}`) % REDESIGN_ORDER.length;
+      let pick = REDESIGN_ORDER[start];
+      for (let tries = 1; tries < REDESIGN_ORDER.length && recentFamilies.includes(familyOf(pick)); tries++) {
+        pick = REDESIGN_ORDER[(start + tries) % REDESIGN_ORDER.length];
       }
+      result[item.key] = pick;
+      recentFamilies.push(familyOf(pick));
+      if (recentFamilies.length > 2) recentFamilies.shift();
+      continue;
     }
     result[item.key] = colorId!;
     recentFamilies.push(ITEM_COLORS.find((color) => color.id === colorId)!.family);
@@ -130,6 +130,11 @@ export function automaticItemColorAssignments(
   }
 
   return result;
+}
+
+const REDESIGN_ORDER = ["red", "green", "gold", "sky", "violet", "pink", "teal", "orange"];
+function familyOf(id: string): string {
+  return ITEM_COLORS.find((color) => color.id === id)?.family ?? id;
 }
 
 const STORE_PREFIX = "context.itemColors:";

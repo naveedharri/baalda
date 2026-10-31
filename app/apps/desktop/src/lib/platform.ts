@@ -13,6 +13,10 @@
  * bundle free of a plugin we'd otherwise pull in for one boolean.
  */
 export function platformClass(): "macos" | "windows" | "linux" | "other" {
+  // Local redesign testing: `VITE_FAKE_PLATFORM=windows` runs the real app with
+  // the Windows chrome and layout on a Mac (dev builds only).
+  const fake = import.meta.env.DEV ? import.meta.env.VITE_FAKE_PLATFORM : undefined;
+  if (fake === "windows" || fake === "linux" || fake === "macos") return fake;
   const ua = navigator.userAgent;
   // Apple Silicon still reports "Intel Mac OS X" in WKWebView, so match loosely.
   if (/Mac OS X|Macintosh/.test(ua)) return "macos";

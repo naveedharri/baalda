@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { refuseKeyIncapableClient } from "../../crypto/transport.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { mintVaultToken } from "../../tokens/vault-token.js";
 import { getSession } from "../session.js";
@@ -32,6 +33,10 @@ vaultTokenRoutes.post("/vault-sync-token", async (c) => {
 
   const role = await orgRole(organizationId, session.userId);
   if (!role) return c.json({ error: "No access to this vault" }, 403);
+  // Keyed vault + a build without vault keys: 426 (it would otherwise meet
+  // close 4409 / `key_required` on the channel, which it has never seen).
+  const outdated = await refuseKeyIncapableClient(c, vaultId);
+  if (outdated) return outdated;
 
   const token = await mintVaultToken({ userId: session.userId, vaultId });
   return c.json({ token, vaultId });

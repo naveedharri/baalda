@@ -6,6 +6,7 @@ import {
   SIDEBAR_WIDTH_DEFAULT,
   SIDEBAR_WIDTH_MAX,
   SIDEBAR_WIDTH_MIN,
+  SIDEBAR_WIDTH_SQUEEZED,
   readSidebarHidden,
   writeSidebarHidden,
 } from "./prefs";
@@ -59,8 +60,9 @@ describe("clampSidebarWidth", () => {
 
   it("still yields a usable sidebar on a window narrower than the minimum", () => {
     // Below this the floor wins: the window is too small to honour both the
-    // editor's reserve and the sidebar's floor, and the sidebar keeps its.
-    expect(clampSidebarWidth(9000, 400)).toBe(SIDEBAR_WIDTH_MIN);
+    // editor's reserve and the sidebar's floor, and the sidebar keeps its
+    // squeezed floor (the 300px default floor gives way down to 264px, no more).
+    expect(clampSidebarWidth(9000, 400)).toBe(SIDEBAR_WIDTH_SQUEEZED);
   });
 
   it("falls back to the default for a corrupted stored value", () => {

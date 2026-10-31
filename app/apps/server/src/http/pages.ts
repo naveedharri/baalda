@@ -1,5 +1,6 @@
 import { BRAND_NAME } from "../brand.js";
 import { GLYPH_FAVICON_DATA_URI, WORDMARK_INK_DATA_URI } from "../brand-assets.js";
+import { FONT_FACE_CSS } from "./fonts.js";
 
 /**
  * Shared chrome for every human-facing page this headless server renders: the
@@ -29,10 +30,8 @@ export function page(opts: { title: string; body: string; head?: string; wide?: 
 <meta name="robots" content="noindex" />
 <title>${esc(opts.title)} · ${esc(BRAND_NAME)}</title>
 <link rel="icon" href="${GLYPH_FAVICON_DATA_URI}" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Radio+Canada+Big:wght@500;600&display=swap" />
 <style>
+${FONT_FACE_CSS}
   :root {
     color-scheme: light;
     --ink: #030302; --muted: #737373; --faint: #a3a3a3;

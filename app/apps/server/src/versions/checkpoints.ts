@@ -1,3 +1,6 @@
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { KeyRequiredError } from "../crypto/transport.js";
+import { indexCryptoFor } from "../index/sealed-index.js";
 import { randomUUID } from "node:crypto";
 import { pgText } from "../db/text.js";
 import type pg from "pg";
@@ -5,7 +8,7 @@ import { pool as defaultPool } from "../db/pool.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
 import { sha256Hex } from "./capture.js";
 import { isSharpShrink } from "./shrink-guard.js";
-import { gcNoteTexts, storeNoteText, VERSION_CONTENT, VERSION_TEXT_JOIN } from "./texts.js";
+import { gcNoteTexts, resolveText, storeNoteText, VERSION_CONTENT, VERSION_CONTENT_ENC, VERSION_TEXT_JOIN } from "./texts.js";
 import { countRegisteredWithoutState, inc } from "../metrics/sync-metrics.js";
 import { checkpointSchedule, type CheckpointSchedule } from "./checkpoint-plan.js";
 
@@ -175,6 +178,12 @@ export interface CaptureCheckpointOptions {
   /** Override {@link CHECKPOINT_BLOB_MAX_POSTGRES_BYTES} (tests). */
   blobMaxPostgresBytes?: number;
   /**
+   * W3: a request's own vault key. Omitted (background), a keyed vault uses a
+   * cache copy, or the capture refuses BEFORE writing anything (key_required)
+   * and is retried later: never a checkpoint with missing or empty texts.
+   */
+  crypto?: DocCrypto;
+  /**
    * Sweep the vault's unreferenced `note_texts` afterwards (default true). A
    * revert's own undo snapshot passes false: it runs inside the revert's long
    * transaction, where the sweep's row locks would be held until the end.
@@ -199,12 +208,36 @@ export async function captureCheckpoint(
   blobCount: number;
 }> {
   const { db, vaultId } = opts;
+  let crypto = opts.crypto;
+  let cacheCopy: Buffer | null = null;
+  if (!crypto) {
+    const resolved = await indexCryptoFor(vaultId, db);
+    if (resolved === null) throw new KeyRequiredError();
+    if (resolved) {
+      crypto = resolved;
+      cacheCopy = resolved.key;
+    }
+  }
+  try {
+    return await captureCheckpointKeyed(opts, crypto);
+  } finally {
+    cacheCopy?.fill(0);
+  }
+}
+
+async function captureCheckpointKeyed(
+  opts: CaptureCheckpointOptions,
+  crypto: DocCrypto | undefined,
+): Promise<{ id: string; noteCount: number; carriedPreShrink: number; structureOnly: number; blobCount: number }> {
+  const { db, vaultId } = opts;
   const startedAt = Date.now();
   const structure = await readVaultStructure(db, vaultId);
   const id = randomUUID();
   const preShrink = await recentPreShrinkTexts(
     db,
     structure.notes.map((n) => n.id),
+    vaultId,
+    crypto,
   );
   const carried: string[] = [];
   await db.query(
@@ -227,7 +260,7 @@ export async function captureCheckpoint(
   const skippedOversized: string[] = [];
   const SAMPLE = 5;
   for (const note of structure.notes) {
-    const raw = await opts.docWriter.peekContent(vaultId, note.id);
+    const raw = await opts.docWriter.peekContent(vaultId, note.id, crypto);
     // NUL would abort the whole checkpoint transaction (see `pgText`).
     const content = raw == null ? null : pgText(raw);
     // `null` = the server has never seen this note's content (registered, but
@@ -260,7 +293,7 @@ export async function captureCheckpoint(
     // narrow reference row, no text. Text first, reference second: the order
     // the `note_texts` sweep's grace relies on.
     const sha = sha256Hex(body);
-    await storeNoteText(db, { vaultId, docId: note.id, sha, content: body });
+    await storeNoteText(db, { vaultId, docId: note.id, sha, content: body }, crypto);
     await db.query(
       `INSERT INTO vault_checkpoint_docs (checkpoint_id, doc_id, sha256, content)
        VALUES ($1, $2, $3, NULL)
@@ -540,15 +573,34 @@ export async function topUpCheckpoint(
   checkpointId: string,
   docIds: string[],
 ): Promise<string[]> {
+  // W3: background work. A keyed vault with no key held tops up nothing now
+  // (the docs stay pending for a later pass); never a plaintext or empty text.
+  const resolved = await indexCryptoFor(vaultId, db);
+  if (resolved === null) return [];
+  try {
+    return await topUpWith(db, docWriter, vaultId, checkpointId, docIds, resolved);
+  } finally {
+    resolved?.key.fill(0);
+  }
+}
+
+async function topUpWith(
+  db: Queryable,
+  docWriter: Pick<DocWriter, "peekContent">,
+  vaultId: string,
+  checkpointId: string,
+  docIds: string[],
+  crypto: DocCrypto | undefined,
+): Promise<string[]> {
   const done: string[] = [];
   for (const docId of docIds) {
-    const raw = await docWriter.peekContent(vaultId, docId);
+    const raw = await docWriter.peekContent(vaultId, docId, crypto);
     if (raw == null) continue;
     const body = pgText(raw);
     if (Buffer.byteLength(body, "utf8") > MAX_CHECKPOINT_DOC_BYTES) continue;
     const sha = sha256Hex(body);
     // Text first, reference second, as in `captureCheckpoint`.
-    await storeNoteText(db, { vaultId, docId, sha, content: body });
+    await storeNoteText(db, { vaultId, docId, sha, content: body }, crypto);
     const { rowCount } = await db.query(
       `INSERT INTO vault_checkpoint_docs (checkpoint_id, doc_id, sha256, content)
        SELECT $1, $2, $3, NULL
@@ -573,18 +625,24 @@ export async function topUpCheckpoint(
 async function recentPreShrinkTexts(
   db: Queryable,
   docIds: string[],
+  vaultId: string,
+  crypto: DocCrypto | undefined,
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (docIds.length === 0) return out;
-  const { rows } = await db.query<{ doc_id: string; content: string | null }>(
-    `SELECT DISTINCT ON (v.doc_id) v.doc_id, ${VERSION_CONTENT} AS content
+  const { rows } = await db.query<{ doc_id: string; content: string | null; content_enc: Buffer | null; sha256: string }>(
+    `SELECT DISTINCT ON (v.doc_id) v.doc_id, v.sha256, ${VERSION_CONTENT} AS content,
+            ${VERSION_CONTENT_ENC} AS content_enc
        FROM note_versions v ${VERSION_TEXT_JOIN}
       WHERE v.doc_id = ANY($1::text[]) AND v.cause = 'pre-shrink'
         AND v.created_at > now() - ($2::bigint * interval '1 millisecond')
       ORDER BY v.doc_id, v.id DESC`,
     [docIds, CHECKPOINT_SHRINK_CARRY_MS],
   );
-  for (const r of rows) if (r.content != null) out.set(r.doc_id, pgText(r.content));
+  for (const r of rows) {
+    const text = resolveText(r, { vaultId, docId: r.doc_id, sha: r.sha256 }, crypto);
+    if (text != null) out.set(r.doc_id, pgText(text));
+  }
   return out;
 }
 
@@ -749,20 +807,28 @@ export async function maybeDailyCheckpoint(opts: {
     }
   }
 
-  const outcome = await withVaultCheckpointLock(
-    opts.vaultId,
-    async (db) => {
-      if (!(await due(db))) return null;
-      return captureCheckpoint({
-        db,
-        docWriter: opts.docWriter,
-        vaultId: opts.vaultId,
-        kind: "auto",
-        createdBy: null,
-      });
-    },
-    pool,
-  );
+  let outcome;
+  try {
+    outcome = await withVaultCheckpointLock(
+      opts.vaultId,
+      async (db) => {
+        if (!(await due(db))) return null;
+        return captureCheckpoint({
+          db,
+          docWriter: opts.docWriter,
+          vaultId: opts.vaultId,
+          kind: "auto",
+          createdBy: null,
+        });
+      },
+      pool,
+    );
+  } catch (err) {
+    // W3: a keyed vault with no member connected (no key held). The capture
+    // refused before writing anything; ask again soon, like an upload deferral.
+    if (err instanceof KeyRequiredError) return { deferred: true };
+    throw err;
+  }
   if (outcome.acquired && outcome.value) deferredSince.delete(opts.vaultId);
   return outcome.acquired ? outcome.value : null;
 }

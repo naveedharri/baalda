@@ -1,0 +1,2662 @@
+/* ============================================================
+   Local redesign preview (v4: admin + site blend).
+   Light theme only. Imported last from App.tsx so it wins over
+   App.css; nothing else in the app is edited for the look.
+   ============================================================ */
+
+html:not(.rd-off) {
+  /* Redesign surface tokens (dark values in the dark block below). */
+  --rd-surface: #fff;
+  --rd-cream: #fcfaf6;
+  --rd-fill: #f3efe6;
+  --rd-fill-soft: #f6f3ec;
+  --rd-chip: #1a1920;
+  --rd-ink: 11, 10, 16;
+  /* Very light cream canvas, white cards. */
+  --bg-app: var(--rd-cream);
+  --bg-card: var(--rd-cream);
+  --bg-subtle: #f6f3ed;
+  --text-primary: var(--rd-chip);
+  --text-secondary: #55545e;
+  --text-tertiary: #85848f;
+  --accent: #7c5cff;
+  --accent-hover: #6a4fe0;
+  --accent-soft: #f1edff;
+  --accent-soft-hover: #e7e0ff;
+  --border: rgba(var(--rd-ink), 0.08);
+  --border-strong: rgba(var(--rd-ink), 0.14);
+  --rd-card-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.075), 0 1px 2px rgba(var(--rd-ink), 0.04), 0 8px 22px -10px rgba(var(--rd-ink), 0.13);
+  --editor-font-size: 17px;
+  --inline-title-size: 2.5em;
+  --inline-title-weight: 600;
+}
+
+/* ---- Dark: "night paper". Warm charcoal, never pure black; the canvas sits a
+   step below the page the way cream sits under white; off-white text with
+   warmth; a calmer violet so nothing glows. ---- */
+html[data-theme="dark"]:not(.rd-off) {
+  --rd-surface: #1f1e1c;
+  --rd-cream: #181715;
+  --rd-fill: #2a2825;
+  --rd-fill-soft: #252320;
+  --rd-chip: #2e2c29;
+  --rd-ink: 255, 248, 236;
+  --bg-app: #181715;
+  --bg-surface: #1f1e1c;
+  --bg-card: #1f1e1c;
+  --bg-subtle: #262421;
+  --bg-hover: #292724;
+  --bg-active: #2f2b3c;
+  --text-primary: #e7e2d9;
+  --text-secondary: #b1aca2;
+  --text-tertiary: #8b867d;
+  --text-faint: #6f6b64;
+  --accent: #a597ff;
+  --accent-hover: #b8adff;
+  --accent-soft: rgba(165, 151, 255, 0.14);
+  --accent-soft-hover: rgba(165, 151, 255, 0.2);
+  --link: #b3a8ff;
+  --border: rgba(255, 248, 236, 0.08);
+  --border-strong: rgba(255, 248, 236, 0.14);
+  --rd-card-shadow: 0 0 0 1px rgba(255, 248, 236, 0.07), 0 10px 26px -14px rgba(0, 0, 0, 0.65);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 10px 26px -10px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 20px 44px -16px rgba(0, 0, 0, 0.7);
+  --selection-bg: rgba(165, 151, 255, 0.28);
+  --editor-selection-bg: rgba(165, 151, 255, 0.22);
+  --editor-selection-bg-inactive: rgba(165, 151, 255, 0.14);
+  --success: #6cc58f;
+  --success-soft: rgba(108, 197, 143, 0.14);
+  --warning: #e5b65a;
+  --warning-soft: rgba(229, 182, 90, 0.14);
+  --highlight-bg: rgba(229, 182, 90, 0.24);
+}
+
+/* Dark values for the redesign's named colours: inks lift to soft light
+   tones, pastel fills become low-alpha washes of the same hue. */
+html[data-theme="dark"]:not(.rd-off) {
+  --rdc-26252d: #ddd8cf;
+  --rdc-2e2d36: #ddd8cf;
+  --rdc-55545e: #aaa59b;
+  --rdc-6b6558: #aaa59b;
+  --rdc-8a8374: #aaa59b;
+  --rdc-5f6b7a: #aaa59b;
+  --rdc-4a5361: #aaa59b;
+  --rdc-4a2fc7: #b8adff;
+  --rdc-5b3fd6: #b8adff;
+  --rdc-6a4fe0: #b8adff;
+  --rdc-6a46f0: #b8adff;
+  --rdc-2a1a7a: #b8adff;
+  --rdc-3b5fc7: #9db4ff;
+  --rdc-4b68c3: #9db4ff;
+  --rdc-ece6ff: rgba(165, 151, 255, 0.14);
+  --rdc-f1edff: rgba(165, 151, 255, 0.14);
+  --rdc-e9e2ff: rgba(165, 151, 255, 0.14);
+  --rdc-efeaff: rgba(165, 151, 255, 0.14);
+  --rdc-f6f3ff: rgba(165, 151, 255, 0.14);
+  --rdc-e3e8fb: rgba(165, 151, 255, 0.14);
+  --rdc-d9d0ff: rgba(165, 151, 255, 0.14);
+  --rdc-c9bcf6: rgba(165, 151, 255, 0.32);
+  --rdc-cfc4ff55: rgba(165, 151, 255, 0.2);
+  --rdc-cfc4ff66: rgba(165, 151, 255, 0.2);
+  --rdc-b8caf566: rgba(165, 151, 255, 0.2);
+  --rdc-2f7044: #86cf9e;
+  --rdc-2f8a4a: #86cf9e;
+  --rdc-3f8850: #86cf9e;
+  --rdc-dff3e5: rgba(108, 197, 143, 0.14);
+  --rdc-e4f3e6: rgba(108, 197, 143, 0.14);
+  --rdc-9bd8a966: rgba(108, 197, 143, 0.22);
+  --rdc-9bd8a9: #4f8a63;
+  --rdc-5c3d00: #e3c17a;
+  --rdc-6b4500: #e3c17a;
+  --rdc-7a5a00: #e3c17a;
+  --rdc-8a5a00: #e3c17a;
+  --rdc-8a6a2a: #e3c17a;
+  --rdc-987e1b: #e3c17a;
+  --rdc-b07a10: #e3c17a;
+  --rdc-c98a12: #e3c17a;
+  --rdc-fff1c9: rgba(229, 182, 90, 0.14);
+  --rdc-fff4d9: rgba(229, 182, 90, 0.14);
+  --rdc-fde6a8: rgba(229, 182, 90, 0.14);
+  --rdc-fde99b: rgba(229, 182, 90, 0.14);
+  --rdc-fff6e0: rgba(229, 182, 90, 0.14);
+  --rdc-fff7e6: rgba(229, 182, 90, 0.14);
+  --rdc-f2c66d: rgba(229, 182, 90, 0.14);
+  --rdc-fde99baa: rgba(229, 182, 90, 0.2);
+  --rdc-f0d48f: rgba(229, 182, 90, 0.3);
+  --rdc-f1d79a: rgba(229, 182, 90, 0.3);
+  --rdc-b8473a: #ee9a8f;
+  --rdc-bb433a: #ee9a8f;
+  --rdc-fdecea: rgba(238, 154, 143, 0.14);
+  --rdc-fff8f7: rgba(238, 154, 143, 0.14);
+  --rdc-fde6d6: rgba(238, 154, 143, 0.14);
+  --rdc-f4c5c066: rgba(238, 154, 143, 0.2);
+  --rdc-c4621f: #e8a578;
+  --rdc-8e6347: #e8a578;
+  --rdc-f1e3d6: rgba(232, 165, 120, 0.14);
+  --rdc-427e8a: #8fcbd6;
+  --rdc-9ed4ef77: rgba(143, 203, 214, 0.18);
+  --rdc-a549ab: #e3a6e6;
+  --rdc-f3c4ec88: rgba(227, 166, 230, 0.18);
+  --rdc-eef0f3: rgba(255, 248, 236, 0.07);
+  --rdc-e7eaee: rgba(255, 248, 236, 0.07);
+}
+/* Tags and folder squares get their pastel pairs from JS (light values): in
+   dark, wash the hue instead of painting the pastel. */
+html[data-theme="dark"]:not(.rd-off) .cm-editor .cm-hashtag,
+html[data-theme="dark"]:not(.rd-off) .prop-chip {
+  background: color-mix(in srgb, var(--tag-fg, #a597ff) 22%, transparent) !important;
+  color: color-mix(in srgb, var(--tag-fg, #a597ff) 45%, #f3eee6) !important;
+}
+html[data-theme="dark"]:not(.rd-off) .tree-row.is-dir .tree-glyph,
+html[data-theme="dark"]:not(.rd-off) .pinned-row.is-dir .tree-glyph {
+  background: color-mix(in srgb, var(--glyph-fill, currentColor) 22%, transparent);
+}
+html[data-theme="dark"]:not(.rd-off) .tree-row.is-dir .tree-glyph.colored svg,
+html[data-theme="dark"]:not(.rd-off) .pinned-row.is-dir .tree-glyph.colored svg {
+  color: color-mix(in srgb, var(--glyph-fill, currentColor) 70%, #f3eee6);
+}
+
+/* ---- Shell: tabs on the canvas, the note on a floating white card ---- */
+html:not(.rd-off) .main {
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  overflow: visible;
+}
+html:not(.rd-off) .editor-wrap {
+  background: var(--rd-surface);
+  border-radius: 22px;
+  box-shadow: var(--rd-card-shadow);
+  margin: 2px 14px 14px 6px;
+}
+
+/* ---- Tabs ---- */
+html:not(.rd-off) .tab-active-bg {
+  background: var(--rd-surface);
+  box-shadow: var(--rd-card-shadow);
+}
+html:not(.rd-off) .tab {
+  color: rgba(var(--rd-ink), 0.66);
+}
+
+/* ---- Right-hand controls pill ---- */
+html:not(.rd-off) .header-actions {
+  border: 0;
+  background: var(--rd-surface);
+  box-shadow: var(--rd-card-shadow);
+  padding: 4px 6px 4px 5px;
+}
+
+/* ---- Sidebar ---- */
+html:not(.rd-off) .sidebar-header-id {
+  background: var(--rd-surface);
+  border-radius: 18px;
+  box-shadow: var(--rd-card-shadow);
+  padding: 10px 12px 10px 10px;
+}
+html:not(.rd-off) .vault-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+html:not(.rd-off) .pinned-label,
+html:not(.rd-off) .filetree-head .section-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: rgba(var(--rd-ink), 0.60);
+}
+html:not(.rd-off) .pinned-section {
+  border-bottom: 0;
+}
+html:not(.rd-off) .home-sidebar-row {
+  min-height: 40px;
+  border-radius: 12px;
+}
+html:not(.rd-off) .home-sidebar-row.is-unset {
+  outline: 1.5px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  font-weight: 500;
+}
+
+/* Tree rows: soft rounded rows, the open note lifts as a white pill. */
+html:not(.rd-off) .tree-row {
+  border-radius: 10px;
+  min-height: 32px;
+  color: var(--rdc-2e2d36, #2e2d36);
+}
+html:not(.rd-off) .tree-row:hover {
+  background: rgba(var(--rd-ink), 0.04);
+}
+html:not(.rd-off) .tree-row.selected,
+html:not(.rd-off) .tree-row.selected:hover {
+  background: var(--rd-surface);
+  box-shadow: var(--rd-card-shadow);
+  color: var(--text-primary);
+  position: relative;
+}
+html:not(.rd-off) .tree-row.selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+/* ---- Editor writing styles ---- */
+html:not(.rd-off) .cm-editor .cm-content {
+  color: var(--rdc-26252d, #26252d);
+}
+html:not(.rd-off) .cm-editor .cm-line {
+  line-height: 1.75;
+}
+
+/* Bullets: a small, quiet round dot in soft ink (the violet dash read as a
+   rule, not a list). Drawn, so its size is steady across fonts. */
+html:not(.rd-off) .cm-editor .cm-bullet {
+  color: transparent !important;
+  position: relative;
+  display: inline-block;
+}
+html:not(.rd-off) .cm-editor .cm-bullet::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  opacity: 0.45;
+}
+
+/* [[links]]: violet text with a thin underline, no chip. */
+html:not(.rd-off) .cm-editor .cm-wikilink {
+  color: var(--rdc-4a2fc7, #4a2fc7) !important;
+  font-weight: 500;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(124, 92, 255, 0.4);
+  border-radius: 0 !important;
+}
+html:not(.rd-off) .cm-editor .cm-wikilink:hover {
+  background: transparent !important;
+  border-bottom-color: var(--accent);
+}
+
+/* #tags: a small soft tag, not a loud pill. */
+html:not(.rd-off) .cm-editor .cm-hashtag {
+  background: rgba(124, 92, 255, 0.08) !important;
+  color: var(--rdc-4a2fc7, #4a2fc7);
+  font-weight: 500;
+  font-size: 0.85em;
+  border-radius: 7px !important;
+  padding: 0.12em 0.45em 0.18em !important;
+}
+
+/* > quotes: a thin violet bar and calm grey text. */
+html:not(.rd-off) .cm-editor .cm-blockquote {
+  color: var(--rdc-55545e, #55545e) !important;
+}
+html:not(.rd-off) .cm-editor .cm-blockquote::before {
+  width: 2px !important;
+  background-color: var(--accent) !important;
+}
+
+/* ==highlight==: a marker stroke under the words. */
+
+/* - [ ] tasks: a rounded square that fills violet when done. */
+html:not(.rd-off) .cm-editor .cm-task-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 17px !important;
+  height: 17px !important;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1.5px rgba(11, 10, 16, 0.3);
+  background: var(--rd-surface);
+  position: relative;
+  vertical-align: -3px !important;
+}
+html:not(.rd-off) .cm-editor .cm-task-checkbox:checked {
+  background: var(--accent);
+  box-shadow: none;
+}
+html:not(.rd-off) .cm-editor .cm-task-checkbox:checked::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 4.5px;
+  width: 8px;
+  height: 4px;
+  border: 2px solid var(--rd-surface);
+  border-top: 0;
+  border-right: 0;
+  transform: rotate(-45deg);
+}
+
+/* ============================================================
+   Round 2: closer to the mockup
+   ============================================================ */
+
+/* Search lives on ⌘F / ⌘K, not as a sidebar icon. */
+.titlebar-search { display: none !important; }
+
+/* Full-width New note button under the vault card. */
+
+/* Rows sit inside the sidebar, not edge to edge. */
+html:not(.rd-off) .sidebar .tree-row,
+html:not(.rd-off) .home-sidebar-row {
+  margin-left: 6px;
+  margin-right: 6px;
+  width: auto;
+}
+html:not(.rd-off) .home-section,
+html:not(.rd-off) .pinned-section { padding-left: 4px; padding-right: 4px; }
+
+/* No green dot on every synced row: only rows that need attention show one. */
+
+/* Folders: the coloured glyph sits in a soft tinted square. */
+html:not(.rd-off) .tree-row.is-dir .tree-glyph,
+html:not(.rd-off) .pinned-row.is-dir .tree-glyph {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 13%, transparent);
+}
+html:not(.rd-off) .tree-row.is-dir .tree-glyph svg { width: 14px; height: 14px; }
+html:not(.rd-off) .tree-row.is-dir:hover .tree-glyph { transform: none; }
+
+/* No rule above the account row. */
+html:not(.rd-off) .sidebar-footer { border-top: 0; }
+
+/* Note column: narrower and centred, like the mockup. */
+
+/* Markdown links: violet with a thin underline, same family as [[links]]. */
+html:not(.rd-off) .cm-editor .cm-md-link {
+  color: var(--rdc-4a2fc7, #4a2fc7) !important;
+  text-decoration: none !important;
+  border-bottom: 1px solid rgba(124, 92, 255, 0.4);
+}
+html:not(.rd-off) .cm-editor .cm-md-link:hover { border-bottom-color: var(--accent); }
+
+/* ---- Welcome screen: flat cream, a calm centred card ---- */
+/* ---- Sign-in dialog ---- */
+html:not(.rd-off) .modal {
+  border-radius: 24px;
+  border: 0;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 30px 70px -20px rgba(11, 10, 16, 0.35);
+}
+html:not(.rd-off) .modal-backdrop {
+  background: rgba(11, 10, 16, 0.22);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* ============================================================
+   Motion: small, quick, quiet. All of it is off for reduced motion.
+   ============================================================ */
+@keyframes rd-pop { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes rd-rise { from { opacity: 0; transform: translateY(6px) scale(0.985); } to { opacity: 1; transform: none; } }
+@keyframes rd-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rd-lift { from { box-shadow: none; transform: scale(0.985); } to { transform: none; } }
+@keyframes rd-tick { 0% { transform: scale(0.8); } 60% { transform: scale(1.12); } 100% { transform: scale(1); } }
+@keyframes rd-note-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: no-preference) {
+  /* Every button gives a little under the finger. */
+  button.primary:active:not(:disabled), .ghost-pill:active:not(:disabled), .rd-status-btn:active { transform: scale(0.97); }
+
+  /* Menus and popovers open with a soft pop from the trigger. */
+  .context-menu, .account-menu, .vault-popover, .home-sidebar-menu-items {
+    animation: rd-pop 140ms var(--ease) both;
+    transform-origin: top left;
+  }
+  /* Dialogs rise in over a fading backdrop. */
+  .modal-backdrop { animation: rd-fade 160ms var(--ease) both; }
+  .modal { animation: rd-rise 200ms var(--ease) both; }
+
+  /* The open note's row settles into its white pill. */
+  .tree-row.selected { animation: rd-lift 180ms var(--ease) both; }
+
+  /* Switching notes: the page eases in instead of snapping. */
+  .editor-wrap .cm-editor { animation: rd-note-in 180ms var(--ease) both; }
+
+  /* Ticking a task gives a tiny bounce. */
+  .cm-editor .cm-task-checkbox:checked { animation: rd-tick 220ms var(--ease) both; }
+
+  /* Tabs and toolbar icons warm up on hover. */
+  .tab { transition: color var(--t-fast) var(--ease); }
+  .header-actions .icon-btn:hover { background: var(--bg-subtle); }
+
+}
+
+/* The link text inside .cm-md-link carries its own highlight colour. */
+html:not(.rd-off) .cm-editor .cm-md-link * {
+  color: inherit !important;
+  text-decoration: none !important;
+}
+/* Preview: hold the calm reading width even if Content width is set wider. */
+html:not(.rd-off) .cm-editor .cm-bullet { margin-right: 0.35em; }
+
+/* ============================================================
+   Round 3: the page's own top row, as in the mockup.
+   Path chips top-left and the Synced toolbar top-right, both
+   inside the white page; tabs alone on the cream strip.
+   ============================================================ */
+html:not(.rd-off) .main { position: relative; }
+html:not(.rd-off) .editor-wrap { position: relative; }
+html:not(.rd-off) .header-actions {
+  position: absolute;
+  top: calc(var(--chrome-row-h) + 14px);
+  right: 30px;
+  z-index: 6;
+}
+html:not(.rd-off) .main-header { padding-right: var(--sp-4); }
+.rd-crumbs {
+  position: absolute;
+  top: 16px;
+  left: 18px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+.rd-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: var(--bg-app);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+.rd-crumb svg { width: 15px; height: 15px; fill: var(--rdc-9bd8a9, #9bd8a9); stroke: var(--rdc-3f8850, #3f8850); stroke-width: 1.5; }
+.rd-crumb-sep { color: var(--text-tertiary); font-size: 13px; }
+/* Room for that row above the title. */
+html:not(.rd-off) .editor-wrap .cm-scroller { padding-top: 40px; }
+
+/* Tabs: a small page icon before each name. */
+.tab-label::before {
+  content: "";
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 7px;
+  vertical-align: -2px;
+  background: currentColor;
+  opacity: 0.45;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'%3E%3Cpath d='M7 3h7l4 4v14H7z'/%3E%3Cpath d='M14 3v4h4'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'%3E%3Cpath d='M7 3h7l4 4v14H7z'/%3E%3Cpath d='M14 3v4h4'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* The header row is a containment box, so its pill would paint under the
+   later white page in WebKit. Lift the whole row above it. */
+html:not(.rd-off) .main-header { position: relative; z-index: 10; }
+/* [[links]] carry an inner highlight span too. */
+html:not(.rd-off) .cm-editor .cm-wikilink * {
+  color: inherit !important;
+  text-decoration: none !important;
+}
+
+/* ============================================================
+   Round 4: menus and settings like the mockup
+   ============================================================ */
+
+/* Popovers: white, 20px corners, soft deep shadow. */
+html:not(.rd-off) .account-popover,
+html:not(.rd-off) .vault-popover {
+  border: 0;
+  border-radius: 20px;
+  padding: 8px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 2px 4px rgba(var(--rd-ink), 0.05), 0 30px 60px -16px rgba(11, 10, 16, 0.25);
+}
+
+/* Profile header at the top of the account menu. */
+.rd-prof {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  margin-bottom: 4px;
+  border-radius: 14px;
+  background: var(--bg-app);
+}
+.rd-prof .avatar { width: 44px !important; height: 44px !important; font-size: 16px; }
+.rd-prof-text { display: flex; flex-direction: column; min-width: 0; }
+.rd-prof-text b { font: 600 15px var(--font-display); color: var(--text-primary); }
+.rd-prof-text small { font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; }
+
+/* Menu rows: taller, roomier, the icon in a pastel square. */
+html:not(.rd-off) .account-popover .menu-item,
+html:not(.rd-off) .vault-switcher .menu-item {
+  min-height: 44px;
+  padding: 0 10px;
+  gap: 12px;
+  border-radius: 12px;
+  font-size: 14px;
+}
+html:not(.rd-off) .account-popover .menu-hint { font-size: 12px; color: rgba(var(--rd-ink), 0.60); }
+html:not(.rd-off) .account-popover .menu-icon,
+html:not(.rd-off) .settings-nav .menu-icon {
+  box-sizing: content-box;
+  width: 15px !important;
+  height: 15px !important;
+  padding: 7.5px;
+  border-radius: 9px;
+  flex: none;
+  color: var(--rd-icon-ink, var(--rdc-6a4fe0, #6a4fe0));
+  background: var(--rd-tint, rgba(124, 92, 255, 0.12));
+}
+/* A pastel per row, cycling through the site's palette. */
+.account-popover > .menu-item:nth-of-type(5n + 1) .menu-icon { --rd-tint: var(--rdc-b8caf566, #b8caf566); --rd-icon-ink: var(--rdc-4b68c3, #4b68c3); }
+.account-popover > .menu-item:nth-of-type(5n + 2) .menu-icon { --rd-tint: var(--rdc-fde99baa, #fde99baa); --rd-icon-ink: var(--rdc-987e1b, #987e1b); }
+.account-popover > .menu-item:nth-of-type(5n + 3) .menu-icon { --rd-tint: var(--rdc-9ed4ef77, #9ed4ef77); --rd-icon-ink: var(--rdc-427e8a, #427e8a); }
+.account-popover > .menu-item:nth-of-type(5n + 4) .menu-icon { --rd-tint: var(--rdc-9bd8a966, #9bd8a966); --rd-icon-ink: var(--rdc-3f8850, #3f8850); }
+.account-popover > .menu-item:nth-of-type(5n + 5) .menu-icon { --rd-tint: var(--rdc-f3c4ec88, #f3c4ec88); --rd-icon-ink: var(--rdc-a549ab, #a549ab); }
+.account-popover > .menu-item.danger .menu-icon { --rd-tint: var(--rdc-f4c5c066, #f4c5c066); --rd-icon-ink: var(--rdc-bb433a, #bb433a); }
+html:not(.rd-off) .account-popover .menu-sep { margin: 6px 8px; }
+
+/* ---- Vault switcher ---- */
+html:not(.rd-off) .vault-switcher {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2px 8px;
+  right: auto;
+  width: 360px;
+  max-height: none;
+}
+html:not(.rd-off) .vault-switcher > * { grid-column: 1 / -1; }
+html:not(.rd-off) .vault-switcher::before {
+  content: "Your vaults";
+  grid-column: 1 / -1;
+  padding: 8px 10px 6px;
+  font: 500 10.5px var(--font-mono);
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: rgba(var(--rd-ink), 0.60);
+}
+html:not(.rd-off) .vault-switcher .vault-card {
+  min-height: 58px;
+  padding: 0 10px;
+  gap: 12px;
+  border-radius: 12px;
+}
+html:not(.rd-off) .vault-switcher .vault-card .vault-tile {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+}
+html:not(.rd-off) .vault-switcher .vault-card-name { font-size: 14px; font-weight: 500; }
+html:not(.rd-off) .vault-switcher .vault-card-sub { font-size: 11.5px; color: var(--text-secondary); }
+html:not(.rd-off) .vault-switcher .vault-card-sub::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--rdc-3f8850, #3f8850);
+  vertical-align: 1px;
+}
+html:not(.rd-off) .vault-switcher .vault-card.current {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px rgba(124, 92, 255, 0.2);
+}
+html:not(.rd-off) .vault-switcher .vault-card-kbd {
+  font: 11px var(--font-mono);
+  color: rgba(var(--rd-ink), 0.44);
+  background: var(--bg-subtle);
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 0;
+}
+html:not(.rd-off) .vault-switcher .menu-sep { margin: 6px 8px; }
+
+/* New vault · Join with code · Manage: three tiles in a row. */
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
+  grid-column: auto;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  min-height: 0;
+  padding: 12px 6px 10px;
+  border-radius: 14px;
+  background: var(--bg-app);
+  font-size: 12px;
+  text-align: center;
+}
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
+  box-sizing: content-box;
+  width: 16px !important;
+  height: 16px !important;
+  padding: 8px;
+  border-radius: 9px;
+}
+.vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon { background: var(--rdc-cfc4ff66, #cfc4ff66); color: var(--rdc-6a4fe0, #6a4fe0); }
+.vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon { background: var(--rdc-9bd8a966, #9bd8a966); color: var(--rdc-3f8850, #3f8850); }
+.vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon { background: var(--rdc-9ed4ef77, #9ed4ef77); color: var(--rdc-427e8a, #427e8a); }
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: 0; }
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { content: "Manage"; font-size: 12px; }
+html:not(.rd-off) .vault-switcher .menu-item:hover { background: var(--bg-hover); }
+
+/* ============================================================
+   Sizes follow the app's global scale (tokens.css), not the
+   enlarged mockup render. Overrides the bigger values above.
+   ============================================================ */
+html:not(.rd-off) {
+  --editor-font-size: var(--fs-lg);
+  --inline-title-size: 1.75em;
+  --inline-title-weight: 700;
+}
+html:not(.rd-off) .cm-editor .cm-line { line-height: var(--lh-body); }
+
+/* Sidebar */
+html:not(.rd-off) .sidebar-header-id { padding: 8px 10px 8px 8px; border-radius: var(--radius-lg); }
+html:not(.rd-off) .vault-name { font-size: var(--fs-md); }
+html:not(.rd-off) .home-sidebar-row { min-height: 30px; border-radius: var(--radius-md); }
+html:not(.rd-off) .tree-row { min-height: 0; border-radius: var(--radius-sm); }
+html:not(.rd-off) .tree-row.is-dir .tree-glyph,
+html:not(.rd-off) .pinned-row.is-dir .tree-glyph { width: 20px; height: 20px; border-radius: 6px; }
+html:not(.rd-off) .tree-row.is-dir .tree-glyph svg { width: 12px; height: 12px; }
+html:not(.rd-off) .tree-row.selected::before { top: 6px; bottom: 6px; }
+
+/* Page top row */
+.rd-crumb { height: 24px; padding: 0 var(--sp-2); font-size: var(--fs-sm); gap: 5px; }
+.rd-crumb svg { width: 13px; height: 13px; }
+html:not(.rd-off) .editor-wrap .cm-scroller { padding-top: 28px; }
+html:not(.rd-off) .header-actions { top: calc(var(--chrome-row-h) + 10px); right: 24px; }
+.tab-label::before { width: 12px; height: 12px; margin-right: 6px; }
+html:not(.rd-off) .editor-wrap { border-radius: var(--radius-xl); }
+
+/* Account menu */
+.rd-prof { padding: 8px; gap: var(--sp-2); border-radius: var(--radius-md); }
+.rd-prof .avatar { width: 32px !important; height: 32px !important; font-size: var(--fs-xs); }
+.rd-prof-text b { font-size: var(--fs-md); }
+.rd-prof-text small { font-size: var(--fs-xs); }
+html:not(.rd-off) .account-popover,
+html:not(.rd-off) .vault-popover { border-radius: var(--radius-lg); padding: var(--sp-2); }
+html:not(.rd-off) .account-popover .menu-item,
+html:not(.rd-off) .vault-switcher .menu-item {
+  min-height: 32px;
+  padding: 4px var(--sp-2);
+  gap: var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+}
+html:not(.rd-off) .account-popover .menu-hint { font-size: var(--fs-xs); }
+html:not(.rd-off) .account-popover .menu-icon,
+html:not(.rd-off) .settings-nav .menu-icon {
+  width: 13px !important;
+  height: 13px !important;
+  padding: 5px;
+  border-radius: 6px;
+}
+
+/* Vault switcher */
+html:not(.rd-off) .vault-switcher { width: 300px; gap: 2px 6px; }
+html:not(.rd-off) .vault-switcher::before { padding: 4px 8px; font-size: 10px; }
+html:not(.rd-off) .vault-switcher .vault-card { min-height: 44px; padding: 0 var(--sp-2); gap: var(--sp-2); border-radius: var(--radius-md); }
+html:not(.rd-off) .vault-switcher .vault-card .vault-tile { width: 28px; height: 28px; border-radius: 8px; }
+html:not(.rd-off) .vault-switcher .vault-card-name { font-size: var(--fs-sm); }
+html:not(.rd-off) .vault-switcher .vault-card-sub { font-size: var(--fs-xs); }
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
+  padding: 8px 4px 7px;
+  gap: 5px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-xs);
+}
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
+  width: 13px !important;
+  height: 13px !important;
+  padding: 6px;
+  border-radius: 7px;
+}
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { font-size: var(--fs-xs); }
+
+/* Folder icons as in the mockup: a thin outline in the deep tone on a soft
+   pastel square, instead of a filled folder shape. */
+html:not(.rd-off) .tree-row.is-dir .tree-glyph,
+html:not(.rd-off) .pinned-row.is-dir .tree-glyph {
+  background: color-mix(in srgb, var(--glyph-fill, currentColor) 60%, transparent);
+}
+html:not(.rd-off) .tree-row.is-dir .tree-glyph.colored svg,
+html:not(.rd-off) .pinned-row.is-dir .tree-glyph.colored svg {
+  fill: none !important;
+  stroke-width: 2;
+}
+
+/* ============================================================
+   Round 5
+   ============================================================ */
+
+/* Account row vanished when a note opened: an unclipped .main plus transform
+   animations hit the WKWebView compositing bug App.css warns about. Keep .main
+   clipped and animate opacity only. */
+html:not(.rd-off) .main { overflow: hidden; }
+@media (prefers-reduced-motion: no-preference) {
+  .editor-wrap .cm-editor { animation: rd-fade 160ms var(--ease) both; }
+  .tree-row.selected { animation: none; }
+}
+
+/* ---- Editor: calmer type, tighter paragraph gaps ---- */
+html:not(.rd-off) { --inline-title-weight: 600; }
+html:not(.rd-off) .cm-editor .cm-content { color: var(--rdc-2e2d36, #2e2d36); }
+
+/* ---- Tree: children indent under the folder name, like the mockup ---- */
+html:not(.rd-off) .filetree-scroll .tree-row:not(.is-dir) .tree-glyph { color: rgba(var(--rd-ink), 0.40); }
+html:not(.rd-off) .filetree-scroll .tree-row.selected .tree-glyph { color: var(--accent); }
+html:not(.rd-off) .sidebar .tree-row { height: 32px; }
+
+/* ---- Pinned: yellow star squares ---- */
+html:not(.rd-off) .pinned-row:not(.is-dir) .tree-glyph {
+  width: 20px; height: 20px; border-radius: 6px;
+  background: var(--rdc-fde99baa, #fde99baa); color: var(--rdc-987e1b, #987e1b) !important;
+}
+html:not(.rd-off) .pinned-row:not(.is-dir) .tree-glyph svg { display: none; }
+html:not(.rd-off) .pinned-row:not(.is-dir) .tree-glyph::after {
+  content: ""; width: 12px; height: 12px; background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='m12 4 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.6-4.8 2.6.9-5.4-3.9-3.8 5.4-.8z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+html:not(.rd-off) .pinned-shared { font-size: var(--fs-xs); color: var(--text-tertiary); }
+
+/* ---- Vault settings: cream window, white cards, title top-left ---- */
+html:not(.rd-off) .settings-page.settings-modal {
+  background: var(--bg-app);
+  border: 0;
+  border-radius: 24px;
+  box-shadow: 0 50px 100px -24px rgba(11, 10, 16, 0.45);
+}
+html:not(.rd-off) .settings-page-header {
+  border-bottom: 0;
+  padding: var(--sp-5) var(--sp-6) var(--sp-2);
+}
+html:not(.rd-off) .settings-eyebrow { font-family: var(--font-mono); font-weight: 500; letter-spacing: 0.7px; color: rgba(var(--rd-ink), 0.60); }
+html:not(.rd-off) .settings-page-header .icon-btn {
+  background: var(--rd-surface); box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
+}
+html:not(.rd-off) .settings-body { padding-top: var(--sp-3); }
+html:not(.rd-off) .settings-nav { width: 220px; }
+html:not(.rd-off) .settings-nav .menu-item { min-height: 36px; border-radius: var(--radius-md); font-size: var(--fs-md); gap: var(--sp-2); }
+html:not(.rd-off) .settings-nav .menu-item.active { background: var(--rd-surface); box-shadow: var(--rd-card-shadow); color: var(--text-primary); }
+.settings-nav .menu-item:nth-of-type(5n + 1) .menu-icon { --rd-tint: var(--rdc-cfc4ff66, #cfc4ff66); --rd-icon-ink: var(--rdc-6a4fe0, #6a4fe0); }
+.settings-nav .menu-item:nth-of-type(5n + 2) .menu-icon { --rd-tint: var(--rdc-9bd8a966, #9bd8a966); --rd-icon-ink: var(--rdc-3f8850, #3f8850); }
+.settings-nav .menu-item:nth-of-type(5n + 3) .menu-icon { --rd-tint: var(--rdc-9ed4ef77, #9ed4ef77); --rd-icon-ink: var(--rdc-427e8a, #427e8a); }
+.settings-nav .menu-item:nth-of-type(5n + 4) .menu-icon { --rd-tint: var(--rdc-fde99baa, #fde99baa); --rd-icon-ink: var(--rdc-987e1b, #987e1b); }
+.settings-nav .menu-item:nth-of-type(5n + 5) .menu-icon { --rd-tint: var(--rdc-f3c4ec88, #f3c4ec88); --rd-icon-ink: var(--rdc-a549ab, #a549ab); }
+
+/* The content pane is the cream ground; each block is its own white card. */
+html:not(.rd-off) .settings-content {
+  background: transparent;
+  box-shadow: none;
+  padding: 0 var(--sp-1) var(--sp-8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+html:not(.rd-off) .settings-section-title { font-size: var(--fs-2xl); font-weight: 600; letter-spacing: -0.02em; margin: 0 0 var(--sp-2); }
+html:not(.rd-off) .settings-content > .menu-sep { display: none; }
+html:not(.rd-off) .settings-content > .vault-icon-settings,
+html:not(.rd-off) .settings-content > .toggle-row,
+html:not(.rd-off) .settings-content > .join-code-row {
+  background: var(--rd-surface);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--rd-card-shadow);
+  padding: var(--sp-5);
+  margin: 0;
+}
+html:not(.rd-off) .settings-content > .subhead {
+  margin: var(--sp-3) 0 calc(-1 * var(--sp-1)) var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.7px;
+  color: rgba(var(--rd-ink), 0.60);
+}
+html:not(.rd-off) .settings-content .vault-root-path { background: var(--bg-app); border-radius: var(--radius-md); }
+html:not(.rd-off) .vault-icon-option { border-radius: 10px; }
+html:not(.rd-off) .vault-local-only-card {
+  background: linear-gradient(180deg, var(--rd-surface), var(--rdc-fff8f7, #fff8f7));
+  box-shadow: 0 0 0 1px rgba(187, 67, 58, 0.16), var(--rd-card-shadow);
+  border: 0;
+  border-radius: var(--radius-xl);
+}
+html:not(.rd-off) .settings-content > .toggle-row { height: auto; min-height: 0; flex-shrink: 0; align-items: center; overflow: visible; }
+html:not(.rd-off) .settings-content > * { flex-shrink: 0; }
+
+/* Sidebar text on the small step of the scale. */
+html:not(.rd-off) .sidebar .tree-row,
+html:not(.rd-off) .home-sidebar-row,
+html:not(.rd-off) .pinned-name { font-size: var(--fs-sm); }
+html:not(.rd-off) .sidebar .tree-row { height: 30px; }
+html:not(.rd-off) .vault-name { font-size: 13px; }
+html:not(.rd-off) .identity-line1 { font-size: var(--fs-sm); }
+
+/* ============================================================
+   Round 6: the old full-height page, in the new look.
+   The white page fills the window again; tabs and the toolbar
+   sit in its top row. No floating card, no cream strip.
+   ============================================================ */
+html:not(.rd-off) .main {
+  background: var(--rd-surface);
+  border-top-left-radius: var(--radius-xl);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 8px 24px rgba(20, 20, 40, 0.06);
+}
+html:not(.rd-off) .editor-wrap {
+  margin: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+html:not(.rd-off) .header-actions { position: static; }
+html:not(.rd-off) .tab-active-bg { background: var(--bg-app); box-shadow: none; }
+.rd-crumbs { display: none; }
+html:not(.rd-off) .editor-wrap .cm-scroller { padding-top: 0; }
+
+/* Tree rows: 38px slots with a 4px breathing gap between rows. */
+html:not(.rd-off) .sidebar .filetree-scroll .tree-row { height: 34px; margin-top: 2px; margin-bottom: 2px; }
+html:not(.rd-off) .pinned-section .pinned-row,
+html:not(.rd-off) .home-sidebar-row { min-height: 34px; margin-top: 2px; margin-bottom: 2px; }
+
+/* Section labels and the buttons in their rows use the app's own font. */
+html:not(.rd-off) .settings-content .subhead {
+  font-family: var(--font-body);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+}
+html:not(.rd-off) .settings-content .subhead button,
+html:not(.rd-off) .settings-content .subhead * { font-family: var(--font-body); letter-spacing: normal; }
+
+/* ---- Vault settings, mockup layout ---- */
+html:not(.rd-off) .settings-page.settings-modal { position: relative; }
+html:not(.rd-off) .settings-body { padding: var(--sp-6) var(--sp-6) var(--sp-6) var(--sp-5); gap: var(--sp-6); }
+html:not(.rd-off) .settings-section-title { margin: 0; }
+
+/* Name and icon card: a large preview on the left, controls on the right. */
+html:not(.rd-off) .settings-content > .vault-icon-settings {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  column-gap: var(--sp-5);
+  row-gap: var(--sp-3);
+}
+html:not(.rd-off) .vault-icon-settings .vault-icon-head { display: contents; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-preview {
+  grid-row: 1 / span 2; grid-column: 1;
+  display: grid; place-items: center; align-self: stretch; min-height: 180px;
+  border-radius: var(--radius-lg); background: var(--bg-app); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.05);
+}
+html:not(.rd-off) .vault-icon-settings .vault-icon-preview .vault-tile { width: 76px; height: 76px; border-radius: 20px; box-shadow: 0 12px 24px -10px rgba(11, 10, 16, 0.35); }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-text { grid-column: 2; grid-row: 1; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-actions { grid-column: 2; grid-row: 1; justify-self: end; align-self: start; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-customise { grid-column: 2; grid-row: 2; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-actions button.secondary { background: var(--text-primary); color: #fff; border: 0; }
+html:not(.rd-off) .vault-icon-option { background: rgba(124, 92, 255, 0.07); border: 0; color: var(--rdc-4a2fc7, #4a2fc7); }
+html:not(.rd-off) .vault-icon-option.active { background: var(--accent); color: #fff; }
+
+/* Settings menu: the selected pill stays inside the menu column. */
+html:not(.rd-off) .settings-nav { padding: 2px 8px 2px 2px; overflow-x: hidden; }
+html:not(.rd-off) .settings-nav .menu-item { width: 100%; box-sizing: border-box; }
+html:not(.rd-off) .settings-nav .menu-item.active { box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 2px 6px -2px rgba(var(--rd-ink), 0.1); }
+
+/* ---- Inner settings pages ---- */
+/* Header actions clear the close button. */
+html:not(.rd-off) .members-access-header { padding-right: 48px; }
+html:not(.rd-off) .members-access-intro { color: var(--text-secondary); font-size: var(--fs-sm); }
+
+/* Everyone / New members rows: one white card. */
+html:not(.rd-off) .members-access-rows {
+  background: var(--rd-surface); border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow);
+  padding: 4px var(--sp-4);
+}
+html:not(.rd-off) .members-access-row-icon {
+  width: 30px; height: 30px; border-radius: 9px; background: var(--rdc-cfc4ff55, #cfc4ff55); color: var(--rdc-6a4fe0, #6a4fe0); display: grid; place-items: center;
+}
+html:not(.rd-off) .members-access-row + .members-access-row .members-access-row-icon { background: var(--rdc-fde99baa, #fde99baa); color: var(--rdc-987e1b, #987e1b); }
+
+/* People table: a white card with a quiet header row. */
+html:not(.rd-off) .members-table {
+  background: var(--rd-surface); border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow);
+  border: 0 !important; overflow: hidden; border-collapse: separate; border-spacing: 0;
+}
+html:not(.rd-off) .members-table th {
+  background: var(--bg-app) !important; font: 500 10.5px var(--font-mono); letter-spacing: 0.6px; text-transform: uppercase; color: rgba(var(--rd-ink), 0.53);
+}
+html:not(.rd-off) .members-table td,
+html:not(.rd-off) .members-table th { border-color: rgba(var(--rd-ink), 0.06) !important; }
+html:not(.rd-off) .members-table tr.is-clickable:hover td { background: var(--bg-app); }
+html:not(.rd-off) .members-access-search {
+  background: var(--rd-surface); border: 0; box-shadow: var(--rd-card-shadow); border-radius: var(--radius-md);
+}
+html:not(.rd-off) .members-access-mcp-hint { color: var(--text-tertiary); }
+
+/* Profile: name card and segmented tabs. */
+html:not(.rd-off) .member-profile-head {
+  background: var(--rd-surface); border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); padding: var(--sp-4);
+}
+html:not(.rd-off) .member-profile-head .avatar { width: 40px; height: 40px; }
+html:not(.rd-off) .member-profile-name { font: 600 var(--fs-lg) var(--font-display); }
+html:not(.rd-off) .member-profile-tabs {
+  display: inline-flex; gap: 2px; padding: 3px; border: 0 !important;
+  background: rgba(var(--rd-ink), 0.05); border-radius: var(--radius-md); align-self: flex-start;
+}
+html:not(.rd-off) .member-profile-tab {
+  border: 0 !important; border-radius: 8px; padding: 6px 14px; font-size: var(--fs-sm); color: var(--text-secondary);
+}
+html:not(.rd-off) .member-profile-tab::after { display: none !important; }
+html:not(.rd-off) .member-profile-tab.active {
+  background: var(--rd-surface); color: var(--text-primary); font-weight: 500; box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.1);
+}
+html:not(.rd-off) .member-profile-access > .members-access-row {
+  background: var(--rd-surface); border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); padding: var(--sp-3) var(--sp-4); border: 0;
+}
+
+/* Access board: three quiet white cards. The column's colour lives in a small
+   dot and a count pill, not a painted band, so the folders are what you read.
+   Row arrows wait for hover; an empty column is a calm drop zone, not a
+   dashed box; a drag over a column rings it in its own colour. */
+html:not(.rd-off) .access-board-columns { gap: 14px; }
+html:not(.rd-off) .access-board-column {
+  background: var(--rd-surface); border: 0 !important; border-radius: 16px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 1px 2px rgba(var(--rd-ink), 0.04), 0 8px 24px -12px rgba(var(--rd-ink), 0.12);
+  padding: 0 6px 6px; overflow: hidden;
+  transition: box-shadow var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+html:not(.rd-off) .access-board-column.is-over {
+  background: var(--rd-surface);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--col-fg) 45%, transparent), 0 8px 24px -12px rgba(var(--rd-ink), 0.16);
+}
+html:not(.rd-off) .access-board-column-head {
+  height: 48px; margin: 0 0 4px; padding: 0 8px 0 12px;
+  background: transparent; border-bottom: 1px solid rgba(var(--rd-ink), 0.05); border-radius: 0;
+}
+html:not(.rd-off) .access-board-column-title {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+}
+html:not(.rd-off) .access-board-column-title::before {
+  content: ""; width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--col-fg);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--col-fg) 16%, transparent);
+}
+html:not(.rd-off) .access-board-column-title .access-board-count {
+  font-size: 11px; font-weight: 600; opacity: 1; font-variant-numeric: tabular-nums;
+  color: var(--col-fg); background: var(--col-bg);
+  border-radius: 99px; padding: 1px 8px;
+}
+html:not(.rd-off) .access-board-row {
+  height: 36px; margin: 1px 0; padding-left: 4px; border-radius: 9px; font-size: var(--fs-sm);
+  transition: background var(--t-fast) var(--ease);
+}
+html:not(.rd-off) .access-board-row:hover { background: rgba(var(--rd-ink), 0.035); }
+html:not(.rd-off) .access-board-icon { color: color-mix(in srgb, var(--col-fg) 70%, var(--text-tertiary)); }
+html:not(.rd-off) .access-board-row .access-board-count {
+  color: var(--text-tertiary); opacity: 1; font-size: 12px; font-variant-numeric: tabular-nums;
+}
+html:not(.rd-off) .access-board-arrows { opacity: 0; transition: opacity var(--t-fast) var(--ease); }
+html:not(.rd-off) .access-board-row:hover .access-board-arrows,
+html:not(.rd-off) .access-board-row:focus-within .access-board-arrows { opacity: 1; }
+html:not(.rd-off) .access-board-arrow { border-radius: 7px; color: var(--text-tertiary); }
+html:not(.rd-off) .access-board-empty {
+  margin: 4px 2px 0; border: 0; border-radius: 12px;
+  background: color-mix(in srgb, var(--col-bg) 45%, transparent);
+  color: var(--text-tertiary); font-size: 12.5px;
+  flex-direction: column; justify-content: center; gap: 8px;
+}
+html:not(.rd-off) .access-board-empty::before {
+  content: ""; width: 28px; height: 28px; border-radius: 50%;
+  border: 1.5px dashed color-mix(in srgb, var(--col-fg) 40%, transparent);
+}
+html:not(.rd-off) .access-board-hint { font-size: 12.5px; color: var(--text-tertiary); }
+html:not(.rd-off) .member-access-view { background: rgba(var(--rd-ink), 0.05); border: 0; border-radius: var(--radius-md); padding: 3px; }
+html:not(.rd-off) .member-access-view-btn.is-active { background: var(--rd-surface); box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.1); }
+
+/* Name and icon card, lighter: small preview inline, compact picker. */
+html:not(.rd-off) .settings-content > .vault-icon-settings { display: block; padding: var(--sp-4); }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head { display: flex; align-items: center; gap: var(--sp-3); }
+html:not(.rd-off) .vault-icon-settings .vault-icon-preview {
+  min-height: 0; background: none; box-shadow: none; border-radius: 0; display: block;
+}
+html:not(.rd-off) .vault-icon-settings .vault-icon-preview .vault-tile { width: 40px; height: 40px; border-radius: 11px; box-shadow: none; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-text { flex: 1; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-actions { margin-left: auto; align-self: center; }
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-actions button { height: 30px; padding: 0 12px; font-size: var(--fs-sm); }
+html:not(.rd-off) .vault-icon-settings .vault-icon-customise { margin-top: var(--sp-3); }
+html:not(.rd-off) .vault-icon-colors { gap: 6px; }
+html:not(.rd-off) .vault-icon-colors .swatch { width: 16px; height: 16px; }
+html:not(.rd-off) .vault-icon-grid { grid-template-columns: repeat(auto-fill, 30px); gap: 5px; }
+html:not(.rd-off) .vault-icon-option { width: 30px; height: 30px; border-radius: 8px; }
+html:not(.rd-off) .vault-icon-option svg { width: 15px; height: 15px; }
+html:not(.rd-off) .vault-icon-option {
+  box-sizing: border-box; padding: 0 !important; min-width: 0; aspect-ratio: auto;
+  display: grid !important; place-items: center;
+}
+html:not(.rd-off) .vault-icon-option svg { width: 16px !important; height: 16px !important; }
+html:not(.rd-off) .vault-icon-option { color: var(--rdc-4a2fc7, #4a2fc7); background: rgba(124, 92, 255, 0.07) !important; }
+html:not(.rd-off) .vault-icon-option.active { color: #fff; background: var(--accent) !important; }
+html:not(.rd-off) .vault-icon-option svg { stroke: currentColor; opacity: 1; }
+html:not(.rd-off) .vault-icon-option .vault-tile {
+  width: 100% !important; height: 100% !important; margin: 0 !important;
+  display: grid !important; place-items: center; border-radius: inherit;
+  background: transparent !important; box-shadow: none !important; color: inherit !important;
+  --tile-fill: transparent; --tile-ink: currentColor;
+}
+html:not(.rd-off) .vault-icon-option .vault-icon-svg { width: 16px; height: 16px; display: grid; place-items: center; }
+
+/* ============================================================
+   Small dialogs (Invite people, confirms, prompts)
+   ============================================================ */
+html:not(.rd-off) .modal {
+  padding: var(--sp-6);
+  background: var(--rd-surface);
+}
+html:not(.rd-off) .modal .confirm-title,
+html:not(.rd-off) .modal .modal-header h2 {
+  font: 600 var(--fs-xl) var(--font-display);
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--sp-4);
+}
+html:not(.rd-off) .modal .confirm-body { color: var(--text-secondary); font-size: var(--fs-md); line-height: 1.55; }
+
+/* Inputs: soft cream fill, no hard border, violet focus ring. */
+html:not(.rd-off) .modal input[type="text"],
+html:not(.rd-off) .modal input[type="email"],
+html:not(.rd-off) .modal input[type="password"],
+html:not(.rd-off) .modal input:not([type]),
+html:not(.rd-off) .modal textarea,
+html:not(.rd-off) .invite-chips {
+  background: var(--bg-app) !important;
+  border: 0 !important;
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06) !important;
+  border-radius: var(--radius-md) !important;
+  min-height: 42px;
+  font-size: var(--fs-md);
+}
+html:not(.rd-off) .modal input:focus,
+html:not(.rd-off) .modal textarea:focus,
+html:not(.rd-off) .invite-chips:focus-within {
+  background: var(--rd-surface) !important;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft) !important;
+  outline: none;
+}
+
+/* Role / Access pickers: two soft tiles, text never spills out. */
+html:not(.rd-off) .invite-people-fields { gap: var(--sp-2); display: grid; grid-template-columns: 1fr 1.5fr; margin-top: 12px; }
+html:not(.rd-off) .invite-field {
+  background: var(--bg-app);
+  border: 0 !important;
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06);
+  border-radius: var(--radius-md);
+  min-width: 0;
+  overflow: hidden;
+}
+html:not(.rd-off) .invite-field > *:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html:not(.rd-off) .invite-field-label {
+  font: 400 12px var(--font-body); letter-spacing: 0; text-transform: none; color: var(--text-tertiary);
+}
+
+/* Join code: a quiet panel with the code in mono. */
+
+/* Footer buttons: a quiet Cancel and a solid primary. */
+html:not(.rd-off) .confirm-actions { margin-top: var(--sp-5); gap: var(--sp-2); }
+html:not(.rd-off) .confirm-actions .ghost-pill,
+html:not(.rd-off) .confirm-actions button.primary {
+  height: 36px; padding: 0 var(--sp-4); border-radius: var(--radius-md); font-weight: 500; font-size: var(--fs-sm);
+}
+html:not(.rd-off) .confirm-actions .ghost-pill { border: 0; box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.1); background: var(--rd-surface); color: var(--text-primary); }
+html:not(.rd-off) .confirm-actions button.primary { box-shadow: 0 8px 18px -8px rgba(124, 92, 255, 0.6); }
+html:not(.rd-off) .confirm-actions button.primary:disabled { background: var(--accent); opacity: 0.4; box-shadow: none; }
+html:not(.rd-off) .confirm-actions button.danger,
+html:not(.rd-off) .confirm-actions button.primary.danger { background: var(--rdc-bb433a, #bb433a); box-shadow: 0 8px 18px -8px rgba(187, 67, 58, 0.55); }
+html:not(.rd-off) .invite-chips input,
+html:not(.rd-off) .invite-chips input:focus {
+  background: transparent !important; box-shadow: none !important; min-height: 0;
+}
+html:not(.rd-off) .confirm-actions button.primary:disabled {
+  opacity: 1; background: var(--rdc-d9d0ff, #d9d0ff); color: #fff !important;
+}
+html:not(.rd-off) .confirm-actions button.primary:disabled * { color: #fff !important; opacity: 1 !important; }
+
+/* Confirm dialogs, "before and after" (chosen 2026-10-30): left aligned, no
+   warning tile, a quiet subtitle, the change itself as a card (who, then the
+   level now -> the level after), the outcome as one small info line, and two
+   equal buttons that each name their result. Every ConfirmDialog takes the
+   layout; access confirms also pass `change`. */
+html:not(.rd-off) .confirm-dialog { width: 460px; padding: 26px 26px 24px; text-align: left; border-radius: 20px; }
+html:not(.rd-off) .confirm-dialog .confirm-badge { display: none; }
+html:not(.rd-off) .modal .confirm-dialog .confirm-title,
+html:not(.rd-off) .confirm-dialog .confirm-title { font: 600 18px var(--font-display); margin: 0 0 6px; }
+html:not(.rd-off) .confirm-subtitle { margin: 0 0 18px; font-size: 14px; line-height: 1.5; color: var(--text-tertiary); }
+html:not(.rd-off) .confirm-dialog .confirm-body {
+  margin: 0 0 22px; max-width: none; font-size: 14px; line-height: 1.55; color: var(--text-secondary);
+}
+html:not(.rd-off) .confirm-dialog .confirm-title + .confirm-body { margin-top: 10px; }
+html:not(.rd-off) .confirm-change {
+  display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 14px 16px;
+  background: var(--bg-app); border-radius: 14px;
+}
+html:not(.rd-off) .confirm-change-who { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+html:not(.rd-off) .confirm-change-who .avatar { width: 32px; height: 32px; flex: none; }
+html:not(.rd-off) .confirm-change-name { display: flex; flex-direction: column; min-width: 0; font-size: 14px; font-weight: 500; color: var(--text-primary); }
+html:not(.rd-off) .confirm-change-name > span,
+html:not(.rd-off) .confirm-change-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html:not(.rd-off) .confirm-change-name small { font-size: 12px; font-weight: 400; color: var(--text-tertiary); }
+html:not(.rd-off) .confirm-change-arrow { color: var(--text-tertiary); font-size: 13px; }
+html:not(.rd-off) .confirm-level {
+  flex: none; font: 600 12px var(--font-body); border-radius: 99px; padding: 4px 10px; white-space: nowrap;
+  background: rgba(var(--rd-ink), 0.06); color: var(--text-secondary);
+}
+html:not(.rd-off) .confirm-level.is-edit { background: var(--access-edit-bg); color: var(--access-edit-fg); }
+html:not(.rd-off) .confirm-level.is-view { background: var(--access-view-bg); color: var(--access-view-fg); }
+html:not(.rd-off) .confirm-level.is-none { background: var(--rdc-fbe9e6, #fbe9e6); color: var(--rdc-a8352b, #a8352b); }
+html:not(.rd-off) .confirm-note {
+  position: relative; padding-left: 22px; font-size: 12.5px; line-height: 1.5; color: var(--text-tertiary);
+}
+html:not(.rd-off) .confirm-note::before {
+  content: "i"; position: absolute; left: 0; top: 2px; width: 14px; height: 14px; border-radius: 50%;
+  box-shadow: inset 0 0 0 1.2px currentColor; font: 600 9px/14px var(--font-body); text-align: center;
+}
+html:not(.rd-off) .confirm-dialog .confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 0; }
+html:not(.rd-off) .confirm-dialog .confirm-actions > * { width: 100%; justify-content: center; }
+html:not(.rd-off) .modal .invite-chips input:not([type]),
+html:not(.rd-off) .modal .invite-chips input:not([type]):focus,
+html:not(.rd-off) .modal .skills-prefix-input input,
+html:not(.rd-off) .modal .skills-prefix-input input:focus {
+  background: transparent !important; box-shadow: none !important; min-height: 0;
+  border: 0 !important; outline: none; padding-left: 0; padding-right: 0;
+}
+
+/* Icon picker, clean: plain grey line icons, light hover, violet ring when chosen. */
+html:not(.rd-off) .vault-icon-grid { gap: 2px; }
+html:not(.rd-off) .vault-icon-option,
+html:not(.rd-off) .vault-icon-option.active {
+  background: transparent !important;
+  color: rgba(var(--rd-ink), 0.60) !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  border-radius: 8px;
+}
+html:not(.rd-off) .vault-icon-option:hover { background: rgba(var(--rd-ink), 0.05) !important; color: var(--text-primary) !important; }
+html:not(.rd-off) .vault-icon-option.active {
+  background: var(--accent-soft) !important;
+  color: var(--rdc-4a2fc7, #4a2fc7) !important;
+  box-shadow: inset 0 0 0 1.5px var(--accent) !important;
+}
+html:not(.rd-off) .vault-icon-option .vault-tile,
+html:not(.rd-off) .vault-icon-option .vault-tile * {
+  --tile-fill: transparent !important;
+  --tile-ink: currentColor !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+/* The picker icons are SVGs with a baked-in tile rect and colours. */
+html:not(.rd-off) .vault-icon-option svg > g > rect:first-child { fill: transparent !important; }
+html:not(.rd-off) .vault-icon-option svg > g > g [stroke]:not([stroke="none"]) { stroke: currentColor !important; }
+html:not(.rd-off) .vault-icon-option svg > g > g [fill]:not([fill="none"]) { fill: currentColor !important; }
+html:not(.rd-off) .vault-icon-option .vault-icon-svg,
+html:not(.rd-off) .vault-icon-option svg { width: 22px !important; height: 22px !important; }
+
+/* ============================================================
+   Vault settings follows the Account settings Profile page:
+   open content on the cream ground, no stacked cards.
+   ============================================================ */
+html:not(.rd-off) .settings-content > .vault-icon-settings,
+html:not(.rd-off) .settings-content > .toggle-row,
+html:not(.rd-off) .settings-content > .join-code-row {
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 0;
+}
+html:not(.rd-off) .settings-content { gap: var(--sp-4); }
+html:not(.rd-off) .settings-section-title { font-size: var(--fs-2xl); margin-bottom: var(--sp-1); }
+
+/* Icon row like the avatar row: big icon, name, buttons on the right. */
+html:not(.rd-off) .vault-icon-settings .vault-icon-preview .vault-tile { width: 56px; height: 56px; border-radius: 15px; }
+/* The picker sits in a soft panel, like "Or pick a character". */
+html:not(.rd-off) .vault-icon-settings .vault-icon-customise {
+  margin-top: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  border-radius: var(--radius-lg);
+  background: var(--bg-subtle);
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06);
+}
+html:not(.rd-off) .vault-icon-option:hover { background: rgba(var(--rd-ink), 0.06) !important; }
+
+/* Path field like the Profile inputs. */
+html:not(.rd-off) .settings-content .vault-root-path { background: var(--bg-subtle); padding: 10px 12px; }
+
+/* Danger zone keeps its soft red cards. */
+html:not(.rd-off) .vault-icon-settings .vault-icon-head-actions button.secondary { background: var(--bg-subtle); color: var(--text-primary); height: 34px; font-size: var(--fs-md); }
+
+/* ============================================================
+   Token dialog: premium
+   ============================================================ */
+html:not(.rd-off) .mcp-token-dialog { width: 520px; padding: 0; overflow: hidden; }
+html:not(.rd-off) .mcp-token-dialog .skills-form-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
+  background: var(--rd-surface);
+}
+html:not(.rd-off) .mcp-token-dialog .skills-form-head::before {
+  content: ""; width: 36px; height: 36px; flex: none; border-radius: 10px;
+  /* The redesign's tinted icon tile, like toasts and Import and export. */
+  background: var(--rdc-f1edff, #f1edff) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235b3fd6' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='15' r='4'/%3E%3Cpath d='m11 12 9-9M17 6l3 3M15 8l2 2'/%3E%3C/svg%3E") center / 18px no-repeat;
+  box-shadow: none;
+}
+html:not(.rd-off) .mcp-token-dialog .skills-form-head .confirm-title { margin: 0; flex: 1; font-size: var(--fs-lg); }
+html:not(.rd-off) .mcp-token-dialog .skills-form-head .icon-btn {
+  width: 30px; height: 30px; border-radius: 9px; background: var(--rd-surface); box-shadow: var(--rd-card-shadow); display: grid; place-items: center; font-size: 12px;
+}
+html:not(.rd-off) .mcp-token-dialog > :not(.skills-form-head) { margin-left: var(--sp-5); margin-right: var(--sp-5); }
+html:not(.rd-off) .mcp-token-dialog .skills-form-intro {
+  margin-top: 0; font-size: var(--fs-sm); line-height: 1.5; color: var(--text-tertiary);
+  background: none; border-radius: 0; padding: 0;
+}
+/* Token: a clean mono chip. */
+html:not(.rd-off) .mcp-token-dialog .mcp-field {
+  margin-top: var(--sp-3);
+  background: var(--rd-surface); border: 0; border-radius: var(--radius-md);
+  box-shadow: 0 0 0 1px rgba(124, 92, 255, 0.35), 0 0 0 4px rgba(124, 92, 255, 0.08);
+}
+html:not(.rd-off) .mcp-token-dialog .mcp-field-value { font-size: 13px; letter-spacing: 0.2px; color: var(--rdc-2a1a7a, #2a1a7a); }
+/* Setup header and app switcher. */
+html:not(.rd-off) .mcp-token-dialog .mcp-setup-head { margin-top: var(--sp-5); }
+html:not(.rd-off) .mcp-token-dialog .mcp-setup-title { font: 500 10.5px var(--font-mono); letter-spacing: 0.7px; text-transform: uppercase; color: rgba(var(--rd-ink), 0.53); }
+html:not(.rd-off) .mcp-token-dialog .mcp-client-tab { font-size: var(--fs-sm); padding: 5px 12px; border-radius: 8px; color: var(--text-secondary); }
+html:not(.rd-off) .mcp-token-dialog .mcp-client-tab.is-active { color: var(--text-primary); font-weight: 500; }
+/* Command block (redesign): light and quiet, a header with the label and copy,
+   then one line per command with a `$` prompt (continuations are indented). */
+html:not(.rd-off) .mcp-token-dialog .mcp-block {
+  margin-top: var(--sp-2); padding: 0; display: block; position: relative;
+  background: var(--bg-app); border: 0; border-radius: 14px;
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.07);
+}
+html:not(.rd-off) .mcp-block-head {
+  display: flex; align-items: center; justify-content: space-between; padding: 6px 6px 0 14px;
+}
+html:not(.rd-off) .mcp-block-label { font: 500 11px var(--font-body); color: var(--text-tertiary); }
+html:not(.rd-off) .mcp-token-dialog .mcp-block-value {
+  display: block; padding: 6px 14px 14px; color: var(--text-primary); font: 12.5px/1.7 var(--font-mono);
+  white-space: normal;
+}
+html:not(.rd-off) .mcp-block-line {
+  display: block; position: relative; padding-left: 16px;
+  white-space: pre-wrap; word-break: normal; overflow-wrap: break-word;
+}
+html:not(.rd-off) .mcp-block-line::before { content: "$"; position: absolute; left: 0; color: var(--accent); opacity: 0.8; }
+html:not(.rd-off) .mcp-block-line.is-cont { padding-left: 32px; }
+html:not(.rd-off) .mcp-block-line.is-cont::before { content: none; }
+html:not(.rd-off) .mcp-token-dialog .mcp-setup-hint { margin-top: 8px; font-size: var(--fs-xs); color: var(--text-tertiary); }
+html:not(.rd-off) .mcp-token-dialog .confirm-actions {
+  margin: var(--sp-5) 0 0; padding: 0 var(--sp-5) var(--sp-5); background: none; border-top: 0;
+}
+html:not(.rd-off) .mcp-token-dialog > .confirm-actions { margin-left: 0; margin-right: 0; }
+html:not(.rd-off) .mcp-token-dialog input { margin-top: var(--sp-3); width: calc(100% - 2 * var(--sp-5)); box-sizing: border-box; }
+
+
+/* View-only banner: a slim, quiet pill instead of a full-width yellow block. */
+
+/* Sidebar back to the old, roomier scale: 14px names, 36px slots. */
+html:not(.rd-off) .sidebar .tree-row,
+html:not(.rd-off) .home-sidebar-row,
+html:not(.rd-off) .pinned-name { font-size: var(--fs-md); }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-row { height: 34px; margin-top: 1px; margin-bottom: 1px; }
+html:not(.rd-off) .vault-name { font-size: var(--fs-lg); }
+html:not(.rd-off) .identity-line1 { font-size: var(--fs-md); }
+
+/* ---- Status picker in the account menu ---- */
+.rd-status { padding: 6px 8px 8px; margin-bottom: 4px; border-bottom: 1px solid var(--border); }
+.rd-status-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.rd-status-btn {
+  height: 34px; border: 0; border-radius: var(--radius-sm); background: var(--bg-subtle);
+  color: var(--text-secondary); display: grid; place-items: center; cursor: pointer;
+}
+.rd-status-btn svg { width: 17px; height: 17px; }
+.rd-status-btn:hover { background: var(--accent-soft); color: var(--accent-hover); }
+.rd-status-btn.on { background: var(--accent); color: #fff; }
+.rd-status-btn.s-online { color: var(--rdc-3f8850, #3f8850); }
+.rd-status-btn.s-online.on { background: var(--rdc-3f8850, #3f8850); color: #fff; }
+.rd-status-clear { display: flex; gap: 4px; margin-top: 6px; }
+.rd-status-clear button {
+  flex: 1; height: 24px; border: 0; border-radius: 99px; font: 500 var(--fs-xs) var(--font-body);
+  background: transparent; color: var(--text-secondary); cursor: pointer;
+}
+.rd-status-clear button:hover { background: var(--bg-subtle); }
+.rd-status-clear button.on { background: var(--accent-soft); color: var(--accent-hover); }
+.rd-prof .sm-host .avatar { width: 44px !important; height: 44px !important; }
+
+/* Tree performance: rows repaint on every expand/collapse, so keep them cheap. */
+html:not(.rd-off) .filetree-scroll .tree-row { transition: background 90ms linear; }
+html:not(.rd-off) .filetree-scroll .tree-row .tree-glyph { transition: none; }
+
+/* ============================================================
+   Sidebar blends in (Slack-style): the vault is a plain title,
+   rows are flat with a soft tint, nothing floats as a card.
+   ============================================================ */
+html:not(.rd-off) .sidebar-header-id {
+  background: transparent;
+  box-shadow: none;
+  padding: 2px 4px;
+  border-radius: var(--radius-md);
+}
+html:not(.rd-off) .sidebar-header-id:hover { background: rgba(var(--rd-ink), 0.04); }
+html:not(.rd-off) .sidebar-header-id .vault-tile { width: 30px !important; height: 30px !important; border-radius: 8px !important; }
+html:not(.rd-off) .vault-name { font-size: var(--fs-lg); font-weight: 700; }
+html:not(.rd-off) .vault-path { font-size: var(--fs-xs); }
+
+/* Rows: flat, a soft tint when open, no white card or shadow. */
+html:not(.rd-off) .tree-row.selected,
+html:not(.rd-off) .tree-row.selected:hover {
+  background: var(--accent-soft) !important;
+  box-shadow: none !important;
+  color: var(--text-primary);
+}
+html:not(.rd-off) .tree-row.selected::before { display: none; }
+html:not(.rd-off) .home-sidebar-row.selected { background: var(--accent-soft); box-shadow: none; }
+
+/* Account row and Set a home: flat too. */
+html:not(.rd-off) .acct, html:not(.rd-off) .identity-bar { background: transparent; box-shadow: none; }
+html:not(.rd-off) .home-sidebar-row.is-unset { outline-width: 1px; }
+
+/* ---- Account menu: compact, no wider than the sidebar ---- */
+html:not(.rd-off) .account-popover {
+  width: calc(var(--sidebar-layout-w, 264px) - 16px) !important;
+  min-width: 248px;
+  padding: 6px;
+  border-radius: var(--radius-lg);
+}
+html:not(.rd-off) .rd-prof { padding: 6px 6px 8px; margin: 0; gap: 10px; background: transparent; border-radius: 0; }
+html:not(.rd-off) .rd-prof .sm-host .avatar,
+html:not(.rd-off) .rd-prof .avatar { width: 32px !important; height: 32px !important; }
+html:not(.rd-off) .rd-prof-text b { font-size: var(--fs-md); }
+html:not(.rd-off) .rd-prof-text small { font-size: var(--fs-xs); }
+.rd-status { padding: 4px 6px 8px; }
+.rd-status-row { gap: 3px; }
+.rd-status-btn { height: 28px; border-radius: 7px; }
+.rd-status-btn svg { width: 15px; height: 15px; }
+.rd-status-clear { margin-top: 5px; gap: 2px; }
+.rd-status-clear button { height: 22px; font-size: 11px; }
+html:not(.rd-off) .account-popover .menu-item { min-height: 30px; padding: 3px 6px; font-size: var(--fs-sm); gap: 8px; }
+html:not(.rd-off) .account-popover .menu-hint { display: none; }
+html:not(.rd-off) .account-popover .menu-icon { width: 12px !important; height: 12px !important; padding: 4px; border-radius: 6px; }
+html:not(.rd-off) .account-popover .menu-sep { margin: 4px 6px; }
+
+/* ---- Vault switcher: compact, no wider than the sidebar ---- */
+html:not(.rd-off) .vault-switcher {
+  width: calc(var(--sidebar-layout-w, 264px) - 16px) !important;
+  min-width: 248px;
+  display: flex !important;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px;
+  border-radius: var(--radius-lg);
+}
+html:not(.rd-off) .vault-switcher::before { padding: 4px 6px 4px; }
+html:not(.rd-off) .vault-switcher .vault-card { min-height: 38px; padding: 0 6px; gap: 8px; border-radius: 8px; }
+html:not(.rd-off) .vault-switcher .vault-card .vault-tile { width: 24px !important; height: 24px !important; border-radius: 6px !important; }
+html:not(.rd-off) .vault-switcher .vault-card.current { box-shadow: none; }
+html:not(.rd-off) .vault-switcher .vault-card-sub { font-size: 11px; }
+html:not(.rd-off) .vault-switcher .vault-card-kbd { background: none; padding: 0; font-size: 10.5px; }
+html:not(.rd-off) .vault-switcher .menu-sep { margin: 4px 6px; }
+/* The three tiles go back to slim rows. */
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
+  flex-direction: row !important; justify-content: flex-start; gap: 8px;
+  padding: 3px 6px !important; min-height: 30px; background: transparent !important;
+  font-size: var(--fs-sm) !important; text-align: left; border-radius: 8px;
+}
+html:not(.rd-off) .vault-switcher .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
+  width: 12px !important; height: 12px !important; padding: 4px !important; border-radius: 6px !important;
+}
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: var(--fs-sm); }
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label::after { content: none; }
+html:not(.rd-off) .vault-switcher .menu-item { min-height: 30px; padding: 3px 6px; font-size: var(--fs-sm); }
+html:not(.rd-off) .vault-switcher .menu-hint { font-size: 11px; }
+html:not(.rd-off) .vault-switcher .menu-item .menu-icon { box-sizing: content-box; flex: none; }
+html:not(.rd-off) .vault-switcher .menu-item:nth-last-of-type(-n + 2) .menu-icon { background: var(--bg-subtle); color: var(--text-secondary); }
+
+/* ---- Account menu, direction D: hero card + status chip ---- */
+html:not(.rd-off) .rd-prof { background: var(--bg-app); border-radius: 10px; padding: 8px; margin-bottom: 6px; }
+html:not(.rd-off) .rd-prof .sm-host .avatar, html:not(.rd-off) .rd-prof .avatar { width: 40px !important; height: 40px !important; }
+.rd-status { padding: 0 0 6px; border-bottom: 0; }
+.rd-status.is-open .rd-status-row { margin-top: 6px; }
+html:not(.rd-off) .account-popover > .menu-item .menu-icon { background: none !important; color: var(--text-primary) !important; padding: 2px; }
+
+/* ---- Round: neutral selection, bigger vault icon, aligned columns ---- */
+/* Selection is a warm neutral, not purple. */
+html:not(.rd-off) .tree-row.selected,
+html:not(.rd-off) .tree-row.selected:hover,
+html:not(.rd-off) .home-sidebar-row.selected { background: rgba(var(--rd-ink), 0.06) !important; }
+html:not(.rd-off) .tree-row:hover { background: rgba(var(--rd-ink), 0.035); }
+html:not(.rd-off) .tree-row.selected .tree-glyph { color: var(--text-primary); }
+
+/* Vault header: a 40px icon, name and path centred against it, on the
+   same left edge (12px) as the section labels and tree glyphs. */
+html:not(.rd-off) .sidebar-header { padding-left: 8px; padding-right: 8px; }
+html:not(.rd-off) .sidebar-header-id { padding: 4px; gap: 12px; align-items: center; }
+html:not(.rd-off) .sidebar-header-id .vault-tile { width: 40px !important; height: 40px !important; border-radius: 10px !important; }
+html:not(.rd-off) .sidebar-header-text { transform: none; gap: 1px; }
+html:not(.rd-off) .vault-name { font-size: 16px; line-height: 20px; }
+html:not(.rd-off) .vault-path { font-size: 12px; line-height: 16px; }
+
+/* Pixel grid: every icon starts at x=20, every label at x=50. */
+html:not(.rd-off) .pinned-label { padding-left: 8px; padding-right: 8px; }
+html:not(.rd-off) .home-sidebar-row { padding-left: 2px; gap: 10px; }
+html:not(.rd-off) .home-sidebar-row svg { width: 20px; height: 20px; }
+html:not(.rd-off) .pinned-section .pinned-row { padding-left: 2px; }
+html:not(.rd-off) .pinned-open { gap: 10px; }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-row { margin-left: 3px; gap: 10px; }
+html:not(.rd-off) .sidebar .tree-glyph { width: 20px; }
+html:not(.rd-off) .sidebar-footer .identity-bar { padding-left: 4px; }
+html:not(.rd-off) .home-sidebar-row { margin-left: -2px !important; padding-left: 0 !important; }
+html:not(.rd-off) .sidebar-footer .identity-bar { padding-left: 12px; }
+/* No grey behind the vault header, at rest, on hover or while open. */
+html:not(.rd-off) .sidebar-header-id,
+html:not(.rd-off) .sidebar-header-id:hover,
+html:not(.rd-off) .vault-switch-tile,
+html:not(.rd-off) .vault-switch-btn,
+html:not(.rd-off) .vault-switch-btn.open,
+html:not(.rd-off) .vault-switch-btn:hover { background: transparent !important; box-shadow: none !important; }
+html:not(.rd-off) .sidebar-header-id .vault-tile { background: var(--tile-fill) !important; }
+
+html:not(.rd-off) .home-sidebar-row { margin-left: 0 !important; }
+
+/* Account menu grid: avatar, status icon and row icons start 14px in;
+   names and labels share one text column. */
+html:not(.rd-off) .account-popover { padding: 6px; }
+html:not(.rd-off) .rd-prof { padding: 8px; gap: 10px; margin: 0 0 6px; }
+.rd-status { padding: 0 0 6px; }
+html:not(.rd-off) .account-popover > .menu-item { padding: 4px 8px; gap: 10px; min-height: 32px; }
+html:not(.rd-off) .account-popover > .menu-item .menu-icon { width: 16px !important; height: 16px !important; padding: 0 !important; margin: 0 12px; }
+html:not(.rd-off) .account-popover .menu-sep { margin: 4px 8px; }
+html:not(.rd-off) .vault-switcher .vault-card.current { background: rgba(var(--rd-ink), 0.06) !important; }
+
+/* ============================================================
+   Professional pass: inline forms in the switcher, Vaults page
+   ============================================================ */
+
+/* Switcher "Vault name / Create" and "Join code / Join": one field with the
+   button inside it, a calm focus ring, no browser-green outline. */
+html:not(.rd-off) .menu-create-org {
+  position: relative; display: flex; align-items: center; gap: 0;
+  margin: 2px 4px; padding: 3px; border-radius: 10px;
+  background: var(--bg-subtle); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.08);
+  transition: box-shadow 120ms ease, background 120ms ease;
+}
+html:not(.rd-off) .menu-create-org:focus-within {
+  background: var(--rd-surface); box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft);
+}
+html:not(.rd-off) .menu-create-org input {
+  flex: 1; min-width: 0; height: 30px; padding: 0 8px;
+  border: 0 !important; outline: none !important; box-shadow: none !important;
+  background: transparent !important; font: 13px var(--font-body); color: var(--text-primary);
+}
+html:not(.rd-off) .menu-create-org input::placeholder { color: rgba(var(--rd-ink), 0.40); }
+html:not(.rd-off) .menu-create-org button.primary.sm {
+  height: 28px; padding: 0 12px; border-radius: 8px; font-size: 12.5px; font-weight: 500;
+  box-shadow: none; flex: none;
+}
+html:not(.rd-off) .menu-create-org button.primary.sm:disabled { background: rgba(var(--rd-ink), 0.08); color: rgba(var(--rd-ink), 0.40); opacity: 1; }
+
+/* ---- Account settings → Vaults ---- */
+html:not(.rd-off) .account-vaults-head,
+html:not(.rd-off) .settings-content .subhead {
+  font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: rgba(var(--rd-ink), 0.53);
+  display: flex; align-items: center;
+}
+html:not(.rd-off) .vault-hdr-btn,
+html:not(.rd-off) .account-vaults-head-actions button,
+html:not(.rd-off) .settings-content .subhead button {
+  height: 32px; padding: 0 12px; border-radius: 9px; font: 500 13px var(--font-body);
+  text-transform: none; letter-spacing: 0; box-shadow: none;
+}
+html:not(.rd-off) .vault-hdr-btn.secondary,
+html:not(.rd-off) .settings-content .subhead .ghost-pill,
+html:not(.rd-off) .settings-content .subhead button.secondary {
+  background: var(--rd-surface); color: var(--text-primary); border: 0; box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1);
+}
+
+/* Vault cards: a clean tile with the icon, name and one status line. */
+html:not(.rd-off) .vault-grid { gap: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+html:not(.rd-off) .vault-grid-card {
+  background: var(--rd-surface); border: 0; border-radius: 14px; padding: 14px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.04);
+  transition: box-shadow 140ms ease, transform 140ms ease; min-height: 0;
+}
+html:not(.rd-off) .vault-grid-card:hover { box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1), 0 10px 24px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px); }
+html:not(.rd-off) .vault-grid-card.current {
+  border-color: transparent !important; outline: 0;
+  box-shadow: 0 0 0 1.5px var(--accent), 0 12px 28px -16px rgba(124, 92, 255, 0.45);
+}
+html:not(.rd-off) .vault-grid-card.current .vault-switch-chip { background: var(--rdc-e4f3e6, #e4f3e6); color: var(--rdc-2f8a4a, #2f8a4a); }
+html:not(.rd-off) .vault-grid-card .vault-tile { width: 36px !important; height: 36px !important; border-radius: 9px !important; }
+html:not(.rd-off) .vault-grid-name { font: 600 14px var(--font-body); margin-top: 12px; }
+html:not(.rd-off) .vault-grid-foot { margin-top: 8px; }
+html:not(.rd-off) .vault-switch-chip {
+  font: 500 11.5px var(--font-body); padding: 3px 8px; border-radius: 99px;
+  background: var(--bg-subtle); color: var(--text-secondary); border: 0;
+}
+html:not(.rd-off) .vault-grid-card:not(.current) .vault-switch-chip { background: var(--accent-soft); color: var(--rdc-4a2fc7, #4a2fc7); }
+
+/* Folder location: one field with its actions inside. */
+html:not(.rd-off) .join-code-row {
+  background: var(--rd-surface); border-radius: 12px; padding: 6px 6px 6px 14px; gap: 6px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.08);
+}
+html:not(.rd-off) .join-code-row .vault-root-path { background: transparent !important; padding: 0; font-size: 12.5px; flex: 1; }
+html:not(.rd-off) .join-code-row .link-btn { height: 30px; padding: 0 10px; border-radius: 8px; font-size: 12.5px; }
+html:not(.rd-off) .join-code-row .link-btn:hover { background: var(--bg-subtle); }
+html:not(.rd-off) .settings-content .subhead .member-access-view-btn { height: 26px; width: 30px; padding: 0; box-shadow: none; background: transparent; display: grid; place-items: center; }
+html:not(.rd-off) .settings-content .subhead .member-access-view-btn.is-active { background: var(--rd-surface); box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.1); }
+html:not(.rd-off) .settings-content .subhead .member-access-view-btn svg { width: 15px; height: 15px; }
+
+/* View-only banner: reads as a warning. Soft amber, a strong amber edge,
+   amber lock, still slim. */
+
+/* ---- View only: floating dark chip + a thin amber page frame ---- */
+/* The amber frame wraps the whole page, drawn as an overlay so nothing clips it. */
+html:not(.rd-off) .editor-wrap:has(.rd-viewonly)::after {
+  content: ""; position: absolute; inset: 6px; border-radius: 14px; pointer-events: none; z-index: 30;
+  box-shadow: inset 0 0 0 2px var(--rdc-f2c66d, #f2c66d);
+}
+.rd-viewonly {
+  position: fixed; left: calc(var(--sidebar-layout-w, 300px) + (100vw - var(--sidebar-layout-w, 300px)) / 2); bottom: 22px;
+  transform: translateX(-50%); z-index: 40;
+  display: flex; align-items: center; gap: 10px; padding: 7px 7px 7px 14px;
+  border-radius: 999px; background: var(--rd-chip); color: #fff; font-size: 13px; white-space: nowrap;
+  box-shadow: 0 14px 30px -12px rgba(11, 10, 16, 0.55);
+  animation: rd-rise 260ms var(--ease) both;
+}
+.rd-viewonly svg { width: 15px; height: 15px; color: var(--rdc-fbc64a, #fbc64a); flex: none; }
+.rd-viewonly-label { font-weight: 500; }
+.rd-viewonly-who { display: flex; align-items: center; gap: 6px; color: rgba(255, 255, 255, 0.65); padding: 0 6px 0 10px; border-left: 1px solid rgba(255, 255, 255, 0.15); }
+.rd-viewonly-dot { width: 20px; height: 20px; border-radius: 50%; background: var(--rdc-3f8850, #3f8850); color: #fff; display: grid; place-items: center; font: 600 10px var(--font-body); }
+.rd-viewonly-ask { border: 0; border-radius: 99px; padding: 4px 13px; background: var(--rdc-fbc64a, #fbc64a); color: var(--rd-chip); font: 600 12.5px var(--font-body); cursor: pointer; }
+.rd-viewonly-ask:hover:not(:disabled) { background: var(--rdc-ffd56b, #ffd56b); }
+.rd-viewonly-ask:disabled { background: rgba(255, 255, 255, 0.15); color: #fff; cursor: default; }
+.rd-viewonly:not(:has(.rd-viewonly-ask)) { padding-right: 12px; }
+
+/* ---- Colourful tags: each name keeps its own pastel ---- */
+html:not(.rd-off) .cm-editor .cm-hashtag {
+  background: var(--tag-bg, var(--rdc-ece6ff, #ece6ff)) !important; color: var(--tag-fg, var(--rdc-5b3fd6, #5b3fd6)) !important;
+}
+html:not(.rd-off) .prop-chip {
+  background: var(--tag-bg, var(--bg-subtle)) !important; color: var(--tag-fg, var(--text-primary)) !important;
+  border: 0 !important; font-weight: 500;
+}
+html:not(.rd-off) .prop-chip button { color: inherit; opacity: 0.6; }
+
+/* ---- "On this device only": one slim row that blends into the sidebar ---- */
+html:not(.rd-off) .local-sync-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 8px 6px; padding: 5px 5px 5px 8px; min-height: 0;
+  border: 0; border-radius: 9px;
+  background: var(--rd-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06);
+}
+html:not(.rd-off) .local-sync-icon {
+  width: 20px !important; height: 20px !important; flex: none; padding: 3px; box-sizing: border-box;
+  border-radius: 6px; background: var(--rdc-fff1c9, #fff1c9); color: var(--rdc-7a5a00, #7a5a00);
+}
+html:not(.rd-off) .local-sync-label { display: flex; min-width: 0; line-height: 1.2; overflow: hidden; }
+html:not(.rd-off) .local-sync-label b { font-weight: 500; font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html:not(.rd-off) .local-sync-label small { display: none; }
+html:not(.rd-off) .local-sync-btn {
+  margin: 0 0 0 auto !important; flex: none; height: 20px; padding: 0 6px !important; border-radius: 5px;
+  background: transparent !important; color: var(--accent) !important; font: 600 11px var(--font-body) !important; text-decoration: none !important;
+}
+html:not(.rd-off) .local-sync-btn:hover:not(:disabled) { background: rgba(124, 92, 255, 0.1) !important; }
+
+.rd-viewonly { padding: 8px 8px 8px 16px; gap: 12px; font-size: 13.5px; }
+.rd-viewonly:not(:has(.rd-viewonly-ask)) { padding-right: 16px; }
+/* Centre the chip on the page itself, not on a computed window offset. */
+html:not(.rd-off) .editor-wrap { position: relative; }
+html:not(.rd-off) .editor-wrap .editor-column,
+html:not(.rd-off) .editor-wrap .editor-topbar,
+html:not(.rd-off) .editor-wrap .editor-slot { position: static; }
+.rd-viewonly { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); }
+/* No amber frame: the chip alone says view only. */
+html:not(.rd-off) .editor-wrap:has(.rd-viewonly)::after { content: none; }
+.rd-viewonly-msg { color: rgba(255, 255, 255, 0.72); }
+/* Centred without transform, so the entrance animation can't undo it. */
+.rd-viewonly {
+  left: 0 !important; right: 0 !important; transform: none !important;
+  margin: 0 auto; width: max-content; max-width: calc(100% - 48px);
+  animation: rd-chip-in 260ms var(--ease) both;
+}
+@keyframes rd-chip-in { from { opacity: 0; translate: 0 8px; } to { opacity: 1; translate: 0 0; } }
+.rd-viewonly-msg { overflow: hidden; text-overflow: ellipsis; }
+/* Home row spans the sidebar: box from x=12 to the sync-dot column's right
+   edge, icon still on the 20px line, label on 50px. */
+html:not(.rd-off) .home-sidebar-entry { position: relative; }
+html:not(.rd-off) .home-sidebar-row {
+  margin-left: -8px !important; padding-left: 8px !important;
+  width: calc(100% + 3px) !important; min-height: 36px; border-radius: 10px;
+}
+html:not(.rd-off) .home-sidebar-menu { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); }
+
+/* ---- Sidebar columns that hold at any width, with or without a scrollbar ----
+   The tree always reserves an 8px scrollbar lane (macOS, Windows and Linux
+   alike), and Home/Pinned reserve the same lane, so every row shares one
+   left edge (12px) and one right edge. */
+html:not(.rd-off) .filetree-scroll { scrollbar-gutter: stable; }
+html:not(.rd-off) .filetree-scroll::-webkit-scrollbar { width: 8px; }
+html:not(.rd-off) .filetree-scroll::-webkit-scrollbar-thumb { background: rgba(var(--rd-ink), 0.14); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+html:not(.rd-off) .filetree-scroll::-webkit-scrollbar-track { background: transparent; }
+html:not(.rd-off) .home-section, html:not(.rd-off) .pinned-section { padding-right: 8px !important; }
+/* Row highlight drawn as an inset layer: starts at x=12 like the Home box and
+   ends where the row's ⋯ button ends, without moving the icon/label grid. */
+html:not(.rd-off) .sidebar .tree-row { position: relative; isolation: isolate; background: transparent !important; box-shadow: none !important; }
+html:not(.rd-off) .sidebar .tree-row::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 9px; right: 4px;
+  border-radius: 9px; z-index: -1; background: var(--rd-row-bg, transparent);
+  transition: background 90ms linear;
+}
+html:not(.rd-off) .sidebar .tree-row:hover { --rd-row-bg: rgba(var(--rd-ink), 0.04); }
+html:not(.rd-off) .sidebar .tree-row.selected { --rd-row-bg: rgba(var(--rd-ink), 0.065); }
+html:not(.rd-off) .sidebar .tree-row.drop-target { --rd-row-bg: var(--accent-soft); }
+/* Home box spans the same 12px → row-end line. */
+html:not(.rd-off) .home-sidebar-row { width: calc(var(--sidebar-layout-w, 300px) - 22px) !important; }
+/* Right edge = the NOTES header's last icon (the select checkbox). Boxes end
+   there; the sync dot and the row's ⋯ sit centred under that icon. */
+html:not(.rd-off) .sidebar .tree-row::after { right: 36px; }
+html:not(.rd-off) .home-sidebar-row { width: calc(var(--sidebar-layout-w, 300px) - 54px) !important; }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-sync { transform: translateX(8px); }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more { transform: translateX(-20px); }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-row:hover .tree-sync { opacity: 0; }
+/* Bring the menu hints back, right-aligned and quiet. */
+html:not(.rd-off) .account-popover .menu-hint { display: inline !important; margin-left: auto; font-size: 11.5px; color: rgba(var(--rd-ink), 0.50); }
+
+/* Empty status: a quiet field with three one-tap shortcuts. */
+.rd-status-field {
+  display: flex; align-items: center; gap: 2px; padding: 3px;
+  border-radius: 10px; background: var(--rd-surface); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.12);
+}
+.rd-status-field-main {
+  flex: 1; display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 8px;
+  border: 0; border-radius: 8px; background: transparent; cursor: pointer;
+  font: 400 13px var(--font-body); color: var(--text-secondary); text-align: left;
+}
+.rd-status-field-main svg { width: 18px; height: 18px; color: var(--text-tertiary); flex: none; }
+.rd-status-field-main:hover { background: var(--bg-subtle); color: var(--text-primary); }
+.rd-status-quick {
+  width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent; cursor: pointer;
+  display: grid; place-items: center; color: var(--text-tertiary);
+}
+.rd-status-quick svg { width: 16px; height: 16px; }
+.rd-status-quick:hover { background: var(--accent-soft); color: var(--accent-hover); }
+/* Synced badge: same breathing room on the left as above and below. */
+html:not(.rd-off) .header-actions { padding-left: 8px !important; }
+html:not(.rd-off) .header-actions .sync-badge { padding-left: 11px; padding-right: 12px; gap: 6px; }
+.rd-status-field.is-set .rd-status-field-main { color: var(--text-primary); }
+.rd-status-field.is-set .rd-status-set-icon { color: var(--accent); }
+.rd-status-set-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rd-status-set-text b { font-weight: 500; }
+.rd-status-set-text small { color: var(--text-tertiary); font-size: 12.5px; }
+/* Menu labels never truncate; the grey hint gives way first. */
+html:not(.rd-off) .account-popover .menu-item-label { flex: none; }
+html:not(.rd-off) .account-popover .menu-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* View-only chip: warm amber instead of black. */
+.rd-viewonly {
+  background: var(--rdc-fff4d9, #fff4d9) !important; color: var(--rdc-5c3d00, #5c3d00) !important;
+  box-shadow: 0 0 0 1px var(--rdc-f0d48f, #f0d48f), 0 12px 28px -14px rgba(122, 78, 0, 0.45) !important;
+}
+.rd-viewonly svg { color: var(--rdc-c98a12, #c98a12) !important; }
+.rd-viewonly-msg { color: var(--rdc-8a6a2a, #8a6a2a) !important; }
+.rd-viewonly-who { color: var(--rdc-8a6a2a, #8a6a2a) !important; border-left-color: var(--rdc-f0d48f, #f0d48f) !important; }
+.rd-viewonly-ask { background: var(--rdc-c98a12, #c98a12) !important; color: #fff !important; }
+.rd-viewonly-ask:hover:not(:disabled) { background: var(--rdc-b07a10, #b07a10) !important; }
+
+/* Account menu grows out of the account row: it covers the row, and the
+   profile card sits at the bottom exactly where the row was. */
+html:not(.rd-off) .account-popover {
+  bottom: 0 !important; top: auto !important;
+  display: flex !important; flex-direction: column;
+}
+html:not(.rd-off) .account-popover > .rd-status { order: 98; margin-top: 4px; padding: 8px 0 4px; border-top: 1px solid var(--border); }
+html:not(.rd-off) .account-popover > .rd-prof { order: 99; background: transparent; margin: 0; }
+html:not(.rd-off) .rd-prof .sm-host .avatar,
+html:not(.rd-off) .rd-prof .avatar { width: 34px !important; height: 34px !important; }
+html:not(.rd-off) .rd-prof .sm-host .avatar,
+html:not(.rd-off) .rd-prof .avatar { width: 28px !important; height: 28px !important; }
+html:not(.rd-off) .account-popover > .rd-prof { padding: 8px 6px 8px 6px; }
+html:not(.rd-off) .account-popover > .rd-prof { padding-top: 15px; padding-bottom: 1px; gap: 8px; }
+
+/* One colour per status, used on every status icon. */
+.s-online { --st: var(--rdc-3f8850, #3f8850); --st-bg: var(--rdc-dff3e5, #dff3e5); }
+.s-smoke { --st: var(--rdc-5f6b7a, #5f6b7a); --st-bg: var(--rdc-e7eaee, #e7eaee); }
+.s-coffee { --st: var(--rdc-8e6347, #8e6347); --st-bg: var(--rdc-f1e3d6, #f1e3d6); }
+.s-lunch { --st: var(--rdc-c4621f, #c4621f); --st-bg: var(--rdc-fde6d6, #fde6d6); }
+.s-meeting { --st: var(--rdc-3b5fc7, #3b5fc7); --st-bg: var(--rdc-e3e8fb, #e3e8fb); }
+.s-focus { --st: var(--rdc-6a4fe0, #6a4fe0); --st-bg: var(--rdc-ece6ff, #ece6ff); }
+.s-brb { --st: var(--rdc-b07a10, #b07a10); --st-bg: var(--rdc-fff1c9, #fff1c9); }
+.rd-status-quick[class*="s-"] { color: var(--st); }
+.rd-status-quick[class*="s-"]:hover { background: var(--st-bg); color: var(--st); }
+.rd-status-set-icon[class*="s-"] { color: var(--st) !important; }
+.rd-status-btn[class*="s-"] { color: var(--st); }
+.rd-status-btn[class*="s-"]:hover { background: var(--st-bg); color: var(--st); }
+.rd-status-btn[class*="s-"].on { background: var(--st); color: #fff; }
+
+/* ---- Agent Skills row: same grid as the tree ---- */
+html:not(.rd-off) .skills-sparkles { display: none; }
+html:not(.rd-off) .skills-shortcut-row {
+  position: relative; display: flex; align-items: center; gap: 10px;
+  height: 36px; margin: 0 0 0 12px; padding: 0 8px; border-radius: 9px;
+  width: calc(var(--sidebar-layout-w, 300px) - 54px); box-sizing: border-box;
+}
+html:not(.rd-off) .skills-shortcut-row:hover { background: rgba(var(--rd-ink), 0.04); }
+html:not(.rd-off) .skills-shortcut-row > svg:first-child {
+  width: 20px; height: 20px; padding: 3px; box-sizing: border-box; border-radius: 6px;
+  background: var(--rdc-ece6ff, #ece6ff); color: var(--rdc-5b3fd6, #5b3fd6); flex: none;
+}
+html:not(.rd-off) .skills-shortcut-name { font-size: var(--fs-md); color: var(--text-primary); }
+html:not(.rd-off) .skills-shortcut-new {
+  height: 18px; padding: 0 7px; border-radius: 99px; border: 0;
+  background: var(--rdc-ece6ff, #ece6ff); color: var(--rdc-5b3fd6, #5b3fd6); font: 600 10.5px var(--font-body); display: inline-flex; align-items: center;
+}
+html:not(.rd-off) .skills-shortcut-count { margin-left: auto; width: 14px; text-align: center; font: 500 11.5px var(--font-body); color: var(--text-tertiary); }
+html:not(.rd-off) .skills-shortcut-row { margin-left: 4px; padding: 0 0 0 8px; background: transparent; border: 0; cursor: pointer; }
+html:not(.rd-off) .skills-shortcut-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+html:not(.rd-off) .skills-shortcut-dot { margin-left: auto; }
+html:not(.rd-off) .skills-shortcut-dot + .skills-shortcut-count { margin-left: 6px; }
+/* Agent Skills: on the 20/50px lines, and set apart from the notes with a hairline. */
+html:not(.rd-off) .skills-shortcut-row { margin-left: 12px !important; }
+html:not(.rd-off) .skills-shortcut {
+  position: relative; margin-top: 8px; padding-top: 8px;
+}
+html:not(.rd-off) .skills-shortcut::before {
+  content: ""; position: absolute; top: 0; left: 20px;
+  width: calc(var(--sidebar-layout-w, 300px) - 62px); height: 1px; background: rgba(var(--rd-ink), 0.08);
+}
+
+/* ---- No grey fills on controls: white with a hairline, violet when active ---- */
+html:not(.rd-off) .member-access-view,
+html:not(.rd-off) .settings-content .subhead .member-access-view {
+  background: var(--rd-surface) !important; border: 0 !important; padding: 3px; border-radius: 11px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1) !important;
+}
+html:not(.rd-off) .member-access-view-btn { background: transparent !important; box-shadow: none !important; color: var(--text-secondary); border-radius: 8px; }
+html:not(.rd-off) .member-access-view-btn:hover { color: var(--text-primary); }
+html:not(.rd-off) .member-access-view-btn.is-active,
+html:not(.rd-off) .settings-content .subhead .member-access-view-btn.is-active {
+  background: var(--accent-soft) !important; color: var(--rdc-4a2fc7, #4a2fc7) !important; box-shadow: none !important;
+}
+html:not(.rd-off) button.secondary,
+html:not(.rd-off) .skills-hdr-btn.secondary {
+  background: var(--rd-surface) !important; border: 0 !important; color: var(--text-primary);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1) !important;
+}
+html:not(.rd-off) button.secondary:hover:not(:disabled) { background: var(--rd-cream) !important; box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.16) !important; }
+html:not(.rd-off) .skills-hdr-btn { height: 36px; border-radius: 10px; font-weight: 500; }
+html:not(.rd-off) .settings-page-header .icon-btn:focus,
+html:not(.rd-off) .settings-page-header .icon-btn:focus-visible { outline: none; box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.12), 0 0 0 4px var(--accent-soft); }
+
+/* ---- Agent Skills cards ---- */
+html:not(.rd-off) .skills-works-with { background: var(--bg-app); }
+html:not(.rd-off) .skills-works-with::before { background: linear-gradient(to bottom, transparent, var(--bg-app)); }
+html:not(.rd-off) .skills-works-coin { background: var(--rd-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.08); }
+html:not(.rd-off) .skills-grid { gap: 12px; }
+html:not(.rd-off) .skills-card {
+  --skills-card-bg: var(--rd-surface); --skills-card-bg-hover: var(--rd-surface); --skills-tile-bg: var(--rdc-f6f3ff, #f6f3ff);
+  border-radius: 14px; padding: 16px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.04);
+  transition: box-shadow 140ms ease, transform 140ms ease;
+}
+html:not(.rd-off) .skills-card:not(.is-static):hover {
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1), 0 12px 26px -14px rgba(11, 10, 16, 0.35); transform: translateY(-1px);
+}
+html:not(.rd-off) .skills-card .skills-icon.is-lg { border: 0; background: var(--rdc-f1edff, #f1edff); color: var(--rdc-6a4fe0, #6a4fe0); border-radius: 10px; }
+html:not(.rd-off) .skills-card .skills-row-name { font-size: 14px; }
+html:not(.rd-off) .skills-card-byline { font-size: 11.5px; color: var(--text-tertiary); }
+html:not(.rd-off) .skills-card-desc { font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+html:not(.rd-off) .skills-card-action {
+  border: 0 !important; background: transparent !important; color: var(--text-tertiary) !important;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1) !important; border-radius: 9px !important;
+}
+html:not(.rd-off) .skills-card-action:hover { color: var(--rdc-4a2fc7, #4a2fc7) !important; box-shadow: 0 0 0 1px var(--rdc-c9bcf6, #c9bcf6) !important; background: var(--rdc-f6f3ff, #f6f3ff) !important; }
+html:not(.rd-off) .skills-group-head { font-size: 13.5px; font-weight: 600; }
+html:not(.rd-off) .skills-chip { background: var(--rd-surface); border: 0; box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1); color: var(--text-secondary); font-size: 11.5px; }
+
+/* ---- Activity panel ---- */
+html:not(.rd-off) .right-panel-head { border-bottom: 1px solid rgba(var(--rd-ink), 0.06); }
+html:not(.rd-off) .right-panel-tab { border-radius: 9px; }
+html:not(.rd-off) .activity-clear { font-size: 12px; color: var(--text-tertiary); }
+html:not(.rd-off) .activity-list { padding: 0 8px; }
+html:not(.rd-off) .activity-row { border: 0 !important; border-radius: 12px; padding: 10px 10px; }
+html:not(.rd-off) .activity-row:hover { background: rgba(var(--rd-ink), 0.03); }
+html:not(.rd-off) .activity-row-head { align-items: flex-start; gap: 10px; }
+
+/* Kind as a soft coloured pill instead of a bold black word. */
+html:not(.rd-off) .activity-row-chip {
+  flex: none; min-width: 0; height: 22px; padding: 0 9px; border-radius: 99px; border: 0;
+  display: inline-flex; align-items: center; font: 600 11px var(--font-body); letter-spacing: 0.01em;
+  background: var(--rdc-ece6ff, #ece6ff); color: var(--rdc-5b3fd6, #5b3fd6);
+}
+html:not(.rd-off) .activity-row-chip[data-tone="trash"],
+html:not(.rd-off) .activity-row-chip[data-tone="failed"] { background: var(--rdc-fdecea, #fdecea); color: var(--rdc-b8473a, #b8473a); }
+html:not(.rd-off) .activity-row-chip[data-tone="warn"],
+html:not(.rd-off) .activity-row-chip[data-tone="held"],
+html:not(.rd-off) .activity-row-chip[data-tone="paused"],
+html:not(.rd-off) .activity-row-chip[data-tone="shrunk"] { background: var(--rdc-fff1c9, #fff1c9); color: var(--rdc-7a5a00, #7a5a00); }
+html:not(.rd-off) .activity-row-chip[data-tone="invitation"] { background: var(--rdc-dff3e5, #dff3e5); color: var(--rdc-2f7044, #2f7044); }
+html:not(.rd-off) .activity-row-chip[data-tone="none"],
+html:not(.rd-off) .activity-row-chip[data-tone="round"] { background: var(--rdc-eef0f3, #eef0f3); color: var(--rdc-4a5361, #4a5361); }
+
+html:not(.rd-off) .activity-row-message { font-size: 13.5px; font-weight: 500; color: var(--text-primary); }
+html:not(.rd-off) .activity-row-path,
+html:not(.rd-off) .activity-row-paths { font-size: 11.5px; color: var(--text-tertiary); }
+html:not(.rd-off) .activity-row-time { font-size: 11.5px; color: var(--text-tertiary); white-space: nowrap; }
+
+/* Expanded detail: an inset cream panel with neat small buttons. */
+html:not(.rd-off) .activity-row-detail {
+  margin-top: 8px; padding: 10px 12px; border-radius: 10px; background: var(--bg-app);
+  font-size: 12.5px; color: var(--text-secondary); line-height: 1.55;
+}
+html:not(.rd-off) .activity-row-explain { font-size: 13px; color: var(--text-primary); margin-bottom: 4px; }
+html:not(.rd-off) .activity-row-fact { font-size: 12px; color: var(--text-tertiary); }
+html:not(.rd-off) .activity-row-actions { gap: 6px; margin-top: 8px; }
+html:not(.rd-off) .activity-row-actions button {
+  height: 28px; padding: 0 12px; border-radius: 8px; font: 500 12.5px var(--font-body);
+  background: var(--rd-surface) !important; border: 0 !important; box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.12) !important; color: var(--text-primary);
+}
+html:not(.rd-off) .activity-row-actions button:last-child { background: var(--accent) !important; color: #fff !important; box-shadow: none !important; }
+/* Chip colour by kind: deletes red, access/copies violet, warnings amber. */
+html:not(.rd-off) .activity-row-chip[data-kind="trash"],
+html:not(.rd-off) .activity-row-chip[data-kind="deleted"],
+html:not(.rd-off) .activity-row-chip[data-kind="failed"] { background: var(--rdc-fdecea, #fdecea); color: var(--rdc-b8473a, #b8473a); }
+html:not(.rd-off) .activity-row-chip[data-kind="invitation"] { background: var(--rdc-dff3e5, #dff3e5); color: var(--rdc-2f7044, #2f7044); }
+html:not(.rd-off) .activity-row-chip[data-tone="warn"]:not([data-kind="trash"]):not([data-kind="failed"]):not([data-kind="invitation"]) { background: var(--rdc-fff1c9, #fff1c9); color: var(--rdc-7a5a00, #7a5a00); }
+
+/* Search icon back beside the sidebar toggle. */
+.titlebar-search { display: inline-flex !important; }
+
+/* Skill detail header: title and meta get the full width, buttons wrap
+   underneath instead of crushing the name into a narrow column. */
+html:not(.rd-off) .skills-detail-head { flex-wrap: wrap; align-items: flex-start; row-gap: 12px; }
+html:not(.rd-off) .skills-detail-title { flex: 1 1 260px; }
+html:not(.rd-off) .skills-detail-head .settings-section-title { font-size: 20px; white-space: normal; }
+html:not(.rd-off) .skills-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+html:not(.rd-off) .skills-meta-line,
+html:not(.rd-off) .skills-byline { white-space: normal; word-break: normal; overflow-wrap: anywhere; font-size: 12.5px; color: var(--text-tertiary); }
+html:not(.rd-off) .skills-detail-controls { flex-wrap: wrap; }
+html:not(.rd-off) .skills-detail-controls .skills-hdr-btn { height: 34px; }
+html:not(.rd-off) .member-profile-back { display: inline-flex !important; margin-bottom: 8px; }
+
+/* ============================================================
+   Inner settings pages: one system everywhere.
+   - Settings rows group into a white card with hairline dividers.
+   - Section labels are small caps above their card.
+   - Lists (tokens, checkpoints, agents, statuses) are cards of rows.
+   ============================================================ */
+html:not(.rd-off) .settings-content { --rd-gap: 14px; gap: var(--rd-gap); }
+html:not(.rd-off) .settings-content > .muted,
+html:not(.rd-off) .settings-content > div > .muted:first-child,
+html:not(.rd-off) .settings-content > div > p.muted:first-child,
+html:not(.rd-off) .connection-tab > .field-hint:first-child { font-size: 13px; color: var(--text-secondary); line-height: 1.55; max-width: 640px; }
+html:not(.rd-off) .settings-content .menu-sep { display: none; }
+html:not(.rd-off) .settings-content .subhead {
+  margin: 8px 0 -6px 2px; font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: rgba(var(--rd-ink), 0.50);
+}
+
+/* Grouped rows */
+/* One white card per group with no rules between rows (the redesign uses
+   space, not lines, to separate things). Only the group's outer edge is drawn:
+   sides on every row, plus the top edge on the first and the bottom on the last. */
+html:not(.rd-off) .settings-content > .menu-row {
+  --rd-row-edge: rgba(var(--rd-ink), 0.07);
+  background: var(--rd-surface); margin: 0; padding: 16px 18px; min-height: 60px;
+  box-shadow: 1px 0 0 var(--rd-row-edge), -1px 0 0 var(--rd-row-edge); border-radius: 0;
+}
+html:not(.rd-off) .settings-content > .menu-row + .menu-row { margin-top: calc(-1 * var(--rd-gap)); }
+html:not(.rd-off) .settings-content > .menu-row:not(.menu-row + .menu-row) {
+  border-top-left-radius: 14px; border-top-right-radius: 14px;
+  box-shadow: 1px 0 0 var(--rd-row-edge), -1px 0 0 var(--rd-row-edge), 0 -1px 0 var(--rd-row-edge);
+}
+html:not(.rd-off) .settings-content > .menu-row:not(:has(+ .menu-row)) {
+  border-bottom-left-radius: 14px; border-bottom-right-radius: 14px;
+  box-shadow: 1px 0 0 var(--rd-row-edge), -1px 0 0 var(--rd-row-edge), 0 1px 0 var(--rd-row-edge);
+}
+html:not(.rd-off) .settings-content > .menu-row:only-child,
+html:not(.rd-off) .settings-content > .menu-row:not(.menu-row + .menu-row):not(:has(+ .menu-row)) {
+  box-shadow: 0 0 0 1px var(--rd-row-edge);
+}
+html:not(.rd-off) .menu-row-label { font-size: 14px; color: var(--text-primary); }
+html:not(.rd-off) .menu-row-label .field-hint,
+html:not(.rd-off) .menu-row .field-hint { font-size: 12px; color: var(--text-tertiary); }
+/* Content width preview: one soft tray holding a miniature page, like the
+   settings cards around it. The text column is a faint accent band (an outline,
+   so it never changes the wrap), and the bottom of the page fades out instead
+   of being cut. The caption sits outside the tray as a plain hint. */
+html:not(.rd-off) .width-preview { background: transparent; border: 0; gap: 8px; }
+html:not(.rd-off) .width-preview-frame {
+  background: var(--bg-app); border: 0; border-radius: 12px; padding: 10px;
+}
+html:not(.rd-off) .width-preview-page {
+  height: 92px; padding: 14px 0; border-radius: 8px;
+  background: var(--rd-surface);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 1px 2px rgba(var(--rd-ink), 0.04);
+  -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
+  mask-image: linear-gradient(to bottom, #000 70%, transparent);
+}
+html:not(.rd-off) .width-preview-col {
+  border-inline: 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  outline: 6px solid color-mix(in srgb, var(--accent) 6%, transparent);
+}
+html:not(.rd-off) .width-preview-text { color: var(--text-tertiary); }
+html:not(.rd-off) .width-preview-text strong { font-weight: 600; color: var(--text-primary); }
+html:not(.rd-off) .width-preview-caption { text-align: left; font-size: 12px; color: var(--text-tertiary); padding-left: 2px; }
+html:not(.rd-off) .appearance-tag { font: 500 11px var(--font-body); color: var(--rdc-5b3fd6, #5b3fd6); background: var(--rdc-f1edff, #f1edff); border-radius: 99px; padding: 2px 8px; }
+
+/* Generic card helper used below */
+html:not(.rd-off) .mcp-endpoint,
+html:not(.rd-off) .mcp-conn-list,
+html:not(.rd-off) .checkpoint-list,
+html:not(.rd-off) .status-options,
+html:not(.rd-off) .about-update-row,
+html:not(.rd-off) .installed-agents-status,
+html:not(.rd-off) .connection-tab > .field,
+html:not(.rd-off) .versioning-tab .invite-bar,
+html:not(.rd-off) .perm-empty {
+  background: var(--rd-surface); border: 0 !important; border-radius: 14px; padding: 14px 16px; margin: 0;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.03);
+}
+html:not(.rd-off) .mcp-conn-list,
+html:not(.rd-off) .checkpoint-list,
+html:not(.rd-off) .status-options { padding: 4px; list-style: none; }
+
+/* Rows inside list cards */
+html:not(.rd-off) .mcp-conn,
+html:not(.rd-off) .checkpoint-row,
+html:not(.rd-off) .status-options .menu-item,
+html:not(.rd-off) .installed-agent-row {
+  border-radius: 10px; padding: 10px 12px; border: 0 !important; margin: 0;
+}
+html:not(.rd-off) .mcp-conn + .mcp-conn,
+html:not(.rd-off) .checkpoint-row + .checkpoint-row,
+html:not(.rd-off) .status-options .menu-item + .menu-item { box-shadow: 0 -1px 0 rgba(var(--rd-ink), 0.06); }
+html:not(.rd-off) .checkpoint-row:hover,
+html:not(.rd-off) .mcp-conn:hover,
+html:not(.rd-off) .status-options .menu-item:hover { background: var(--bg-app); }
+html:not(.rd-off) .status-options .menu-item.active { background: var(--rdc-f1edff, #f1edff); box-shadow: none; }
+
+/* Each settings page's sections */
+html:not(.rd-off) .versioning-tab,
+html:not(.rd-off) .about-tab,
+html:not(.rd-off) .connection-tab,
+html:not(.rd-off) .status-tab { display: flex; flex-direction: column; gap: 14px; }
+html:not(.rd-off) .versioning-tab .invite-bar { display: flex; gap: 8px; padding: 8px; }
+html:not(.rd-off) .versioning-tab .invite-bar input { flex: 1; height: 34px; border: 0 !important; box-shadow: none !important; background: transparent !important; padding: 0 8px; }
+/* (Import and export: see the io-list block at the end.) */
+html:not(.rd-off) .about-update-row { display: flex; align-items: center; justify-content: space-between; }
+html:not(.rd-off) .installed-agents-status h3 { font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: rgba(var(--rd-ink), 0.50); margin-bottom: 4px; }
+html:not(.rd-off) .about-tab > .menu-item.danger { align-self: flex-start; padding: 8px 12px; border-radius: 9px; }
+html:not(.rd-off) .connection-tab > .field { display: flex; flex-direction: column; gap: 8px; }
+html:not(.rd-off) .connection-tab .field-label { font-size: 12.5px; font-weight: 500; color: var(--text-secondary); }
+html:not(.rd-off) .connection-tab input { height: 38px; border-radius: 9px; background: var(--bg-app) !important; border: 0 !important; box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06) !important; padding: 0 12px; }
+html:not(.rd-off) .mcp-endpoint { display: flex; align-items: center; gap: 12px; }
+html:not(.rd-off) .mcp-section-head { margin-top: 6px; }
+html:not(.rd-off) .perm-empty { color: var(--text-secondary); font-size: 13px; }
+
+/* Buttons inside pages: one size. */
+html:not(.rd-off) .settings-content button.primary:not(.sm),
+html:not(.rd-off) .settings-content button.secondary { height: 34px; padding: 0 14px; border-radius: 9px; font-weight: 500; font-size: 13px; }
+
+
+/* Windows: keep the header pill clear of the minimise / maximise / close buttons
+   (the redesign's main-header padding otherwise wins over App.css's 146px). */
+html[data-platform="windows"]:not(.rd-off) .main-header { padding-right: 146px; }
+html[data-platform="windows"]:not(.rd-off):has(.right-panel) .main-header { padding-right: var(--sp-4); }
+
+/* The Home "···" menu has to sit above the Pinned / Notes rows below it. */
+.home-section:has(.home-sidebar-menu[open]),
+.home-sidebar-entry:has(.home-sidebar-menu[open]) { position: relative; z-index: 60; }
+
+/* ---- Upgrade (Team plans): one cream page, quiet cards, one violet focus ---- */
+html:not(.rd-off) .modal.upgrade-dialog.is-page { background: var(--rd-cream); }
+html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-header {
+  background: transparent; border-bottom: 0; padding-bottom: 0;
+}
+html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-header h2,
+html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-header .subhead {
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary);
+}
+html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-page-body {
+  background: transparent; border: 0; box-shadow: none; padding-top: 12px;
+}
+html:not(.rd-off) .upgrade-tiers-heading {
+  font-family: var(--font-body); font-size: 26px; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 26px;
+}
+html:not(.rd-off) .upgrade-tiers { column-gap: 18px; }
+html:not(.rd-off) .upgrade-tier {
+  --tier-pad: 26px;
+  background: var(--rd-surface); border: 0; border-radius: 16px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.04);
+}
+html:not(.rd-off) .upgrade-tier.is-featured {
+  padding: var(--tier-pad); border: 0;
+  box-shadow: 0 0 0 1.5px var(--accent), 0 18px 40px -18px rgba(124, 92, 255, 0.35);
+}
+html:not(.rd-off) .upgrade-tier.is-featured .upgrade-tier-list-head {
+  margin-inline: calc(-1 * var(--tier-pad)); padding-inline: var(--tier-pad);
+}
+html:not(.rd-off) .upgrade-tier-icon {
+  width: 38px; height: 38px; margin-bottom: 18px; border-radius: 10px;
+  align-items: center; justify-content: center;
+  background: var(--rd-fill); color: var(--rdc-6b6558, #6b6558);
+}
+html:not(.rd-off) .upgrade-tier.is-featured .upgrade-tier-icon { background: var(--rdc-efeaff, #efeaff); color: var(--accent); }
+html:not(.rd-off) .upgrade-tier-icon svg { width: 20px; height: 20px; }
+html:not(.rd-off) .upgrade-tier-name { font-family: var(--font-body); font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+html:not(.rd-off) .upgrade-tier-tagline { font-size: 13px; color: var(--text-tertiary); }
+html:not(.rd-off) .upgrade-tier-price { margin-top: 16px; }
+html:not(.rd-off) .upgrade-tier-price .upgrade-amount,
+html:not(.rd-off) .upgrade-tier-price > :first-child { font-size: 34px; font-weight: 600; letter-spacing: -0.03em; line-height: 1; }
+html:not(.rd-off) .upgrade-tier-unit { color: var(--text-tertiary); font-size: 11.5px; }
+html:not(.rd-off) .upgrade-tier-controls { font-size: 13px; color: var(--text-secondary); }
+html:not(.rd-off) .upgrade-tier-cta {
+  height: 38px; padding: 0 16px; border-radius: 10px; font-size: 13.5px; font-weight: 500;
+}
+html:not(.rd-off) .upgrade-tier-cta.ghost-pill:disabled {
+  background: var(--rd-fill-soft); box-shadow: none; border: 0; color: var(--text-tertiary);
+}
+html:not(.rd-off) .upgrade-tier-footnote { font-size: 11.5px; }
+html:not(.rd-off) .upgrade-tier-list-head {
+  border-top: 1px solid rgba(var(--rd-ink), 0.06); font-size: 12px; font-weight: 500; color: var(--text-tertiary);
+}
+html:not(.rd-off) .upgrade-tier .upgrade-features li { font-size: 13.5px; color: var(--text-primary); }
+html:not(.rd-off) .upgrade-tier .upgrade-features li::before { width: 17px; height: 17px; font-size: 9.5px; }
+html:not(.rd-off) .upgrade-tier.is-featured .upgrade-features li::before { background: var(--rdc-efeaff, #efeaff); color: var(--accent); }
+html:not(.rd-off) .upgrade-tier:not(.is-featured) .upgrade-features li::before { background: var(--rd-fill); color: var(--rdc-8a8374, #8a8374); }
+/* Monthly / Yearly: white thumb on a cream track, like the other toggles. */
+html:not(.rd-off) .upgrade-tier-toggle { background: var(--rd-fill); border: 0; padding: 3px; border-radius: 9px; }
+html:not(.rd-off) .upgrade-tier-toggle button { height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12px; }
+html:not(.rd-off) .modal.upgrade-dialog.is-page .modal-header > span {
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary);
+}
+/* Upgrade, round 2: livelier icon tiles, a "current plan" label, a deeper CTA. */
+html:not(.rd-off) .upgrade-tier-icon { background: var(--rdc-e4f3e6, #e4f3e6); color: var(--rdc-2f8a4a, #2f8a4a); }
+html:not(.rd-off) .upgrade-tier.is-featured .upgrade-tier-icon { background: var(--rdc-e9e2ff, #e9e2ff); color: var(--rdc-6a46f0, #6a46f0); }
+html:not(.rd-off) .upgrade-tier-icon svg { stroke-width: 2; }
+html:not(.rd-off) .upgrade-tier:not(.is-featured) .upgrade-features li::before { background: var(--rdc-e4f3e6, #e4f3e6); color: var(--rdc-2f8a4a, #2f8a4a); }
+html:not(.rd-off) .upgrade-tier-cta.ghost-pill:disabled {
+  background: transparent; box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.08);
+  color: var(--text-secondary); gap: 7px;
+}
+html:not(.rd-off) .upgrade-tier-cta.ghost-pill:disabled::before {
+  content: ""; width: 16px; height: 16px; flex: none; border-radius: 50%;
+  background: var(--rdc-2f8a4a, #2f8a4a) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 8.2l2.2 2.2 4.8-4.8' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 16px no-repeat;
+}
+html:not(.rd-off) .upgrade-tier-cta.primary {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 6px 16px -6px rgba(124, 92, 255, 0.55);
+  transition: background-color 140ms ease, box-shadow 140ms ease;
+}
+html:not(.rd-off) .upgrade-tier-cta.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 10px 22px -8px rgba(124, 92, 255, 0.6);
+}
+
+/* Account → Vaults → one vault: section labels keep their own line, never
+   squashed under the cards below. */
+html:not(.rd-off) .account-vault-page > * { flex-shrink: 0; }
+html:not(.rd-off) .account-vault-page > .subhead { margin: 22px 0 8px 2px; line-height: 1.4; min-height: 16px; }
+
+/* ---- Motion: dialogs leave as softly as they arrive; settings tabs glide ---- */
+@keyframes rd-out-fade { to { opacity: 0; } }
+@keyframes rd-out-sink { to { opacity: 0; transform: translateY(6px) scale(0.985); } }
+@keyframes rd-tab-glide { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: no-preference) {
+  .modal-backdrop.rd-exit { animation: rd-out-fade 150ms var(--ease) both; pointer-events: none; }
+  .modal-backdrop.rd-exit > * { animation: rd-out-sink 150ms var(--ease) both; }
+  .settings-backdrop { animation: rd-fade 170ms var(--ease) both; }
+  .settings-backdrop > * { animation: rd-rise 210ms var(--ease) both; }
+  .settings-content.rd-tab-in { animation: rd-tab-glide 170ms var(--ease) both; }
+  .settings-nav .menu-item { transition: background-color 120ms var(--ease), color 120ms var(--ease); }
+}
+
+/* ---- Folder open / close: no sliding rows over each other ----
+   App.css glides every row's `top`, but a folder's new children appear at
+   once in their final slot, so the sliding siblings pass over them (rows
+   drawn twice). Rows now settle instantly and only the new children fade in. */
+.filetree-scroll .tree-rowwrap { transition: none !important; will-change: auto; }
+@keyframes rd-row-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: no-preference) {
+  .filetree-scroll .tree-row.rd-row-new { animation: rd-row-in 170ms var(--ease) both; }
+}
+
+/* Dark: vault tiles carry a JS pastel; dim it so it sits in the room. */
+html[data-theme="dark"]:not(.rd-off) .vault-tile {
+  background: color-mix(in srgb, var(--tile-ink, #a597ff) 42%, #24221f) !important;
+}
+html[data-theme="dark"]:not(.rd-off) .vault-tile svg > g > rect:first-child {
+  fill: color-mix(in srgb, var(--tile-ink, #a597ff) 42%, #24221f) !important;
+}
+html[data-theme="dark"]:not(.rd-off) .vault-tile svg g g :is(path, circle, rect, polygon, ellipse) {
+  fill: color-mix(in srgb, var(--tile-fill, #cfc4ff) 55%, #fff) !important;
+}
+/* Dark: menus and popovers float one step above the page. */
+html[data-theme="dark"]:not(.rd-off) :is(.account-popover, .vault-popover, .vault-switcher, .context-menu, .home-sidebar-menu-items) {
+  background: #262421 !important;
+  box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.08), 0 18px 40px -14px rgba(0, 0, 0, 0.7) !important;
+}
+
+/* ---- Dark: icons carry the colour so the room feels alive ---- */
+/* Folder squares: the pastel itself as the line, a soft wash behind it. */
+html[data-theme="dark"]:not(.rd-off) .tree-row.is-dir .tree-glyph,
+html[data-theme="dark"]:not(.rd-off) .pinned-row .tree-glyph {
+  background: color-mix(in srgb, currentColor 24%, transparent) !important;
+}
+html[data-theme="dark"]:not(.rd-off) .tree-row.is-dir .tree-glyph.colored svg,
+html[data-theme="dark"]:not(.rd-off) .pinned-row .tree-glyph svg {
+  color: color-mix(in srgb, currentColor 62%, #fff4e6) !important;
+}
+/* Note icons and toolbar icons: a touch brighter so they don't sink. */
+html[data-theme="dark"]:not(.rd-off) .tree-row:not(.is-dir) .tree-glyph { color: #a7a196; }
+html[data-theme="dark"]:not(.rd-off) .tree-row.selected:not(.is-dir) .tree-glyph { color: var(--accent); }
+html[data-theme="dark"]:not(.rd-off) :is(.header-actions, .sidebar-header, .titlebar-tools) .icon-btn { color: #b5afa4; }
+html[data-theme="dark"]:not(.rd-off) :is(.header-actions, .sidebar-header, .titlebar-tools) .icon-btn:hover { color: var(--text-primary); }
+/* Home row icon in violet, the way Set a home reads in light. */
+html[data-theme="dark"]:not(.rd-off) .home-sidebar-row svg { color: var(--accent); }
+/* Highlights: a warm marker, not a yellow block. */
+html[data-theme="dark"]:not(.rd-off) .cm-editor mark {
+  background: linear-gradient(transparent 55%, rgba(229, 182, 90, 0.32) 55%) !important;
+}
+
+/* ---- Dark: buttons sit in the room, they don't glow ----
+   A deeper, slightly muted violet with soft off-white text and no coloured
+   halo; hover lifts one step. Links keep the lighter --accent. */
+html[data-theme="dark"]:not(.rd-off) :is(button.primary, .upgrade-tier-cta.primary, .local-sync-btn, .account-vaults-head-actions button.primary) {
+  background: #5f50c4 !important;
+  color: #ece8ff !important;
+  box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.06) inset !important;
+}
+html[data-theme="dark"]:not(.rd-off) :is(button.primary, .upgrade-tier-cta.primary, .local-sync-btn):hover:not(:disabled) {
+  background: #6b5cd0 !important;
+}
+html[data-theme="dark"]:not(.rd-off) :is(button.primary, .upgrade-tier-cta.primary):disabled {
+  background: #3a3360 !important; color: rgba(236, 232, 255, 0.55) !important;
+}
+/* The text-link version of Turn on sync stays a link. */
+html[data-theme="dark"]:not(.rd-off) .local-sync-btn { background: transparent !important; color: var(--accent) !important; box-shadow: none !important; }
+/* Switches: a calmer "on". */
+html[data-theme="dark"]:not(.rd-off) .switch input:checked + span,
+html[data-theme="dark"]:not(.rd-off) .toggle input:checked + .slider,
+html[data-theme="dark"]:not(.rd-off) [role="switch"][aria-checked="true"] { background: #5f50c4 !important; }
+/* Badges / counts in solid violet: same softer tone. */
+html[data-theme="dark"]:not(.rd-off) .upgrade-tier.is-featured {
+  box-shadow: 0 0 0 1px rgba(165, 151, 255, 0.45), 0 18px 40px -20px rgba(0, 0, 0, 0.7) !important;
+}
+html[data-theme="dark"]:not(.rd-off) .vault-grid-card.current {
+  box-shadow: 0 0 0 1px rgba(165, 151, 255, 0.45), 0 12px 28px -18px rgba(0, 0, 0, 0.7);
+}
+
+/* ---- Welcome: one clean glass gradient, no dot grid, no blurred blobs ----
+   A single soft glow from the top over the canvas, plus a faint sheen. No
+   filter blur (it bands and smears in WebKit), no overlapping colour fields. */
+.vault-picker .aurora { display: none; }
+.vault-picker {
+  background:
+    radial-gradient(70% 75% at 100% 0%, rgba(150, 120, 255, 0.5), rgba(150, 120, 255, 0.18) 42%, transparent 72%),
+    radial-gradient(60% 65% at 0% 100%, rgba(255, 160, 120, 0.42), rgba(255, 160, 120, 0.14) 44%, transparent 72%),
+    radial-gradient(50% 55% at 0% 8%, rgba(120, 190, 255, 0.28), transparent 70%),
+    radial-gradient(55% 55% at 100% 100%, rgba(236, 130, 200, 0.26), transparent 70%),
+    var(--bg-app) !important;
+}
+.vault-picker::before {
+  background-image: none;
+  background-size: auto; opacity: 1; filter: none;
+  -webkit-mask-image: none; mask-image: none;
+}
+html[data-theme="dark"] .vault-picker {
+  background:
+    radial-gradient(120% 70% at 50% -10%, rgba(140, 118, 255, 0.2), transparent 62%),
+    radial-gradient(80% 60% at 100% 0%, rgba(214, 120, 190, 0.07), transparent 60%),
+    #161513 !important;
+}
+html[data-theme="dark"] .vault-picker::before {
+  background-image: linear-gradient(180deg, rgba(255, 248, 236, 0.035), rgba(255, 248, 236, 0) 45%);
+}
+
+/* ---- Welcome footnotes: one quiet, even group under the actions ---- */
+.vault-picker-card .hint {
+  margin: 0; font-size: 13px; line-height: 1.5; letter-spacing: 0;
+  color: var(--text-tertiary); text-align: center;
+}
+.vault-picker-card .hint + .hint { margin-top: 4px; }
+.vault-picker-card .hint:first-of-type { margin-top: 18px; }
+.vault-picker-card .hint .linkish {
+  font: inherit; font-weight: 500; color: var(--accent);
+  text-decoration: none; padding: 0 1px; border-radius: 4px;
+  transition: color 120ms var(--ease);
+}
+.vault-picker-card .hint .linkish:hover:not(:disabled) { color: var(--accent-hover); text-decoration: underline; text-underline-offset: 3px; }
+.vault-picker-card .hint code {
+  font: 500 11.5px var(--font-mono); padding: 1px 5px; border-radius: 5px;
+  background: rgba(var(--rd-ink), 0.06); color: var(--text-secondary);
+}
+
+/* Welcome: the wordmark spans exactly the button row. The card becomes one
+   centred column as wide as its widest real content (the buttons); the
+   wordmark has no width of its own and fills that column. */
+.vault-picker-card { display: grid; grid-template-columns: max-content; justify-content: center; }
+.vault-picker-card > * { min-width: 0; }
+.vault-picker-card .product-name { margin-bottom: clamp(36px, 6vh, 64px); }
+.vault-picker-card .product-name .wordmark { display: block; width: 100%; }
+.vault-picker-card > .recent-list { width: 100%; max-width: none; justify-self: stretch; }
+
+/* ---- Sign in / Create account: a frosted glass card over the welcome glow ---- */
+html:not(.rd-off) .modal-backdrop:has(> .auth-dialog) {
+  background: rgba(255, 255, 255, 0.18) !important;
+  backdrop-filter: blur(10px) saturate(150%);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+}
+html[data-theme="dark"]:not(.rd-off) .modal-backdrop:has(> .auth-dialog) { background: rgba(0, 0, 0, 0.32) !important; }
+.modal.auth-dialog {
+  width: min(400px, calc(100vw - 32px)) !important; max-width: none;
+  padding: 30px 28px 24px !important; border-radius: 22px !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+  backdrop-filter: blur(28px) saturate(170%);
+  -webkit-backdrop-filter: blur(28px) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.7) !important;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset, 0 30px 70px -24px rgba(40, 24, 90, 0.35), 0 0 0 1px rgba(var(--rd-ink), 0.04) !important;
+}
+.auth-dialog .modal-header {
+  position: relative; justify-content: center; padding: 0 0 18px !important; border: 0 !important; background: none !important;
+}
+.auth-dialog .modal-header > span {
+  font: 600 21px/1.25 var(--font-body); letter-spacing: -0.02em; color: var(--text-primary); text-align: center;
+}
+.auth-dialog .modal-header .icon-btn {
+  position: absolute; top: -14px; right: -12px; width: 28px; height: 28px; border-radius: 50%;
+  font-size: 12px; color: var(--text-tertiary); background: transparent;
+}
+.auth-dialog .modal-header .icon-btn:hover { background: rgba(var(--rd-ink), 0.06); color: var(--text-primary); }
+html:not(.rd-off) .modal.auth-dialog .segmented {
+  display: flex; padding: 3px; border-radius: 11px; margin-bottom: 18px;
+  background: var(--rd-fill) !important; border: 0; box-shadow: none;
+}
+html:not(.rd-off) .modal.auth-dialog .segmented button { flex: 1; height: 32px; border-radius: 8px; font: 500 13px var(--font-body); color: var(--text-secondary); }
+html:not(.rd-off) .modal.auth-dialog .segmented button.active { background: var(--rd-surface); color: var(--text-primary); box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.12); }
+.auth-dialog .oauth-btn {
+  width: 100%; height: 44px; display: flex; align-items: center; justify-content: center; gap: 10px;
+  border-radius: 12px; background: var(--rd-surface) !important; color: var(--text-primary) !important;
+  font: 500 14px var(--font-body); border: 0 !important;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1), 0 1px 2px rgba(var(--rd-ink), 0.06) !important;
+  transition: box-shadow 140ms var(--ease), transform 140ms var(--ease);
+}
+.auth-dialog .oauth-btn:hover:not(:disabled) { box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.14), 0 6px 16px -8px rgba(var(--rd-ink), 0.25) !important; transform: translateY(-1px); }
+.auth-dialog .oauth-btn svg { width: 18px; height: 18px; }
+.auth-dialog .auth-divider { display: flex; align-items: center; gap: 12px; margin: 16px 0; color: var(--text-tertiary); font-size: 12px; }
+.auth-dialog .auth-divider::before, .auth-dialog .auth-divider::after { content: ""; flex: 1; height: 1px; background: rgba(var(--rd-ink), 0.1); }
+.auth-dialog .auth-divider span { background: none !important; padding: 0 !important; }
+.auth-dialog .auth-form { display: flex; flex-direction: column; gap: 10px; }
+html:not(.rd-off) .modal.auth-dialog .auth-form input:not([type="checkbox"]) {
+  height: 44px !important; min-height: 44px; padding: 0 14px !important; border-radius: 12px !important;
+  font-size: 14px !important; background: var(--rd-surface) !important; border: 0 !important;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1) !important;
+}
+html:not(.rd-off) .modal.auth-dialog .auth-form input:not([type="checkbox"]):focus { box-shadow: 0 0 0 1.5px var(--accent), 0 0 0 5px var(--accent-soft) !important; }
+.auth-dialog .auth-form-options { margin: 2px 0 4px; font-size: 13px; color: var(--text-secondary); }
+.auth-dialog .auth-form button.primary, .auth-dialog .auth-form .primary {
+  height: 44px; border-radius: 12px; font: 500 14px var(--font-body); margin-top: 4px;
+}
+.auth-dialog .auth-server-note { margin-top: 16px; text-align: center; font-size: 12px; color: var(--text-tertiary); }
+.auth-dialog .auth-server-note strong, .auth-dialog .auth-server-note b { color: var(--text-secondary); font-weight: 500; }
+.auth-dialog .auth-server-note .linkish, .auth-dialog .auth-server-note .link-btn,
+.auth-dialog .auth-server-note a { font: inherit; font-weight: 500; color: var(--accent); text-decoration: none; }
+html[data-theme="dark"] .modal.auth-dialog {
+  background: rgba(34, 32, 30, 0.9) !important;
+  border-color: rgba(255, 248, 236, 0.08) !important;
+  box-shadow: 0 1px 0 rgba(255, 248, 236, 0.05) inset, 0 30px 70px -24px rgba(0, 0, 0, 0.7) !important;
+}
+
+/* ---- Welcome to workspace: a crossfade, not a cut ---- */
+@keyframes rd-ghost-out { to { opacity: 0; transform: scale(1.015); } }
+@keyframes rd-app-in { from { opacity: 0; transform: scale(0.992); } to { opacity: 1; transform: none; } }
+@keyframes rd-side-in { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: no-preference) {
+  .rd-ghost { animation: rd-ghost-out 380ms var(--ease) both; }
+  body:has(.rd-ghost) .app .sidebar { animation: rd-side-in 420ms var(--ease) both; }
+  body:has(.rd-ghost) .app .main { animation: rd-fade 420ms var(--ease) both; }
+}
+
+/* ---- Graph: calm, clean, on the app's own canvas ---- */
+.graph-diag { display: none !important; }
+html:not(.rd-off) .graph-canvas-wrap { background: #fdfbf7; }
+html[data-theme="dark"]:not(.rd-off) .graph-canvas-wrap { background: #1b1a18; }
+html:not(.rd-off) .graph-canvas-wrap::after { display: none; }
+html:not(.rd-off) .graph-floating-controls {
+  background: rgba(var(--rd-ink), 0.04); border: 0; padding: 3px; border-radius: 12px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.08), 0 8px 24px -12px rgba(var(--rd-ink), 0.25);
+}
+html:not(.rd-off) .graph-icon-btn { color: var(--text-secondary); border-radius: 9px; }
+html:not(.rd-off) .graph-icon-btn:hover { background: rgba(var(--rd-ink), 0.06); color: var(--text-primary); }
+html:not(.rd-off) .graph-icon-btn.is-active { background: var(--accent-soft); color: var(--accent); }
+html:not(.rd-off) .graph-controls {
+  width: 284px; gap: 18px; padding: 18px; border: 0; border-radius: 16px;
+  background: var(--rd-surface);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 24px 48px -20px rgba(var(--rd-ink), 0.3);
+}
+html[data-theme="dark"]:not(.rd-off) .graph-controls { background: #262421; box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.08), 0 24px 48px -18px rgba(0, 0, 0, 0.7); }
+html:not(.rd-off) .graph-control-group-title {
+  font: 500 10.5px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary);
+}
+html:not(.rd-off) .graph-control-row { font-size: 13px; color: var(--text-secondary); }
+html:not(.rd-off) .graph-control-row input[type="range"] { accent-color: var(--accent); }
+html:not(.rd-off) .graph-control-search {
+  height: 32px; border-radius: 9px; border: 0; background: var(--rd-fill-soft);
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06); font-size: 13px;
+}
+html:not(.rd-off) .graph-seg { background: var(--rd-fill); border: 0; padding: 3px; border-radius: 9px; }
+html:not(.rd-off) .graph-seg-btn { border-radius: 7px; font-size: 12px; color: var(--text-secondary); }
+html:not(.rd-off) .graph-seg-btn.is-active { background: var(--rd-surface); color: var(--text-primary); box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.12); }
+html[data-theme="dark"]:not(.rd-off) .graph-seg-btn.is-active { background: #34312d; }
+/* The panel stays clear of the window's traffic lights and scrolls instead of
+   growing up under them. */
+html:not(.rd-off) .graph-controls { max-height: calc(100% - 72px); overflow-y: auto; overscroll-behavior: contain; }
+/* A segmented row whose options need the full width: label above, control below. */
+html:not(.rd-off) .graph-control-row.is-stacked { grid-template-columns: 1fr; gap: 6px; }
+html:not(.rd-off) .graph-control-row.is-stacked .graph-seg { grid-column: 1 / -1; }
+html:not(.rd-off) .graph-seg-btn { padding: 5px 4px; }
+/* Shape templates: four picture tiles. */
+html:not(.rd-off) .graph-shape-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 4px; }
+html:not(.rd-off) .graph-shape-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 8px 0 6px; border: 0; border-radius: 10px; cursor: pointer;
+  background: var(--rd-fill-soft); color: var(--text-tertiary);
+  font: 500 11.5px var(--font-body);
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.05);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+html:not(.rd-off) .graph-shape-btn svg { width: 26px; height: 26px; }
+html:not(.rd-off) .graph-shape-btn:hover { color: var(--text-primary); }
+html:not(.rd-off) .graph-shape-btn.is-active {
+  background: var(--accent-soft); color: var(--accent);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+html:not(.rd-off) .graph-shape-btn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+html:not(.rd-off) .graph-legend-row { font-size: 12.5px; color: var(--text-secondary); }
+html:not(.rd-off) .graph-legend-count { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+html:not(.rd-off) .graph-control-reset { height: 30px; border-radius: 8px; font-size: 12.5px; }
+
+/* Toasts, "icon chip" (chosen 2026-10-30): a white card, a tinted icon tile per
+   tone (green tick, violet info, red alert; no yellow), the message, then an
+   optional violet action and the close. The tile reuses `.toast-dot`, so the
+   base styles' tone hooks still apply. */
+html:not(.rd-off) .toast-viewport { gap: 10px; max-width: min(400px, calc(100vw - var(--sp-8))); }
+html:not(.rd-off) .toast {
+  min-width: 300px; gap: 12px; padding: 10px 10px 10px 10px; border: 0; border-radius: 16px;
+  background: var(--rd-surface);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 1px 2px rgba(var(--rd-ink), 0.04), 0 16px 34px -18px rgba(var(--rd-ink), 0.38);
+  font-size: 13.5px; line-height: 1.4;
+}
+html:not(.rd-off) .toast-error { border: 0; }
+html:not(.rd-off) .toast .toast-dot {
+  width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center;
+  background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6);
+}
+html:not(.rd-off) .toast-success .toast-dot { background: var(--rdc-e4f3e8, #e4f3e8); color: var(--rdc-2f7a46, #2f7a46); }
+html:not(.rd-off) .toast-error .toast-dot { background: var(--rdc-fbe9e6, #fbe9e6); color: var(--rdc-b3392f, #b3392f); }
+html:not(.rd-off) .toast-text { color: var(--text-primary); }
+html:not(.rd-off) .toast-action {
+  flex: none; border: 0; cursor: pointer; font: 600 13px var(--font-body);
+  padding: 7px 12px; border-radius: 10px;
+  background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6);
+}
+html:not(.rd-off) .toast-action:hover { background: var(--rdc-e6dfff, #e6dfff); }
+html:not(.rd-off) .toast-close { width: 26px; height: 26px; border-radius: 8px; color: var(--text-tertiary); }
+
+/* Toggles, "ink" (chosen 2026-10-30): a rounded-square track with a white
+   rounded-square knob, black when on (cream in dark), no rim. Same geometry as
+   the base switch so nothing around it moves. */
+html:not(.rd-off) .switch-track { border-radius: 8px; background: rgba(var(--rd-ink), 0.08); box-shadow: none; }
+html:not(.rd-off) .switch-knob {
+  border-radius: 6px; background: #fff;
+  box-shadow: 0 1px 3px rgba(11, 10, 16, 0.18), 0 0 0 0.5px rgba(11, 10, 16, 0.04);
+}
+html:not(.rd-off) .switch.on .switch-track { background: var(--text-primary); box-shadow: none; }
+html:not(.rd-off)[data-theme="dark"] .switch.on .switch-knob { background: var(--rd-surface); }
+html:not(.rd-off) .switch.is-disabled { opacity: 0.45; }
+html:not(.rd-off) .switch .switch-input:focus-visible + .switch-track {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* Invite people, two tabs (chosen 2026-10-30): a header with a close button,
+   By email / Join code as equal segments, the code as large tiles with one copy
+   button that confirms, the New members setting beside it, and a quiet footer
+   hint. No rules between sections. */
+html:not(.rd-off) .modal.invite-people { width: 480px; padding: 22px 22px 18px; border-radius: 22px; }
+html:not(.rd-off) .invite-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+html:not(.rd-off) .invite-head .confirm-title { margin: 0; font-size: 19px; }
+html:not(.rd-off) .invite-close {
+  width: 30px; height: 30px; border: 0; border-radius: 9px; display: grid; place-items: center;
+  background: rgba(var(--rd-ink), 0.04); color: var(--text-tertiary); font-size: 16px; cursor: pointer;
+}
+html:not(.rd-off) .invite-close:hover { background: rgba(var(--rd-ink), 0.08); color: var(--text-primary); }
+html:not(.rd-off) .invite-tabs {
+  display: grid; grid-template-columns: 1fr 1fr; padding: 3px; margin-bottom: 18px;
+  border-radius: 12px; background: rgba(var(--rd-ink), 0.05);
+}
+html:not(.rd-off) .invite-tabs button {
+  border: 0; background: transparent; padding: 8px 0; border-radius: 10px; cursor: pointer;
+  font: 400 13.5px var(--font-body); color: var(--text-tertiary);
+}
+html:not(.rd-off) .invite-tabs button.on {
+  background: var(--rd-surface); color: var(--text-primary); font-weight: 500; box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.12);
+}
+html:not(.rd-off) .invite-code-card {
+  display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 22px 18px 18px;
+  border-radius: 18px; background: var(--bg-app); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06);
+}
+html:not(.rd-off) .invite-code-lead { margin: 0; font-size: 12.5px; color: var(--text-tertiary); text-align: center; }
+html:not(.rd-off) .invite-code-tiles { display: flex; gap: 6px; }
+html:not(.rd-off) .invite-code-tiles span {
+  width: 38px; height: 48px; display: grid; place-items: center; border-radius: 10px;
+  background: var(--rd-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.08), 0 2px 6px -3px rgba(var(--rd-ink), 0.15);
+  font: 500 22px var(--font-mono); color: var(--text-primary);
+}
+html:not(.rd-off) .invite-code-tiles span.gap { margin-left: 10px; }
+html:not(.rd-off) .invite-copy { min-width: 132px; }
+html:not(.rd-off) .invite-copy.is-copied,
+html:not(.rd-off) .invite-copy.is-copied:hover { background: var(--rdc-2f7a46, #2f7a46); box-shadow: 0 8px 18px -8px rgba(47, 122, 70, 0.55); }
+html:not(.rd-off) .invite-code-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 4px 0;
+  font-size: 13.5px; color: var(--text-primary);
+}
+html:not(.rd-off) .invite-code-row small { display: block; margin-top: 2px; font-size: 12px; color: var(--text-tertiary); }
+html:not(.rd-off) .invite-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; }
+html:not(.rd-off) .invite-foot-hint { font-size: 12.5px; color: var(--text-tertiary); }
+html:not(.rd-off) .invite-foot .confirm-actions { margin: 0; display: flex; gap: 8px; }
+
+/* Import and export (redesign): one card of action rows, each an icon tile, a
+   title with a one-line hint, and a quiet button. No loud violet buttons and no
+   half-empty second card. */
+html:not(.rd-off) .io-tab { display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 640px; }
+html:not(.rd-off) .io-list {
+  background: var(--rd-surface); border-radius: 16px; padding: 6px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.03);
+}
+html:not(.rd-off) .io-row { display: flex; align-items: center; gap: 14px; padding: 12px 12px; border-radius: 12px; }
+html:not(.rd-off) .io-row:hover { background: rgba(var(--rd-ink), 0.025); }
+html:not(.rd-off) .io-icon {
+  flex: none; width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center;
+  background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6);
+}
+html:not(.rd-off) .io-icon.is-export { background: var(--rdc-e4f3e8, #e4f3e8); color: var(--rdc-2f7a46, #2f7a46); }
+html:not(.rd-off) .io-text { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; color: var(--text-primary); }
+html:not(.rd-off) .io-text small { display: block; margin-top: 2px; font-size: 12.5px; font-weight: 400; color: var(--text-tertiary); line-height: 1.45; }
+html:not(.rd-off) .io-row .ghost-pill { flex: none; height: 34px; padding: 0 14px; border-radius: 10px; font-weight: 500; }
+html:not(.rd-off) .io-tip { margin: 0; padding-left: 4px; font-size: 12.5px; color: var(--text-tertiary); }
+
+/* Dropdown options with a hint line: the tick sits on the label's line, not
+   beside the hint. */
+html:not(.rd-off) .context-menu.role-menu li .menu-tick { align-self: flex-start; line-height: 1.4; }
+
+/* "No access" reads as the soft red it is in the confirm dialogs, not as a
+   disabled-looking grey. Can edit and Can view are unchanged. Light and dark. */
+html:not(.rd-off) { --access-none-bg: #fbe9e6; --access-none-fg: #a8352b; }
+html:not(.rd-off)[data-theme="dark"] { --access-none-bg: rgba(240, 139, 128, 0.14); --access-none-fg: #f08b80; }
+
+/* Copy buttons in the token dialog and MCP tab: the redesign's tinted icon
+   tile (as in toasts and Import and export), green once copied. */
+html:not(.rd-off) .mcp-copy-btn {
+  width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; flex: none;
+  background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6); border: 0; box-shadow: none;
+}
+html:not(.rd-off) .mcp-copy-btn:hover { background: var(--rdc-e6dfff, #e6dfff); }
+html:not(.rd-off) .mcp-copy-btn.is-copied { background: var(--rdc-e4f3e8, #e4f3e8); color: var(--rdc-2f7a46, #2f7a46); }
+
+/* Alert banners, "floating cards" (chosen 2026-10-30): a white rounded card
+   inside the note area, a tinted icon tile by tone (red: something stopped or
+   was removed; violet: an action to take; green: good news; neutral:
+   information), the message, then its buttons. Overrides every variant's tint;
+   no yellow. */
+html:not(.rd-off) .banner-slot > .banner {
+  margin: 8px 16px 0; padding: 10px 10px 10px 12px; gap: 12px; justify-content: flex-start;
+  background: var(--rd-surface) !important; border: 0 !important; border-radius: 16px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 14px 30px -18px rgba(var(--rd-ink), 0.35) !important;
+  font-size: 13.5px; line-height: 1.45; color: var(--text-secondary);
+}
+html:not(.rd-off) .banner-slot > .banner > :not(.banner-icon):not(.banner-actions) { flex: 1; min-width: 0; }
+html:not(.rd-off) .banner-slot > .banner strong,
+html:not(.rd-off) .banner-slot > .banner b { color: var(--text-primary) !important; font-weight: 600; }
+html:not(.rd-off) .banner-icon {
+  flex: none; width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center;
+  background: var(--rdc-f1efeb, #f1efeb); color: var(--text-tertiary);
+}
+html:not(.rd-off) .banner.tone-danger .banner-icon { background: var(--rdc-fbe9e6, #fbe9e6); color: var(--rdc-b3392f, #b3392f); }
+html:not(.rd-off) .banner.tone-action .banner-icon { background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6); }
+html:not(.rd-off) .banner.tone-good .banner-icon { background: var(--rdc-e4f3e8, #e4f3e8); color: var(--rdc-2f7a46, #2f7a46); }
+html:not(.rd-off)[data-theme="dark"] .banner-icon { background: rgba(255, 250, 240, 0.08); }
+html:not(.rd-off) .banner-slot > .banner .banner-actions { margin-left: auto; }
+html:not(.rd-off) .banner-slot > .banner .banner-actions button:not(.primary):not(.link-btn) {
+  border: 0; background: rgba(var(--rd-ink), 0.05); border-radius: 10px;
+}
+html:not(.rd-off) .banner-slot > .banner .banner-actions button.primary { border-radius: 10px; }
+
+/* What's new, "glow badge" (chosen 2026-10-30): a sparkle in a ring of the
+   sidebar's folder colours, "Baalda v0.1.98" with the version in ink-to-violet,
+   and each change as a soft row with a folder-colour tile, title and detail. */
+html:not(.rd-off) .modal.whats-new { width: 460px; padding: 26px 24px 22px; border-radius: 24px; text-align: center; }
+html:not(.rd-off) .whats-new-badge {
+  width: 76px; height: 76px; margin: 0 auto 14px; border-radius: 24px; display: grid; place-items: center;
+  background: conic-gradient(from 200deg, #7c5cff, #dc5f97, #d9773a, #3f8850, #2f86bf, #7c5cff);
+  box-shadow: 0 16px 34px -12px rgba(124, 92, 255, 0.6);
+}
+html:not(.rd-off) .whats-new-badge > div {
+  width: 66px; height: 66px; border-radius: 20px; display: grid; place-items: center;
+  background: var(--rd-surface); color: #7c5cff;
+}
+html:not(.rd-off) .whats-new-title { font: 700 28px var(--font-display); letter-spacing: -0.02em; margin: 0 0 6px; }
+html:not(.rd-off) .whats-new-title-version {
+  background: linear-gradient(90deg, var(--text-primary), #7f73ff); -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+html:not(.rd-off) .whats-new-sub { color: var(--text-tertiary); font-size: 13.5px; margin: 0 0 16px; }
+html:not(.rd-off) .whats-new-notes { list-style: none; margin: 0 0 18px; padding: 0; display: grid; gap: 8px; text-align: left; }
+html:not(.rd-off) .whats-new-notes li {
+  display: flex; align-items: flex-start; gap: 12px; padding: 10px 12px; border-radius: 14px;
+  background: var(--bg-app); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.04);
+}
+html:not(.rd-off) .whats-new-tile {
+  flex: none; width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center;
+  background: color-mix(in srgb, var(--tile-fill) 40%, transparent); color: var(--tile-ink);
+}
+html:not(.rd-off) .whats-new-notes li.tone-violet { --tile-fill: #cbbcf6; --tile-ink: #7c5cff; }
+html:not(.rd-off) .whats-new-notes li.tone-green { --tile-fill: #9bd8a9; --tile-ink: #3f8850; }
+html:not(.rd-off) .whats-new-notes li.tone-orange { --tile-fill: #f7d9be; --tile-ink: #d9773a; }
+html:not(.rd-off) .whats-new-notes li.tone-sky { --tile-fill: #9ed4ef; --tile-ink: #2f86bf; }
+html:not(.rd-off) .whats-new-notes li.tone-pink { --tile-fill: #fac6dc; --tile-ink: #dc5f97; }
+html:not(.rd-off) .whats-new-text { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-tertiary); line-height: 1.45; }
+html:not(.rd-off) .whats-new-text b { display: block; font-size: 13.5px; font-weight: 600; color: var(--text-primary); margin-bottom: 1px; }
+html:not(.rd-off) .whats-new-tag { flex: none; align-self: center; font: 600 10px var(--font-body); color: #fff; background: #7f73ff; border-radius: 99px; padding: 2px 7px; }
+html:not(.rd-off) .whats-new-cta { width: 100%; height: 42px; border-radius: 12px; }
+/* The CTA takes focus when the card opens (Enter closes it); show that as a
+   soft glow in its own violet, not the app's green double focus ring. */
+html:not(.rd-off) .whats-new-cta:focus,
+html:not(.rd-off) .whats-new-cta:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(127, 115, 255, 0.18), 0 10px 22px -10px rgba(127, 115, 255, 0.7);
+}
+
+/* The joining teammate's avatar on its way into the team stack. */
+.join-avatar-drop {
+  position: fixed; left: 0; top: 0; z-index: var(--z-toast, 9000); pointer-events: none;
+  width: 36px; height: 36px; border-radius: 50%; will-change: transform, opacity;
+  box-shadow: 0 0 0 3px #fff, 0 14px 30px -10px rgba(11, 10, 16, 0.45);
+}
+.join-avatar-drop .avatar { width: 100% !important; height: 100% !important; }
+
+/* Connection, "Cloud or your own" (chosen 2026-10-30): two choice cards, the
+   address only for your own server, recent servers as chips, one Connect. */
+html:not(.rd-off) .conn-b { display: flex; flex-direction: column; gap: 16px; max-width: 720px; }
+html:not(.rd-off) .conn-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+html:not(.rd-off) .conn-option {
+  position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left;
+  padding: 18px; border: 0; border-radius: 16px; cursor: pointer; font: inherit; color: var(--text-primary);
+  background: var(--rd-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.03);
+  transition: box-shadow var(--t-fast) var(--ease);
+}
+html:not(.rd-off) .conn-option:hover { box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.14); }
+html:not(.rd-off) .conn-option.is-selected { box-shadow: 0 0 0 2px var(--accent), 0 12px 28px -18px color-mix(in srgb, var(--accent) 60%, transparent); }
+html:not(.rd-off) .conn-option b { font-size: 15px; font-weight: 600; margin-top: 10px; }
+html:not(.rd-off) .conn-option-hint { font-size: 12.5px; color: var(--text-tertiary); line-height: 1.45; }
+html:not(.rd-off) .conn-radio {
+  position: absolute; top: 16px; right: 16px; width: 18px; height: 18px; border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px rgba(var(--rd-ink), 0.25); transition: box-shadow var(--t-fast) var(--ease);
+}
+html:not(.rd-off) .conn-option.is-selected .conn-radio { box-shadow: inset 0 0 0 5px var(--accent); }
+html:not(.rd-off) .conn-tile { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; }
+html:not(.rd-off) .conn-tile.is-cloud { background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6); }
+html:not(.rd-off) .conn-tile.is-own { background: var(--rdc-e4f3e8, #e4f3e8); color: var(--rdc-2f7a46, #2f7a46); }
+html:not(.rd-off) .conn-address {
+  width: 100%; margin-top: 12px; padding: 10px 12px; border: 0; border-radius: 10px;
+  background: var(--bg-app); font: 13px var(--font-mono); color: var(--text-primary);
+}
+html:not(.rd-off) .conn-address:focus { outline: none; box-shadow: 0 0 0 1.5px var(--accent), 0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent); }
+html:not(.rd-off) .conn-recent-label { display: block; font: 500 11px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 8px; }
+html:not(.rd-off) .conn-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+html:not(.rd-off) .conn-chip {
+  display: inline-flex; align-items: center; gap: 6px; border: 0; cursor: pointer;
+  padding: 5px 11px; border-radius: 99px; font: 500 12.5px var(--font-body);
+  background: rgba(var(--rd-ink), 0.05); color: var(--text-secondary);
+}
+html:not(.rd-off) .conn-chip.is-active::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--rdc-3f9a5c, #3f9a5c); }
+html:not(.rd-off) .conn-chip.is-picked { background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6); box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent); }
+html:not(.rd-off) .conn-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+html:not(.rd-off) .conn-status { font-size: 12.5px; color: var(--text-tertiary); }
+
+/* Graph loading / arranging: a small white pill with a spinner on the light
+   canvas, not the dark-void grey slab (the canvas follows the theme now). */
+html:not(.rd-off) .graph-state-card.graph-loading,
+html:not(.rd-off) .graph-state-card.graph-settling {
+  flex-direction: row; gap: 10px; padding: 10px 16px; border-radius: 99px;
+  background: var(--rd-surface); color: var(--text-secondary); font-size: 13px;
+  border: 0; backdrop-filter: none;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 12px 28px -16px rgba(var(--rd-ink), 0.35);
+}
+
+/* Skill "needs a look" badge: violet (something to choose), not amber. */
+html:not(.rd-off) .skills-install.is-warn {
+  background: var(--rdc-f1edff, #f1edff); color: var(--rdc-5b3fd6, #5b3fd6);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}

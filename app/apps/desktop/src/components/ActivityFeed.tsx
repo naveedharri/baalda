@@ -506,7 +506,7 @@ export function ActivityFeed() {
                       }
                     }}
                   >
-                    <span className="health-pill activity-row-chip" data-tone={rowTone(row)}>
+                    <span className="health-pill activity-row-chip" data-tone={rowTone(row)} data-kind={row.type}>
                       {t.label}
                     </span>
                     <span className="activity-row-body">

@@ -1,3 +1,7 @@
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { aadFor, ENVELOPE_OVERHEAD, open, seal } from "../crypto/envelope.js";
+import { KeyRequiredError } from "../crypto/transport.js";
+import { indexCryptoFor } from "../index/sealed-index.js";
 import type pg from "pg";
 
 /**
@@ -21,6 +25,48 @@ import type pg from "pg";
 
 type Queryable = Pick<pg.Pool, "query">;
 
+// ── W3: sealed texts for keyed vaults ────────────────────────────────────────
+// A keyed vault's text goes into `content_enc` (sealed, AAD bound to vault +
+// doc + sha) with `content = ''`. Readers select {@link VERSION_CONTENT_ENC}
+// beside {@link VERSION_CONTENT} and call {@link resolveText}: a sealed row
+// without a key is `key_required`, never an empty note.
+
+function textAad(vaultId: string, docId: string, sha: string): Buffer {
+  return aadFor("note_texts", "content", vaultId, `${docId}:${sha}`);
+}
+
+/** Seal one stored text (backfill; `storeNoteText` seals the same way). */
+export function sealNoteText(c: DocCrypto, docId: string, sha: string, content: string): Buffer {
+  return seal(c.key, textAad(c.vaultId, docId, sha), Buffer.from(content, "utf8"), c.generation);
+}
+
+/** Open a sealed stored text to its raw bytes (backfill verification). */
+export function openNoteTextBytes(c: DocCrypto, docId: string, sha: string, sealed: Buffer): Buffer {
+  return open(c.key, textAad(c.vaultId, docId, sha), sealed);
+}
+
+/** The sealed text of a `note_versions v` row (null for plaintext/inline rows). */
+export const VERSION_CONTENT_ENC = "CASE WHEN v.content IS NULL THEN t.content_enc END";
+/** Byte size of a `note_versions v` row's text, sealed or not, without the key. */
+export const VERSION_SIZE = `CASE WHEN v.content IS NULL AND t.content_enc IS NOT NULL
+  THEN octet_length(t.content_enc) - ${ENVELOPE_OVERHEAD} ELSE octet_length(COALESCE(v.content, t.content)) END`;
+
+/**
+ * A stored text as a string: the sealed copy opened with `crypto` (its AAD
+ * binds vault, doc and sha, so a swapped row fails), else the plaintext.
+ */
+export function resolveText(
+  row: { content: string | null; content_enc?: Buffer | null },
+  ids: { vaultId: string; docId: string; sha: string },
+  crypto: DocCrypto | undefined,
+): string | null {
+  if (row.content_enc) {
+    if (!crypto) throw new KeyRequiredError();
+    return open(crypto.key, textAad(ids.vaultId, ids.docId, ids.sha), row.content_enc).toString("utf8");
+  }
+  return row.content;
+}
+
 /** A text unreferenced for less than this is never swept. */
 export const TEXT_GC_GRACE_MS = 60 * 60_000;
 /** Re-bump `last_ref_at` at most this often, so an unchanged note does not
@@ -40,7 +86,38 @@ export const VERSION_CONTENT = "COALESCE(v.content, t.content)";
 export async function storeNoteText(
   db: Queryable,
   input: { vaultId: string; docId: string; sha: string; content: string },
+  crypto?: DocCrypto,
 ): Promise<void> {
+  // W3: a REQUEST passes its own key. Background capture passes none and gets
+  // a cache COPY; a keyed vault with no key held refuses (nothing written), so
+  // the caller defers rather than storing plaintext or an empty text.
+  let c = crypto;
+  let copy: Buffer | null = null;
+  if (!c) {
+    const resolved = await indexCryptoFor(input.vaultId, db);
+    if (resolved === null) throw new KeyRequiredError();
+    if (resolved) {
+      c = resolved;
+      copy = resolved.key;
+    }
+  }
+  if (c) {
+    try {
+      const sealed = seal(c.key, textAad(input.vaultId, input.docId, input.sha), Buffer.from(input.content, "utf8"), c.generation);
+      // An existing row for this (doc, sha) holds the SAME text: keep it as is
+      // (never overwritten, never nulled) and only bump the reference time.
+      await db.query(
+        `INSERT INTO note_texts (doc_id, sha256, vault_id, content, content_enc)
+         VALUES ($1, $2, $3, '', $4)
+         ON CONFLICT (doc_id, sha256) DO UPDATE SET last_ref_at = now()
+           WHERE note_texts.last_ref_at < now() - interval '${TOUCH_INTERVAL}'`,
+        [input.docId, input.sha, input.vaultId, sealed],
+      );
+    } finally {
+      copy?.fill(0);
+    }
+    return;
+  }
   await db.query(
     `INSERT INTO note_texts (doc_id, sha256, vault_id, content)
      VALUES ($1, $2, $3, $4)

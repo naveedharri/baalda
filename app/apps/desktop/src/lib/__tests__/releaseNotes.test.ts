@@ -4,6 +4,7 @@ import {
   isSilentRelease,
   notesForVersion,
   releaseNoteLines,
+  releaseNoteItems,
 } from "../releaseNotes";
 
 /** A body shaped like docs/RELEASE_NOTES.md: comment header, newest-first sections. */
@@ -168,5 +169,16 @@ describe("isSilentRelease", () => {
 
   it("announces a release with notes", () => {
     expect(isSilentRelease(MULTI, "0.1.60")).toBe(false);
+  });
+});
+
+describe("releaseNoteItems", () => {
+  it("splits a leading bold phrase into title and detail", () => {
+    const notes = "## 0.1.98\n\n- **Encrypted vaults.** Only your team's devices hold the key.\n- **Safer and steadier**, with security fixes.\n- Plain line with **bold** inside.";
+    expect(releaseNoteItems(notes)).toEqual([
+      { title: "Encrypted vaults", detail: "Only your team's devices hold the key." },
+      { title: "Safer and steadier", detail: "with security fixes." },
+      { title: "", detail: "Plain line with bold inside." },
+    ]);
   });
 });

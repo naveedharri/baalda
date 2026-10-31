@@ -1,10 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-// The miniature borrows `.skel-line` from the loading skeleton. In a production
-// build `cssCodeSplit: false` puts that rule in the one eager stylesheet
-// anyway; importing it here is what makes Settings look right in `vite dev`
-// before the (lazy) editor chunk has ever been loaded.
-import "./editor.css";
 import { computePreviewColumn } from "../lib/editorMeasure";
+import { useStore } from "../store";
 import type { EditorMeasure } from "../lib/prefs";
 
 /**
@@ -30,6 +26,18 @@ const FALLBACK_GUTTER_PX = 64;
 const PROBE_CHARS = 20;
 /** A sane `ch` for a browser that measures zero (a detached document). */
 const FALLBACK_CH_PX = 9;
+/** A sane editor font size for the same case. */
+const FALLBACK_FONT_PX = 16;
+
+/** Real words, not grey bars: the miniature sets them in the editor's font
+ *  scaled by the same factor as the column, so they break where a real note
+ *  would and the eye can judge the line length directly. */
+const SAMPLE_TITLE = "Weekly planning";
+const SAMPLE_TEXT =
+  "Each Monday the team picks the three things that matter most this week and " +
+  "writes them down here, so nobody has to ask twice. Decisions get a line of " +
+  "context and a name, open questions get an owner, and anything that slips " +
+  "moves to Friday's review with a short note on why it slipped.";
 
 /**
  * The width of one `0` in the editor's body font — which is exactly what the
@@ -37,17 +45,22 @@ const FALLBACK_CH_PX = 9;
  * and it is not the root font either: `ch` resolves at the element that uses
  * the token, and that element is `.cm-line`.
  */
-function measureChPx(): number {
+function measureFont(): { chPx: number; fontPx: number } {
   const probe = document.createElement("span");
   probe.setAttribute("aria-hidden", "true");
   probe.style.cssText =
     "position:absolute;top:0;left:-9999px;white-space:pre;visibility:hidden;" +
-    "pointer-events:none;font-family:var(--font-body);font-size:var(--fs-lg)";
+    "pointer-events:none;font-family:var(--editor-font-family, var(--font-body));" +
+    "font-size:var(--editor-font-size, var(--fs-lg))";
   probe.textContent = "0".repeat(PROBE_CHARS);
   document.body.appendChild(probe);
   const width = probe.getBoundingClientRect().width / PROBE_CHARS;
+  const fontPx = Number.parseFloat(getComputedStyle(probe).fontSize);
   probe.remove();
-  return width > 0 ? width : FALLBACK_CH_PX;
+  return {
+    chPx: width > 0 ? width : FALLBACK_CH_PX,
+    fontPx: Number.isFinite(fontPx) && fontPx > 0 ? fontPx : FALLBACK_FONT_PX,
+  };
 }
 
 function readGutterPx(): number {
@@ -61,6 +74,7 @@ function readGutterPx(): number {
  *  at startup and the gutter is a token. Measured once, off the resize path. */
 interface Scale {
   chPx: number;
+  fontPx: number;
   gutterPx: number;
 }
 
@@ -74,9 +88,13 @@ export function ContentWidthPreview({ measure }: { measure: EditorMeasure }) {
   const [scale, setScale] = useState<Scale | null>(null);
   const [widths, setWidths] = useState<Widths | null>(null);
 
+  // Re-measured when the note font or size changes: `ch` is the width of a
+  // character in THAT font at THAT size.
+  const editorFont = useStore((s) => s.editorFont);
+  const editorFontSize = useStore((s) => s.editorFontSize);
   useEffect(() => {
-    setScale({ chPx: measureChPx(), gutterPx: readGutterPx() });
-  }, []);
+    setScale({ ...measureFont(), gutterPx: readGutterPx() });
+  }, [editorFont, editorFontSize]);
 
   useEffect(() => {
     const page = pageRef.current;
@@ -115,6 +133,12 @@ export function ContentWidthPreview({ measure }: { measure: EditorMeasure }) {
           previewWidth: widths.previewWidth,
         })
       : null;
+  // Same factor computePreviewColumn shrinks the pane by, so the sample text
+  // keeps its true characters-per-line inside the miniature column.
+  const ratio =
+    widths && widths.paneWidth > 0 ? widths.previewWidth / widths.paneWidth : 1;
+  const charsPerLine =
+    column && scale ? Math.round(column.columnPx / ratio / scale.chPx) : null;
 
   return (
     <div className="width-preview">
@@ -131,16 +155,20 @@ export function ContentWidthPreview({ measure }: { measure: EditorMeasure }) {
                   { width: 0, marginInline: "auto", visibility: "hidden" }
             }
           >
-            <span className="skel-line skel-title" />
-            <span className="skel-line" style={{ width: "92%" }} />
-            <span className="skel-line" style={{ width: "78%" }} />
-            <span className="skel-line" style={{ width: "85%" }} />
-            <span className="skel-line" style={{ width: "45%" }} />
+            <div
+              className="width-preview-text"
+              style={scale ? { fontSize: `${scale.fontPx * ratio}px` } : undefined}
+            >
+              <strong>{SAMPLE_TITLE}</strong>
+              <p>{SAMPLE_TEXT}</p>
+            </div>
           </div>
         </div>
       </div>
       <span className="field-hint width-preview-caption">
-        About how a note will sit in your window.
+        {charsPerLine != null
+          ? `${measure === "full" ? "Full width, about" : "About"} ${charsPerLine} characters per line in this window.`
+          : "About how a note will sit in your window."}
       </span>
     </div>
   );

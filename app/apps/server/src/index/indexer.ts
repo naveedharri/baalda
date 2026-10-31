@@ -1,3 +1,7 @@
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { indexCryptoFor, openBlobTextRow, openSearchRow, sealSearchRow } from "./sealed-index.js";
+import { KeyRequiredError, loadVkCheck } from "../crypto/transport.js";
+import { vaultKeyCache } from "../crypto/key-cache.js";
 import * as Y from "yjs";
 import { pgText } from "../db/text.js";
 import type pg from "pg";
@@ -6,6 +10,7 @@ import { loadDocState } from "../yjs/persistence.js";
 import { purgeBlobRefs, replaceBlobRefs } from "../blobs/refs.js";
 import { cachedRefHeads, refText } from "../blobs/ref-windows.js";
 import { cosineSimilarity, embed, tokenize } from "./embedder.js";
+import { keywordMatchCount, searchTokenSet } from "./search-tokens.js";
 
 /**
  * Note indexing engine (spec: links + vectors).
@@ -28,8 +33,10 @@ const CONTENT_FIELD = "content";
 /** Default debounce window: collapse bursts of updates into one index write. */
 const DEBOUNCE_MS = 2000;
 
-// Per-doc pending timers (debounce). Keyed by docId.
-const pending = new Map<string, ReturnType<typeof setTimeout>>();
+// Per-doc pending timers (debounce). Keyed by docId. `crypto` is a COPY of a
+// key the scheduling request presented and the server verified (W3), held only
+// until the run fires and zeroed right after; absent = background path.
+const pending = new Map<string, { timer: ReturnType<typeof setTimeout>; crypto?: DocCrypto }>();
 // Index runs whose timer already fired, so {@link flushIndexQueue} can wait for
 // them too (a 0 ms schedule is usually mid-flight by the caller's next await).
 const inFlight = new Set<Promise<void>>();
@@ -67,8 +74,9 @@ export function parseWikilinks(text: string): string[] {
 export async function extractDocText(
   docId: string,
   db: Queryable = defaultPool,
+  crypto?: DocCrypto,
 ): Promise<string> {
-  const state = await loadDocState(docId, db);
+  const state = await loadDocState(docId, db, crypto);
   if (!state) return "";
   const doc = new Y.Doc();
   try {
@@ -107,13 +115,22 @@ export function setLiveDocLookup(fn: LiveDocLookup | null): void {
 export async function indexDoc(
   docId: string,
   db: Queryable = defaultPool,
+  /**
+   * W3: a key the CURRENT request presented and the server verified (e.g. an
+   * MCP token's own wrap), so a keyed vault's write is searchable with no
+   * member connected. Never zeroed here; the caller owns it.
+   */
+  given?: DocCrypto,
 ): Promise<boolean> {
   const { rows } = await db.query<{
     vault_id: string;
     title: string | null;
     rel_path: string;
+    started: string;
   }>(
-    "SELECT vault_id, title, rel_path FROM notes WHERE id = $1 AND deleted_at IS NULL",
+    // `started` (database clock, as TEXT to keep microseconds): a queued
+    // deferral older than this run is satisfied by it (see `clearSatisfied`).
+    "SELECT vault_id, title, rel_path, clock_timestamp()::text AS started FROM notes WHERE id = $1 AND deleted_at IS NULL",
     [docId],
   );
   const note = rows[0];
@@ -128,11 +145,86 @@ export async function indexDoc(
     return false;
   }
 
+  // W3: a keyed vault indexes only with a key a connected member supplied
+  // (process cache COPY, zeroed below). No key held: defer, writing nothing —
+  // the existing row stays as it was and the next edit or connect re-indexes.
+  if (given && given.vaultId === note.vault_id) {
+    // Re-check the generation at run time: a debounced run fires after the
+    // request, and a rotation in between must not seal under a retired key.
+    // Any miss or failure falls through to the background path below (cached
+    // key, else the queue), so a note is never dropped unindexed.
+    const state = await loadVkCheck(note.vault_id, db);
+    if (state && state.generation === given.generation) {
+      try {
+        const ok = await indexNoteRow(docId, note, given, db);
+        await clearSatisfied(docId, note.started, db);
+        return ok;
+      } catch (err) {
+        console.warn(`[indexer] keyed index of ${docId} failed, falling back:`, (err as Error).message);
+      }
+    }
+  }
+  const crypto = await indexCryptoFor(note.vault_id, db);
+  if (crypto === null) {
+    // Queue the doc so the key-arrival catch-up indexes exactly it (no vault
+    // scan). `clock_timestamp()` so a re-queue during a drain is never
+    // mistaken for the row the drain read (it deletes by queued_at).
+    await db.query(
+      `INSERT INTO index_pending (doc_id, vault_id, queued_at) VALUES ($1, $2, clock_timestamp())
+       ON CONFLICT (doc_id) DO UPDATE SET vault_id = EXCLUDED.vault_id, queued_at = EXCLUDED.queued_at`,
+      [docId, note.vault_id],
+    );
+    if (vaultKeyCache.has(note.vault_id)) {
+      // A key arrived between the lookup above and the INSERT: the arrival's
+      // drain may already have read the queue, so ask for another pass.
+      try {
+        indexDeferredHook?.(note.vault_id);
+      } catch (err) {
+        console.error("[indexer] deferral hook failed:", err);
+      }
+    }
+    return false;
+  }
+  try {
+    const ok = await indexNoteRow(docId, note, crypto, db);
+    if (crypto) await clearSatisfied(docId, note.started, db);
+    return ok;
+  } finally {
+    crypto?.key.fill(0);
+  }
+}
+
+/**
+ * A keyed index just ran: a deferral queued BEFORE it started is satisfied, so
+ * drop it rather than have the catch-up index the note a second time. A row
+ * re-queued after `started` (a newer edit deferred meanwhile) is kept.
+ */
+async function clearSatisfied(docId: string, started: string, db: Queryable): Promise<void> {
+  await db.query("DELETE FROM index_pending WHERE doc_id = $1 AND queued_at < $2::timestamptz", [docId, started]);
+}
+
+/** Told (vault id only) when a note was queued while a key is cached; see `setIndexDeferredHook`. */
+let indexDeferredHook: ((vaultId: string) => void) | null = null;
+
+/**
+ * Registered by the crypto backfill (which imports this module, so the hook
+ * runs the other way): a deferral that raced a key arrival kicks a drain.
+ */
+export function setIndexDeferredHook(fn: ((vaultId: string) => void) | null): void {
+  indexDeferredHook = fn;
+}
+
+async function indexNoteRow(
+  docId: string,
+  note: { vault_id: string; title: string | null; rel_path: string },
+  crypto: DocCrypto | undefined,
+  db: Queryable,
+): Promise<boolean> {
   // Postgres rejects NUL in `text`; a single such byte in one note used to fail
   // that note's indexing forever (see `pgText`).
   const live = liveDocLookup?.(note.vault_id, docId);
   const content = pgText(
-    live ? live.getText(CONTENT_FIELD).toString() : await extractDocText(docId, db),
+    live ? live.getText(CONTENT_FIELD).toString() : await extractDocText(docId, db, crypto),
   );
   const title = pgText(note.title ?? relPathStem(note.rel_path));
   const links = parseWikilinks(content);
@@ -142,9 +234,37 @@ export async function indexDoc(
   // The excerpts the scoped attachment list reads instead of `content` (#343).
   const heads = await cachedRefHeads(note.vault_id, db);
 
-  await db.query(
-    `INSERT INTO note_index (doc_id, vault_id, title, content, vector, updated_at, ref_text, ref_heads)
-     VALUES ($1, $2, $3, $4, $5::jsonb, now(), $6, $7::text[])
+  if (crypto) {
+    // Keyed: content, vector and tokens go ONLY into the sealed `search_enc`.
+    // The plaintext columns are not written, and never nulled here: an old row
+    // keeps its stale plaintext until the separate null-out step (W3 rule).
+    // `ref_text` is not written either: the attachment rule decides a sealed
+    // row from its decrypted body in memory (`permissions/sealed-refs.ts`),
+    // which is the same answer the excerpt gives.
+    await db.query(
+      `INSERT INTO note_index (doc_id, vault_id, title, updated_at, ref_heads, search_enc)
+       VALUES ($1, $2, $3, now(), $4::text[], $5)
+       ON CONFLICT (doc_id) DO UPDATE
+         SET vault_id = EXCLUDED.vault_id,
+             title = EXCLUDED.title,
+             updated_at = now(),
+             ref_heads = EXCLUDED.ref_heads,
+             search_enc = EXCLUDED.search_enc`,
+      [
+        docId,
+        note.vault_id,
+        title,
+        heads,
+        sealSearchRow(crypto, docId, {
+          body: content,
+          vector,
+          tokens: searchTokenSet(`${title ?? ""} ${content}`) ?? null,
+        }),
+      ],
+    );
+  } else await db.query(
+    `INSERT INTO note_index (doc_id, vault_id, title, content, vector, updated_at, ref_text, ref_heads, search_tokens)
+     VALUES ($1, $2, $3, $4, $5::jsonb, now(), $6, $7::text[], $8)
      ON CONFLICT (doc_id) DO UPDATE
        SET vault_id = EXCLUDED.vault_id,
            title = EXCLUDED.title,
@@ -152,8 +272,19 @@ export async function indexDoc(
            vector = EXCLUDED.vector,
            updated_at = now(),
            ref_text = EXCLUDED.ref_text,
-           ref_heads = EXCLUDED.ref_heads`,
-    [docId, note.vault_id, title, content, JSON.stringify(vector), refText(content, heads), heads],
+           ref_heads = EXCLUDED.ref_heads,
+           search_tokens = EXCLUDED.search_tokens`,
+    [
+      docId,
+      note.vault_id,
+      title,
+      content,
+      JSON.stringify(vector),
+      refText(content, heads),
+      heads,
+      // Same string the old SQL matched against: title, a space, the body.
+      searchTokenSet(`${title ?? ""} ${content}`),
+    ],
   );
 
   // Which attachments this note points at (migration 027). Derived from the
@@ -180,22 +311,37 @@ export async function indexDoc(
  * hook — repeated calls within the window reset the timer so only the last one
  * fires. Errors are logged, never thrown (indexing must not break sync).
  */
-export function scheduleIndex(docId: string, delayMs: number = DEBOUNCE_MS): void {
+export function scheduleIndex(docId: string, delayMs: number = DEBOUNCE_MS, given?: DocCrypto): void {
   const existing = pending.get(docId);
-  if (existing) clearTimeout(existing);
+  if (existing) clearTimeout(existing.timer);
+  // Keep the newest key: a keyless reschedule (trash restore) must not drop a
+  // key an earlier write in the same window supplied.
+  let crypto = existing?.crypto;
+  if (given) {
+    crypto?.key.fill(0);
+    crypto = { vaultId: given.vaultId, key: Buffer.from(given.key), generation: given.generation };
+  }
   const timer = setTimeout(() => {
     pending.delete(docId);
-    const run = indexDoc(docId)
-      .then(() => undefined)
-      .catch((err) => {
-        console.error(`[indexer] failed to index ${docId}:`, err);
-      })
-      .finally(() => inFlight.delete(run));
-    inFlight.add(run);
+    void runIndex(docId, crypto);
   }, delayMs);
   // Don't keep the event loop alive just for a pending index.
   if (typeof timer.unref === "function") timer.unref();
-  pending.set(docId, timer);
+  pending.set(docId, { timer, crypto });
+}
+
+function runIndex(docId: string, crypto: DocCrypto | undefined): Promise<void> {
+  const run: Promise<void> = indexDoc(docId, defaultPool, crypto)
+    .then(() => undefined)
+    .catch((err) => {
+      console.error(`[indexer] failed to index ${docId}:`, err);
+    })
+    .finally(() => {
+      crypto?.key.fill(0);
+      inFlight.delete(run);
+    });
+  inFlight.add(run);
+  return run;
 }
 
 /**
@@ -214,19 +360,12 @@ export function scheduleIndex(docId: string, delayMs: number = DEBOUNCE_MS): voi
  * flush after the writes have settled.
  */
 export async function flushIndexQueue(): Promise<void> {
-  const ids = [...pending.keys()];
-  for (const id of ids) {
-    const timer = pending.get(id);
-    if (timer) clearTimeout(timer);
+  const entries = [...pending.entries()];
+  for (const [id, { timer }] of entries) {
+    clearTimeout(timer);
     pending.delete(id);
   }
-  for (const id of ids) {
-    try {
-      await indexDoc(id);
-    } catch (err) {
-      console.error(`[indexer] failed to index ${id}:`, err);
-    }
-  }
+  for (const [id, { crypto }] of entries) await runIndex(id, crypto);
   await Promise.all([...inFlight]);
 }
 
@@ -251,7 +390,10 @@ export async function backfillIndex(db: Queryable = defaultPool): Promise<number
     `SELECT n.id FROM notes n
        LEFT JOIN note_index ni ON ni.doc_id = n.id
       WHERE n.deleted_at IS NULL
-        AND (ni.doc_id IS NULL OR ni.updated_at < n.updated_at)`,
+        AND (ni.doc_id IS NULL OR ni.updated_at < n.updated_at)
+        -- Already queued for a keyed vault's catch-up: re-deferring it here
+        -- only rewrote the same row, ~20k upserts on every boot of a 20k vault.
+        AND NOT EXISTS (SELECT 1 FROM index_pending p WHERE p.doc_id = n.id)`,
   );
   let count = 0;
   for (const { id } of rows) {
@@ -386,6 +528,18 @@ export async function searchNoteIndex(opts: {
    * whole candidate set is not something a request path can afford.
    */
   vaultWideReader?: boolean;
+  /**
+   * `"sql"` forces the pre-068 keyword count computed in Postgres from the
+   * note text (parity tests and benchmarks only). Default: score in the app
+   * from `search_tokens`, falling back to SQL only for rows not yet re-indexed.
+   */
+  keywordMode?: "app" | "sql";
+  /**
+   * W3: the REQUEST's verified vault key for a keyed vault. A sealed row is
+   * scored from its decrypted text/vector/tokens with the same formula; a
+   * sealed row without a key throws {@link KeyRequiredError} (fail closed).
+   */
+  crypto?: DocCrypto;
   db?: Queryable;
 }): Promise<NoteSearchHit[]> {
   const db = opts.db ?? defaultPool;
@@ -398,6 +552,7 @@ export async function searchNoteIndex(opts: {
 
   const qVec = embed(opts.query);
   const qTokens = Array.from(new Set(tokenize(opts.query)));
+  const legacySql = opts.keywordMode === "sql";
 
   // Phase 1: score every candidate, retaining only id + score per note.
   const scored: Array<{ docId: string; score: number }> = [];
@@ -406,14 +561,20 @@ export async function searchNoteIndex(opts: {
     const { rows } = await db.query<{
       doc_id: string;
       vector: number[] | null;
-      matched: number;
+      search_tokens: string | null;
+      matched_legacy: number | null;
+      search_enc: Buffer | null;
+      title: string | null;
     }>(
       `SELECT ni.doc_id,
+              ni.search_enc,
+              ni.title,
               ni.vector,
-              (
+              CASE WHEN $6::boolean THEN NULL ELSE ni.search_tokens END AS search_tokens,
+              CASE WHEN ni.search_tokens IS NULL OR $6::boolean THEN (
                 SELECT count(*) FROM unnest($4::text[]) AS t(tok)
                  WHERE position(t.tok IN lower(coalesce(ni.title, '') || ' ' || ni.content)) > 0
-              )::int AS matched
+              )::int END AS matched_legacy
          FROM note_index ni
          JOIN notes n ON n.id = ni.doc_id AND n.deleted_at IS NULL
         WHERE ni.vault_id = $1
@@ -421,12 +582,28 @@ export async function searchNoteIndex(opts: {
           AND ni.doc_id > $3
         ORDER BY ni.doc_id
         LIMIT $5`,
-      [opts.vaultId, docIds, after, qTokens, SEARCH_BATCH],
+      [opts.vaultId, docIds, after, qTokens, SEARCH_BATCH, legacySql],
     );
     if (rows.length === 0) break;
     for (const r of rows) {
+      if (r.search_enc) {
+        // Sealed row: same score from the decrypted fields. No token set means
+        // the pre-068 rule, substring-counted over the same "title body" text.
+        if (!opts.crypto) throw new KeyRequiredError();
+        const sealed = openSearchRow(opts.crypto, r.doc_id, r.search_enc);
+        const sim = sealed.vector ? cosineSimilarity(qVec, sealed.vector) : 0;
+        const matched =
+          sealed.tokens !== null && !legacySql
+            ? keywordMatchCount(qTokens, sealed.tokens)
+            : legacySubstringCount(qTokens, `${r.title ?? ""} ${sealed.body}`);
+        const boost = qTokens.length > 0 ? 0.1 * (matched / qTokens.length) : 0;
+        scored.push({ docId: r.doc_id, score: sim + boost });
+        continue;
+      }
       const sim = r.vector ? cosineSimilarity(qVec, r.vector) : 0;
-      const boost = qTokens.length > 0 ? 0.1 * (r.matched / qTokens.length) : 0;
+      const matched =
+        r.search_tokens !== null ? keywordMatchCount(qTokens, r.search_tokens) : (r.matched_legacy ?? 0);
+      const boost = qTokens.length > 0 ? 0.1 * (matched / qTokens.length) : 0;
       scored.push({ docId: r.doc_id, score: sim + boost });
     }
     after = rows[rows.length - 1].doc_id;
@@ -442,6 +619,8 @@ export async function searchNoteIndex(opts: {
         k: opts.k,
         readableDocIds: docIds,
         vaultWideReader: opts.vaultWideReader === true,
+        legacySql,
+        crypto: opts.crypto,
       })
     : [];
 
@@ -488,6 +667,14 @@ export async function searchNoteIndex(opts: {
     .slice(0, opts.k);
 }
 
+/** The pre-068 SQL rule in app memory: query tokens found as substrings of lower(text). */
+function legacySubstringCount(qTokens: string[], text: string): number {
+  const hay = text.toLowerCase();
+  let n = 0;
+  for (const t of qTokens) if (hay.includes(t)) n++;
+  return n;
+}
+
 /**
  * The FILE half of {@link searchNoteIndex}: rank `blob_text` the same way.
  *
@@ -517,24 +704,30 @@ async function searchBlobText(opts: {
   k: number;
   readableDocIds: string[];
   vaultWideReader: boolean;
+  legacySql: boolean;
+  crypto?: DocCrypto;
 }): Promise<NoteSearchHit[]> {
   const { rows } = await opts.db.query<{
+    search_enc: Buffer | null;
     blob_id: string;
     doc_id: string | null;
     rel_path: string | null;
     filename: string | null;
     vector: number[] | null;
-    matched: number;
+    search_tokens: string | null;
+    matched_legacy: number | null;
   }>(
     `SELECT bt.blob_id,
+            bt.search_enc,
             b.doc_id,
             b.rel_path,
             b.filename,
             bt.vector,
-            (
+            CASE WHEN $6::boolean THEN NULL ELSE bt.search_tokens END AS search_tokens,
+            CASE WHEN bt.search_tokens IS NULL OR $6::boolean OR b.rel_path ~ '[^\x01-\x7f]' THEN (
               SELECT count(*) FROM unnest($3::text[]) AS t(tok)
                WHERE position(t.tok IN lower(coalesce(b.rel_path, '') || ' ' || bt.content)) > 0
-            )::int AS matched
+            )::int END AS matched_legacy
        FROM blob_text bt
        JOIN blobs b ON b.id = bt.blob_id AND b.status = 'ready'
       WHERE bt.vault_id = $1
@@ -544,13 +737,39 @@ async function searchBlobText(opts: {
         )
       ORDER BY bt.blob_id
       LIMIT $5`,
-    [opts.vaultId, opts.readableDocIds, opts.qTokens, opts.vaultWideReader, FILE_SEARCH_CAP],
+    [opts.vaultId, opts.readableDocIds, opts.qTokens, opts.vaultWideReader, FILE_SEARCH_CAP, opts.legacySql],
   );
 
   const scored = rows.map((r) => {
-    const sim = r.vector ? cosineSimilarity(opts.qVec, r.vector) : 0;
-    const boost = opts.qTokens.length > 0 ? 0.1 * (r.matched / opts.qTokens.length) : 0;
     const relPath = r.rel_path ?? "";
+    let vector = r.vector;
+    let matchedSealed: number | null = null;
+    if (r.search_enc) {
+      // W3 sealed row: the same formula over the decrypted fields. The SQL
+      // count (no stored set, a non-ASCII rel_path, or legacy mode) becomes the
+      // identical substring count over lower(rel_path || ' ' || body).
+      if (!opts.crypto) throw new KeyRequiredError();
+      const sealed = openBlobTextRow(opts.crypto, r.blob_id, r.search_enc);
+      vector = sealed.vector;
+      matchedSealed =
+        sealed.tokens === null || opts.legacySql || /[^\x01-\x7f]/.test(relPath)
+          ? legacySubstringCount(opts.qTokens, `${relPath} ${sealed.body}`)
+          : keywordMatchCount(opts.qTokens, `${searchTokenSet(relPath) ?? ""} ${sealed.tokens}`);
+    }
+    const sim = vector ? cosineSimilarity(opts.qVec, vector) : 0;
+    // rel_path is file metadata, not content: its tokens are matched live, the
+    // extracted text through the stored set. Union of the two = the old
+    // `position(tok IN lower(rel_path || ' ' || content))` (the space is outside
+    // the token alphabet, so no match can straddle it).
+    // Any row the SQL counted (no stored set, or a non-ASCII rel_path) keeps
+    // that count; otherwise both halves here are pure ASCII.
+    const matched =
+      matchedSealed !== null
+        ? matchedSealed
+        : r.matched_legacy !== null || r.search_tokens === null
+        ? (r.matched_legacy ?? 0)
+        : keywordMatchCount(opts.qTokens, `${searchTokenSet(relPath) ?? ""} ${r.search_tokens}`);
+    const boost = opts.qTokens.length > 0 ? 0.1 * (matched / opts.qTokens.length) : 0;
     return {
       docId: r.doc_id,
       blobId: r.blob_id,
