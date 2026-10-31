@@ -1,15 +1,15 @@
 /**
  * Pending vault invitations as rows: the vault, who invited you and the role,
- * then Accept and Decline. Shared by the account menu and Account Settings →
- * Vaults so the copy, buttons, pulse and error handling cannot drift. The menu
- * variant is a plain menu row (icon, name, "from X", two text buttons) so it
- * sits flush with Account settings below it instead of a card in a box.
+ * then Accept and Decline. Shared by the account menu's Invitations panel and
+ * Account Settings → Vaults so the copy, buttons, pulse and error handling
+ * cannot drift. The flyout variant is one compact row per invitation (letter
+ * tile, vault, "Inviter · Role", Decline and Accept) for the panel that opens
+ * beside the menu's Invitations row.
  */
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
 import { AsyncButton } from "./AsyncButton";
-import { MenuIcon } from "./MenuIcon";
 import { toast } from "../lib/toast";
 import { acceptInviteFailureMessage } from "../lib/inviteFlow";
 import {
@@ -18,7 +18,15 @@ import {
   unseenInvitations,
 } from "../lib/inviteSeen";
 
-type Invitation = ReturnType<typeof useStore.getState>["userInvitations"][number];
+export type Invitation = ReturnType<typeof useStore.getState>["userInvitations"][number];
+
+/** "Naveed · Admin": who asked and, when it is not plain member, the role. */
+export function invitationHint(inv: Invitation): string {
+  const role = inv.role && inv.role !== "member" ? inv.role : null;
+  return [inv.inviterName ?? "", role ? role.charAt(0).toUpperCase() + role.slice(1) : ""]
+    .filter(Boolean)
+    .join(" · ");
+}
 
 /**
  * What was new when the surface mounted keeps its glow for this showing; the
@@ -40,7 +48,7 @@ export function useFreshInvitations(
 // Accepting is: accept → re-read session → roster → switch into the vault →
 // bind a folder → reconcile. Easily seconds, hence AsyncButton. It swallows a
 // rejection, so a refused accept (a full vault, wrong account) is toasted here.
-async function acceptInvite(inv: Invitation): Promise<void> {
+export async function acceptInvite(inv: Invitation): Promise<void> {
   try {
     await useStore.getState().acceptInvitation(inv.id);
   } catch (e) {
@@ -56,7 +64,7 @@ async function acceptInvite(inv: Invitation): Promise<void> {
 
 // Declining is a real answer, and without it the only way to clear the row is
 // to join a vault you were never joining.
-async function declineInvite(inv: Invitation): Promise<void> {
+export async function declineInvite(inv: Invitation): Promise<void> {
   try {
     await authManager.api.rejectInvitation(inv.id);
   } finally {
@@ -71,49 +79,44 @@ export function InvitationRows({
 }: {
   invitations: ReadonlyArray<Invitation>;
   freshIds: ReadonlySet<string>;
-  /** "menu": flat account-menu rows. "list": Account Settings → Vaults. */
-  variant?: "menu" | "list";
+  /** "flyout": the account menu's Invitations panel. "list": Account Settings → Vaults. */
+  variant?: "flyout" | "list";
 }) {
-  if (variant === "menu") {
+  if (variant === "flyout") {
     return (
       <>
         {invitations.map((inv) => {
-          const role = inv.role && inv.role !== "member" ? inv.role : null;
-          const from = inv.inviterName ? `from ${inv.inviterName}` : "";
-          const hint = [from, role ? role.charAt(0).toUpperCase() + role.slice(1) : ""]
-            .filter(Boolean)
-            .join(" · ");
+          const hint = invitationHint(inv);
           const name = inv.organizationName ?? "A vault";
           return (
             <div
               key={inv.id}
-              className={`menu-item invite-menu-row${freshIds.has(inv.id) ? " is-new" : ""}`}
+              className={`invites-flyout-row${freshIds.has(inv.id) ? " is-new" : ""}`}
               title={hint ? `Invitation to ${name}, ${hint}` : `Invitation to ${name}`}
             >
-              <span className="invite-menu-icon">
-                <MenuIcon>
-                  <rect x="3" y="5" width="18" height="14" rx="2" />
-                  <path d="m3 7 9 6 9-6" />
-                </MenuIcon>
+              <span className="invites-flyout-tile" aria-hidden="true">
+                {name.trim().charAt(0).toUpperCase() || "V"}
               </span>
-              <span className="menu-item-label">{name}</span>
-              {hint && <span className="menu-hint">{hint}</span>}
-              <span className="invite-menu-actions">
+              <span className="invites-flyout-meta">
+                <span className="invites-flyout-name">{name}</span>
+                {hint && <span className="invites-flyout-hint">{hint}</span>}
+              </span>
+              <span className="invites-flyout-actions">
                 <AsyncButton
-                  className="link-btn invite-menu-btn"
-                  spinnerTone="accent"
-                  replaceLabel
-                  onClick={() => acceptInvite(inv)}
-                >
-                  Accept
-                </AsyncButton>
-                <AsyncButton
-                  className="link-btn invite-menu-btn decline"
+                  className="invite-btn decline"
                   spinnerTone="neutral"
                   replaceLabel
                   onClick={() => declineInvite(inv)}
                 >
                   Decline
+                </AsyncButton>
+                <AsyncButton
+                  className="invite-btn accept"
+                  spinnerTone="on-accent"
+                  replaceLabel
+                  onClick={() => acceptInvite(inv)}
+                >
+                  Accept
                 </AsyncButton>
               </span>
             </div>

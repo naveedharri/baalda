@@ -3837,14 +3837,41 @@ button.secondary.about-update-btn:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Pending-invitation ping */
-.identity-alert {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+/* Pending invitations, seen with the menu closed: a count on the avatar and
+   line 2 reading "N invitations" until every one is answered. Ink, not the
+   accent, so it reads as a notice rather than a brand mark. */
+.identity-invite-badge {
+  position: absolute;
+  top: -5px;
+  right: -7px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: var(--text-primary);
+  color: var(--bg-app);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--bg-app);
+  pointer-events: none;
+}
+.identity-bar:hover .identity-invite-badge {
+  box-shadow: 0 0 0 2px var(--bg-hover);
+}
+.identity-line2.identity-invites {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.identity-invites svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
 }
 .identity-chevron {
   color: var(--text-tertiary);
@@ -5276,50 +5303,218 @@ button.secondary.about-update-btn:disabled {
   color: var(--accent);
   background: var(--accent-soft);
 }
-/* Account menu: one plain menu row per invitation (envelope, vault, "from X"),
-   with Accept and Decline as compact text buttons at the right. An unseen one
-   gets an accent envelope and a small dot, nothing louder. */
-.invite-menu-row {
-  cursor: default;
-}
-.invite-menu-row .menu-hint {
-  max-width: 35%;
-}
-.invite-menu-icon {
+/* Account menu: ONE "Invitations" row (count + chevron) whose panel opens
+   beside it, like a submenu. The panel's top lines up with the row; the row
+   keeps a soft fill while its panel is out. Neutral ink throughout. */
+.invites-tab {
   position: relative;
-  display: inline-flex;
-  flex-shrink: 0;
 }
-.invite-menu-row.is-new .menu-icon {
-  color: var(--accent);
+.invites-tab.is-open > .invites-tab-row {
+  background: var(--bg-hover);
 }
-.invite-menu-row.is-new .invite-menu-icon::after {
-  content: "";
-  position: absolute;
-  top: -2px;
-  right: -3px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 1.5px var(--bg-surface);
-}
-.invite-menu-actions {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
+.invites-count {
   margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  background: var(--text-primary);
+  color: var(--bg-surface);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  flex: none;
 }
-.invite-menu-btn {
-  padding: 1px 6px;
-  font-size: var(--fs-xs);
-  line-height: var(--lh-body);
-}
-.invite-menu-btn.decline {
+.invites-chevron {
+  width: 14px;
+  height: 14px;
+  flex: none;
   color: var(--text-tertiary);
 }
-.invite-menu-btn.decline:hover {
+.invites-flyout {
+  position: absolute;
+  top: -6px;
+  /* Past the popover's own padding, then a small gap. */
+  left: calc(100% + 14px);
+  width: 360px;
+  padding: 6px;
+  box-sizing: border-box;
+  border-radius: 16px;
+  background: var(--bg-surface);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 2px 4px rgba(11, 10, 16, 0.05),
+    0 24px 48px -16px rgba(11, 10, 16, 0.22);
+  z-index: 2;
+  cursor: default;
+}
+.invites-flyout-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 10px;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.invites-flyout-head b {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.invites-flyout-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+}
+.invites-flyout-row.is-new {
+  background: var(--bg-subtle);
+  border-radius: var(--radius-sm);
+}
+.invites-flyout-tile {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: var(--bg-subtle);
   color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.invites-flyout-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.invites-flyout-name {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.invites-flyout-hint {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.invites-flyout-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+/* Accept is solid ink (inverted in dark), Decline plain text. */
+.invite-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  font-size: var(--fs-xs);
+  line-height: 26px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.invite-btn.accept {
+  background: var(--text-primary);
+  color: var(--bg-surface);
+  font-weight: 500;
+}
+.invite-btn.accept:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.invite-btn.decline {
+  background: transparent;
+  color: var(--text-secondary);
+}
+.invite-btn.decline:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+/* The one-time card above the identity bar when an invitation arrives. */
+.invite-arrival {
+  margin: 0 var(--sp-2) var(--sp-2);
+  padding: 12px;
+  border-radius: 14px;
+  background: var(--bg-surface);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 12px 28px -12px rgba(11, 10, 16, 0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: invite-arrival-in var(--t-med, 200ms) var(--ease, ease-out);
+}
+.invite-arrival-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.invite-arrival-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+.invite-arrival-text b {
+  font-weight: 600;
+}
+.invite-arrival-text small {
+  display: block;
+  margin-top: 1px;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.invite-arrival-close {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.invite-arrival-close svg {
+  width: 12px;
+  height: 12px;
+}
+.invite-arrival-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.invite-arrival-actions {
+  display: flex;
+  gap: 6px;
+  padding-left: 38px;
+}
+.invite-arrival-actions .invite-btn {
+  height: 28px;
+  line-height: 28px;
+  padding: 0 12px;
+}
+.invite-arrival-actions .invite-btn.decline {
+  box-shadow: inset 0 0 0 1px var(--border-strong, var(--border));
+}
+@keyframes invite-arrival-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
 }
 /* One row per invitation: name + who asked on the left, Accept and Decline
    right-aligned. Both buttons carry fixed labels, so they line up across rows. */
@@ -5397,23 +5592,9 @@ button.secondary.about-update-btn:disabled {
 .invite-row + .invite-row.is-new {
   border-top-color: transparent;
 }
-@keyframes identity-alert-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 3px var(--accent-soft);
-  }
-  50% {
-    box-shadow:
-      0 0 0 3px var(--accent-soft),
-      0 0 8px 3px color-mix(in srgb, var(--accent) 55%, transparent);
-  }
-}
-.identity-alert.is-new {
-  animation: identity-alert-pulse 2s ease-in-out infinite;
-}
 @media (prefers-reduced-motion: reduce) {
   .invite-row.is-new,
-  .identity-alert.is-new {
+  .invite-arrival {
     animation: none;
   }
 }
