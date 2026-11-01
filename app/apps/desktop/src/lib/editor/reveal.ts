@@ -22,7 +22,7 @@
 // it, so you can walk the caret out of `**bold**` and watch the markers fold
 // away one position past the closing `*`, exactly like Obsidian.
 
-import { type EditorState, StateEffect, StateField } from "@codemirror/state";
+import { type EditorState, type SelectionRange, StateEffect, StateField } from "@codemirror/state";
 import { EditorView, type ViewUpdate } from "@codemirror/view";
 import type { SyntaxNode } from "@lezer/common";
 
@@ -80,7 +80,7 @@ export function focusMoved(u: ViewUpdate): boolean {
  */
 export function selectionTouches(state: EditorState): (from: number, to: number) => boolean {
   if (!isFocused(state)) return () => false;
-  const ranges = state.selection.ranges;
+  const ranges = editingRanges(state);
   return (from, to) => ranges.some((r) => r.from <= to && from <= r.to);
 }
 
@@ -92,7 +92,7 @@ export function selectionTouches(state: EditorState): (from: number, to: number)
 export function lineSpanChecker(state: EditorState): (from: number, to: number) => boolean {
   const doc = state.doc;
   const activeLines = new Set<number>();
-  for (const r of state.selection.ranges) {
+  for (const r of editingRanges(state)) {
     const first = doc.lineAt(r.from).number;
     const last = doc.lineAt(r.to).number;
     for (let n = first; n <= last; n++) activeLines.add(n);
@@ -103,6 +103,19 @@ export function lineSpanChecker(state: EditorState): (from: number, to: number) 
     for (let n = first; n <= last; n++) if (activeLines.has(n)) return true;
     return false;
   };
+}
+
+/**
+ * The ranges that count as "being edited": the caret and selections inside one
+ * line. A selection across lines (⌘A, a dragged paragraph run) is being moved
+ * or copied, not typed into, so it leaves the page rendered; revealing every
+ * `##`, `**` and backtick under it made the note jump into source.
+ */
+function editingRanges(state: EditorState): readonly SelectionRange[] {
+  const doc = state.doc;
+  return state.selection.ranges.filter(
+    (r) => r.empty || doc.lineAt(r.from).number === doc.lineAt(r.to).number,
+  );
 }
 
 /**
