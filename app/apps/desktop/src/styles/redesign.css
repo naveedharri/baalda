@@ -2779,3 +2779,14 @@ html:not(.rd-off) .home-sidebar-row.is-unset {
   margin-left: 0 !important;
   width: calc(var(--sidebar-layout-w, 300px) - 62px) !important;
 }
+
+/* Vault page: "Switch here" is the page's main action, so it reads as a
+   button (ink pill, like the list's "Open now"), not a grey tag. */
+html:not(.rd-off) .vaults-split-detail .vault-switch-chip,
+html:not(.rd-off) .account-vault-page .vault-switch-chip {
+  height: 30px; padding: 0 14px; border-radius: 99px;
+  background: var(--text-primary); color: var(--bg-surface);
+  font: 600 13px var(--font-body); cursor: pointer;
+}
+html:not(.rd-off) .vaults-split-detail .vault-switch-chip:hover:not(:disabled),
+html:not(.rd-off) .account-vault-page .vault-switch-chip:hover:not(:disabled) { opacity: 0.88; }
