@@ -195,7 +195,7 @@ const RD_LABEL: Partial<Record<string, string>> = {
   members: "People and access",
   versioning: "Version history",
   "import-export": "Import and export",
-  mcp: "Connect AI apps",
+  mcp: "MCP",
 };
 const rdLabel = (t: { id: string; label: string }) => RD_LABEL[t.id] ?? t.label;
 

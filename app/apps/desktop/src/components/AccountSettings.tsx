@@ -36,9 +36,6 @@ import { AiToolsTab } from "./skills/AiToolsTab";
 import { Avatar } from "./Avatar";
 import { serverFailureMessage } from "./serverFailureMessage";
 import { SecurityCodeField } from "./SecurityCodeField";
-import { VaultKeySection } from "./VaultKeySection";
-import { onVaultKeyEvent, vaultKeyStateFor } from "../lib/vaultKeys/runtime";
-import { syncManager } from "../lib/sync/docSession";
 import { SettingsModal } from "./SettingsModal";
 import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
@@ -104,16 +101,6 @@ const ACCOUNT_TABS: Array<{ id: AccountTab; label: string; icon: React.ReactNode
         <rect x="14" y="3" width="7" height="7" rx="1.5" />
         <rect x="3" y="14" width="7" height="7" rx="1.5" />
         <rect x="14" y="14" width="7" height="7" rx="1.5" />
-      </Icon>
-    ),
-  },
-  {
-    id: "encryption",
-    label: "Encryption",
-    icon: (
-      <Icon>
-        <rect x="4" y="11" width="16" height="10" rx="2" />
-        <path d="M8 11V7a4 4 0 0 1 8 0v4" />
       </Icon>
     ),
   },
@@ -228,8 +215,6 @@ export function AccountSettings({
             <AccountPlanTab />
           ) : tab === "vaults" ? (
             <AccountVaultsTab />
-          ) : tab === "encryption" ? (
-            <EncryptionTab />
           ) : tab === "appearance" ? (
             <AppearanceTab />
           ) : tab === "notifications" ? (
@@ -429,6 +414,7 @@ function ProfileTab() {
             )}
           </div>
         </div>
+        <SecurityCodeField />
       </div>
 
       {error && <div className="auth-error">{error}</div>}
@@ -1036,133 +1022,3 @@ function Icon({ children }: { children: React.ReactNode }) {
 
 export { AccountSettings as default };
 
-/** What is encrypted and what is not. Plain words, and never "end to end":
- *  the server process sees plaintext while it works (docs/VAULT_KEYS.md). */
-const ENCRYPTED = ["Note text", "Version history", "Search index", "Public link tokens"];
-const NOT_ENCRYPTED = ["Note titles and folder names", "Attachments and files", "Who is in the vault and their access"];
-
-/** The hero card's words for one vault-key state. */
-function encryptionStatus(
-  state: string | null | undefined,
-  synced: boolean,
-): { tone: "on" | "wait" | "off" | "warn"; title: string; detail: string } {
-  if (!synced) {
-    return { tone: "off", title: "Nothing to show yet", detail: "Open a synced vault to see whether it is encrypted." };
-  }
-  switch (state) {
-    case "ready":
-      return {
-        tone: "on",
-        title: "Encrypted",
-        detail: "Note text, history and search are stored encrypted. This computer holds the key.",
-      };
-    case "waiting-for-teammate":
-      return {
-        tone: "wait",
-        title: "Waiting for the key",
-        detail: "A teammate's device shares it automatically, usually within 2 minutes of them being online.",
-      };
-    case "unkeyed":
-      return {
-        tone: "off",
-        title: "Not encrypted yet",
-        detail: "Every vault is encrypted automatically. This one switches over on its own as soon as its key can't be lost.",
-      };
-    case "needs-account-key":
-    case "security-warning":
-    case "key-mismatch":
-      return {
-        tone: "warn",
-        title: "Needs attention",
-        detail: "This computer cannot use the vault key right now. See the details below.",
-      };
-    default:
-      return {
-        tone: "off",
-        title: "Not available on this server",
-        detail: "This server does not have vault encryption turned on yet.",
-      };
-  }
-}
-
-/**
- * Account Settings → Encryption: everything about vault keys on one page./**
- * Account Settings → Encryption: everything about vault keys on one page.
- * The open vault's status and key actions (the same card Vault Settings →
- * General leads with), this account's security code, and what the key covers.
- */
-function EncryptionTab() {
-  const session = useStore((s) => s.session);
-  const organizations = useStore((s) => s.organizations);
-  const members = useStore((s) => s.members);
-  const syncEnabled = useStore((s) => s.syncEnabled);
-  const activeOrg = organizations.find((o) => o.id === session?.activeOrganizationId) ?? null;
-  const me = members.find((m) => m.userId === session?.user.id);
-  const canManage = me?.role === "owner" || me?.role === "admin";
-  const isOwner = me?.role === "owner";
-
-  const [, bump] = useState(0);
-  useEffect(() => onVaultKeyEvent(() => bump((n) => n + 1)), []);
-  const synced = !!(activeOrg && syncEnabled);
-  const status = encryptionStatus(synced ? vaultKeyStateFor(syncManager.registry.vaultId)?.state : null, synced);
-
-  return (
-    <div className="encryption-page">
-      <section className={`encryption-hero is-${status.tone}`}>
-        <span className="encryption-hero-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 3 4.5 6v5.5c0 4.6 3.1 8.4 7.5 9.5 4.4-1.1 7.5-4.9 7.5-9.5V6L12 3Z" />
-            {status.tone === "on" ? <path d="m8.8 12.2 2.2 2.2 4.3-4.6" /> : <path d="M12 8.5v4M12 15.5h.01" />}
-          </svg>
-        </span>
-        <div className="encryption-hero-text">
-          <span className="encryption-hero-vault">{synced ? activeOrg!.name : "No synced vault open"}</span>
-          <h3>{status.title}</h3>
-          <p>{status.detail}</p>
-        </div>
-      </section>
-
-      <p className="encryption-lede">
-        Notes are encrypted in our database with a key only your team&apos;s devices hold.
-        Backups and admin tools see only scrambled text.
-      </p>
-
-      {synced && <VaultKeySection vaultName={activeOrg!.name} isOwner={isOwner} canManage={canManage} />}
-
-      {/* Hidden by CSS until this computer has an account key to show. */}
-      <div className="encryption-code">
-        <div className="subhead">Your security code</div>
-        <div className="profile-rows">
-          <SecurityCodeField />
-        </div>
-        <p className="muted encryption-note">
-          Teammates compare this code with yours when they share a vault key with you.
-        </p>
-      </div>
-
-      <div className="subhead">What the key covers</div>
-      <div className="encryption-cover">
-        <div className="encryption-cover-col">
-          <span className="encryption-cover-title is-on">Encrypted</span>
-          <ul>
-            {ENCRYPTED.map((x) => (
-              <li key={x}>{x}</li>
-            ))}
-          </ul>
-        </div>
-        <div className="encryption-cover-col">
-          <span className="encryption-cover-title">Not encrypted</span>
-          <ul>
-            {NOT_ENCRYPTED.map((x) => (
-              <li key={x}>{x}</li>
-            ))}
-          </ul>
-        </div>
-      </div>
-      <p className="muted encryption-note">
-        The server reads notes in memory while it works, to index search and keep versions, so
-        this is encryption at rest, not end to end.
-      </p>
-    </div>
-  );
-}
