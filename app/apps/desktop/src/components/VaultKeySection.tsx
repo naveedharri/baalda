@@ -215,40 +215,38 @@ function KeyIcon() {
 }
 
 /**
- * The encrypted vault's status card: what is encrypted, what is not, and the
- * conversion line while older content is still being checked. `children` is
- * the owner's key row (and its reveal or restore panel), at the card's foot.
+ * The encrypted vault's status card under its own "Security" heading (the last
+ * section of General), with the conversion line while older content is still
+ * being checked. `children` is the owner's key row (and its reveal or restore
+ * panel), at the card's foot.
  * Copy rule: never "end-to-end" or "zero-knowledge" (docs/VAULT_KEYS.md).
  */
 function EncryptionCard({ converting, children }: { converting: string | null; children?: ReactNode }) {
   return (
-    <section className="encryption-card" aria-label="Encryption">
-      <div className="encryption-card-main">
-        <span className="encryption-badge" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="4" y="10.5" width="16" height="10.5" rx="2.5" />
-            <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
-            <circle cx="12" cy="15.5" r="1.3" fill="currentColor" stroke="none" />
-          </svg>
-        </span>
-        <div className="encryption-card-body">
-          <div className="encryption-card-title">
-            Encrypted <span className="encryption-pill">Key held by your team</span>
+    <>
+      <div className="menu-sep" />
+      <div className="subhead">Security</div>
+      <section className="encryption-card" aria-label="Encryption">
+        <div className="encryption-card-main">
+          <span className="encryption-badge" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="4" y="10.5" width="16" height="10.5" rx="2.5" />
+              <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
+              <circle cx="12" cy="15.5" r="1.3" fill="currentColor" stroke="none" />
+            </svg>
+          </span>
+          <div className="encryption-card-body">
+            <div className="encryption-card-title">
+              Encrypted <span className="encryption-pill">Key held by your team</span>
+            </div>
+            <p className="encryption-card-desc">
+              This vault is encrypted with a key that only your team&apos;s devices hold.
+            </p>
+            {converting && <p className="encryption-card-converting">{converting}</p>}
           </div>
-          <p className="encryption-card-desc">
-            This vault is encrypted with a key that only your team&apos;s devices hold. Baalda&apos;s database and
-            backups store scrambled data.
-          </p>
-          {converting && <p className="encryption-card-converting">{converting}</p>}
-          <ul className="encryption-covered">
-            <li>Notes</li>
-            <li>Search</li>
-            <li>Version history</li>
-            <li className="not">Titles, folder names and attachment files stay readable</li>
-          </ul>
         </div>
-      </div>
-      {children && <div className="encryption-card-foot">{children}</div>}
-    </section>
+        {children && <div className="encryption-card-foot">{children}</div>}
+      </section>
+    </>
   );
 }

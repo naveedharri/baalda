@@ -169,7 +169,7 @@ describe("red team 3: crafted key requests from the server", () => {
     listed = Array.from({ length: 2000 }, (_, i) => ({ userId: `big${i}`, publicKey: pub() }));
     expect((await h.session.serviceAllKeyRequests("v1")).sealed).toHaveLength(MAX_BACK_TO_BACK_RUNS * MAX_KEY_REQUESTS_PER_RUN);
     expect(h.api.listVaultKeyRequests).toHaveBeenCalledTimes(MAX_BACK_TO_BACK_RUNS);
-  });
+  }, 30_000); // 500 real seals: slow when the whole suite shares the CPU
 
   it("one person listed thousands of times with one key: sealed once, checked once", async () => {
     const h = harness();

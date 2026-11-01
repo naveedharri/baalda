@@ -468,10 +468,6 @@ function GeneralTab({
 
   return (
     <>
-      {/* Encryption leads the page: it is the setting with the most weight. */}
-      {isSynced && canManage && (
-        <VaultKeySection vaultName={activeOrgName ?? "Vault"} isOwner={isOwner} canManage={canManage} />
-      )}
       {iconIdentity && (
         <>
           {/* One icon per vault. A synced vault's belongs to the org: members see
@@ -552,6 +548,12 @@ function GeneralTab({
       </div>
 
       {isSynced && isOwner && <UnsyncDangerZone />}
+
+      {/* Security sits last; the card brings its own heading, so nothing shows
+          for a vault that is not encrypted. */}
+      {isSynced && canManage && (
+        <VaultKeySection vaultName={activeOrgName ?? "Vault"} isOwner={isOwner} canManage={canManage} />
+      )}
 
       {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
     </>
