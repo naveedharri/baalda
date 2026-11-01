@@ -71,6 +71,15 @@ export function redactToken(token: unknown): string {
 }
 
 /**
+ * Text with every `#k=` / `&k=` / `?k=` value (an invite secret in an email
+ * link or deep link, seamless keys B5) replaced by `<redacted>`. For any log
+ * line that may carry such a URL.
+ */
+export function redactKeyFragments(text: unknown): string {
+  return String(text ?? "").replace(/([#&?]k=)[^&#\s"'<>]*/g, "$1<redacted>");
+}
+
+/**
  * The vault's key state: null when the vault is not keyed (today's path).
  *
  * A NULL `vk_check` beside key material the vault can only have once keyed

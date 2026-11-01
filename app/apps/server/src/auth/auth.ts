@@ -21,6 +21,8 @@ import { isValidProfileImage } from "./profile-image.js";
 import { hasExpiryNotice } from "../invitations/expiries.js";
 import { invitationActivityChanged } from "../invitations/sweep.js";
 import { applyInvitationAccess } from "../members/invitation-access.js";
+import { applyInvitationKeys } from "../members/invitation-keys.js";
+import { vaultKeysEnabled } from "../crypto/config.js";
 import { announceInvitation, announceInvitationGone } from "../sync/user-events.js";
 
 /**
@@ -415,6 +417,15 @@ export const auth = betterAuth({
             organizationId: data.organization.id,
             userId: data.user.id,
           });
+          // Seamless keys (B3): a seal made at invite time to this person's
+          // current account key becomes their wrap. Best-effort, logged.
+          if (vaultKeysEnabled()) {
+            await applyInvitationKeys({
+              invitationIds: [data.invitation.id],
+              organizationId: data.organization.id,
+              userId: data.user.id,
+            });
+          }
           const name = data.user.name?.trim() || data.user.email;
           await announceMemberJoined(data.organization.id, name);
           await announceInvitationGone(data.invitation.id, { userId: data.user.id });
