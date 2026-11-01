@@ -29,6 +29,7 @@ import { verifyVk } from "../../crypto/vk-check.js";
 import { encryptionProgress } from "../../crypto/null-out.js";
 import {
   ENCRYPTION_NOT_REQUESTED,
+  conversionFlagOn,
   KEY_MATERIAL_EXISTS,
   initGate,
   lockGateRows,
@@ -99,8 +100,7 @@ export const MAX_PENDING_DEVICES = 5;
  * version is required). Default off.
  */
 export function conversionAllowed(versionHeader: string | null | undefined): boolean {
-  const flag = (process.env.VAULT_KEY_CONVERSION ?? "").trim().toLowerCase();
-  if (!["1", "true", "on", "yes"].includes(flag)) return false;
+  if (!conversionFlagOn()) return false;
   const policy = clientVersionPolicy();
   return judgeClientVersion(versionHeader, { ...policy, allowUnversioned: false, graceUntil: 0 }).ok;
 }
@@ -148,9 +148,10 @@ export function createVaultKeyRoutes(): Hono {
         await client.query("ROLLBACK");
         return c.json({ error: "This vault already has a key", code: "already_keyed" }, 409);
       }
-      // Opt-in (migration 081): never key a vault nobody asked to encrypt,
-      // whatever the client. Read under the vault row lock.
-      if (!rows[0].encryption_requested_at) {
+      // Never key a vault nobody asked to encrypt, whatever the client. While
+      // conversion is on every vault counts as asked (`encryptionRequested`).
+      // Read under the vault row lock.
+      if (!rows[0].encryption_requested_at && !conversionFlagOn()) {
         await client.query("ROLLBACK");
         return c.json(ENCRYPTION_NOT_REQUESTED, 409);
       }
@@ -218,12 +219,23 @@ export function createVaultKeyRoutes(): Hono {
       [vaultId],
     );
     if (!v[0]?.vk_check) {
-      // Opt-in: an existing vault is keyed only after an owner/admin asked
-      // for it (or it was created with vault keys on). Until then a desktop
-      // must not key it, whatever the rollout gate says.
-      const encryptionRequested = v[0]?.encryption_requested_at != null;
+      // Every vault counts as asked while conversion is on; otherwise only one
+      // an owner/admin asked for (or created with vault keys on).
+      const encryptionRequested = v[0]?.encryption_requested_at != null || conversionFlagOn();
       const gate = conversionAllowed(c.req.header(CLIENT_VERSION_HEADER) ?? c.req.query(CLIENT_VERSION_PARAM));
-      return c.json({ keyed: false, conversionAllowed: gate && encryptionRequested, encryptionRequested });
+      // Teammates who would receive the key at conversion: the desktop converts
+      // only when a lost laptop would still be recoverable (a count, never ids).
+      const { rows: others } = await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM member m JOIN user_keys k ON k.user_id = m."userId"
+          WHERE m."organizationId" = (SELECT organization_id FROM vaults WHERE id = $1) AND m."userId" <> $2`,
+        [vaultId, session.userId],
+      );
+      return c.json({
+        keyed: false,
+        conversionAllowed: gate && encryptionRequested,
+        encryptionRequested,
+        otherMembersWithKeys: others[0]?.n ?? 0,
+      });
     }
     // Wraps sealed before the caller last replaced their account key cannot be
     // opened by them any more; they are kept (never deleted) but do not count.
