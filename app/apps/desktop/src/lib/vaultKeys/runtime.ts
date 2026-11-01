@@ -246,6 +246,18 @@ export function onVaultKeyBlockChange(cb: (vaultId: string, blocked: boolean) =>
   return () => blockListeners.delete(cb);
 }
 
+/**
+ * What the open vault's waiting notice shows, read fresh for `vaultId` (the
+ * vault open NOW) rather than remembered from events: after a switch the
+ * previous vault's block or state must never show on the next one.
+ */
+export function openVaultKeyView(vaultId: string | null | undefined): {
+  blocked: boolean;
+  state: VaultKeyState["state"] | null;
+} {
+  return { blocked: isVaultKeyBlocked(vaultId), state: vaultKeyStateFor(vaultId)?.state ?? null };
+}
+
 /** The last known key state per vault, for Vault Settings (absent = unknown). */
 const lastStates = new Map<string, VaultKeyState>();
 export function vaultKeyStateFor(vaultId: string | null | undefined): VaultKeyState | null {
@@ -493,8 +505,12 @@ export function vaultKeysOpened(opts: { userId: string; vaultId: string; orgId: 
 }
 
 export function vaultKeysClosed(): void {
+  // Leaving a vault ends its block: say so, or a "waiting for the key" banner
+  // (and the paused enable's listener) for the vault we left outlive the switch.
+  const wasBlocked = [...blockedVaults];
   blockedVaults.clear();
   lastStates.clear();
+  for (const id of wasBlocked) for (const cb of blockListeners) cb(id, false);
   if (!current) return;
   if (current.timer) clearInterval(current.timer);
   current.timer = null;
