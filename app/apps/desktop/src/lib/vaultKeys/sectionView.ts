@@ -1,9 +1,7 @@
 // What Vault Settings → General shows for vault keys (pure, for tests).
 //
-// - `encrypt-offer`: an EXISTING vault nobody opted in yet; owners/admins get
-//   "Encrypt this vault" (one-way). New vaults are requested at creation.
-// - `setting-up`: requested (or an older server converting on its own), not
-//   keyed yet: "Encryption is being set up for this vault."
+// - Unkeyed vaults show nothing: every vault is encrypted automatically (owner
+//   decision 2026-11-01, no opt-in), so there is nothing to offer or explain.
 // - `reveal`: owner, key verified on this computer: "Show vault key".
 // - `restore`: owner, vault keyed but this computer has no key.
 // - `hidden`: everything else, including every plain member and any unknown state.
@@ -29,7 +27,7 @@ export function conversionLine(opts: {
   return opts.fullyEncrypted === false ? CONVERTING_LINE : null;
 }
 
-export type VaultKeySectionView = "hidden" | "encrypt-offer" | "setting-up" | "reveal" | "restore";
+export type VaultKeySectionView = "hidden" | "reveal" | "restore";
 
 export function vaultKeySectionView(opts: {
   hasWords: boolean;
@@ -41,13 +39,7 @@ export function vaultKeySectionView(opts: {
   const canManage = opts.canManage || isOwner;
   if (!canManage) return "hidden";
   if (hasWords) return isOwner ? "reveal" : "hidden";
-  if (state?.state === "unkeyed") {
-    // `conversionAllowed` alone means the server already decided to key it (an
-    // older server converts every vault): never offer a button there.
-    if (state.encryptionRequested || state.conversionAllowed) return "setting-up";
-    // Undefined: the server predates opt-in and has no request route.
-    return state.encryptionRequested === false ? "encrypt-offer" : "hidden";
-  }
+  if (state?.state === "unkeyed") return "hidden";
   // Keyed, but this computer cannot open it (`blocksStructure` in runtime.ts
   // minus the security warning, which has its own notice). Not imported from
   // there: runtime.ts pulls in the API client.

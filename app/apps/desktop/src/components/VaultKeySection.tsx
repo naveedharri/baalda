@@ -6,9 +6,8 @@
 // When the vault is keyed but this device has no verified key for it, the same
 // place offers the owner "Restore with vault key" (a wrong key is refused,
 // never stored).
-// An EXISTING vault is encrypted only when an owner/admin clicks "Encrypt this
-// vault" (one-way, confirmed); new vaults are requested at creation. Once
-// requested but not keyed yet it shows one line. What to show is decided by
+// Every vault is encrypted automatically (no opt-in, no review): an unkeyed
+// vault shows nothing here. What to show is decided by
 // `vaultKeySectionView`; an unknown state shows nothing. While a keyed vault's
 // older content is still being converted (the server's `fullyEncrypted:
 // false`), one more line says so (`conversionLine`); once sealed, none.
@@ -22,16 +21,11 @@ import { api } from "../lib/auth/authManager";
 import {
   currentVaultKeySession,
   onVaultKeyEvent,
-  pendingConversionReview,
-  submitConversionReview,
-  vaultKeysNudge,
   vaultKeyStateFor,
 } from "../lib/vaultKeys/runtime";
-import { ConversionReviewDialog } from "./ConversionReviewDialog";
 import { conversionLine, vaultKeySectionView } from "../lib/vaultKeys/sectionView";
 import { vaultKeyFileText, wordsToVaultKey } from "../lib/vaultKeys/crypto";
 import { AsyncButton } from "./AsyncButton";
-import { ConfirmDialog } from "./ConfirmDialog";
 import { CopyField } from "./McpTab";
 
 const RESTORE_MESSAGES: Record<string, string> = {
@@ -57,8 +51,6 @@ export function VaultKeySection({
   const [shown, setShown] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
   const [restoreText, setRestoreText] = useState("");
-  const [confirmEncrypt, setConfirmEncrypt] = useState(false);
-  const [reviewing, setReviewing] = useState(false);
   const [fullyEncrypted, setFullyEncrypted] = useState<boolean | undefined>(undefined);
   const [, bump] = useState(0);
   // Revealed words belong to ONE vault: a vault switch hides them (they must
@@ -70,7 +62,7 @@ export function VaultKeySection({
   }, [vaultId]);
   useEffect(() => {
     const off = onVaultKeyEvent((e) => {
-      if (e.kind === "vault" || e.kind === "conversion-review") bump((n) => n + 1);
+      if (e.kind === "vault") bump((n) => n + 1);
     });
     return () => void off();
   }, []);
@@ -101,92 +93,6 @@ export function VaultKeySection({
     // An admin (not the owner) of an encrypted vault still sees its status.
     return state?.state === "ready" ? <EncryptionCard converting={converting} /> : null;
   }
-  if (view === "setting-up") {
-    const review = pendingConversionReview(vaultId);
-    return (
-      <>
-        {review ? (
-          <div className="menu-row vault-key-row">
-            <span className="menu-row-label">
-              Encryption
-              <span className="field-hint">
-                Encryption is waiting for you to review the connected AI tools and public links.
-              </span>
-            </span>
-            <button type="button" className="secondary sm" onClick={() => setReviewing(true)}>
-              Review connections
-            </button>
-          </div>
-        ) : (
-          <div className="muted">Encryption is being set up for this vault.</div>
-        )}
-        {review && reviewing && (
-          <ConversionReviewDialog
-            candidates={review}
-            onSubmit={(keep) => {
-              setReviewing(false);
-              submitConversionReview(vaultId, keep);
-              bump((n) => n + 1);
-            }}
-            onLater={() => setReviewing(false)}
-          />
-        )}
-        <div className="menu-sep" />
-      </>
-    );
-  }
-  if (view === "encrypt-offer") {
-    return (
-      <>
-        <div className="menu-row vault-key-row">
-          <span className="menu-row-label">
-            Encryption
-            <span className="field-hint">
-              Encrypt this vault with a key only your team&apos;s devices hold. Baalda&apos;s database, backups and
-              admins will only see scrambled data. This can&apos;t be undone.
-            </span>
-          </span>
-          <button type="button" className="secondary sm" onClick={() => setConfirmEncrypt(true)}>
-            Encrypt this vault
-          </button>
-        </div>
-        {confirmEncrypt && (
-          <ConfirmDialog
-            tone="accent"
-            title={`Encrypt ${vaultName}?`}
-            confirmLabel="Encrypt this vault"
-            onCancel={() => setConfirmEncrypt(false)}
-            onConfirm={async () => {
-              try {
-                await api.requestVaultEncryption(vaultId);
-              } catch {
-                // Nothing changed on the server; the dialog stays open to retry.
-                toast("Couldn't start encrypting this vault. Try again.", "error");
-                return;
-              }
-              setConfirmEncrypt(false);
-              toast("Encryption is being set up for this vault.");
-              vaultKeysNudge();
-            }}
-          >
-            <p>
-              Its notes, search index and version history will be stored encrypted with a key that only your
-              team&apos;s devices hold. Everything keeps working as it does today.
-            </p>
-            <p>
-              New edits are encrypted right away. Older content is encrypted in the background, and its earlier
-              unencrypted copies are removed only after each one has been checked.
-            </p>
-            <p>
-              <strong>This is one-way.</strong> Once a vault is encrypted it can&apos;t be turned back off.
-            </p>
-          </ConfirmDialog>
-        )}
-        <div className="menu-sep" />
-      </>
-    );
-  }
-
   const saveKeyFile = async (keyWords: string) => {
     const vk = wordsToVaultKey(keyWords);
     if (!vk) return;

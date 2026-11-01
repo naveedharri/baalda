@@ -1542,7 +1542,15 @@ export type MyVaultKeys =
   /** `encryptionRequested`: an owner/admin opted this vault in (or it was created
    * with vault keys on). `conversionAllowed` already includes it. Undefined: the
    * server predates opt-in (no request route). */
-  | { keyed: false; pending: false; conversionAllowed: boolean; encryptionRequested?: boolean }
+  | {
+      keyed: false;
+      pending: false;
+      conversionAllowed: boolean;
+      encryptionRequested?: boolean;
+      /** Other current members with an account key (conversion safety rule;
+       *  undefined on a server that does not report it). */
+      otherMembersWithKeys?: number;
+    }
   | { keyed: true; pending: true; vkCheck?: string; generation?: number }
   | ({ keyed: true; pending: false } & MyVaultKeysBody);
 export interface VaultKeyRequest {
@@ -1592,6 +1600,9 @@ export interface AccountKeysBody {
   publicKey: string;
   /** The account key wrapped under the password unlock key (seamless keys F). */
   privWrappedPassword?: string | null;
+  /** This account's approved, non-revoked device rows. Each approval involves
+   *  an existing computer plus the approved one, so computers = length + 1. */
+  devices?: Array<{ deviceId: string; privWrapped?: string | null }>;
   /** Optional since the owner decision: the VAULT key is the recovery path. */
   privWrappedRecovery?: string;
 }
@@ -1722,12 +1733,13 @@ export class ApiClient {
       // Rollout gate for converting an existing vault: absent ⇒ false.
       // `encryptionRequested` absent ⇒ undefined: a server without opt-in
       // (no migration 081) has no request route, so the UI offers nothing.
-      const d = data as { conversionAllowed?: unknown; encryptionRequested?: unknown };
+      const d = data as { conversionAllowed?: unknown; encryptionRequested?: unknown; otherMembersWithKeys?: unknown };
       return {
         keyed: false,
         pending: false,
         conversionAllowed: d.conversionAllowed === true,
         encryptionRequested: typeof d.encryptionRequested === "boolean" ? d.encryptionRequested : undefined,
+        otherMembersWithKeys: typeof d.otherMembersWithKeys === "number" ? d.otherMembersWithKeys : undefined,
       };
     }
     if (status === 202 || data?.pending) {
@@ -1744,12 +1756,6 @@ export class ApiClient {
       wraps: data.wraps,
       fullyEncrypted: typeof data.fullyEncrypted === "boolean" ? data.fullyEncrypted : undefined,
     };
-  }
-
-  /** "Encrypt this vault" (owner/admin, one-way, idempotent). Only records the
-   * decision; a member's desktop keys the vault once the rollout gate opens. */
-  async requestVaultEncryption(vaultId: string): Promise<void> {
-    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/request-encryption`);
   }
 
   async listVaultKeyRequests(vaultId: string): Promise<VaultKeyRequest[]> {

@@ -176,7 +176,7 @@ describe.skipIf(!BASE)("seamless vault keys (live server)", () => {
     expect(laptopDevice.headerFor(vault.id)).toBe(ownerDevice.headerFor(vault.id));
   }, 60_000);
 
-  it("5. encrypting an existing 2-member vault: one owner run keys the other member", async () => {
+  it("5. an existing 2-member vault is encrypted automatically: one owner run keys the other member", async () => {
     const tag = newTag();
     const owner = await signUp("owner", tag);
     const org = await owner.api.createOrganization({ name: `Seamless ${tag}`, slug: `seamless-${tag}` });
@@ -193,7 +193,8 @@ describe.skipIf(!BASE)("seamless vault keys (live server)", () => {
     const mateDevice = device(mate, () => org.id);
     expect((await mateDevice.ensureAccountKeys()).state).toBe("ready");
 
-    await owner.api.requestVaultEncryption(vault.id);
+    // No opt-in: the server allows converting every unkeyed vault. The other
+    // member's account key satisfies the safety rule.
     let conv = await ownerDevice.convertVault(vault.id);
     for (let i = 0; i < 3 && conv === "waiting-ready"; i++) conv = await ownerDevice.convertVault(vault.id);
     console.log("[seamless-it 5] convert", conv);

@@ -29,6 +29,8 @@ function fakeServer() {
   let pendingDevices: { deviceId: string; publicKey: string }[] = [];
   const conv = {
     allowed: false,
+    /** Conversion safety (a): other members with an account key. */
+    otherMembersWithKeys: 1 as number | undefined,
     ready: false,
     claims: new Map<string, { vkCheck: string; deviceId: string }>(),
     candidates: [] as { kind: string; id: string; hash: string }[],
@@ -49,7 +51,14 @@ function fakeServer() {
     }),
     getMyVaultKeys: vi.fn(async (vaultId: string): Promise<MyVaultKeys> => {
       const v = vaults.get(vaultId);
-      if (!v) return { keyed: false, pending: false, conversionAllowed: conv.allowed, encryptionRequested: conv.allowed };
+      if (!v)
+        return {
+          keyed: false,
+          pending: false,
+          conversionAllowed: conv.allowed,
+          encryptionRequested: conv.allowed,
+          otherMembersWithKeys: conv.otherMembersWithKeys,
+        };
       const w = v.wraps.get(caller);
       if (!w) return { keyed: true, pending: true };
       return {
@@ -561,67 +570,51 @@ describe("converting an existing vault", () => {
     expect(await s.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
   });
 
-  it("owner review: nothing is allow-listed or converted until the owner answers", async () => {
-    const { srv, s } = await ownerSetup({ reviewConnections: true });
+  it("keeps every connection without a review; one excluded earlier stays excluded", async () => {
+    const { srv, keys, s } = await ownerSetup();
     srv.conv.allowed = true;
-    srv.conv.ready = true; // even a ready gate waits for the review
-    srv.conv.candidates = [
-      { kind: "mcp_token", id: "t1", hash: "h1", label: "Claude", lastUsedAt: new Date().toISOString() },
-      { kind: "public_link", id: "l1", hash: "h2", label: "a.md" },
-    ] as never;
-    expect(await s.convertVault("v1")).toBe("needs-review");
-    expect(srv.api.postAllowlist).not.toHaveBeenCalled();
-    expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
-    expect(s.pendingConversionReview("v1")?.map((c) => c.id)).toEqual(["t1", "l1"]);
-    // Asking again without an answer changes nothing.
-    expect(await s.convertVault("v1")).toBe("needs-review");
-    expect(srv.api.postAllowlist).not.toHaveBeenCalled();
-  });
-
-  it("owner review: checked ones get MACs, unchecked ones are sent as excluded, then conversion proceeds", async () => {
-    const { srv, keys, s } = await ownerSetup({ reviewConnections: true });
-    srv.conv.allowed = true;
+    srv.conv.ready = true;
     srv.conv.candidates = [
       { kind: "mcp_token", id: "t1", hash: "h1" },
-      { kind: "oauth_grant", id: "g1", hash: "h2" },
-    ] as never;
-    expect(await s.convertVault("v1")).toBe("needs-review");
-    s.submitConversionReview("v1", new Set(["mcp_token:t1"]));
-    expect(s.pendingConversionReview("v1")).toBeNull();
-    expect(await s.convertVault("v1")).toBe("waiting-ready");
-    const vk = keys.vks.get("v1")!;
-    const call = srv.api.postAllowlist.mock.calls[0] as unknown[];
-    expect(call[1]).toEqual([{ kind: "mcp_token", id: "t1", mac: toBase64(allowlistMac(vk, "t1", "h1")) }]);
-    expect(call[3]).toEqual([{ kind: "oauth_grant", id: "g1" }]);
-
-    // The server now records the exclusion: it is not re-sent, and a token
-    // minted while pending is a NEW undecided one that needs its own review.
-    srv.conv.candidates = [
-      { kind: "mcp_token", id: "t1", hash: "h1", allowed: true },
-      { kind: "oauth_grant", id: "g1", hash: "h2", excluded: true },
-      { kind: "mcp_token", id: "t2", hash: "h3" },
-    ] as never;
-    expect(await s.convertVault("v1")).toBe("needs-review");
-    expect(s.pendingConversionReview("v1")?.map((c) => c.id)).toEqual(["t2"]);
-    s.submitConversionReview("v1", new Set(["mcp_token:t2"]));
-    srv.conv.ready = true;
-    expect(await s.convertVault("v1")).toBe("converted");
-    const calls = srv.api.postAllowlist.mock.calls;
-    const last = calls[calls.length - 1] as unknown[];
-    expect((last[1] as { id: string }[]).map((e) => e.id).sort()).toEqual(["t1", "t2"]);
-    expect(last[3]).toEqual([]);
-  });
-
-  it("an earlier review on another device (server says allowed/excluded) is not asked again", async () => {
-    const { srv, s } = await ownerSetup({ reviewConnections: true });
-    srv.conv.allowed = true;
-    srv.conv.ready = true;
-    srv.conv.candidates = [
-      { kind: "mcp_token", id: "t1", hash: "h1", allowed: true },
+      { kind: "oauth_grant", id: "g1", hash: "h3", allowed: true },
       { kind: "public_link", id: "l1", hash: "h2", excluded: true },
     ] as never;
     expect(await s.convertVault("v1")).toBe("converted");
-    expect(s.pendingConversionReview("v1")).toBeNull();
+    const vk = keys.vks.get("v1")!;
+    expect(srv.conv.allowlists[0].entries).toEqual([
+      { kind: "mcp_token", id: "t1", mac: toBase64(allowlistMac(vk, "t1", "h1")) },
+      { kind: "oauth_grant", id: "g1", mac: toBase64(allowlistMac(vk, "g1", "h3")) },
+    ]);
+  });
+
+  it("safety rule: no other keyed member, no password wrap, one computer ⇒ not converted yet, nothing generated or sent", async () => {
+    const { srv, keys, s } = await ownerSetup();
+    srv.conv.allowed = true;
+    srv.conv.ready = true;
+    srv.conv.otherMembersWithKeys = 0;
+    expect(await s.convertVault("v1")).toBe("not-safe-yet");
+    expect(keys.setVaultKey).not.toHaveBeenCalled();
+    expect(srv.api.registerPendingVaultKey).not.toHaveBeenCalled();
+    expect(srv.api.initVaultKeys).not.toHaveBeenCalled();
+    // An older server that does not report the count: also not yet.
+    srv.conv.otherMembersWithKeys = undefined;
+    expect(await s.convertVault("v1")).toBe("not-safe-yet");
+    // Once the person's password wraps the account key, conversion proceeds.
+    const me = (await srv.api.getMyKeys())!;
+    srv.setMe({ ...me, privWrappedPassword: "d3JhcA==" });
+    expect(await s.convertVault("v1")).toBe("converted");
+  });
+
+  it("safety rule: a second approved computer is enough", async () => {
+    const { srv, s } = await ownerSetup();
+    srv.conv.allowed = true;
+    srv.conv.ready = true;
+    srv.conv.otherMembersWithKeys = 0;
+    const me = (await srv.api.getMyKeys())!;
+    srv.setMe({ ...me, devices: [] });
+    expect(await s.convertVault("v1")).toBe("not-safe-yet");
+    srv.setMe({ ...me, devices: [{ deviceId: "laptop", privWrapped: "eA==" }] });
+    expect(await s.convertVault("v1")).toBe("converted");
   });
 
   it("a crash between steps resumes with the same key and the same check", async () => {

@@ -5,17 +5,13 @@
 // - "A new device is signing in as you" on an existing device.
 // - "<person>'s security key changed": the one human override of a pin.
 // - "Gave <person> the vault key" toast with the key's short fingerprint.
-// - "Keep these connections working?": the owner's review at conversion.
 
 import { useEffect, useState } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { toast } from "../lib/toast";
 import { useStore } from "../store";
 import { memberDisplayName } from "../lib/vaultKeys/names";
-import { currentVaultKeySession, onVaultKeyEvent, submitConversionReview } from "../lib/vaultKeys/runtime";
-import { candidateKey } from "../lib/vaultKeys/conversionReview";
-import type { AllowlistCandidate } from "../lib/api";
-import { ConversionReviewDialog } from "./ConversionReviewDialog";
+import { currentVaultKeySession, onVaultKeyEvent } from "../lib/vaultKeys/runtime";
 import { LOST_DEVICES_LABEL } from "../lib/vaultKeys/recovery";
 import { syncManager } from "../lib/sync/docSession";
 import { LostDevicesFlow } from "./VaultKeyRecovery";
@@ -26,13 +22,10 @@ type Prompt =
   /** "I don't have my other devices", chosen from the awaiting-device prompt. */
   | { kind: "lost-devices" }
   | { kind: "approve-device"; device: PendingDeviceView }
-  | { kind: "key-changed"; vaultId: string; change: SealedFor & { publicKey: string } }
-  | { kind: "conversion-review"; vaultId: string; candidates: AllowlistCandidate[] };
+  | { kind: "key-changed"; vaultId: string; change: SealedFor & { publicKey: string } };
 
 const promptKey = (p: Prompt) =>
-  p.kind === "conversion-review"
-    ? `r:${p.vaultId}:${p.candidates.map(candidateKey).sort().join(",")}`
-    : p.kind === "approve-device"
+  p.kind === "approve-device"
     ? `d:${p.device.deviceId}`
     : p.kind === "key-changed"
       ? `k:${p.vaultId}:${p.change.userId}:${p.change.fingerprint}`
@@ -96,8 +89,6 @@ export function VaultKeyPrompts() {
         toast("Your security key on the server does not match this computer. Vault keys are paused.", "error");
       } else if (e.kind === "rate-limited") {
         toast(e.message, "error");
-      } else if (e.kind === "conversion-review") {
-        push({ kind: "conversion-review", vaultId: e.vaultId, candidates: e.candidates });
       } else if (e.kind === "pending-devices") {
         for (const device of e.devices) push({ kind: "approve-device", device });
       } else if (e.kind === "serviced") {
@@ -141,18 +132,6 @@ export function VaultKeyPrompts() {
       return <LostDevicesFlow isOwner={isOwner} vaultId={syncManager.registry.vaultId} onClose={done} />;
     case "approve-device":
       return <ApproveDevicePrompt key={current.device.deviceId} device={current.device} done={done} />;
-    case "conversion-review":
-      return (
-        <ConversionReviewDialog
-          key={promptKey(current)}
-          candidates={current.candidates}
-          onSubmit={(keep) => {
-            submitConversionReview(current.vaultId, keep);
-            done();
-          }}
-          onLater={done}
-        />
-      );
     case "key-changed":
       return (
         <ConfirmDialog
