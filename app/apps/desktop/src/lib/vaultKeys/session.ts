@@ -507,7 +507,6 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const mine = await api.getMyVaultKeys(vaultId);
     if (mine.keyed) return "already-keyed";
     if (!mine.conversionAllowed) return "not-allowed";
-    if (!(deps.canConvert && (await deps.canConvert(vaultId)))) return "not-allowed";
     const priv = await keys.getAccountPrivateKey();
     if (!priv) return "needs-account-key";
     const remote = await api.getMyKeys();
@@ -520,6 +519,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       approvedDevices: Array.isArray(remote.devices) ? remote.devices.length + 1 : undefined,
     });
     if (!safe) return "not-safe-yet";
+    // The role check reads the member list (heavy on a big vault): asked only
+    // once everything else says go, so a vault that is not safe yet does not
+    // fetch it on every run.
+    if (!(deps.canConvert && (await deps.canConvert(vaultId)))) return "not-allowed";
 
     let vk = await keys.getVaultKey(vaultId); // a crashed earlier run: same key
     if (!vk) {
