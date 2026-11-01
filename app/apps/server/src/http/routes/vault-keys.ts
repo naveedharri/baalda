@@ -53,6 +53,7 @@ import {
   takeKeyChurn,
 } from "../../crypto/key-churn.js";
 import { CLIENT_VERSION_HEADER, CLIENT_VERSION_PARAM, clientVersionPolicy, judgeClientVersion } from "../client-version.js";
+import { dropSpentInvitationKeys } from "../../members/invitation-keys.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -454,6 +455,11 @@ export function createVaultKeyRoutes(): Hono {
       client.release();
     }
     await pool.query("DELETE FROM vault_key_requests WHERE vault_id = $1 AND user_id = $2", [vaultId, userId]);
+    // Their invitation's secret wrap / seal is spent once they hold a current
+    // wrap (the self-wrap after adopting it, or a teammate's seal).
+    await dropSpentInvitationKeys({ vaultId, userId }).catch((err: unknown) =>
+      console.error(`[vault-keys] dropping spent invitation keys failed: ${(err as Error).message}`),
+    );
     return c.json({ sealed: true }, 201);
   });
 
