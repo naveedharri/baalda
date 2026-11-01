@@ -8,6 +8,22 @@ import { create } from "zustand";
 import * as ipc from "./lib/ipc";
 import { DOCUMENTS_BLOCKED_TEXT, isDocumentsDenied } from "./lib/vault/folderErrors";
 import { bridgeManager } from "./lib/bridge";
+import { resetVaultKeySessions } from "./lib/vaultKeys/session";
+import {
+  onVaultKeyBlockChange,
+  VAULT_KEY_PAUSE_REASON,
+  vaultKeysEarlyChannel,
+  vaultKeysGate,
+  vaultKeysMembershipEnded,
+  vaultKeysPasswordUnlock,
+  rememberInviteSecret,
+  claimInviteSecret,
+  offerJoinSecret,
+  joinCodeSecret,
+} from "./lib/vaultKeys/runtime";
+import { loadRememberedPassword } from "./lib/rememberedPassword";
+import { allowLaunchUnlock, runLaunchUnlock } from "./lib/vaultKeys/launchUnlock";
+import { clearVaultKeyCache } from "./lib/vaultKeys/store";
 import {
   colorsAdopted,
   markColorsAdopted,
@@ -61,6 +77,7 @@ import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
 import type { StructureNotice, VoiceSpeaker } from "./lib/sync/docSession";
 import type { SyncPause } from "./lib/sync/syncPause";
+import type { OAuthConsentLink } from "./lib/oauthConsentLink";
 import { MicPermissionError } from "./lib/voice/capture";
 import * as perf from "./lib/perf";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
@@ -69,6 +86,7 @@ import {
   type ActivityStatus,
   type EditorMeasure,
   readActivityStatus,
+  readActivityStatusUntil,
   readAppearanceOverrides,
   writeAppearanceOverrides,
   readAutomaticItemColors,
@@ -77,6 +95,10 @@ import {
   readEditorFontSize,
   writeEditorFontSize,
   applyEditorFontSize,
+  readEditorFont,
+  writeEditorFont,
+  applyEditorFont,
+  type EditorFont,
   readLineNumbers,
   readHomeSectionHidden,
   writeHomeSectionHidden,
@@ -587,6 +609,8 @@ interface AppStore {
   editorMeasure: EditorMeasure;
   /** Note editor text size in px (Settings → Appearance). Device-local. */
   editorFontSize: number;
+  /** Personal, device-local note font (lib/prefs.ts EDITOR_FONTS). */
+  editorFont: EditorFont;
   /** Show the editor's line-number gutter. Off by default. */
   lineNumbers: boolean;
   homeSectionHidden: boolean;
@@ -714,6 +738,14 @@ interface AppStore {
   requestUpgradeDialog: (opts?: { reason?: string; orgId?: string }) => void;
   clearUpgradeDialogRequest: () => void;
   /**
+   * A `baalda://oauth-consent` hand-off: claude.ai / ChatGPT asking to connect
+   * to a keyed vault (W3). Parked until the person confirms in
+   * `OAuthConsentHost` (main.tsx); a deep link never presents a key on its own.
+   */
+  oauthConsentLink: OAuthConsentLink | null;
+  promptOAuthConsent: (link: OAuthConsentLink) => void;
+  clearOAuthConsent: () => void;
+  /**
    * Whether the connected server lacks features this app needs (UI mirror
    * only; `lib/serverFeatures.ts`). Null = unknown or not checked yet, which
    * shows nothing. Written by `BackendBehindNotice`'s health poll.
@@ -805,11 +837,13 @@ interface AppStore {
   // Account profile & preferences
   /** Update display name / avatar (server-backed; refreshes the session). */
   updateProfile: (input: { name?: string; image?: string | null }) => Promise<void>;
-  setActivityStatus: (status: ActivityStatus) => void;
+  setActivityStatus: (status: ActivityStatus, until?: number | null) => void;
+  activityStatusUntil: number | null;
   setMentionSound: (enabled: boolean) => void;
   setPropertiesMode: (mode: PropertiesMode) => void;
   setEditorMeasure: (measure: EditorMeasure) => void;
   setEditorFontSize: (px: number) => void;
+  setEditorFont: (font: EditorFont) => void;
   setLineNumbers: (on: boolean) => void;
   /** Set (value) or clear back to "inherit" (undefined) one personal override. */
   setAppearanceOverride: <K extends AppearanceKey>(key: K, value: AppearanceSettings[K] | undefined) => void;
@@ -1228,6 +1262,29 @@ async function findExistingVaultFolder(orgId: string): Promise<string | null> {
 async function peekStampedOrgId(path: string): Promise<string | null> {
   const stamp = await ipc.peekVaultStamp(path).catch(() => null);
   return stamp?.organizationId ?? null;
+}
+
+/** The collection id `path`'s stamp names for `orgId` (else null). */
+async function stampedVaultIdFor(path: string | null, orgId: string): Promise<string | null> {
+  if (!path) return null;
+  const stamp = await ipc.peekVaultStamp(path).catch(() => null);
+  return stamp?.organizationId === orgId ? (stamp.serverVaultId ?? null) : null;
+}
+
+/**
+ * Membership of `orgId` ended or the vault is gone, per a definitive server
+ * answer the CALLER already has: forget this device's key for it (never the
+ * account key). Never throws; local files are untouched here.
+ */
+async function forgetVaultKeysForOrg(
+  userId: string | null | undefined,
+  orgId: string,
+  vaultIdHint: string | null,
+): Promise<void> {
+  if (!userId) return;
+  await vaultKeysMembershipEnded({ userId, orgId, vaultIdHint }).catch((e: unknown) =>
+    console.warn("[vault-keys] could not forget the vault key", e instanceof Error ? e.message : e),
+  );
 }
 
 /**
@@ -2025,11 +2082,15 @@ async function unsyncLocalTeardown(
 ): Promise<void> {
   const vault = get().vault;
   const isOpenFolder = vault != null && folderPath != null && vault.path === folderPath;
+  // Read BEFORE the stamp is cleared below. Every caller holds a definitive
+  // answer (the server confirmed the unsync, or `vault_not_found`).
+  const keyHint = await stampedVaultIdFor(folderPath, organizationId);
 
   if (isOpenFolder) {
     leaveVaultSync();
     await clearVaultStamp(vault, organizationId);
   }
+  await forgetVaultKeysForOrg(get().session?.user.id, organizationId, keyHint);
   forgetOrgVault(organizationId);
   forgetLastVault(organizationId);
   forgetTeamAccessCache(get().serverUrl, organizationId);
@@ -2062,6 +2123,26 @@ async function unsyncLocalTeardown(
   await get().refreshTree();
   await get().refreshTitles();
 }
+
+/** Clears a timed status ("Out for a smoke · 30 min") when its time is up. */
+let statusClearTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleStatusClear(until: number | null): void {
+  if (statusClearTimer) clearTimeout(statusClearTimer);
+  statusClearTimer = null;
+  if (until === null) return;
+  const wait = Math.max(0, until - Date.now());
+  // setTimeout caps near 24.8 days; a status never runs that long.
+  statusClearTimer = setTimeout(() => {
+    if (useStore.getState().activityStatusUntil === until) useStore.getState().setActivityStatus("online", null);
+  }, Math.min(wait, 2_000_000_000));
+}
+
+// The note font is device-local; publish it before the first editor paints.
+applyEditorFont(readEditorFont());
+
+// W3: the first sync pass of a vault waits for a known vault-key state.
+syncManager.setVaultKeyGate?.(vaultKeysGate);
+syncManager.setEarlyVaultChannelCheck?.(vaultKeysEarlyChannel);
 
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
@@ -2141,6 +2222,9 @@ export const useStore = create<AppStore>((set, get) => ({
   closeSettingsDialog: (which) =>
     set((s) => (which && s.settingsDialog !== which ? {} : { settingsDialog: null })),
   upgradeDialogRequest: null,
+  oauthConsentLink: null,
+  promptOAuthConsent: (link) => set({ oauthConsentLink: link }),
+  clearOAuthConsent: () => set({ oauthConsentLink: null }),
   backendStatus: null,
   setBackendStatus: (backendStatus) => set({ backendStatus }),
   revealedPath: null,
@@ -2188,11 +2272,13 @@ export const useStore = create<AppStore>((set, get) => ({
   orgBilling: null,
   myBilling: null,
   activityStatus: readActivityStatus(),
+  activityStatusUntil: readActivityStatusUntil(),
   mentionSound: readMentionSound(),
   automaticItemColors: readAutomaticItemColors(null),
   propertiesMode: readPropertiesMode(),
   editorMeasure: readEditorMeasure(),
   editorFontSize: readEditorFontSize(),
+  editorFont: readEditorFont(),
   lineNumbers: readLineNumbers(),
   homeSectionHidden: readHomeSectionHidden(),
   setHomeSectionHidden: (hidden) => {
@@ -2888,6 +2974,8 @@ export const useStore = create<AppStore>((set, get) => ({
   openInviteLink: async (url) => {
     const link = parseInviteDeepLink(url);
     if (!link) return;
+    // B5: the invite secret rides in memory until the vault opens.
+    rememberInviteSecret(link.invitationId, link.secret);
 
     // 1. Wrong server? Park the invite and ask. A deep link must never repoint
     // this device on its own — that value decides where a password gets posted
@@ -3313,6 +3401,9 @@ export const useStore = create<AppStore>((set, get) => ({
       set({ serverUrl: authManager.getServerUrl() });
       if (session) {
         set({ session, authStatus: "signed-in", authError: null });
+        // Seamless keys F at launch: a remembered password refreshes the
+        // account key's password wrap (or unlocks it). Background; never blocks.
+        void launchPasswordUnlock(authManager.getServerUrl(), session.user.id, session.user.email);
         // Independent of each other: the vault roster + invitations, and the
         // billing feature flag. Serial, these were two round trips in front of
         // the landing for no reason.
@@ -3372,6 +3463,14 @@ export const useStore = create<AppStore>((set, get) => ({
     try {
       await authManager.signIn({ email, password });
       const session = await authManager.currentSession();
+      // Seamless keys F: the password unlocks this account's key before any
+      // vault opens (so a new computer needs no approval). Bounded; any
+      // failure falls back to one-click approval and never blocks sign-in.
+      if (session) {
+        // A good manual password: launch-time unlock may run again.
+        allowLaunchUnlock(authManager.getServerUrl(), session.user.id);
+        await passwordUnlockBounded(session.user.id, password);
+      }
       set({ session, authStatus: session ? "signed-in" : "signed-out" });
       if (session) {
         await get().refreshVault();
@@ -3494,6 +3593,9 @@ export const useStore = create<AppStore>((set, get) => ({
     // reconcile/pull with a token that is about to be revoked.
     leaveVaultSync();
     await authManager.signOut();
+    // Vault keys belong to the account: drop every in-memory copy.
+    resetVaultKeySessions();
+    clearVaultKeyCache();
     // A queued shared link belongs to the account that clicked it.
     clearPendingNoteLink();
     // Ditto a queued invitation and the card describing it: an invitation is
@@ -3593,6 +3695,9 @@ export const useStore = create<AppStore>((set, get) => ({
       // fails (the address could not be saved) falls back to it intact.
       leaveVaultSync();
       set({ syncEnabled: false });
+      // Vault keys are per server: drop every in-memory copy before switching.
+      resetVaultKeySessions();
+      clearVaultKeyCache();
       let session: SessionInfo | null;
       try {
         // Clears the old bearer before exposing the new base URL.
@@ -3652,9 +3757,10 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ session });
   },
 
-  setActivityStatus: (status) => {
-    writeActivityStatus(status);
-    set({ activityStatus: status });
+  setActivityStatus: (status, until = null) => {
+    writeActivityStatus(status, until);
+    set({ activityStatus: status, activityStatusUntil: until });
+    scheduleStatusClear(until);
     // Re-broadcast immediately on any live note presence.
     syncManager.setPresenceStatus(status);
   },
@@ -3679,6 +3785,11 @@ export const useStore = create<AppStore>((set, get) => ({
   setEditorFontSize: (px) => {
     writeEditorFontSize(px);
     get().setAppearanceOverride("textSize", px);
+  },
+  setEditorFont: (font) => {
+    writeEditorFont(font);
+    applyEditorFont(font);
+    set({ editorFont: font });
   },
 
   setLineNumbers: (on) => {
@@ -4019,7 +4130,9 @@ export const useStore = create<AppStore>((set, get) => ({
               : undefined,
         });
       } else {
-        toast(`Couldn't turn on sync: ${errMsg(e)}`, "error");
+        toast(`Couldn't turn on sync: ${errMsg(e)}`, "error", {
+          action: { label: "Retry", run: () => void get().turnOnSyncNow(name) },
+        });
       }
       return false;
     } finally {
@@ -4485,6 +4598,9 @@ export const useStore = create<AppStore>((set, get) => ({
         null;
     }
     if (orgId) {
+      // B4: the invite's secret (if the link carried one) unlocks this vault's
+      // key as soon as it opens; claimed before the switch so the gate sees it.
+      claimInviteSecret(invitationId, orgId);
       await get().setActiveOrganization(orgId);
     }
     // The invite card is spent — leaving it up would offer to accept an
@@ -4501,7 +4617,10 @@ export const useStore = create<AppStore>((set, get) => ({
     // This flow owns the session from here: a detached `initAuth` still
     // restoring the previous one must not land its state on top of ours.
     ++authInitGen;
+    // C: `<code>-<J>` goes to the server as typed (it reads the part before
+    // the first `-`); J stays in memory until the vault opens.
     const joined = await authManager.api.joinVault(code.trim());
+    offerJoinSecret(joined.organizationId, joinCodeSecret(code));
     // The code was good, so the welcome screen's join flow is over: disarm the
     // landing suppression before switching in (it's module state, and leaving it
     // armed would silently strand the NEXT sign-in on the welcome screen).
@@ -4575,6 +4694,8 @@ export const useStore = create<AppStore>((set, get) => ({
       .refreshVault()
       .catch((e: unknown) => console.warn("[vault] refresh before membership cleanup failed", e));
     if (get().organizations.some((o) => o.id === organizationId)) return;
+    // Read before the folder (and its stamp) is deleted below.
+    const keyHint = await stampedVaultIdFor(path, organizationId);
 
     const vault = get().vault;
     const isOpen =
@@ -4600,6 +4721,9 @@ export const useStore = create<AppStore>((set, get) => ({
     forgetTeamAccessCache(get().serverUrl, organizationId);
     const userId = get().session?.user.id;
     if (userId) forgetMembership(get().serverUrl, userId, organizationId);
+    // The membership is confirmed gone (re-listed above): this device's key for
+    // the vault goes too. Wraps are deleted server-side; the account key stays.
+    await forgetVaultKeysForOrg(userId, organizationId, keyHint);
 
     if (path) {
       // Rust refuses links, roots, the home and vaults folders, and any folder
@@ -4665,6 +4789,12 @@ export const useStore = create<AppStore>((set, get) => ({
     const result = await authManager.api.deleteRemoteVault(organizationId);
     // This device's folder, captured BEFORE the teardown forgets the binding.
     const folderPath = readOrgVaults()[organizationId] ?? null;
+    // The vault is gone for everyone (server confirmed): forget its key here.
+    await forgetVaultKeysForOrg(
+      get().session?.user.id,
+      organizationId,
+      await stampedVaultIdFor(folderPath, organizationId),
+    );
     // Then tear down the same local state as a device-level removal.
     await get().removeVaultLocally(organizationId);
     // The vault is gone for everyone, so this device's copy goes to the Trash
@@ -5505,6 +5635,15 @@ export const useStore = create<AppStore>((set, get) => ({
       } else {
         set({ locks: [] });
         if (result.reason) console.warn("[sync] not enabled:", result.reason);
+        // W3: paused for the vault key. Nothing on disk was touched; run the
+        // whole enable again once the key state is known and safe.
+        if (result.reason === VAULT_KEY_PAUSE_REASON) {
+          const off = onVaultKeyBlockChange((_vaultId, blocked) => {
+            if (blocked) return;
+            off();
+            if (!stale()) void get().enableSyncForVault(opts);
+          });
+        }
       }
     })().finally(resolvePrimed);
 
@@ -5531,6 +5670,31 @@ function requireSyncedVaultId(get: () => AppStore): string {
     throw new Error("Turn on sync for this vault to use checkpoints.");
   }
   return vaultId;
+}
+
+/** Password unlock of the account key, capped so sign-in never waits long. */
+const PASSWORD_UNLOCK_WAIT_MS = 8_000;
+async function passwordUnlockBounded(userId: string, password: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  await Promise.race([
+    vaultKeysPasswordUnlock(userId, password),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, PASSWORD_UNLOCK_WAIT_MS);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+}
+
+async function launchPasswordUnlock(serverUrl: string, userId: string, email: string | null | undefined): Promise<void> {
+  if (!email) return;
+  // A stale remembered password is tried once, never on every launch (each
+  // try counts in the sign-in throttle); see lib/vaultKeys/launchUnlock.ts.
+  await runLaunchUnlock({
+    server: serverUrl,
+    userId,
+    loadPassword: () => loadRememberedPassword(serverUrl, email),
+    unlock: (password) => vaultKeysPasswordUnlock(userId, password),
+  });
 }
 
 function errMsg(e: unknown): string {
@@ -5625,3 +5789,6 @@ useStore.subscribe((state, prev) => {
 
 // Registry pull → store mirror (see `lib/sync/vaultVisibility`).
 vaultVisibility.subscribe((v) => useStore.setState({ vaultVisibility: v }));
+
+// A timed status set before a restart still clears on time.
+scheduleStatusClear(useStore.getState().activityStatusUntil);

@@ -294,7 +294,7 @@ export async function previewFetch(
   if (p === "/api/auth-methods")
     return ok({
       emailPassword: true,
-      google: false,
+      google: true,
       passwordReset: false,
       invitationEmail: false,
       bugReport: true,
@@ -637,17 +637,6 @@ export async function previewFetch(
     return ok({ items: [], truncated: false, afterIsCurrent: true });
   if (p.endsWith("/shrink-brakes")) return ok({ items: [], canRelease: true });
   if (p.endsWith("/invitation-expiries")) return ok({ items: [] });
-  if (p.endsWith("/housekeeper/status"))
-    return ok({
-      requiresPro: true,
-      available: true,
-      provider: "Sample provider — no live inference",
-      model: "Preview only",
-    });
-  if (p.includes("/housekeeper/"))
-    return blocked(
-      "AI requests are disabled in this visual preview. Configure a real provider in the installed app.",
-    );
   if (p === "/api/bug-reports")
     return blocked("Reports cannot be sent from this visual preview.");
   if (

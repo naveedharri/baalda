@@ -1,3 +1,5 @@
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { sealedReferencedPaths, vaultIsKeyed } from "./sealed-refs.js";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { orgRole, vaultOrg } from "./lookup.js";
@@ -19,6 +21,7 @@ import {
 import { listReadableDocsInVault, vaultAccess } from "./vault-docs.js";
 import { isAccountReadOnly } from "../billing/lapse.js";
 import { REF_WINDOW_CHARS, scheduleRefWindowRefresh } from "../blobs/ref-windows.js";
+import { inc } from "../metrics/sync-metrics.js";
 
 /** The refusal a billing-lapsed vault answers every write with (HTTP 402),
  *  ahead of `no_write_access` / `root_frozen`. */
@@ -254,6 +257,7 @@ export async function canReadAttachment(
   relPath: string | null,
   docId: string | null = null,
   db: Queryable = defaultPool,
+  crypto?: DocCrypto,
 ): Promise<boolean> {
   if (docId && (await fileDoc(db, vaultId, docId))) {
     return (await effectivePermission(userId, docId, db)) !== "none";
@@ -265,14 +269,96 @@ export async function canReadAttachment(
 
   const readable = await listReadableDocsInVault(userId, vaultId, db);
   if (readable.size === 0) return false;
+  const mode = attachmentAclMode();
+  const byRefs = async () => (await referencedByRefs(vaultId, [relPath], readable, db)).size > 0;
+  if (mode === "refs") return byRefs();
+  // W3: a keyed vault's sealed rows are judged in memory (same predicate).
+  const keyed = await vaultIsKeyed(vaultId, db);
   const { rows } = await db.query<{ ok: number }>(
     `SELECT 1 AS ok FROM note_index
       WHERE vault_id = $1 AND doc_id = ANY($2::text[])
-        AND content LIKE '%' || $3 || '%' ESCAPE '\\'
+        AND content LIKE '%' || $3 || '%' ESCAPE '\\'${keyed ? " AND search_enc IS NULL" : ""}
       LIMIT 1`,
     [vaultId, [...readable], likeEscape(relPath)],
   );
-  return rows.length > 0;
+  let old = rows.length > 0;
+  if (!old && keyed) {
+    old = (await sealedReferencedPaths(vaultId, [...readable], [relPath], crypto, db)).size > 0;
+  }
+  if (mode === "shadow") {
+    const viaRefs = await byRefs();
+    recordAclShadow("single", vaultId, userId, 1, old && !viaRefs ? 1 : 0, !old && viaRefs ? 1 : 0);
+  }
+  return old;
+}
+
+/**
+ * How a scoped member's `attachments/` read is decided (W3).
+ *
+ *   · `text`   — the reference test reads note text (`note_index.content` /
+ *                `ref_text`), as before;
+ *   · `shadow` — (default) computes both, counts any disagreement in the sync
+ *                metrics and RETURNS THE TEXT ANSWER, so nobody gains or loses
+ *                access while the two are compared;
+ *   · `refs`   — answers from `blob_refs` alone, never reading note text.
+ *
+ * Read per call so a deploy flips it with an env change and restart.
+ */
+export type AttachmentAclMode = "text" | "shadow" | "refs";
+export function attachmentAclMode(): AttachmentAclMode {
+  const v = (process.env.ATTACHMENT_ACL_MODE ?? "").trim().toLowerCase();
+  return v === "text" || v === "refs" ? v : "shadow";
+}
+
+/**
+ * Of `paths`, the ones some readable note links to per `blob_refs`
+ * (migration 027: lowercased, percent-decoded forms recorded beside the raw
+ * ones, written by the indexer from the same markdown as `note_index.content`).
+ * Returns the INPUT spellings that matched.
+ */
+async function referencedByRefs(
+  vaultId: string,
+  paths: string[],
+  readable: Set<string>,
+  db: Queryable,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (paths.length === 0 || readable.size === 0) return out;
+  const lowered = paths.map((p) => p.toLowerCase());
+  const { rows } = await db.query<{ rel_path: string }>(
+    `SELECT DISTINCT rel_path FROM blob_refs
+      WHERE vault_id = $1 AND doc_id = ANY($2::text[]) AND rel_path = ANY($3::text[])`,
+    [vaultId, [...readable], [...new Set(lowered)]],
+  );
+  const hit = new Set(rows.map((r) => r.rel_path));
+  paths.forEach((p, i) => {
+    if (hit.has(lowered[i])) out.add(p);
+  });
+  return out;
+}
+
+/**
+ * Shadow-mode bookkeeping: `attachment_acl.shadow.<kind>.checked` per blob
+ * judged, `.disagree.text_only` (text grants, refs would refuse: the case that
+ * would LOSE someone access on the flip) and `.disagree.refs_only` (refs would
+ * grant what text refuses). One log line per disagreeing request, ids and
+ * counts only, never paths.
+ */
+function recordAclShadow(
+  kind: "single" | "list",
+  vaultId: string,
+  userId: string,
+  checked: number,
+  textOnly: number,
+  refsOnly: number,
+): void {
+  inc(`attachment_acl.shadow.${kind}.checked`, checked);
+  if (textOnly === 0 && refsOnly === 0) return;
+  inc(`attachment_acl.shadow.${kind}.disagree.text_only`, textOnly);
+  inc(`attachment_acl.shadow.${kind}.disagree.refs_only`, refsOnly);
+  console.warn(
+    `[attachment-acl] shadow disagreement kind=${kind} vault=${vaultId} user=${userId} text_only=${textOnly} refs_only=${refsOnly}`,
+  );
 }
 
 /**
@@ -299,6 +385,7 @@ export async function filterReadableBlobs<T extends BlobAclRow>(
   vaultId: string,
   blobs: T[],
   db: Queryable = defaultPool,
+  crypto?: DocCrypto,
 ): Promise<T[]> {
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return [];
@@ -333,7 +420,7 @@ export async function filterReadableBlobs<T extends BlobAclRow>(
   if (rest.length > 0) {
     const visibleRest = access.vaultWide
       ? rest
-      : await filterByNoteReference(vaultId, rest, await readable(), db);
+      : await filterByNoteReferenceMode(userId, vaultId, rest, await readable(), db, crypto);
     for (const b of visibleRest) keep.add(b);
   }
   return blobs.filter((b) => keep.has(b));
@@ -386,13 +473,47 @@ function referenceAnchor(path: string): string | null {
  *  read what (see `blobs/refs.ts`). A path with no `/` has no anchor and
  *  keeps the direct LIKE test (attachment drops always live under a folder, so
  *  this is the rare legacy case). */
+/** {@link filterByNoteReference} under {@link attachmentAclMode}. */
+async function filterByNoteReferenceMode<T extends BlobAclRow>(
+  userId: string,
+  vaultId: string,
+  blobs: T[],
+  readable: Set<string>,
+  db: Queryable,
+  crypto?: DocCrypto,
+): Promise<T[]> {
+  const mode = attachmentAclMode();
+  const byRefs = async () => {
+    const paths = [...new Set(blobs.map((b) => b.rel_path).filter((p): p is string => !!p))];
+    const hit = await referencedByRefs(vaultId, paths, readable, db);
+    return blobs.filter((b) => !!b.rel_path && hit.has(b.rel_path));
+  };
+  if (mode === "refs") return byRefs();
+  const old = await filterByNoteReference(vaultId, blobs, readable, db, crypto);
+  if (mode === "shadow") {
+    const viaRefs = new Set(await byRefs());
+    const viaText = new Set(old);
+    let textOnly = 0;
+    let refsOnly = 0;
+    for (const b of viaText) if (!viaRefs.has(b)) textOnly++;
+    for (const b of viaRefs) if (!viaText.has(b)) refsOnly++;
+    recordAclShadow("list", vaultId, userId, blobs.length, textOnly, refsOnly);
+  }
+  return old;
+}
+
 async function filterByNoteReference<T extends BlobAclRow>(
   vaultId: string,
   blobs: T[],
   readable: Set<string>,
   db: Queryable,
+  crypto?: DocCrypto,
 ): Promise<T[]> {
   if (readable.size === 0) return [];
+  // W3: in a keyed vault, sealed rows leave the SQL (their plaintext columns
+  // may be stale) and are judged in memory below with the same predicate.
+  const keyed = await vaultIsKeyed(vaultId, db);
+  const plainOnly = keyed ? " AND ni.search_enc IS NULL" : "";
   // A falsy rel_path can never match (it has no needle to search for), so it is
   // dropped here exactly as the old `!!b.rel_path` guard dropped it.
   const paths = [...new Set(blobs.map((b) => b.rel_path).filter((p): p is string => !!p))];
@@ -442,7 +563,7 @@ async function filterByNoteReference<T extends BlobAclRow>(
        docs AS MATERIALIZED (
           SELECT CASE WHEN ni.ref_heads @> $5::text[] THEN ni.ref_text ELSE ni.content END AS content
             FROM note_index ni
-           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
+           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])${plainOnly}
        ),
        -- The text after occurrence i of an anchor is piece i+1, the anchor,
        -- piece i+2, ... Only its first r characters can matter, so every piece
@@ -486,7 +607,7 @@ async function filterByNoteReference<T extends BlobAclRow>(
          FROM unnest($3::text[], $4::text[], $5::text[]) AS p(rel_path, needle, prefix)
         WHERE EXISTS (
           SELECT 1 FROM note_index ni
-           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
+           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])${plainOnly}
              AND CASE
                    WHEN ni.ref_heads @> $6::text[] AND NOT (ni.ref_text LIKE '%' || p.prefix || '%' ESCAPE '\\') THEN false
                    ELSE ni.content LIKE '%' || p.needle || '%' ESCAPE '\\'
@@ -512,12 +633,16 @@ async function filterByNoteReference<T extends BlobAclRow>(
          FROM unnest($3::text[], $4::text[]) AS p(rel_path, needle)
         WHERE EXISTS (
           SELECT 1 FROM note_index ni
-           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
+           WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])${plainOnly}
              AND ni.content LIKE '%' || p.needle || '%' ESCAPE '\\'
         )`,
       [vaultId, readableIds, bare, bare.map(likeEscape)],
     );
     for (const r of rows) referenced.add(r.rel_path);
+  }
+  if (keyed) {
+    const remaining = paths.filter((p) => !referenced.has(p));
+    for (const p of await sealedReferencedPaths(vaultId, readableIds, remaining, crypto, db)) referenced.add(p);
   }
   return blobs.filter((b) => !!b.rel_path && referenced.has(b.rel_path));
 }

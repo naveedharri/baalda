@@ -2,7 +2,13 @@
    vault tile and the identity bar. Pure transitions here, the timers and React
    state in `components/useHoverMenu.ts`. */
 
-/** `hover` closes when the pointer leaves; `pinned` waits for a click, Escape or an outside press. */
+/**
+ * `hover` opened on hover, `pinned` by a click or a press inside. BOTH close
+ * once the pointer has been away for the grace period: a pinned menu that
+ * outlived the pointer read as stuck (2026-11-01). The one exception, judged
+ * by the hook, is a text field inside the menu holding focus, so typing a
+ * vault name or join code is never cut off.
+ */
 export type HoverMenuMode = "closed" | "hover" | "pinned";
 
 export type HoverMenuEvent =
@@ -27,7 +33,7 @@ export function nextHoverMenuMode(mode: HoverMenuMode, event: HoverMenuEvent): H
     case "enter":
       return mode === "closed" ? "hover" : mode;
     case "leave-elapsed":
-      return mode === "hover" ? "closed" : mode;
+      return "closed";
     case "toggle":
       // Clicking a hover preview pins it; only a second click closes it.
       return mode === "pinned" ? "closed" : "pinned";

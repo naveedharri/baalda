@@ -121,7 +121,7 @@ accountPageRoutes.get("/reset-password", (c) => {
     </form>
     <div id="done" style="display:none">
       <div class="ok">Your password is updated. Opening ${esc(BRAND_NAME)} so you can sign in with it…</div>
-      <a class="btn primary" href="${esc(SIGNIN_DEEP_LINK)}" style="display:block;text-decoration:none">Open ${esc(
+      <a class="btn primary" href="${esc(SIGNIN_DEEP_LINK)}" style="display:flex;text-decoration:none">Open ${esc(
         BRAND_NAME,
       )}</a>
     </div>
@@ -185,13 +185,36 @@ accountPageRoutes.get("/email-verified", (c) => {
       body: `<h1>Email confirmed</h1><p class="sub">Thanks, your address is verified. Taking you back to ${esc(
         BRAND_NAME,
       )}…</p>
-      <a class="btn primary" href="${esc(VERIFIED_DEEP_LINK)}" style="display:block;text-decoration:none">Open ${esc(
+      <a class="btn primary" href="${esc(VERIFIED_DEEP_LINK)}" style="display:flex;text-decoration:none">Open ${esc(
         BRAND_NAME,
       )}</a>
       <script>location.href = ${JSON.stringify(VERIFIED_DEEP_LINK)};</script>`,
     }),
   );
 });
+
+/**
+ * Seamless keys B5: the invite secret arrives in the link's FRAGMENT (`#k=`),
+ * which a browser never sends to the server. This script, run in the browser,
+ * copies a well-formed one onto the app deep link as `&k=` (button and
+ * auto-redirect) and strips it from the address bar. The server-rendered HTML
+ * never contains the secret.
+ */
+function inviteHandOffScript(deepLink: string): string {
+  return `(function () {
+  var link = ${JSON.stringify(deepLink)};
+  try {
+    var m = /(?:^#|&)k=([0-9A-HJKMNP-TV-Z]{26})(?:&|$)/.exec(location.hash || "");
+    if (m) {
+      link += "&k=" + m[1];
+      var a = document.getElementById("open-invite");
+      if (a) a.setAttribute("href", link);
+      if (history.replaceState) history.replaceState(null, "", location.pathname + location.search);
+    }
+  } catch (e) {}
+  location.href = link;
+})();`;
+}
 
 // ── Invitation landing page ──────────────────────────────────────────────────
 accountPageRoutes.get("/invite/:id", async (c) => {
@@ -235,13 +258,13 @@ accountPageRoutes.get("/invite/:id", async (c) => {
     <p class="sub"><b>${esc(who)}</b> invited <b>${esc(inv.email)}</b> to this vault${
       inv.role === "admin" ? " as an admin" : ""
     }.</p>
-    <a class="btn primary" href="${esc(deepLink)}" style="display:block;text-decoration:none">Open in ${esc(
+    <a id="open-invite" class="btn primary" href="${esc(deepLink)}" style="display:flex;text-decoration:none">Open in ${esc(
       BRAND_NAME,
     )}</a>
     <p class="sub" style="margin-top:18px">Sign in with <b>${esc(
       inv.email,
     )}</b> (or create an account with that address) and you'll land in the vault.</p>
     <p class="foot">Don't have ${esc(BRAND_NAME)} yet? <a href="https://baalda.com" rel="noopener">Get it</a>, then open this link again.</p>
-    <script>location.href = ${JSON.stringify(deepLink)};</script>`;
+    <script>${inviteHandOffScript(deepLink)}</script>`;
   return c.html(page({ title: `Join ${inv.organizationName}`, body }));
 });

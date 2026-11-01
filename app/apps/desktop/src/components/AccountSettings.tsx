@@ -6,6 +6,9 @@ import { readRecentServers, switchServer } from "../lib/auth/recentServers";
 import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
 import {
   ACTIVITY_STATUSES,
+  STATUS_MOMENTS,
+  EDITOR_FONTS,
+  type EditorFont,
   type ActivityStatus,
   writeServerChoice,
 } from "../lib/prefs";
@@ -17,6 +20,8 @@ import {
   useUpdateState,
 } from "../lib/updater";
 import { useStore } from "../store";
+import { updateView } from "../lib/updateView";
+import appIcon from "../assets/brand/app-icon.png";
 import {
   CHARACTER_PREFIX,
   PROFILE_CHARACTER_SEEDS,
@@ -24,12 +29,13 @@ import {
   PROFILE_IMAGE_PX,
 } from "../lib/profileAvatar";
 import { imageFileToSquareDataUrl } from "../lib/squareImage";
-import { InstalledAgentsStatus } from "./DashboardAgentRunner";
+import { InstalledAgentsList } from "./DashboardAgentRunner";
 import { AccountPlanTab } from "./AccountPlanTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
 import { AiToolsTab } from "./skills/AiToolsTab";
 import { Avatar } from "./Avatar";
 import { serverFailureMessage } from "./serverFailureMessage";
+import { SecurityCodeField } from "./SecurityCodeField";
 import { SettingsModal } from "./SettingsModal";
 import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
@@ -199,7 +205,7 @@ export function AccountSettings({
           )}
         </nav>
 
-        <section className="settings-content" aria-label={activeTab.label}>
+        <section key={tab} className="settings-content rd-tab-in" aria-label={activeTab.label}>
           <h2 className="settings-section-title">{activeTab.label}</h2>
           {tab === "profile" ? (
             <ProfileTab />
@@ -312,73 +318,104 @@ function ProfileTab() {
 
   return (
     <div className="account-profile">
-      {/* The picture is chosen right where it's shown: upload / reset beside
-          the big avatar, the character gallery just under it. */}
-      <div className="profile-hero">
-        <Avatar
-          label={trimmedName || session.user.email}
-          image={trimmedImage || null}
-          userId={session.user.id}
-        />
-        <div className="profile-hero-meta">
-          <strong>{trimmedName || "—"}</strong>
-          <span className="muted">{session.user.email}</span>
+      {/* Settings rows: title + one-line hint on the left, the control on the
+          right, so a section title, a label and a value never read alike. */}
+      <div className="profile-rows">
+        <div className="profile-row">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Photo</span>
+            <span className="profile-row-hint">
+              A picture or a character. Teammates see it in the sidebar and on your cursor.
+            </span>
+          </div>
+          <div className="profile-row-control profile-photo-control">
+            <Avatar
+              label={trimmedName || session.user.email}
+              image={trimmedImage || null}
+              userId={session.user.id}
+            />
+            <ProfilePictureActions image={trimmedImage} onChange={changeImage} onError={setError} />
+          </div>
         </div>
-        <ProfilePictureActions image={trimmedImage} onChange={changeImage} onError={setError} />
-      </div>
-      <ProfileCharacterGrid
-        label={trimmedName || session.user.email}
-        userId={session.user.id}
-        image={trimmedImage}
-        onChange={changeImage}
-      />
 
-      <label className="field">
-        <span className="field-label">Display name</span>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onFocus={() => {
-            nameFocused.current = true;
-          }}
-          onBlur={() => {
-            nameFocused.current = false;
-            // Leaving the field saves now rather than after the pause.
-            if (nameDraft && nameDraft !== savedName) void persist({ name: nameDraft });
-          }}
-          placeholder="Your name"
-          autoComplete="name"
-        />
-      </label>
+        <div className="profile-row profile-row-top">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Character</span>
+            <span className="profile-row-hint">Pick one instead of a photo.</span>
+          </div>
+          <div className="profile-row-control">
+            <ProfileCharacterGrid
+              label={trimmedName || session.user.email}
+              userId={session.user.id}
+              image={trimmedImage}
+              onChange={changeImage}
+            />
+          </div>
+        </div>
 
+        <div className="profile-row">
+          <label className="profile-row-label" htmlFor="profile-display-name">
+            <span className="profile-row-title">Display name</span>
+            <span className="profile-row-hint">Shown next to your notes and cursor.</span>
+          </label>
+          <div className="profile-row-control">
+            <input
+              id="profile-display-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onFocus={() => {
+                nameFocused.current = true;
+              }}
+              onBlur={() => {
+                nameFocused.current = false;
+                // Leaving the field saves now rather than after the pause.
+                if (nameDraft && nameDraft !== savedName) void persist({ name: nameDraft });
+              }}
+              placeholder="Your name"
+              autoComplete="name"
+            />
+          </div>
+        </div>
 
-      <label className="field">
-        <span className="field-label">Email</span>
-        <input value={session.user.email} disabled readOnly />
-        {/* Verification state, live: the confirmation link bounces back into
-            the app (`baalda://verified`), which re-reads the session, so this
-            flips without a reload. `emailVerified` is absent on very old
-            servers — say nothing rather than "not confirmed" then. */}
-        {session.user.emailVerified === true && (
-          <span className="field-hint">Email confirmed ✓</span>
-        )}
-        {session.user.emailVerified === false && (
-          <span className="field-hint">
-            Not confirmed yet. Check your inbox for the confirmation email.{" "}
-            <button
-              type="button"
-              className="linkish"
-              disabled={resendBusy}
-              onClick={() => void resendConfirmation()}
-            >
-              {resendBusy ? "Sending…" : resendState === "sent" ? "Sent ✓" : "Resend it"}
-            </button>
-            {resendState && resendState !== "sent" && (
-              <span className="update-status error"> {resendState}</span>
+        <div className="profile-row profile-row-top">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Email</span>
+            <span className="profile-row-hint">Used to sign in and for invitations.</span>
+          </div>
+          <div className="profile-row-control">
+            <div className="profile-email">
+              <span className="profile-email-value">{session.user.email}</span>
+              {/* Verification state, live: the confirmation link bounces back
+                  into the app (`baalda://verified`), which re-reads the session,
+                  so this flips without a reload. `emailVerified` is absent on
+                  very old servers: say nothing rather than "not confirmed". */}
+              {session.user.emailVerified === true && (
+                <span className="profile-pill ok">Confirmed</span>
+              )}
+              {session.user.emailVerified === false && (
+                <span className="profile-pill warn">Not confirmed</span>
+              )}
+            </div>
+            {session.user.emailVerified === false && (
+              <span className="profile-row-hint profile-email-hint">
+                Check your inbox for the confirmation email.{" "}
+                <button
+                  type="button"
+                  className="linkish"
+                  disabled={resendBusy}
+                  onClick={() => void resendConfirmation()}
+                >
+                  {resendBusy ? "Sending…" : resendState === "sent" ? "Sent ✓" : "Resend it"}
+                </button>
+                {resendState && resendState !== "sent" && (
+                  <span className="update-status error"> {resendState}</span>
+                )}
+              </span>
             )}
-          </span>
-        )}
-      </label>
+          </div>
+        </div>
+        <SecurityCodeField />
+      </div>
 
       {error && <div className="auth-error">{error}</div>}
 
@@ -417,7 +454,7 @@ function ProfilePictureActions({
     <div className="profile-hero-actions">
       {image && (
         <button type="button" className="link-btn" onClick={() => onChange("")}>
-          Reset
+          Use default
         </button>
       )}
       <button type="button" className="secondary sm" onClick={() => fileRef.current?.click()}>
@@ -451,7 +488,6 @@ function ProfileCharacterGrid({
 }) {
   return (
     <div className="profile-characters">
-      <span className="field-label">Or pick a character</span>
       <div className="profile-character-grid" role="radiogroup" aria-label="Character">
         <button
           type="button"
@@ -485,12 +521,20 @@ function ProfileCharacterGrid({
 
 function StatusTab() {
   const activityStatus = useStore((s) => s.activityStatus);
+  // A status moment ("Coffee break") is none of the four options below, which
+  // left every radio unticked with no word about what was actually set.
+  const moment = STATUS_MOMENTS.find((m) => m.id === activityStatus);
 
   return (
     <div className="status-tab">
       <p className="muted">
         Your status shows next to your cursor for teammates working in the same note.
       </p>
+      {moment && (
+        <p className="field-hint">
+          Right now: {moment.label}, set from the account menu. Pick a status below to replace it.
+        </p>
+      )}
       <div className="status-options">
         {ACTIVITY_STATUSES.map((s) => {
           const active = s.id === activityStatus;
@@ -531,6 +575,7 @@ function StatusTab() {
 }
 
 function AppearanceTab() {
+  const editorFont = useStore((s) => s.editorFont);
   const homeSectionHidden = useStore((s) => s.homeSectionHidden);
   const overrides = useStore((s) => s.appearanceOverrides);
   const vaultAppearance = useStore((s) => s.vaultAppearance);
@@ -593,6 +638,19 @@ function AppearanceTab() {
         return null;
       }}
     />
+    <div className="menu-row">
+      <span className="menu-row-label">
+        Note font
+        <span className="field-hint">The typeface notes are written in, on this device.</span>
+      </span>
+      <MenuSelect<EditorFont>
+        value={editorFont}
+        options={EDITOR_FONTS.map((f) => ({ value: f.id, label: f.label, hint: f.hint }))}
+        onSelect={(f) => useStore.getState().setEditorFont(f)}
+        ariaLabel="Note font"
+        triggerClassName="role-field-trigger"
+      />
+    </div>
     </>
   );
 }
@@ -673,79 +731,106 @@ export function ConnectionTab() {
     }
   };
 
+  // Redesign: two clear choices. Baalda Cloud is the managed server; anything
+  // else is "your own", which is the only case that needs an address typed.
+  const cloudUrl = normalizeServerUrl(DEFAULT_SERVER_URL);
+  const isCloud = draftUrl === cloudUrl;
+  const pick = (url: string) => {
+    setDraft(url);
+    setSaved(false);
+    setError(null);
+  };
+
   return (
-    <div className="connection-tab">
-      <p className="field-hint">
-        One server is active at a time. Switching pauses sync with the previous
-        server. Choose a vault on the new server to resume syncing.
-      </p>
-      {recent.length > 0 && (
-        <div className="field">
-          <span className="field-label">Recent connections</span>
-          {/* The app's one popover select (as in Appearance and Members), not
-              a native <select>: that was the last OS-chrome dropdown here. */}
-          <div className="connection-recent-row">
-            <MenuSelect<string>
-              value={selectedRecent}
-              options={recent.map((url) => ({
-                value: url,
-                label: serverHost(url),
-                hint: url === activeUrl ? "Active" : undefined,
-              }))}
-              onSelect={(url) => {
-                setDraft(url);
-                setSaved(false);
-                setError(null);
-              }}
-              disabled={busy}
-              ariaLabel="Recent connections"
-              direction="down"
-              triggerClassName="role-field-trigger connection-recent-trigger"
-              menuClassName="connection-recent-menu"
-              triggerContent={
-                <span className="role-trigger-label">
-                  {selectedRecent ? serverHost(selectedRecent) : "Choose a recent server"}
-                  {selectedRecent && selectedRecent === activeUrl && (
-                    <span className="appearance-tag connection-active-tag">Active</span>
-                  )}
-                </span>
-              }
-            />
-            <button
-              type="button"
-              className="secondary sm"
-              disabled={busy}
-              onClick={() => {
-                setDraft("");
-                setSaved(false);
-                setError(null);
-                addressInput.current?.focus();
-              }}
-            >
-              Add server
-            </button>
-          </div>
+    <div className="connection-tab conn-b">
+      <p className="field-hint">Choose where your notes sync. You sign in separately on each server.</p>
+      <div className="conn-options" role="radiogroup" aria-label="Server">
+        <button
+          type="button"
+          role="radio"
+          aria-checked={isCloud}
+          className={`conn-option${isCloud ? " is-selected" : ""}`}
+          disabled={busy}
+          onClick={() => pick(DEFAULT_SERVER_URL)}
+        >
+          <span className="conn-radio" aria-hidden="true" />
+          <span className="conn-tile is-cloud" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 18a5 5 0 0 0-1-9.9 7 7 0 0 0-13 3.4A4 4 0 0 0 4 18h13z" /></svg>
+          </span>
+          <b>Baalda Cloud</b>
+          <span className="conn-option-hint">Managed by us. Nothing to set up.</span>
+        </button>
+        <div
+          role="radio"
+          aria-checked={!isCloud}
+          tabIndex={0}
+          className={`conn-option${!isCloud ? " is-selected" : ""}`}
+          onClick={() => {
+            if (isCloud) pick(selectedRecent && selectedRecent !== cloudUrl ? selectedRecent : "");
+            window.setTimeout(() => addressInput.current?.focus(), 0);
+          }}
+          onKeyDown={(e) => {
+            if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+              e.preventDefault();
+              if (isCloud) pick("");
+              addressInput.current?.focus();
+            }
+          }}
+        >
+          <span className="conn-radio" aria-hidden="true" />
+          <span className="conn-tile is-own" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" /><path d="M7 7.5h.01M7 16.5h.01" /></svg>
+          </span>
+          <b>Your own server</b>
+          <span className="conn-option-hint">Self-hosted Baalda. Your data, your machine.</span>
         </div>
-      )}
-      <label className="field">
-        <span className="field-label">Server URL</span>
+      </div>
+      {/* Below the two cards, not inside one: growing a card made both
+          cards resize and jump whenever the choice flipped. */}
+      {!isCloud && (
         <input
           ref={addressInput}
+          className="conn-address"
           value={draft}
           disabled={busy}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setSaved(false);
+            setError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void save();
+          }}
           placeholder="https://notes.example.com"
+          aria-label="Server address"
           spellCheck={false}
           autoCapitalize="off"
         />
-        <span className="field-hint">
-          The Baalda server this device syncs against, currently{" "}
-          <strong>{serverHost(serverUrl)}</strong>. Use the managed service or
-          point at your own. Your account is per-server, so switching signs you
-          in to that server's session instead.
+      )}
+      {recent.length > 0 && (
+        <div className="conn-recent">
+          <span className="conn-recent-label">Recent</span>
+          <div className="conn-chips" role="group" aria-label="Recent connections">
+            {recent.map((url) => (
+              <button
+                key={url}
+                type="button"
+                className={`conn-chip${url === draftUrl ? " is-picked" : ""}${url === activeUrl ? " is-active" : ""}`}
+                disabled={busy}
+                aria-pressed={url === draftUrl}
+                title={url === activeUrl ? `${url} (active)` : url}
+                onClick={() => pick(url)}
+              >
+                {serverHost(url)}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="conn-foot">
+        <span className="conn-status" role="status">
+          {saved ? "Reconnected." : `Connected to ${serverHost(serverUrl)}`}
         </span>
-      </label>
-      <div className="update-actions">
         <button
           type="button"
           className="primary sm"
@@ -753,13 +838,8 @@ export function ConnectionTab() {
           onClick={() => void save()}
         >
           {busy && <span className="btn-spinner" aria-hidden="true" />}
-          <span>Save &amp; reconnect</span>
+          <span>Connect</span>
         </button>
-        {saved && (
-          <span className="update-status" role="status">
-            Reconnected.
-          </span>
-        )}
       </div>
       {error && <div className="auth-error">{error}</div>}
     </div>
@@ -768,6 +848,8 @@ export function ConnectionTab() {
 
 function AboutTab({ onClose }: { onClose: () => void }) {
   const update = useUpdateState();
+  const serverUrl = useStore((s) => s.serverUrl);
+  const email = useStore((s) => s.session?.user.email ?? "");
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -784,7 +866,6 @@ function AboutTab({ onClose }: { onClose: () => void }) {
     update.phase === "ready";
 
   let statusText: string | null = null;
-  let statusError = false;
   switch (update.phase) {
     case "checking":
       statusText = "Checking for updates…";
@@ -814,65 +895,110 @@ function AboutTab({ onClose }: { onClose: () => void }) {
       break;
     case "error":
       statusText = `Couldn't check for updates: ${update.message}`;
-      statusError = true;
       break;
     case "failed":
       statusText = `Couldn't install version ${update.version}${update.message ? `: ${update.message}` : ""}`;
-      statusError = true;
       break;
   }
 
   return (
     <div className="about-tab">
-      {/* One row: version + status on the left, the action on the right. The
-          status line is always rendered (empty when idle) so a check never
-          shifts the row; the button keeps a fixed width for the same reason. */}
-      <div className="about-update-row">
-        <div className="about-update-text">
-          <div className="about-version">
-            <span className="menu-row-label">Current version</span>
-            <span className="mono">{version ?? "…"}</span>
+      {/* One card for every update state, so nothing jumps between steps. */}
+      <UpdateCard
+        view={updateView(update, version)}
+        statusText={statusText}
+        busy={busy}
+        onCheck={() => void checkAndAutoInstall()}
+        onRestart={() => void relaunchForUpdate()}
+      />
+
+      <div className="profile-rows about-rows">
+        <div className="profile-row profile-row-top">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Installed agents</span>
+            <span className="profile-row-hint">Used to update dashboards. Found when Baalda starts.</span>
           </div>
-          <span className={`update-status${statusError ? " error" : ""}`} role="status" aria-live="polite">
-            {statusText}
+          <div className="profile-row-control">
+            <InstalledAgentsList />
+          </div>
+        </div>
+        <div className="profile-row">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Server</span>
+            <span className="profile-row-hint">Where your notes sync.</span>
+          </div>
+          <div className="profile-row-control about-inline">
+            <span className="about-value">
+              <span className="about-live-dot" aria-hidden="true" />
+              {serverHost(serverUrl)}
+            </span>
+          </div>
+        </div>
+        <div className="profile-row">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Account</span>
+            <span className="profile-row-hint">Signing out keeps your notes on this computer.</span>
+          </div>
+          <div className="profile-row-control about-inline">
+            <span className="about-value">{email}</span>
+            <button
+              type="button"
+              className="about-signout"
+              onClick={() => {
+                onClose();
+                void useStore.getState().signOut();
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** About's update card: mark, version and status, the one action, progress. */
+function UpdateCard({
+  view,
+  statusText,
+  busy,
+  onCheck,
+  onRestart,
+}: {
+  view: ReturnType<typeof updateView>;
+  statusText: string | null;
+  busy: boolean;
+  onCheck: () => void;
+  onRestart: () => void;
+}) {
+  return (
+    <div className={`update-card is-${view.tone}`}>
+      <div className="update-card-row">
+        <img className="update-card-mark is-icon" src={appIcon} alt="" aria-hidden="true" />
+        <div className="update-card-text">
+          <span className="update-card-title">{view.title}</span>
+          <span className="update-card-sub" role="status" aria-live="polite">
+            {view.tone === "ok" || view.tone === "ready" ? <span className="update-card-dot" aria-hidden="true" /> : null}
+            {view.sub || statusText}
           </span>
         </div>
-        {/* The one moment worth an accent button: the bytes are in and we are
-            holding the restart for a pause in typing. Someone who is done can
-            take it now. (The check button is disabled in this phase anyway.) */}
-        {update.phase === "ready" ? (
-          <button className="primary sm about-update-btn" onClick={() => void relaunchForUpdate()}>
+        {view.tone === "busy" && view.percent === null && <span className="btn-spinner update-card-spin" aria-hidden="true" />}
+        {view.action === "restart" ? (
+          <button type="button" className="update-card-btn is-ink" onClick={onRestart}>
             Restart now
           </button>
-        ) : (
-          <button
-            className="secondary sm about-update-btn"
-            disabled={busy}
-            aria-busy={busy}
-            onClick={() => void checkAndAutoInstall()}
-          >
-            {busy && <span className="btn-spinner" aria-hidden="true" />}
-            <span>{update.phase === "checking" ? "Checking…" : busy ? "Updating…" : "Check for updates"}</span>
+        ) : view.action ? (
+          <button type="button" className="update-card-btn" disabled={busy} onClick={onCheck}>
+            {view.action === "retry" ? "Try again" : "Check for updates"}
           </button>
-        )}
+        ) : null}
       </div>
-
-      <InstalledAgentsStatus />
-
-      <div className="menu-sep" />
-      <button
-        className="menu-item danger"
-        onClick={() => {
-          onClose();
-          void useStore.getState().signOut();
-        }}
-      >
-        <Icon>
-          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-          <path d="M16 17l5-5-5-5M21 12H9" />
-        </Icon>
-        <span className="menu-item-label">Sign out</span>
-      </button>
+      {view.percent !== null && (
+        <span className="update-card-bar" aria-hidden="true">
+          <b style={{ width: `${view.percent}%` }} />
+        </span>
+      )}
     </div>
   );
 }
@@ -895,3 +1021,4 @@ function Icon({ children }: { children: React.ReactNode }) {
 }
 
 export { AccountSettings as default };
+

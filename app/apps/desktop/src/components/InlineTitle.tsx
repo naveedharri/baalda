@@ -310,14 +310,44 @@ export function InlineTitle({
           {warning}
         </p>
       )}
+      {/* A note with no properties offers the three common starts, always
+          visible (quietly), instead of one button that only showed on hover. */}
       {!hasFrontmatter && !readOnly && (
-        <button
-          type="button"
-          className="inline-title-add"
-          onClick={() => addPropertyToNote(view)}
-        >
-          Add property
-        </button>
+        <div className="inline-title-adds">
+          <button
+            type="button"
+            className="inline-title-add"
+            onClick={() => addPropertyToNote(view, { key: "tags", value: { kind: "list", value: [] } })}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M20 12l-8 8-9-9V3h8z" />
+              <circle cx="7.5" cy="7.5" r="1.5" />
+            </svg>
+            Add tags
+          </button>
+          <button type="button" className="inline-title-add" onClick={() => addPropertyToNote(view)}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            Add property
+          </button>
+          <button
+            type="button"
+            className="inline-title-add"
+            onClick={() =>
+              addPropertyToNote(view, {
+                key: "date",
+                value: { kind: "date", value: new Date().toLocaleDateString("en-CA") },
+              })
+            }
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="5" width="18" height="16" rx="2" />
+              <path d="M3 10h18M8 3v4M16 3v4" />
+            </svg>
+            Add date
+          </button>
+        </div>
       )}
     </div>
   );

@@ -1,6 +1,28 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { AsyncButton } from "./AsyncButton";
+import { levelClass } from "../lib/membersAccess";
+
+/** Access levels as the confirm's before/after card names them. */
+const LEVEL_NAME: Record<string, string> = {
+  open: "Can edit",
+  readonly: "Can view",
+  private: "No access",
+  custom: "Custom",
+};
+
+/**
+ * What an access confirm changes, drawn as one before/after line: who, then
+ * their level now and the level they will have. `from: null` (not known yet)
+ * shows only the new level.
+ */
+export interface ConfirmChange {
+  who: ReactNode;
+  sub?: ReactNode;
+  avatar?: ReactNode;
+  from: "open" | "readonly" | "private" | "custom" | null;
+  to: "open" | "readonly" | "private";
+}
 
 /**
  * A confirm for actions that are hard to take back. Rides the shared
@@ -20,6 +42,8 @@ import { AsyncButton } from "./AsyncButton";
  */
 export function ConfirmDialog({
   title,
+  subtitle,
+  change,
   children,
   confirmLabel,
   cancelLabel = "Cancel",
@@ -29,6 +53,10 @@ export function ConfirmDialog({
   onCancel,
 }: {
   title: ReactNode;
+  /** One quiet line under the title (e.g. which vault this applies to). */
+  subtitle?: ReactNode;
+  /** An access change, shown as a before/after card above the body. */
+  change?: ConfirmChange;
   children: ReactNode;
   confirmLabel: string;
   cancelLabel?: string;
@@ -95,6 +123,25 @@ export function ConfirmDialog({
           )}
         </div>
         <h2 className="confirm-title">{title}</h2>
+        {subtitle && <p className="confirm-subtitle">{subtitle}</p>}
+        {change && (
+          <div className="confirm-change">
+            <span className="confirm-change-who">
+              {change.avatar}
+              <span className="confirm-change-name">
+                <span>{change.who}</span>
+                {change.sub && <small>{change.sub}</small>}
+              </span>
+            </span>
+            {change.from && (
+              <>
+                <span className={`confirm-level ${levelClass(change.from)}`}>{LEVEL_NAME[change.from]}</span>
+                <span className="confirm-change-arrow" aria-label="to">→</span>
+              </>
+            )}
+            <span className={`confirm-level ${levelClass(change.to)}`}>{LEVEL_NAME[change.to]}</span>
+          </div>
+        )}
         <div className="confirm-body">{children}</div>
         <div className="confirm-actions">
           <button type="button" className="ghost-pill" onClick={onCancel}>

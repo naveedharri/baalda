@@ -43,7 +43,6 @@ export interface PlanLimits {
   storageBytes: number | null;
   /** Live notes per vault; null = no cap. */
   notesPerVault: number | null;
-  assistant: boolean;
   fileSync: boolean;
 }
 
@@ -90,7 +89,6 @@ const UNLIMITED: PlanLimits = {
   vaults: null,
   storageBytes: null,
   notesPerVault: null,
-  assistant: true,
   fileSync: true,
 };
 
@@ -203,7 +201,6 @@ export function planFromRow(
       vaults: freeVaults,
       storageBytes: abuseMaxStorageBytes(),
       notesPerVault: abuseMaxNotes(),
-      assistant: false,
       fileSync: false,
     };
   }
@@ -234,7 +231,6 @@ async function legacyPlan(db: Queryable, target: PlanTarget): Promise<AccountPla
         vaults: active ? null : config.freeMaxVaults,
         storageBytes: orgId ? await legacyStorageLimitBytes(orgId, db) : null,
         notesPerVault: requiresCloudPlan() && !active ? LEGACY_FREE_NOTE_LIMIT : null,
-        assistant: !requiresCloudPlan() || active,
         fileSync: orgId ? await legacyCanSyncAttachments(orgId, db) : false,
       };
   return {

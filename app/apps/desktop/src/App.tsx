@@ -1,9 +1,14 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { EditorView } from "@codemirror/view";
 import "./App.css";
+import "./styles/redesign.css";
 import { AccountMenu } from "./components/AccountMenu";
 import { BackendBehindNotice } from "./components/BackendBehindNotice";
 import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
+import { Avatar } from "./components/Avatar";
+import { forgetLayouts, prewarmGraphLayout } from "./lib/graph/prelayout";
+import { loadSettings as loadGraphSettings } from "./lib/graph/graphSettings";
 import { ReconcileBanner } from "./components/ReconcileBanner";
 import { HeldDeleteNotice } from "./components/HeldDeleteNotice";
 import { NoteRemovedNotice } from "./components/NoteRemovedNotice";
@@ -40,6 +45,8 @@ import { GraphButton } from "./components/GraphButton";
 import { TabBar } from "./components/TabBar";
 import { VirtualTabHost } from "./components/VirtualTabHost";
 import { Toasts } from "./components/Toasts";
+import { VaultKeyPrompts } from "./components/VaultKeyPrompts";
+import { VaultKeyWaitingNotice } from "./components/VaultKeyWaitingNotice";
 import { toast } from "./lib/toast";
 import { RightPanel } from "./components/RightPanel";
 import { TalkStatus } from "./components/TalkButton";
@@ -73,7 +80,7 @@ import {
 } from "./lib/updater";
 import { onClientOutdated } from "./lib/api";
 import { setUpdateHintHandler } from "./lib/updateHint";
-import { isSilentRelease, notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
+import { isSilentRelease, notesForVersion, releaseNoteItems } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { viewerFor } from "./lib/formats";
 import { effectiveHomeNote, homeSidebarVisitKey } from "./lib/pins";
@@ -122,6 +129,26 @@ const AuthDialog = lazy(() =>
  * rather than implying the app lost track of the file — and it still only offers
  * to close, because the editor may hold text the user has not saved anywhere.
  */
+/** Folder path chips at the top-left of the note page (mockup v4). */
+function NoteBreadcrumb() {
+  const path = useStore((s) => s.openNote?.path ?? null);
+  if (!path) return null;
+  const parts = path.split("/");
+  const folders = parts.slice(0, -1);
+  return (
+    <nav className="rd-crumbs" aria-label="Note location">
+      {folders.map((f, i) => (
+        <span key={i} className="rd-crumb">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2h8.4A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" /></svg>
+          {f}
+        </span>
+      ))}
+      {folders.length > 0 && <span className="rd-crumb-sep">/</span>}
+      <span className="rd-crumb">{noteLabel(path)}</span>
+    </nav>
+  );
+}
+
 function RemovedBanner() {
   const noteRemoved = useStore((s) => s.noteRemoved);
   const openNote = useStore((s) => s.openNote);
@@ -460,6 +487,60 @@ function ClosedAppChangesBanner() {
  * after a few seconds) plus a one-shot confetti burst over the whole window.
  * The chime is played by the store when the celebration is triggered.
  */
+/**
+ * The new teammate's avatar drops from the top of the window and lands in the
+ * team's avatar stack beside the open note (or by the header buttons when no
+ * note is open), with a small bounce, then hands over to the real stack.
+ * Decorative only; skipped entirely when the OS asks for reduced motion.
+ */
+function JoinAvatarDrop({ name }: { name: string }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      setDone(true);
+      return;
+    }
+    // The VISIBLE stack: hidden tabs keep their own (zero-sized) copies, and
+    // landing on one of those sent the avatar to the top-left corner.
+    const visible = (sel: string) =>
+      [...document.querySelectorAll<HTMLElement>(sel)].find((e) => {
+        const b = e.getBoundingClientRect();
+        return b.width > 0 && b.height > 0;
+      }) ?? null;
+    const avatar = visible(".presence-bar .presence-avatar");
+    const target = avatar ?? visible(".header-actions");
+    const r = target?.getBoundingClientRect();
+    const size = avatar ? Math.round(r!.width) : 36;
+    el.style.width = el.style.height = `${size}px`;
+    // Land just left of the first avatar, as the newest face in the row.
+    const endX = r ? (avatar ? r.left - size * 0.72 : r.left + r.width / 2 - size / 2) : window.innerWidth - 80;
+    const endY = r ? r.top + r.height / 2 - size / 2 : 20;
+    const startX = window.innerWidth / 2 - size / 2;
+    const startY = -80;
+    const anim = el.animate(
+      [
+        { transform: `translate(${startX}px, ${startY}px) scale(2.2) rotate(-12deg)`, opacity: 0 },
+        { transform: `translate(${startX}px, ${window.innerHeight * 0.32}px) scale(2.2) rotate(6deg)`, opacity: 1, offset: 0.35 },
+        { transform: `translate(${endX}px, ${endY}px) scale(1.15) rotate(0deg)`, opacity: 1, offset: 0.78 },
+        { transform: `translate(${endX}px, ${endY - 8}px) scale(1)`, opacity: 1, offset: 0.88 },
+        { transform: `translate(${endX}px, ${endY}px) scale(1)`, opacity: 0 },
+      ],
+      { duration: 2200, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "forwards" },
+    );
+    anim.onfinish = () => setDone(true);
+    return () => anim.cancel();
+  }, []);
+  if (done) return null;
+  return (
+    <div ref={ref} className="join-avatar-drop" aria-hidden="true">
+      <Avatar label={name} />
+    </div>
+  );
+}
+
 function MemberJoinedBanner() {
   const memberJoined = useStore((s) => s.memberJoined);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -476,6 +557,7 @@ function MemberJoinedBanner() {
       {memberJoined && (
         <canvas ref={canvasRef} className="celebrate-confetti" aria-hidden="true" />
       )}
+      {memberJoined && <JoinAvatarDrop key={memberJoined.at} name={memberJoined.name} />}
       <Banner show={!!memberJoined} className="celebrate-banner" role="status">
         <span>
           🎉 <strong>{memberJoined?.name}</strong> joined the vault
@@ -860,8 +942,33 @@ const loadMemberPictures = createMemberPicturesLoader({
   fetch: (orgId) => authManager.api.getMembersOverview(orgId),
 });
 
+/**
+ * Lays the graph out in the background (lib/graph/prelayout.ts) a few seconds
+ * after a vault opens or its notes change, while the graph is closed, so
+ * opening it shows the finished shape. Renders nothing.
+ */
+function GraphPrewarm({ paused }: { paused: boolean }) {
+  const vaultPath = useStore((s) => s.vault?.path ?? null);
+  const noteCount = useStore((s) => s.titles.length);
+  useEffect(() => {
+    forgetLayouts();
+  }, [vaultPath]);
+  useEffect(() => {
+    if (!vaultPath || paused || noteCount === 0) return;
+    const id = window.setTimeout(() => {
+      void prewarmGraphLayout(vaultPath, loadGraphSettings());
+    }, GRAPH_PREWARM_DELAY_MS);
+    return () => window.clearTimeout(id);
+  }, [vaultPath, noteCount, paused]);
+  return null;
+}
+const GRAPH_PREWARM_DELAY_MS = 4000;
+
+/** Folder colours for the change tiles, in order (lib/appearance.ts ITEM_COLORS). */
+const WHATS_NEW_TONES = ["violet", "green", "orange", "sky", "pink"] as const;
+
 function WhatsNewModal() {
-  const [updated, setUpdated] = useState<{ version: string; notes: string[] } | null>(
+  const [updated, setUpdated] = useState<{ version: string; notes: { title: string; detail: string }[] } | null>(
     null,
   );
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -881,7 +988,7 @@ function WhatsNewModal() {
       // installed; the workflow ships one section now and this is the backstop.
       setUpdated({
         version: stash.version,
-        notes: releaseNoteLines(notesForVersion(stash.notes, stash.version), 5),
+        notes: releaseNoteItems(notesForVersion(stash.notes, stash.version), 5),
       });
     });
     return () => {
@@ -922,52 +1029,39 @@ function WhatsNewModal() {
           onClick={(e) => e.stopPropagation()}
         >
           <div className="whats-new-hero">
-            <div className="whats-new-glyph" aria-hidden="true">
-              <svg
-                width="26"
-                height="26"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
-                <path d="M19 15l.7 1.8L21.5 17.5l-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7L19 15z" />
-              </svg>
+            {/* Redesign: a ring in the sidebar's folder colours around the sparkle. */}
+            <div className="whats-new-badge" aria-hidden="true">
+              <div>
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
+                </svg>
+              </div>
             </div>
-            <h2 className="whats-new-title">What&rsquo;s New</h2>
-            <span className="whats-new-version">v{updated.version}</span>
-            <p className="whats-new-sub">
-              {BRAND_NAME} updated itself to the latest version. Here&rsquo;s what
-              changed.
-            </p>
+            <h2 className="whats-new-title">
+              {BRAND_NAME} <span className="whats-new-title-version">v{updated.version}</span>
+            </h2>
+            <p className="whats-new-sub">Updated and ready. Here&rsquo;s what&rsquo;s new.</p>
           </div>
           {updated.notes.length > 0 && (
             <ul className="whats-new-notes">
-              {updated.notes.map((line, i) => (
-                <li key={i} style={{ animationDelay: `${120 + i * 70}ms` }}>
-                  <svg
-                    width="15"
-                    height="15"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2.4"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M20 6L9 17l-5-5" />
-                  </svg>
-                  <span>{line}</span>
+              {updated.notes.map((n, i) => (
+                <li key={i} className={`tone-${WHATS_NEW_TONES[i % WHATS_NEW_TONES.length]}`} style={{ animationDelay: `${120 + i * 70}ms` }}>
+                  <span className="whats-new-tile" aria-hidden="true">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                  </span>
+                  <span className="whats-new-text">
+                    {n.title && <b>{n.title}</b>}
+                    {n.detail && <span>{n.detail}</span>}
+                  </span>
+                  {i === 0 && <span className="whats-new-tag">NEW</span>}
                 </li>
               ))}
             </ul>
           )}
           <button className="primary whats-new-cta" autoFocus onClick={close}>
-            Nice, let&rsquo;s go
+            Awesome
           </button>
         </div>
       </div>
@@ -1529,6 +1623,30 @@ export default function App() {
 
     const onKey = async (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
+      // ⌘A / Ctrl+A with nothing focused (after a click on the tab strip, the
+      // sidebar or empty space) selects the open note, not the whole window.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === "a") {
+        const ae = document.activeElement;
+        const inField = ae?.closest("input, textarea, [contenteditable='true'], .cm-editor");
+        const host = document.querySelector<HTMLElement>(".editor-pane .cm-editor, .cm-editor");
+        const view = !inField && host ? EditorView.findFromDOM(host) : null;
+        if (view) {
+          e.preventDefault();
+          view.focus();
+          view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+        }
+        return;
+      }
+      // Copy by keyboard even when no native Edit menu item claims ⌘C first (a
+      // menu that has it consumes the key before it gets here). Copy only: a
+      // second copy is harmless where the native one also runs, a second cut
+      // is not.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === "c") {
+        const sel = window.getSelection();
+        const inField = document.activeElement?.closest("input, textarea, .cm-editor");
+        if (inField || (sel && !sel.isCollapsed)) document.execCommand("copy");
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "h") {
         e.preventDefault();
         void useStore.getState().openHome().catch((err) => toast(String(err), "error"));
@@ -1607,8 +1725,40 @@ export default function App() {
         return;
       }
     };
+    // macOS runs Edit → Select All itself, before the page sees ⌘A, and selects
+    // the document rather than the note. When a selection appears that swallows
+    // the whole note while no field has focus, hand it to the editor as its own
+    // select-all, so it is highlighted, copyable and editable like one.
+    // A selection made with the mouse is the user's own; only one that appears
+    // with no pointer involved (Edit → Select All) is taken over.
+    let pointerAt = 0;
+    const onPointer = () => {
+      pointerAt = performance.now();
+    };
+    const onSelectionChange = () => {
+      const sel = document.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+      if (performance.now() - pointerAt < 400) return;
+      const ae = document.activeElement;
+      if (ae && ae !== document.body && ae.closest("input, textarea, .cm-editor, .modal")) return;
+      const content = document.querySelector<HTMLElement>(".cm-editor .cm-content");
+      if (!content || !sel.containsNode(content, true)) return;
+      const view = EditorView.findFromDOM(content.closest(".cm-editor") as HTMLElement);
+      if (!view || view.hasFocus) return;
+      sel.removeAllRanges();
+      view.focus();
+      view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    document.addEventListener("pointerdown", onPointer, true);
+    document.addEventListener("pointerup", onPointer, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("selectionchange", onSelectionChange);
+      document.removeEventListener("pointerdown", onPointer, true);
+      document.removeEventListener("pointerup", onPointer, true);
+    };
   }, []);
 
   // Only while we still don't know WHICH folder to show. `setVault` lands
@@ -1811,6 +1961,7 @@ export default function App() {
           <MembershipLostBanner />
           <VaultRootMissingBanner />
           <VaultRootRestoredBanner />
+          <VaultKeyWaitingNotice />
           <AccountLapsedNotice />
           <ClosedAppChangesBanner />
           <NotSyncingBanner />
@@ -1820,6 +1971,7 @@ export default function App() {
           <RemovedBanner />
           {attachmentLocalOnly && <AttachmentSyncNotice />}
           <div className="editor-wrap">
+            {!activeVirtual && <NoteBreadcrumb />}
             {activeVirtual && <VirtualTabHost tab={activeVirtual} />}
             {/* Stays MOUNTED under a virtual tab (display toggles, the tree does
                 not), so the note's live editor is still there for the
@@ -1888,6 +2040,8 @@ export default function App() {
           </ErrorBoundary>
         )}
         <VaultFolderPrompt />
+        <VaultKeyPrompts />
+        <GraphPrewarm paused={graphOpen} />
         {/* Last child so it layers over everything without a z-index race. */}
         <Toasts />
       </div>

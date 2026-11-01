@@ -44,6 +44,14 @@ export async function seedVault(organizationId: string, name = "Vault"): Promise
   return id;
 }
 
+/** Vault keys opt-in (migration 081): what "Encrypt this vault" records. */
+export async function markEncryptionRequested(vaultId: string, userId: string | null = null): Promise<void> {
+  await pool.query(
+    "UPDATE vaults SET encryption_requested_at = now(), encryption_requested_by = $2 WHERE id = $1",
+    [vaultId, userId],
+  );
+}
+
 export async function seedFolder(
   vaultId: string,
   parentId: string | null,

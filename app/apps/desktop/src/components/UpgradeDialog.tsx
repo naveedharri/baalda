@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { exitThen } from "../lib/exitMotion";
 import { createPortal } from "react-dom";
 import { authManager } from "../lib/auth/authManager";
 import * as ipc from "../lib/ipc";
@@ -435,8 +436,8 @@ export function UpgradeDialog({
           <>
             {reason && <p className="upgrade-reason muted">{reason}</p>}
             <p className="upgrade-lead">
-              <strong>Pro</strong> adds unlimited members, standalone file sync and Baalda
-              Assistant to this vault. Pick how you'd like to pay.
+              <strong>Pro</strong> adds unlimited members and standalone file sync to this
+              vault. Pick how you'd like to pay.
             </p>
             <p className="muted">{legacyFreePlanExplanation(billingConfig?.freeLimits)}</p>
 
@@ -562,7 +563,7 @@ export function UpgradeDialog({
             <div className="muted">
               {teamMode
                 ? "Your vaults now sync standalone files, and your seats are ready for your team."
-                : "This vault now has unlimited members, standalone file sync and Baalda Assistant."}
+                : "This vault now has unlimited members and standalone file sync."}
             </div>
             <button className="primary sm" onClick={onClose}>
               Done
@@ -621,7 +622,7 @@ export function UpgradeDialogHost() {
       key={request.token}
       orgId={request.orgId}
       reason={request.reason}
-      onClose={() => useStore.getState().clearUpgradeDialogRequest()}
+      onClose={() => exitThen(() => useStore.getState().clearUpgradeDialogRequest())}
     />
   );
 }

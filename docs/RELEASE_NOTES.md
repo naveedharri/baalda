@@ -21,6 +21,13 @@
     (every app still installs it). Ask before each release: silent, or notes?
 -->
 
+## 0.1.98
+
+- **A fresh new look** across the app, with cleaner settings, menus and sidebar.
+- **Security improvements** for your vaults and your team.
+- **Easier teamwork**: inviting people and joining a vault takes fewer steps.
+- **Faster and more reliable**, with fixes and improvements throughout.
+
 ## 0.1.94
 
 - **Choose who gets each skill.** Share an Agent Skill with your whole team, or only with the people you pick. You can see who has it on every skill, and each person's skills on their profile.

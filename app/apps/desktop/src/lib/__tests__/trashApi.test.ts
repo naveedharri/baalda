@@ -8,11 +8,19 @@ interface Call {
   body: unknown;
 }
 
+/** The URL without this build's `clientVersion` parameter, which every API
+ *  call now carries (`withClientVersion`); asserted on its own in api.test.ts. */
+function stripClientVersion(raw: string): string {
+  const u = new URL(raw);
+  u.searchParams.delete("clientVersion");
+  return u.toString();
+}
+
 function client(script: (call: Call) => { status?: number; json?: unknown }) {
   const calls: Call[] = [];
   const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const call: Call = {
-      url: String(input),
+      url: stripClientVersion(String(input)),
       method: init?.method ?? "GET",
       body: init?.body ? JSON.parse(init.body as string) : undefined,
     };

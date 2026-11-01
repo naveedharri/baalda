@@ -736,7 +736,7 @@ button.primary.hero:hover:not(:disabled) {
   display: grid;
   /* Width is user-set (see SidebarResizer); the fallback is the default so the
      layout is correct for one paint before React sets the variable. */
-  --sidebar-layout-w: var(--sidebar-w, 264px);
+  --sidebar-layout-w: var(--sidebar-w, 300px);
   grid-template-columns: var(--sidebar-layout-w) minmax(0, 1fr);
   height: 100%;
   background: var(--bg-app);
@@ -745,6 +745,11 @@ button.primary.hero:hover:not(:disabled) {
 }
 .app.sidebar-hidden {
   --sidebar-layout-w: 0px;
+}
+/* Dragging the sidebar edge: no easing, so the column and the rows sized from
+   --sidebar-layout-w move together with the pointer (see SidebarResizer). */
+.sidebar-resizing .app {
+  transition: none;
 }
 
 /* ---- Window drag regions ----
@@ -3837,14 +3842,41 @@ button.secondary.about-update-btn:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Pending-invitation ping */
-.identity-alert {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+/* Pending invitations, seen with the menu closed: a count on the avatar and
+   line 2 reading "N invitations" until every one is answered. Ink, not the
+   accent, so it reads as a notice rather than a brand mark. */
+.identity-invite-badge {
+  position: absolute;
+  top: -5px;
+  right: -7px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: var(--text-primary);
+  color: var(--bg-app);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--bg-app);
+  pointer-events: none;
+}
+.identity-bar:hover .identity-invite-badge {
+  box-shadow: 0 0 0 2px var(--bg-hover);
+}
+.identity-line2.identity-invites {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.identity-invites svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
 }
 .identity-chevron {
   color: var(--text-tertiary);
@@ -4555,7 +4587,8 @@ button.secondary.about-update-btn:disabled {
    graph panel and nowhere else. Checkboxes and radios keep their own compact
    controls instead of inheriting text-field dimensions. */
 .settings-page input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
-.settings-page select {
+.settings-page select,
+.settings-page textarea.vault-key-input {
   background: var(--bg-subtle);
   border: 1px solid transparent;
   color: var(--text-primary);
@@ -4569,18 +4602,21 @@ button.secondary.about-update-btn:disabled {
     box-shadow var(--t-fast) var(--ease),
     background var(--t-fast) var(--ease);
 }
-.settings-page input::placeholder {
+.settings-page input::placeholder,
+.settings-page textarea.vault-key-input::placeholder {
   color: var(--text-tertiary);
 }
 .settings-page input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):hover,
-.settings-page select:hover {
+.settings-page select:hover,
+.settings-page textarea.vault-key-input:hover {
   border-color: var(--border-strong);
 }
 /* A focused range keeps the browser's own ring — the box-shadow + surface
    background below are a text field's focus, and the background would repaint
    the track out of existence. */
 .settings-page input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus,
-.settings-page select:focus {
+.settings-page select:focus,
+.settings-page textarea.vault-key-input:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
@@ -5272,50 +5308,218 @@ button.secondary.about-update-btn:disabled {
   color: var(--accent);
   background: var(--accent-soft);
 }
-/* Account menu: one plain menu row per invitation (envelope, vault, "from X"),
-   with Accept and Decline as compact text buttons at the right. An unseen one
-   gets an accent envelope and a small dot, nothing louder. */
-.invite-menu-row {
-  cursor: default;
-}
-.invite-menu-row .menu-hint {
-  max-width: 35%;
-}
-.invite-menu-icon {
+/* Account menu: ONE "Invitations" row (count + chevron) whose panel opens
+   beside it, like a submenu. The panel's top lines up with the row; the row
+   keeps a soft fill while its panel is out. Neutral ink throughout. */
+.invites-tab {
   position: relative;
-  display: inline-flex;
-  flex-shrink: 0;
 }
-.invite-menu-row.is-new .menu-icon {
-  color: var(--accent);
+.invites-tab.is-open > .invites-tab-row {
+  background: var(--bg-hover);
 }
-.invite-menu-row.is-new .invite-menu-icon::after {
-  content: "";
-  position: absolute;
-  top: -2px;
-  right: -3px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 1.5px var(--bg-surface);
-}
-.invite-menu-actions {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
+.invites-count {
   margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  background: var(--text-primary);
+  color: var(--bg-surface);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  flex: none;
 }
-.invite-menu-btn {
-  padding: 1px 6px;
-  font-size: var(--fs-xs);
-  line-height: var(--lh-body);
-}
-.invite-menu-btn.decline {
+.invites-chevron {
+  width: 14px;
+  height: 14px;
+  flex: none;
   color: var(--text-tertiary);
 }
-.invite-menu-btn.decline:hover {
+.invites-flyout {
+  position: absolute;
+  top: -6px;
+  /* Past the popover's own padding, then a small gap. */
+  left: calc(100% + 14px);
+  width: 360px;
+  padding: 6px;
+  box-sizing: border-box;
+  border-radius: 16px;
+  background: var(--bg-surface);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 2px 4px rgba(11, 10, 16, 0.05),
+    0 24px 48px -16px rgba(11, 10, 16, 0.22);
+  z-index: 2;
+  cursor: default;
+}
+.invites-flyout-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 10px;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.invites-flyout-head b {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.invites-flyout-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+}
+.invites-flyout-row.is-new {
+  background: var(--bg-subtle);
+  border-radius: var(--radius-sm);
+}
+.invites-flyout-tile {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: var(--bg-subtle);
   color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.invites-flyout-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.invites-flyout-name {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.invites-flyout-hint {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.invites-flyout-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+/* Accept is solid ink (inverted in dark), Decline plain text. */
+.invite-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  font-size: var(--fs-xs);
+  line-height: 26px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.invite-btn.accept {
+  background: var(--text-primary);
+  color: var(--bg-surface);
+  font-weight: 500;
+}
+.invite-btn.accept:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.invite-btn.decline {
+  background: transparent;
+  color: var(--text-secondary);
+}
+.invite-btn.decline:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+/* The one-time card above the identity bar when an invitation arrives. */
+.invite-arrival {
+  margin: 0 var(--sp-2) var(--sp-2);
+  padding: 12px;
+  border-radius: 14px;
+  background: var(--bg-surface);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 12px 28px -12px rgba(11, 10, 16, 0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: invite-arrival-in var(--t-med, 200ms) var(--ease, ease-out);
+}
+.invite-arrival-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.invite-arrival-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+.invite-arrival-text b {
+  font-weight: 600;
+}
+.invite-arrival-text small {
+  display: block;
+  margin-top: 1px;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.invite-arrival-close {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.invite-arrival-close svg {
+  width: 12px;
+  height: 12px;
+}
+.invite-arrival-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.invite-arrival-actions {
+  display: flex;
+  gap: 6px;
+  padding-left: 38px;
+}
+.invite-arrival-actions .invite-btn {
+  height: 28px;
+  line-height: 28px;
+  padding: 0 12px;
+}
+.invite-arrival-actions .invite-btn.decline {
+  box-shadow: inset 0 0 0 1px var(--border-strong, var(--border));
+}
+@keyframes invite-arrival-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
 }
 /* One row per invitation: name + who asked on the left, Accept and Decline
    right-aligned. Both buttons carry fixed labels, so they line up across rows. */
@@ -5393,23 +5597,9 @@ button.secondary.about-update-btn:disabled {
 .invite-row + .invite-row.is-new {
   border-top-color: transparent;
 }
-@keyframes identity-alert-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 3px var(--accent-soft);
-  }
-  50% {
-    box-shadow:
-      0 0 0 3px var(--accent-soft),
-      0 0 8px 3px color-mix(in srgb, var(--accent) 55%, transparent);
-  }
-}
-.identity-alert.is-new {
-  animation: identity-alert-pulse 2s ease-in-out infinite;
-}
 @media (prefers-reduced-motion: reduce) {
   .invite-row.is-new,
-  .identity-alert.is-new {
+  .invite-arrival {
     animation: none;
   }
 }
@@ -6064,15 +6254,27 @@ button.secondary:disabled {
     width var(--t-med) var(--ease),
     margin var(--t-med) var(--ease);
 }
-/* Borrowed from the editor's loading skeleton, at miniature scale and holding
-   still: a shimmer here would say "loading" on a panel that is not loading. */
-.width-preview .skel-line {
-  height: 6px;
-  animation: none;
+/* The column's edges, so the line length reads as a measured span rather than
+   as text that happens to stop. */
+.width-preview-col {
+  align-self: stretch;
+  border-inline: 1px dashed color-mix(in srgb, var(--accent) 35%, transparent);
 }
-.width-preview .skel-title {
-  height: 9px;
-  margin-bottom: var(--sp-1);
+/* Real sample text in the editor's font, scaled with the column (inline
+   font-size), so it wraps exactly where a note would at this width. */
+.width-preview-text {
+  font-family: var(--editor-font-family, var(--font-body));
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+.width-preview-text strong {
+  display: block;
+  margin-bottom: 0.45em;
+  font-size: 1.35em;
+  color: var(--text-primary);
+}
+.width-preview-text p {
+  margin: 0;
 }
 .width-preview-caption {
   text-align: center;
@@ -6146,6 +6348,25 @@ button.secondary:disabled {
   color: var(--text-tertiary);
   font-weight: 400;
   margin-top: 2px;
+}
+
+/* General → Vault key: the revealed words or the restore field sit under the
+   row, with their actions in one line below. */
+.vault-key-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-3);
+}
+.vault-key-row > button {
+  flex: none;
+  white-space: nowrap;
+}
+.settings-page textarea.vault-key-input {
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
 }
 
 /* The General tab's destructive sync exit is a contained decision, with the
@@ -7591,17 +7812,6 @@ button.secondary:active:not(:disabled),
   }
 }
 
-/* Keep the agent entry recognisable even when another settings tab is active. */
-.settings-nav .settings-ai-item .menu-icon {
-  color: var(--accent);
-  fill: color-mix(in srgb, var(--accent) 22%, transparent);
-  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 35%, transparent));
-}
-
-.settings-nav .settings-ai-item .menu-icon svg {
-  fill: color-mix(in srgb, var(--accent) 22%, transparent);
-}
-
 /* #228 — the open vault's folder is missing. */
 .member-role.folder-missing {
   color: var(--danger);
@@ -8369,17 +8579,11 @@ button.secondary:active:not(:disabled),
 .profile-characters {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
-  padding: var(--sp-3) var(--sp-4) var(--sp-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-subtle);
 }
 .profile-character-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, 40px);
-  justify-content: space-between;
-  gap: var(--sp-3) var(--sp-2);
+  gap: var(--sp-2);
 }
 .profile-character-option {
   display: inline-flex;
@@ -8403,7 +8607,7 @@ button.secondary:active:not(:disabled),
 }
 .profile-character-option.active .avatar {
   box-shadow:
-    0 0 0 2px var(--bg-subtle),
+    0 0 0 2px var(--bg-surface),
     0 0 0 3.5px var(--text-primary);
 }
 /* Autosave feedback under the profile form; reserves its line so nothing jumps. */
@@ -10777,4 +10981,593 @@ body.access-board-grabbing * {
 .account-vaults-head-actions .vault-hdr-btn svg {
   flex: none;
   color: currentColor;
+}
+
+/* ---- Plan & Billing (Team with seats): plan card + seats card ----
+   Neutral ink, no accent gradient: the price is the headline, the seats ring
+   says how full the plan is at a glance. */
+.plan-cards {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: var(--sp-3);
+}
+@media (max-width: 760px) {
+  .plan-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.plan-cards .billing-card {
+  background: var(--bg-surface);
+  gap: var(--sp-2);
+}
+.plan-card .billing-plan-name {
+  font-size: 22px;
+}
+.plan-total {
+  margin-top: var(--sp-2);
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  line-height: 1.1;
+}
+.plan-total span {
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-tertiary);
+}
+.plan-discount {
+  align-self: flex-start;
+  margin-top: var(--sp-1);
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: color-mix(in srgb, var(--success) 75%, var(--text-primary));
+  font-size: var(--fs-xs);
+}
+.plan-card-spacer {
+  flex: 1;
+}
+.plan-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.plan-card-actions .plan-cancel {
+  color: var(--text-tertiary);
+}
+.plan-card-actions .plan-cancel:hover {
+  color: var(--text-primary);
+}
+.seats-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+.seats-card-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.plan-ink-btn,
+.encryption-ink-btn {
+  height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--text-primary);
+  color: var(--bg-surface);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.plan-ink-btn:hover:not(:disabled),
+.encryption-ink-btn:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.seat-ring {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin-top: var(--sp-3);
+}
+.seat-ring-chart {
+  width: 86px;
+  height: 86px;
+  flex: none;
+}
+.seat-ring-chart circle {
+  fill: none;
+  stroke-width: 5;
+  stroke-linecap: round;
+}
+.seat-ring-track {
+  stroke: var(--bg-hover);
+}
+.seat-ring-claimed {
+  stroke: var(--text-primary);
+}
+.seat-ring-invited {
+  stroke: var(--text-tertiary);
+}
+.seat-ring-chart text {
+  font-size: 9px;
+  font-weight: 700;
+  fill: var(--text-primary);
+}
+.seat-ring-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+}
+.seat-ring-legend b {
+  color: var(--text-primary);
+}
+
+/* ---- Vault Settings → General: the encryption status card ----
+   Leads the page. A green lock and "Key held by your team", what is and is not
+   encrypted, and the owner's vault key row at the foot. */
+.encryption-card {
+  margin-bottom: var(--sp-4);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 1px 2px rgba(11, 10, 16, 0.04);
+  overflow: hidden;
+}
+.encryption-card-main {
+  display: flex;
+  gap: var(--sp-4);
+  padding: 20px 22px 18px;
+}
+.encryption-badge {
+  width: 46px;
+  height: 46px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: color-mix(in srgb, var(--success) 80%, var(--text-primary));
+}
+.encryption-badge svg {
+  width: 24px;
+  height: 24px;
+}
+.encryption-card-body {
+  flex: 1;
+  min-width: 0;
+}
+.encryption-card-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.encryption-pill {
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: color-mix(in srgb, var(--success) 80%, var(--text-primary));
+}
+.encryption-card-desc,
+.encryption-card-converting {
+  margin: 4px 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.encryption-card-converting {
+  color: var(--text-tertiary);
+}
+.encryption-covered {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+.encryption-covered li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.encryption-covered li::before {
+  content: "";
+  width: 10px;
+  height: 6px;
+  border-left: 2px solid var(--success);
+  border-bottom: 2px solid var(--success);
+  transform: translateY(-2px) rotate(-45deg);
+}
+.encryption-covered li.not {
+  color: var(--text-tertiary);
+}
+.encryption-covered li.not::before {
+  width: 10px;
+  height: 0;
+  border-left: 0;
+  border-bottom: 2px solid var(--text-tertiary);
+  transform: none;
+}
+.encryption-card-foot {
+  padding: 14px 22px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.encryption-card-foot .vault-key-panel {
+  padding: var(--sp-3) 0 0;
+}
+.encryption-key-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.encryption-key-icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: var(--text-secondary);
+}
+.encryption-key-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.encryption-key-text b {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* ---- Account settings → Profile: settings rows ----
+   One card of rows: title + one-line hint on the left, the control on the
+   right. Four distinct levels (page title, row title, hint, value), so a
+   heading, a label and a value never read alike. */
+.profile-rows {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 1px 2px rgba(11, 10, 16, 0.04);
+}
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: 18px 22px;
+}
+.profile-row + .profile-row {
+  border-top: 1px solid var(--border);
+}
+.profile-row.profile-row-top {
+  align-items: flex-start;
+}
+.profile-row-label {
+  width: 240px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.profile-row-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.profile-row-hint {
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--text-tertiary);
+}
+.profile-row-control {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.profile-row-control > input {
+  width: 100%;
+}
+.profile-photo-control {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-4);
+}
+.profile-photo-control .avatar {
+  width: 56px;
+  height: 56px;
+  font-size: var(--fs-md);
+}
+.profile-photo-control .profile-hero-actions {
+  margin-left: 0;
+  flex-direction: row-reverse;
+}
+.profile-email {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-height: 40px;
+  padding: 0 6px 0 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+.profile-email-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profile-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 11px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.profile-pill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.profile-pill.warn {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: color-mix(in srgb, var(--warning) 70%, var(--text-primary));
+}
+.profile-pill.ok {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: color-mix(in srgb, var(--success) 75%, var(--text-primary));
+}
+.profile-email-hint .linkish {
+  font-weight: 600;
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+.profile-code-row {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.profile-code {
+  display: flex;
+  gap: var(--sp-2);
+}
+.profile-code > span {
+  padding: 7px 11px;
+  border-radius: 9px;
+  background: var(--bg-subtle);
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-primary);
+}
+@media (max-width: 760px) {
+  .profile-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--sp-3);
+  }
+  .profile-row-label {
+    width: auto;
+  }
+}
+
+/* ---- Account settings → Vaults: list on the left, the selected vault on
+   the right. The list scrolls on its own; the page beside it is the same
+   AccountVaultPage a card used to open. ---- */
+.vaults-split {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  /* Search on its own row, so the detail starts level with the LIST, not
+     with the search box above it. */
+  grid-template-areas:
+    "search ."
+    "list detail";
+  column-gap: var(--sp-4);
+  row-gap: var(--sp-2);
+  align-items: start;
+}
+@media (max-width: 860px) {
+  .vaults-split {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "search" "list" "detail";
+  }
+}
+.vaults-split-list {
+  /* Its children (search, list) take their own grid areas. */
+  display: contents;
+}
+.vaults-search {
+  grid-area: search;
+  width: 100%;
+  height: 36px;
+}
+.vaults-split-list > .vaults-split-items {
+  grid-area: list;
+  min-width: 0;
+}
+.vaults-split-detail {
+  grid-area: detail;
+}
+.vaults-split-list .vault-tab-actions {
+  margin: 0;
+}
+.vaults-split-items {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 520px;
+  overflow-y: auto;
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 1px 2px rgba(11, 10, 16, 0.04);
+}
+.vaults-split-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.vaults-split-item:hover {
+  background: var(--bg-hover);
+}
+.vaults-split-item.selected {
+  background: var(--bg-active, var(--bg-hover));
+}
+.vaults-split-item:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: -2px;
+}
+.vaults-split-item .vault-tile {
+  width: 32px;
+  height: 32px;
+  flex: none;
+}
+.vaults-split-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.vaults-split-name {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vaults-split-meta {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vaults-split-meta.is-danger {
+  color: var(--danger);
+}
+.vaults-split-open {
+  flex: none;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 10px;
+  background: var(--text-primary);
+  color: var(--bg-surface);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 20px;
+}
+.vaults-split-detail {
+  min-width: 0;
+  padding: 20px 22px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 1px 2px rgba(11, 10, 16, 0.04);
+}
+
+/* ---- Properties: in-app suggestions (replace the OS datalist) ---- */
+.prop-chips,
+.prop-input-wrap {
+  position: relative;
+}
+.prop-input-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.prop-input-wrap > .prop-input {
+  flex: 1;
+  min-width: 0;
+}
+.prop-suggest {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  min-width: 220px;
+  max-width: 320px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--bg-surface);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 14px 32px -14px rgba(11, 10, 16, 0.32);
+}
+.prop-suggest-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 3px 8px;
+  border-radius: 7px;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.prop-suggest-item.is-active {
+  background: var(--bg-hover);
+}
+.prop-suggest-item.is-create {
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+  padding-top: 5px;
+}
+.prop-suggest-item.is-create b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.prop-suggest-plus {
+  width: 16px;
+  text-align: center;
+  color: var(--text-tertiary);
 }

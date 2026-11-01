@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole } from "../../permissions/lookup.js";
+import { forgetMemberKeys } from "../../crypto/member-keys.js";
 import { getSession } from "../session.js";
 import { canAddMember } from "../../billing/entitlements.js";
 import { checkJoinSeat, seatRefusalBody, teamModel } from "../../billing/plan.js";
@@ -14,6 +15,7 @@ import {
 import { announceMemberJoined, announceMemberRemoved } from "../../sync/member-events.js";
 import { announceInvitationGone } from "../../sync/user-events.js";
 import { applyInvitationAccess } from "../../members/invitation-access.js";
+import { applyInvitationKeys } from "../../members/invitation-keys.js";
 import { billingEnabled } from "../../config.js";
 import { dispatchMail, emailEnabled } from "../../email/mailer.js";
 import { memberLeftEmail, youLeftVaultEmail } from "../../email/templates.js";
@@ -177,6 +179,9 @@ async function revokeMembership(
         WHERE org_id = $1 AND principal_type = 'user' AND principal_id = $2`,
       [orgId, userId],
     );
+    // Client-held vault keys (W3): the departed member's sealed keys and
+    // pending requests go with the membership (no-op when none exist).
+    await forgetMemberKeys(orgId, userId, client);
     await client.query(
       `UPDATE session SET "activeOrganizationId" = NULL
         WHERE "userId" = $1 AND "activeOrganizationId" = $2`,
@@ -453,6 +458,13 @@ async function deleteVaultEverywhere(
         WHERE organization_id = $1 AND NOT ($4::boolean AND billing_account_id IS NOT NULL)`,
       [orgId, orgName, actorUserId, teamModel()],
     );
+    // Access history survives the vault (migration 065 dropped its FK); close
+    // it with one row saying who deleted the vault.
+    await client.query(
+      `INSERT INTO access_audit (organization_id, actor_user_id, actor_name, entity_type, entity_id, action, before_state)
+       VALUES ($1, $2, (SELECT name FROM "user" WHERE id = $2), 'organization', $1, 'delete', jsonb_build_object('name', $3::text))`,
+      [orgId, actorUserId, orgName],
+    );
     // Cascades: member, invitation, vaults→(folders, notes, files), shares,
     // org_join_codes, mcp_tokens, public_links.
     await client.query("DELETE FROM organization WHERE id = $1", [orgId]);
@@ -528,7 +540,10 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     if (!session) return c.json({ error: "Authentication required" }, 401);
 
     const body = await c.req.json().catch(() => ({}));
-    const code = typeof body.code === "string" ? body.code.trim().toUpperCase() : "";
+    // Seamless keys (C): a displayed code is `<org code>-<device secret J>`.
+    // Only the part before the first `-` is the org's code; J never leaves
+    // this line (not stored, not logged). Plain 8-char codes work as before.
+    const code = typeof body.code === "string" ? body.code.trim().split("-")[0].trim().toUpperCase() : "";
     if (!code) return c.json({ error: "code is required" }, 400);
 
     const { rows } = await pool.query<{ organization_id: string; name: string }>(
@@ -609,6 +624,8 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
         { invitationIds: [liveInvite.id], organizationId, userId: session.userId },
         { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
       );
+      // Seamless keys (B3): the invite's direct seal applies here too.
+      await applyInvitationKeys({ invitationIds: [liveInvite.id], organizationId, userId: session.userId });
     }
 
     // Announce to teammates already live in the vault (this path bypasses

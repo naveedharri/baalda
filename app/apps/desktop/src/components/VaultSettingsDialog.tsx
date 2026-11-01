@@ -12,7 +12,8 @@ import {
   type VaultCheckpoint,
 } from "../lib/api";
 import { toast } from "../lib/toast";
-import { agoFromIso, checkpointTitle, noteCountLabel } from "./versionFormat";
+import { noteCountLabel } from "./versionFormat";
+import { RowActionsMenu } from "./RowActionsMenu";
 import { authManager } from "../lib/auth/authManager";
 import {
   classifyLimitError,
@@ -34,7 +35,6 @@ import { AsyncButton } from "./AsyncButton";
 import { McpTab } from "./McpTab";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { useResetLocalCopy } from "./useResetLocalCopy";
-import { AiSettingsTab } from "./AiSettingsTab";
 // Static, not via ./Face: this module is itself a lazy chunk, so it pays for
 // the avatar chunk it is already loading.
 import { LimitNudge } from "./LimitNudge";
@@ -58,6 +58,7 @@ import { VaultIconSettings } from "./VaultIconSettings";
 import { VaultDashboardsTab } from "./VaultDashboardsTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
 import { SkillsTab } from "./skills/SkillsTab";
+import { VaultKeySection } from "./VaultKeySection";
 import { AGENT_SKILLS_ICON_PATH } from "./skills/parts";
 
 // Defined in `lib/settingsTabs.ts` so the store can name a tab without importing
@@ -91,14 +92,6 @@ const GENERAL_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
       <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
     </MenuIcon>
   ),
-};
-
-/** The AI (Beta) page is hidden for now; flip to bring it back. Anything that
- *  asks for the "ai" tab while it is hidden lands on General instead. */
-const SHOW_AI_TAB = false;
-
-const AI_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
-  id: "ai", label: "AI", icon: <MenuIcon><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z" /></MenuIcon>,
 };
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
@@ -197,6 +190,15 @@ const BILLING_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
  * here. Members (roster + join code + invites), Permissions (RBAC locks), and
  * Appearance (the vault's appearance defaults).
  */
+/** Redesign preview: plain-word names for a few tabs. */
+const RD_LABEL: Partial<Record<string, string>> = {
+  members: "People and access",
+  versioning: "Version history",
+  "import-export": "Import and export",
+  mcp: "MCP",
+};
+const rdLabel = (t: { id: string; label: string }) => RD_LABEL[t.id] ?? t.label;
+
 export function VaultSettingsDialog({
   onClose,
   onRequestSignIn,
@@ -215,7 +217,7 @@ export function VaultSettingsDialog({
   const locals = useLocalVaults();
 
   const visibleTab = (t: SettingsTab): SettingsTab =>
-    (!SHOW_AI_TAB && t === "ai") || (t === "vaults" && session) ? "general" : t;
+    t === "vaults" && session ? "general" : t;
   const [tab, setTabRaw] = useState<SettingsTab>(visibleTab(initialTab ?? "general"));
   /** Bumped when the active nav item is clicked again, so a tab can return to its first page. */
   const [tabReset, setTabReset] = useState(0);
@@ -246,7 +248,7 @@ export function VaultSettingsDialog({
     localClasses.resolved &&
     visibleFolders(locals, localClasses.classes).length > 0;
   const tabs = useMemo(() => {
-    const out = SHOW_AI_TAB ? [GENERAL_TAB, AI_TAB] : [GENERAL_TAB];
+    const out = [GENERAL_TAB];
     if (showVaults) out.push(...SETTINGS_TABS);
     else out.push(...SETTINGS_TABS.filter((t) => t.id !== "vaults"));
     if (billingEnabled) {
@@ -308,7 +310,7 @@ export function VaultSettingsDialog({
               <button
                 key={t.id}
                 type="button"
-                className={`menu-item${t.id === "ai" ? " settings-ai-item" : ""}${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
+                className={`menu-item${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
                 onClick={() => {
                   // Re-clicking the active item resets its sub-pages (#308).
                   if (tab === t.id) setTabReset((n) => n + 1);
@@ -317,7 +319,7 @@ export function VaultSettingsDialog({
                 title={locked ? "Turn on sync to unlock" : undefined}
               >
                 {t.icon}
-                <span className="menu-item-label">{t.id === "ai" ? "AI (Beta)" : t.label}</span>
+                <span className="menu-item-label">{rdLabel(t)}</span>
                 {locked && (
                   <svg
                     className="nav-lock"
@@ -344,10 +346,10 @@ export function VaultSettingsDialog({
           )}
         </nav>
 
-        <section ref={contentRef} className="settings-content" aria-label={activeTab.label}>
+        <section key={shown} ref={contentRef} className="settings-content rd-tab-in" aria-label={activeTab.label}>
           {/* Members and access (and Skills) swap the title for a back link
               while a profile (or a skill) is open. */}
-          {!((shown === "members" || shown === "skills") && !lockedTab) && <h2 className="settings-section-title">{activeTab.label}</h2>}
+          {!((shown === "members" || shown === "skills") && !lockedTab) && <h2 className="settings-section-title">{rdLabel(activeTab)}</h2>}
           {shown === "general" ? (
             <GeneralTab
               isSynced={isSynced}
@@ -358,8 +360,6 @@ export function VaultSettingsDialog({
             />
           ) : shown === "dashboards" ? (
             <VaultDashboardsTab onClose={onClose} resetToken={tabReset} />
-          ) : shown === "ai" ? (
-            <AiSettingsTab onClose={onClose} onGoToGeneral={() => setTab("general")} />
           ) : lockedTab ? (
             <SyncGate label={activeTab.label} onRequestSignIn={onRequestSignIn} />
           ) : shown === "vaults" ? (
@@ -548,6 +548,12 @@ function GeneralTab({
       </div>
 
       {isSynced && isOwner && <UnsyncDangerZone />}
+
+      {/* Security sits last; the card brings its own heading, so nothing shows
+          for a vault that is not encrypted. */}
+      {isSynced && canManage && (
+        <VaultKeySection vaultName={activeOrgName ?? "Vault"} isOwner={isOwner} canManage={canManage} />
+      )}
 
       {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
     </>
@@ -869,7 +875,7 @@ function FreezeRootRow({ canManage }: { canManage: boolean }) {
   return (
     <>
       <div className="menu-sep" />
-      <label className="menu-row toggle-row">
+      <label className="menu-row toggle-row freeze-root-row">
         <span className="menu-row-label">
           Freeze vault root
           <span className="field-hint">
@@ -1803,87 +1809,125 @@ function VersioningTab({ canManage }: { canManage: boolean }) {
 
   return (
     <div className="versioning-tab">
-      <div className="muted">
+      <p className="versioning-lede">
         {auto
-          ? "A checkpoint captures every note in this vault, content and folder " +
-            "structure. One is taken automatically each day the vault changes; the " +
-            "vault keeps its 5 most recent. Reverting rolls every member's vault back " +
-            "and broadcasts live."
-          : "A checkpoint captures every note in this vault, content and folder " +
-            "structure. You can create one a week; the vault keeps its 5 most " +
-            "recent. Reverting rolls every member's vault back and broadcasts live."}
-      </div>
-      <div className="menu-sep" />
-      {canManage && (
-        <>
-          <div className="subhead">Create checkpoint</div>
-          <div className="row invite-bar">
-            <input
-              type="text"
-              placeholder="Label (optional), e.g. Before the big reorg"
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-            />
-            <AsyncButton className="primary" onClick={create} disabled={manualWaiting}>
-              Create
-            </AsyncButton>
-          </div>
-          {manualWaiting && (
-            <div className="muted checkpoint-note">
-              You can create the next one on{" "}
-              {new Date(nextManualMs).toLocaleDateString(undefined, {
-                weekday: "short",
-                day: "numeric",
-                month: "short",
-              })}
-              .
-            </div>
-          )}
-          <div className="menu-sep" />
-        </>
-      )}
-      <div className="subhead">Checkpoints</div>
+          ? "A checkpoint saves every note and folder in this vault. One is taken each day " +
+            "the vault changes, and the 5 most recent are kept. Reverting rolls back the " +
+            "vault for everyone."
+          : "A checkpoint saves every note and folder in this vault. You can create one a " +
+            "week, and the 5 most recent are kept. Reverting rolls back the vault for everyone."}
+      </p>
       {error && <div className="auth-error">{error}</div>}
-      {checkpoints == null ? (
-        <div className="muted perm-empty">Loading…</div>
-      ) : checkpoints.length === 0 ? (
-        <div className="muted perm-empty">
-          {auto ? (
-            <>
-              No checkpoints yet. One is captured automatically within a day of the
-              vault changing{canManage ? ", or create one above" : ""}.
-            </>
-          ) : (
-            <>No checkpoints yet{canManage ? ". Create one above" : ""}.</>
-          )}
-        </div>
-      ) : (
-        <ul className="checkpoint-list">
-          {checkpoints.map((cp) => (
-            <li key={cp.id} className="checkpoint-row">
-              <span className="checkpoint-main">
-                <span className="checkpoint-title">
-                  {checkpointTitle(cp.label, cp.kind, cp.createdAt, now)}
-                </span>
-                <span className="checkpoint-sub">
-                  {agoFromIso(cp.createdAt, now)} · {noteCountLabel(cp.noteCount)}
-                  {cp.createdByName ? ` · by ${cp.createdByName}` : ""}
-                </span>
-              </span>
-              {canManage && (
-                <button className="link-btn" onClick={() => setConfirming(cp)}>
-                  Revert
-                </button>
-              )}
-              {canManage && (
-                <AsyncButton className="link-btn danger" onClick={() => remove(cp.id)}>
-                  Delete
+      <div className="profile-rows versioning-rows">
+        {canManage && (
+          <div className="profile-row">
+            <div className="profile-row-label">
+              <span className="profile-row-title">New checkpoint</span>
+              <span className="profile-row-hint">Save the vault as it is now, before a big change.</span>
+            </div>
+            <div className="profile-row-control">
+              <form
+                className="checkpoint-create"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!manualWaiting) void create();
+                }}
+              >
+                <input
+                  type="text"
+                  placeholder="Label (optional), e.g. Before the big reorg"
+                  value={label}
+                  onChange={(e) => setLabel(e.target.value)}
+                />
+                <AsyncButton className="checkpoint-ink-btn" onClick={create} disabled={manualWaiting}>
+                  Create
                 </AsyncButton>
+              </form>
+              {manualWaiting && (
+                <div className="muted checkpoint-note">
+                  You can create the next one on{" "}
+                  {new Date(nextManualMs).toLocaleDateString(undefined, {
+                    weekday: "short",
+                    day: "numeric",
+                    month: "short",
+                  })}
+                  .
+                </div>
               )}
-            </li>
-          ))}
-        </ul>
-      )}
+            </div>
+          </div>
+        )}
+        <div className="profile-row profile-row-top">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Checkpoints</span>
+            <span className="profile-row-hint">
+              Newest first. Reverting is itself saved as a checkpoint first, so it can be undone.
+            </span>
+          </div>
+          <div className="profile-row-control">
+            {checkpoints == null ? (
+              <div className="muted perm-empty">Loading…</div>
+            ) : checkpoints.length === 0 ? (
+              <div className="muted perm-empty">
+                {auto ? (
+                  <>
+                    No checkpoints yet. One is captured automatically within a day of the
+                    vault changing{canManage ? ", or create one above" : ""}.
+                  </>
+                ) : (
+                  <>No checkpoints yet{canManage ? ". Create one above" : ""}.</>
+                )}
+              </div>
+            ) : (
+              <ul className="checkpoint-cards">
+                {checkpoints.map((cp) => (
+                  <li key={cp.id} className="checkpoint-card">
+                    <span className={`checkpoint-icon${cp.kind === "manual" ? " is-manual" : ""}`} aria-hidden="true">
+                      {cp.kind === "manual" ? (
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M12 20h9" />
+                          <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                        </svg>
+                      ) : (
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="12" cy="12" r="9" />
+                          <path d="M12 7v5l3 2" />
+                        </svg>
+                      )}
+                    </span>
+                    <span className="checkpoint-main">
+                      <span className="checkpoint-title">{checkpointName(cp)}</span>
+                      <span className="checkpoint-sub">
+                        {checkpointWhen(cp.createdAt, now)}
+                        {cp.createdByName ? ` · ${cp.createdByName}` : cp.kind === "auto" ? " · automatic" : ""}
+                        {" · "}
+                        {noteCountLabel(cp.noteCount)}
+                      </span>
+                    </span>
+                    {canManage && (
+                      <>
+                        <button type="button" className="checkpoint-revert" onClick={() => setConfirming(cp)}>
+                          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+                            <path d="M3 3v5h5" />
+                          </svg>
+                          Revert
+                        </button>
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${checkpointName(cp)}`}
+                          actions={[
+                            { key: "delete", label: "Delete checkpoint", danger: true, onSelect: () => remove(cp.id) },
+                          ]}
+                        />
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </div>
       {!canManage && (
         <div className="muted checkpoint-note">
           Only a vault owner or admin can revert to a checkpoint.
@@ -1891,26 +1935,18 @@ function VersioningTab({ canManage }: { canManage: boolean }) {
       )}
       {confirming && (
         <div className="modal-backdrop" onClick={() => setConfirming(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal checkpoint-confirm" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2>Revert the entire vault?</h2>
             </div>
             <p className="muted">
-              Every note goes back to{" "}
-              <strong>
-                {checkpointTitle(
-                  confirming.label,
-                  confirming.kind,
-                  confirming.createdAt,
-                  now,
-                )}
-              </strong>{" "}
-              ({agoFromIso(confirming.createdAt, now)}): content, names and
+              Every note goes back to <strong>{checkpointName(confirming)}</strong> from{" "}
+              {checkpointWhen(confirming.createdAt, now)}: content, names and
               folders, for every member, live. Notes created since then are
               moved to trash. Attachments are not reverted. A checkpoint of the
               current state is taken first, so this can be undone.
             </p>
-            <div className="banner-actions">
+            <div className="banner-actions checkpoint-confirm-actions">
               <button className="secondary" onClick={() => setConfirming(null)}>
                 Cancel
               </button>
@@ -1927,6 +1963,22 @@ function VersioningTab({ canManage }: { canManage: boolean }) {
       )}
     </div>
   );
+}
+
+/** A checkpoint's name without its time: the label, or what made it. */
+function checkpointName(cp: VaultCheckpoint): string {
+  return cp.label?.trim() || (cp.kind === "manual" ? "Manual checkpoint" : "Daily checkpoint");
+}
+
+/** "Today, 3:02 PM", "Yesterday, 9:00 AM", or "Thu 29 Oct, 9:00 AM". */
+function checkpointWhen(iso: string, now: number): string {
+  const d = new Date(iso);
+  const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const day = (t: number) => new Date(t).toDateString();
+  if (day(d.getTime()) === day(now)) return `Today, ${time}`;
+  if (day(d.getTime()) === day(now - 86_400_000)) return `Yesterday, ${time}`;
+  const date = d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  return `${date}, ${time}`;
 }
 
 function importSummaryText(s: ipc.ImportSummary): string {
@@ -2000,38 +2052,45 @@ function ImportExportTab() {
 
   return (
     <div className="io-tab">
-      <section className="io-section">
-        <h3 className="io-heading">Import</h3>
-        <p className="io-desc">
-          Bring existing files and folders into this vault, in any format. Markdown and text
-          become notes; everything else is kept as-is, with its folder structure. Existing
-          names are never overwritten.
-        </p>
-        <div className="io-actions">
-          <button className="primary" disabled={busy !== null} onClick={() => void importFiles()}>
-            {busy === "files" ? "Importing…" : "Import files…"}
-          </button>
-          <button className="primary" disabled={busy !== null} onClick={() => void importFolder()}>
-            {busy === "folder" ? "Importing…" : "Import folder…"}
+      <div className="io-list">
+        <div className="io-row">
+          <span className="io-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5M12 18v-6M9 15l3 3 3-3" /></svg>
+          </span>
+          <span className="io-text">
+            Import files
+            <small>Markdown and text become notes; anything else is kept as is.</small>
+          </span>
+          <button className="ghost-pill" disabled={busy !== null} onClick={() => void importFiles()}>
+            {busy === "files" ? "Importing…" : "Choose files…"}
           </button>
         </div>
-        <p className="io-hint">
-          You can also right-click any folder in the sidebar, or drag files straight onto it.
-        </p>
-      </section>
-
-      <section className="io-section">
-        <h3 className="io-heading">Export</h3>
-        <p className="io-desc">
-          Save a copy of this whole vault to a folder on your computer. The hidden{" "}
-          <code>.context</code> index is skipped.
-        </p>
-        <div className="io-actions">
-          <button className="primary" disabled={busy !== null} onClick={() => void exportVault()}>
-            {busy === "export" ? "Exporting…" : "Export entire vault…"}
+        <div className="io-row">
+          <span className="io-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M12 10v6M9 13l3 3 3-3" /></svg>
+          </span>
+          <span className="io-text">
+            Import a folder
+            <small>Keeps its folder structure. Existing names are never overwritten.</small>
+          </span>
+          <button className="ghost-pill" disabled={busy !== null} onClick={() => void importFolder()}>
+            {busy === "folder" ? "Importing…" : "Choose folder…"}
           </button>
         </div>
-      </section>
+        <div className="io-row">
+          <span className="io-icon is-export" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4M12 15V4M8 8l4-4 4 4" /></svg>
+          </span>
+          <span className="io-text">
+            Export this vault
+            <small>Saves a copy of every note and file to a folder on your computer.</small>
+          </span>
+          <button className="ghost-pill" disabled={busy !== null} onClick={() => void exportVault()}>
+            {busy === "export" ? "Exporting…" : "Export…"}
+          </button>
+        </div>
+      </div>
+      <p className="io-tip">Tip: drag files onto any folder in the sidebar, or right-click it to import there.</p>
 
       {error ? (
         <div className="auth-error">{error}</div>

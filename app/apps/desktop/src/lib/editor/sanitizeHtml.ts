@@ -24,7 +24,16 @@ export const BLOCKED_HTML_TAGS = new Set([
   "EMBED",
   "META",
   "BASE",
+  "FRAME",
+  "FRAMESET",
+  "PORTAL",
+  "FENCEDFRAME",
 ]);
+
+const MATHML_NS = "http://www.w3.org/1998/Math/MathML";
+
+/** Attributes that make a click or submit navigate the app window. */
+const NAVIGATING_ATTRS = new Set(["action", "formaction", "formtarget", "target", "ping"]);
 
 /**
  * Render an embedded HTML fragment into `target` as real DOM so it flows inline
@@ -44,14 +53,27 @@ export function renderEmbeddedHtml(
   parsed.querySelectorAll("*").forEach((el) => {
     // Uppercase so a foreign-content (SVG/MathML) <script> — whose tagName is
     // lowercase — is caught by the same blocklist as an HTML one.
-    if (BLOCKED_HTML_TAGS.has(el.tagName.toUpperCase())) {
+    const tag = el.tagName.toUpperCase();
+    if (BLOCKED_HTML_TAGS.has(tag)) {
       el.remove();
       return;
     }
+    // A form submit would navigate the whole app window (the main CSP has no
+    // form-action): keep its contents as inert markup, drop the form itself.
+    if (tag === "FORM") {
+      const box = parsed.createElement("div");
+      while (el.firstChild) box.appendChild(el.firstChild);
+      el.replaceWith(box);
+    }
+    // Only an HTML/SVG anchor or an image-map area may carry a link, and those
+    // are rewired below; `href` anywhere else (MathML) is dropped.
+    const isLink = tag === "A" || tag === "AREA";
     for (const attr of Array.from(el.attributes)) {
       const name = attr.name.toLowerCase();
       const isUrlAttr = name === "href" || name === "src" || name === "xlink:href";
-      if (name.startsWith("on")) {
+      if (NAVIGATING_ATTRS.has(name) || (!isLink && name === "href" && el.namespaceURI === MATHML_NS)) {
+        el.removeAttribute(attr.name);
+      } else if (name.startsWith("on")) {
         // Inline event handlers.
         el.removeAttribute(attr.name);
       } else if (name === "style") {
@@ -67,9 +89,12 @@ export function renderEmbeddedHtml(
       if (src) el.setAttribute("src", resolveAsset(src));
     }
     // Rewire links so a click opens externally instead of hijacking the window.
-    if (el.tagName === "A") {
-      const href = el.getAttribute("href") ?? "";
+    // Case-insensitive: an SVG <a> has a lowercase tagName and used to keep
+    // its live https href (a look-alike page could replace the app).
+    if (isLink) {
+      const href = el.getAttribute("href") ?? el.getAttribute("xlink:href") ?? "";
       el.removeAttribute("href");
+      el.removeAttribute("xlink:href");
       if (/^(https?:|mailto:)/i.test(href)) {
         el.setAttribute("data-href", href);
         el.classList.add("cm-md-link");

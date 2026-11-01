@@ -686,16 +686,16 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   always persists the provider's returned state. One vault = one subscription (409 `already_subscribed`).
   `BILLING_MODEL=vault|team` (default `vault` until the production flip) picks the model. **`team`
   (the shipped model):** Free = 2 people per account (owner counts), 1 synced vault, MCP included,
-  no Assistant, no standalone-file sync (embeds under `attachments/` still sync), "unlimited"
+  no standalone-file sync (embeds under `attachments/` still sync), "unlimited"
   notes/storage under hidden per-vault ceilings `ABUSE_MAX_NOTES` (100000) / `ABUSE_MAX_STORAGE_MB`
   (10240). Team = $10/seat/month or $110/seat/year, `TEAM_MIN_SEATS` 3, owner buys N seats upfront
   (402 `seat_limit_reached {seats, used, pending, message}` when full; pending unexpired invites
-  reserve a seat), unlimited vaults on one account, Assistant + file sync included; managed in
+  reserve a seat), unlimited vaults on one account, file sync included; managed in
   Account Settings → Plan & Billing (per-vault usage: Vault Settings → Usage), plan named "Team" in-app (was "Pro"). Existing subscribers keep
   their price via a Polar discount on the Team seat product (ops scripts
   `scripts/billing/move-legacy-subs.ts`, `polar-spike.ts`). Old 402 codes stay emitted for old
-  desktops (`attachment_sync_requires_pro`, `housekeeper_requires_pro`, `vault_limit_reached`,
-  `member_limit_reached` now `{limit: 2, scope: 'account'}`); new: `housekeeper_requires_team`,
+  desktops (`attachment_sync_requires_pro`, `vault_limit_reached`,
+  `member_limit_reached` now `{limit: 2, scope: 'account'}`); new:
   `account_read_only`, `upgrade_in_new_app`, `transfer_retired`. **`vault` (legacy):** per-vault
   Pro; new accounts get `FREE_MAX_VAULTS` (2) unsubscribed vaults, migration 031 keeps three for
   older accounts, and an active or past-due Pro vault unlocks standalone-file sync for its members.
@@ -1015,7 +1015,115 @@ billing (managed/Polar only; self-hosters leave all unset ⇒ unlimited): `POLAR
 `POLAR_PRODUCT_TEAM_MONTHLY_ID`/`POLAR_PRODUCT_TEAM_YEARLY_ID` · `TEAM_PRICE_MONTHLY_CENTS` (1000) ·
 `TEAM_PRICE_YEARLY_CENTS` (11000) · `TEAM_MIN_SEATS` (3) · `ABUSE_MAX_NOTES` (100000) ·
 `ABUSE_MAX_STORAGE_MB` (10240) · `FREE_MAX_VAULTS`/`FREE_MAX_MEMBERS`/`FREE_MAX_STORAGE_MB`
-(per-vault model only).
+(per-vault model only) ·
+vault keys: `BAALDA_VAULT_KEYS` (off) · `VAULT_KEY_CONVERSION` (off) · `VAULT_PLAINTEXT_RETENTION_DAYS` (30; 0 allowed) — see "Vault keys" below.
+
+## Vault keys (`src/crypto/`, `docs/VAULT_KEYS.md`)
+
+Encryption at rest with **client-held** keys. **It is NOT end-to-end encryption**: a running server
+process sees plaintext and keys in memory while it works; the database, backups and admin tools alone
+yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-knowledge.
+- **Who holds keys.** Each vault has a random 32-byte key (VK) that only members' devices keep (OS
+  keychain). Users have X25519 key pairs (`user_keys`); VK is sealed to each member per generation
+  (`vault_key_wraps`). The server keeps only `vaults.vk_check` to verify a presented key.
+- **Transport.** HTTP: `X-Baalda-VK` (`crypto/transport.ts vaultKeyHeader`/`requireVaultKey`); per-doc
+  sockets: token `<jwt>.<vk-b64>` (`splitSyncToken`); vault channel: `hello`. Neither may ever be logged
+  (`redactToken`; `tests/vk-redaction.test.ts`).
+- **Sealed columns** (AES-256-GCM, AAD = table|column|vault|row): `doc_updates.update_enc`,
+  `doc_snapshots.snapshot_enc`, `note_index.search_enc`, `blob_text.search_enc`,
+  `note_texts.content_enc`, `public_links.token_enc` (+ `token_hash`). **Not encrypted:** attachment/file
+  BYTES (S3/R2 uploads go presigned straight to the bucket and rely only on the provider's at-rest
+  encryption; Postgres-stored bytes are not sealed either), titles, paths, folder names, sizes,
+  timestamps, membership and ACL rows.
+- **Rule 1:** every request/socket that reads or writes content presents VK itself, checked against
+  `vk_check`. `key-cache.ts` serves ONLY server-internal background work (index, compaction,
+  checkpoints, backfill), never a user request; `get()` returns a copy the caller zeroes. It is FILLED by a
+  vault channel (while connected + 10 min) and, one-way, by any request whose key the server verified
+  (`holdForRequest`, 15 min after the last one): verified `X-Baalda-VK`, an MCP/OAuth write's unwrapped key
+  (checked against `vk_check` first), `keys/init`. Read-only public-link views never fill it. Keyed writes
+  index with the request's own key (debounced copy, zeroed after); otherwise `index_pending`, drained whole
+  (batches of 500) on any key arrival and by the tick while a key is held.
+- **Rule 2:** only a member's device seals VK to a new member or device; the server only queues the
+  request. Devices pin each member's key fingerprint on first seal (TOFU) and refuse a changed key until
+  a person approves it.
+- **Rule 3:** MCP tokens and public links store hashes only, plus VK wrapped under an HKDF key from the
+  token secret (`mcp_token_keys`, `public_links.wrapped_vk`); unwrapped per call, never cached, zeroed
+  after the request. MCP and links work with no desktop online.
+- **Device linking:** a new device signing in with a password unlocks the account key itself
+  (`user_keys.priv_wrapped_password`, under `POST /api/me/keys/unlock`'s HKDF(HMAC(`ACCOUNT_KEY_PEPPER`,
+  password))). Anyone with the password can open that person's vaults: the owner chose this (2026-11-01).
+  The pepper also makes login hashes `p1$` (rehashed on sign-in), so a DB dump alone cannot test passwords;
+  it must never change. `auth/pepper-boot.ts` settles it at boot: env wins; unset with vault keys on, the
+  server generates one once into `server_secrets` (migration 086; a stolen DB then includes it); unset with
+  keys off, off. A fingerprint is recorded and a different or missing pepper REFUSES THE BOOT. Google-only accounts and stale wraps (after a
+  reset) fall back to one-click approval on an existing device (code shown, not typed). A session alone
+  never yields keys. There is no account recovery kit.
+- **Seamless keys** (2026-11-01, contract in `members/invitation-keys.ts` + `docs/VAULT_KEYS.md`): the
+  inviter's device seals VK to an invitee's existing account key (`invitation_vault_keys`, moved into
+  `vault_key_wraps` on accept by `applyInvitationKeys`) and wraps it under a per-invite secret carried only
+  in the email link fragment (`#k=` → `baalda://invite/…&k=`); join codes are `<code>-<device secret>`
+  (`vault_join_wraps`, only `sha256(secret)` stored). `keys/requests` also lists members lacking a wrap
+  (`kind: "missing"`), and key holders service every vault they hold, so a conversion keys everyone.
+  The server never stores the secrets; every stored wrap came from a device that presented VK.
+- **Churn brakes** (`crypto/key-churn.ts`): ≤3 account-key replacements per user per 24 h (counted from
+  `user_key_history.replaced_at` under the `user_keys` row lock; first create and same-key re-PUT free),
+  ≤10 new device registrations and ≤10 new approvals per user per hour (in process). 429
+  `rate_limited` + Retry-After + plain message, nothing stored; desktop toasts it (`rateLimitedMessage`,
+  runtime `startFreshAccountKey`).
+- **Owner vault key:** owners reveal it in Vault Settings → General ("Show vault key"); no popup, never
+  emailed. "Restore with vault key" verifies against `vk_check`.
+- **Conversion gate + MCP upgrade** (`crypto/conversion.ts`): a device registers a pending key,
+  allow-lists existing tokens/links with an HMAC under VK, and they upgrade on next use. `keys/init`
+  accepts only when nothing used in 30 days lacks a wrap and the check bytes match the pending row; the
+  gate runs inside the init transaction under row locks (`lockGateRows`). `VAULT_KEY_CONVERSION` plus
+  the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all. No owner review any more (2026-11-01): the
+  converting device allow-lists every candidate; exclusions recorded by an earlier review
+  (`vault_conversion_exclusions`, migration 083) still stand, and the review UI is gone.
+- **Launch safety net** (decided 2026-11-01, on until the owner switches it off): while
+  `KEY_RECOVERY_PUBLIC_KEY` is set, `crypto/key-recovery.ts` seals each vault key the cache acquires to that
+  OFFLINE public key (`vault_key_recovery`, migration 085, format in `recovery-seal.ts`); the owner's
+  `scripts/key-recovery.ts rescue` opens it locally and re-issues it through `POST
+  /api/admin/key-recovery/:vaultId/grant` (`KEY_RECOVERY_ADMIN_TOKEN` + the vault key itself; audited
+  `key_recovered`). Unset ⇒ no copies and every row deleted. While on, the offline key holder can read any
+  vault: the website must say so.
+- **Every vault converts automatically** (decided 2026-11-01, supersedes the 2026-10-29 opt-in): while
+  `VAULT_KEY_CONVERSION` is on, `crypto/conversion.ts encryptionRequested` answers true for every vault, so
+  `keys/mine` reports `conversionAllowed` (0.1.98+ clients) and `keys/pending`/`keys/init` accept it;
+  `vaults.encryption_requested_at` (migration 081) matters only with the flag off. There is no
+  "Encrypt this vault" button. An owner/admin device converts only when `lib/vaultKeys/conversionSafety.ts
+  conversionSafe` holds, so a lost laptop cannot lose the vault: another member has an account key
+  (`keys/mine` unkeyed `otherMembersWithKeys`), or this account has a password wrap, or 2+ devices hold
+  the account key; else `not-safe-yet` and it re-checks on later runs.
+- **Desktops without vault keys** (`http/client-version.ts VAULT_KEYS_MIN_DESKTOP` = 0.1.98, no env
+  override, no grace, missing version = old): on a KEYED vault every entry point (`requireVaultKey`'s
+  refusal, plus `crypto/transport.ts refuseKeyIncapableClient` on the sync/vault-channel token mints,
+  bootstrap create, notes/batch and `POST /api/notes` with or without state, blob legacy POST/intent/
+  complete) answers them `426 client_outdated` (`reason: vault_keys`) instead of `key_required`, and
+  writes nothing — the refusal 0.1.97 and older already turn into "stop syncing, update". A verified
+  `X-Baalda-VK` also counts as capable. Sockets are gated at the mint (an old build never gets a token).
+  The desktop sends `clientVersion` on EVERY `/api/*` call except `/api/auth/*` (`api.ts
+  withClientVersion`, raw fetches included), and its key on both token mints. Unkeyed vaults: unchanged.
+  Ships only together with the 0.1.98 version bump (an unbumped build reports 0.1.97 and is refused
+  wherever it presents no key).
+- **Zero data loss:** plaintext is never removed before a per-row decrypt-and-compare check (a separate,
+  delayed, reversible step); `key_required` changes nothing server-side and never drops local edits;
+  compaction verifies the sealed snapshot first; key generations are never destroyed; when in doubt,
+  refuse and let the client retry.
+- **Converting docs and the null-out.** A keyed doc that still holds pre-keying plaintext is compacted by
+  `persistence.ts compactConverting`: sealed-only snapshot of everything + ONE dual log row holding
+  `Y.mergeUpdates` of exactly the old plaintext parts (verified, never post-keying edits); a lone dual row
+  is kept in place. `crypto/null-out.ts` (run from the backfill tick after `complete`) clears plaintext
+  only when the backfill is complete, a fresh `encryptionStatus` is 0 and `VAULT_PLAINTEXT_RETENTION_DAYS`
+  have passed: per row, open the sealed copy, compare byte for byte, clear under `WHERE plaintext =
+  original AND sealed = compared`; a mismatch keeps both (ids logged). `doc_updates`/`doc_snapshots`
+  clears run under the doc's EXCLUSIVE advisory lock (`withDocWriteLock`, the one compaction holds), so
+  a converting compaction can never fold a just-cleared row's plaintext back into its dual row. Inline pre-038 version/checkpoint
+  texts are first sealed into `note_texts` by the backfill. At zero plaintext `phase = 'sealed'`;
+  `keys/mine` reports `fullyEncrypted`/`plaintextRemaining` as last recorded (never counted per request).
+  A keyed re-index leaves stale `note_index`/`blob_text` plaintext that never byte-matches; it is derived,
+  so it is cleared (decided 2026-10-29) under the same guard when the sealed entry is CURRENT
+  (`sealedIsCurrent`: note body equals the CRDT text now; blob text opens under the current key).
+  `note_links` titles stay. Residuals with no sealed column: `blobs.data`, `checkpoint_blob_bytes`, skills files.
 
 ## Conventions & gotchas
 
@@ -1076,24 +1184,6 @@ restored even if identical bytes already exist at another local path, without
 overwriting occupied paths. Legacy whole-list Pro refusals can be re-probed on
 a sync pass after a one-minute cooldown, allowing a running updated desktop to
 recover when its server is upgraded.
-
-### Baalda Assistant engine
-
-AI’s Baalda Assistant provides user-reviewed agent repairs. `http/routes/housekeeper.ts` hosts the optional
-`app/apps/server/housekeeper/index.mjs` module (override with `HOUSEKEEPER_MODULE`) without a
-static build dependency. Every request checks vault membership and a non-deleted
-`pro` subscription in `active`/`past_due` on Cloud. Self-hosters with
-`BAALDA_DEPLOYMENT=self-hosted` have access. The Apache-2.0 module uses the server-side
-OpenRouter SDK through swappable Decisions/chat adapters. Personal provider keys live in the desktop OS keychain and are supplied per inference request; the server does not persist them. Candidate reads use per-note permissions and apply/undo use
-`DocWriter.editContent` with revision/span guards under its lock. Preview tokens
-are scoped to user/vault, expire, and live in bounded process memory. No sync wire
-format or bridge timing changes. Setup, limits and isolated tests:
-[Baalda Assistant](docs/HOUSEKEEPER.md). Keys are user-owned and stored in the desktop OS keychain; inference supplies them per request. Diagnostic review sends aggregate counts only and returns allowlisted next-step recommendations. Advanced diagnostic tools live in AI (the Health tab is gone).
-
-Baalda Agents follow observe → investigate → propose → approve → execute → verify.
-Finding cards are data-driven; models choose allowlisted capabilities, while
-existing permission-checked tools own changes. Link and filename changes require
-concrete previews. Never interpret generated text as executable tool authority.
 
 On Cloud servers with billing on, Free vaults can register up to `ABUSE_MAX_NOTES` (100000) live
 notes under `BILLING_MODEL=team` (a hidden abuse ceiling; Free is marketed unlimited) and 20,000

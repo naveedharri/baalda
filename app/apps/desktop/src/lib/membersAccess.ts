@@ -236,6 +236,19 @@ export function reduceAccessCopy(
   return { title, button, outcome };
 }
 
+/** The before/after line an access confirm shows (ConfirmDialog `change`). */
+export function accessChangeFor(
+  scope: ReduceScope,
+  from: TeamAccessMode | "custom" | null,
+  to: TeamAccessMode,
+): { who: string; sub?: string; from: TeamAccessMode | "custom" | null; to: TeamAccessMode } {
+  if (scope.kind === "everyone") return { who: "Everyone", sub: "Default for every member", from, to };
+  if (scope.kind === "person") {
+    return scope.self ? { who: "You", sub: scope.name, from, to } : { who: scope.name, from, to };
+  }
+  return { who: scope.name, from, to };
+}
+
 /** Colour class for a level pill: green edit, amber view, grey none, neutral mixed. */
 export function levelClass(level: TeamAccessMode | MemberAccessLevel | "mixed" | null | undefined): string {
   switch (level) {

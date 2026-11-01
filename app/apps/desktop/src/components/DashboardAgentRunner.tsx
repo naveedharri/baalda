@@ -257,3 +257,23 @@ export function InstalledAgentsStatus() {
     <p className="dashboard-agent-description">Detection refreshes when Baalda restarts. Dashboard updates use the selected CLI and its signed-in account.</p>
   </div>;
 }
+
+/** Account Settings → About, the Installed agents row's list (profile-row style). */
+export function InstalledAgentsList() {
+  const { agents, error } = useInstalledAgents();
+  if (error) return <p className="muted">Detection is unavailable in this preview.</p>;
+  if (agents === null) return <p className="muted">Checking installed clients…</p>;
+  if (!agents.length) {
+    return <p className="muted">No supported CLI found. Install Claude or Codex, sign in from your terminal, then restart Baalda.</p>;
+  }
+  return <ul className="about-agents">
+    {agents.map((agent) => <li key={agent.agent} className="about-agent">
+      <span className="about-agent-glyph" aria-hidden="true"><AgentGlyph agent={agent.agent} /></span>
+      <span className="about-agent-text">
+        <b>{agent.agent === "codex" ? "Codex" : "Claude"} <span className="about-agent-version">{agent.version}</span></b>
+        <small title={agent.detail}>{agent.detail}</small>
+      </span>
+      <span className={`about-agent-tag${agent.signedIn ? "" : " is-off"}`}>{agent.signedIn ? "Signed in" : "Not signed in"}</span>
+    </li>)}
+  </ul>;
+}

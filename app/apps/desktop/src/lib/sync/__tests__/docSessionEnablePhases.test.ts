@@ -335,6 +335,68 @@ describe("SyncManager.enable — the prime window", () => {
     expect(storeHooks.suppressed).toBe(MAPPED_DOC);
   });
 
+  type EarlyCheck = () => boolean | Promise<boolean>;
+  const earlyCases: Array<[string, EarlyCheck, number]> = [
+    ["a server without vault keys (async yes)", () => Promise.resolve(true), 1],
+    ["a held key or unkeyed vault (sync yes)", () => true, 1],
+    ["unknown features or keyed without the key (async no)", () => Promise.resolve(false), 0],
+    ["a known keyed vault without the key (sync no)", () => false, 0],
+  ];
+  it.each(earlyCases)("early channel check: %s", async (_name, check, inWindow) => {
+    const held = gate();
+    fakeRegistry.reconcile.mockImplementation(async () => {
+      await held.waited;
+      return { seeded: false };
+    });
+    const keyGate = gate();
+    const sm = new SyncManager();
+    sm.setEarlyVaultChannelCheck(check);
+    sm.setVaultKeyGate(async () => {
+      await keyGate.waited;
+      return "proceed";
+    });
+    const enabling = sm.enable(session(), { orgId: "org-a", name: "a", path: "/vaults/a", epoch: 1 });
+    await flush();
+    // Before the gate answers, the channel opens only on a known-safe answer
+    // (never a 4409 hello at startup); otherwise it waits for the gate.
+    expect(storeHooks.created).toBe(inWindow);
+    keyGate.open();
+    await flush();
+    expect(storeHooks.created).toBe(1);
+    held.open();
+    await enabling;
+    await flush();
+    expect(storeHooks.created).toBe(1);
+  });
+
+  it("a held-back early channel opens once the gate proceeds, still before the reconcile", async () => {
+    const held = gate();
+    fakeRegistry.reconcile.mockImplementation(async () => {
+      await held.waited;
+      return { seeded: false };
+    });
+    const sm = new SyncManager();
+    sm.setEarlyVaultChannelCheck(() => Promise.resolve(false));
+    sm.setVaultKeyGate(async () => "proceed");
+    const enabling = sm.enable(session(), { orgId: "org-a", name: "a", path: "/vaults/a", epoch: 1 });
+    await flush();
+    expect(storeHooks.created).toBe(1);
+    held.open();
+    await enabling;
+    await flush();
+    expect(storeHooks.created).toBe(1);
+  });
+
+  it("a paused gate never opens the held-back channel", async () => {
+    const sm = new SyncManager();
+    sm.setEarlyVaultChannelCheck(() => false);
+    sm.setVaultKeyGate(async () => "paused");
+    const out = await sm.enable(session(), { orgId: "org-a", name: "a", path: "/vaults/a", epoch: 1 });
+    await flush();
+    expect(out).toMatchObject({ ok: false, reason: "vault-key" });
+    expect(storeHooks.created).toBe(0);
+  });
+
   it("finishes the run when the channel settled BEFORE the reconcile returned", async () => {
     // The channel starts in the prime window, so on a small vault its `ready`
     // and idle edge both land while the reconcile is still running. The download

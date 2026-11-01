@@ -47,6 +47,9 @@ import {
   tombstoneFile,
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
+import { docCryptoOf, refuseKeyIncapableClient, requireVaultKey } from "../../crypto/transport.js";
+import { vaultKeysEnabled } from "../../crypto/config.js";
+import type { DocCrypto } from "../../crypto/doc-crypto.js";
 import { softDeleteSet } from "../../trash/retention.js";
 import { trashChanged } from "../../trash/activity.js";
 import { gainsConflictSuffix, takeForeignRename } from "../../registry/rename-guard.js";
@@ -265,9 +268,14 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const isFirstVault = existing[0]?.n === "0";
 
     const id = randomUUID();
+    // Vault keys: a vault created while the feature is on is encrypted from
+    // the start (the creator's desktop keys it). Existing vaults are opt-in
+    // through keys/request-encryption; nothing here touches them.
+    const requestEncryption = vaultKeysEnabled();
     await pool.query(
-      "INSERT INTO vaults (id, organization_id, name) VALUES ($1, $2, $3)",
-      [id, organizationId, name],
+      `INSERT INTO vaults (id, organization_id, name, encryption_requested_at, encryption_requested_by)
+       VALUES ($1, $2, $3, CASE WHEN $4::boolean THEN now() END, CASE WHEN $4::boolean THEN $5 END)`,
+      [id, organizationId, name, requestEncryption, session.userId],
     );
 
     // Shared-with-team by default: a brand-new vault gets an org-wide `edit`
@@ -897,6 +905,18 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
+    // A build without vault keys registers nothing in a keyed vault (426),
+    // with or without state.
+    const outdated = await refuseKeyIncapableClient(c, vaultId);
+    if (outdated) return outdated;
+    // W3: content into a keyed vault needs this request's key, checked BEFORE
+    // registration so a refusal registers nothing.
+    let seedCrypto: DocCrypto | undefined;
+    if (state) {
+      const vkr = await requireVaultKey(c, vaultId);
+      if (!vkr.ok) return vkr.response;
+      seedCrypto = docCryptoOf(vaultId, vkr);
+    }
 
     // Shared with `/notes/batch` — see `registry/batch-ops.ts registerNote` for
     // the sequence and the incidents each step closes.
@@ -936,7 +956,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       if (sameId) {
         const seeded = await seedRegistered(vaultId, session.userId, [
           { key: 0, docId: n.id, state, created: out.status === "created" },
-        ]);
+        ], seedCrypto);
         Object.assign(payload, seeded.get(0));
       } else {
         Object.assign(payload, { seeded: false, content: "skipped", reason: "adopted" });
@@ -1202,6 +1222,10 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
+    // A build without vault keys registers no file in a keyed vault (426): its
+    // bytes would be refused anyway, leaving a `files` row with nothing behind it.
+    const outdatedClient = await refuseKeyIncapableClient(c, vaultId);
+    if (outdatedClient) return outdatedClient;
     // Client-supplied stable id, under either spelling: notes call it `docId`,
     // and the desktop's local `files.id` is sometimes sent as `id`. Both mean
     // the same thing — this doc's identity was minted on the device.

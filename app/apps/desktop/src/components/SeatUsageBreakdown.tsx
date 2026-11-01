@@ -25,7 +25,11 @@ export function SeatUsageBreakdown({
   showManage = true,
   invitedByVault,
   onOpenInvitedVault,
+  layout = "table",
 }: {
+  /** "ring": a used-of-total ring beside Claimed / Invited / Available, for
+   *  the Plan & Billing seats card. "table": the four-column table. */
+  layout?: "table" | "ring";
   seats: MyBillingAccount["seats"];
   canManage: boolean;
   onManage: () => void;
@@ -38,6 +42,65 @@ export function SeatUsageBreakdown({
 }) {
   const b = seatBreakdown(seats);
   const vaults = invitedVaults(invitedByVault);
+  if (layout === "ring") {
+    // Claimed is the solid arc, invited the lighter one after it.
+    const total = Math.max(1, b.purchased);
+    const circ = 2 * Math.PI * 16;
+    const claimedLen = (Math.min(b.claimed, total) / total) * circ;
+    const invitedLen = (Math.min(b.reserved, Math.max(0, total - b.claimed)) / total) * circ;
+    return (
+      <div className="seat-ring">
+        <svg
+          className="seat-ring-chart"
+          viewBox="0 0 42 42"
+          role="img"
+          aria-label={`${b.claimed + b.reserved} of ${b.purchased} seats taken`}
+        >
+          <circle className="seat-ring-track" cx="21" cy="21" r="16" />
+          {invitedLen > 0 && (
+            <circle
+              className="seat-ring-invited"
+              cx="21"
+              cy="21"
+              r="16"
+              strokeDasharray={`${invitedLen} ${circ}`}
+              strokeDashoffset={-claimedLen}
+              transform="rotate(-90 21 21)"
+            />
+          )}
+          {claimedLen > 0 && (
+            <circle
+              className="seat-ring-claimed"
+              cx="21"
+              cy="21"
+              r="16"
+              strokeDasharray={`${claimedLen} ${circ}`}
+              transform="rotate(-90 21 21)"
+            />
+          )}
+          <text x="21" y="24" textAnchor="middle">
+            {b.claimed}/{b.purchased}
+          </text>
+        </svg>
+        <div className="seat-ring-legend">
+          <span>
+            <b>{b.claimed}</b> claimed
+          </span>
+          <span className="muted">
+            {b.reserved > 0 && vaults.length > 0 ? (
+              <InvitedCount total={b.reserved} vaults={vaults} onOpenVault={onOpenInvitedVault} />
+            ) : (
+              <b>{b.reserved}</b>
+            )}{" "}
+            invited
+          </span>
+          <span className="muted">
+            <b>{b.available}</b> available
+          </span>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="seat-breakdown">
       <table className="members-table seat-breakdown-table">

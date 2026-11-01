@@ -7,7 +7,8 @@ import { buildOrgRowsByPath, effectiveTeamMode } from "../lib/accessMode";
 import { createAccessSummaryBatcher } from "../lib/accessSummaryBatch";
 import { accessResourceType, ancestorPaths, entriesFromServer, rowsFromEntries, type AccessRow } from "../lib/accessTree";
 import { resourceIdsByPath } from "../lib/locks";
-import { needsAccessConfirm, levelClass, LEVEL_TO_MODE, reduceAccessCopy, tickGrantMode, type ReduceScope, dateWithAgo, GRANT_LABEL, PERSON_LEVEL_LABEL, ROLE_LABEL, splitNotePath } from "../lib/membersAccess";
+import { needsAccessConfirm, levelClass, LEVEL_TO_MODE, reduceAccessCopy,
+  accessChangeFor, tickGrantMode, type ReduceScope, dateWithAgo, GRANT_LABEL, PERSON_LEVEL_LABEL, ROLE_LABEL, splitNotePath } from "../lib/membersAccess";
 import { syncManager } from "../lib/sync/docSession";
 import { activitySummary, buildTimeline, commonFolder, runNames, type TimelineEntry } from "../lib/memberActivity";
 import { relativeTime } from "../lib/health/format";
@@ -491,7 +492,7 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
   }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<{ title: string; button: string; outcome: string; danger: boolean; apply: () => Promise<void> } | null>(null);
+  const [confirm, setConfirm] = useState<{ title: string; button: string; outcome: string; danger: boolean; apply: () => Promise<void>; change?: ReturnType<typeof accessChangeFor> } | null>(null);
 
   useEffect(() => { if (map.error) setError(map.error); }, [map.error]);
   // Seed during render so the first frame with a tree has its modes.
@@ -598,7 +599,7 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
 
   const guarded = (from: TeamAccessMode | "custom" | null, to: TeamAccessMode, run: () => Promise<void>, scope: ReduceScope) => {
     if (to === "open" || !needsAccessConfirm(from, to)) return void run();
-    setConfirm({ ...reduceAccessCopy(scope, to), danger: to === "private", apply: run });
+    setConfirm({ ...reduceAccessCopy(scope, to), danger: to === "private", apply: run, change: accessChangeFor(scope, from, to) });
   };
 
   const level = member.access?.level ?? null;
@@ -675,12 +676,13 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
       {confirm && (
         <ConfirmDialog
           title={confirm.title}
+          change={confirm.change}
           confirmLabel={confirm.button}
           tone={confirm.danger ? "danger" : "accent"}
           onCancel={() => setConfirm(null)}
           onConfirm={async () => { await confirm.apply(); setConfirm(null); }}
         >
-          <p>{confirm.outcome}</p>
+          <p className="confirm-note">{confirm.outcome}</p>
         </ConfirmDialog>
       )}
     </div>

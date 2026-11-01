@@ -9,6 +9,12 @@ import { listReadableDocsInVault, type SharedVaultReads } from "../permissions/v
 import { listEmptyDocs, loadDocDiff } from "../yjs/persistence.js";
 import { deletedNotesAmong } from "../trash/access.js";
 import { pool } from "../db/pool.js";
+import { vaultKeysEnabled } from "../crypto/config.js";
+import { kickVaultBackfill } from "../crypto/backfill.js";
+import { vaultKeyCache } from "../crypto/key-cache.js";
+import { CLOSE_KEY_REQUIRED, KEY_REQUIRED_CODE, decodeVk, loadVkCheck } from "../crypto/transport.js";
+import { verifyVk } from "../crypto/vk-check.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
 import { observeCount } from "../metrics/sync-metrics.js";
 import {
   parseHello,
@@ -119,6 +125,8 @@ export interface VaultChannelDeps {
  * Mirrored in `desktop/src/lib/sync/vaultSyncEngine.ts` as `WS_CLOSE_*`.
  */
 export const WS_CLOSE_UNAUTHORIZED = 4401;
+/** Live updates held per connection while its first ACL read is in flight. */
+export const PRE_ACL_UPDATES_MAX = 256;
 export const WS_CLOSE_PROTOCOL = 4400;
 
 export const REGISTRY_COALESCE_MS = 120;
@@ -530,9 +538,31 @@ class VaultConnection {
    *  clients would misparse as doc updates (see {@link HelloFrame.caps}). */
   private caps = new Set<string>();
   private readable = new Set<string>();
+  /**
+   * ACL refreshes run concurrently (registry-changed, acl-changed, reauth each
+   * start one) and resolve out of order. Only a result at least as new as the
+   * last one applied may replace `readable`: an older read finishing last would
+   * otherwise re-admit a doc a newer refresh just dropped, and backfill it.
+   */
+  private aclRefreshStarted = 0;
+  private aclRefreshApplied = 0;
+  /**
+   * The connect-time readable set is read AFTER subscribing to the vault topic,
+   * so an ACL change committed while the hello was in flight is never missed.
+   * A refresh that lands before that first read finishes only marks the set
+   * dirty; it is read once more right after.
+   */
+  private aclLoaded = false;
+  private aclDirty = false;
+  /** Live updates heard before that first read lands; replayed through the ACL gate (bounded). */
+  private preAclUpdates: Array<{ docId: string; update: Uint8Array }> | null = [];
   private unsubscribe: (() => void) | null = null;
   /** The user-addressed topic (`invitations` cap only, sync/user-events.ts). */
   private unsubscribeUser: (() => void) | null = null;
+  /** W3: releases this connection's hold on the vault key cache entry. */
+  private releaseKey: (() => void) | null = null;
+  /** W3: the key this connection verified at hello; zeroed on cleanup. */
+  private docCrypto: DocCrypto | null = null;
   private helloSeen = false;
   // Set once by cleanup(). `close` fires exactly once, so anything that outlives
   // it (an in-flight hello await) must consult this instead of relying on
@@ -541,7 +571,13 @@ class VaultConnection {
   private readonly helloTimer: ReturnType<typeof setTimeout>;
   // This connection's last-announced presence (which note the user is viewing),
   // kept so we can re-broadcast it when a newcomer asks, and clear it on close.
-  private myPresence: { docId: string | null; name: string; color: string; status: string } | null =
+  private myPresence: {
+    docId: string | null;
+    name: string;
+    color: string;
+    status: string;
+    moment?: string;
+  } | null =
     null;
   /** A presence frame that arrived before auth finished; replayed right after
    *  the pub/sub subscribe so the announce (and the roster query it triggers)
@@ -660,11 +696,35 @@ class VaultConnection {
     }
     if (this.closed) return; // closed while verifying — don't run the ACL query
 
-    try {
-      this.readable = await this.deps.listReadableDocs(this.userId, this.vaultId);
-    } catch (err) {
-      console.error("Vault channel ACL resolve failed:", err);
-      return this.fail("acl resolve failed");
+    // W3: a hello may carry the vault key. Verified against `vk_check`, it is
+    // held in the process cache for this connection (background work only);
+    // released in cleanup(). Flag off or no key: exactly today's path.
+    // A keyed vault without a valid key is refused: close 4409, err frame
+    // message `key_required` (the desktop asks a member's device for the key).
+    if (vaultKeysEnabled()) {
+      let state;
+      try {
+        state = await loadVkCheck(this.vaultId, pool);
+      } catch (err) {
+        console.error("Vault channel key check failed:", (err as Error)?.message ?? err);
+        return this.fail("key check failed");
+      }
+      if (this.closed) return;
+      if (state) {
+        const vk = decodeVk(hello.vk);
+        try {
+          if (!vk || !verifyVk(vk, this.vaultId, state.vkCheck)) {
+            return this.fail(KEY_REQUIRED_CODE, CLOSE_KEY_REQUIRED);
+          }
+          this.releaseKey = vaultKeyCache.acquire(this.vaultId, vk, state.generation);
+          // Index notes skipped while no key was held, and seal old rows.
+          void kickVaultBackfill(this.vaultId);
+          // This connection's own copy for its backfill reads (never the cache).
+          this.docCrypto = { vaultId: this.vaultId, key: Buffer.from(vk), generation: state.generation };
+        } finally {
+          vk?.fill(0);
+        }
+      }
     }
 
     // Subscribe BEFORE backfill so no live update is missed during the drain;
@@ -683,6 +743,33 @@ class VaultConnection {
       return;
     }
     this.unsubscribe = off;
+
+    // The readable set is read only now, AFTER subscribing: an access change
+    // that commits during the auth I/O above is either seen by this read or
+    // arrives as a pubsub message (which marks the set dirty until the read
+    // lands, and forces one more). Read first, it could be missed for good and
+    // the backfill would hand over a doc access was just removed from.
+    try {
+      for (;;) {
+        this.aclDirty = false;
+        const seq = ++this.aclRefreshStarted;
+        const read = await this.deps.listReadableDocs(this.userId, this.vaultId);
+        if (seq >= this.aclRefreshApplied) {
+          this.aclRefreshApplied = seq;
+          this.readable = read;
+        }
+        if (!this.aclDirty) break;
+      }
+      this.aclLoaded = true;
+    } catch (err) {
+      this.preAclUpdates = null;
+      console.error("Vault channel ACL resolve failed:", err);
+      return this.fail("acl resolve failed");
+    }
+    const held = this.preAclUpdates;
+    this.preAclUpdates = null;
+    if (this.closed || this.ws.readyState !== this.ws.OPEN) return;
+    for (const u of held ?? []) if (this.readable.has(u.docId)) this.forwardLive(u.docId, u.update);
 
     // Events addressed to this USER (an invitation to another vault) ride
     // whichever vault channel they have open. Opt-in by cap: an old client
@@ -910,6 +997,7 @@ class VaultConnection {
       name: frame.name,
       color: frame.color,
       status: frame.status,
+      ...(frame.moment ? { moment: frame.moment } : {}),
     };
     void this.pubsub.publish(
       vaultTopic(this.vaultId),
@@ -1055,12 +1143,20 @@ class VaultConnection {
     // The ACL can be revoked while we're parked — re-check before reading.
     if (!this.readable.has(docId)) return;
     const clientSv = clientSvB64 ? new Uint8Array(Buffer.from(clientSvB64, "base64")) : null;
+    // The channel zeroes its key on close, possibly while this read is parked
+    // or running: read with a private copy, and stop once the socket is gone.
+    if (this.closed) return;
+    const held = this.docCrypto;
+    const crypto = held ? { ...held, key: Buffer.from(held.key) } : undefined;
     let diff;
     try {
-      diff = await this.deps.loadDiff(docId, clientSv);
+      diff = await this.deps.loadDiff(docId, clientSv, undefined, crypto);
     } catch (err) {
+      if (this.closed) return; // the socket went away mid-read; the next connect re-sends
       console.error(`Vault channel backfill failed for ${docId}:`, err);
       return;
+    } finally {
+      crypto?.key.fill(0);
     }
     if (diff?.clientAhead) {
       if (this.behind.length < BEHIND_CAP) this.behind.push(docId);
@@ -1070,6 +1166,10 @@ class VaultConnection {
       else this.coveredTruncated = true;
     }
     if (!diff || diff.upToDate) return; // nothing new for this client
+    // ...and again AFTER the read: access can be removed while `loadDiff` runs
+    // (a large doc takes a while), and a frame sent after the `drop` would hand
+    // a now-restricted doc's content to a member who lost it.
+    if (this.closed || !this.readable.has(docId)) return;
     this.sendBinary(encodeWsUpdate(docId, diff.update));
   }
 
@@ -1102,6 +1202,16 @@ class VaultConnection {
     const msg = decodePubsub(payload);
     if (!msg) return;
     if (msg.type === "update") {
+      if (!this.aclLoaded) {
+        // Subscribed, but the readable set is not read yet: hold it (a
+        // live-only client has no backfill to cover it) and judge it after.
+        if (this.preAclUpdates && this.preAclUpdates.length < PRE_ACL_UPDATES_MAX) {
+          this.preAclUpdates.push({ docId: msg.docId, update: msg.update });
+        } else {
+          this.preAclUpdates = null; // overflow: the backfill / next connect re-sends
+        }
+        return;
+      }
       if (this.readable.has(msg.docId)) this.forwardLive(msg.docId, msg.update);
       return;
     }
@@ -1272,6 +1382,11 @@ class VaultConnection {
     opts: { reauth?: "always" | "if-changed" | "never"; trigger?: object } = {},
   ): Promise<void> {
     if (!this.userId || !this.vaultId) return;
+    if (!this.aclLoaded) {
+      this.aclDirty = true;
+      return;
+    }
+    const seq = ++this.aclRefreshStarted;
     let next: Set<string>;
     try {
       next = await this.readableFor(opts.trigger);
@@ -1279,6 +1394,9 @@ class VaultConnection {
       console.error("Vault channel ACL refresh failed:", err);
       return;
     }
+    // A newer refresh already applied a fresher read: this one is stale.
+    if (seq < this.aclRefreshApplied || this.closed) return;
+    this.aclRefreshApplied = seq;
     const prev = this.readable;
     this.readable = next;
     // A doc that fell out because it was DELETED is not a revocation: the
@@ -1598,6 +1716,14 @@ class VaultConnection {
         encodePubsubPresence({ userId: this.userId, docId: null, name, color, status }),
       );
       this.announced = false;
+    }
+    if (this.releaseKey) {
+      this.releaseKey();
+      this.releaseKey = null;
+    }
+    if (this.docCrypto) {
+      this.docCrypto.key.fill(0);
+      this.docCrypto = null;
     }
     if (this.unsubscribeUser) {
       this.unsubscribeUser();

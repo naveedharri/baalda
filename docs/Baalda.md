@@ -143,11 +143,13 @@ See [[STATUS]] for the live build checklist.
 5. **Reuse patterns, not code.** Study the OSS references, own our implementation.
 6. **Self-hostable, no vendor lock-in.** Everything runs on our infra (Tauri + Node + Postgres).
 
-## Baalda Assistant
+## Dashboards
 
 - [Home and dashboards](DASHBOARDS.md): personal/shared pins and Home, ordinary HTML
   notes, the optional read-only bridge, linked dashboards, and installed Codex.
 
-- [Agent diagnostics and repairs](HOUSEKEEPER.md): included for billing-disabled
-  self-hosters; Pro (Team under `BILLING_MODEL=team`) on billing-enabled servers. BYOK model setup, reviewed actions
-  and verification.
+
+## Security
+
+- [Vault keys](VAULT_KEYS.md): encryption at rest with client-held keys (not end-to-end
+  encryption), what is and is not encrypted, and how to enable it on a self-hosted server.

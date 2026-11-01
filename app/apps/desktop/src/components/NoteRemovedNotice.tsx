@@ -16,7 +16,7 @@ export function NoteRemovedNotice() {
   const dismiss = () => useStore.setState({ noteRemovedByTeammate: null });
   const visible = useNoticeSlot("note-removed", removed != null, { onFade: dismiss });
   return (
-    <Banner show={visible}>
+    <Banner show={visible} tone="danger">
       <span>
         {removed?.reason === "revoked" ? (
           <>Your access to this note was removed. It is no longer on this device.</>

@@ -11,6 +11,7 @@ import type {
   TeamAccessMode,
 } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
+import { inviteWithVaultKeys } from "../lib/vaultKeys/runtime";
 import { freeLimitOf } from "../lib/billing";
 import { rosterCache, type RosterSnapshot } from "../lib/membersAccessCaches";
 import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
@@ -44,7 +45,7 @@ import { toast } from "../lib/toast";
 import type { SettingsTab } from "../lib/settingsTabs";
 import { useStore } from "../store";
 import { Avatar } from "./Avatar";
-import { ConfirmDialog } from "./ConfirmDialog";
+import { ConfirmDialog, type ConfirmChange } from "./ConfirmDialog";
 import { InvitePeopleDialog } from "./InvitePeopleDialog";
 import { PeopleLimitNotice, inviteLimitError, peopleLimitKind } from "./PeopleLimitNotice";
 import { MemberProfilePage, type ProfileTab } from "./MemberProfilePage";
@@ -66,6 +67,9 @@ interface Confirm {
   tone: "danger" | "accent";
   body: React.ReactNode;
   apply: () => Promise<void>;
+  subtitle?: React.ReactNode;
+  change?: ConfirmChange;
+  cancelLabel?: string;
 }
 
 /**
@@ -291,7 +295,6 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   const chooseEveryone = (mode: TeamAccessMode) => {
     if (!teamAccess) return;
     if (mode === teamAccess.mode && teamAccess.overrides.length === 0 && teamAccess.posture !== "none") return;
-    const label = EVERYONE_OPTIONS.find((o) => o.value === mode)?.label ?? mode;
     if (!needsAccessConfirm(teamAccess.posture === "none" ? "private" : teamAccess.mode, mode)) {
       void writeEveryone(mode);
       return;
@@ -303,12 +306,15 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       label: copy.button,
       tone: mode === "private" ? "danger" : "accent",
       apply: () => writeEveryone(mode),
-      body: (
-        <>
-          <p>Every member gets <strong>{label}</strong> unless they have their own setting. People set by name keep theirs.</p>
-          <p>{copy.outcome}</p>
-        </>
-      ),
+      subtitle: <>People set by name keep their own setting.</>,
+      change: {
+        who: `Everyone in ${vaultName}`,
+        sub: "Default for every member",
+        from: teamAccess.posture === "none" ? "private" : teamAccess.mode,
+        to: mode,
+      },
+      cancelLabel: "Keep as is",
+      body: <p className="confirm-note">{copy.outcome}</p>,
     });
   };
 
@@ -352,22 +358,28 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       return;
     }
     if (choice === "open") return;
-    const copy = reduceAccessCopy({ kind: "person", name: displayName(m), self: m.userId === myUserId }, choice);
+    const self = m.userId === myUserId;
+    const copy = reduceAccessCopy({ kind: "person", name: displayName(m), self }, choice);
     setConfirm({
       title: copy.title,
       label: copy.button,
       tone: choice === "private" ? "danger" : "accent",
       apply: () => writePerson(m, choice),
-      body: (
+      subtitle: (
         <>
-          <p>
-            {m.userId === myUserId
-              ? "This replaces your own settings across the vault. Your setting wins over the default setting, and owners and admins are not exempt."
-              : `This replaces ${displayName(m)}'s own settings across the vault. Their setting wins over the default setting.`}
-          </p>
-          <p>{copy.outcome}</p>
+          This applies across {vaultName}
+          {self ? ", and owners and admins are not exempt." : ", over the default for everyone."}
         </>
       ),
+      change: {
+        who: self ? "You" : displayName(m),
+        sub: self ? displayName(m) : m.email ?? undefined,
+        avatar: <Avatar label={displayName(m)} image={m.image} userId={m.userId} />,
+        from: from === null ? null : from,
+        to: choice,
+      },
+      cancelLabel: self ? "Keep my access" : "Keep as is",
+      body: <p className="confirm-note">{copy.outcome}</p>,
     });
   };
 
@@ -399,7 +411,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
 
   const resend = (inv: InvitationOverview) => run(async () => {
     if (!orgId) return;
-    const [result] = await authManager.api.inviteMany(orgId, {
+    const [result] = await inviteWithVaultKeys(orgId, {
       emails: [inv.email],
       role: inv.role === "admin" ? "admin" : "member",
       access: inv.access,
@@ -474,6 +486,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
         {confirm && (
           <ConfirmDialog
             title={confirm.title}
+            subtitle={confirm.subtitle}
+            change={confirm.change}
+            cancelLabel={confirm.cancelLabel}
             confirmLabel={confirm.label}
             tone={confirm.tone}
             onCancel={() => setConfirm(null)}
@@ -710,6 +725,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       {confirm && (
         <ConfirmDialog
           title={confirm.title}
+          subtitle={confirm.subtitle}
+          change={confirm.change}
+          cancelLabel={confirm.cancelLabel}
           confirmLabel={confirm.label}
           tone={confirm.tone}
           onCancel={() => setConfirm(null)}
@@ -724,6 +742,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       {inviteOpen && orgId && (
         <InvitePeopleDialog
           orgId={orgId}
+          vaultName={vaultName}
+          newMembersAccess={accessDefault?.mode ?? null}
+          onNewMembersAccess={manage ? (mode) => void chooseDefault(mode) : undefined}
           canManageBilling={myRole === "owner"}
           seatAccount={seatAccount}
           ownerName={ownerName(members)}

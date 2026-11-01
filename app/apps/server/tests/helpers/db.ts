@@ -11,6 +11,9 @@ export async function ensureMigrated(): Promise<void> {
 }
 
 const TABLES = [
+  // No FK to organization since migration 065, so the CASCADE below misses it.
+  "access_audit",
+  "index_pending",
   "skill_version_files",
   "skill_versions",
   "skill_draft_files",
@@ -53,6 +56,25 @@ const TABLES = [
   "account",
   "verification",
   "signin_throttle",
+  "user_keys",
+  "user_device_keys",
+  "vault_key_wraps",
+  "vault_key_requests",
+  "vault_crypto_state",
+  "mcp_token_keys",
+  "mcp_token_allow",
+  "oauth_grant_allow",
+  "oauth_grant_keys",
+  "oauth_consents",
+  "vault_pending_keys",
+  "user_device_registrations",
+  "user_key_history",
+  "vault_key_wrap_history",
+  "invitation_vault_keys",
+  "vault_join_wraps",
+  "vault_key_recovery",
+  "server_secrets",
+  "server_secret_fingerprints",
   '"user"',
 ];
 

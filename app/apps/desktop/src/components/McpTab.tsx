@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import { syncManager } from "../lib/sync/docSession";
 import { createPortal } from "react-dom";
 import type { McpToolInfo, McpTokenRow } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import * as ipc from "../lib/ipc";
 import { isManagedServer } from "../lib/serverFeatures";
 import { toast } from "../lib/toast";
+import { copySensitiveText, SENSITIVE_COPIED_MESSAGE } from "../lib/clipboard";
 import { useStore } from "../store";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { BusyButton } from "./skills/parts";
@@ -87,37 +89,54 @@ export function McpTab() {
 
   return (
     <>
-      <div className="muted">
+      <p className="mcp-lede">
         Connect any MCP-compatible AI client to this vault. It gets the same
         access you do: read, search, create, edit and delete notes and folders.
         Owners and admins can also manage the team's access from the same chat.
-        Ask Claude or ChatGPT to share a folder with someone, make it view only,
-        or set what new members see.
-      </div>
+      </p>
 
-      {isManagedServer(serverUrl) && <ClaudeDirectoryBanner />}
+      <div className="profile-rows mcp-rows">
+        {isManagedServer(serverUrl) && (
+          <div className="profile-row">
+            <div className="profile-row-label">
+              <span className="profile-row-title mcp-row-title">
+                <ToolLogo tool="claude" size={15} title="" />
+                Claude
+                <span className="mcp-official">Official connector</span>
+              </span>
+              <span className="profile-row-hint">Add Baalda from Claude&apos;s connector directory in one click.</span>
+            </div>
+            <div className="profile-row-control mcp-row-end">
+              <ClaudeDirectoryButton />
+            </div>
+          </div>
+        )}
 
-      <div className="mcp-endpoint">
-        <span className="mcp-endpoint-label">Server address</span>
-        <CopyField value={mcpUrl} label="server address" />
-      </div>
-
-      <div className="mcp-section-head">
-        <div className="mcp-section-text">
-          <div className="subhead">Access tokens</div>
-          <div className="mcp-section-hint">
-            Each token connects one AI client as you, in this vault. Revoke any time.
+        <div className="profile-row">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Server address</span>
+            <span className="profile-row-hint">Paste it into any MCP client.</span>
+          </div>
+          <div className="profile-row-control">
+            <CopyField value={mcpUrl} label="server address" />
           </div>
         </div>
-        <button
-          type="button"
-          className="primary skills-hdr-btn"
-          onClick={() => setCreating(true)}
-        >
-          New token
-        </button>
-      </div>
 
+        <div className="profile-row profile-row-top">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Access tokens</span>
+            <span className="profile-row-hint">
+              Each token connects one AI client as you, in this vault. Revoke any time.
+            </span>
+            <button
+              type="button"
+              className="mcp-new-token"
+              onClick={() => setCreating(true)}
+            >
+              New token
+            </button>
+          </div>
+          <div className="profile-row-control">
       {loading ? (
         <div className="mcp-empty">Loading…</div>
       ) : tokens.length === 0 ? (
@@ -194,6 +213,9 @@ export function McpTab() {
           })}
         </ul>
       )}
+          </div>
+        </div>
+      </div>
 
       {creating && (
         <NewMcpTokenDialog
@@ -221,14 +243,9 @@ export function McpTab() {
 /** The directory listing points at the managed server, so self-hosters never see it. */
 const CLAUDE_DIRECTORY_URL = "https://claude.ai/directory/baalda";
 
-function ClaudeDirectoryBanner() {
+function ClaudeDirectoryButton() {
   return (
-    <div className="mcp-directory">
-      <ToolLogo tool="claude" size={16} title="" />
-      <span className="mcp-directory-pill">Official connector</span>
-      <span className="mcp-directory-text">
-        Baalda is in Claude's connector directory. Add it in Claude with one click.
-      </span>
+    <>
       <button
         type="button"
         className="secondary mcp-directory-btn"
@@ -243,7 +260,7 @@ function ClaudeDirectoryBanner() {
           <path d="M5.5 10.5l5-5M6.5 5.5h4v4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
-    </div>
+    </>
   );
 }
 
@@ -289,7 +306,7 @@ function NewMcpTokenDialog({
   const create = async () => {
     setError(null);
     try {
-      const minted = await authManager.api.createMcpToken(name.trim() || "MCP token");
+      const minted = await authManager.api.createMcpToken(name.trim() || "MCP token", syncManager.registry.vaultId);
       const { token, ...row } = minted;
       setCreated({ name: minted.name, token });
       onCreated(row);
@@ -421,7 +438,7 @@ function NewMcpTokenDialog({
 }
 
 /** Copies on click; the glyph flips to a tick for 1.5 s in the same 28px box. */
-function CopyButton({ value, label }: { value: string; label: string }) {
+function CopyButton({ value, label, sensitive = false }: { value: string; label: string; sensitive?: boolean }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | null>(null);
   useEffect(() => () => {
@@ -429,7 +446,13 @@ function CopyButton({ value, label }: { value: string; label: string }) {
   }, []);
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(value);
+      if (sensitive) {
+        // A secret: native write, then wiped after 60 s if still on the clipboard.
+        if (!(await copySensitiveText(value))) return;
+        toast(SENSITIVE_COPIED_MESSAGE);
+      } else {
+        await navigator.clipboard.writeText(value);
+      }
       setCopied(true);
       if (timer.current !== null) window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => setCopied(false), 1500);
@@ -459,24 +482,49 @@ function CopyButton({ value, label }: { value: string; label: string }) {
   );
 }
 
-/** A monospace value with its copy button inside the field; one line unless `wrap`. */
-function CopyField({ value, label, wrap = false }: { value: string; label: string; wrap?: boolean }) {
+/** A monospace value with its copy button inside the field; one line unless `wrap`.
+ *  `sensitive`: a secret, cleared from the clipboard 60 s after copying. */
+export function CopyField({
+  value,
+  label,
+  wrap = false,
+  sensitive = false,
+}: {
+  value: string;
+  label: string;
+  wrap?: boolean;
+  sensitive?: boolean;
+}) {
   return (
     <div className="mcp-field">
       <code className={`mcp-field-value${wrap ? " is-wrapped" : ""}`} title={value}>
         {value}
       </code>
-      <CopyButton value={value} label={label} />
+      <CopyButton value={value} label={label} sensitive={sensitive} />
     </div>
   );
 }
 
-/** A multi-line command block with its copy button in the corner. */
+/**
+ * A multi-line command block: a small header (label + copy) over the commands,
+ * each starting with a `$` prompt; indented lines are continuations of the one
+ * above and get no prompt. The copied text is exactly `value`.
+ */
 function CopyBlock({ value, label }: { value: string; label: string }) {
+  const lines = value.split("\n");
   return (
     <div className="mcp-field mcp-block">
-      <code className="mcp-block-value">{value}</code>
-      <CopyButton value={value} label={label} />
+      <div className="mcp-block-head">
+        <span className="mcp-block-label">Terminal</span>
+        <CopyButton value={value} label={label} />
+      </div>
+      <code className="mcp-block-value">
+        {lines.map((line, i) => (
+          <span key={i} className={`mcp-block-line${/^\s/.test(line) ? " is-cont" : ""}`}>
+            {line.trimStart()}
+          </span>
+        ))}
+      </code>
     </div>
   );
 }
@@ -490,7 +538,7 @@ function isConnected(lastUsedAt: string | null): boolean {
 }
 
 /** Compact relative time: "just now", "5m ago", "3h ago", "2d ago", else a date. */
-function relTime(iso: string): string {
+export function relTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
   if (diff < 60_000) return "just now";
   const m = Math.floor(diff / 60_000);

@@ -27,6 +27,8 @@ export interface HelloFrame {
   files?: string[];
   /** Mapped notes held locally, including those with no CRDT state vector yet. */
   held?: string[];
+  /** W3: the vault key (base64), only for a keyed vault whose key verified. */
+  vk?: string;
   /**
    * This app instance's id (`ApiClient.getClientId()`), the same value sent as
    * `x-baalda-origin` on registry writes. Lets the server skip telling us to
@@ -67,6 +69,8 @@ export interface PresenceState {
   name: string;
   color: string;
   status: string;
+  /** Optional status moment; see `statusToWire` in lib/prefs.ts. */
+  moment?: string;
 }
 
 export type ServerControl =
@@ -308,6 +312,7 @@ export function parseServerControl(text: string): ServerControl | null {
         name: o.name,
         color: o.color,
         status: o.status,
+        ...(typeof o.moment === "string" ? { moment: o.moment } : {}),
       };
     }
     return null;

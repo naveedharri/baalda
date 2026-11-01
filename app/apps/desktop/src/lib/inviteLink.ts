@@ -31,6 +31,8 @@ export interface InviteDeepLink {
   /** The server the link says the invitation lives on, or null if it didn't
    *  say (or said something that isn't an http(s) address). */
   server: string | null;
+  /** B5: the invite secret `k` (memory only; never persisted or logged). */
+  secret?: string | null;
 }
 
 /**
@@ -75,10 +77,18 @@ export function parseInviteDeepLink(url: string): InviteDeepLink | null {
   const invitationId = segments[1];
   if (!ID_RE.test(invitationId)) return null;
   const rawServer = parsed.searchParams.get("server");
+  const k = parsed.searchParams.get("k");
+  const secret = k && /^[0-9A-Za-z]{26}$/.test(k) ? k : null;
   return {
     invitationId,
     server: rawServer ? normalizeServerUrl(rawServer) : null,
+    ...(secret ? { secret } : {}),
   };
+}
+
+/** A link safe to log: the invite secret `k` (it opens a vault key) replaced. */
+export function redactInviteSecret(url: string): string {
+  return String(url).replace(/([#?&]k=)[^&#\s]*/g, "$1<redacted>");
 }
 
 /**

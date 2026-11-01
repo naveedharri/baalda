@@ -2,7 +2,8 @@ import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
 import { recordVersion, sha256Hex, stampLastEdited } from "./capture.js";
-import { VERSION_CONTENT, VERSION_TEXT_JOIN } from "./texts.js";
+import { resolveText, VERSION_CONTENT, VERSION_CONTENT_ENC, VERSION_TEXT_JOIN } from "./texts.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
 
 /**
  * Reviewed recovery of notes damaged by past sync bugs (issue #200).
@@ -156,6 +157,8 @@ export async function listRecoveryCandidates(
     docWriter: Pick<DocWriter, "peekContent">;
     canEdit: (docId: string) => Promise<boolean>;
     db?: Queryable;
+    /** W3: the request's vault key for a keyed vault. */
+    crypto?: DocCrypto;
   },
 ): Promise<RecoveryCandidate[]> {
   const db = deps.db ?? defaultPool;
@@ -169,16 +172,20 @@ export async function listRecoveryCandidates(
   const out: RecoveryCandidate[] = [];
   for (const note of notes) {
     if (!(await deps.canEdit(note.id))) continue;
-    const current = (await deps.docWriter.peekContent(vaultId, note.id)) ?? "";
-    const { rows } = await db.query<{ id: string; created_at: Date; content: string }>(
-      `SELECT v.id, v.created_at, ${VERSION_CONTENT} AS content
+    const current = (await deps.docWriter.peekContent(vaultId, note.id, deps.crypto)) ?? "";
+    const { rows } = await db.query<{ id: string; created_at: Date; content: string; content_enc: Buffer | null; sha256: string }>(
+      `SELECT v.id, v.created_at, v.sha256, ${VERSION_CONTENT} AS content, ${VERSION_CONTENT_ENC} AS content_enc
          FROM note_versions v ${VERSION_TEXT_JOIN}
         WHERE v.doc_id = $1 AND ${VERSION_CONTENT} IS NOT NULL`,
       [note.id],
     );
     const verdict = assessNote(
       current,
-      rows.map((r) => ({ id: Number(r.id), createdAt: new Date(r.created_at).toISOString(), content: r.content })),
+      rows.map((r) => ({
+        id: Number(r.id),
+        createdAt: new Date(r.created_at).toISOString(),
+        content: resolveText(r, { vaultId, docId: note.id, sha: r.sha256 }, deps.crypto) ?? "",
+      })),
     );
     if (verdict) {
       out.push({ docId: note.id, path: note.rel_path, currentChars: size(current), ...verdict });
@@ -208,6 +215,8 @@ export async function applyRecovery(
     docWriter: Pick<DocWriter, "readContent" | "setContent">;
     canEdit: (docId: string) => Promise<boolean>;
     db?: Queryable;
+    /** W3: the request's vault key for a keyed vault. */
+    crypto?: DocCrypto;
   },
 ): Promise<RecoveryResult[]> {
   const db = deps.db ?? defaultPool;
@@ -225,8 +234,8 @@ export async function applyRecovery(
       results.push({ docId, ok: false, error: "no_write_access" });
       continue;
     }
-    const { rows } = await db.query<{ content: string }>(
-      `SELECT ${VERSION_CONTENT} AS content
+    const { rows } = await db.query<{ content: string; content_enc: Buffer | null; sha256: string }>(
+      `SELECT v.sha256, ${VERSION_CONTENT} AS content, ${VERSION_CONTENT_ENC} AS content_enc
          FROM note_versions v ${VERSION_TEXT_JOIN}
         WHERE v.id = $1 AND v.doc_id = $2 AND ${VERSION_CONTENT} IS NOT NULL`,
       [versionId, docId],
@@ -235,14 +244,18 @@ export async function applyRecovery(
       results.push({ docId, ok: false, error: "unknown_version" });
       continue;
     }
-    const target = rows[0].content;
-    const current = await deps.docWriter.readContent(vaultId, docId);
+    const target = resolveText(rows[0], { vaultId, docId, sha: rows[0].sha256 }, deps.crypto);
+    if (target == null) {
+      results.push({ docId, ok: false, error: "unknown_version" });
+      continue;
+    }
+    const current = await deps.docWriter.readContent(vaultId, docId, deps.crypto);
     const preRevertVersionId = await recordVersion(
-      { vaultId, docId, content: current, cause: "pre-revert", authorId: userId },
+      { vaultId, docId, content: current, cause: "pre-revert", authorId: userId, crypto: deps.crypto },
       db,
     );
     if (sha256Hex(current) !== sha256Hex(target)) {
-      await deps.docWriter.setContent(vaultId, docId, target, { userId });
+      await deps.docWriter.setContent(vaultId, docId, target, { userId, crypto: deps.crypto });
     }
     await stampLastEdited(docId, userId, db);
     results.push({ docId, ok: true, preRevertVersionId });

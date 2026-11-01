@@ -1,3 +1,5 @@
+import type { DocCrypto } from "../crypto/doc-crypto.js";
+import { pool } from "../db/pool.js";
 import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import type { LocalTransactionOrigin, Server } from "@hocuspocus/server";
@@ -143,7 +145,12 @@ export interface DocWriter {
     actor?: DocActor,
   ): Promise<void>;
   /** Read the current note body (from the live doc if open, else from storage). */
-  readContent(vaultId: string, docId: string): Promise<string>;
+  /**
+   * W3: `crypto` is the CALLER's verified key for a keyed vault. A sealed doc
+   * read without it throws `KeyRequiredError` — never "" (an empty answer would
+   * let a caller write over text it could not see).
+   */
+  readContent(vaultId: string, docId: string, crypto?: DocCrypto): Promise<string>;
   /**
    * Like {@link readContent}, but `null` when the doc has NO live session and NO
    * persisted CRDT state — i.e. the server has never seen this note's content
@@ -151,7 +158,7 @@ export interface DocWriter {
    * Callers that snapshot content MUST use this: treating "not uploaded yet" as
    * "empty note" is how a checkpoint ends up bulldozing real text with "".
    */
-  peekContent(vaultId: string, docId: string): Promise<string | null>;
+  peekContent(vaultId: string, docId: string, crypto?: DocCrypto): Promise<string | null>;
 }
 
 export function createDocWriter(
@@ -193,7 +200,16 @@ export function createDocWriter(
       // persist exactly like a human's.
       live.transact(() => fn(live.getText(CONTENT_FIELD)), {
         source: "local",
-        context: { source: MCP_ORIGIN, userId },
+        // W3: the call's own key rides along, so `onChange` seals the update
+        // and any pre-shrink text with it when the live doc remembers none.
+        context: {
+          source: MCP_ORIGIN,
+          userId,
+          // A COPY: `onChange` runs later on Hocuspocus' hook chain, and the
+          // request zeroes its own key when it ends; a zeroed key would refuse
+          // (or, before the zero-key guard, poison) this already-applied edit.
+          ...(actor?.crypto ? { vaultKey: Buffer.from(actor.crypto.key), vaultKeyGeneration: actor.crypto.generation } : {}),
+        },
       } satisfies LocalTransactionOrigin);
       return;
     }
@@ -211,10 +227,11 @@ export function createDocWriter(
 
   // A plain closure, NOT a method using `this`: call sites hand these functions
   // around detached (`readContent: docWriter.readContent`), where `this` dies.
-  async function peekContent(vaultId: string, docId: string): Promise<string | null> {
+  async function peekContent(vaultId: string, docId: string, crypto?: DocCrypto): Promise<string | null> {
     const live = server.hocuspocus.documents.get(formatDocName(vaultId, docId));
     if (live) return live.getText(CONTENT_FIELD).toString();
-    const state = await loadDocState(docId);
+    // W3: a sealed log needs the caller's key (key_required otherwise).
+    const state = await loadDocState(docId, pool, crypto);
     // No state is NOT an empty note: it is a note whose content has never
     // reached this server. The distinction is load-bearing for checkpoints.
     if (!state) return null;
@@ -305,7 +322,7 @@ export function createDocWriter(
         actor,
       ),
 
-    readContent: async (vaultId, docId) => (await peekContent(vaultId, docId)) ?? "",
+    readContent: async (vaultId, docId, crypto) => (await peekContent(vaultId, docId, crypto)) ?? "",
 
     peekContent,
   };

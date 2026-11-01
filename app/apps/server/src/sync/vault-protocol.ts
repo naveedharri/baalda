@@ -84,6 +84,12 @@ export interface HelloFrame {
    * Absent ⇒ full backfill, which is every shipped client.
    */
   mode?: "live-only";
+  /**
+   * Client-held vault keys (W3): the vault key, base64 (32 bytes). Verified
+   * against `vaults.vk_check`; when valid, held in the process key cache for
+   * this connection's lifetime (background work only). Never logged.
+   */
+  vk?: string;
 }
 
 /** A teammate's live "who's viewing what" state, forwarded to every subscriber
@@ -97,6 +103,9 @@ export interface PresenceState {
   name: string;
   color: string;
   status: string;
+  /** Optional status moment ("coffee", "meeting"…) for clients that show one;
+   *  `status` then carries its plain tone (away/busy) for clients that don't. */
+  moment?: string;
 }
 
 export type ServerControl =
@@ -269,7 +278,12 @@ export interface PresenceFrame {
   name: string;
   color: string;
   status: string;
+  /** See {@link PresenceState.moment}. */
+  moment?: string;
 }
+
+/** A moment id is a short lowercase word; anything else is dropped, never relayed. */
+const MOMENT_RE = /^[a-z]{1,16}$/;
 
 /** Parse a client presence text frame; null if it isn't one. */
 export function parsePresence(text: string): PresenceFrame | null {
@@ -292,6 +306,7 @@ export function parsePresence(text: string): PresenceFrame | null {
     name: o.name,
     color: o.color,
     status: o.status,
+    ...(typeof o.moment === "string" && MOMENT_RE.test(o.moment) ? { moment: o.moment } : {}),
   };
 }
 
@@ -329,6 +344,8 @@ export function parseHello(text: string): HelloFrame | null {
     // Exactly one recognised value; anything else is an older or a confused
     // client and gets the full backfill, which is always correct if slower.
     mode: f.mode === "live-only" ? "live-only" : undefined,
+    // W3: optional vault key (base64, 32 bytes); verified by the channel.
+    vk: typeof f.vk === "string" && f.vk ? f.vk : undefined,
   };
 }
 

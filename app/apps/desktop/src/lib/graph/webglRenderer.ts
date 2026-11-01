@@ -50,9 +50,11 @@ out vec4 fragColor;
 
 // Same three stops as the CSS backdrop, so the 2D fallback and the GPU path
 // sit on an identical void.
-const vec3 C_CORE = vec3(0.059, 0.067, 0.106); // #0f111b
-const vec3 C_MID  = vec3(0.031, 0.035, 0.063); // #080910
-const vec3 C_RIM  = vec3(0.012, 0.016, 0.035); // #030409
+// Redesign: the three stops come from the page theme (setTheme), so the graph
+// sits on the app's own warm canvas instead of a navy void.
+uniform vec3 C_CORE;
+uniform vec3 C_MID;
+uniform vec3 C_RIM;
 
 void main() {
   vec2 uv = gl_FragCoord.xy / uViewport;
@@ -162,16 +164,17 @@ void main() {
   // Lambert, lifted by an ambient floor so the unlit limb stays coloured rather
   // than going black — a fully dark terminator reads as a hole, not a shadow.
   float diff = max(0.0, dot(n, LIGHT));
-  float shade = 0.42 + 0.72 * diff;
+  // Redesign: matte and calm. A hint of volume, no gloss, no breathing.
+  float shade = 0.9 + 0.12 * diff;
 
   // Narrow soft highlight where the light hits square on: the cue that says
   // "sphere" rather than "gradient". It breathes very slightly with the node's
   // own phase, which is what keeps a settled graph from looking like a print.
-  float spec = pow(diff, 20.0) * (0.42 + 0.22 * vPulse);
+  float spec = 0.0 * vPulse;
 
   // Rim light on the far limb, which is what separates one node from another
   // when they overlap in a dense cluster.
-  float rim = pow(1.0 - z, 3.0) * 0.30;
+  float rim = 0.0;
 
   // Hover-dimming is applied by the caller as a multiplier on the fill colour,
   // and a white specular would ignore it — dimmed nodes would keep a full-bright
@@ -191,6 +194,11 @@ void main() {
   float d = sqrt(d2);
   float aa = clamp(1.0 / max(vPx, 1.0), 0.02, 0.5);
   float alpha = 1.0 - smoothstep(1.0 - aa, 1.0, d);
+  // Redesign: hubs (big on screen) read as a ringed disc: solid core, a thin
+  // clear gap, then an outer ring. Leaves stay solid dots.
+  float ringOn = smoothstep(8.0, 11.0, vPx);
+  float gap = smoothstep(0.66 - aa, 0.66, d) * (1.0 - smoothstep(0.78, 0.78 + aa, d));
+  alpha *= 1.0 - gap * ringOn;
   fragColor = vec4(lit, alpha);
 }`;
 
@@ -240,7 +248,9 @@ uniform vec2 uPan;
 uniform float uScale;
 uniform float uWidthPx;              // full width of the quad, device px
 out float vAcross;
+out float vWidth;
 void main() {
+  vWidth = uWidthPx;
   vec2 p0 = aSeg.xy * uScale + uPan;
   vec2 p1 = aSeg.zw * uScale + uPan;
   vec2 dir = p1 - p0;
@@ -259,13 +269,15 @@ void main() {
 const LINE_FRAG = `#version 300 es
 precision highp float;
 in float vAcross;
+in float vWidth;
 uniform vec4 uLineColor;
 out vec4 fragColor;
 void main() {
-  // Soft across the width: solid down the spine, faded to nothing at the rim.
-  // This is what replaces MSAA on a 1px line — and it is why the resting alpha
-  // can be raised without thousands of overlapping links turning into a wash.
-  float a = pow(1.0 - abs(vAcross), 1.5);
+  // Redesign: a crisp thread. Solid across the core, antialiased over only the
+  // outermost device pixel, instead of a soft smear across the whole quad.
+  float half_ = vWidth * 0.5;
+  float px = abs(vAcross) * half_;
+  float a = 1.0 - smoothstep(half_ - 1.0, half_, px);
   fragColor = vec4(uLineColor.rgb, uLineColor.a * a);
 }`;
 
@@ -521,6 +533,20 @@ export class WebGLGraphRenderer {
    * per-node breathing, and `glow` scales the halos (turned down as the node
    * count rises so a dense vault doesn't bloom into a single white cloud).
    */
+  private uBgStops: (WebGLUniformLocation | null)[] | null = null;
+  private theme = {
+    core: [0.094, 0.09, 0.082] as [number, number, number],
+    mid: [0.078, 0.075, 0.07] as [number, number, number],
+    rim: [0.063, 0.06, 0.055] as [number, number, number],
+    line: [1, 0.97, 0.925, 0.16] as [number, number, number, number],
+    hl: [0.65, 0.59, 1, 0.9] as [number, number, number, number],
+  };
+
+  /** Redesign: backdrop stops and edge colours, read from the page theme. */
+  setTheme(t: Partial<typeof this.theme>): void {
+    this.theme = { ...this.theme, ...t };
+  }
+
   draw(
     scale: number,
     panX: number,
@@ -539,6 +565,10 @@ export class WebGLGraphRenderer {
     gl.useProgram(this.bgProgram);
     gl.bindVertexArray(this.bgVao);
     gl.uniform2f(this.uBgViewport, vw, vh);
+    this.uBgStops ??= ["C_CORE", "C_MID", "C_RIM"].map((n) => gl.getUniformLocation(this.bgProgram, n));
+    gl.uniform3fv(this.uBgStops[0], this.theme.core);
+    gl.uniform3fv(this.uBgStops[1], this.theme.mid);
+    gl.uniform3fv(this.uBgStops[2], this.theme.rim);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(null);
     gl.enable(gl.BLEND);
@@ -570,14 +600,16 @@ export class WebGLGraphRenderer {
     // lavender wash over dense regions, so they had to be dialled down until
     // they nearly disappeared. The softness carries the density now.
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    drawSegments(this.lineVao, this.lineCount, 1.6 * dpr, 0.44, 0.56, 0.9, 0.3);
+    const L = this.theme.line;
+    drawSegments(this.lineVao, this.lineCount, Math.max(1, dpr) + 1, L[0], L[1], L[2], L[3]);
 
     // Hover rays go UNDER the nodes, not over them. Drawn last, they crossed the
     // hovered node itself — dozens of bright lines converging on top of the very
     // thing being pointed at, which blew out its centre and hid it. Beneath the
     // node layer they emerge from behind it instead, which is also what the
     // geometry actually is: a link starts at the node, not on it.
-    drawSegments(this.hlVao, this.hlCount, 2.6 * dpr, 1.0, 0.86, 0.38, 0.95);
+    const H = this.theme.hl;
+    drawSegments(this.hlVao, this.hlCount, 1.5 * Math.max(1, dpr) + 1, H[0], H[1], H[2], H[3]);
 
     if (this.count === 0) return;
 
@@ -594,10 +626,13 @@ export class WebGLGraphRenderer {
     };
 
     // ---- 3. Glow (additive) ----
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-    gl.useProgram(this.glowProgram);
-    gl.uniform1f(this.glowU.glow, glow);
-    bindNodes(this.glowU, HALO);
+    // Redesign: off by default (glow 0), which skips a whole instanced pass.
+    if (glow > 0.01) {
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      gl.useProgram(this.glowProgram);
+      gl.uniform1f(this.glowU.glow, glow);
+      bindNodes(this.glowU, HALO);
+    }
 
     // ---- 4. Cores ----
     // Last, so every edge — resting or highlighted — is occluded by the discs

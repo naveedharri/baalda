@@ -12,6 +12,7 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { StatusMoment } from "./StatusMoment";
 import { NOT_CREATOR_MESSAGE, canDeleteItem } from "../lib/sync/deletePolicy";
 import {
   Tree,
@@ -84,6 +85,28 @@ import type { ShareTarget } from "./ShareDialog";
 /** The row menu's Share… is hidden until per-item sharing is reworked;
  *  Members and access is where access is managed meanwhile. */
 const SHOW_SHARE_ITEM = false;
+
+/**
+ * Redesign: give a just-opened folder's child rows `.rd-row-new` (a short fade,
+ * redesign.css) as they mount. Watches for ~400ms so lazily loaded children
+ * fade too; each row fades once. Scrolling and other rows are untouched.
+ */
+function fadeInChildren(folder: string): void {
+  const prefix = `${folder}/`;
+  const seen = new Set<string>();
+  const until = performance.now() + 400;
+  const tick = () => {
+    for (const row of document.querySelectorAll<HTMLElement>(".filetree-scroll [data-tree-path]")) {
+      const path = row.dataset.treePath ?? "";
+      if (!path.startsWith(prefix) || seen.has(path)) continue;
+      seen.add(path);
+      row.classList.add("rd-row-new");
+      window.setTimeout(() => row.classList.remove("rd-row-new"), 260);
+    }
+    if (performance.now() < until) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
 
 const ShareDialog = lazy(() =>
   import("./ShareDialog").then((m) => ({ default: m.ShareDialog })),
@@ -608,6 +631,8 @@ export function FileTree() {
     }
     // Arborist applies the fold after this callback; read it next frame.
     requestAnimationFrame(() => setTreeCollapsed(!anyFolderOpen()));
+    // Redesign: the folder's children fade in as they appear (redesign.css).
+    fadeInChildren(id);
   };
 
   // Stable: it goes into the row context (`rowShared`), whose identity must
@@ -1954,10 +1979,10 @@ export function FileTree() {
             data={data}
             idAccessor="id"
             openByDefault={false}
-            width={dim.width}
+            width="100%"
             height={dim.height - 34 - (selectMode ? 36 : 0)}
             indent={14}
-            rowHeight={32}
+            rowHeight={36}
             onToggle={onToggle}
             onActivate={onActivate}
             onRename={onRename}
@@ -2631,6 +2656,7 @@ function SidebarAvatar({ peer }: { peer: VaultPeer }) {
   const tone = statusTone(peer.status);
   const live = ringShowsColor(tone);
   return (
+    <span className="sm-host">
     <Face
       userId={peer.userId}
       name={peer.name}
@@ -2642,6 +2668,8 @@ function SidebarAvatar({ peer }: { peer: VaultPeer }) {
       }
       title={peer.name}
     />
+    <StatusMoment status={peer.status} size={20} />
+    </span>
   );
 }
 

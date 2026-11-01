@@ -90,6 +90,31 @@ export function releaseNoteLines(
 }
 
 /**
+ * The same lines as `releaseNoteLines`, split into a title and a detail when
+ * the line opens with a bold phrase ("**Encrypted vaults.** New vaults…").
+ * A line without one is all detail.
+ */
+export function releaseNoteItems(
+  notes: string | null | undefined,
+  max = 5,
+): { title: string; detail: string }[] {
+  if (!notes) return [];
+  return stripHtmlComments(notes)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .filter((line) => !line.startsWith("See the assets below"))
+    .map((line) => line.replace(/^[-*•]\s+/, ""))
+    .slice(0, max)
+    .map((line) => {
+      const m = /^\*\*(.+?)\*\*[\s,.:]*(.*)$/.exec(line);
+      const strip = (t: string) => t.replace(/\*\*(.+?)\*\*/g, "$1").trim();
+      if (!m) return { title: "", detail: strip(line) };
+      return { title: strip(m[1]).replace(/[.:]$/, ""), detail: strip(m[2]) };
+    });
+}
+
+/**
  * The release workflows append this to a release body whose version section in
  * `docs/RELEASE_NOTES.md` was left empty: "ship it, but don't announce it". It
  * is an HTML comment, so the GitHub release page never shows it.

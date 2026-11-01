@@ -3,15 +3,15 @@ import * as ipc from "../lib/ipc";
 import { requestTurnOnSyncAfterAuth, useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
 import { statusTone } from "../lib/presence/color";
-import {
-  loadSeenInvitations,
-  onSeenInvitationsChanged,
-  unseenInvitations,
-} from "../lib/inviteSeen";
-import { InvitationRows, useFreshInvitations } from "./InvitationRows";
+import { loadSeenInvitations, onSeenInvitationsChanged } from "../lib/inviteSeen";
+import { useFreshInvitations } from "./InvitationRows";
+import { InvitationsTab, InviteArrivalNote, invitationCountLabel } from "./InvitationsTab";
 import { LazyAvatar } from "./Face";
+import { StatusMoment } from "./StatusMoment";
+import { StatusPicker } from "./StatusPicker";
 import { MenuIcon } from "./MenuIcon";
 import { BugReportDialog } from "./BugReportDialog";
+import { exitThen } from "../lib/exitMotion";
 import { useHoverMenu } from "./useHoverMenu";
 import { createFetchThrottle, isForcedMenuOpen } from "../lib/menuFetchThrottle";
 import {
@@ -22,7 +22,8 @@ import {
   updateState,
   useUpdateState,
 } from "../lib/updater";
-import { isUpdateBusy, updateCheckToast, updateRowHint } from "../lib/updateMenuRow";
+import { isUpdateBusy, updateCheckToast } from "../lib/updateMenuRow";
+import { showsSidebarUpdateLine, updateView } from "../lib/updateView";
 import { toast } from "../lib/toast";
 
 /* The settings surface is a whole second app (nine tabs, billing, MCP tokens,
@@ -76,7 +77,8 @@ function LocalVaultSyncRow({ onTurnOnSync }: { onTurnOnSync: () => void }) {
         <path d="M3 19h18" />
       </svg>
       <span className="local-sync-label" title="This vault lives only on this computer">
-        On this device only
+        <b>On this device only</b>
+        <small>Sync to back up and share</small>
       </span>
       <button
         type="button"
@@ -135,6 +137,11 @@ export function AccountMenu() {
   // Any surface that shows the rows (this menu, Account Settings → Vaults)
   // writes the seen set; follow it so the identity dot settles either way.
   useEffect(() => onSeenInvitationsChanged(setSeenInvites), []);
+  // "View all" on the arrival note opens the menu with its Invitations panel out.
+  const [invitesPanelOnOpen, setInvitesPanelOnOpen] = useState(false);
+  useEffect(() => {
+    if (!open) setInvitesPanelOnOpen(false);
+  }, [open]);
   const [authOpen, setAuthOpen] = useState(false);
   // Which full-screen settings dialog shows lives in the store, so opening one
   // closes the other in the same update (`requestSettings` /
@@ -374,7 +381,7 @@ export function AccountMenu() {
           <Suspense fallback={null}>
             <VaultSettingsDialog
               key={settingsRequest?.token ?? 0}
-              onClose={() => closeSettingsDialog("vault")}
+              onClose={() => exitThen(() => closeSettingsDialog("vault"))}
               onRequestSignIn={() => setAuthOpen(true)}
               initialTab={settingsTab}
             />
@@ -387,8 +394,7 @@ export function AccountMenu() {
   const activeOrg =
     organizations.find((o) => o.id === session.activeOrganizationId) ?? null;
   const userLabel = session.user.name || session.user.email;
-  const hasInvites = userInvitations.length > 0;
-  const hasNewInvites = unseenInvitations(userInvitations, seenInvites).length > 0;
+  const inviteCount = userInvitations.length;
   // Presence light on the avatar. Connectivity gates it first — no-access is
   // blocked, an in-flight socket is idle. Once we're actually live (synced or
   // read-only), the user's *chosen* availability takes over: online → green,
@@ -422,6 +428,17 @@ export function AccountMenu() {
   return (
     <div className="account-menu" ref={rootRef}>
       <LocalVaultSyncRow onTurnOnSync={() => void useStore.getState().turnOnSyncNow()} />
+      <InviteArrivalNote
+        invitations={userInvitations}
+        seen={seenInvites}
+        hidden={open}
+        onViewAll={() => {
+          setInvitesPanelOnOpen(true);
+          if (open) menu.pin();
+          else menu.toggle();
+        }}
+      />
+      <SidebarUpdateLine />
       <div className="identity-row">
         <button
           className={`identity-bar ${open ? "open" : ""}`}
@@ -441,7 +458,13 @@ export function AccountMenu() {
         >
           <span className="identity-avatar-wrap">
             <LazyAvatar label={userLabel} image={session.user.image} userId={session.user.id} />
+            <StatusMoment status={activityStatus} size={34} image={session.user.image} />
             <span className={`presence-light ${presence}`} aria-label={presenceLabel} />
+            {inviteCount > 0 && (
+              <span className="identity-invite-badge" aria-label={invitationCountLabel(inviteCount)}>
+                {inviteCount > 9 ? "9+" : inviteCount}
+              </span>
+            )}
           </span>
           <span className="identity-meta">
             {/* This bar is the profile control — it names its person. The vault's
@@ -450,16 +473,30 @@ export function AccountMenu() {
                 display name, line 1 is already the email, so line 2 falls back to
                 presence rather than repeating it. */}
             <span className="identity-line1">{userLabel}</span>
-            <span className="identity-line2">
-              {session.user.name ? session.user.email : presenceLabel}
-            </span>
+            {/* Pending invitations take line 2 until they are answered: the
+                menu opens on hover, so this is what says one is waiting. */}
+            {inviteCount > 0 ? (
+              <span className="identity-line2 identity-invites">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="3" y="5" width="18" height="14" rx="2" />
+                  <path d="m3 7 9 6 9-6" />
+                </svg>
+                {invitationCountLabel(inviteCount)}
+              </span>
+            ) : (
+              <span className="identity-line2">
+                {session.user.name ? session.user.email : presenceLabel}
+              </span>
+            )}
           </span>
-          {hasInvites && (
-            <span
-              className={`identity-alert${hasNewInvites ? " is-new" : ""}`}
-              aria-label={hasNewInvites ? "New invitation" : "Pending invitation"}
-            />
-          )}
         </button>
         {bugReport && (
           <button
@@ -498,6 +535,9 @@ export function AccountMenu() {
           onPointerLeave={menu.hoverLeave}
           onPin={menu.pin}
           seenInvites={seenInvites}
+          invitesPanelOpen={invitesPanelOnOpen}
+          presence={presence}
+          presenceLabel={presenceLabel}
           onOpenAccount={() => {
             useStore.getState().requestAccountSettings("profile");
           }}
@@ -507,7 +547,7 @@ export function AccountMenu() {
         <Suspense fallback={null}>
           <VaultSettingsDialog
             key={settingsRequest?.token ?? 0}
-            onClose={() => closeSettingsDialog("vault")}
+            onClose={() => exitThen(() => closeSettingsDialog("vault"))}
             initialTab={settingsTab}
           />
         </Suspense>
@@ -516,7 +556,7 @@ export function AccountMenu() {
         <Suspense fallback={null}>
           <AccountSettings
             key={accountSettingsRequest?.token ?? 0}
-            onClose={() => closeSettingsDialog("account")}
+            onClose={() => exitThen(() => closeSettingsDialog("account"))}
             initialTab={accountSettingsTab}
           />
         </Suspense>
@@ -569,9 +609,10 @@ function UpdateMenuRow({ onClose }: { onClose: () => void }) {
       alive = false;
     };
   }, []);
+  const view = updateView(update, version);
   return (
     <button
-      className="menu-item"
+      className={`menu-item update-row is-${view.tone}`}
       onClick={() => {
         onClose();
         runMenuUpdateCheck();
@@ -581,9 +622,73 @@ function UpdateMenuRow({ onClose }: { onClose: () => void }) {
         <path d="M21 12a9 9 0 1 1-2.64-6.36" />
         <path d="M21 3v6h-6" />
       </MenuIcon>
-      <span className="menu-item-label">Check for updates</span>
-      <span className="menu-hint">{updateRowHint(update, version)}</span>
+      <span className="menu-item-label update-row-text">
+        <span>{view.tone === "ok" || view.tone === "idle" ? "Check for updates" : view.tone === "busy" && view.percent === null ? "Checking…" : view.title}</span>
+        {view.percent !== null && (
+          <span className="update-row-bar" aria-hidden="true">
+            <b style={{ width: `${view.percent}%` }} />
+          </span>
+        )}
+        {(view.tone === "ready" || view.tone === "wait" || view.tone === "error") && (
+          <small className="update-row-sub">{view.sub}</small>
+        )}
+      </span>
+      <span className="menu-hint update-row-end">
+        {view.tone === "ready" ? (
+          <span className="update-row-btn is-ink">Restart</span>
+        ) : view.tone === "error" ? (
+          <span className="update-row-btn">Retry</span>
+        ) : view.percent !== null ? (
+          `${view.percent}%`
+        ) : view.tone === "busy" ? (
+          <span className="btn-spinner" aria-hidden="true" />
+        ) : (
+          `${version ?? "…"}${view.tone === "ok" ? " ✓" : ""}`
+        )}
+      </span>
     </button>
+  );
+}
+
+/**
+ * B: a quiet line above the account row, only while an update is moving or
+ * waiting on you; nothing when up to date. Ready restarts, a failure retries.
+ */
+function SidebarUpdateLine() {
+  const update = useUpdateState();
+  const view = updateView(update, menuVersion);
+  if (!showsSidebarUpdateLine(view)) return null;
+  const act = view.action === "restart" ? () => void relaunchForUpdate() : view.action === "retry" ? () => void checkAndAutoInstall() : undefined;
+  return (
+    <div className={`sidebar-update is-${view.tone}`} role="status">
+      <span className="sidebar-update-icon" aria-hidden="true">
+        {view.tone === "busy" ? (
+          view.percent !== null ? (
+            <svg viewBox="0 0 36 36" width="18" height="18">
+              <circle cx="18" cy="18" r="14" fill="none" strokeWidth="5" className="ring-bg" />
+              <circle cx="18" cy="18" r="14" fill="none" strokeWidth="5" className="ring-fg" strokeLinecap="round" strokeDasharray={`${(view.percent / 100) * 88} 88`} transform="rotate(-90 18 18)" />
+            </svg>
+          ) : (
+            <span className="btn-spinner" />
+          )
+        ) : view.tone === "ready" ? (
+          "●"
+        ) : view.tone === "error" ? (
+          "!"
+        ) : (
+          "◷"
+        )}
+      </span>
+      <span className="sidebar-update-text">
+        <b>{view.title}</b>
+        <small>{view.sub}</small>
+      </span>
+      {act && (
+        <button type="button" className="sidebar-update-btn" onClick={act}>
+          {view.action === "restart" ? "Restart" : "Retry"}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -591,13 +696,22 @@ function AccountPopover({
   onClose,
   onOpenAccount,
   seenInvites,
+  invitesPanelOpen,
+  presence,
+  presenceLabel,
   onPointerEnter,
   onPointerLeave,
   onPin,
 }: {
+  /** The account row's presence light, repeated on the profile line the menu
+   *  draws over it, so the dot does not vanish when the menu opens. */
+  presence: string;
+  presenceLabel: string;
   onClose: () => void;
   onOpenAccount: () => void;
   seenInvites: Set<string>;
+  /** Open with the Invitations panel already out. */
+  invitesPanelOpen: boolean;
   onPointerEnter: () => void;
   onPointerLeave: () => void;
   /** A press or focus inside pins a hover-opened menu, as on the vault switcher. */
@@ -610,6 +724,7 @@ function AccountPopover({
   // the list changes while open (so an arrival during it counts as seen, and
   // answered invitations are pruned).
   const freshIds = useFreshInvitations(userInvitations, seenInvites);
+  const activityStatus = useStore((s) => s.activityStatus);
 
   if (!session) return null;
 
@@ -626,11 +741,23 @@ function AccountPopover({
       onPointerDownCapture={onPin}
       onFocusCapture={onPin}
     >
+      <div className="rd-prof">
+        <span className="sm-host"><LazyAvatar label={session.user.name || session.user.email} image={session.user.image} userId={session.user.id} /><StatusMoment status={activityStatus} size={44} image={session.user.image} /><span className={`presence-light ${presence}`} aria-label={presenceLabel} /></span>
+        <div className="rd-prof-text">
+          <b>{session.user.name || session.user.email}</b>
+          {session.user.name && <small>{session.user.email}</small>}
+        </div>
+      </div>
+      <StatusPicker />
       {userInvitations.length > 0 && (
         <>
-          {/* Pending invitations as plain menu rows, a hairline above the
-              account rows; no eyebrow, since nothing else here has one. */}
-          <InvitationRows invitations={userInvitations} freshIds={freshIds} variant="menu" />
+          {/* One Invitations row, first in the menu, whose panel opens beside
+              it; a hairline above the account rows. Absent with none pending. */}
+          <InvitationsTab
+            invitations={userInvitations}
+            freshIds={freshIds}
+            defaultOpen={invitesPanelOpen}
+          />
           <div className="menu-sep" />
         </>
       )}
