@@ -1535,6 +1535,10 @@ interface MyVaultKeysBody {
   /** Every older plaintext copy has been checked and removed on the server.
    * Undefined: the server does not report it (older server). */
   fullyEncrypted?: boolean;
+  /** Other current members holding this generation's key (undefined: older server). */
+  otherKeyHolders?: number;
+  /** The server keeps launch recovery copies (crypto/key-recovery.ts). */
+  recoveryNet?: boolean;
 }
 /** A pending answer may still carry `vkCheck`, so a restore can verify a typed key. */
 export type MyVaultKeys =
@@ -1550,6 +1554,8 @@ export type MyVaultKeys =
       /** Other current members with an account key (conversion safety rule;
        *  undefined on a server that does not report it). */
       otherMembersWithKeys?: number;
+      /** The launch safety net is on: a lost laptop is recoverable by Baalda. */
+      recoveryNet?: boolean;
     }
   | { keyed: true; pending: true; vkCheck?: string; generation?: number }
   | ({ keyed: true; pending: false } & MyVaultKeysBody);
@@ -1733,13 +1739,19 @@ export class ApiClient {
       // Rollout gate for converting an existing vault: absent ⇒ false.
       // `encryptionRequested` absent ⇒ undefined: a server without opt-in
       // (no migration 081) has no request route, so the UI offers nothing.
-      const d = data as { conversionAllowed?: unknown; encryptionRequested?: unknown; otherMembersWithKeys?: unknown };
+      const d = data as {
+        conversionAllowed?: unknown;
+        encryptionRequested?: unknown;
+        otherMembersWithKeys?: unknown;
+        recoveryNet?: unknown;
+      };
       return {
         keyed: false,
         pending: false,
         conversionAllowed: d.conversionAllowed === true,
         encryptionRequested: typeof d.encryptionRequested === "boolean" ? d.encryptionRequested : undefined,
         otherMembersWithKeys: typeof d.otherMembersWithKeys === "number" ? d.otherMembersWithKeys : undefined,
+        recoveryNet: d.recoveryNet === true,
       };
     }
     if (status === 202 || data?.pending) {
@@ -1755,7 +1767,33 @@ export class ApiClient {
       generation: data.generation,
       wraps: data.wraps,
       fullyEncrypted: typeof data.fullyEncrypted === "boolean" ? data.fullyEncrypted : undefined,
+      otherKeyHolders: typeof data.otherKeyHolders === "number" ? data.otherKeyHolders : undefined,
+      recoveryNet: data.recoveryNet === true,
     };
+  }
+
+  /** A Google-only account adds a Baalda password (`POST /api/me/password`). */
+  async setAccountPassword(password: string): Promise<"set" | "has-password"> {
+    try {
+      await this.request("POST", "/api/me/password", { body: { password } });
+      return "set";
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) return "has-password";
+      throw e;
+    }
+  }
+
+  /** Whether this account can sign in with a password (Better Auth's linked accounts). */
+  async hasPasswordLogin(): Promise<boolean | null> {
+    try {
+      const { data } = await this.request<Array<{ providerId?: string; provider?: string }>>(
+        "GET",
+        "/api/auth/list-accounts",
+      );
+      return Array.isArray(data) ? data.some((a) => (a.providerId ?? a.provider) === "credential") : null;
+    } catch {
+      return null;
+    }
   }
 
   async listVaultKeyRequests(vaultId: string): Promise<VaultKeyRequest[]> {

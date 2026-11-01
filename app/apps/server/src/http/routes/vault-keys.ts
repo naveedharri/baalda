@@ -27,6 +27,8 @@ import { VK_HEADER, decodeVk, requireVaultKey } from "../../crypto/transport.js"
 import { vaultKeyCache } from "../../crypto/key-cache.js";
 import { verifyVk } from "../../crypto/vk-check.js";
 import { encryptionProgress } from "../../crypto/null-out.js";
+import { recoveryPublicKey } from "../../crypto/key-recovery.js";
+import { auth } from "../../auth/auth.js";
 import {
   ENCRYPTION_NOT_REQUESTED,
   conversionFlagOn,
@@ -268,6 +270,8 @@ export function createVaultKeyRoutes(): Hono {
         conversionAllowed: gate && encryptionRequested,
         encryptionRequested,
         otherMembersWithKeys: others[0]?.n ?? 0,
+        // The launch safety net is a way back too (crypto/key-recovery.ts).
+        recoveryNet: recoveryPublicKey() !== null,
       });
     }
     // Wraps sealed before the caller last replaced their account key cannot be
@@ -300,8 +304,19 @@ export function createVaultKeyRoutes(): Hono {
     // Conversion progress for the UI, as last recorded by the background
     // worker (never counted per request).
     const progress = await encryptionProgress(vaultId);
+    // Teammates holding this generation's key: with none, the safety net off
+    // and no other way back, the owner's app asks them to save the vault key.
+    const { rows: holders } = await pool.query<{ n: number }>(
+      `SELECT count(DISTINCT w.user_id)::int AS n FROM vault_key_wraps w
+         JOIN member m ON m."userId" = w.user_id
+          AND m."organizationId" = (SELECT organization_id FROM vaults WHERE id = $1)
+        WHERE w.vault_id = $1 AND w.generation = $2 AND w.user_id <> $3`,
+      [vaultId, v[0].key_generation ?? 1, session.userId],
+    );
     return c.json({
       keyed: true,
+      otherKeyHolders: holders[0]?.n ?? 0,
+      recoveryNet: recoveryPublicKey() !== null,
       generation: v[0].key_generation ?? 1,
       vkCheck: v[0].vk_check.toString("base64"),
       fullyEncrypted: progress.fullyEncrypted,
@@ -760,6 +775,32 @@ export function createVaultKeyRoutes(): Hono {
   // ── Seamless keys F: the password unlocks the account key. The unlock key is
   // derived with the server-only pepper, so the database alone (hashes +
   // `priv_wrapped_password`) never yields it. Never log the body or the key.
+  // A Google-only account adds a Baalda password (owner decision 2026-11-01):
+  // it then unlocks the account key on a new computer like any password, and
+  // can sign in with email and password too. Hashing goes through the same
+  // Better Auth override, so it is peppered (`p1$`) when the pepper is set.
+  routes.post("/me/password", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    const password = typeof body?.password === "string" ? body.password : "";
+    if (!password) return c.json({ error: "password is required", code: "invalid_argument" }, 400);
+    const { rows } = await pool.query(
+      `SELECT 1 FROM account WHERE "userId" = $1 AND "providerId" = 'credential' AND password IS NOT NULL`,
+      [session.userId],
+    );
+    if (rows.length) {
+      return c.json({ error: "This account already has a password", code: "has_password" }, 409);
+    }
+    try {
+      await auth.api.setPassword({ body: { newPassword: password }, headers: c.req.raw.headers });
+    } catch (err) {
+      const message = (err as { body?: { message?: string } }).body?.message ?? "That password can't be used";
+      return c.json({ error: message, code: "invalid_password" }, 400);
+    }
+    return c.json({ set: true }, 201);
+  });
+
   routes.post("/me/keys/unlock", async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);

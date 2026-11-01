@@ -208,4 +208,29 @@ describe("password unlocks the account key (F)", () => {
     const { rows } = await pool.query("SELECT priv_wrapped_password, password_wrap_at FROM user_keys WHERE user_id = $1", [u.userId]);
     expect(rows[0]).toEqual({ priv_wrapped_password: null, password_wrap_at: null });
   });
+
+  it("a Google-only account sets a Baalda password once: peppered, then unlock and email sign-in both work", async () => {
+    const u = await signUp("google@unlock.test", "throwaway-pass-1");
+    // Make it Google-only: no password login.
+    await pool.query(`DELETE FROM account WHERE "userId" = $1 AND "providerId" = 'credential'`, [u.userId]);
+    await pool.query(
+      `INSERT INTO account (id, "accountId", "providerId", "userId", "createdAt", "updatedAt")
+       VALUES ($1, $2, 'google', $3, now(), now())`,
+      [`acc-${u.userId}`, `g-${u.userId}`, u.userId],
+    );
+    expect((await call(u, "POST", "/api/me/keys/unlock", { password: "x" })).status).toBe(409);
+
+    expect((await call(u, "POST", "/api/me/password", { password: "short" })).status).toBe(400);
+    const set = await call(u, "POST", "/api/me/password", { password: "my-new-baalda-pass-1" });
+    expect(set.status).toBe(201);
+    expect((await storedHash(u.userId)).startsWith("p1$")).toBe(true);
+    // Only once: a second set is refused (changing it is the normal change-password flow).
+    expect((await call(u, "POST", "/api/me/password", { password: "another-pass-2" })).status).toBe(409);
+    expect((await call(null, "POST", "/api/me/password", { password: "another-pass-2" })).status).toBe(401);
+
+    const unlock = await call(u, "POST", "/api/me/keys/unlock", { password: "my-new-baalda-pass-1" });
+    expect(unlock.status).toBe(200);
+    expect(((await unlock.json()) as { unlockKey: string }).unlockKey).toBe(expectedUnlockKey(u.userId, "my-new-baalda-pass-1"));
+    expect((await signIn("google@unlock.test", "my-new-baalda-pass-1")).userId).toBe(u.userId);
+  });
 });

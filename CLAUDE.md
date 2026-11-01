@@ -1094,6 +1094,13 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   conversionSafe` holds, so a lost laptop cannot lose the vault: another member has an account key
   (`keys/mine` unkeyed `otherMembersWithKeys`), or this account has a password wrap, or 2+ devices hold
   the account key; else `not-safe-yet` and it re-checks on later runs.
+  (d) 2026-11-01: while the launch safety net is on (`keys/mine` `recoveryNet`), every vault converts,
+  Google-only solo owners included. Owners with no other way back (no password wrap, one computer, no
+  teammate holding the key: keyed `keys/mine` `otherKeyHolders` 0) see `SaveVaultKeyCard` at the top of
+  Vault Settings → General: Save to file, Email it to myself (their own mail app via `mailto:`, never our
+  mailer), Show key, and for Google-only accounts "Set a password instead" (`POST /api/me/password`, Better
+  Auth `setPassword`, then the password unlock writes the wrap). The key file is one line of 24 words;
+  `wordsToVaultKey` ignores numbering and punctuation.
 - **Desktops without vault keys** (`http/client-version.ts VAULT_KEYS_MIN_DESKTOP` = 0.1.98, no env
   override, no grace, missing version = old): on a KEYED vault every entry point (`requireVaultKey`'s
   refusal, plus `crypto/transport.ts refuseKeyIncapableClient` on the sync/vault-channel token mints,
