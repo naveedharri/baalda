@@ -2721,3 +2721,14 @@ html:not(.rd-off) .conn-recent-label {
 .account-vaults-head-actions .vault-tab-form input,
 .account-vaults-head-actions .vault-tab-form button { height: 34px; font-size: var(--fs-sm); }
 .account-vaults-head-actions .vault-tab-form button { padding: 0 14px; font-weight: 600; }
+
+/* The menu's profile line is the account row it covers: same font, sizes,
+   colours and line boxes (name 14/17, email 11/13, 3px apart), so opening
+   the menu never changes the text under the pointer. */
+html:not(.rd-off) .account-popover > .rd-prof .rd-prof-text { gap: 3px; }
+html:not(.rd-off) .account-popover > .rd-prof .rd-prof-text b {
+  font: 600 14px/17px var(--font-body); color: var(--text-primary);
+}
+html:not(.rd-off) .account-popover > .rd-prof .rd-prof-text small {
+  font-size: 11px; line-height: 13px; color: var(--text-tertiary);
+}
