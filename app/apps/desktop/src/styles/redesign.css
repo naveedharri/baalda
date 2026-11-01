@@ -3042,3 +3042,5 @@ html:not(.rd-off) .about-agent-version { font-size: 12px; }
    the left edge and 12px in from the right, so neither side looks short. The
    ⋯ and sync dot now sit inside it. Colours unchanged. */
 html:not(.rd-off) .sidebar .tree-row::after { left: 9px; right: -2px; }
+/* Hover is a very light purple; the open note keeps its neutral grey. */
+html:not(.rd-off) .sidebar .tree-row:hover:not(.selected) { --rd-row-bg: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
