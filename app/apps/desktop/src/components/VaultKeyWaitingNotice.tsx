@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { Banner } from "./Banner";
 import { LostDevicesFlow, RestoreVaultKeyDialog } from "./VaultKeyRecovery";
 import { useStore } from "../store";
@@ -7,10 +7,9 @@ import { syncManager } from "../lib/sync/docSession";
 import {
   accountKeyStateNow,
   freshAccountKeyCode,
-  isVaultKeyBlocked,
   onVaultKeyBlockChange,
   onVaultKeyEvent,
-  vaultKeyStateFor,
+  openVaultKeyView,
   vaultKeysNudge,
 } from "../lib/vaultKeys/runtime";
 import {
@@ -29,21 +28,16 @@ import {
  * the new key's code for teammates to confirm.
  */
 export function VaultKeyWaitingNotice() {
-  const [blocked, setBlocked] = useState(() => isVaultKeyBlocked(syncManager.registry.vaultId));
   const [restoring, setRestoring] = useState(false);
   const [lostDevices, setLostDevices] = useState(false);
   const [account, setAccount] = useState(accountKeyStateNow);
   const [freshCode, setFreshCode] = useState(freshAccountKeyCode);
-  const [vaultState, setVaultState] = useState(() => vaultKeyStateFor(syncManager.registry.vaultId)?.state ?? null);
   const isOwner = useStore((s) => s.members.find((m) => m.userId === s.session?.user.id)?.role === "owner");
-
-  useEffect(
-    () =>
-      onVaultKeyBlockChange((vaultId, now) => {
-        if (vaultId === syncManager.registry.vaultId) setBlocked(now);
-      }),
-    [],
-  );
+  // Re-render on any key event or vault switch; what shows is read for the
+  // vault open NOW, so a block of the vault we left never shows on the next.
+  const [, bump] = useReducer((n: number) => n + 1, 0);
+  useStore((s) => s.vault?.epoch);
+  useEffect(() => onVaultKeyBlockChange(() => bump()), []);
   useEffect(
     () =>
       onVaultKeyEvent((e) => {
@@ -51,14 +45,15 @@ export function VaultKeyWaitingNotice() {
           setAccount(e.state);
           setFreshCode(freshAccountKeyCode());
         } else if (e.kind === "fresh-key") setFreshCode(e.code);
-        else if (e.kind === "vault" && e.vaultId === syncManager.registry.vaultId) setVaultState(e.state.state);
+        bump();
       }),
     [],
   );
+  const vaultId = syncManager.registry.vaultId;
+  const { blocked, state: vaultState } = openVaultKeyView(vaultId);
   const code = waitingNoticeCode({ freshCode, vaultState });
 
   const visible = useNoticeSlot("vault-key-waiting", blocked);
-  const vaultId = syncManager.registry.vaultId;
 
   return (
     <>

@@ -1,6 +1,9 @@
+import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import * as Y from "yjs";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { makeVkCheck } from "../src/crypto/vk-check.js";
+import { CLIENT_VERSION_HEADER, VAULT_KEYS_MIN_DESKTOP } from "../src/http/client-version.js";
 import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
@@ -292,6 +295,50 @@ describe("note trash", () => {
     const purged = await req(member, "GET", `/api/notes/${doc}/trash-content`);
     expect(purged.status).toBe(410);
     expect(((await purged.json()) as { code: string }).code).toBe("purged");
+  });
+
+  it("trash-content on a keyed vault reads with the request's key: 409 / 426 without it, never a 500", async () => {
+    vi.stubEnv("BAALDA_VAULT_KEYS", "on");
+    try {
+      const doc = await seedNote(vault, null, "k.md", owner.userId);
+      const base = updateFor("before keying ");
+      await appendUpdate(doc, base);
+      await softDelete(owner, doc);
+      const key = randomBytes(32);
+      await pool.query("UPDATE vaults SET vk_check = $2, key_generation = 1 WHERE id = $1", [vault, makeVkCheck(key, vault)]);
+      await pool.query("INSERT INTO vault_crypto_state (vault_id, phase, generation) VALUES ($1, 'keyed', 1)", [vault]);
+      const get = (headers: Record<string, string>) =>
+        app.fetch(new Request(`http://local/api/notes/${doc}/trash-content`, { headers: { ...authHeaders(owner), ...headers } }));
+      const capable = { [CLIENT_VERSION_HEADER]: VAULT_KEYS_MIN_DESKTOP };
+
+      // Only pre-keying plaintext rows: still never served without the key.
+      expect((await get({})).status).toBe(426);
+      const noKey = await get(capable);
+      expect(noKey.status).toBe(409);
+      expect(((await noKey.json()) as { code: string }).code).toBe("key_required");
+
+      // A sealed row (an edit after keying) used to throw KeyRequiredError: 500.
+      const crypto = { vaultId: vault, key, generation: 1 };
+      const more = new Y.Doc();
+      Y.applyUpdate(more, base);
+      let sealed: Uint8Array | null = null;
+      more.on("update", (u: Uint8Array) => (sealed = u));
+      more.getText("content").insert(more.getText("content").length, "after keying");
+      await appendUpdate(doc, sealed!, pool, 1000, crypto);
+      expect((await get({})).status).toBe(426);
+      expect((await get(capable)).status).toBe(409);
+      const ok = await get({ ...capable, "x-baalda-vk": key.toString("base64") });
+      expect(ok.status).toBe(200);
+      expect(((await ok.json()) as { text: string }).text).toBe("before keying after keying");
+      expect((await get({ ...capable, "x-baalda-vk": randomBytes(32).toString("base64") })).status).toBe(409);
+      // Authorisation still comes first: an outsider learns nothing about the key.
+      const outsiderRes = await app.fetch(
+        new Request(`http://local/api/notes/${doc}/trash-content`, { headers: { ...authHeaders(outsider), ...capable } }),
+      );
+      expect(outsiderRes.status).toBe(403);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("restore refuses members without edit (403) and unknown ids (404)", async () => {

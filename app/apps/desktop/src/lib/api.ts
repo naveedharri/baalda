@@ -2040,10 +2040,14 @@ export class ApiClient {
         !opts.keyRetry &&
         (parsed as { code?: unknown } | undefined)?.code === KEY_REQUIRED_CODE
       ) {
-        const id = opts.vaultScope ?? vaultIdFromPath(path);
+        // A path that does not name its vault (`/api/notes/:id/versions`, Trash
+        // text, ...) learns it from the refusal, and the retry is scoped to it
+        // so the key header rides along.
+        const named = (parsed as { vaultId?: unknown } | undefined)?.vaultId;
+        const id = opts.vaultScope ?? vaultIdFromPath(path) ?? (typeof named === "string" && named ? named : null);
         const handler = this.keyRequiredHandler;
         if (id && handler && (await handler(id).catch(() => false))) {
-          return this.request<T>(method, path, { ...opts, keyRetry: true });
+          return this.request<T>(method, path, { ...opts, vaultScope: id, keyRetry: true });
         }
       }
       throw new ApiError(res.status, msg, parsed);

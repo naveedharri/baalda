@@ -1222,6 +1222,10 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
+    // A build without vault keys registers no file in a keyed vault (426): its
+    // bytes would be refused anyway, leaving a `files` row with nothing behind it.
+    const outdatedClient = await refuseKeyIncapableClient(c, vaultId);
+    if (outdatedClient) return outdatedClient;
     // Client-supplied stable id, under either spelling: notes call it `docId`,
     // and the desktop's local `files.id` is sometimes sent as `id`. Both mean
     // the same thing — this doc's identity was minted on the device.

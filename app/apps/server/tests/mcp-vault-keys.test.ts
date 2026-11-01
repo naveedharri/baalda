@@ -3,6 +3,7 @@
 // W3: MCP tokens and public links in keyed vaults behave exactly as today and
 // work with ZERO desktops online (no key in the process cache). Conversion of
 // an existing vault waits until every active token/link has its own wrap.
+import { CLIENT_VERSION_HEADER, VAULT_KEYS_MIN_DESKTOP } from "../src/http/client-version.js";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { Server } from "@hocuspocus/server";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,6 +33,8 @@ function api(user: TestUser, method: string, path: string, body?: unknown, vk?: 
     method,
     headers: {
       ...authHeaders(user),
+      // A vault-key desktop: an older build is answered 426 instead of key_required.
+      [CLIENT_VERSION_HEADER]: VAULT_KEYS_MIN_DESKTOP,
       ...(vk ? { "x-baalda-vk": typeof vk === "string" ? vk : b64(vk) } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
