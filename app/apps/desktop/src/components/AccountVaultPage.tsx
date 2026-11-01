@@ -51,7 +51,8 @@ export function AccountVaultPage({
   settingsAction: "open" | "switch-then-open" | "unavailable";
   onSwitch: () => Promise<void>;
   onOpenSettings: () => Promise<void>;
-  onBack: () => void;
+  /** Absent when the page sits beside the vault list (no Back needed). */
+  onBack?: () => void;
 }) {
   const tiles = vaultPageTiles(usage);
   const ordered = orderPageActions(actions);
@@ -62,9 +63,11 @@ export function AccountVaultPage({
   );
   return (
     <section className="member-profile account-vault-page" aria-label={name}>
-      <button type="button" className="link-btn member-profile-back" onClick={onBack}>
-        ← Vaults
-      </button>
+      {onBack && (
+        <button type="button" className="link-btn member-profile-back" onClick={onBack}>
+          ← Vaults
+        </button>
+      )}
       <header className="member-profile-head">
         <VaultTile identity={`org:${orgId}`} name={name} />
         <span className="member-profile-names">

@@ -29,7 +29,7 @@ import { ConfirmDialog } from "../ConfirmDialog";
 import { Switch } from "../Switch";
 import { ToolLogo } from "./ToolLogos";
 import "../editor.css";
-import { EmptyState, InstallButton, LoadError, ProgressBar, SkeletonCards, SkillCard, TARGET_SHORT, ToolRowSkeleton, WarnMark } from "./parts";
+import { EmptyState, InstallButton, LoadError, ProgressBar, SkeletonCards, TARGET_SHORT, ToolRowSkeleton, WarnMark } from "./parts";
 import { SkillsMenuButton } from "./SkillsMenuButton";
 import { TipAnchor } from "./SquareTip";
 import { overallState, stateLines, targetStates } from "../../lib/skills/installState";
@@ -91,7 +91,6 @@ export function AiToolsTab() {
   const rows = (state.manifest?.orgs ?? []).flatMap((org) =>
     org.skills.map((skill) => ({ org, skill })),
   );
-  const multiVault = (state.manifest?.orgs.length ?? 0) > 1;
 
   /**
    * The Skills tab's install square for one skill on this computer: + to use
@@ -183,89 +182,112 @@ export function AiToolsTab() {
     await ipc.openInFileManager(dir);
   };
 
+  const checkButton = (
+    <AsyncButton
+      className="secondary skills-btn-sm"
+      disabled={!state.active || state.running}
+      onClick={() => checkSkillsNow()}
+    >
+      {state.running ? (
+        <span className="skills-inline">
+          <Spinner size="xs" /> Checking…
+        </span>
+      ) : (
+        "Check now"
+      )}
+    </AsyncButton>
+  );
+
   return (
     <>
-      <div className="muted">Your vaults' skills install into these folders.</div>
-
-      {targets.length === 0 && <ToolRowSkeleton />}
-      {targets.map((t) => (
-        <label key={t.target} className="menu-row toggle-row">
-          <span className="menu-row-label">
-            <span className="skills-tool-row-title">
-              <span className="skills-tool-cluster">
-                {(t.target === "claude" ? (["claude"] as const) : (["codex", "cursor", "gemini"] as const)).map((tool) => (
-                  <ToolLogo key={tool} tool={tool} size={15} />
-                ))}
-              </span>
-              {TARGET_LABEL[t.target]}
+      <p className="ai-tools-lede">Skills from your vaults install into the AI tools on this computer.</p>
+      <div className="profile-rows ai-tools-rows">
+        <div className="profile-row profile-row-top">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Install into</span>
+            <span className="profile-row-hint">
+              Tools found on this computer. Switch one off to stop installing skills there.
             </span>
-            <span className="field-hint">
-              {installedText(t)}
-              <code className="skills-target-path">{t.root}</code>
-            </span>
-          </span>
-          <Switch
-            checked={prefs.targets[t.target]}
-            ariaLabel={`Install skills for ${TARGET_LABEL[t.target]}`}
-            onChange={(next) => setSkillTargetEnabled(t.target, next)}
-          />
-        </label>
-      ))}
-
-      <div className="skills-section-head">
-        <div className="subhead">Agent Skills</div>
-        <span className="skills-actions">
-          <RowActionsMenu
-            ariaLabel="More"
-            actions={[{ key: "backups", label: "Open backups folder", onSelect: openBackups }]}
-          />
-          <AsyncButton
-            className="secondary skills-btn-sm"
-            disabled={!state.active || state.running}
-            onClick={() => checkSkillsNow()}
-          >
-            {state.running ? (
-              <span className="skills-inline">
-                <Spinner size="xs" /> Checking…
-              </span>
-            ) : (
-              "Check now"
-            )}
-          </AsyncButton>
-        </span>
-      </div>
-      <ProgressBar active={state.running && !!state.manifest} />
-      {state.lastError && (
-        <LoadError message={`Couldn't check for skills: ${state.lastError}`} onRetry={() => checkSkillsNow()} />
-      )}
-
-      {!state.active ? (
-        <div className="muted">Sign in to get your team's skills.</div>
-      ) : !state.manifest ? (
-        <div className="skills-grid-host">
-          <SkeletonCards count={3} label="Checking for skills" />
-        </div>
-      ) : rows.length === 0 ? (
-        <EmptyState title="No skills yet">Your vaults haven't published any skills.</EmptyState>
-      ) : (
-        <div className="skills-grid-host">
-          <ul className="skills-grid">
-            {rows.map(({ org, skill }) => (
-              <SkillCard
-                key={`${org.orgId}:${skill.skillId}`}
-                name={skill.name}
-                byline={
-                  <span className="skills-meta-line">
-                    {multiVault ? `${org.orgName} · ` : ""}v{skill.version} · {skill.delivery === "optional" ? "Optional" : "Required"}
-                  </span>
-                }
-                description={skill.description || "No description yet."}
-                action={square(org.orgId, org.role, skill)}
-              />
+          </div>
+          <div className="profile-row-control ai-tools-list">
+            {targets.length === 0 && <ToolRowSkeleton />}
+            {targets.map((t) => (
+              <label key={t.target} className="ai-tool">
+                <span className="skills-tool-cluster ai-tool-logos">
+                  {(t.target === "claude" ? (["claude"] as const) : (["codex", "cursor", "gemini"] as const)).map((tool) => (
+                    <ToolLogo key={tool} tool={tool} size={16} />
+                  ))}
+                </span>
+                <span className="ai-tool-text">
+                  <span className="ai-tool-name">{TARGET_LABEL[t.target]}</span>
+                  <code className="ai-tool-path">{t.root}</code>
+                </span>
+                <span className={`ai-tool-tag${installedText(t) === "Not installed" ? " is-off" : ""}`}>
+                  {installedText(t).replace(/^Detected: /, "")}
+                </span>
+                <Switch
+                  checked={prefs.targets[t.target]}
+                  ariaLabel={`Install skills for ${TARGET_LABEL[t.target]}`}
+                  onChange={(next) => setSkillTargetEnabled(t.target, next)}
+                />
+              </label>
             ))}
-          </ul>
+          </div>
         </div>
-      )}
+
+        <div className="profile-row profile-row-top">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Skills on this computer</span>
+            <span className="profile-row-hint">
+              Required skills always install. Optional ones you can add or remove.
+            </span>
+            <span className="ai-tools-actions">
+              {checkButton}
+              <RowActionsMenu
+                ariaLabel="More"
+                actions={[{ key: "backups", label: "Open backups folder", onSelect: openBackups }]}
+              />
+            </span>
+          </div>
+          <div className="profile-row-control ai-tools-list">
+            <ProgressBar active={state.running && !!state.manifest} />
+            {state.lastError && (
+              <LoadError message={`Couldn't check for skills: ${state.lastError}`} onRetry={() => checkSkillsNow()} />
+            )}
+            {!state.active ? (
+              <div className="muted">Sign in to get your team's skills.</div>
+            ) : !state.manifest ? (
+              <SkeletonCards count={3} label="Checking for skills" />
+            ) : rows.length === 0 ? (
+              <EmptyState title="No skills yet">Your vaults haven't published any skills.</EmptyState>
+            ) : (
+              <ul className="ai-skills">
+                {rows.map(({ org, skill }) => (
+                  <li key={`${org.orgId}:${skill.skillId}`} className="ai-skill">
+                    <span className="ai-skill-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+                        <path d="M14 3v5h5M9 13h6M9 17h4" />
+                      </svg>
+                    </span>
+                    <span className="ai-skill-text">
+                      <span className="ai-skill-name">{skillDisplayName(skill.name)}</span>
+                      <span className="ai-skill-meta" title={skill.description || undefined}>
+                        {org.orgName} · v{skill.version}
+                        {skill.description ? ` · ${skill.description}` : ""}
+                      </span>
+                    </span>
+                    <span className={`ai-skill-tag${skill.delivery === "optional" ? " is-optional" : ""}`}>
+                      {skill.delivery === "optional" ? "Optional" : "Required"}
+                    </span>
+                    {square(org.orgId, org.role, skill)}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </div>
 
       {removing && (
         <ConfirmDialog

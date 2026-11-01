@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   clampSidebarWidth,
   SIDEBAR_WIDTH_DEFAULT,
@@ -26,6 +26,17 @@ export function SidebarResizer({
   // The pointer grabs the divider somewhere along its 7px width; tracking that
   // offset stops the sidebar from jumping by a few pixels on the first move.
   const grabOffset = useRef(0);
+  // While dragging, the layout must follow the pointer 1:1. `.app` eases
+  // `grid-template-columns` (for show/hide), but the rows sized from
+  // `--sidebar-layout-w` change instantly, so a drag showed the rows jumping
+  // ahead and the panel sliding after them. `sidebar-resizing` turns the
+  // easing off for the drag only.
+  useEffect(() => {
+    if (!dragging) return;
+    const root = document.documentElement;
+    root.classList.add("sidebar-resizing");
+    return () => root.classList.remove("sidebar-resizing");
+  }, [dragging]);
 
   const commit = (px: number) => {
     onWidth(px);
@@ -66,6 +77,9 @@ export function SidebarResizer({
         setDragging(false);
         commit(e.clientX - grabOffset.current);
       }}
+      // A capture lost mid-drag (window blur, a system gesture) ends the drag
+      // rather than leaving the easing switched off.
+      onLostPointerCapture={() => setDragging(false)}
       onDoubleClick={() => commit(SIDEBAR_WIDTH_DEFAULT)}
       onKeyDown={(e) => {
         // Keyboard users get the same control; Home restores the default.

@@ -93,13 +93,15 @@ function formatValue(key: SliderKey, value: number): string {
 
 export function GraphControls(props: GraphControlsProps): React.JSX.Element {
   const { settings, onChange, onReset, legend } = props;
+  // Radial and Ring place notes by folder and link count, not by physics.
+  const fixedShape = settings.shape === "radial" || settings.shape === "ring";
 
   // One slider row: friendly label, native range input, live numeric readout.
-  const slider = (key: SliderKey) => {
+  const slider = (key: SliderKey, disabled = false) => {
     const range = SETTING_RANGES[key];
     const value = settings[key] as number;
     return (
-      <div className="graph-control-row" key={key}>
+      <div className={"graph-control-row" + (disabled ? " is-disabled" : "")} key={key}>
         <label htmlFor={`graph-${key}`}>{SLIDER_LABELS[key]}</label>
         <input
           id={`graph-${key}`}
@@ -109,6 +111,7 @@ export function GraphControls(props: GraphControlsProps): React.JSX.Element {
           max={range.max}
           step={range.step}
           value={value}
+          disabled={disabled}
           onChange={(e) => onChange({ [key]: Number(e.target.value) })}
         />
         <span className="range-value">{formatValue(key, value)}</span>
@@ -123,10 +126,15 @@ export function GraphControls(props: GraphControlsProps): React.JSX.Element {
           under one name, and the whole-vault view is the one that was wanted. */}
       <div className="graph-control-group">
         <div className="graph-control-group-title">Forces</div>
-        {slider("charge")}
-        {slider("linkDistance")}
-        {slider("linkStrength")}
-        {slider("gravity")}
+        {fixedShape && (
+          <p className="graph-control-note">
+            Radial and Ring are fixed shapes, so forces don&apos;t move them. A dragged note springs back to its place.
+          </p>
+        )}
+        {slider("charge", fixedShape)}
+        {slider("linkDistance", fixedShape)}
+        {slider("linkStrength", fixedShape)}
+        {slider("gravity", fixedShape)}
       </div>
 
       <div className="graph-control-group">

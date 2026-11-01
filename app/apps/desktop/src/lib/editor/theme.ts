@@ -126,18 +126,22 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     outline: "none",
   },
 
-  // [[wiki-links]]: accent text that grows a soft rounded chip on hover.
+  // [[wiki-links]] read as links: the link colour (not the violet accent the
+  // rest of the editor uses) and an underline that firms up on hover. In the
+  // body face even inside inline code, so a link never passes for code.
   ".cm-wikilink": {
-    color: "var(--accent)",
+    color: "var(--link)",
     cursor: "pointer",
-    borderRadius: "var(--radius-sm)",
-    padding: "0 2px",
-    margin: "0 -2px",
-    transition: "background-color var(--t-fast) var(--ease)",
+    fontFamily: "var(--editor-font-family, var(--font-body))",
+    backgroundColor: "transparent",
+    textDecoration: "underline",
+    textDecorationThickness: "1px",
+    textUnderlineOffset: "3px",
+    textDecorationColor: "color-mix(in srgb, var(--link) 45%, transparent)",
+    transition: "text-decoration-color var(--t-fast) var(--ease)",
   },
   ".cm-wikilink:hover": {
-    backgroundColor: "var(--accent-soft)",
-    textDecoration: "none",
+    textDecorationColor: "var(--link)",
   },
   // A link to a note that does not exist: greyed out, and inert to the mouse
   // (a click places the caret; it never creates the note). `--text-tertiary`
@@ -442,8 +446,9 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     overflowWrap: "normal",
     wordBreak: "normal",
   },
+  // A soft sage header, the same green family as the Synced pill.
   ".cm-md-table th": {
-    backgroundColor: "var(--bg-subtle)",
+    backgroundColor: "var(--success-soft)",
     fontWeight: "700",
   },
 
@@ -475,6 +480,11 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   },
   // The open cell: a quiet ring drawn INSIDE the cell, so the table's own grid
   // lines never move by a pixel when a cell is being edited.
+  // A dragged or shift-clicked block of cells: the editor's selection wash.
+  ".cm-md-table .cm-md-cell-selected": {
+    backgroundColor: "var(--editor-selection-bg)",
+  },
+  ".cm-md-table-wrap:focus": { outline: "none" },
   ".cm-md-table .cm-md-cell-open": {
     backgroundColor: "var(--bg-subtle)",
     boxShadow: "inset 0 0 0 2px var(--accent)",
@@ -502,7 +512,7 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     fontSize: "0.9em",
     padding: "0.1em 0.3em",
     borderRadius: "var(--radius-sm)",
-    backgroundColor: "var(--bg-subtle)",
+    backgroundColor: "var(--success-soft)",
   },
   ".cm-md-table .cm-md-cell-content .cm-md-link, .cm-md-table .cm-md-cell-content .cm-wikilink":
     {
@@ -822,20 +832,32 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     fontSize: "var(--fs-sm)",
     color: "var(--danger)",
   },
-  ".inline-title-add": {
+  // A note with no properties: Add tags · Add property · Add date, always
+  // visible but quiet (it used to be invisible until hovered).
+  ".inline-title-adds": {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "6px",
     alignSelf: "flex-start",
+  },
+  ".inline-title-add": {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "6px",
+    height: "28px",
+    padding: "0 10px",
     border: "0",
-    background: "transparent",
-    padding: "0",
+    borderRadius: "8px",
+    background: "var(--bg-subtle)",
     cursor: "pointer",
     fontSize: "var(--fs-sm)",
     color: "var(--text-tertiary)",
-    opacity: "0",
-    transition: "opacity 120ms ease",
+    transition: "background 120ms ease, color 120ms ease",
   },
-  // A note with no properties shows no chrome until you reach for it.
-  ".cm-note-title:hover .inline-title-add, .inline-title-add:focus-visible": {
-    opacity: "1",
+  ".inline-title-add svg": { width: "14px", height: "14px", flex: "none" },
+  ".inline-title-add:hover, .inline-title-add:focus-visible": {
+    background: "var(--bg-hover)",
+    color: "var(--text-primary)",
   },
 
   // Same rule as `.cm-note-title`: padding only, no vertical margin. The gap
@@ -893,6 +915,15 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     fontFamily: "var(--font-body)",
     fontSize: "var(--fs-sm)",
     color: "var(--text-primary)",
+  },
+  // Empty fields say they take input (placeholder), and every field shows a
+  // soft hover fill so it reads as clickable before you click it.
+  ".prop-input::placeholder, .prop-chip-input::placeholder": {
+    color: "var(--text-tertiary)",
+  },
+  ".prop-row:not(.is-readonly) .prop-input:hover, .prop-row:not(.is-readonly) .prop-chips:hover": {
+    background: "var(--bg-hover)",
+    borderRadius: "var(--radius-sm)",
   },
   ".prop-name:hover:not(:read-only), .prop-input:hover:not(:read-only)": {
     backgroundColor: "var(--bg-subtle)",
@@ -1061,7 +1092,7 @@ export const markdownHighlightSpec = [
       fontFamily: "var(--font-mono)",
       fontSize: "0.9em",
       color: "var(--text-primary)",
-      background: "var(--bg-subtle)",
+      background: "var(--success-soft)",
       padding: "0.1em 0.35em",
       borderRadius: "var(--radius-sm)",
     },

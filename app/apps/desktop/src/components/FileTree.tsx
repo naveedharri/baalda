@@ -1979,7 +1979,7 @@ export function FileTree() {
             data={data}
             idAccessor="id"
             openByDefault={false}
-            width={dim.width}
+            width="100%"
             height={dim.height - 34 - (selectMode ? 36 : 0)}
             indent={14}
             rowHeight={36}

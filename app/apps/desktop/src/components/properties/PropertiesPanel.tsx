@@ -53,7 +53,7 @@ import { PropertyIcon } from "./PropertyIcons";
  */
 
 /** The new property a `⌘;` just created, so the panel can focus its name. */
-const pendingFocus = new WeakMap<EditorView, string>();
+const pendingFocus = new WeakMap<EditorView, { key: string; cell: "name" | "value" }>();
 
 function docEntries(view: EditorView): { entries: PropEntry[]; ok: boolean } {
   const fm = findFrontmatter(view.state.doc);
@@ -102,18 +102,28 @@ function freeKey(taken: ReadonlySet<string>): string {
  * not in the file has nowhere to live — and a pending row would have to survive
  * a widget that does not exist yet when the note has no frontmatter at all.
  */
-export function addPropertyToNote(view: EditorView): boolean {
+export function addPropertyToNote(
+  view: EditorView,
+  /** A specific property to add (the title's Add tags / Add date); default: a
+   *  blank text property under a free name. A preset whose key the note
+   *  already has adds nothing. */
+  preset?: { key: string; value: PropValue },
+): boolean {
   if (view.state.readOnly) return false;
   const fm = findFrontmatter(view.state.doc);
   const parsed = fm ? parseFrontmatter(view.state.doc, fm) : null;
   if (parsed && !parsed.ok) return false; // never rewrite YAML we can't read
   const entries = parsed?.ok ? parsed.entries : [];
-  const key = freeKey(new Set(entries.map((e) => e.key)));
+  const taken = new Set(entries.map((e) => e.key));
+  if (preset && taken.has(preset.key)) return false;
+  const key = preset?.key ?? freeKey(taken);
   dispatch(
     view,
-    planAddProperty(view.state.doc, fm, entries, key, { kind: "text", value: "" }),
+    planAddProperty(view.state.doc, fm, entries, key, preset?.value ?? { kind: "text", value: "" }),
   );
-  pendingFocus.set(view, key);
+  // A preset (tags, date) lands in its value, ready to type; a blank property
+  // lands in its name, selected, so typing replaces "property".
+  pendingFocus.set(view, { key, cell: preset ? "value" : "name" });
   return true;
 }
 
@@ -171,9 +181,9 @@ export function PropertiesPanel({
   // A row added by `⌘;` (possibly from the title widget, before this panel
   // existed) gets its name focused and selected, so typing replaces it.
   useEffect(() => {
-    const key = pendingFocus.get(view);
-    if (!key) return;
-    if (focusRow(key, "name")) pendingFocus.delete(view);
+    const pending = pendingFocus.get(view);
+    if (!pending) return;
+    if (focusRow(pending.key, pending.cell)) pendingFocus.delete(view);
   });
 
   const move = (index: number, delta: number, cell: "name" | "value") => {
@@ -361,9 +371,10 @@ function PropertyRow({
     [commitValue, type],
   );
 
-  const commitName = useCallback(() => {
-    if (nameDraft === null) return;
-    const next = nameDraft.trim();
+  const commitName = useCallback((override?: string) => {
+    const draftName = override ?? nameDraft;
+    if (draftName === null) return;
+    const next = draftName.trim();
     setNameDraft(null);
     if (next === "" || next === entry.key) return;
     const fm = findFrontmatter(view.state.doc);
@@ -410,7 +421,17 @@ function PropertyRow({
     }
   };
 
-  const listId = `prop-keys-${entry.key.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  // Name suggestions: the vault's other property names, filtered by what is
+  // typed (all of them while the name is untouched, e.g. a fresh "property").
+  const nameMatches = filterSuggestions(
+    suggestions.filter((k) => k !== entry.key),
+    nameDraft ?? "",
+  );
+  const nameSg = useSuggest(nameMatches.length);
+  const pickName = (i: number) => {
+    const picked = nameMatches[i];
+    if (picked) commitName(picked);
+  };
 
   return (
     <div className="prop-row" role="row">
@@ -435,10 +456,19 @@ function PropertyRow({
         value={nameDraft ?? entry.key}
         readOnly={readOnly}
         aria-label="Property name"
-        list={suggestions.length > 0 ? listId : undefined}
-        onChange={(e) => setNameDraft(e.target.value)}
-        onBlur={commitName}
+        aria-autocomplete="list"
+        onFocus={() => !readOnly && nameSg.setOpen(true)}
+        onChange={(e) => {
+          setNameDraft(e.target.value);
+          nameSg.setOpen(true);
+          nameSg.setHi(0);
+        }}
+        onBlur={() => {
+          nameSg.setOpen(false);
+          commitName();
+        }}
         onKeyDown={(e) => {
+          if (nameSg.onKey(e, pickName)) return;
           if (e.key === "Enter") {
             e.preventDefault();
             commitName();
@@ -455,12 +485,8 @@ function PropertyRow({
           onCellKeyDown(e, "name");
         }}
       />
-      {suggestions.length > 0 && (
-        <datalist id={listId}>
-          {suggestions.map((s) => (
-            <option key={s} value={s} />
-          ))}
-        </datalist>
+      {nameSg.open && !readOnly && (
+        <SuggestPopover items={nameMatches} hi={nameSg.hi} setHi={nameSg.setHi} onPick={pickName} />
       )}
       <div className="prop-value">
         <ValueControl
@@ -561,6 +587,44 @@ function ValueControl({
     );
   }
 
+  return (
+    <TextValue
+      type={type}
+      entry={entry}
+      readOnly={readOnly}
+      draft={draft}
+      setDraft={setDraft}
+      commitText={commitText}
+      suggestions={suggestions}
+      setRef={setRef}
+      onKeyDown={onKeyDown}
+    />
+  );
+}
+
+/** A text, number, date or datetime value: its own component so the
+ *  suggestion hook always runs in the same order. */
+function TextValue({
+  type,
+  entry,
+  readOnly,
+  draft,
+  setDraft,
+  commitText,
+  suggestions,
+  setRef,
+  onKeyDown,
+}: {
+  type: PropertyType;
+  entry: PropEntry;
+  readOnly: boolean;
+  draft: string | null;
+  setDraft: (v: string | null) => void;
+  commitText: (v: string) => void;
+  suggestions: string[];
+  setRef: (el: HTMLElement | null) => void;
+  onKeyDown: (e: React.KeyboardEvent) => void;
+}) {
   const inputType =
     type === "number"
       ? "number"
@@ -573,23 +637,42 @@ function ValueControl({
   // fall back to a text field rather than silently dropping the zone.
   const raw = valueToText(entry.value);
   const shown = draft ?? (type === "datetime" ? raw.replace(/Z$/, "").slice(0, 16) : raw);
-  const listId = suggestions.length > 0 ? `prop-values-${entry.key}` : undefined;
+  // Text values suggest what other notes use for this property; dates and
+  // numbers keep their own native pickers.
+  const suggestable = inputType === "text" && suggestions.length > 0 && !readOnly;
+  const valueMatches = suggestable ? filterSuggestions(suggestions, draft ?? "", [raw]) : [];
+  const valueSg = useSuggest(valueMatches.length);
+  const pickValue = (i: number) => {
+    const picked = valueMatches[i];
+    if (picked === undefined) return;
+    setDraft(null);
+    commitText(picked);
+  };
 
   return (
-    <>
+    <div className="prop-input-wrap">
       <input
         ref={setRef}
         type={inputType}
         className="prop-input"
         value={shown}
         readOnly={readOnly}
+        // An empty value says it takes typing, like the tag row's "Add a tag…".
+        placeholder={readOnly ? undefined : "Add a value…"}
         aria-label={entry.key}
-        list={listId}
-        onChange={(e) => setDraft(e.target.value)}
+        aria-autocomplete={suggestable ? "list" : undefined}
+        onFocus={() => suggestable && valueSg.setOpen(true)}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          valueSg.setOpen(true);
+          valueSg.setHi(0);
+        }}
         onBlur={() => {
+          valueSg.setOpen(false);
           if (draft !== null) commitText(draft);
         }}
         onKeyDown={(e) => {
+          if (suggestable && valueSg.onKey(e, pickValue)) return;
           if (e.key === "Enter") {
             e.preventDefault();
             if (draft !== null) commitText(draft);
@@ -598,14 +681,10 @@ function ValueControl({
           onKeyDown(e);
         }}
       />
-      {listId && (
-        <datalist id={listId}>
-          {suggestions.map((s) => (
-            <option key={s} value={s} />
-          ))}
-        </datalist>
+      {valueSg.open && suggestable && (
+        <SuggestPopover items={valueMatches} hi={valueSg.hi} setHi={valueSg.setHi} onPick={pickValue} />
       )}
-    </>
+    </div>
   );
 }
 
@@ -634,9 +713,17 @@ function Chips({
       : valueToText(entry.value).trim() === ""
         ? []
         : [valueToText(entry.value)];
-  const listId = suggestions.length > 0 ? `prop-chips-${entry.key}` : undefined;
-
   const setItems = (next: string[]) => commitValue({ kind: "list", value: next });
+  const typed = (draft ?? "").trim();
+  const matches = filterSuggestions(suggestions, typed, items);
+  const create =
+    typed !== "" && !matches.some((m) => m.toLowerCase() === typed.toLowerCase()) ? typed : null;
+  const sg = useSuggest(matches.length + (create ? 1 : 0));
+  const pick = (i: number) => {
+    const value = i < matches.length ? matches[i] : create;
+    setDraft(null);
+    if (value) setItems([...items, value]);
+  };
 
   return (
     <div className="prop-chips">
@@ -660,15 +747,22 @@ function Chips({
         value={draft ?? ""}
         readOnly={readOnly}
         aria-label={`Add to ${entry.key}`}
-        list={listId}
-        placeholder={items.length === 0 ? "Empty" : ""}
-        onChange={(e) => setDraft(e.target.value)}
+        aria-autocomplete="list"
+        placeholder={items.length === 0 ? "Add a tag…" : ""}
+        onFocus={() => !readOnly && sg.setOpen(true)}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          sg.setOpen(true);
+          sg.setHi(0);
+        }}
         onBlur={() => {
+          sg.setOpen(false);
           const text = (draft ?? "").trim();
           setDraft(null);
           if (text !== "") setItems([...items, text]);
         }}
         onKeyDown={(e) => {
+          if (sg.onKey(e, pick)) return;
           if (e.key === "Enter") {
             e.preventDefault();
             const text = (draft ?? "").trim();
@@ -684,13 +778,113 @@ function Chips({
           onKeyDown(e);
         }}
       />
-      {listId && (
-        <datalist id={listId}>
-          {suggestions.map((s) => (
-            <option key={s} value={s} />
-          ))}
-        </datalist>
+      {sg.open && !readOnly && (
+        <SuggestPopover items={matches} hi={sg.hi} setHi={sg.setHi} onPick={pick} create={create} chips />
       )}
+    </div>
+  );
+}
+
+/**
+ * In-app suggestions under a property field, replacing `<datalist>` (which the
+ * OS draws as a full-width black list). Filters as you type, ↑/↓ moves, Enter
+ * or a click picks; `create` adds a "Create …" row for a value not in the list.
+ */
+function filterSuggestions(all: readonly string[], query: string, exclude: readonly string[] = []): string[] {
+  const q = query.trim().toLowerCase();
+  const taken = new Set(exclude.map((x) => x.toLowerCase()));
+  return all
+    .filter((x) => !taken.has(x.toLowerCase()) && (!q || x.toLowerCase().includes(q)))
+    .slice(0, 8);
+}
+
+function useSuggest(count: number) {
+  const [open, setOpen] = useState(false);
+  const [hi, setHi] = useState(0);
+  useEffect(() => {
+    if (hi >= count) setHi(0);
+  }, [count, hi]);
+  /** Returns true when the key was handled by the popover. */
+  const onKey = (e: React.KeyboardEvent, pick: (i: number) => void): boolean => {
+    if (!open || count === 0) return false;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHi((i) => (i + 1) % count);
+      return true;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHi((i) => (i - 1 + count) % count);
+      return true;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      pick(hi);
+      return true;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setOpen(false);
+      return true;
+    }
+    return false;
+  };
+  return { open, setOpen, hi, setHi, onKey };
+}
+
+function SuggestPopover({
+  items,
+  hi,
+  setHi,
+  onPick,
+  create,
+  chips,
+}: {
+  items: string[];
+  hi: number;
+  setHi: (i: number) => void;
+  onPick: (i: number) => void;
+  /** The typed text, offered as "Create …" after the matches. */
+  create?: string | null;
+  chips?: boolean;
+}) {
+  const rows = create ? [...items, create] : items;
+  if (rows.length === 0) return null;
+  return (
+    <div className="prop-suggest" role="listbox">
+      {rows.map((item, i) => {
+        const isCreate = !!create && i === items.length;
+        return (
+          <div
+            key={`${isCreate ? "create:" : ""}${item}`}
+            role="option"
+            aria-selected={i === hi}
+            className={`prop-suggest-item${i === hi ? " is-active" : ""}${isCreate ? " is-create" : ""}`}
+            onMouseEnter={() => setHi(i)}
+            // mousedown, not click: picking must win over the input's blur.
+            onMouseDown={(e) => {
+              e.preventDefault();
+              onPick(i);
+            }}
+          >
+            {isCreate ? (
+              <>
+                <span className="prop-suggest-plus" aria-hidden="true">+</span>
+                Create <b>{item}</b>
+              </>
+            ) : chips ? (
+              <span
+                className="prop-chip"
+                style={{ "--tag-bg": tagColor(item).bg, "--tag-fg": tagColor(item).fg } as CSSProperties}
+              >
+                {item}
+              </span>
+            ) : (
+              item
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

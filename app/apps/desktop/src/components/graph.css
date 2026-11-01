@@ -527,3 +527,8 @@ html[data-platform="windows"] .graph-floating-controls {
   will-change: transform;
   transition: opacity 120ms ease;
 }
+
+/* Forces on a fixed shape (Radial, Ring): shown, but clearly not in play. */
+.graph-control-row.is-disabled { opacity: 0.4; }
+.graph-control-row.is-disabled .range-input { cursor: not-allowed; }
+.graph-control-note { margin: 0 0 8px; font-size: 11.5px; line-height: 1.4; color: var(--text-tertiary); }

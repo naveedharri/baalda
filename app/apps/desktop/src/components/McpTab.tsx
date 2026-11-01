@@ -89,37 +89,54 @@ export function McpTab() {
 
   return (
     <>
-      <div className="muted">
+      <p className="mcp-lede">
         Connect any MCP-compatible AI client to this vault. It gets the same
         access you do: read, search, create, edit and delete notes and folders.
         Owners and admins can also manage the team's access from the same chat.
-        Ask Claude or ChatGPT to share a folder with someone, make it view only,
-        or set what new members see.
-      </div>
+      </p>
 
-      {isManagedServer(serverUrl) && <ClaudeDirectoryBanner />}
+      <div className="profile-rows mcp-rows">
+        {isManagedServer(serverUrl) && (
+          <div className="profile-row">
+            <div className="profile-row-label">
+              <span className="profile-row-title mcp-row-title">
+                <ToolLogo tool="claude" size={15} title="" />
+                Claude
+                <span className="mcp-official">Official connector</span>
+              </span>
+              <span className="profile-row-hint">Add Baalda from Claude&apos;s connector directory in one click.</span>
+            </div>
+            <div className="profile-row-control mcp-row-end">
+              <ClaudeDirectoryButton />
+            </div>
+          </div>
+        )}
 
-      <div className="mcp-endpoint">
-        <span className="mcp-endpoint-label">Server address</span>
-        <CopyField value={mcpUrl} label="server address" />
-      </div>
-
-      <div className="mcp-section-head">
-        <div className="mcp-section-text">
-          <div className="subhead">Access tokens</div>
-          <div className="mcp-section-hint">
-            Each token connects one AI client as you, in this vault. Revoke any time.
+        <div className="profile-row">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Server address</span>
+            <span className="profile-row-hint">Paste it into any MCP client.</span>
+          </div>
+          <div className="profile-row-control">
+            <CopyField value={mcpUrl} label="server address" />
           </div>
         </div>
-        <button
-          type="button"
-          className="primary skills-hdr-btn"
-          onClick={() => setCreating(true)}
-        >
-          New token
-        </button>
-      </div>
 
+        <div className="profile-row profile-row-top">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Access tokens</span>
+            <span className="profile-row-hint">
+              Each token connects one AI client as you, in this vault. Revoke any time.
+            </span>
+            <button
+              type="button"
+              className="mcp-new-token"
+              onClick={() => setCreating(true)}
+            >
+              New token
+            </button>
+          </div>
+          <div className="profile-row-control">
       {loading ? (
         <div className="mcp-empty">Loading…</div>
       ) : tokens.length === 0 ? (
@@ -196,6 +213,9 @@ export function McpTab() {
           })}
         </ul>
       )}
+          </div>
+        </div>
+      </div>
 
       {creating && (
         <NewMcpTokenDialog
@@ -223,14 +243,9 @@ export function McpTab() {
 /** The directory listing points at the managed server, so self-hosters never see it. */
 const CLAUDE_DIRECTORY_URL = "https://claude.ai/directory/baalda";
 
-function ClaudeDirectoryBanner() {
+function ClaudeDirectoryButton() {
   return (
-    <div className="mcp-directory">
-      <ToolLogo tool="claude" size={16} title="" />
-      <span className="mcp-directory-pill">Official connector</span>
-      <span className="mcp-directory-text">
-        Baalda is in Claude's connector directory. Add it in Claude with one click.
-      </span>
+    <>
       <button
         type="button"
         className="secondary mcp-directory-btn"
@@ -245,7 +260,7 @@ function ClaudeDirectoryBanner() {
           <path d="M5.5 10.5l5-5M6.5 5.5h4v4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
-    </div>
+    </>
   );
 }
 

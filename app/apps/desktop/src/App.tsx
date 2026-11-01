@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { EditorView } from "@codemirror/view";
 import "./App.css";
 import "./styles/redesign.css";
 import { AccountMenu } from "./components/AccountMenu";
@@ -1622,6 +1623,30 @@ export default function App() {
 
     const onKey = async (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
+      // ⌘A / Ctrl+A with nothing focused (after a click on the tab strip, the
+      // sidebar or empty space) selects the open note, not the whole window.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === "a") {
+        const ae = document.activeElement;
+        const inField = ae?.closest("input, textarea, [contenteditable='true'], .cm-editor");
+        const host = document.querySelector<HTMLElement>(".editor-pane .cm-editor, .cm-editor");
+        const view = !inField && host ? EditorView.findFromDOM(host) : null;
+        if (view) {
+          e.preventDefault();
+          view.focus();
+          view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+        }
+        return;
+      }
+      // Copy by keyboard even when no native Edit menu item claims ⌘C first (a
+      // menu that has it consumes the key before it gets here). Copy only: a
+      // second copy is harmless where the native one also runs, a second cut
+      // is not.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === "c") {
+        const sel = window.getSelection();
+        const inField = document.activeElement?.closest("input, textarea, .cm-editor");
+        if (inField || (sel && !sel.isCollapsed)) document.execCommand("copy");
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "h") {
         e.preventDefault();
         void useStore.getState().openHome().catch((err) => toast(String(err), "error"));
@@ -1700,8 +1725,40 @@ export default function App() {
         return;
       }
     };
+    // macOS runs Edit → Select All itself, before the page sees ⌘A, and selects
+    // the document rather than the note. When a selection appears that swallows
+    // the whole note while no field has focus, hand it to the editor as its own
+    // select-all, so it is highlighted, copyable and editable like one.
+    // A selection made with the mouse is the user's own; only one that appears
+    // with no pointer involved (Edit → Select All) is taken over.
+    let pointerAt = 0;
+    const onPointer = () => {
+      pointerAt = performance.now();
+    };
+    const onSelectionChange = () => {
+      const sel = document.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+      if (performance.now() - pointerAt < 400) return;
+      const ae = document.activeElement;
+      if (ae && ae !== document.body && ae.closest("input, textarea, .cm-editor, .modal")) return;
+      const content = document.querySelector<HTMLElement>(".cm-editor .cm-content");
+      if (!content || !sel.containsNode(content, true)) return;
+      const view = EditorView.findFromDOM(content.closest(".cm-editor") as HTMLElement);
+      if (!view || view.hasFocus) return;
+      sel.removeAllRanges();
+      view.focus();
+      view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    document.addEventListener("pointerdown", onPointer, true);
+    document.addEventListener("pointerup", onPointer, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("selectionchange", onSelectionChange);
+      document.removeEventListener("pointerdown", onPointer, true);
+      document.removeEventListener("pointerup", onPointer, true);
+    };
   }, []);
 
   // Only while we still don't know WHICH folder to show. `setVault` lands

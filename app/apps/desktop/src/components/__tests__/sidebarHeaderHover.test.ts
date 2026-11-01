@@ -67,19 +67,24 @@ describe("vault switcher hover and click", () => {
     expect(menu()).toBeNull();
   });
 
-  it("pins a hover preview on click and closes on a second click", () => {
+  it("a click pins the preview, a second click closes it, and leaving closes it too", () => {
+    point(tile(), "pointerover");
+    act(() => tile().click());
+    expect(menu()).not.toBeNull();
+    act(() => tile().click());
+    expect(menu()).toBeNull();
+    // Pinned or not, the menu does not outlive the pointer (it read as stuck).
     point(tile(), "pointerover");
     act(() => tile().click());
     point(tile(), "pointerout");
     advance(300);
-    expect(menu()).not.toBeNull();
-    act(() => tile().click());
     expect(menu()).toBeNull();
   });
 
-  it("keeps an interacted-with form open, while selection still closes", () => {
+  it("keeps a form being typed in open, while selection still closes", () => {
     point(tile(), "pointerover");
     point(menu()!.querySelector("input")!, "pointerdown");
+    act(() => menu()!.querySelector("input")!.focus());
     point(menu()!, "pointerout");
     advance(300);
     expect(menu()).not.toBeNull();

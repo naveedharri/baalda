@@ -312,10 +312,24 @@ type Drag =
       startX: number;
       startY: number;
       moved: boolean;
+    }
+  // Radial / Ring: a note dragged off its fixed spot. It follows the pointer
+  // and springs back to its place when let go.
+  | {
+      type: "spot";
+      node: SimNode;
+      startX: number;
+      startY: number;
+      fromDx: number;
+      fromDy: number;
+      moved: boolean;
     };
 
 /** A note's place on the globe this frame: screen-world position and depth. */
 type Placed = SimNode & { gx?: number; gy?: number; gz?: number };
+
+/** Seconds a released Radial / Ring note takes to spring back to its spot. */
+const TEMPLATE_SPRING_S = 1.1;
 
 /** Switching shape glides every note from where it was to where it goes. */
 const MORPH_MS = 850;
@@ -587,6 +601,10 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     template: null as
       | { shape: TemplateShape; nodes: SimNode[]; pos: Float32Array; group: Int32Array; r: number; index: Map<SimNode, number> }
       | null,
+    // Radial / Ring: notes the user dragged off their spot, as world offsets.
+    templateOffsets: new Map<SimNode, { dx: number; dy: number }>(),
+    // Released notes springing back to their Radial / Ring spot.
+    templateSprings: new Map<SimNode, { dx: number; dy: number; t0: number }>(),
     seededEdges: 0,
     idleTimer: 0,
     // Large global graphs offload the force sim to a Web Worker so the UI thread
@@ -1105,12 +1123,40 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         const L = templateLayout(nodes, shape);
         t = { shape, nodes, ...L, index: new Map(nodes.map((n, i) => [n, i])) };
         S.template = t;
+        S.templateOffsets.clear();
+        S.templateSprings.clear();
       }
       for (let i = 0; i < nodes.length; i++) {
         const p = nodes[i] as Placed;
         p.gx = t.pos[i * 2];
         p.gy = t.pos[i * 2 + 1];
         p.gz = 1;
+      }
+    }
+
+    /**
+     * Radial, Ring and Globe: notes the user is dragging, or that are springing
+     * back after a drag, sit this far off their place. A damped spring (a touch
+     * of overshoot, then settled) carries a released note home.
+     */
+    function applyDragOffsets() {
+      const now = performance.now();
+      for (const [n, sp] of S.templateSprings) {
+        const t = (now - sp.t0) / 1000;
+        if (t >= TEMPLATE_SPRING_S) {
+          S.templateSprings.delete(n);
+          S.templateOffsets.delete(n);
+          continue;
+        }
+        const k = Math.exp(-6 * t) * Math.cos(11 * t);
+        S.templateOffsets.set(n, { dx: sp.dx * k, dy: sp.dy * k });
+      }
+      if (!S.templateOffsets.size) return;
+      for (const [n, off] of S.templateOffsets) {
+        const p = n as Placed;
+        if (p.gx === undefined) continue;
+        p.gx += off.dx;
+        p.gy = p.gy! + off.dy;
       }
     }
 
@@ -1525,14 +1571,18 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     let sphereKey = "";
     function drawSphere(fr: GlobeFrame, cam: Camera) {
       const c = ctx!;
-      const R = fr.r * GLOBE_SCALE * cam.k;
+      // Coming from Flat / Radial / Ring the sphere fades and swells in with the
+      // notes' glide, so the switch reads as one motion instead of a pop.
+      const t = S.morph && morphing() ? clamp((performance.now() - S.morph.t0) / MORPH_MS, 0, 1) : 1;
+      const appear = 1 - Math.pow(1 - t, 3);
+      const R = fr.r * GLOBE_SCALE * cam.k * (0.88 + 0.12 * appear);
       const cx = width / 2 + cam.x + fr.cx * cam.k;
       const cy = height / 2 + cam.y + fr.cy * cam.k;
       const bg = graphTheme().mid ?? [1, 1, 1];
       const dark = bg[0] * 0.3 + bg[1] * 0.59 + bg[2] * 0.11 < 0.5;
       // The sphere does not change as the globe turns: repaint only when the
       // camera, the size, the canvas or the theme does.
-      const key = `${cx.toFixed(1)}|${cy.toFixed(1)}|${R.toFixed(1)}|${width}x${height}@${dpr}|${dark}`;
+      const key = `${cx.toFixed(1)}|${cy.toFixed(1)}|${R.toFixed(1)}|${width}x${height}@${dpr}|${dark}|${appear.toFixed(2)}`;
       if (key === sphereKey) return;
       sphereKey = key;
       c.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -1547,6 +1597,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         g.addColorStop(0.7, "rgba(120,100,70,0.04)");
         g.addColorStop(1, "rgba(90,70,40,0.1)");
       }
+      c.globalAlpha = appear;
       c.fillStyle = g;
       c.beginPath();
       c.arc(cx, cy, R * 1.02, 0, Math.PI * 2);
@@ -1554,6 +1605,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       c.lineWidth = 1;
       c.strokeStyle = dark ? "rgba(255,255,255,0.08)" : "rgba(40,34,28,0.08)";
       c.stroke();
+      c.globalAlpha = 1;
     }
 
     const webglNodes: RenderNode[] = [];
@@ -1634,6 +1686,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         if (S.visNodes.length > 0 && (S.visNodes[0] as Placed).gx !== undefined) startMorph();
         S.view = view;
         S.globe.frame = null;
+        S.templateOffsets.clear();
+        S.templateSprings.clear();
         // Leaving the globe: wipe its sphere off the 2D canvas underneath.
         S.cleared2d = false;
       }
@@ -1642,6 +1696,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       if (onGlobe) placeOnGlobe();
       else if (view === "radial" || view === "ring") placeTemplate(view);
       else placeFlat();
+      if (view !== "flat") applyDragOffsets();
       applyMorph();
       // On the globe the far side paints first, so the near side covers it.
       const order = onGlobe ? globeOrder() : null;
@@ -1983,9 +2038,27 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const hit = nodeAt(sx, sy);
       canvas!.setPointerCapture(e.pointerId);
       canvas!.classList.add("is-dragging");
+      if (S.view !== "flat" && hit && (!S.globe.on || viewPos(hit).z >= GLOBE_FACE_TO_OPEN)) {
+        // Radial / Ring / the front of the globe: a press on a note moves that
+        // note (it springs back on release); empty space pans or spins.
+        S.globe.target = null;
+        S.globe.lastTouch = performance.now();
+        S.templateSprings.delete(hit);
+        const off = S.templateOffsets.get(hit);
+        S.drag = {
+          type: "spot",
+          node: hit,
+          startX: e.clientX,
+          startY: e.clientY,
+          fromDx: off?.dx ?? 0,
+          fromDy: off?.dy ?? 0,
+          moved: false,
+        };
+        return;
+      }
       if (S.view !== "flat") {
-        // A press on the globe spins it, and on Radial / Ring it pans: those
-        // shapes are fixed, so nothing is pinned or pulled.
+        // A press on the globe spins it, and on Radial / Ring empty space pans:
+        // those shapes are fixed, so nothing is pinned or pulled.
         S.globe.target = null;
         S.globe.lastTouch = performance.now();
         S.drag = { type: "pan", lastX: e.clientX, lastY: e.clientY, moved: false, pick: hit };
@@ -2037,6 +2110,18 @@ export function GraphView({ onClose }: { onClose: () => void }) {
             drag.lastY = e.clientY;
             requestDraw();
           }
+        } else if (drag.type === "spot") {
+          const dx = e.clientX - drag.startX;
+          const dy = e.clientY - drag.startY;
+          if (!drag.moved && Math.hypot(dx, dy) > CLICK_DRAG_THRESHOLD) drag.moved = true;
+          if (drag.moved) {
+            S.templateOffsets.set(drag.node, {
+              dx: drag.fromDx + dx / S.camera.k,
+              dy: drag.fromDy + dy / S.camera.k,
+            });
+            clearHoverTips();
+            requestDraw();
+          }
         } else {
           const { x: wx, y: wy } = screenToWorld(sx, sy);
           drag.node.fx = wx;
@@ -2085,6 +2170,24 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           // front (or any note on the other shapes) opens.
           if (S.globe.on && viewPos(pick).z < GLOBE_FACE_TO_OPEN) turnToFace(pick);
           else useStore.getState().openNoteByPath(pick.path).then(onClose);
+        }
+        requestDraw();
+      }
+      if (drag?.type === "spot") {
+        if (!drag.moved) {
+          useStore.getState().openNoteByPath(drag.node.path).then(onClose);
+        } else {
+          // Let go: the note springs back to its place in the shape.
+          const off = S.templateOffsets.get(drag.node);
+          if (off) {
+            S.templateSprings.set(drag.node, { dx: off.dx, dy: off.dy, t0: performance.now() });
+            const tick = () => {
+              if (!S.templateSprings.size) return;
+              requestDraw();
+              requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+          }
         }
         requestDraw();
       }

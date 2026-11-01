@@ -22,7 +22,8 @@ import {
   updateState,
   useUpdateState,
 } from "../lib/updater";
-import { isUpdateBusy, updateCheckToast, updateRowHint } from "../lib/updateMenuRow";
+import { isUpdateBusy, updateCheckToast } from "../lib/updateMenuRow";
+import { showsSidebarUpdateLine, updateView } from "../lib/updateView";
 import { toast } from "../lib/toast";
 
 /* The settings surface is a whole second app (nine tabs, billing, MCP tokens,
@@ -437,6 +438,7 @@ export function AccountMenu() {
           else menu.toggle();
         }}
       />
+      <SidebarUpdateLine />
       <div className="identity-row">
         <button
           className={`identity-bar ${open ? "open" : ""}`}
@@ -534,6 +536,8 @@ export function AccountMenu() {
           onPin={menu.pin}
           seenInvites={seenInvites}
           invitesPanelOpen={invitesPanelOnOpen}
+          presence={presence}
+          presenceLabel={presenceLabel}
           onOpenAccount={() => {
             useStore.getState().requestAccountSettings("profile");
           }}
@@ -605,9 +609,10 @@ function UpdateMenuRow({ onClose }: { onClose: () => void }) {
       alive = false;
     };
   }, []);
+  const view = updateView(update, version);
   return (
     <button
-      className="menu-item"
+      className={`menu-item update-row is-${view.tone}`}
       onClick={() => {
         onClose();
         runMenuUpdateCheck();
@@ -617,9 +622,73 @@ function UpdateMenuRow({ onClose }: { onClose: () => void }) {
         <path d="M21 12a9 9 0 1 1-2.64-6.36" />
         <path d="M21 3v6h-6" />
       </MenuIcon>
-      <span className="menu-item-label">Check for updates</span>
-      <span className="menu-hint">{updateRowHint(update, version)}</span>
+      <span className="menu-item-label update-row-text">
+        <span>{view.tone === "ok" || view.tone === "idle" ? "Check for updates" : view.tone === "busy" && view.percent === null ? "Checking…" : view.title}</span>
+        {view.percent !== null && (
+          <span className="update-row-bar" aria-hidden="true">
+            <b style={{ width: `${view.percent}%` }} />
+          </span>
+        )}
+        {(view.tone === "ready" || view.tone === "wait" || view.tone === "error") && (
+          <small className="update-row-sub">{view.sub}</small>
+        )}
+      </span>
+      <span className="menu-hint update-row-end">
+        {view.tone === "ready" ? (
+          <span className="update-row-btn is-ink">Restart</span>
+        ) : view.tone === "error" ? (
+          <span className="update-row-btn">Retry</span>
+        ) : view.percent !== null ? (
+          `${view.percent}%`
+        ) : view.tone === "busy" ? (
+          <span className="btn-spinner" aria-hidden="true" />
+        ) : (
+          `${version ?? "…"}${view.tone === "ok" ? " ✓" : ""}`
+        )}
+      </span>
     </button>
+  );
+}
+
+/**
+ * B: a quiet line above the account row, only while an update is moving or
+ * waiting on you; nothing when up to date. Ready restarts, a failure retries.
+ */
+function SidebarUpdateLine() {
+  const update = useUpdateState();
+  const view = updateView(update, menuVersion);
+  if (!showsSidebarUpdateLine(view)) return null;
+  const act = view.action === "restart" ? () => void relaunchForUpdate() : view.action === "retry" ? () => void checkAndAutoInstall() : undefined;
+  return (
+    <div className={`sidebar-update is-${view.tone}`} role="status">
+      <span className="sidebar-update-icon" aria-hidden="true">
+        {view.tone === "busy" ? (
+          view.percent !== null ? (
+            <svg viewBox="0 0 36 36" width="18" height="18">
+              <circle cx="18" cy="18" r="14" fill="none" strokeWidth="5" className="ring-bg" />
+              <circle cx="18" cy="18" r="14" fill="none" strokeWidth="5" className="ring-fg" strokeLinecap="round" strokeDasharray={`${(view.percent / 100) * 88} 88`} transform="rotate(-90 18 18)" />
+            </svg>
+          ) : (
+            <span className="btn-spinner" />
+          )
+        ) : view.tone === "ready" ? (
+          "●"
+        ) : view.tone === "error" ? (
+          "!"
+        ) : (
+          "◷"
+        )}
+      </span>
+      <span className="sidebar-update-text">
+        <b>{view.title}</b>
+        <small>{view.sub}</small>
+      </span>
+      {act && (
+        <button type="button" className="sidebar-update-btn" onClick={act}>
+          {view.action === "restart" ? "Restart" : "Retry"}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -628,10 +697,16 @@ function AccountPopover({
   onOpenAccount,
   seenInvites,
   invitesPanelOpen,
+  presence,
+  presenceLabel,
   onPointerEnter,
   onPointerLeave,
   onPin,
 }: {
+  /** The account row's presence light, repeated on the profile line the menu
+   *  draws over it, so the dot does not vanish when the menu opens. */
+  presence: string;
+  presenceLabel: string;
   onClose: () => void;
   onOpenAccount: () => void;
   seenInvites: Set<string>;
@@ -667,7 +742,7 @@ function AccountPopover({
       onFocusCapture={onPin}
     >
       <div className="rd-prof">
-        <span className="sm-host"><LazyAvatar label={session.user.name || session.user.email} image={session.user.image} userId={session.user.id} /><StatusMoment status={activityStatus} size={44} image={session.user.image} /></span>
+        <span className="sm-host"><LazyAvatar label={session.user.name || session.user.email} image={session.user.image} userId={session.user.id} /><StatusMoment status={activityStatus} size={44} image={session.user.image} /><span className={`presence-light ${presence}`} aria-label={presenceLabel} /></span>
         <div className="rd-prof-text">
           <b>{session.user.name || session.user.email}</b>
           {session.user.name && <small>{session.user.email}</small>}

@@ -10,13 +10,14 @@ describe("nextHoverMenuMode", () => {
     expect(run(["enter", "leave-elapsed"])).toBe("closed");
   });
 
-  it("pins a hover preview on click, so leaving no longer closes it", () => {
+  it("pins a hover preview on click, and still closes once the pointer leaves", () => {
     expect(run(["enter", "toggle"])).toBe("pinned");
-    expect(run(["enter", "toggle", "leave-elapsed"])).toBe("pinned");
+    expect(run(["enter", "toggle", "leave-elapsed"])).toBe("closed");
   });
 
-  it("pins on a press or focus inside a hover-opened menu", () => {
-    expect(run(["enter", "pin", "leave-elapsed"])).toBe("pinned");
+  it("pins on a press or focus inside a hover-opened menu, closing on leave like any other", () => {
+    expect(run(["enter", "pin"])).toBe("pinned");
+    expect(run(["enter", "pin", "leave-elapsed"])).toBe("closed");
     expect(run(["pin"])).toBe("closed");
   });
 

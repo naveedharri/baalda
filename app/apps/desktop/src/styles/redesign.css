@@ -7,15 +7,15 @@
 html:not(.rd-off) {
   /* Redesign surface tokens (dark values in the dark block below). */
   --rd-surface: #fff;
-  --rd-cream: #fcfaf6;
-  --rd-fill: #f3efe6;
-  --rd-fill-soft: #f6f3ec;
+  --rd-cream: #faf9f8;
+  --rd-fill: #efeeea;
+  --rd-fill-soft: #f3f2ef;
   --rd-chip: #1a1920;
   --rd-ink: 11, 10, 16;
-  /* Very light cream canvas, white cards. */
+  /* Very light cream canvas at 15% saturation (hue 40), white cards. */
   --bg-app: var(--rd-cream);
   --bg-card: var(--rd-cream);
-  --bg-subtle: #f6f3ed;
+  --bg-subtle: #f4f2ef;
   --text-primary: var(--rd-chip);
   --text-secondary: #55545e;
   --text-tertiary: #85848f;
@@ -417,13 +417,13 @@ html:not(.rd-off) .modal-backdrop {
   }
   /* Dialogs rise in over a fading backdrop. */
   .modal-backdrop { animation: rd-fade 160ms var(--ease) both; }
-  .modal { animation: rd-rise 200ms var(--ease) both; }
+  .modal { animation: rd-rise 200ms var(--ease) backwards; }
 
   /* The open note's row settles into its white pill. */
-  .tree-row.selected { animation: rd-lift 180ms var(--ease) both; }
+  .tree-row.selected { animation: rd-lift 180ms var(--ease) backwards; }
 
   /* Switching notes: the page eases in instead of snapping. */
-  .editor-wrap .cm-editor { animation: rd-note-in 180ms var(--ease) both; }
+  .editor-wrap .cm-editor { animation: rd-note-in 180ms var(--ease) backwards; }
 
   /* Ticking a task gives a tiny bounce. */
   .cm-editor .cm-task-checkbox:checked { animation: rd-tick 220ms var(--ease) both; }
@@ -1958,8 +1958,8 @@ html:not(.rd-off) .width-preview-page {
 html:not(.rd-off) .width-preview-col {
   border-inline: 0;
   border-radius: 4px;
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
-  outline: 6px solid color-mix(in srgb, var(--accent) 6%, transparent);
+  background: transparent;
+  outline: 0;
 }
 html:not(.rd-off) .width-preview-text { color: var(--text-tertiary); }
 html:not(.rd-off) .width-preview-text strong { font-weight: 600; color: var(--text-primary); }
@@ -2129,8 +2129,12 @@ html:not(.rd-off) .account-vault-page > .subhead { margin: 22px 0 8px 2px; line-
   .modal-backdrop.rd-exit { animation: rd-out-fade 150ms var(--ease) both; pointer-events: none; }
   .modal-backdrop.rd-exit > * { animation: rd-out-sink 150ms var(--ease) both; }
   .settings-backdrop { animation: rd-fade 170ms var(--ease) both; }
-  .settings-backdrop > * { animation: rd-rise 210ms var(--ease) both; }
-  .settings-content.rd-tab-in { animation: rd-tab-glide 170ms var(--ease) both; }
+  /* `backwards`, not `both`: a fill that outlives the animation keeps the
+     transform in effect, which makes this panel the containing block for every
+     fixed dialog opened inside it (New vault and Join with code landed off
+     to the side). Same entrance, nothing left behind. */
+  .settings-backdrop > * { animation: rd-rise 210ms var(--ease) backwards; }
+  .settings-content.rd-tab-in { animation: rd-tab-glide 170ms var(--ease) backwards; }
   .settings-nav .menu-item { transition: background-color 120ms var(--ease), color 120ms var(--ease); }
 }
 
@@ -2491,7 +2495,7 @@ html:not(.rd-off) .invite-foot .confirm-actions { margin: 0; display: flex; gap:
 /* Import and export (redesign): one card of action rows, each an icon tile, a
    title with a one-line hint, and a quiet button. No loud violet buttons and no
    half-empty second card. */
-html:not(.rd-off) .io-tab { display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 640px; }
+html:not(.rd-off) .io-tab { display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: none; }
 html:not(.rd-off) .io-list {
   background: var(--rd-surface); border-radius: 16px; padding: 6px;
   box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.03);
@@ -2608,7 +2612,7 @@ html:not(.rd-off) .whats-new-cta:focus-visible {
 
 /* Connection, "Cloud or your own" (chosen 2026-10-30): two choice cards, the
    address only for your own server, recent servers as chips, one Connect. */
-html:not(.rd-off) .conn-b { display: flex; flex-direction: column; gap: 16px; max-width: 720px; }
+html:not(.rd-off) .conn-b { display: flex; flex-direction: column; gap: 16px; }
 html:not(.rd-off) .conn-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 html:not(.rd-off) .conn-option {
   position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left;
@@ -2666,3 +2670,454 @@ html:not(.rd-off) .invites-flyout {
   border-radius: 18px;
   box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 2px 4px rgba(var(--rd-ink), 0.05), 0 30px 60px -16px rgba(11, 10, 16, 0.25);
 }
+
+/* ---- Type hierarchy pass (2026-11-01) ----
+   Sidebar section labels: the app font, not the wide monospace. */
+html:not(.rd-off) .pinned-label,
+html:not(.rd-off) .filetree-head .section-label {
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: rgba(var(--rd-ink), 0.55);
+}
+/* Settings section titles are headings, not footnotes: sentence case, the
+   body size, full ink. Their explanation lines (.muted) stay a step smaller
+   and greyer, so title, hint and content read as three distinct levels. */
+html:not(.rd-off) .settings-content > .subhead,
+html:not(.rd-off) .settings-content .subhead,
+html:not(.rd-off) .account-vaults-head {
+  margin: var(--sp-5) 0 var(--sp-1);
+  font: 600 15px var(--font-body);
+  letter-spacing: -0.005em;
+  text-transform: none;
+  color: var(--text-primary);
+}
+html:not(.rd-off) .settings-content .muted {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+
+/* Connection fills the page like the other settings pages (it stopped at
+   720px and left the right half empty); its Recent label uses the app font. */
+html:not(.rd-off) .conn-recent-label {
+  font: 600 11.5px var(--font-body);
+  letter-spacing: 0.04em;
+}
+
+/* View only chip: at the top of the note, under the tab bar, where it is seen
+   before you try to type (it sat at the bottom edge). Slides down into place. */
+.rd-viewonly {
+  top: 58px;
+  bottom: auto;
+  animation-name: rd-chip-in-top;
+}
+@keyframes rd-chip-in-top { from { opacity: 0; translate: 0 -8px; } to { opacity: 1; translate: 0 0; } }
+
+/* Vaults: New vault / Join with code open their form in the header, in the
+   buttons' own spot, at the buttons' height, so the list never shifts. */
+.account-vaults-head-actions .vault-tab-actions { margin: 0; }
+.account-vaults-head-actions .vault-tab-form { width: 380px; max-width: 100%; font-size: var(--fs-sm); font-weight: 400; }
+.account-vaults-head-actions .vault-tab-form input,
+.account-vaults-head-actions .vault-tab-form button { height: 34px; font-size: var(--fs-sm); }
+.account-vaults-head-actions .vault-tab-form button { padding: 0 14px; font-weight: 600; }
+
+/* The menu's profile line is the account row it covers: same font, sizes,
+   colours and line boxes (name 14/17, email 11/13, 3px apart), so opening
+   the menu never changes the text under the pointer. */
+html:not(.rd-off) .account-popover > .rd-prof .rd-prof-text { gap: 3px; }
+html:not(.rd-off) .account-popover > .rd-prof .rd-prof-text b {
+  font: 600 14px/17px var(--font-body); color: var(--text-primary);
+}
+html:not(.rd-off) .account-popover > .rd-prof .rd-prof-text small {
+  font-size: 11px; line-height: 13px; color: var(--text-tertiary);
+}
+
+/* Account Settings → Encryption. */
+.encryption-page { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
+.encryption-page .subhead { margin-top: 12px; }
+.encryption-lede { margin: 0; font-size: var(--fs-md); color: var(--text-secondary); line-height: 1.5; }
+.encryption-note { margin: 0; }
+.encryption-page .profile-rows:empty { display: none; }
+.encryption-cover { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.encryption-cover-col { padding: 14px 16px; border-radius: 12px; box-shadow: var(--rd-card-shadow); background: var(--bg-surface, #fff); }
+.encryption-cover-title { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); font-weight: 600; color: var(--text-secondary); }
+.encryption-cover-title::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--text-tertiary); }
+.encryption-cover-title.is-on { color: var(--success); }
+.encryption-cover-title.is-on::before { background: var(--success); }
+.encryption-cover ul { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-sm); color: var(--text-primary); }
+
+/* An open note under the pointer keeps ONE highlight: the inset layer. The
+   older full-row "selected:hover" fill outranked the transparent row. */
+html:not(.rd-off) .sidebar .tree-row.selected:hover { background: transparent !important; }
+
+/* Vault menu: the status is words only. The dot was drawn green for every
+   vault, local ones included, so it said nothing. */
+html:not(.rd-off) .vault-switcher .vault-card-sub::before { display: none; }
+
+/* The menu's avatar carries the same presence light as the account row it
+   covers, sitting on the menu's surface. */
+html:not(.rd-off) .account-popover .rd-prof .sm-host { position: relative; }
+html:not(.rd-off) .account-popover .rd-prof .presence-light { border-color: var(--bg-surface); z-index: 2; }
+
+/* One right-hand column: the NOTES header's last icon (the select checkbox)
+   is centred 49px in from the sidebar's right edge. The sync dots, each
+   row's ⋯, the Agent Skills count and the bug icon all centre on it.
+   (Measured live: dots were 7.5px left of it, the bug icon 23px right of it
+   with its old 8px margin, so it now gets 31px.) */
+html:not(.rd-off) .sidebar .filetree-scroll .tree-sync { transform: translateX(15.5px); }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more { transform: translateX(-12.5px); }
+html:not(.rd-off) .sidebar-footer .identity-bug { margin-right: 31px; }
+
+/* Left column: every icon starts at x=20 (Home, folders, Skills, avatar, the
+   HOME and NOTES labels). The vault tile sat at 22. */
+html:not(.rd-off) .sidebar-header-id .vault-tile { margin-left: -2px; }
+
+/* The empty "Set a home" box starts on the icon line (x=20) instead of 8px
+   left of it; its right edge stays on the checkbox column. */
+html:not(.rd-off) .home-sidebar-row.is-unset {
+  margin-left: 0 !important;
+  width: calc(var(--sidebar-layout-w, 300px) - 62px) !important;
+}
+
+/* Vault page: "Switch here" is the page's main action, so it reads as a
+   button (ink pill, like the list's "Open now"), not a grey tag. */
+html:not(.rd-off) .vaults-split-detail .vault-switch-chip,
+html:not(.rd-off) .account-vault-page .vault-switch-chip {
+  height: 30px; padding: 0 14px; border-radius: 99px;
+  background: var(--text-primary); color: var(--bg-surface);
+  font: 600 13px var(--font-body); cursor: pointer;
+}
+html:not(.rd-off) .vaults-split-detail .vault-switch-chip:hover:not(:disabled),
+html:not(.rd-off) .account-vault-page .vault-switch-chip:hover:not(:disabled) { opacity: 0.88; }
+
+/* Version history (option B): two profile-style rows, New checkpoint and
+   Checkpoints, each checkpoint a quiet card with Revert and a ⋯ menu. */
+html:not(.rd-off) .versioning-tab { display: flex; flex-direction: column; gap: 16px; }
+html:not(.rd-off) .versioning-lede { margin: 0; max-width: 720px; color: var(--text-secondary); font-size: var(--fs-md); line-height: 1.5; }
+html:not(.rd-off) .versioning-rows .profile-row { grid-template-columns: minmax(200px, 300px) 1fr; }
+html:not(.rd-off) .checkpoint-create { display: flex; gap: 8px; width: 100%; }
+html:not(.rd-off) .checkpoint-create input { flex: 1; min-width: 0; height: 38px; border-radius: 10px; background: var(--bg-subtle); border: 0; padding: 0 14px; }
+html:not(.rd-off) .checkpoint-ink-btn { height: 38px; padding: 0 16px; border-radius: 10px; border: 0; background: var(--text-primary); color: var(--bg-surface); font-weight: 600; }
+html:not(.rd-off) .checkpoint-ink-btn:disabled { opacity: 0.45; }
+html:not(.rd-off) .checkpoint-cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; width: 100%; }
+html:not(.rd-off) .checkpoint-card { display: flex; align-items: center; gap: 14px; padding: 10px 12px; border-radius: 12px; }
+html:not(.rd-off) .checkpoint-card:nth-child(odd) { background: var(--bg-app); }
+html:not(.rd-off) .checkpoint-icon { flex: none; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--success-soft); color: var(--success); }
+html:not(.rd-off) .checkpoint-icon.is-manual { background: var(--accent-soft); color: var(--accent); }
+html:not(.rd-off) .checkpoint-card .checkpoint-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+html:not(.rd-off) .checkpoint-card .checkpoint-title { font-weight: 600; font-size: 14.5px; color: var(--text-primary); }
+html:not(.rd-off) .checkpoint-card .checkpoint-sub { font-size: 12.5px; color: var(--text-tertiary); }
+html:not(.rd-off) .checkpoint-revert { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px; border-radius: 10px; border: 0; background: var(--bg-surface, #fff); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.12); color: var(--text-primary); font-weight: 600; font-size: 13.5px; cursor: pointer; }
+html:not(.rd-off) .checkpoint-revert:hover { background: var(--bg-hover); }
+
+/* ============================================================
+   Settings: open sections, not box after box (2026-11-01).
+   ============================================================ */
+
+/* General: the icon picker, Freeze vault root and the folder path sit on the
+   page, split by hairlines, instead of each in its own card. */
+html:not(.rd-off) .settings-content > .vault-icon-settings,
+html:not(.rd-off) .settings-content > .join-code-row {
+  background: transparent; box-shadow: none; border-radius: 0; padding: 0;
+}
+/* Every other toggle row (Appearance, Notifications) is a grouped card row
+   like its neighbours: same white fill and 18px inset. An older rule stripped
+   all toggle rows to bare text flush with the card edge. */
+html:not(.rd-off) .settings-content > .toggle-row {
+  background: var(--rd-surface); padding: 16px 18px; gap: 24px;
+}
+html:not(.rd-off) .vault-icon-settings .vault-icon-customise {
+  background: transparent; box-shadow: none; padding: var(--sp-2) 0 0;
+}
+html:not(.rd-off) .settings-content .vault-root-path { background: transparent; padding: 0; }
+
+/* Danger zone: one red-edged card, its actions as rows inside it. */
+html:not(.rd-off) .vault-local-only-card:has(+ .vault-local-only-card) {
+  border-bottom-left-radius: 0; border-bottom-right-radius: 0;
+}
+html:not(.rd-off) .vault-local-only-card + .vault-local-only-card {
+  margin-top: calc(-1 * var(--sp-4));
+  border-top-left-radius: 0; border-top-right-radius: 0;
+  border-top: 1px solid rgba(187, 67, 58, 0.12);
+}
+html:not(.rd-off) .vault-local-only-card { background: var(--rd-surface); }
+
+/* Activity status: the chosen status is a neutral row with an ink check,
+   not a violet band. */
+html:not(.rd-off) .status-options .menu-item.active { background: rgba(var(--rd-ink), 0.045); }
+html:not(.rd-off) .status-options .menu-item.active svg:last-child,
+html:not(.rd-off) .status-options .menu-item.active .menu-check { color: var(--text-primary); }
+
+/* Usage: the four numbers are columns inside the one card, split by
+   hairlines, not four more cards; numbers in the body face. */
+html:not(.rd-off) .vault-usage-tiles { gap: 0; }
+html:not(.rd-off) .vault-usage-tile {
+  border: 0; border-radius: 0; background: transparent; box-shadow: none;
+  padding: var(--sp-1) var(--sp-5);
+}
+html:not(.rd-off) .vault-usage-tile:first-child { padding-left: 0; }
+html:not(.rd-off) .vault-usage-tile + .vault-usage-tile { border-left: 1px solid rgba(var(--rd-ink), 0.07); }
+html:not(.rd-off) .vault-usage-value { font-family: var(--font-body); font-size: 22px; font-weight: 600; }
+html:not(.rd-off) .plan-pro .billing-plan-name { color: var(--text-primary); }
+html:not(.rd-off) .plan-header.is-team .billing-plan-name { color: var(--text-primary); background: none; -webkit-text-fill-color: currentColor; }
+
+/* Revert confirm: text right under the title, actions on the right, and the
+   destructive action in red rather than violet. */
+html:not(.rd-off) .checkpoint-confirm .modal-header { margin-bottom: 8px; }
+html:not(.rd-off) .checkpoint-confirm p { margin: 0 0 20px; line-height: 1.55; }
+html:not(.rd-off) .checkpoint-confirm-actions { justify-content: flex-end; gap: 8px; }
+html:not(.rd-off) .checkpoint-confirm-actions .primary.danger { background: var(--danger); color: #fff; }
+
+/* Account Settings → Encryption: a status hero that carries the page. */
+html:not(.rd-off) .encryption-hero {
+  display: flex; align-items: center; gap: 22px; padding: 26px 28px; border-radius: 18px;
+  background: var(--rd-surface); box-shadow: var(--rd-card-shadow);
+  --enc-fg: var(--text-tertiary); --enc-bg: rgba(var(--rd-ink), 0.05);
+}
+html:not(.rd-off) .encryption-hero.is-on { --enc-fg: var(--success); --enc-bg: var(--success-soft); background: linear-gradient(135deg, var(--success-soft), var(--rd-surface) 55%); }
+html:not(.rd-off) .encryption-hero.is-wait { --enc-fg: #b7791f; --enc-bg: rgba(245, 158, 11, 0.14); }
+html:not(.rd-off) .encryption-hero.is-warn { --enc-fg: var(--danger); --enc-bg: rgba(187, 67, 58, 0.1); }
+html:not(.rd-off) .encryption-hero-icon {
+  flex: none; width: 64px; height: 64px; border-radius: 18px; display: grid; place-items: center;
+  color: var(--enc-fg); background: var(--enc-bg);
+}
+html:not(.rd-off) .encryption-hero-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+html:not(.rd-off) .encryption-hero-vault { font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); }
+html:not(.rd-off) .encryption-hero h3 { margin: 0; font: 600 22px var(--font-display); color: var(--enc-fg); }
+html:not(.rd-off) .encryption-hero.is-off h3 { color: var(--text-primary); }
+html:not(.rd-off) .encryption-hero p { margin: 0; color: var(--text-secondary); font-size: var(--fs-sm); line-height: 1.5; max-width: 620px; }
+html:not(.rd-off) .encryption-code { display: flex; flex-direction: column; gap: 12px; }
+html:not(.rd-off) .encryption-code:not(:has(.profile-row)) { display: none; }
+
+/* Connection: both choices share one box model (one is a button, one a div),
+   so flipping the choice changes only the ring, never the size or text line. */
+html:not(.rd-off) .conn-options { align-items: stretch; }
+html:not(.rd-off) .conn-option { line-height: 1.4; font-size: 14px; margin: 0; appearance: none; }
+html:not(.rd-off) .settings-content .conn-address { width: 100%; }
+
+/* Account menu: the status sits at the top of the menu, the first thing the
+   pointer meets; the profile line stays at the bottom over the account row. */
+html:not(.rd-off) .account-popover > .rd-status {
+  order: -1; margin-top: 0; margin-bottom: 4px; padding: 4px 0 8px;
+  border-top: 0; border-bottom: 1px solid var(--border);
+}
+
+/* Account Settings → AI tools (option B): two profile-style rows. */
+html:not(.rd-off) .ai-tools-lede { margin: 0; color: var(--text-secondary); font-size: var(--fs-md); }
+html:not(.rd-off) .ai-tools-rows .profile-row { grid-template-columns: minmax(200px, 260px) 1fr; }
+html:not(.rd-off) .ai-tools-list { display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0; }
+html:not(.rd-off) .ai-tools-actions { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
+html:not(.rd-off) .ai-tool,
+html:not(.rd-off) .ai-skill { display: flex; align-items: center; gap: 14px; padding: 10px 14px; border-radius: 12px; min-width: 0; }
+html:not(.rd-off) .ai-tool:nth-child(odd),
+html:not(.rd-off) .ai-skill:nth-child(odd) { background: var(--bg-app); }
+html:not(.rd-off) .ai-tool { cursor: pointer; }
+html:not(.rd-off) .ai-tool-logos { flex: none; min-width: 34px; display: inline-flex; gap: 3px; }
+html:not(.rd-off) .ai-tool-text,
+html:not(.rd-off) .ai-skill-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+html:not(.rd-off) .ai-tool-name,
+html:not(.rd-off) .ai-skill-name { font-weight: 600; font-size: 14.5px; color: var(--text-primary); }
+html:not(.rd-off) .ai-tool-path { font: 12px var(--font-mono); color: var(--text-tertiary); background: none; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html:not(.rd-off) .ai-skill-meta { font-size: 12.5px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html:not(.rd-off) .ai-tool-tag,
+html:not(.rd-off) .ai-skill-tag { flex: none; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--success-soft); color: var(--success); }
+html:not(.rd-off) .ai-tool-tag.is-off,
+html:not(.rd-off) .ai-skill-tag.is-optional { background: rgba(var(--rd-ink), 0.06); color: var(--text-secondary); }
+html:not(.rd-off) .ai-skill-icon { flex: none; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
+html:not(.rd-off) .ai-skills { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+/* The address now sits on the page, not inside a white card, so it needs its
+   own white field and edge to read as something to type in. */
+html:not(.rd-off) .settings-content .conn-address {
+  height: 42px; padding: 0 14px; border: 0; border-radius: 12px;
+  background: var(--bg-surface, #fff) !important; color: var(--text-primary); font-size: 14px;
+  box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.08), 0 4px 14px -8px rgba(var(--rd-ink), 0.12) !important;
+  outline: none;
+}
+html:not(.rd-off) .settings-content .conn-address::placeholder { color: var(--text-tertiary); }
+html:not(.rd-off) .settings-content .conn-address:focus { outline: none; box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.1), 0 6px 18px -8px rgba(var(--rd-ink), 0.18) !important; }
+
+/* Plan & Billing loading: card shapes instead of a bare "Loading…". */
+html:not(.rd-off) .plan-skeleton .plan-card { display: flex; flex-direction: column; align-items: flex-start; min-height: 210px; }
+html:not(.rd-off) .plan-skeleton .skel-line { display: block; }
+html:not(.rd-off) .plan-skeleton-seats { flex-direction: row !important; align-items: center !important; gap: 24px; }
+html:not(.rd-off) .plan-skeleton-ring { width: 112px; height: 112px; border-radius: 50%; border: 12px solid rgba(var(--rd-ink), 0.06); flex: none; animation: rd-skel-pulse 1.4s ease-in-out infinite; }
+html:not(.rd-off) .plan-skeleton-legend { display: flex; flex-direction: column; gap: 12px; }
+@keyframes rd-skel-pulse { 50% { opacity: 0.55; } }
+
+/* Welcome: the big wordmark is back (2026-11-01). Its width is its own again,
+   min(42vw, 670px), not the button row's; the buttons stay centred under it. */
+.vault-picker-card .product-name { justify-self: center; }
+.vault-picker-card .product-name .wordmark { width: min(42vw, 670px); }
+.vault-picker-card > .vault-actions { justify-self: center; }
+.vault-picker-card > .recent-list { max-width: 520px; justify-self: center; }
+
+/* ============ Updates: one reading, three sizes (lib/updateView.ts) ============ */
+/* A · About card */
+.update-card {
+  display: flex; flex-direction: column; gap: 14px; padding: 20px 22px; border-radius: 16px;
+  background: var(--rd-surface, var(--bg-surface)); box-shadow: var(--rd-card-shadow, 0 0 0 1px var(--border));
+  --up-fg: var(--text-tertiary);
+}
+.update-card.is-ok, .update-card.is-ready { --up-fg: var(--success); }
+.update-card.is-error { --up-fg: var(--danger); }
+.update-card-row { display: flex; align-items: center; gap: 14px; }
+.update-card-mark { flex: none; width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: var(--text-primary); color: var(--bg-surface); font: 700 18px var(--font-display); }
+.update-card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.update-card-title { font-weight: 600; font-size: 15.5px; color: var(--text-primary); }
+.update-card-sub { font-size: 13px; color: var(--up-fg); display: inline-flex; align-items: center; gap: 6px; }
+.update-card.is-busy .update-card-sub, .update-card.is-idle .update-card-sub { color: var(--text-secondary); }
+.update-card-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.update-card-spin { flex: none; }
+.update-card-btn { flex: none; height: 34px; padding: 0 14px; border-radius: 10px; border: 0; font-weight: 600; font-size: 13.5px; cursor: pointer; background: var(--rd-surface, var(--bg-surface)); color: var(--text-primary); box-shadow: 0 0 0 1px rgba(var(--rd-ink, 0,0,0), 0.12); }
+.update-card-btn:disabled { opacity: 0.5; cursor: default; }
+.update-card-btn.is-ink { background: var(--text-primary); color: var(--bg-surface); box-shadow: none; }
+.update-card-bar, .update-row-bar { display: block; height: 6px; border-radius: 99px; background: rgba(var(--rd-ink, 0,0,0), 0.07); overflow: hidden; }
+.update-card-bar > b, .update-row-bar > b { display: block; height: 100%; border-radius: 99px; background: var(--text-primary); transition: width 300ms var(--ease); }
+
+/* C · account menu row */
+.update-row-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.update-row-bar { height: 4px; width: 100%; }
+.update-row-sub { font-size: 11.5px; color: var(--text-tertiary); }
+.update-row.is-ready { background: var(--success-soft); }
+.update-row.is-ready .update-row-sub { color: var(--success); }
+.update-row.is-error { background: rgba(187, 67, 58, 0.07); }
+.update-row.is-error .update-row-text > span:first-child { color: var(--danger); }
+.update-row-end { display: inline-flex !important; align-items: center; }
+.update-row-btn { height: 26px; padding: 0 10px; border-radius: 8px; display: inline-flex; align-items: center; font-size: 12px; font-weight: 600; color: var(--text-primary); background: var(--bg-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink, 0,0,0), 0.12); }
+.update-row-btn.is-ink { background: var(--text-primary); color: var(--bg-surface); box-shadow: none; }
+
+/* B · sidebar line above the account row */
+.sidebar-update {
+  display: flex; align-items: center; gap: 10px; margin: 0 12px 6px; padding: 8px 10px; border-radius: 12px;
+  background: var(--bg-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink, 0,0,0), 0.08);
+}
+.sidebar-update.is-ready { background: var(--text-primary); color: var(--bg-surface); box-shadow: none; }
+.sidebar-update.is-error { background: rgba(187, 67, 58, 0.06); box-shadow: 0 0 0 1px rgba(187, 67, 58, 0.18); }
+.sidebar-update.is-wait { background: transparent; box-shadow: none; }
+.sidebar-update-icon { flex: none; width: 18px; display: grid; place-items: center; color: var(--text-tertiary); font-size: 13px; }
+.sidebar-update.is-ready .sidebar-update-icon { color: #7fd39b; font-size: 10px; }
+.sidebar-update.is-error .sidebar-update-icon { color: var(--danger); font-weight: 700; }
+.sidebar-update-icon .ring-bg { stroke: rgba(var(--rd-ink, 0,0,0), 0.1); }
+.sidebar-update-icon .ring-fg { stroke: var(--text-primary); transition: stroke-dasharray 300ms var(--ease); }
+.sidebar-update-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sidebar-update-text b { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar-update-text small { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar-update.is-ready .sidebar-update-text small { color: rgba(255, 255, 255, 0.6); }
+.sidebar-update.is-error .sidebar-update-text b { color: var(--danger); }
+.sidebar-update-btn { flex: none; height: 26px; padding: 0 10px; border-radius: 8px; border: 0; font-size: 12px; font-weight: 600; cursor: pointer; background: var(--bg-surface); color: var(--text-primary); box-shadow: 0 0 0 1px rgba(var(--rd-ink, 0,0,0), 0.12); }
+.sidebar-update.is-ready .sidebar-update-btn { box-shadow: none; }
+
+/* Account Settings → About: the update card, then one card of rows. */
+html:not(.rd-off) .about-tab { display: flex; flex-direction: column; gap: 16px; }
+html:not(.rd-off) .about-rows .profile-row { grid-template-columns: minmax(200px, 260px) 1fr; }
+html:not(.rd-off) .about-inline { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+html:not(.rd-off) .about-value { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text-primary); }
+html:not(.rd-off) .about-live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+html:not(.rd-off) .about-signout { height: 34px; padding: 0 14px; border-radius: 10px; border: 0; cursor: pointer; font-weight: 600; font-size: 13.5px; background: var(--rd-surface); color: var(--danger); box-shadow: 0 0 0 1px rgba(187, 67, 58, 0.25); }
+html:not(.rd-off) .about-signout:hover { background: rgba(187, 67, 58, 0.06); }
+html:not(.rd-off) .about-agents { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; width: 100%; }
+html:not(.rd-off) .about-agent { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; background: var(--bg-app); min-width: 0; }
+html:not(.rd-off) .about-agent-glyph { flex: none; width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; background: var(--rd-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.08); }
+html:not(.rd-off) .about-agent-glyph svg, html:not(.rd-off) .about-agent-glyph img { width: 18px; height: 18px; }
+html:not(.rd-off) .about-agent-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+html:not(.rd-off) .about-agent-text b { font-size: 14.5px; font-weight: 600; }
+html:not(.rd-off) .about-agent-version { font-weight: 400; font-size: 12.5px; color: var(--text-tertiary); margin-left: 4px; }
+html:not(.rd-off) .about-agent-text small { font-size: 12.5px; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html:not(.rd-off) .about-agent-tag { flex: none; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--success-soft); color: var(--success); }
+html:not(.rd-off) .about-agent-tag.is-off { background: rgba(var(--rd-ink), 0.06); color: var(--text-secondary); }
+
+/* About fixes: the real app icon, values on the left of their column, the
+   account email and Sign out on one line, quieter agent detail. */
+.update-card-mark.is-icon { background: none; object-fit: cover; border-radius: 12px; box-shadow: 0 6px 14px -8px rgba(0, 0, 0, 0.5); }
+html:not(.rd-off) .about-rows .profile-row-control.about-inline {
+  flex-direction: row; align-items: center; justify-content: space-between; text-align: left; width: 100%;
+}
+html:not(.rd-off) .about-rows .profile-row-control { align-items: stretch; text-align: left; }
+html:not(.rd-off) .about-agent-text > b { font-size: 14px; }
+html:not(.rd-off) .about-agent-text > small { font-size: 12px !important; line-height: 1.4; }
+html:not(.rd-off) .about-agent-version { font-size: 12px; }
+
+/* The row highlight (hover, open note) spans the sidebar evenly: 12px in from
+   the left edge and 12px in from the right, so neither side looks short. The
+   ⋯ and sync dot now sit inside it. Colours unchanged. */
+html:not(.rd-off) .sidebar .tree-row::after { left: 9px; right: -2px; }
+/* Hover is a very light purple; the open note keeps its neutral grey. */
+html:not(.rd-off) .sidebar .tree-row:hover:not(.selected) { --rd-row-bg: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
+
+/* Sidebar rows look like the settings menu: the open note is a white card
+   (hairline + soft shadow, semibold), hover is the same light purple. */
+html:not(.rd-off) .sidebar .tree-row:hover:not(.selected) { --rd-row-bg: var(--bg-hover); }
+html:not(.rd-off) .sidebar .tree-row.selected { --rd-row-bg: var(--rd-surface); font-weight: 600; }
+html:not(.rd-off) .sidebar .tree-row.selected::after {
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 2px 6px -2px rgba(var(--rd-ink), 0.1);
+}
+
+/* Account Settings → Vaults: Synced and On this device carry equal weight,
+   one switch at the top picks which list fills the page. */
+html:not(.rd-off) .vaults-scope {
+  display: inline-flex; gap: 2px; padding: 3px; border-radius: 12px;
+  background: rgba(var(--rd-ink), 0.05); text-transform: none; letter-spacing: normal;
+}
+html:not(.rd-off) .vaults-scope button {
+  height: 32px; padding: 0 14px; border: 0; border-radius: 9px; cursor: pointer;
+  background: transparent; color: var(--text-secondary); font: 600 13.5px var(--font-body);
+  display: inline-flex; align-items: center; gap: 8px;
+}
+html:not(.rd-off) .vaults-scope button b {
+  font-weight: 600; font-size: 11.5px; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 99px;
+  display: inline-grid; place-items: center; background: rgba(var(--rd-ink), 0.07); color: var(--text-secondary);
+}
+html:not(.rd-off) .vaults-scope button.is-on {
+  background: var(--rd-surface); color: var(--text-primary);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 2px 6px -2px rgba(var(--rd-ink), 0.12);
+}
+html:not(.rd-off) .vaults-scope button.is-on b { background: var(--text-primary); color: var(--bg-surface); }
+html:not(.rd-off) .vaults-local-list {
+  list-style: none; margin: 0; padding: 6px; border-radius: 16px;
+  background: var(--rd-surface); box-shadow: var(--rd-card-shadow);
+}
+html:not(.rd-off) .vaults-local-list .vaults-split-item { display: flex; align-items: center; gap: 12px; cursor: default; }
+html:not(.rd-off) .vaults-local-list .vaults-split-meta { font-family: var(--font-mono); font-size: 11.5px; }
+html:not(.rd-off) .vaults-local-empty {
+  display: flex; flex-direction: column; gap: 4px; padding: 28px; border-radius: 16px; text-align: center;
+  background: var(--rd-surface); box-shadow: var(--rd-card-shadow); color: var(--text-secondary); font-size: 13px;
+}
+html:not(.rd-off) .vaults-local-empty b { color: var(--text-primary); font-size: 15px; }
+
+/* Select All (⌘A / Ctrl+A) reaches only what you can read and edit. On macOS
+   the native Edit menu performs it before the page sees the key, so it would
+   otherwise paint the sidebar, tabs, buttons and the note's header chrome too.
+   App chrome is not text to select; the note, inputs and dialogs still are. */
+.sidebar, .tab-strip, .editor-topbar, .header-actions,
+.inline-title-adds, .properties-add, .backlinks-float > button {
+  -webkit-user-select: none; user-select: none;
+}
+.sidebar input, .sidebar textarea, .tab-strip input { -webkit-user-select: text; user-select: text; }
+
+/* Vault Settings → MCP: the house rows, ink actions, a quiet empty state. */
+html:not(.rd-off) .mcp-lede { margin: 0 0 4px; max-width: 720px; color: var(--text-secondary); font-size: var(--fs-md); line-height: 1.5; }
+html:not(.rd-off) .mcp-rows .profile-row { grid-template-columns: minmax(200px, 260px) 1fr; }
+html:not(.rd-off) .mcp-row-title { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+html:not(.rd-off) .mcp-official { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--success-soft); color: var(--success); }
+html:not(.rd-off) .mcp-row-end { flex-direction: row; justify-content: flex-end; align-items: center; }
+html:not(.rd-off) .mcp-directory-btn { height: 34px; padding: 0 14px; border-radius: 10px; display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+html:not(.rd-off) .mcp-directory-btn svg { width: 14px; height: 14px; }
+html:not(.rd-off) .mcp-new-token {
+  align-self: flex-start; margin-top: 14px; height: 34px; padding: 0 14px; border: 0; border-radius: 10px; cursor: pointer;
+  background: var(--text-primary); color: var(--bg-surface); font-weight: 600; font-size: 13.5px;
+}
+html:not(.rd-off) .mcp-rows .mcp-empty {
+  border: 0; border-radius: 12px; padding: 22px; text-align: center;
+  background: var(--bg-app); color: var(--text-tertiary); font-size: 13px;
+}
+
+/* Button rule (2026-11-02): a button that acts right away is black; a button
+   that opens a dialog is the accent purple. */
+html:not(.rd-off) .conn-foot button.primary {
+  background: var(--text-primary); color: var(--bg-surface); border-color: transparent;
+}
+html:not(.rd-off) .conn-foot button.primary:disabled { opacity: 0.35; }
+html:not(.rd-off) .mcp-new-token { background: var(--accent); color: #fff; }
+html:not(.rd-off) .mcp-new-token:hover { background: var(--accent-hover); }
+html:not(.rd-off) .conn-foot button.primary { height: 34px; padding: 0 16px; border-radius: 10px; font-size: 13.5px; font-weight: 600; }

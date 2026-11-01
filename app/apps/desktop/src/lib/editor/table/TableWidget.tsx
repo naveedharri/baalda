@@ -44,6 +44,7 @@ import {
   planInsertColumn,
   planInsertRow,
   planSetAlignment,
+  planSetCell,
   type SpanChange,
 } from "./edit";
 import {
@@ -54,6 +55,25 @@ import {
   type TableModel,
 } from "./parse";
 import { renderCellInto } from "./render";
+
+interface CellRange {
+  anchor: { row: number; col: number };
+  head: { row: number; col: number };
+}
+interface Box {
+  r0: number;
+  r1: number;
+  c0: number;
+  c1: number;
+}
+function rangeBox({ anchor, head }: CellRange): Box {
+  return {
+    r0: Math.min(anchor.row, head.row),
+    r1: Math.max(anchor.row, head.row),
+    c0: Math.min(anchor.col, head.col),
+    c1: Math.max(anchor.col, head.col),
+  };
+}
 
 /** Shared with the other block replace widgets — see `BLOCK_INSET_CLASS`. */
 const INSET = "cm-block-inset";
@@ -166,6 +186,11 @@ function EditableTable({
   const [draft, setDraft] = useState("");
   const [note, setNote] = useState<string | null>(null);
   const [menu, setMenu] = useState<CellMenu | null>(null);
+  /** A block of selected cells (drag across cells, or shift-click), as the
+   *  two corners in display coordinates. One cell alone is not a range. */
+  const [range, setRange] = useState<CellRange | null>(null);
+  const dragFrom = useRef<{ row: number; col: number } | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   /** The cell's source when the draft began, to spot a concurrent edit. */
   const rawAtStart = useRef("");
@@ -345,6 +370,115 @@ function EditableTable({
     e.preventDefault();
   };
 
+  // ---- cell ranges ----
+
+  const box = range ? rangeBox(range) : null;
+  const inRange = (r: number, c: number) =>
+    !!box && r >= box.r0 && r <= box.r1 && c >= box.c0 && c <= box.c1;
+
+  /** Close the open cell (writing its draft) so a range can take over. */
+  const closeEditing = () => {
+    if (!editing) return;
+    handledCell.current = `${editing.row}:${editing.col}`;
+    commit(editing.row, editing.col, draft);
+    setEditing(null);
+  };
+
+  const selectRange = (next: CellRange) => {
+    if (next.anchor.row === next.head.row && next.anchor.col === next.head.col) {
+      setRange(null);
+      return;
+    }
+    closeEditing();
+    setRange(next);
+    wrapRef.current?.focus({ preventScroll: true });
+  };
+
+  // A drag ends wherever the button comes up, inside the table or not.
+  useEffect(() => {
+    const up = () => {
+      dragFrom.current = null;
+    };
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, []);
+
+  // Clicking anywhere outside the table drops the range.
+  useEffect(() => {
+    if (!range) return;
+    const down = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setRange(null);
+    };
+    window.addEventListener("mousedown", down, true);
+    return () => window.removeEventListener("mousedown", down, true);
+  }, [range]);
+
+  const onCellMouseDown = (e: React.MouseEvent, r: number, c: number) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest("input, button")) return;
+    if (e.shiftKey) {
+      const anchor = range?.anchor ?? (editing ? { row: editing.row, col: editing.col } : null);
+      if (anchor) {
+        e.preventDefault();
+        selectRange({ anchor, head: { row: r, col: c } });
+        return;
+      }
+    }
+    dragFrom.current = { row: r, col: c };
+  };
+
+  const onCellMouseEnter = (e: React.MouseEvent, r: number, c: number) => {
+    const from = dragFrom.current;
+    if (!from || (e.buttons & 1) === 0) return;
+    selectRange({ anchor: from, head: { row: r, col: c } });
+  };
+
+  /** The selected cells' text, tab-separated rows, as a spreadsheet pastes it. */
+  const rangeText = (b: Box) =>
+    Array.from({ length: b.r1 - b.r0 + 1 }, (_, i) =>
+      Array.from({ length: b.c1 - b.c0 + 1 }, (_, j) => cellRaw(b.r0 + i, b.c0 + j)).join("\t"),
+    ).join("\n");
+
+  const clearRange = (b: Box) => {
+    if (readOnly) return;
+    structural((live) => {
+      const out: SpanChange[] = [];
+      for (let r = b.r0; r <= b.r1; r++) {
+        const row = rowOf(live, r);
+        if (!row) continue;
+        for (let c = b.c0; c <= b.c1 && c < row.cells.length; c++) out.push(...planSetCell(row.cells[c]!, ""));
+      }
+      return out;
+    });
+  };
+
+  const onWrapKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!box || e.target !== wrapRef.current) return;
+    const mod = e.metaKey || e.ctrlKey;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setRange(null);
+    } else if (mod && (e.key === "c" || e.key === "x")) {
+      e.preventDefault();
+      void navigator.clipboard?.writeText(rangeText(box));
+      if (e.key === "x") clearRange(box);
+    } else if (e.key === "Backspace" || e.key === "Delete") {
+      e.preventDefault();
+      clearRange(box);
+    }
+  };
+
+  /** Rows or columns removed one at a time from the far end, each planned on
+   *  the table as it is after the previous one. */
+  const deleteRows = (first: number, last: number) => {
+    for (let r = last; r >= first; r--) structural((live) => planDeleteRow(live, r - 1));
+    setRange(null);
+  };
+  const deleteColumns = (first: number, last: number) => {
+    for (let c = last; c >= first; c--) structural((live) => planDeleteColumn(live, c));
+    setRange(null);
+  };
+
   const onCellKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (!editing) return;
     const { row, col } = editing;
@@ -389,6 +523,8 @@ function EditableTable({
   };
 
   const onCellClick = (e: React.MouseEvent, r: number, c: number) => {
+    if (e.shiftKey && range) return;
+    if (range) setRange(null);
     const target = e.target as HTMLElement;
     const link = target.closest<HTMLElement>(".cm-md-link");
     if (link?.dataset.href) {
@@ -432,12 +568,20 @@ function EditableTable({
 
   /** The props every cell shares, header or body. */
   const cellProps = (r: number, c: number) => ({
-    className: editing?.row === r && editing.col === c ? "cm-md-cell-open" : undefined,
+    className:
+      editing?.row === r && editing.col === c
+        ? "cm-md-cell-open"
+        : inRange(r, c)
+          ? "cm-md-cell-selected"
+          : undefined,
+    onMouseDown: (e: React.MouseEvent) => onCellMouseDown(e, r, c),
+    onMouseEnter: (e: React.MouseEvent) => onCellMouseEnter(e, r, c),
     style: model.aligns[c] ? { textAlign: model.aligns[c]! } : undefined,
     onContextMenu: (e: React.MouseEvent) => {
       if (readOnly) return;
       e.preventDefault();
       e.stopPropagation();
+      if (!inRange(r, c)) setRange(null);
       setMenu({ x: e.clientX, y: e.clientY, row: r, col: c });
     },
     onClick: (e: React.MouseEvent) => onCellClick(e, r, c),
@@ -447,7 +591,13 @@ function EditableTable({
   const cols = Array.from({ length: columns }, (_, i) => i);
 
   return (
-    <div className="cm-md-table-wrap" onMouseDown={swallowPointer}>
+    <div
+      ref={wrapRef}
+      className="cm-md-table-wrap"
+      tabIndex={-1}
+      onMouseDown={swallowPointer}
+      onKeyDown={onWrapKeyDown}
+    >
       <div className="cm-md-table-row">
         <table>
           <thead>
@@ -491,8 +641,12 @@ function EditableTable({
       {menu && (
         <CellContextMenu
           menu={menu}
+          rows={box && inRange(menu.row, menu.col) ? box.r1 - Math.max(1, box.r0) + 1 : 1}
+          cols={box && inRange(menu.row, menu.col) ? box.c1 - box.c0 + 1 : 1}
           canDeleteRow={menu.row > 0}
-          canDeleteColumn={columns > 1}
+          canDeleteColumn={
+            box && inRange(menu.row, menu.col) ? columns > box.c1 - box.c0 + 1 : columns > 1
+          }
           onClose={() => setMenu(null)}
           onAction={(action) => {
             setMenu(null);
@@ -510,10 +664,12 @@ function EditableTable({
                 structural((live) => planInsertColumn(live, menu.col));
                 break;
               case "row-delete":
-                structural((live) => planDeleteRow(live, menu.row - 1));
+                if (box && inRange(menu.row, menu.col)) deleteRows(Math.max(1, box.r0), box.r1);
+                else structural((live) => planDeleteRow(live, menu.row - 1));
                 break;
               case "col-delete":
-                structural((live) => planDeleteColumn(live, menu.col));
+                if (box && inRange(menu.row, menu.col)) deleteColumns(box.c0, box.c1);
+                else structural((live) => planDeleteColumn(live, menu.col));
                 break;
               default:
                 structural((live) =>
@@ -573,12 +729,17 @@ type MenuAction =
  */
 function CellContextMenu({
   menu,
+  rows,
+  cols,
   canDeleteRow,
   canDeleteColumn,
   onClose,
   onAction,
 }: {
   menu: CellMenu;
+  /** How many rows / columns the delete items act on (a selected range). */
+  rows: number;
+  cols: number;
   canDeleteRow: boolean;
   canDeleteColumn: boolean;
   onClose: () => void;
@@ -636,8 +797,8 @@ function CellContextMenu({
       {item("row-below", "Insert row below")}
       {item("col-left", "Insert column left")}
       {item("col-right", "Insert column right")}
-      {item("row-delete", "Delete row", canDeleteRow)}
-      {item("col-delete", "Delete column", canDeleteColumn)}
+      {item("row-delete", rows > 1 ? `Delete ${rows} rows` : "Delete row", canDeleteRow && rows > 0)}
+      {item("col-delete", cols > 1 ? `Delete ${cols} columns` : "Delete column", canDeleteColumn)}
       {item("align-left", "Align left")}
       {item("align-center", "Align center")}
       {item("align-right", "Align right")}
