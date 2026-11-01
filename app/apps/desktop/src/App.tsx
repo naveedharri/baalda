@@ -1729,25 +1729,35 @@ export default function App() {
     // the document rather than the note. When a selection appears that swallows
     // the whole note while no field has focus, hand it to the editor as its own
     // select-all, so it is highlighted, copyable and editable like one.
+    // A selection made with the mouse is the user's own; only one that appears
+    // with no pointer involved (Edit → Select All) is taken over.
+    let pointerAt = 0;
+    const onPointer = () => {
+      pointerAt = performance.now();
+    };
     const onSelectionChange = () => {
       const sel = document.getSelection();
       if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
-      if (document.querySelector(".modal")) return;
+      if (performance.now() - pointerAt < 400) return;
       const ae = document.activeElement;
-      if (ae && ae !== document.body && ae.closest("input, textarea, .cm-editor")) return;
+      if (ae && ae !== document.body && ae.closest("input, textarea, .cm-editor, .modal")) return;
       const content = document.querySelector<HTMLElement>(".cm-editor .cm-content");
-      if (!content || !sel.containsNode(content, false)) return;
+      if (!content || !sel.containsNode(content, true)) return;
       const view = EditorView.findFromDOM(content.closest(".cm-editor") as HTMLElement);
-      if (!view) return;
+      if (!view || view.hasFocus) return;
       sel.removeAllRanges();
       view.focus();
       view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
     };
     document.addEventListener("selectionchange", onSelectionChange);
+    document.addEventListener("pointerdown", onPointer, true);
+    document.addEventListener("pointerup", onPointer, true);
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
       document.removeEventListener("selectionchange", onSelectionChange);
+      document.removeEventListener("pointerdown", onPointer, true);
+      document.removeEventListener("pointerup", onPointer, true);
     };
   }, []);
 
