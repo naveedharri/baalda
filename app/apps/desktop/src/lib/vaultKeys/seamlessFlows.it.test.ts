@@ -243,6 +243,27 @@ describe.skipIf(!BASE)("seamless vault keys (live server)", () => {
     expect(soloDevice.headerFor(vault.id)).toBeTruthy();
   }, 60_000);
 
+  it("8. a BRAND-NEW account: the unlock right after sign-up (no key yet) wraps the first key, so its solo vault converts", async () => {
+    const tag = newTag();
+    const fresh = await signUp("fresh", tag);
+    const org = await fresh.api.createOrganization({ name: `Seamless ${tag}`, slug: `seamless-${tag}` });
+    await fresh.api.setActiveOrganization(org.id);
+    const freshDevice = device(fresh, () => org.id, { canConvert: true, keysAllowed: true });
+    // What store.signUp now does, before any account key exists.
+    expect(await freshDevice.unlockWithPassword(PASSWORD)).toBe("fallback");
+    expect(await fresh.api.getMyKeys()).toBeNull();
+    // The first key run creates the account key and writes the password wrap.
+    expect((await freshDevice.ensureAccountKeys()).state).toBe("ready");
+    expect((await fresh.api.getMyKeys())?.privWrappedPassword).toBeTruthy();
+
+    const vault = await fresh.api.createVault({ name: `Seamless ${tag}`, organizationId: org.id });
+    let conv = await freshDevice.convertVault(vault.id);
+    for (let i = 0; i < 3 && conv === "waiting-ready"; i++) conv = await freshDevice.convertVault(vault.id);
+    expect(conv).toBe("converted");
+    const after = await fresh.api.getMyVaultKeys(vault.id);
+    expect(after.keyed && !after.pending).toBe(true);
+  }, 60_000);
+
   it("6. negative: an invitation without a key and no servicing leaves the member paused", async () => {
     const tag = newTag();
     const { owner, org, vault } = await ownerWithKeyedVault(tag);

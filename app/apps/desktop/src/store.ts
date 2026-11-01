@@ -3532,6 +3532,14 @@ export const useStore = create<AppStore>((set, get) => ({
     try {
       await authManager.signUp({ name, email, password });
       const session = await authManager.currentSession();
+      // As on sign-in: a brand-new account has no account key yet, so this
+      // holds the unlock key and the first key run writes the password wrap.
+      // Without it a new solo owner's first vault waited unencrypted (the
+      // conversion safety rule saw no way back) until a later sign-in.
+      if (session) {
+        allowLaunchUnlock(authManager.getServerUrl(), session.user.id);
+        await passwordUnlockBounded(session.user.id, password);
+      }
       set({ session, authStatus: session ? "signed-in" : "signed-out" });
       if (session) {
         await get().refreshVault();
