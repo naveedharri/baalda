@@ -2926,3 +2926,10 @@ html:not(.rd-off) .ai-tool-tag.is-off,
 html:not(.rd-off) .ai-skill-tag.is-optional { background: rgba(var(--rd-ink), 0.06); color: var(--text-secondary); }
 html:not(.rd-off) .ai-skill-icon { flex: none; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
 html:not(.rd-off) .ai-skills { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+/* The address now sits on the page, not inside a white card, so it needs its
+   own white field and edge to read as something to type in. */
+html:not(.rd-off) .conn-b > .conn-address {
+  height: 42px; padding: 0 14px; border: 0; border-radius: 12px;
+  background: var(--rd-surface); color: var(--text-primary); font-size: 14px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.14);
+}
