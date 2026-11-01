@@ -232,6 +232,21 @@ describe("vault key session", () => {
     expect(await member.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
   });
 
+  it("seals a `missing` member (no request filed) exactly like a request, and reports it as sealed", async () => {
+    const srv = fakeServer();
+    const ownerKeys = fakeKeys();
+    const owner = session({ api: srv.api, keys: ownerKeys, isMember: async (_v, userId) => userId === "u2" });
+    await owner.ensureAccountKeys();
+    await owner.ensureVaultKey("v1");
+    const memberPair = generateAccountKeypair();
+    srv.requests.set("v1", [
+      { userId: "u2", publicKey: toBase64(memberPair.publicKey), requestedAt: "", keyChangedAt: null, kind: "missing" },
+    ]);
+    const res = await owner.serviceKeyRequests("v1");
+    expect(res.sealed).toEqual([{ userId: "u2", fingerprint: shortFingerprint(memberPair.publicKey) }]);
+    expect(srv.vaults.get("v1")!.wraps.has("u2")).toBe(true);
+  });
+
   it("waits for a teammate, then the holder seals for a member and refuses a non-member", async () => {
     const srv = fakeServer();
     const ownerKeys = fakeKeys();

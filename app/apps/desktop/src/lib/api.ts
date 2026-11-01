@@ -1528,6 +1528,11 @@ export interface VaultKeyRequest {
   userId: string;
   publicKey: string;
   requestedAt: string;
+  keyChangedAt?: string | null;
+  /** `missing`: a current member with an account key and no wrap for the
+   *  current generation who filed no request (sealed exactly like a request).
+   *  Absent on older servers. */
+  kind?: "request" | "missing";
 }
 export interface VaultKeyWrapPost extends VaultKeyWrap {
   userId: string;
