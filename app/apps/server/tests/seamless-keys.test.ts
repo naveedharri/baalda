@@ -271,6 +271,34 @@ describe("seamless vault keys", () => {
     expect(gone).toHaveLength(0);
   });
 
+  it("B5: the invite page carries the fragment's secret onto the deep link in the browser only", async () => {
+    const s = await setup();
+    const res = await call(s.owner, "POST", `/orgs/${s.orgId}/invitations`, { emails: ["page@seamless.test"] });
+    const invitationId = ((await res.json()) as { results: Array<{ invitationId: string }> }).results[0].invitationId;
+    const page = await app.request(`/invite/${invitationId}`, { headers: { host: "notes.example.com" } });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    const script = /<script>([\s\S]*?)<\/script>/.exec(html.slice(html.indexOf('id="open-invite"')))![1];
+
+    const run = (hash: string) => {
+      const anchor = { href: "", setAttribute(_: string, v: string) { this.href = v; } };
+      const loc = { hash, pathname: `/invite/${invitationId}`, search: "", href: "" };
+      let replaced: string | null = null;
+      new Function("location", "document", "history", script)(
+        loc,
+        { getElementById: () => anchor },
+        { replaceState: (_a: unknown, _b: unknown, url: string) => { replaced = url; } },
+      );
+      return { href: loc.href, button: anchor.href, replaced };
+    };
+    const base = `baalda://invite/${invitationId}?server=${encodeURIComponent("http://notes.example.com")}`;
+    const S = secret();
+    expect(run(`#k=${S}`)).toEqual({ href: `${base}&k=${S}`, button: `${base}&k=${S}`, replaced: `/invite/${invitationId}` });
+    // No or malformed secret: the plain link, nothing rewritten.
+    expect(run("")).toEqual({ href: base, button: "", replaced: null });
+    expect(run("#k=<script>")).toEqual({ href: base, button: "", replaced: null });
+  });
+
   it("flag off: vaultKeys is ignored and the new routes are not there", async () => {
     const s = await setup();
     vi.stubEnv("BAALDA_VAULT_KEYS", "off");
