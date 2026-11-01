@@ -3094,3 +3094,20 @@ html:not(.rd-off) .vaults-local-empty b { color: var(--text-primary); font-size:
   -webkit-user-select: none; user-select: none;
 }
 .sidebar input, .sidebar textarea, .tab-strip input { -webkit-user-select: text; user-select: text; }
+
+/* Vault Settings → MCP: the house rows, ink actions, a quiet empty state. */
+html:not(.rd-off) .mcp-lede { margin: 0 0 4px; max-width: 720px; color: var(--text-secondary); font-size: var(--fs-md); line-height: 1.5; }
+html:not(.rd-off) .mcp-rows .profile-row { grid-template-columns: minmax(200px, 260px) 1fr; }
+html:not(.rd-off) .mcp-row-title { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+html:not(.rd-off) .mcp-official { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--success-soft); color: var(--success); }
+html:not(.rd-off) .mcp-row-end { flex-direction: row; justify-content: flex-end; align-items: center; }
+html:not(.rd-off) .mcp-directory-btn { height: 34px; padding: 0 14px; border-radius: 10px; display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+html:not(.rd-off) .mcp-directory-btn svg { width: 14px; height: 14px; }
+html:not(.rd-off) .mcp-new-token {
+  align-self: flex-start; margin-top: 14px; height: 34px; padding: 0 14px; border: 0; border-radius: 10px; cursor: pointer;
+  background: var(--text-primary); color: var(--bg-surface); font-weight: 600; font-size: 13.5px;
+}
+html:not(.rd-off) .mcp-rows .mcp-empty {
+  border: 0; border-radius: 12px; padding: 22px; text-align: center;
+  background: var(--bg-app); color: var(--text-tertiary); font-size: 13px;
+}
