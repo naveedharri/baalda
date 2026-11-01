@@ -476,6 +476,11 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   },
   // The open cell: a quiet ring drawn INSIDE the cell, so the table's own grid
   // lines never move by a pixel when a cell is being edited.
+  // A dragged or shift-clicked block of cells: the editor's selection wash.
+  ".cm-md-table .cm-md-cell-selected": {
+    backgroundColor: "var(--editor-selection-bg)",
+  },
+  ".cm-md-table-wrap:focus": { outline: "none" },
   ".cm-md-table .cm-md-cell-open": {
     backgroundColor: "var(--bg-subtle)",
     boxShadow: "inset 0 0 0 2px var(--accent)",
