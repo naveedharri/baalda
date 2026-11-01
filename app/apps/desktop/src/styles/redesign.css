@@ -1431,6 +1431,13 @@ html:not(.rd-off) .vault-switcher .menu-item { min-height: 30px; padding: 3px 6p
 html:not(.rd-off) .vault-switcher .menu-hint { font-size: 11px; }
 html:not(.rd-off) .vault-switcher .menu-item .menu-icon { box-sizing: content-box; flex: none; }
 html:not(.rd-off) .vault-switcher .menu-item:nth-last-of-type(-n + 2) .menu-icon { background: var(--bg-subtle); color: var(--text-secondary); }
+/* The transparent !important above also swallowed their hover: give the three
+   rows (New vault, Join with code, Manage vaults) the menu's hover back. */
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item:hover,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item:hover,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item:hover {
+  background: var(--bg-hover) !important;
+}
 
 /* ---- Account menu, direction D: hero card + status chip ---- */
 html:not(.rd-off) .rd-prof { background: var(--bg-app); border-radius: 10px; padding: 8px; margin-bottom: 6px; }
