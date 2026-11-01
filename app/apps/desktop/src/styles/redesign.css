@@ -2889,3 +2889,9 @@ html:not(.rd-off) .encryption-hero.is-off h3 { color: var(--text-primary); }
 html:not(.rd-off) .encryption-hero p { margin: 0; color: var(--text-secondary); font-size: var(--fs-sm); line-height: 1.5; max-width: 620px; }
 html:not(.rd-off) .encryption-code { display: flex; flex-direction: column; gap: 12px; }
 html:not(.rd-off) .encryption-code:not(:has(.profile-row)) { display: none; }
+
+/* Connection: both choices share one box model (one is a button, one a div),
+   so flipping the choice changes only the ring, never the size or text line. */
+html:not(.rd-off) .conn-options { align-items: stretch; }
+html:not(.rd-off) .conn-option { line-height: 1.4; font-size: 14px; margin: 0; appearance: none; }
+html:not(.rd-off) .conn-b > .conn-address { width: 100%; }

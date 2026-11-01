@@ -795,28 +795,30 @@ export function ConnectionTab() {
           </span>
           <b>Your own server</b>
           <span className="conn-option-hint">Self-hosted Baalda. Your data, your machine.</span>
-          {!isCloud && (
-            <input
-              ref={addressInput}
-              className="conn-address"
-              value={draft}
-              disabled={busy}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                setSaved(false);
-                setError(null);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void save();
-              }}
-              placeholder="https://notes.example.com"
-              aria-label="Server address"
-              spellCheck={false}
-              autoCapitalize="off"
-            />
-          )}
         </div>
       </div>
+      {/* Below the two cards, not inside one: growing a card made both
+          cards resize and jump whenever the choice flipped. */}
+      {!isCloud && (
+        <input
+          ref={addressInput}
+          className="conn-address"
+          value={draft}
+          disabled={busy}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setSaved(false);
+            setError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void save();
+          }}
+          placeholder="https://notes.example.com"
+          aria-label="Server address"
+          spellCheck={false}
+          autoCapitalize="off"
+        />
+      )}
       {recent.length > 0 && (
         <div className="conn-recent">
           <span className="conn-recent-label">Recent</span>
