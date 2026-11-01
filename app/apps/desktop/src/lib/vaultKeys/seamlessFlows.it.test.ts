@@ -211,6 +211,38 @@ describe.skipIf(!BASE)("seamless vault keys (live server)", () => {
     expect(mateDevice.headerFor(vault.id)).toBe(ownerDevice.headerFor(vault.id));
   }, 90_000);
 
+  it("7. a SOLO account converts only once its password wraps the account key", async () => {
+    const tag = newTag();
+    const solo = await signUp("solo", tag);
+    const org = await solo.api.createOrganization({ name: `Seamless ${tag}`, slug: `seamless-${tag}` });
+    await solo.api.setActiveOrganization(org.id);
+    const soloDevice = device(solo, () => org.id, { canConvert: true });
+    expect((await soloDevice.ensureAccountKeys()).state).toBe("ready");
+    const me = await solo.api.getMyKeys();
+    console.log("[seamless-it 7] /me/keys devices", JSON.stringify(me?.devices), "wrap", !!me?.privWrappedPassword);
+    // A first computer has no device row (only approvals add one).
+    expect(me?.devices).toEqual([]);
+    expect(me?.privWrappedPassword ?? null).toBeNull();
+
+    const vault = await solo.api.createVault({ name: `Seamless ${tag}`, organizationId: org.id });
+    expect((await soloDevice.ensureVaultKey(vault.id)).state).toBe("unkeyed");
+    expect(await soloDevice.convertVault(vault.id)).toBe("not-safe-yet");
+    const mine = await solo.api.getMyVaultKeys(vault.id);
+    console.log("[seamless-it 7] keys/mine after not-safe-yet", JSON.stringify(mine));
+    expect(mine.keyed).toBe(false);
+    expect(mine.pending).toBe(false);
+    expect(soloDevice.headerFor(vault.id)).toBeNull();
+
+    // The person's password now wraps the account key: conversion goes ahead.
+    expect(await soloDevice.unlockWithPassword(PASSWORD)).toBe("wrap-written");
+    let conv = await soloDevice.convertVault(vault.id);
+    for (let i = 0; i < 3 && conv === "waiting-ready"; i++) conv = await soloDevice.convertVault(vault.id);
+    expect(conv).toBe("converted");
+    const after = await solo.api.getMyVaultKeys(vault.id);
+    expect(after.keyed && !after.pending).toBe(true);
+    expect(soloDevice.headerFor(vault.id)).toBeTruthy();
+  }, 60_000);
+
   it("6. negative: an invitation without a key and no servicing leaves the member paused", async () => {
     const tag = newTag();
     const { owner, org, vault } = await ownerWithKeyedVault(tag);
