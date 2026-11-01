@@ -7,7 +7,7 @@ import { getSession } from "../session.js";
 import { ACCOUNT_READ_ONLY_BODY } from "../../permissions/http-gates.js";
 
 import { ORIGIN_HEADER } from "./registry.js";
-import { docCryptoOf, KEY_REQUIRED_CODE, KeyRequiredError, requireVaultKey } from "../../crypto/transport.js";
+import { docCryptoOf, KeyRequiredError, keyRequiredResponse, requireVaultKey } from "../../crypto/transport.js";
 
 /** `requireVaultKey`'s refusal, carried out of the service to be returned as-is. */
 class KeyRefusal extends Error {
@@ -53,9 +53,7 @@ export function createTrashRoutes(deps: TrashRouteDeps): Hono {
       return c.json(await trashContent(session.userId, c.req.param("docId"), cryptoFor));
     } catch (err) {
       if (err instanceof KeyRefusal) return err.response;
-      if (err instanceof KeyRequiredError) {
-        return c.json({ error: "This vault needs its key. Open Baalda on a device that has it.", code: KEY_REQUIRED_CODE }, 409);
-      }
+      if (err instanceof KeyRequiredError) return keyRequiredResponse(c, null);
       if (err instanceof TrashError) return c.json({ error: err.message, code: err.code }, err.status);
       throw err;
     }

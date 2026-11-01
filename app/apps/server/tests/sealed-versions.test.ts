@@ -81,6 +81,34 @@ describe("sealed versions and checkpoints (W3)", () => {
     expect((await allTextBytes()).includes(Buffer.from("redacted"))).toBe(false);
   });
 
+  it("key_required names the vault (note paths do not); a pre-vault-key build gets 426 instead", async () => {
+    const v1 = await recordVersion({ vaultId, docId, content: SECRET_V1, cause: "idle", authorId: owner.userId, crypto });
+    const old = { ...authHeaders(owner) }; // no version reported = a build before vault keys
+    const routes: Array<[string, string]> = [
+      ["GET", `/api/notes/${docId}/versions/${v1}`],
+      ["POST", `/api/notes/${docId}/versions/${v1}/revert`],
+      ["POST", `/api/notes/${docId}/public-link`],
+      ["POST", `/api/mcp/tokens`],
+    ];
+    for (const [method, path] of routes) {
+      const res = await app.request(path, { method, headers: hdr(false), body: method === "POST" ? "{}" : undefined });
+      expect([path, res.status]).toEqual([path, 409]);
+      expect(await res.json()).toMatchObject({ code: "key_required", vaultId });
+      const legacy = await app.request(path, { method, headers: old, body: method === "POST" ? "{}" : undefined });
+      expect([path, legacy.status]).toEqual([path, 426]);
+      expect(await legacy.json()).toMatchObject({ code: "client_outdated" });
+    }
+    const { rows } = await pool.query("SELECT (SELECT count(*) FROM public_links)::int AS l, (SELECT count(*) FROM mcp_tokens)::int AS t");
+    expect(rows[0]).toEqual({ l: 0, t: 0 });
+    // With the key, the same note-scoped reads work.
+    const read = await app.request(`/api/notes/${docId}/versions/${v1}`, { headers: hdr(true) });
+    expect(read.status).toBe(200);
+    expect((await read.json()).content).toBe(SECRET_V1);
+    const list = await app.request(`/api/notes/${docId}/versions`, { headers: hdr(true) });
+    expect(list.status).toBe(200);
+    expect((await list.json()).versions).toHaveLength(1);
+  });
+
   it("background version capture with no key held refuses and writes nothing", async () => {
     await expect(
       recordVersion({ vaultId, docId, content: SECRET_V1, cause: "idle", authorId: null }),
