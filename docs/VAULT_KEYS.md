@@ -103,9 +103,18 @@ since its last re-index waits for the next one.
 - **Rule 3 — tokens unwrap their own key.** MCP tokens and public links store hashes only, plus the vault key
   wrapped under a key derived from the token's secret. Each call unwraps it, uses it and zeroes it. MCP and
   public links keep working with no desktop online.
-- **Device linking.** A new device of the same account shows a code; on one of the user's existing devices
-  the person TYPES that code to approve it (the prompt never displays it, so a device row nobody started
-  cannot be clicked through), and that device shares the account key. A session alone never yields keys.
+- **Device linking.** Signing in with a password on a new device unlocks the account key directly: it is
+  stored wrapped under a key the server derives from the password and `ACCOUNT_KEY_PEPPER` (a secret kept out
+  of the database), and login hashes are peppered too, so a stolen database alone cannot test passwords.
+  Trade-off, chosen by the owner: anyone who has a person's password can open their vaults. Google-only
+  accounts, and a wrap made stale by a password reset, use one-click approval instead: the new device shows a
+  code, an existing device shows the same code with Approve / Not me, and that device shares the account key.
+  A session alone never yields keys.
+- **Seamless invites and joins.** The inviter's device seals the vault key to an invitee who already has an
+  account key, and also wraps it under a one-time secret that travels only in the invite link's fragment;
+  join codes carry a device secret after a dash. The server stores the wraps, never the secrets. Key holders
+  also share keys for every vault they hold (not only the open one) with any member who lacks one, so
+  encrypting an existing vault keys the whole team without anyone waiting.
 - **Owner vault key.** Owners can reveal the vault key in Vault Settings → General ("Show vault key") to copy
   or save it. It is never emailed or sent anywhere. An owner who has lost every device restores with it.
 - **Conversion of an existing vault** (after an owner/admin asked for it). The first owner/admin device on a supporting version registers a pending

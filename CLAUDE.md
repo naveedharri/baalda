@@ -1049,8 +1049,20 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
 - **Rule 3:** MCP tokens and public links store hashes only, plus VK wrapped under an HKDF key from the
   token secret (`mcp_token_keys`, `public_links.wrapped_vk`); unwrapped per call, never cached, zeroed
   after the request. MCP and links work with no desktop online.
-- **Device linking:** a new device of the same account shows a code that an existing device approves;
-  a session alone never yields keys. There is no account recovery kit.
+- **Device linking:** a new device signing in with a password unlocks the account key itself
+  (`user_keys.priv_wrapped_password`, under `POST /api/me/keys/unlock`'s HKDF(HMAC(`ACCOUNT_KEY_PEPPER`,
+  password))). Anyone with the password can open that person's vaults: the owner chose this (2026-11-01).
+  The pepper also makes login hashes `p1$` (rehashed on sign-in), so a DB dump alone cannot test passwords;
+  it must never change, and unset turns all of this off. Google-only accounts and stale wraps (after a
+  reset) fall back to one-click approval on an existing device (code shown, not typed). A session alone
+  never yields keys. There is no account recovery kit.
+- **Seamless keys** (2026-11-01, contract in `members/invitation-keys.ts` + `docs/VAULT_KEYS.md`): the
+  inviter's device seals VK to an invitee's existing account key (`invitation_vault_keys`, moved into
+  `vault_key_wraps` on accept by `applyInvitationKeys`) and wraps it under a per-invite secret carried only
+  in the email link fragment (`#k=` → `baalda://invite/…&k=`); join codes are `<code>-<device secret>`
+  (`vault_join_wraps`, only `sha256(secret)` stored). `keys/requests` also lists members lacking a wrap
+  (`kind: "missing"`), and key holders service every vault they hold, so a conversion keys everyone.
+  The server never stores the secrets; every stored wrap came from a device that presented VK.
 - **Churn brakes** (`crypto/key-churn.ts`): ≤3 account-key replacements per user per 24 h (counted from
   `user_key_history.replaced_at` under the `user_keys` row lock; first create and same-key re-PUT free),
   ≤10 new device registrations and ≤10 new approvals per user per hour (in process). 429
