@@ -16,6 +16,10 @@ import { invitationState, loadInvitation } from "../../registry/invitations.js";
 import { redactAddresses } from "../../invitations/sweep.js";
 import { getSession } from "../session.js";
 import { ACCOUNT_READ_ONLY_BODY } from "../../permissions/http-gates.js";
+import { redactKeyFragments, requireVaultKey } from "../../crypto/transport.js";
+import { vaultKeysEnabled } from "../../crypto/config.js";
+import { vaultOrg } from "../../permissions/lookup.js";
+import { parseInviteVaultKeys, storeInvitationWrap } from "../../members/invitation-keys.js";
 
 /**
  * The Members & access page.
@@ -361,7 +365,15 @@ memberRoutes.get("/orgs/:orgId/members/:userId/activity", async (c) => {
   return c.json({ events: events.slice(0, limit) });
 });
 
-type InviteResult = { email: string; invitationId?: string; emailed: boolean; error?: string };
+type InviteResult = {
+  email: string;
+  invitationId?: string;
+  emailed: boolean;
+  error?: string;
+  /** Vault keys on: the invited address's existing account and its public key, else null. */
+  publicKey?: string | null;
+  inviteeUserId?: string | null;
+};
 
 /** Map a Better Auth failure to a stable per-email error token. */
 function inviteErrorCode(err: unknown): { code: string; status: number } {
@@ -380,14 +392,19 @@ function inviteErrorCode(err: unknown): { code: string; status: number } {
   return { code: "invite_failed", status: 500 };
 }
 
-async function emailInvitation(id: string): Promise<boolean> {
+/**
+ * `secret`: the invite secret S (seamless keys B1). It rides ONLY in the link's
+ * fragment, which browsers never send to a server, and is never stored, logged
+ * or echoed: a failure is logged with `#k=`/`&k=` values and S redacted.
+ */
+async function emailInvitation(id: string, secret?: string): Promise<boolean> {
   const inv = await loadInvitation(pool, id);
   if (!inv || invitationState(inv) !== "pending") return false;
   try {
     await sendMail(
       invitationEmail({
         to: inv.email,
-        url: `${config.betterAuthUrl}/invite/${encodeURIComponent(inv.id)}`,
+        url: `${config.betterAuthUrl}/invite/${encodeURIComponent(inv.id)}${secret ? `#k=${secret}` : ""}`,
         organizationName: inv.organizationName,
         inviterName: inv.inviterName,
         role: inv.role ?? "member",
@@ -396,9 +413,21 @@ async function emailInvitation(id: string): Promise<boolean> {
     );
     return true;
   } catch (err) {
-    console.error(`[email] invitation ${inv.id} failed: ${redactAddresses(err)}`);
+    const why = redactKeyFragments(redactAddresses(err));
+    console.error(`[email] invitation ${inv.id} failed: ${secret ? why.split(secret).join("<redacted>") : why}`);
     return false;
   }
+}
+
+/** The invited address's existing account and its published account key. */
+async function inviteeKey(email: string): Promise<{ userId: string; publicKey: string | null } | null> {
+  const { rows } = await pool.query<{ id: string; public_key: Buffer | null }>(
+    `SELECT u.id, k.public_key FROM "user" u LEFT JOIN user_keys k ON k.user_id = u.id
+      WHERE lower(u.email) = lower($1) LIMIT 1`,
+    [email],
+  );
+  if (!rows[0]) return null;
+  return { userId: rows[0].id, publicKey: rows[0].public_key?.toString("base64") ?? null };
 }
 
 memberRoutes.post("/orgs/:orgId/invitations", async (c) => {
@@ -432,6 +461,27 @@ memberRoutes.post("/orgs/:orgId/invitations", async (c) => {
     return c.json({ error: "invalid_access", message: "access must be open, readonly, private or null" }, 400);
   }
 
+  // Seamless keys (B1): VK wrapped per invitee under an invite secret, by a
+  // device that proves HERE that it holds VK. A failed proof creates NO
+  // invitation. Flag off, or an unkeyed vault: the field is ignored.
+  const keysOn = vaultKeysEnabled();
+  const vaultKeys = keysOn && body.vaultKeys != null ? parseInviteVaultKeys(body.vaultKeys) : null;
+  if (keysOn && body.vaultKeys != null && !vaultKeys) {
+    return c.json({ error: "invalid_vault_keys", code: "invalid_argument", message: "vaultKeys is malformed" }, 400);
+  }
+  let keyItems: Map<string, { wrappedVk: Buffer; secret: string }> | null = null;
+  if (vaultKeys) {
+    if ((await vaultOrg(vaultKeys.vaultId)) !== orgId) {
+      return c.json(
+        { error: "invalid_vault_keys", code: "invalid_argument", message: "vaultKeys.vaultId is not this vault" },
+        400,
+      );
+    }
+    const key = await requireVaultKey(c, vaultKeys.vaultId);
+    if (!key.ok) return key.response;
+    if (key.keyed) keyItems = vaultKeys.items;
+  }
+
   const canEmail = emailEnabled();
   const results: InviteResult[] = [];
   let limitError: Record<string, unknown> | null = null;
@@ -454,8 +504,28 @@ memberRoutes.post("/orgs/:orgId/invitations", async (c) => {
           [inv.id, access],
         );
       }
-      const emailed = canEmail ? await emailInvitation(inv.id) : false;
-      results.push({ email, invitationId: inv.id, emailed });
+      const keyItem = keyItems?.get(email);
+      let secret: string | undefined;
+      if (keyItem && vaultKeys) {
+        // Best-effort: a failed store only means this invitee waits for a
+        // teammate's device; the invitation itself stands.
+        const stored = await storeInvitationWrap({
+          invitationId: inv.id,
+          vaultId: vaultKeys.vaultId,
+          generation: vaultKeys.generation,
+          wrappedVk: keyItem.wrappedVk,
+          createdBy: session.userId,
+        });
+        if (stored) secret = keyItem.secret;
+      }
+      const emailed = canEmail ? await emailInvitation(inv.id, secret) : false;
+      const invitee = keysOn ? await inviteeKey(email) : null;
+      results.push({
+        email,
+        invitationId: inv.id,
+        emailed,
+        ...(keysOn ? { publicKey: invitee?.publicKey ?? null, inviteeUserId: invitee?.userId ?? null } : {}),
+      });
     } catch (err) {
       const { code } = inviteErrorCode(err);
       if ((code === "member_limit_reached" || code === "seat_limit_reached") && err instanceof APIError) {

@@ -492,6 +492,13 @@ export interface InviteManyInput {
   role: "member" | "admin";
   /** null = whatever the vault's New members setting says. */
   access: TeamAccessMode | null;
+  /** Seamless keys B1: the vault key wrapped per invitee under a one-time
+   *  secret (sent with `X-Baalda-VK`). Omitted by a device without the key. */
+  vaultKeys?: {
+    vaultId: string;
+    generation: number;
+    items: Array<{ email: string; wrappedVk: string; secret: string }>;
+  };
 }
 
 export interface InviteManyResult {
@@ -499,6 +506,20 @@ export interface InviteManyResult {
   invitationId?: string;
   emailed: boolean;
   error?: string;
+  /** B1: the invited address's existing account key, when it has one. */
+  publicKey?: string | null;
+  inviteeUserId?: string | null;
+}
+
+/** B4: a secret-wrapped vault key of an invitation to the caller. */
+export interface InviteWrap {
+  invitationId: string;
+  generation: number;
+  wrappedVk: string;
+}
+export interface JoinWrap {
+  generation: number;
+  wrappedVk: string;
 }
 
 /** What a whole-vault mode change actually did. */
@@ -1521,13 +1542,26 @@ export type MyVaultKeys =
   /** `encryptionRequested`: an owner/admin opted this vault in (or it was created
    * with vault keys on). `conversionAllowed` already includes it. Undefined: the
    * server predates opt-in (no request route). */
-  | { keyed: false; pending: false; conversionAllowed: boolean; encryptionRequested?: boolean }
+  | {
+      keyed: false;
+      pending: false;
+      conversionAllowed: boolean;
+      encryptionRequested?: boolean;
+      /** Other current members with an account key (conversion safety rule;
+       *  undefined on a server that does not report it). */
+      otherMembersWithKeys?: number;
+    }
   | { keyed: true; pending: true; vkCheck?: string; generation?: number }
   | ({ keyed: true; pending: false } & MyVaultKeysBody);
 export interface VaultKeyRequest {
   userId: string;
   publicKey: string;
   requestedAt: string;
+  keyChangedAt?: string | null;
+  /** `missing`: a current member with an account key and no wrap for the
+   *  current generation who filed no request (sealed exactly like a request).
+   *  Absent on older servers. */
+  kind?: "request" | "missing";
 }
 export interface VaultKeyWrapPost extends VaultKeyWrap {
   userId: string;
@@ -1564,6 +1598,11 @@ export interface PendingDevice {
 }
 export interface AccountKeysBody {
   publicKey: string;
+  /** The account key wrapped under the password unlock key (seamless keys F). */
+  privWrappedPassword?: string | null;
+  /** This account's approved, non-revoked device rows. Each approval involves
+   *  an existing computer plus the approved one, so computers = length + 1. */
+  devices?: Array<{ deviceId: string; privWrapped?: string | null }>;
   /** Optional since the owner decision: the VAULT key is the recovery path. */
   privWrappedRecovery?: string;
 }
@@ -1694,12 +1733,13 @@ export class ApiClient {
       // Rollout gate for converting an existing vault: absent ⇒ false.
       // `encryptionRequested` absent ⇒ undefined: a server without opt-in
       // (no migration 081) has no request route, so the UI offers nothing.
-      const d = data as { conversionAllowed?: unknown; encryptionRequested?: unknown };
+      const d = data as { conversionAllowed?: unknown; encryptionRequested?: unknown; otherMembersWithKeys?: unknown };
       return {
         keyed: false,
         pending: false,
         conversionAllowed: d.conversionAllowed === true,
         encryptionRequested: typeof d.encryptionRequested === "boolean" ? d.encryptionRequested : undefined,
+        otherMembersWithKeys: typeof d.otherMembersWithKeys === "number" ? d.otherMembersWithKeys : undefined,
       };
     }
     if (status === 202 || data?.pending) {
@@ -1716,12 +1756,6 @@ export class ApiClient {
       wraps: data.wraps,
       fullyEncrypted: typeof data.fullyEncrypted === "boolean" ? data.fullyEncrypted : undefined,
     };
-  }
-
-  /** "Encrypt this vault" (owner/admin, one-way, idempotent). Only records the
-   * decision; a member's desktop keys the vault once the rollout gate opens. */
-  async requestVaultEncryption(vaultId: string): Promise<void> {
-    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/request-encryption`);
   }
 
   async listVaultKeyRequests(vaultId: string): Promise<VaultKeyRequest[]> {
@@ -1759,6 +1793,39 @@ export class ApiClient {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;
     }
+  }
+
+  /**
+   * `POST /api/me/keys/unlock` (seamless keys F). The password is the body
+   * only: never logged, never in an error. `wrong-password` (401),
+   * `unavailable` (409 `no_password` / 503 `password_unlock_off` / 404 on an
+   * older server); anything else (429 throttle, 5xx) throws.
+   */
+  async unlockAccountKey(password: string): Promise<{ unlockKey: string } | "wrong-password" | "unavailable"> {
+    try {
+      const { data } = await this.request<{ unlockKey?: string }>("POST", "/api/me/keys/unlock", {
+        body: { password },
+      });
+      if (typeof data?.unlockKey !== "string") throw new ApiError(500, "Unexpected unlock answer");
+      return { unlockKey: data.unlockKey };
+    } catch (e) {
+      if (e instanceof ApiError) {
+        // Only the server's password verdict is "wrong": a 401 for a session
+        // that is gone says nothing about the password (and must never switch
+        // off the launch-time unlock, lib/vaultKeys/launchUnlock.ts).
+        if (e.status === 401) {
+          const b = e.body as { code?: unknown; error?: unknown } | null;
+          return b?.code === "wrong_password" || b?.error === "wrong_password" ? "wrong-password" : "unavailable";
+        }
+        if (e.status === 409 || e.status === 503 || e.status === 404) return "unavailable";
+      }
+      throw e;
+    }
+  }
+
+  /** `PUT /api/me/keys/password-wrap` → `{ stored: true }`. */
+  async putPasswordWrap(privWrapped: string): Promise<void> {
+    await this.request("PUT", "/api/me/keys/password-wrap", { body: { privWrapped } });
   }
 
   /** Approve a pending device: the account private key sealed to its key. */
@@ -1973,10 +2040,14 @@ export class ApiClient {
         !opts.keyRetry &&
         (parsed as { code?: unknown } | undefined)?.code === KEY_REQUIRED_CODE
       ) {
-        const id = opts.vaultScope ?? vaultIdFromPath(path);
+        // A path that does not name its vault (`/api/notes/:id/versions`, Trash
+        // text, ...) learns it from the refusal, and the retry is scoped to it
+        // so the key header rides along.
+        const named = (parsed as { vaultId?: unknown } | undefined)?.vaultId;
+        const id = opts.vaultScope ?? vaultIdFromPath(path) ?? (typeof named === "string" && named ? named : null);
         const handler = this.keyRequiredHandler;
         if (id && handler && (await handler(id).catch(() => false))) {
-          return this.request<T>(method, path, { ...opts, keyRetry: true });
+          return this.request<T>(method, path, { ...opts, vaultScope: id, keyRetry: true });
         }
       }
       throw new ApiError(res.status, msg, parsed);
@@ -3880,13 +3951,64 @@ export class ApiClient {
 
   /** Invite several addresses at once, each carrying a role and an access level.
    * A 402 `member_limit_reached` throws like {@link inviteMember}. */
-  async inviteMany(orgId: string, input: InviteManyInput): Promise<InviteManyResult[]> {
+  async inviteMany(orgId: string, input: InviteManyInput, vkBase64?: string): Promise<InviteManyResult[]> {
     const { data } = await this.request<{ results: InviteManyResult[] }>(
       "POST",
       `/api/orgs/${encodeURIComponent(orgId)}/invitations`,
-      { body: input },
+      { body: input, headers: input.vaultKeys && vkBase64 ? { [VAULT_KEY_HEADER]: vkBase64 } : undefined },
     );
     return data.results ?? [];
+  }
+
+  /** B2: the vault key sealed to an invitee's existing account key. */
+  async putInviteWrap(
+    vaultId: string,
+    invitationId: string,
+    body: { sealedVk: string; publicKey: string; generation: number },
+    vkBase64: string,
+  ): Promise<void> {
+    await this.request(
+      "PUT",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/invite-wraps/${encodeURIComponent(invitationId)}`,
+      { body, headers: { [VAULT_KEY_HEADER]: vkBase64 } },
+    );
+  }
+
+  /** B4: `{ wraps: [...] }` of invitations to the caller for this vault. */
+  async getInviteWraps(vaultId: string): Promise<InviteWrap[]> {
+    const { data } = await this.request<{ wraps?: InviteWrap[] }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/invite-wrap`,
+    );
+    return Array.isArray(data?.wraps) ? data.wraps : [];
+  }
+
+  /** C: the admin's join wrap; `stale-code` when the org's code moved on (409). */
+  async putJoinWrap(
+    vaultId: string,
+    body: { secretHash: string; wrappedVk: string; generation: number; code: string },
+    vkBase64: string,
+  ): Promise<"stored" | "stale-code"> {
+    try {
+      await this.request("PUT", `/api/vaults/${encodeURIComponent(vaultId)}/keys/join-wraps`, {
+        body,
+        headers: { [VAULT_KEY_HEADER]: vkBase64 },
+      });
+      return "stored";
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && errorCodeOf(e.body) === "stale_code") return "stale-code";
+      throw e;
+    }
+  }
+
+  /** C: `{ wrap: {...} | null }` for the joiner's secret hash. */
+  async getJoinWrap(vaultId: string, secretHashHex: string): Promise<JoinWrap | null> {
+    const { data } = await this.request<{ wrap?: JoinWrap | null }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/join-wrap?h=${encodeURIComponent(secretHashHex)}`,
+    );
+    const w = data?.wrap;
+    return w && typeof w.wrappedVk === "string" && typeof w.generation === "number" ? w : null;
   }
 
   /**

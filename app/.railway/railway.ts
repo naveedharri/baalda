@@ -45,6 +45,10 @@ const SERVER_ENV = [
   "VAULT_KEY_CONVERSION",
   // Days a keyed vault keeps its verified pre-keying plaintext before the null-out; unset = 30.
   "VAULT_PLAINTEXT_RETENTION_DAYS",
+  // Password unlocks the account key + peppered login hashes; unset = off. Never rotate.
+  "ACCOUNT_KEY_PEPPER",
+  "KEY_RECOVERY_PUBLIC_KEY",
+  "KEY_RECOVERY_ADMIN_TOKEN",
   // Attachment access rule mode: text | shadow (default) | refs.
   "ATTACHMENT_ACL_MODE",
   "NODE_OPTIONS",

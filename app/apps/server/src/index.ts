@@ -23,6 +23,7 @@ import { backfillIndex, setLiveDocLookup } from "./index/indexer.js";
 import { backfillRefWindows } from "./blobs/ref-windows.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
+import { startKeyRecovery, stopKeyRecovery } from "./crypto/key-recovery.js";
 import { startCryptoBackfill, stopCryptoBackfill } from "./crypto/backfill.js";
 import { setLapseNotifier, startLapseScheduler, stopLapseScheduler } from "./billing/lapse.js";
 import { formatDocName } from "./sync/doc-name.js";
@@ -407,6 +408,9 @@ async function main() {
   // W3: seals a keyed vault's pre-existing plaintext rows while a member's
   // key is held. No-op with BAALDA_VAULT_KEYS off.
   startCryptoBackfill();
+  // Launch safety net: recovery copies of vault keys sealed to an offline key
+  // while KEY_RECOVERY_PUBLIC_KEY is set; unset, every copy is deleted.
+  startKeyRecovery();
   // Billing lapse (account read-only): on a flip, the same ACL fan-out as
   // PUT team-access, and close the collection's live sockets so
   // `onAuthenticate` re-admits them with the new readOnly.
@@ -429,6 +433,7 @@ async function main() {
     versionCapture?.stop();
     stopBlobGc();
     stopTrashPurge();
+    stopKeyRecovery();
     stopCryptoBackfill();
     stopLapseScheduler();
     stopInvitationSweep();

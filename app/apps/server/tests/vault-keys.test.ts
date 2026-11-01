@@ -69,6 +69,8 @@ describe("vault key routes", () => {
 
   it("init: the first claimer wins, a second init is 409", async () => {
     const s = await setup();
+    // Two key-capable people (keying is owner/admin only) race.
+    await pool.query(`UPDATE member SET role = 'admin' WHERE "userId" = $1`, [s.member.userId]);
     const [a, b] = await Promise.all([init(s), init(s, s.member)]);
     expect([a.status, b.status].sort()).toEqual([201, 409]);
     const { rows } = await pool.query("SELECT phase, generation FROM vault_crypto_state WHERE vault_id = $1", [s.vaultId]);
@@ -226,25 +228,43 @@ describe("vault key routes", () => {
     expect(hist.rows.map((r) => b64(r.sealed_vk))).toEqual([own]);
   });
 
-  it("keys/mine on an unkeyed vault reports the conversion gate (default off)", async () => {
+  it("keys/mine on an unkeyed vault: conversion on means every vault, no opt-in (default off)", async () => {
     const s = await setup({ requested: false });
+    vi.stubEnv("VAULT_KEY_CONVERSION", "off");
     const res = await call(s.owner, "GET", `/vaults/${s.vaultId}/keys/mine`);
-    expect(await res.json()).toEqual({ keyed: false, conversionAllowed: false, encryptionRequested: false });
+    expect(await res.json()).toMatchObject({ keyed: false, conversionAllowed: false, encryptionRequested: false });
     vi.stubEnv("VAULT_KEY_CONVERSION", "on");
     vi.stubEnv("MIN_CLIENT_VERSION", "0.1.90");
     const mine = async (version?: string) =>
       (await app.request(`/api/vaults/${s.vaultId}/keys/mine`, {
         headers: { ...authHeaders(s.owner), ...(version ? { "x-baalda-version": version } : {}) },
       })).json();
-    // An existing vault stays unkeyed until an owner/admin opts it in.
-    expect(await mine("0.1.95")).toEqual({ keyed: false, conversionAllowed: false, encryptionRequested: false });
-    expect((await call(s.owner, "POST", `/vaults/${s.vaultId}/keys/request-encryption`)).status).toBe(201);
+    // Decided 2026-11-01: with conversion on, an existing vault converts with
+    // nobody asking; only the client-version gate still applies.
+    expect(await mine("0.1.95")).toMatchObject({ keyed: false, conversionAllowed: true, encryptionRequested: true });
     expect((await mine("0.1.80")).conversionAllowed).toBe(false);
-    expect(await mine("0.1.95")).toEqual({ keyed: false, conversionAllowed: true, encryptionRequested: true });
     expect((await mine()).conversionAllowed).toBe(false);
-    // Requested but the rollout gate is closed: not allowed, but reported as requested.
+    // An explicit request outlives the flag but never opens the gate by itself.
+    expect((await call(s.owner, "POST", `/vaults/${s.vaultId}/keys/request-encryption`)).status).toBe(201);
     vi.stubEnv("VAULT_KEY_CONVERSION", "off");
-    expect(await mine("0.1.95")).toEqual({ keyed: false, conversionAllowed: false, encryptionRequested: true });
+    expect(await mine("0.1.95")).toMatchObject({ keyed: false, conversionAllowed: false, encryptionRequested: true });
+  });
+
+  it("keys/mine counts the other members who already have an account key", async () => {
+    const s = await setup({ requested: false });
+    const count = async () =>
+      ((await (await call(s.owner, "GET", `/vaults/${s.vaultId}/keys/mine`)).json()) as { otherMembersWithKeys: number })
+        .otherMembersWithKeys;
+    await pool.query("DELETE FROM user_keys WHERE user_id = $1", [s.member.userId]);
+    expect(await count()).toBe(0);
+    await pool.query("INSERT INTO user_keys (user_id, public_key) VALUES ($1, $2)", [s.member.userId, randomBytes(32)]);
+    expect(await count()).toBe(1);
+    // The caller's own key never counts.
+    await pool.query(
+      "INSERT INTO user_keys (user_id, public_key) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING",
+      [s.owner.userId, randomBytes(32)],
+    );
+    expect(await count()).toBe(1);
   });
 
   it("request-encryption: owner/admin only, idempotent, one-way, audited", async () => {
@@ -284,8 +304,9 @@ describe("vault key routes", () => {
     expect((await (await call(s.member, "GET", `/vaults/${s.vaultId}/keys/mine`)).json()).encryptionRequested).toBe(true);
   });
 
-  it("pending and init refuse a vault nobody opted in; both work once requested", async () => {
+  it("with conversion off, pending and init refuse an unrequested vault; on, they accept it", async () => {
     const s = await setup({ requested: false });
+    vi.stubEnv("VAULT_KEY_CONVERSION", "off");
     const vkCheck = b64(makeVkCheck(s.vk, s.vaultId));
     const pending = () =>
       call(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck, generation: 1, deviceId: "d1" }, s.vk);
@@ -305,7 +326,7 @@ describe("vault key routes", () => {
     expect((await i.json()).code).toBe("encryption_not_requested");
     await unchanged();
 
-    expect((await call(s.owner, "POST", `/vaults/${s.vaultId}/keys/request-encryption`)).status).toBe(201);
+    vi.stubEnv("VAULT_KEY_CONVERSION", "on");
     expect((await pending()).status).toBe(200);
     // Init must present the SAME check bytes as the pending row.
     const done = await call(s.owner, "POST", `/vaults/${s.vaultId}/keys/init`, {

@@ -13,6 +13,15 @@ describe("vault key leak guard (red team 3: 'support asked for my key file')", (
     expect(containsVaultKey(numbered)).toBe(true);
   });
 
+  it("catches an invite link secret and a join code with its device secret", () => {
+    const s = "0123456789ABCDEFGHJKMNPQRS";
+    expect(containsVaultKey(`https://api.test/invite/i1#k=${s}`)).toBe(true);
+    expect(containsVaultKey(`baalda://invite/i1?server=x&k=${s}`)).toBe(true);
+    expect(containsVaultKey(`my code is ABCD2345-${s}`)).toBe(true);
+    expect(containsVaultKey("my code is ABCD2345")).toBe(false);
+    expect(containsVaultKey("doc 3f2a9c1e-7b4d-4e2a-9f10-123456789abc")).toBe(false);
+  });
+
   it("does not flag ordinary text, logs, or 24 list words that are not a key", () => {
     expect(containsVaultKey("The sync stopped after I renamed a folder. Steps: open, rename, wait.")).toBe(false);
     expect(containsVaultKey("[vault-sync] applyUpdate failed for doc-1 ".repeat(2000))).toBe(false);

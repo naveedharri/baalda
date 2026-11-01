@@ -5,17 +5,13 @@
 // - "A new device is signing in as you" on an existing device.
 // - "<person>'s security key changed": the one human override of a pin.
 // - "Gave <person> the vault key" toast with the key's short fingerprint.
-// - "Keep these connections working?": the owner's review at conversion.
 
 import { useEffect, useState } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { toast } from "../lib/toast";
 import { useStore } from "../store";
 import { memberDisplayName } from "../lib/vaultKeys/names";
-import { currentVaultKeySession, onVaultKeyEvent, submitConversionReview } from "../lib/vaultKeys/runtime";
-import { candidateKey } from "../lib/vaultKeys/conversionReview";
-import type { AllowlistCandidate } from "../lib/api";
-import { ConversionReviewDialog } from "./ConversionReviewDialog";
+import { currentVaultKeySession, onVaultKeyEvent } from "../lib/vaultKeys/runtime";
 import { LOST_DEVICES_LABEL } from "../lib/vaultKeys/recovery";
 import { syncManager } from "../lib/sync/docSession";
 import { LostDevicesFlow } from "./VaultKeyRecovery";
@@ -26,13 +22,10 @@ type Prompt =
   /** "I don't have my other devices", chosen from the awaiting-device prompt. */
   | { kind: "lost-devices" }
   | { kind: "approve-device"; device: PendingDeviceView }
-  | { kind: "key-changed"; vaultId: string; change: SealedFor & { publicKey: string } }
-  | { kind: "conversion-review"; vaultId: string; candidates: AllowlistCandidate[] };
+  | { kind: "key-changed"; vaultId: string; change: SealedFor & { publicKey: string } };
 
 const promptKey = (p: Prompt) =>
-  p.kind === "conversion-review"
-    ? `r:${p.vaultId}:${p.candidates.map(candidateKey).sort().join(",")}`
-    : p.kind === "approve-device"
+  p.kind === "approve-device"
     ? `d:${p.device.deviceId}`
     : p.kind === "key-changed"
       ? `k:${p.vaultId}:${p.change.userId}:${p.change.fingerprint}`
@@ -43,24 +36,23 @@ const promptKey = (p: Prompt) =>
 const nameOf = (userId: string) => memberDisplayName(useStore.getState().members, userId);
 
 /**
- * "A new computer is signing in as you": approved only by TYPING the code the
- * new computer shows. The code is never displayed here, so a device the person
- * did not start (a row a server or database writer added with its own key)
- * cannot be approved by clicking through.
+ * "<device> is signing in": one click, Approve or Not me (seamless keys, E).
+ * The code is shown read-only so the person can glance at the new computer;
+ * nothing is typed. This deliberately replaces the earlier typed-code step
+ * (owner decision 2026-11-01): the prompt only ever appears for this
+ * account's own pending devices, and the new device keeps showing its code.
  */
 export function ApproveDevicePrompt({ device, done }: { device: PendingDeviceView; done: () => void }) {
-  const [typed, setTyped] = useState("");
-  const ready = typed.replace(/[\s-]/g, "").length === 8;
+  const name = device.name?.trim() || "A new computer";
   return (
     <ConfirmDialog
-      title="A new computer is signing in as you"
+      title={`${name} is signing in`}
       tone="accent"
       confirmLabel="Approve"
-      cancelLabel="Deny"
-      confirmDisabled={!ready}
+      cancelLabel="Not me"
       onConfirm={async () => {
-        const ok = await currentVaultKeySession()?.approveDevice(device, typed);
-        toast(ok ? "Computer approved." : "That code does not match. Nothing was approved.", ok ? "success" : "error");
+        const ok = await currentVaultKeySession()?.approveDevice(device, device.code);
+        toast(ok ? "Computer approved." : "Could not approve that computer. Nothing was approved.", ok ? "success" : "error");
         done();
       }}
       onCancel={() => {
@@ -69,18 +61,10 @@ export function ApproveDevicePrompt({ device, done }: { device: PendingDeviceVie
       }}
     >
       <p>
-        If you are setting up Baalda on another computer, type the code it shows. If you are not, choose Deny.
+        If you are setting up Baalda on another computer, approve it. It shows the code{" "}
+        <strong aria-label="Code shown on the new computer">{device.code}</strong>. If this is not you, choose Not
+        me.
       </p>
-      <input
-        type="text"
-        aria-label="Code shown on the new computer"
-        placeholder="abcd 1234"
-        autoComplete="off"
-        spellCheck={false}
-        maxLength={12}
-        value={typed}
-        onChange={(e) => setTyped(e.target.value)}
-      />
     </ConfirmDialog>
   );
 }
@@ -105,12 +89,12 @@ export function VaultKeyPrompts() {
         toast("Your security key on the server does not match this computer. Vault keys are paused.", "error");
       } else if (e.kind === "rate-limited") {
         toast(e.message, "error");
-      } else if (e.kind === "conversion-review") {
-        push({ kind: "conversion-review", vaultId: e.vaultId, candidates: e.candidates });
       } else if (e.kind === "pending-devices") {
         for (const device of e.devices) push({ kind: "approve-device", device });
       } else if (e.kind === "serviced") {
-        for (const s of e.result.sealed) toast(`Gave ${nameOf(s.userId)} the vault key · ${s.fingerprint}`);
+        for (const s of e.result.sealed) {
+          toast(`Gave ${e.names?.[s.userId] ?? nameOf(s.userId)} the vault key · ${s.fingerprint}`);
+        }
         for (const change of e.result.keyChanged) push({ kind: "key-changed", vaultId: e.vaultId, change });
       }
     });
@@ -148,18 +132,6 @@ export function VaultKeyPrompts() {
       return <LostDevicesFlow isOwner={isOwner} vaultId={syncManager.registry.vaultId} onClose={done} />;
     case "approve-device":
       return <ApproveDevicePrompt key={current.device.deviceId} device={current.device} done={done} />;
-    case "conversion-review":
-      return (
-        <ConversionReviewDialog
-          key={promptKey(current)}
-          candidates={current.candidates}
-          onSubmit={(keep) => {
-            submitConversionReview(current.vaultId, keep);
-            done();
-          }}
-          onLater={done}
-        />
-      );
     case "key-changed":
       return (
         <ConfirmDialog

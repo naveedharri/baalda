@@ -18,6 +18,15 @@ describe("vault-key list responses", () => {
   it("reads the server's { requests } envelope", async () => {
     expect(await clientAnswering({ requests: [request] }).listVaultKeyRequests("v1")).toEqual([request]);
   });
+  it("keeps the contract's `kind` (request | missing) on each row", async () => {
+    const rows = [
+      { userId: "u1", requestedAt: "2026-11-01T00:00:00Z", publicKey: "cGs=", keyChangedAt: null, kind: "request" },
+      { userId: "u2", requestedAt: "2026-10-01T00:00:00Z", publicKey: "cHM=", keyChangedAt: "2026-10-02T00:00:00Z", kind: "missing" },
+    ];
+    const got = await clientAnswering({ requests: rows }).listVaultKeyRequests("v1");
+    expect(got).toEqual(rows);
+    expect(got.map((r) => r.kind)).toEqual(["request", "missing"]);
+  });
   it("still reads a bare array", async () => {
     expect(await clientAnswering([request]).listVaultKeyRequests("v1")).toEqual([request]);
   });

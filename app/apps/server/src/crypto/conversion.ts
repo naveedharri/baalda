@@ -221,7 +221,20 @@ export async function vaultHasKeyMaterial(vaultId: string, db: Queryable): Promi
   return rows[0]?.found === true;
 }
 
+/** `VAULT_KEY_CONVERSION`: whether existing vaults may be keyed at all. */
+export function conversionFlagOn(): boolean {
+  const flag = (process.env.VAULT_KEY_CONVERSION ?? "").trim().toLowerCase();
+  return ["1", "true", "on", "yes"].includes(flag);
+}
+
+/**
+ * Whether this vault may be keyed. While conversion is on, EVERY vault counts
+ * as requested (owner decision 2026-11-01: no opt-in, every vault is encrypted
+ * automatically); with it off, only an explicit request (migration 081) does,
+ * which matters only to a desktop that keys a vault anyway.
+ */
 export async function encryptionRequested(vaultId: string, db: Queryable): Promise<boolean> {
+  if (conversionFlagOn()) return true;
   const { rows } = await db.query<{ requested: boolean }>(
     "SELECT encryption_requested_at IS NOT NULL AS requested FROM vaults WHERE id = $1",
     [vaultId],

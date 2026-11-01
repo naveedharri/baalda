@@ -15,7 +15,7 @@ import { renderNoteHtml } from "../../render/note-html.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
 import { vaultCheckState, type VaultCheckState } from "../../crypto/conversion.js";
-import { decodeVk, KEY_REQUIRED_CODE, KeyRequiredError, VK_HEADER } from "../../crypto/transport.js";
+import { decodeVk, KeyRequiredError, keyRequiredResponse, VK_HEADER } from "../../crypto/transport.js";
 import { verifyVk } from "../../crypto/vk-check.js";
 import {
   linkCrypto,
@@ -172,11 +172,6 @@ function readableToken(row: LinkRow, vaultId: string, vk: Buffer | null): string
   return null;
 }
 
-const KEY_REQUIRED_BODY = {
-  error: "This vault needs its key. Open Baalda on a device that has it.",
-  code: KEY_REQUIRED_CODE,
-};
-
 publicLinkApiRoutes.post("/notes/:docId/public-link", async (c) => {
   const session = await getSession(c);
   if (!session) return c.json({ error: "Authentication required" }, 401);
@@ -191,7 +186,7 @@ publicLinkApiRoutes.post("/notes/:docId/public-link", async (c) => {
   // written); a pending vault takes it when offered, so the link is wrapped
   // from birth and never holds up the conversion.
   const { state, vk } = await presentedLinkKey(c, g.note.vaultId);
-  if (state && !state.pending && !vk) return c.json(KEY_REQUIRED_BODY, 409);
+  if (state && !state.pending && !vk) return keyRequiredResponse(c, g.note.vaultId);
 
   // Create-or-get: repeated copies must return the SAME url. The unique
   // doc_id key makes the race harmless — the loser's insert is a no-op and
@@ -225,7 +220,7 @@ publicLinkApiRoutes.post("/notes/:docId/public-link", async (c) => {
     (await pool.query<LinkRow>(`SELECT ${LINK_COLS} FROM public_links WHERE doc_id = $1`, [docId])).rows[0];
   if (!row) return c.json({ error: "Unknown note" }, 404);
   const token = created ? fresh : readableToken(row, g.note.vaultId, vk);
-  if (!token) return c.json(KEY_REQUIRED_BODY, 409);
+  if (!token) return keyRequiredResponse(c, g.note.vaultId);
   return c.json(
     {
       id: row.id,
@@ -251,7 +246,7 @@ publicLinkApiRoutes.get("/notes/:docId/public-link", async (c) => {
   if (!row) return c.json({ link: null });
   const { vk } = row.token ? { vk: null } : await presentedLinkKey(c, g.note.vaultId);
   const token = readableToken(row, g.note.vaultId, vk);
-  if (!token) return c.json(KEY_REQUIRED_BODY, 409);
+  if (!token) return keyRequiredResponse(c, g.note.vaultId);
   return c.json({
     link: {
       id: row.id,

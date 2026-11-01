@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { sweepInvitationsOnce } from "./sweep.js";
+import { sweepInvitationKeys } from "../members/invitation-keys.js";
 
 /**
  * Every 15 minutes: two claim queries over the (small) pending-invitation set.
@@ -20,6 +21,14 @@ async function tick(): Promise<void> {
     }
   } catch (err) {
     console.error("[invitations] sweep failed:", err);
+  }
+  // Seamless keys: invitation key rows that can no longer deliver anything,
+  // or whose invitee already holds a current wrap (ids/counts only).
+  try {
+    const dropped = await sweepInvitationKeys();
+    if (dropped > 0) console.log(`[invitations] dropped ${dropped} spent invitation key row(s)`);
+  } catch (err) {
+    console.error(`[invitations] key sweep failed: ${(err as Error).message}`);
   }
 }
 

@@ -23,7 +23,8 @@ function server() {
     }),
     getMyVaultKeys: vi.fn(async (vaultId: string): Promise<MyVaultKeys> => {
       const v = vaults.get(vaultId);
-      if (!v) return { keyed: false, pending: false, conversionAllowed: conv.allowed, encryptionRequested: true };
+      // A teammate with an account key: the conversion safety rule is met.
+      if (!v) return { keyed: false, pending: false, conversionAllowed: conv.allowed, encryptionRequested: true, otherMembersWithKeys: 1 };
       return { keyed: true, pending: false, vkCheck: v.vkCheck, generation: v.generation, wraps: [{ generation: v.generation, sealedVk: v.wrap }] };
     }),
     listVaultKeyRequests: vi.fn(async () => []),

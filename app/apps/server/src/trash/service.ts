@@ -12,6 +12,7 @@ import { ACCOUNT_READ_ONLY_MESSAGE, refusedForBilling } from "../permissions/htt
 import { deletedReadableDocsForActivity } from "../permissions/readable-cache.js";
 import { basename, dirname, findFolderByPath, joinPath } from "../registry/tree-ops.js";
 import { extractDocText, purgeNoteIndex } from "../index/indexer.js";
+import type { DocCrypto } from "../crypto/doc-crypto.js";
 import { trashedNotePermission } from "./access.js";
 import { trashChanged } from "./activity.js";
 
@@ -124,6 +125,12 @@ export async function listTrash(
 export async function trashContent(
   userId: string,
   docId: string,
+  /**
+   * W3: this request's key for the note's vault, asked only once the read is
+   * authorised (`http/routes/trash.ts` throws `requireVaultKey`'s refusal from
+   * it). Undefined for an unkeyed vault, as before.
+   */
+  cryptoFor?: (vaultId: string) => Promise<DocCrypto | undefined>,
 ): Promise<{ docId: string; relPath: string; text: string; deletedAt: string }> {
   const { rows } = await defaultPool.query<{
     vault_id: string;
@@ -140,10 +147,11 @@ export async function trashContent(
   if (!manager && (await trashedNotePermission(userId, docId)) === "none") {
     throw new TrashError(403, "no_access", "No access to this note");
   }
+  const crypto = cryptoFor ? await cryptoFor(note.vault_id) : undefined;
   return {
     docId,
     relPath: note.rel_path,
-    text: await extractDocText(docId),
+    text: await extractDocText(docId, defaultPool, crypto),
     deletedAt: note.deleted_at.toISOString(),
   };
 }

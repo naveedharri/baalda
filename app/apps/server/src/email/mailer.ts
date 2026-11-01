@@ -146,7 +146,9 @@ function logMailer(from: string): Mailer {
       console.log(
         `[email] (log transport — not delivered)\nFrom: ${from}\nTo: ${msg.to}\n${
           msg.replyTo ? `Reply-To: ${msg.replyTo}\n` : ""
-        }Subject: ${msg.subject}\n\n${msg.text}\n${
+        // An invite secret (`#k=`, seamless vault keys) never reaches a log
+        // line, even on the dev log transport (same rule as `redactKeyFragments`).
+        }Subject: ${msg.subject}\n\n${msg.text.replace(/([#&?]k=)[^&#\s"'<>]*/g, "$1<redacted>")}\n${
           msg.attachments?.length
             ? `Attachments: ${msg.attachments.map((a) => `${a.filename} (${a.contentType}, ${a.content.length} bytes)`).join(", ")}\n`
             : ""

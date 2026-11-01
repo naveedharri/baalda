@@ -17,6 +17,8 @@
 import type {
   AccountKeysBody,
   AllowlistCandidate,
+  InviteManyInput,
+  InviteManyResult,
   AllowlistEntry,
   MyVaultKeys,
   PendingDevice,
@@ -25,7 +27,7 @@ import type {
   VaultKeyWrapPost,
 } from "../api";
 import { VAULT_KEYS } from "../serverFeatures";
-import { candidateKey, splitForReview } from "./conversionReview";
+import { conversionSafe } from "./conversionSafety";
 import {
   fromBase64,
   deviceCode,
@@ -41,6 +43,13 @@ import {
   sealTo,
   sealVkTo,
   shortFingerprint,
+  unwrapAccountKeyWithUnlock,
+  wrapAccountKeyWithUnlock,
+  newSecret,
+  secretHash,
+  unwrapVkWithSecret,
+  wrapVkWithSecret,
+  type SecretPurpose,
   toBase64,
   verifyVk,
   vaultKeyToWords,
@@ -75,7 +84,25 @@ export interface VaultKeysApi {
     excluded?: Array<{ kind: string; id: string }>,
   ): Promise<{ rejected: string[] }>;
   getConversionReady(vaultId: string, vkBase64: string): Promise<boolean>;
+  /** Seamless keys F (optional: older test fakes omit them ⇒ always E). */
+  unlockAccountKey?(password: string): Promise<{ unlockKey: string } | "wrong-password" | "unavailable">;
+  putPasswordWrap?(privWrapped: string): Promise<void>;
+  /** Seamless keys B/C (optional: older fakes omit them ⇒ today's behaviour). */
+  putInviteWrap?(
+    vaultId: string,
+    invitationId: string,
+    body: { sealedVk: string; publicKey: string; generation: number },
+    vkBase64: string,
+  ): Promise<void>;
+  putJoinWrap?(
+    vaultId: string,
+    body: { secretHash: string; wrappedVk: string; generation: number; code: string },
+    vkBase64: string,
+  ): Promise<"stored" | "stale-code">;
 }
+
+/** What adopting a secret-wrapped key did (B4 / C). */
+export type SecretAdoptResult = "adopted" | "already" | "no-match" | "refused";
 
 /** The keychain store, scoped to the current server + user by the caller. */
 export interface VaultKeyStore {
@@ -116,11 +143,6 @@ export interface VaultKeySessionDeps {
   deviceId(): string;
   /** May this user convert the vault (owner/admin)? Default: no. */
   canConvert?(vaultId: string): Promise<boolean>;
-  /**
-   * Show the owner's review before allow-listing (production: on). Off, every
-   * candidate is allow-listed without asking (the older flow, kept for tests).
-   */
-  reviewConnections?: boolean;
 }
 
 export type AccountKeysState =
@@ -147,8 +169,9 @@ export type VaultKeyState =
 export type ConvertResult =
   | "converted"
   | "waiting-ready"
-  /** Connections nobody reviewed yet: `pendingConversionReview` lists them. */
-  | "needs-review"
+  /** `conversionSafe` is not met yet (no other keyed member, no password
+   *  wrap, a single device): nothing was generated or sent; ask again later. */
+  | "not-safe-yet"
   | "claimed-elsewhere"
   | "already-keyed"
   | "needs-account-key"
@@ -163,6 +186,20 @@ export type RestoreResult =
   | "security-warning";
 
 export type PendingDeviceView = PendingDevice & { code: string };
+
+/** What a password unlock did (seamless keys F). Every non-`unlocked` answer
+ *  leaves today's path (one-click approval) in charge. */
+export type PasswordUnlockResult =
+  | "unlocked"
+  | "wrap-written"
+  | "wrap-current"
+  | "fallback"
+  | "unavailable"
+  | "wrong-password"
+  | "disabled";
+
+/** A key that arrives this long after a password sign-in still gets a wrap. */
+export const PASSWORD_WRAP_WINDOW_MS = 15 * 60 * 1000;
 
 export type SealedFor = { userId: string; fingerprint: string };
 export type ServiceResult = {
@@ -190,16 +227,96 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
   /** Ids already offered / handled this session: listed after new ones. */
   const offeredDevices = new Set<string>();
   const handledRequests = new Set<string>();
-  /** vaultId → (candidateKey → keep?) from the owner's review on this device. */
-  const reviewDecisions = new Map<string, Map<string, boolean>>();
-  /** vaultId → candidates waiting for the owner's review. */
-  const pendingReviews = new Map<string, AllowlistCandidate[]>();
 
   /** Set when the server's account key is not ours: every key step refuses. */
   let accountMismatch = false;
+  /** The derived unlock key (never the password) while a key may still arrive
+   *  after a password sign-in (`PASSWORD_WRAP_WINDOW_MS`). Memory only. */
+  let pendingUnlock: { key: Uint8Array; until: number } | null = null;
+  const now = () => Date.now();
   const enabled = async () => (await deps.features()).has(VAULT_KEYS);
 
   async function ensureAccountKeys(): Promise<AccountKeysState> {
+    const state = await ensureAccountKeysInner();
+    if (state.state === "ready" && pendingUnlock) await writeLateWrap().catch(() => {});
+    return state;
+  }
+
+  /** The key arrived within the window after a password sign-in: wrap it now. */
+  async function writeLateWrap(): Promise<void> {
+    const pending = pendingUnlock;
+    if (!pending || now() > pending.until) {
+      pendingUnlock = null;
+      return;
+    }
+    const self = deps.selfUserId();
+    const priv = await keys.getAccountPrivateKey();
+    const remote = await api.getMyKeys();
+    if (!self || !priv || !remote || !sameKey(publicKeyFromPrivate(priv), remote.publicKey) || !api.putPasswordWrap) return;
+    if (!wrapOpens(pending.key, self, remote)) {
+      await api.putPasswordWrap(toBase64(wrapAccountKeyWithUnlock(pending.key, self, remote.publicKey, priv)));
+    }
+    pendingUnlock = null;
+  }
+
+  function wrapOpens(unlockKey: Uint8Array, self: string, remote: AccountKeysBody): Uint8Array | null {
+    if (!remote.privWrappedPassword) return null;
+    try {
+      const priv = unwrapAccountKeyWithUnlock(unlockKey, self, remote.publicKey, fromBase64(remote.privWrappedPassword));
+      return priv.length === 32 && sameKey(publicKeyFromPrivate(priv), remote.publicKey) ? priv : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Seamless keys F: the password (memory only, never stored or logged here)
+   * unlocks the account key. Holding the key: (re)write the password wrap when
+   * missing or stale. Not holding it: adopt the wrap only when it opens AND
+   * its public key is the one `/me/keys` names, then the device is ready with
+   * no approval. Anything else falls back to one-click approval (E).
+   */
+  async function unlockWithPassword(password: string): Promise<PasswordUnlockResult> {
+    if (!(await enabled()) || accountMismatch) return "disabled";
+    if (!api.unlockAccountKey || !api.putPasswordWrap) return "unavailable";
+    const self = deps.selfUserId();
+    if (!self) return "fallback";
+    const answer = await api.unlockAccountKey(password);
+    if (answer === "wrong-password" || answer === "unavailable") return answer;
+    let unlockKey: Uint8Array;
+    try {
+      unlockKey = fromBase64(answer.unlockKey);
+    } catch {
+      return "fallback";
+    }
+    if (unlockKey.length !== 32) return "fallback";
+    const remote = await api.getMyKeys();
+    const local = await keys.getAccountPrivateKey();
+    if (!remote) {
+      // No account key yet: the first run publishes one; wrap it then.
+      pendingUnlock = { key: unlockKey, until: now() + PASSWORD_WRAP_WINDOW_MS };
+      return "fallback";
+    }
+    if (local) {
+      if (!sameKey(publicKeyFromPrivate(local), remote.publicKey)) {
+        accountMismatch = true;
+        return "disabled";
+      }
+      if (wrapOpens(unlockKey, self, remote)) return "wrap-current";
+      await api.putPasswordWrap(toBase64(wrapAccountKeyWithUnlock(unlockKey, self, remote.publicKey, local)));
+      return "wrap-written";
+    }
+    const priv = wrapOpens(unlockKey, self, remote);
+    if (!priv) {
+      pendingUnlock = { key: unlockKey, until: now() + PASSWORD_WRAP_WINDOW_MS };
+      return "fallback";
+    }
+    await keys.setAccountPrivateKey(priv);
+    await keys.deleteDeviceLinkKey().catch(() => {});
+    return "unlocked";
+  }
+
+  async function ensureAccountKeysInner(): Promise<AccountKeysState> {
     if (!(await enabled())) return { state: "disabled" };
     const local = await keys.getAccountPrivateKey();
     const remote = await api.getMyKeys();
@@ -274,10 +391,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
   }
 
   /**
-   * The person approved `device` by TYPING the code the new computer shows:
-   * seal our account key to it. The prompt never displays the code, so a
-   * device row the person never started (a server's or database writer's own
-   * key) cannot be approved by clicking through.
+   * The person approved `device` (one click; the prompt shows the code
+   * read-only and passes it back): seal our account key to it. The code must
+   * still match the listed public key, so a row whose key and code disagree is
+   * never approved.
    */
   async function approveDevice(device: PendingDevice, typedCode: string): Promise<boolean> {
     if (!(await enabled()) || accountMismatch) return false;
@@ -390,11 +507,22 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const mine = await api.getMyVaultKeys(vaultId);
     if (mine.keyed) return "already-keyed";
     if (!mine.conversionAllowed) return "not-allowed";
-    if (!(deps.canConvert && (await deps.canConvert(vaultId)))) return "not-allowed";
     const priv = await keys.getAccountPrivateKey();
     if (!priv) return "needs-account-key";
     const remote = await api.getMyKeys();
     if (!remote || !sameKey(publicKeyFromPrivate(priv), remote.publicKey)) return "needs-account-key";
+    // Zero data loss: never key a vault whose key could die with this computer.
+    const safe = conversionSafe({
+      otherMembersWithKeys: mine.otherMembersWithKeys,
+      hasPasswordWrap: typeof remote.privWrappedPassword === "string" && remote.privWrappedPassword.length > 0,
+      // The first computer has no device row; every approved one adds one.
+      approvedDevices: Array.isArray(remote.devices) ? remote.devices.length + 1 : undefined,
+    });
+    if (!safe) return "not-safe-yet";
+    // The role check reads the member list (heavy on a big vault): asked only
+    // once everything else says go, so a vault that is not safe yet does not
+    // fetch it on every run.
+    if (!(deps.canConvert && (await deps.canConvert(vaultId)))) return "not-allowed";
 
     let vk = await keys.getVaultKey(vaultId); // a crashed earlier run: same key
     if (!vk) {
@@ -411,31 +539,18 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const claim = await api.registerPendingVaultKey(vaultId, { vkCheck, generation, deviceId: deps.deviceId() }, vkB64);
     if (claim === "claimed") return "claimed-elsewhere";
 
-    // Re-run on every poll: credentials minted while pending must be listed too
-    // (and reviewed: a new one is undecided until the owner answers).
+    // Re-run on every poll: credentials minted while pending must be listed
+    // too. Every connection is kept (no owner review): MCP tokens, AI
+    // connections and public links keep working. One excluded by an earlier
+    // review stays excluded (the server's record).
     const candidates = await api.getAllowlistCandidates(vaultId, vkB64);
-    const { keep, exclude, undecided } = splitForReview(
-      candidates,
-      reviewDecisions.get(vaultId),
-      deps.reviewConnections === true,
-    );
-    const entries: AllowlistEntry[] = keep.map((c) => ({
-      kind: c.kind,
-      id: c.id,
-      mac: toBase64(allowlistMac(vk!, c.id, c.hash)),
-    }));
-    if (entries.length || exclude.length) {
-      const excluded = exclude.map((c) => ({ kind: c.kind, id: c.id }));
-      const { rejected } = await api.postAllowlist(vaultId, entries, vkB64, excluded);
+    const entries: AllowlistEntry[] = candidates
+      .filter((c) => !c.excluded)
+      .map((c) => ({ kind: c.kind, id: c.id, mac: toBase64(allowlistMac(vk!, c.id, c.hash)) }));
+    if (entries.length) {
+      const { rejected } = await api.postAllowlist(vaultId, entries, vkB64);
       if (rejected.length) console.warn(`[vault-keys] ${rejected.length} allowlist entr(y/ies) rejected; retrying next poll`);
     }
-    // Nothing is allow-listed or converted past a connection the owner has
-    // not seen: unreviewed ones would silently need reconnecting afterwards.
-    if (undecided.length) {
-      pendingReviews.set(vaultId, undecided);
-      return "needs-review";
-    }
-    pendingReviews.delete(vaultId);
     if (!(await api.getConversionReady(vaultId, vkB64))) return "waiting-ready";
 
     const result = await api.initVaultKeys(vaultId, {
@@ -455,25 +570,6 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     await confirmed(vaultId);
     accept(vaultId, vk, generation);
     return "converted";
-  }
-
-  /** Candidates waiting for the owner's review of this vault, else null. */
-  function pendingConversionReview(vaultId: string): AllowlistCandidate[] | null {
-    return pendingReviews.get(vaultId) ?? null;
-  }
-
-  /**
-   * The owner answered the review: `keep` holds the candidate keys they left
-   * checked; every other listed candidate is excluded. Recorded here only; the
-   * next `convertVault` run posts it (allow-list MACs + `excluded`).
-   */
-  function submitConversionReview(vaultId: string, keep: ReadonlySet<string>): void {
-    const listed = pendingReviews.get(vaultId);
-    if (!listed) return;
-    const decisions = reviewDecisions.get(vaultId) ?? new Map<string, boolean>();
-    for (const c of listed) decisions.set(candidateKey(c), keep.has(candidateKey(c)));
-    reviewDecisions.set(vaultId, decisions);
-    pendingReviews.delete(vaultId);
   }
 
   /**
@@ -601,6 +697,134 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     return { state: "ready", generation };
   }
 
+  /** Seal the verified VK to this account's own key (other devices read it). */
+  async function sealToSelf(vaultId: string, vk: Uint8Array, generation: number): Promise<void> {
+    const self = deps.selfUserId();
+    const priv = await keys.getAccountPrivateKey();
+    const remote = priv ? await api.getMyKeys() : null;
+    if (!self || !priv || !remote || !sameKey(publicKeyFromPrivate(priv), remote.publicKey)) return;
+    await api.postVaultKeyWrap(
+      vaultId,
+      { userId: self, generation, sealedVk: toBase64(sealVkTo(publicKeyFromPrivate(priv), vk)) },
+      toBase64(vk),
+    );
+  }
+
+  /**
+   * B1: per-invitee secret wraps of the verified VK, or null when this device
+   * holds no verified key (then it invites exactly as before). The secrets go
+   * only into the request body; nothing here keeps them.
+   */
+  function inviteKeyMaterial(
+    vaultId: string,
+    emails: string[],
+  ): { vaultKeys: NonNullable<InviteManyInput["vaultKeys"]>; vkBase64: string } | null {
+    const held = verified.get(vaultId);
+    if (!held || accountMismatch) return null;
+    const items = emails.map((email) => {
+      const secret = newSecret();
+      return {
+        email,
+        secret,
+        wrappedVk: toBase64(wrapVkWithSecret(secret, "invite", vaultId, held.generation, held.vk)),
+      };
+    });
+    return { vaultKeys: { vaultId, generation: held.generation, items }, vkBase64: held.b64 };
+  }
+
+  /**
+   * B2: invitees who already have an account key get the VK sealed to it now
+   * (the server installs it on acceptance when the key still matches). TOFU:
+   * a pinned, different key is never sealed to. Best-effort per invitee.
+   * Returns each seal with its fingerprint: the caller raises the same "Gave
+   * <name> the vault key" toast as for a request, since the key sealed to came
+   * from the server (first contact) and must never be sealed to silently.
+   */
+  async function sealInviteResults(vaultId: string, results: InviteManyResult[]): Promise<SealedFor[]> {
+    const held = verified.get(vaultId);
+    const sealed: SealedFor[] = [];
+    if (!held || accountMismatch || !api.putInviteWrap) return sealed;
+    for (const r of results) {
+      if (!r?.invitationId || r.error || typeof r.publicKey !== "string" || typeof r.inviteeUserId !== "string") continue;
+      try {
+        const pub = fromBase64(r.publicKey);
+        if (pub.length !== 32) continue;
+        const fp = keyFingerprint(pub);
+        const pinned = await deps.pins.get(r.inviteeUserId);
+        if (pinned && pinned !== fp) continue;
+        await api.putInviteWrap(
+          vaultId,
+          r.invitationId,
+          { sealedVk: toBase64(sealVkTo(pub, held.vk)), publicKey: r.publicKey, generation: held.generation },
+          held.b64,
+        );
+        if (!pinned) await deps.pins.set(r.inviteeUserId, fp);
+        sealed.push({ userId: r.inviteeUserId, fingerprint: shortFingerprint(pub) });
+      } catch (e) {
+        console.warn("[vault-keys] invite seal skipped", e instanceof Error ? e.name : "error");
+      }
+    }
+    return sealed;
+  }
+
+  /**
+   * B4 / C: open a secret-wrapped VK, verify it against the vault's check,
+   * store it, then self-seal. A held confirmed key that verifies is kept; one
+   * that does NOT verify is never replaced (same rule as `ensureVaultKey`).
+   */
+  async function adoptFromSecret(
+    vaultId: string,
+    purpose: SecretPurpose,
+    secret: string,
+    wraps: Array<{ generation: number; wrappedVk: string }>,
+  ): Promise<SecretAdoptResult> {
+    if (!(await enabled()) || accountMismatch) return "refused";
+    const mine = await api.getMyVaultKeys(vaultId);
+    // A member with no wrap of their own yet gets 202 pending, which still
+    // carries the check: that is exactly who a secret wrap is for.
+    if (!mine.keyed || !mine.vkCheck || mine.generation === undefined) return "no-match";
+    const check = fromBase64(mine.vkCheck);
+    const held = await keys.getVaultKey(vaultId);
+    if (held && (await verifyVk(held, vaultId, check))) {
+      await confirmed(vaultId);
+      accept(vaultId, held, mine.generation);
+      return "already";
+    }
+    if (held && !(await keys.isVaultKeyProvisional(vaultId))) return "refused";
+    for (const w of wraps) {
+      if (!w || w.generation !== mine.generation || typeof w.wrappedVk !== "string") continue;
+      let vk: Uint8Array;
+      try {
+        vk = unwrapVkWithSecret(secret, purpose, vaultId, w.generation, fromBase64(w.wrappedVk));
+      } catch {
+        continue;
+      }
+      if (vk.length !== 32 || !(await verifyVk(vk, vaultId, check))) continue;
+      await keys.setVaultKey(vaultId, vk);
+      await confirmed(vaultId);
+      accept(vaultId, vk, mine.generation);
+      await sealToSelf(vaultId, vk, mine.generation).catch(() => {});
+      return "adopted";
+    }
+    return "no-match";
+  }
+
+  /** C: upload the join wrap for `<code>-<secret>` (admin device with the key). */
+  async function uploadJoinWrap(vaultId: string, secret: string, code: string): Promise<"stored" | "stale-code" | "no-key"> {
+    const held = verified.get(vaultId);
+    if (!held || accountMismatch || !api.putJoinWrap) return "no-key";
+    return api.putJoinWrap(
+      vaultId,
+      {
+        secretHash: secretHash(secret),
+        wrappedVk: toBase64(wrapVkWithSecret(secret, "join", vaultId, held.generation, held.vk)),
+        generation: held.generation,
+        code,
+      },
+      held.b64,
+    );
+  }
+
   /** Key holder: seal the VK for each requester who is a current member. */
   async function serviceKeyRequests(vaultId: string): Promise<ServiceResult> {
     const out: ServiceResult = { sealed: [], refused: [], keyChanged: [] };
@@ -650,15 +874,43 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
         out.keyChanged.push({ userId: r.userId, fingerprint: shortFingerprint(pub), publicKey: r.publicKey });
         continue;
       }
-      await api.postVaultKeyWrap(
-        vaultId,
-        { userId: r.userId, generation: held.generation, sealedVk: toBase64(sealVkTo(pub, held.vk)) },
-        held.b64,
-      );
+      try {
+        await api.postVaultKeyWrap(
+          vaultId,
+          { userId: r.userId, generation: held.generation, sealedVk: toBase64(sealVkTo(pub, held.vk)) },
+          held.b64,
+        );
+      } catch (e) {
+        // Removed from the vault after the list was read (our roster may lag
+        // a minute): skip that person, keep sealing for everyone else.
+        if (isNotMemberRefusal(e)) {
+          out.refused.push(r.userId);
+          continue;
+        }
+        throw e;
+      }
       if (!pinned) await deps.pins.set(r.userId, fp);
       out.sealed.push({ userId: r.userId, fingerprint: shortFingerprint(pub) });
     }
     return out;
+  }
+
+  /**
+   * Service runs back to back while each one fills its per-run cap (a big team
+   * right after conversion: 150 people = 3 runs now, not 3 runs 2 minutes
+   * apart). Bounded by {@link MAX_BACK_TO_BACK_RUNS}; stops at the first run
+   * that seals nobody (junk listings cannot keep it going).
+   */
+  async function serviceAllKeyRequests(vaultId: string): Promise<ServiceResult> {
+    const all: ServiceResult = { sealed: [], refused: [], keyChanged: [] };
+    for (let run = 0; run < MAX_BACK_TO_BACK_RUNS; run++) {
+      const r = await serviceKeyRequests(vaultId);
+      all.sealed.push(...r.sealed);
+      all.refused.push(...r.refused);
+      all.keyChanged.push(...r.keyChanged);
+      if (!filledRun(r)) break;
+    }
+    return all;
   }
 
   /** `X-Baalda-VK` value for a vault: verified keys only. Synchronous. */
@@ -668,11 +920,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
 
   const session = {
     ensureAccountKeys,
+    unlockWithPassword,
     restoreWithVaultKey,
     revealVaultKey,
     convertVault,
-    pendingConversionReview,
-    submitConversionReview,
     gateVaultOpen,
     pendingDevices,
     approveDevice,
@@ -682,7 +933,20 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     approveChangedKey,
     ensureVaultKey,
     serviceKeyRequests,
+    serviceAllKeyRequests,
     headerFor,
+    inviteKeyMaterial,
+    sealInviteResults,
+    adoptFromSecret,
+    uploadJoinWrap,
+    /** The verified key's generation, else null. */
+    heldGeneration(vaultId: string): number | null {
+      return verified.get(vaultId)?.generation ?? null;
+    },
+    /** Does this device's keychain hold a key for the vault (verified or not)? */
+    async holdsVaultKey(vaultId: string): Promise<boolean> {
+      return verified.has(vaultId) || (await keys.getVaultKey(vaultId)) !== null;
+    },
     /** Membership ended / vault gone: stop serving this vault's key (memory only;
      *  the keychain copy goes through `forget.ts`). */
     forgetVerified(vaultId: string) {
@@ -692,9 +956,8 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       verified.clear();
       offeredDevices.clear();
       handledRequests.clear();
-      reviewDecisions.clear();
-      pendingReviews.clear();
       accountMismatch = false;
+      pendingUnlock = null;
       keys.clearCache();
     },
     dispose() {
@@ -709,6 +972,19 @@ export type VaultKeySession = ReturnType<typeof createVaultKeySession>;
 
 /** Most key requests handled in one run (the rest wait for the next run). */
 export const MAX_KEY_REQUESTS_PER_RUN = 50;
+/** Back-to-back service runs per cycle while each fills its cap (500 people). */
+export const MAX_BACK_TO_BACK_RUNS = 10;
+
+/** A run that sealed someone and used its whole per-run budget: more may wait. */
+export function filledRun(r: ServiceResult): boolean {
+  return r.sealed.length > 0 && r.sealed.length + r.refused.length + r.keyChanged.length >= MAX_KEY_REQUESTS_PER_RUN;
+}
+
+/** The server's 404 `not_member` for a wrap: that person left the vault. */
+function isNotMemberRefusal(e: unknown): boolean {
+  const err = e as { status?: unknown; body?: { code?: unknown } } | null;
+  return err?.status === 404 && err.body?.code === "not_member";
+}
 /** Most "a new computer is signing in" prompts raised from one listing. */
 export const MAX_PENDING_DEVICES = 5;
 

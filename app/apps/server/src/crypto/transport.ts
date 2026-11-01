@@ -71,6 +71,15 @@ export function redactToken(token: unknown): string {
 }
 
 /**
+ * Text with every `#k=` / `&k=` / `?k=` value (an invite secret in an email
+ * link or deep link, seamless keys B5) replaced by `<redacted>`. For any log
+ * line that may carry such a URL.
+ */
+export function redactKeyFragments(text: unknown): string {
+  return String(text ?? "").replace(/([#&?]k=)[^&#\s"'<>]*/g, "$1<redacted>");
+}
+
+/**
  * The vault's key state: null when the vault is not keyed (today's path).
  *
  * A NULL `vk_check` beside key material the vault can only have once keyed
@@ -137,18 +146,26 @@ export async function requireVaultKey(
     vaultKeyCache.holdForRequest(vaultId, vk, state.generation);
     return { ok: true, key: vk, keyed: true, generation: state.generation };
   }
-  // A build that predates vault keys never sees `key_required` (it has never
-  // handled it): it gets the 426 it already treats as "stop and update".
-  if (!isVaultKeyCapableVersion(reportedClientVersion(c))) {
-    return { ok: false, response: c.json(vaultKeysOutdatedBody(), 426) };
-  }
-  return {
-    ok: false,
-    response: c.json(
-      { error: "This vault needs its key. Open Baalda on a device that has it.", code: KEY_REQUIRED_CODE },
-      409,
-    ),
-  };
+  return { ok: false, response: keyRequiredResponse(c, vaultId) };
+}
+
+/**
+ * The refusal for a keyed vault reached without its key. A build that predates
+ * vault keys never sees `key_required` (it has never handled it): it gets the
+ * 426 it already treats as "stop and update". Anyone else gets 409
+ * `key_required` naming `vaultId`, so a client whose path does not name the
+ * vault (`/api/notes/:id/versions`, ...) knows whose key to fetch and send.
+ */
+export function keyRequiredResponse(c: Context, vaultId: string | null): Response {
+  if (!isVaultKeyCapableVersion(reportedClientVersion(c))) return c.json(vaultKeysOutdatedBody(), 426);
+  return c.json(
+    {
+      error: "This vault needs its key. Open Baalda on a device that has it.",
+      code: KEY_REQUIRED_CODE,
+      ...(vaultId ? { vaultId } : {}),
+    },
+    409,
+  );
 }
 
 /**

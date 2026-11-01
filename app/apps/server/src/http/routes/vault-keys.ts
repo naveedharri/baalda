@@ -10,6 +10,12 @@
 // POST /api/vaults/:vaultId/keys/request-encryption  owner/admin opts an existing vault in (one-way)
 // GET  /api/vaults/:vaultId/keys/requests  pending requests (wrap holders only)
 // POST /api/vaults/:vaultId/keys/wraps     seal VK to a member (holder + valid VK)
+// PUT  /api/vaults/:vaultId/keys/invite-wraps/:invitationId  seal VK to an invitee (owner/admin + VK)
+// GET  /api/vaults/:vaultId/keys/invite-wrap                 my invitations' secret wraps
+// PUT  /api/vaults/:vaultId/keys/join-wraps                  VK wrapped under a join secret (owner/admin + VK)
+// GET  /api/vaults/:vaultId/keys/join-wrap?h=                one join-secret wrap (member)
+// POST /api/me/keys/unlock                  password → unlock key (F; ACCOUNT_KEY_PEPPER)
+// PUT  /api/me/keys/password-wrap           account key wrapped under the unlock key (F)
 // GET  /api/me/keys                         my key pair record
 // PUT  /api/me/keys                         set my public key (recovery wrap optional)
 // PUT  /api/me/devices/:deviceId/key        my private key wrapped for a device
@@ -23,6 +29,7 @@ import { verifyVk } from "../../crypto/vk-check.js";
 import { encryptionProgress } from "../../crypto/null-out.js";
 import {
   ENCRYPTION_NOT_REQUESTED,
+  conversionFlagOn,
   KEY_MATERIAL_EXISTS,
   initGate,
   lockGateRows,
@@ -31,6 +38,20 @@ import {
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
 import {
+  PASSWORD_UNLOCK_OFF,
+  accountKeyPepper,
+  deriveUnlockKey,
+  upgradeLoginHash,
+  verifyPassword,
+} from "../../auth/login-pepper.js";
+import {
+  clearThrottle,
+  lockedForSeconds,
+  recordFailure,
+  throttledResponse,
+  withPasswordSlot,
+} from "../../auth/signin-throttle.js";
+import {
   KEY_REPLACEMENT_WINDOW_MS,
   MAX_KEY_REPLACEMENTS,
   RATE_LIMITED,
@@ -38,6 +59,7 @@ import {
   takeKeyChurn,
 } from "../../crypto/key-churn.js";
 import { CLIENT_VERSION_HEADER, CLIENT_VERSION_PARAM, clientVersionPolicy, judgeClientVersion } from "../client-version.js";
+import { dropSpentInvitationKeys } from "../../members/invitation-keys.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -61,6 +83,21 @@ async function membership(vaultId: string, userId: string, db: Queryable = pool)
   return role ? { orgId, role } : null;
 }
 
+/** 403 body: keying (or converting) a vault is for owners and admins. */
+export const KEYING_REQUIRES_ADMIN = {
+  error: "Only an owner or admin can encrypt this vault",
+  code: "keying_requires_admin",
+} as const;
+
+/**
+ * Who may key a vault: an owner/admin, or the person who created it (POST
+ * /api/vaults stamps `encryption_requested_by`; only owners/admins create
+ * vaults, so this matters only if they were demoted since).
+ */
+export function mayKeyVault(role: string | null | undefined, userId: string, createdBy: string | null): boolean {
+  return role === "owner" || role === "admin" || (createdBy !== null && createdBy === userId);
+}
+
 async function holdsWrap(vaultId: string, userId: string, db: Queryable = pool): Promise<boolean> {
   const { rows } = await db.query(
     "SELECT 1 FROM vault_key_wraps WHERE vault_id = $1 AND user_id = $2 LIMIT 1",
@@ -68,6 +105,13 @@ async function holdsWrap(vaultId: string, userId: string, db: Queryable = pool):
   );
   return rows.length > 0;
 }
+
+/** Rows `keys/requests` answers at most (requests + missing members). */
+export const MAX_KEY_REQUESTS_LISTED = 200;
+
+/** Join-code secret wraps kept per vault (oldest dropped). */
+export const MAX_JOIN_WRAPS = 20;
+const SECRET_HASH_RE = /^[0-9a-f]{64}$/;
 
 /** Pending (unapproved) device registrations allowed per user. */
 export const MAX_PENDING_DEVICES = 5;
@@ -78,8 +122,7 @@ export const MAX_PENDING_DEVICES = 5;
  * version is required). Default off.
  */
 export function conversionAllowed(versionHeader: string | null | undefined): boolean {
-  const flag = (process.env.VAULT_KEY_CONVERSION ?? "").trim().toLowerCase();
-  if (!["1", "true", "on", "yes"].includes(flag)) return false;
+  if (!conversionFlagOn()) return false;
   const policy = clientVersionPolicy();
   return judgeClientVersion(versionHeader, { ...policy, allowUnversioned: false, graceUntil: 0 }).ok;
 }
@@ -95,6 +138,7 @@ export function createVaultKeyRoutes(): Hono {
   };
   routes.use("/vaults/:vaultId/keys/*", flagGate);
   routes.use("/me/keys", flagGate);
+  routes.use("/me/keys/*", flagGate);
   routes.use("/me/devices", flagGate);
   routes.use("/me/devices/*", flagGate);
 
@@ -114,21 +158,33 @@ export function createVaultKeyRoutes(): Hono {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const { rows } = await client.query<{ vk_check: Buffer | null; encryption_requested_at: Date | null }>(
-        "SELECT vk_check, encryption_requested_at FROM vaults WHERE id = $1 FOR UPDATE",
+      const { rows } = await client.query<{
+        vk_check: Buffer | null;
+        encryption_requested_at: Date | null;
+        encryption_requested_by: string | null;
+      }>(
+        "SELECT vk_check, encryption_requested_at, encryption_requested_by FROM vaults WHERE id = $1 FOR UPDATE",
         [vaultId],
       );
       if (!rows[0]) {
         await client.query("ROLLBACK");
         return c.json({ error: "Unknown vault" }, 404);
       }
+      // Only an owner/admin (or the person who created this vault) may key it:
+      // whoever keys it is its only key holder until they share it, so a plain
+      // member keying the team's vault would lock everyone else out.
+      if (!mayKeyVault(member.role, session.userId, rows[0].encryption_requested_by)) {
+        await client.query("ROLLBACK");
+        return c.json(KEYING_REQUIRES_ADMIN, 403);
+      }
       if (rows[0].vk_check) {
         await client.query("ROLLBACK");
         return c.json({ error: "This vault already has a key", code: "already_keyed" }, 409);
       }
-      // Opt-in (migration 081): never key a vault nobody asked to encrypt,
-      // whatever the client. Read under the vault row lock.
-      if (!rows[0].encryption_requested_at) {
+      // Never key a vault nobody asked to encrypt, whatever the client. While
+      // conversion is on every vault counts as asked (`encryptionRequested`).
+      // Read under the vault row lock.
+      if (!rows[0].encryption_requested_at && !conversionFlagOn()) {
         await client.query("ROLLBACK");
         return c.json(ENCRYPTION_NOT_REQUESTED, 409);
       }
@@ -196,12 +252,23 @@ export function createVaultKeyRoutes(): Hono {
       [vaultId],
     );
     if (!v[0]?.vk_check) {
-      // Opt-in: an existing vault is keyed only after an owner/admin asked
-      // for it (or it was created with vault keys on). Until then a desktop
-      // must not key it, whatever the rollout gate says.
-      const encryptionRequested = v[0]?.encryption_requested_at != null;
+      // Every vault counts as asked while conversion is on; otherwise only one
+      // an owner/admin asked for (or created with vault keys on).
+      const encryptionRequested = v[0]?.encryption_requested_at != null || conversionFlagOn();
       const gate = conversionAllowed(c.req.header(CLIENT_VERSION_HEADER) ?? c.req.query(CLIENT_VERSION_PARAM));
-      return c.json({ keyed: false, conversionAllowed: gate && encryptionRequested, encryptionRequested });
+      // Teammates who would receive the key at conversion: the desktop converts
+      // only when a lost laptop would still be recoverable (a count, never ids).
+      const { rows: others } = await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM member m JOIN user_keys k ON k.user_id = m."userId"
+          WHERE m."organizationId" = (SELECT organization_id FROM vaults WHERE id = $1) AND m."userId" <> $2`,
+        [vaultId, session.userId],
+      );
+      return c.json({
+        keyed: false,
+        conversionAllowed: gate && encryptionRequested,
+        encryptionRequested,
+        otherMembersWithKeys: others[0]?.n ?? 0,
+      });
     }
     // Wraps sealed before the caller last replaced their account key cannot be
     // opened by them any more; they are kept (never deleted) but do not count.
@@ -316,13 +383,37 @@ export function createVaultKeyRoutes(): Hono {
       return c.json({ error: "Only a member who holds the key can see requests", code: "key_holder_required" }, 403);
     }
     // Current members only, and only those with a published public key.
-    const { rows } = await pool.query<{ user_id: string; requested_at: Date; public_key: Buffer; key_changed_at: Date | null }>(
-      `SELECT r.user_id, r.requested_at, k.public_key, k.key_changed_at
-         FROM vault_key_requests r
-         JOIN member m ON m."organizationId" = $2 AND m."userId" = r.user_id
-         JOIN user_keys k ON k.user_id = r.user_id
-        WHERE r.vault_id = $1
-        ORDER BY r.requested_at`,
+    // `request`: the person asked (keys/mine). `missing`: a current member with
+    // an account key and no wrap for the vault's current generation who never
+    // asked (e.g. their app was never opened on this vault) — sealed the same
+    // way, so the key is waiting for them when they arrive.
+    const { rows } = await pool.query<{
+      user_id: string;
+      requested_at: Date;
+      public_key: Buffer;
+      key_changed_at: Date | null;
+      kind: "request" | "missing";
+    }>(
+      `SELECT * FROM (
+         SELECT r.user_id, r.requested_at, k.public_key, k.key_changed_at, 'request' AS kind
+           FROM vault_key_requests r
+           JOIN member m ON m."organizationId" = $2 AND m."userId" = r.user_id
+           JOIN user_keys k ON k.user_id = r.user_id
+          WHERE r.vault_id = $1
+         UNION ALL
+         SELECT m."userId", m."createdAt", k.public_key, k.key_changed_at, 'missing'
+           FROM member m
+           JOIN user_keys k ON k.user_id = m."userId"
+          WHERE m."organizationId" = $2
+            AND NOT EXISTS (
+              SELECT 1 FROM vault_key_wraps w
+               WHERE w.vault_id = $1 AND w.user_id = m."userId"
+                 AND w.generation = (SELECT COALESCE(key_generation, 1) FROM vaults WHERE id = $1))
+            AND NOT EXISTS (
+              SELECT 1 FROM vault_key_requests r WHERE r.vault_id = $1 AND r.user_id = m."userId")
+       ) q
+       ORDER BY requested_at, user_id
+       LIMIT ${MAX_KEY_REQUESTS_LISTED}`,
       [vaultId, member.orgId],
     );
     return c.json({
@@ -333,6 +424,7 @@ export function createVaultKeyRoutes(): Hono {
         // Set when the person replaced their account key (lost all devices):
         // teammates' devices show "security key changed" before sealing.
         keyChangedAt: r.key_changed_at,
+        kind: r.kind,
       })),
     });
   });
@@ -395,25 +487,190 @@ export function createVaultKeyRoutes(): Hono {
       client.release();
     }
     await pool.query("DELETE FROM vault_key_requests WHERE vault_id = $1 AND user_id = $2", [vaultId, userId]);
+    // Their invitation's secret wrap / seal is spent once they hold a current
+    // wrap (the self-wrap after adopting it, or a teammate's seal).
+    await dropSpentInvitationKeys({ vaultId, userId }).catch((err: unknown) =>
+      console.error(`[vault-keys] dropping spent invitation keys failed: ${(err as Error).message}`),
+    );
     return c.json({ sealed: true }, 201);
+  });
+
+  // ── Seamless keys (B2): seal VK straight to an invitee's existing account
+  // key, applied on acceptance (`members/invitation-keys.ts`). Owner/admin who
+  // proves the key. Upsert on the invitation id.
+  routes.put("/vaults/:vaultId/keys/invite-wraps/:invitationId", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const invitationId = c.req.param("invitationId");
+    const member = await membership(vaultId, session.userId);
+    if (!member) return c.json({ error: "Unknown vault" }, 404);
+    if (member.role !== "owner" && member.role !== "admin") {
+      return c.json({ error: "Only an owner or admin can do this", code: "access_manager_required" }, 403);
+    }
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    const sealedVk = b64(body?.sealedVk);
+    const publicKey = b64(body?.publicKey);
+    if (!sealedVk || !publicKey || !generationOk(body?.generation)) {
+      return c.json({ error: "sealedVk, publicKey and generation are required", code: "invalid_argument" }, 400);
+    }
+    const key = await requireVaultKey(c, vaultId);
+    if (!key.ok) return key.response;
+    if (!key.keyed) return c.json({ error: "This vault has no key yet", code: "not_keyed" }, 409);
+    const { rows: inv } = await pool.query(
+      `SELECT 1 FROM invitation
+        WHERE id = $1 AND "organizationId" = $2 AND status = 'pending' AND "expiresAt" > now()`,
+      [invitationId, member.orgId],
+    );
+    if (!inv[0]) return c.json({ error: "No such pending invitation", code: "not_found" }, 404);
+    const { rowCount } = await pool.query(
+      `INSERT INTO invitation_vault_keys
+         (invitation_id, vault_id, sealed_vk, sealed_for_public_key, sealed_generation, sealed_by_user_id, sealed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())
+       ON CONFLICT (invitation_id) DO UPDATE
+         SET sealed_vk = EXCLUDED.sealed_vk, sealed_for_public_key = EXCLUDED.sealed_for_public_key,
+             sealed_generation = EXCLUDED.sealed_generation, sealed_by_user_id = EXCLUDED.sealed_by_user_id,
+             sealed_at = now()
+       WHERE invitation_vault_keys.vault_id = EXCLUDED.vault_id`,
+      [invitationId, vaultId, sealedVk, publicKey, body!.generation, session.userId],
+    );
+    if (!rowCount) return c.json({ error: "No such pending invitation", code: "not_found" }, 404);
+    return c.json({ stored: true }, 201);
+  });
+
+  // ── Seamless keys (B4): the caller's own invitations' secret wraps for this
+  // vault. Opened on the device with the secret from the email link's fragment.
+  routes.get("/vaults/:vaultId/keys/invite-wrap", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const member = await membership(vaultId, session.userId);
+    if (!member) return c.json({ error: "Unknown vault" }, 404);
+    const { rows } = await pool.query<{ invitation_id: string; generation: number; wrapped_vk: Buffer }>(
+      `SELECT ivk.invitation_id, ivk.generation, ivk.wrapped_vk
+         FROM invitation_vault_keys ivk
+         JOIN invitation i ON i.id = ivk.invitation_id
+        WHERE ivk.vault_id = $1 AND i."organizationId" = $2
+          AND lower(i.email) = lower($3)
+          AND i.status IN ('pending', 'accepted')
+          AND ivk.wrapped_vk IS NOT NULL
+        ORDER BY i."createdAt" DESC
+        LIMIT 20`,
+      [vaultId, member.orgId, session.email],
+    );
+    return c.json({
+      wraps: rows.map((r) => ({
+        invitationId: r.invitation_id,
+        generation: r.generation,
+        wrappedVk: r.wrapped_vk.toString("base64"),
+      })),
+    });
+  });
+
+  // ── Seamless keys (C): VK wrapped under a join code's device secret J,
+  // uploaded by an owner/admin device that proves the key. Only sha256(J).
+  routes.put("/vaults/:vaultId/keys/join-wraps", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const member = await membership(vaultId, session.userId);
+    if (!member) return c.json({ error: "Unknown vault" }, 404);
+    if (member.role !== "owner" && member.role !== "admin") {
+      return c.json({ error: "Only an owner or admin can do this", code: "access_manager_required" }, 403);
+    }
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    const secretHash = typeof body?.secretHash === "string" ? body.secretHash.toLowerCase() : "";
+    const wrappedVk = b64(body?.wrappedVk);
+    const code = typeof body?.code === "string" ? body.code.trim().toUpperCase() : "";
+    if (!SECRET_HASH_RE.test(secretHash) || !wrappedVk || !code || !generationOk(body?.generation)) {
+      return c.json({ error: "secretHash, wrappedVk, generation and code are required", code: "invalid_argument" }, 400);
+    }
+    const key = await requireVaultKey(c, vaultId);
+    if (!key.ok) return key.response;
+    if (!key.keyed) return c.json({ error: "This vault has no key yet", code: "not_keyed" }, 409);
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Under a share lock on the code row, so a regeneration racing this
+      // upload either waits (and its trigger then deletes this row) or wins
+      // (and this sees the new code: stale).
+      const { rows: cur } = await client.query<{ code: string }>(
+        "SELECT code FROM org_join_codes WHERE organization_id = $1 FOR SHARE",
+        [member.orgId],
+      );
+      if (cur[0]?.code !== code) {
+        await client.query("ROLLBACK");
+        return c.json({ error: "This join code is no longer current", code: "stale_code" }, 409);
+      }
+      await client.query(
+        `INSERT INTO vault_join_wraps (vault_id, secret_hash, code, generation, wrapped_vk, created_by_user_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (vault_id, secret_hash) DO UPDATE
+           SET code = EXCLUDED.code, generation = EXCLUDED.generation, wrapped_vk = EXCLUDED.wrapped_vk,
+               created_by_user_id = EXCLUDED.created_by_user_id, created_at = now()`,
+        [vaultId, secretHash, code, body!.generation, wrappedVk, session.userId],
+      );
+      await client.query(
+        `DELETE FROM vault_join_wraps WHERE vault_id = $1 AND secret_hash IN (
+           SELECT secret_hash FROM vault_join_wraps WHERE vault_id = $1
+            ORDER BY created_at DESC, secret_hash OFFSET ${MAX_JOIN_WRAPS})`,
+        [vaultId],
+      );
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+    return c.json({ stored: true }, 201);
+  });
+
+  routes.get("/vaults/:vaultId/keys/join-wrap", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const member = await membership(vaultId, session.userId);
+    if (!member) return c.json({ error: "Unknown vault" }, 404);
+    const h = (c.req.query("h") ?? "").toLowerCase();
+    if (!SECRET_HASH_RE.test(h)) return c.json({ error: "h is required", code: "invalid_argument" }, 400);
+    // Only a wrap for the org's CURRENT code answers.
+    const { rows } = await pool.query<{ generation: number; wrapped_vk: Buffer }>(
+      `SELECT w.generation, w.wrapped_vk
+         FROM vault_join_wraps w
+         JOIN org_join_codes j ON j.organization_id = $2 AND j.code = w.code
+        WHERE w.vault_id = $1 AND w.secret_hash = $3`,
+      [vaultId, member.orgId, h],
+    );
+    return c.json({
+      wrap: rows[0] ? { generation: rows[0].generation, wrappedVk: rows[0].wrapped_vk.toString("base64") } : null,
+    });
   });
 
   routes.get("/me/keys", async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
-    const { rows } = await pool.query<{ public_key: Buffer; priv_wrapped_recovery: Buffer | null; key_changed_at: Date | null }>(
-      "SELECT public_key, priv_wrapped_recovery, key_changed_at FROM user_keys WHERE user_id = $1",
+    const { rows } = await pool.query<{
+      public_key: Buffer;
+      priv_wrapped_recovery: Buffer | null;
+      priv_wrapped_password: Buffer | null;
+      key_changed_at: Date | null;
+    }>(
+      "SELECT public_key, priv_wrapped_recovery, priv_wrapped_password, key_changed_at FROM user_keys WHERE user_id = $1",
       [session.userId],
     );
     const { rows: devices } = await pool.query<{ device_id: string; priv_wrapped: Buffer }>(
       "SELECT device_id, priv_wrapped FROM user_device_keys WHERE user_id = $1 AND revoked_at IS NULL ORDER BY device_id",
       [session.userId],
     );
-    if (!rows[0]) return c.json({ publicKey: null, privWrappedRecovery: null, keyChangedAt: null, devices: [] });
+    if (!rows[0]) {
+      return c.json({ publicKey: null, privWrappedRecovery: null, privWrappedPassword: null, keyChangedAt: null, devices: [] });
+    }
     return c.json({
       keyChangedAt: rows[0].key_changed_at,
       publicKey: rows[0].public_key.toString("base64"),
       privWrappedRecovery: rows[0].priv_wrapped_recovery?.toString("base64") ?? null,
+      privWrappedPassword: rows[0].priv_wrapped_password?.toString("base64") ?? null,
       devices: devices.map((d) => ({ deviceId: d.device_id, privWrapped: d.priv_wrapped.toString("base64") })),
     });
   });
@@ -435,8 +692,13 @@ export function createVaultKeyRoutes(): Hono {
     let refusedFor = 0;
     try {
       await client.query("BEGIN");
-      const { rows: cur } = await client.query<{ public_key: Buffer; priv_wrapped_recovery: Buffer | null; created_at: Date }>(
-        "SELECT public_key, priv_wrapped_recovery, created_at FROM user_keys WHERE user_id = $1 FOR UPDATE",
+      const { rows: cur } = await client.query<{
+        public_key: Buffer;
+        priv_wrapped_recovery: Buffer | null;
+        priv_wrapped_password: Buffer | null;
+        created_at: Date;
+      }>(
+        "SELECT public_key, priv_wrapped_recovery, priv_wrapped_password, created_at FROM user_keys WHERE user_id = $1 FOR UPDATE",
         [session.userId],
       );
       if (!cur[0]) {
@@ -459,12 +721,15 @@ export function createVaultKeyRoutes(): Hono {
           await client.query("ROLLBACK");
         } else {
           await client.query(
-            `INSERT INTO user_key_history (user_id, public_key, priv_wrapped_recovery, created_at)
-             VALUES ($1, $2, $3, $4)`,
-            [session.userId, cur[0].public_key, cur[0].priv_wrapped_recovery, cur[0].created_at],
+            `INSERT INTO user_key_history (user_id, public_key, priv_wrapped_recovery, priv_wrapped_password, created_at)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [session.userId, cur[0].public_key, cur[0].priv_wrapped_recovery, cur[0].priv_wrapped_password, cur[0].created_at],
           );
+          // The password wrap held the OLD private key: kept in history, cleared
+          // here so no device unlocks a key that no longer matches publicKey.
           await client.query(
-            `UPDATE user_keys SET public_key = $2, priv_wrapped_recovery = $3, created_at = now(), key_changed_at = now()
+            `UPDATE user_keys SET public_key = $2, priv_wrapped_recovery = $3, created_at = now(), key_changed_at = now(),
+                    priv_wrapped_password = NULL, password_wrap_at = NULL
               WHERE user_id = $1`,
             [session.userId, publicKey, recovery],
           );
@@ -490,6 +755,67 @@ export function createVaultKeyRoutes(): Hono {
       );
     }
     return c.json({ saved: true, replaced });
+  });
+
+  // ── Seamless keys F: the password unlocks the account key. The unlock key is
+  // derived with the server-only pepper, so the database alone (hashes +
+  // `priv_wrapped_password`) never yields it. Never log the body or the key.
+  routes.post("/me/keys/unlock", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const pepper = accountKeyPepper();
+    if (!pepper) return c.json({ error: "Password unlock is off on this server", code: PASSWORD_UNLOCK_OFF }, 503);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    const password = typeof body?.password === "string" ? body.password : "";
+    if (!password || password.length > 1024) {
+      return c.json({ error: "password is required", code: "invalid_argument" }, 400);
+    }
+    // Shares the email sign-in throttle (#237): a locked account is refused
+    // before any check, and a wrong password here counts as a failed sign-in.
+    // Check → verify → record run in the account's password slot (one at a
+    // time per email, across instances), so a burst cannot outrun the lock.
+    const verdict = await withPasswordSlot(session.email, async () => {
+      const wait = await lockedForSeconds(session.email);
+      if (wait > 0) return throttledResponse(wait);
+      const { rows } = await pool.query<{ password: string | null }>(
+        `SELECT password FROM account WHERE "userId" = $1 AND "providerId" = 'credential' AND password IS NOT NULL LIMIT 1`,
+        [session.userId],
+      );
+      if (!rows[0]?.password) {
+        return c.json({ error: "This account signs in without a password", code: "no_password" }, 409);
+      }
+      if (!(await verifyPassword({ hash: rows[0].password, password }))) {
+        await recordFailure(session.email);
+        return c.json({ error: "Wrong password", code: "wrong_password" }, 401);
+      }
+      await clearThrottle(session.email);
+      return "ok" as const;
+    });
+    if (verdict === null) return throttledResponse(1); // slot stayed busy
+    if (verdict !== "ok") return verdict;
+    await upgradeLoginHash({ userId: session.userId }, password);
+    const key = deriveUnlockKey(pepper, session.userId, password);
+    const unlockKey = key.toString("base64");
+    key.fill(0);
+    c.header("Cache-Control", "no-store");
+    return c.json({ unlockKey });
+  });
+
+  routes.put("/me/keys/password-wrap", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    if (!accountKeyPepper()) {
+      return c.json({ error: "Password unlock is off on this server", code: PASSWORD_UNLOCK_OFF }, 503);
+    }
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    const privWrapped = b64(body?.privWrapped);
+    if (!privWrapped) return c.json({ error: "privWrapped is required", code: "invalid_argument" }, 400);
+    const { rowCount } = await pool.query(
+      "UPDATE user_keys SET priv_wrapped_password = $2, password_wrap_at = now() WHERE user_id = $1",
+      [session.userId, privWrapped],
+    );
+    if (!rowCount) return c.json({ error: "This account has no security key yet", code: "no_account_key" }, 409);
+    return c.json({ stored: true });
   });
 
   const deviceIdOk = (d: string) => /^[A-Za-z0-9._-]{1,128}$/.test(d);

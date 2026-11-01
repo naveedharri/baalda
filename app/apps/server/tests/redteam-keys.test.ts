@@ -362,7 +362,8 @@ describe("red team round 2 (W3)", () => {
       `${b64(w.vk)}\u0000`,
       "A".repeat(64 * 1024),
       b64(other), // another vault's (or a guessed) key
-      b64(w.vk).replace(/.=$/, "A="), // the real key with one bit-group flipped
+      // The real key with one bit-group changed (never to the character it already has).
+      b64(w.vk).replace(/(.)=$/, (_, ch: string) => (ch === "A" ? "E=" : "A=")),
     ];
     const before = vaultKeyCache.has(w.vaultId);
     vaultKeyCache.clear();

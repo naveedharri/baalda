@@ -127,11 +127,50 @@ export async function throttledSignIn(
   }
   if (!email) return handler(req);
 
-  const wait = await lockedForSeconds(email);
-  if (wait > 0) return throttledResponse(wait);
+  const out = await withPasswordSlot(email, async () => {
+    const wait = await lockedForSeconds(email!);
+    if (wait > 0) return throttledResponse(wait);
+    const res = await handler(req);
+    if (res.status === 401) await recordFailure(email!);
+    else if (res.ok) await clearThrottle(email!);
+    return res;
+  });
+  return out ?? throttledResponse(1);
+}
 
-  const res = await handler(req);
-  if (res.status === 401) await recordFailure(email);
-  else if (res.ok) await clearThrottle(email);
-  return res;
+/** How long an attempt waits for the account's password slot before 429. */
+export const PASSWORD_SLOT_WAIT_MS = 5_000;
+const SLOT_POLL_MS = 20;
+
+/**
+ * Serialize check → password verify → failure record per account, across
+ * instances: a transaction-scoped advisory lock on the lowercased email. Without
+ * it, N simultaneous wrong attempts all pass the lock check before any failure
+ * is recorded (50 at once = 50 guesses instead of 5). `pg_try_` + a short poll
+ * that releases the connection between tries, so waiting attempts never pin
+ * pool connections (a burst on one email cannot starve the server). Null when
+ * the slot stayed busy for {@link PASSWORD_SLOT_WAIT_MS}.
+ */
+export async function withPasswordSlot<T>(email: string, fn: () => Promise<T>): Promise<T | null> {
+  const key = `signin:${throttleKey(email)}`;
+  const deadline = Date.now() + PASSWORD_SLOT_WAIT_MS;
+  for (;;) {
+    const client = await pool.connect();
+    let held = false;
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query<{ ok: boolean }>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS ok",
+        [key],
+      );
+      held = rows[0]?.ok === true;
+      if (held) return await fn();
+    } finally {
+      // COMMIT/ROLLBACK both end the transaction and free the lock.
+      await client.query(held ? "COMMIT" : "ROLLBACK").catch(() => {});
+      client.release();
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, SLOT_POLL_MS + Math.floor(Math.random() * SLOT_POLL_MS)));
+  }
 }

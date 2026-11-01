@@ -19,7 +19,7 @@ import { parseConnectLink } from "./connectLink";
 import { parseAccountLink } from "./accountLink";
 import { parseBillingLink } from "./billingLink";
 import { parseOAuthConsentLink } from "./oauthConsentLink";
-import { parseInviteDeepLink } from "./inviteLink";
+import { parseInviteDeepLink, redactInviteSecret } from "./inviteLink";
 import { parseNoteLink } from "./shareLink";
 
 /** Bring the window forward — a link click means "show me this note". */
@@ -57,7 +57,7 @@ async function handle(urls: string[] | null): Promise<void> {
     try {
       await useStore.getState().openInviteLink(url);
     } catch (e) {
-      console.error("[deeplink] invite failed", url, e);
+      console.error("[deeplink] invite failed", redactInviteSecret(url), e);
     }
     return;
   }

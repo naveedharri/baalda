@@ -1049,8 +1049,20 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
 - **Rule 3:** MCP tokens and public links store hashes only, plus VK wrapped under an HKDF key from the
   token secret (`mcp_token_keys`, `public_links.wrapped_vk`); unwrapped per call, never cached, zeroed
   after the request. MCP and links work with no desktop online.
-- **Device linking:** a new device of the same account shows a code that an existing device approves;
-  a session alone never yields keys. There is no account recovery kit.
+- **Device linking:** a new device signing in with a password unlocks the account key itself
+  (`user_keys.priv_wrapped_password`, under `POST /api/me/keys/unlock`'s HKDF(HMAC(`ACCOUNT_KEY_PEPPER`,
+  password))). Anyone with the password can open that person's vaults: the owner chose this (2026-11-01).
+  The pepper also makes login hashes `p1$` (rehashed on sign-in), so a DB dump alone cannot test passwords;
+  it must never change, and unset turns all of this off. Google-only accounts and stale wraps (after a
+  reset) fall back to one-click approval on an existing device (code shown, not typed). A session alone
+  never yields keys. There is no account recovery kit.
+- **Seamless keys** (2026-11-01, contract in `members/invitation-keys.ts` + `docs/VAULT_KEYS.md`): the
+  inviter's device seals VK to an invitee's existing account key (`invitation_vault_keys`, moved into
+  `vault_key_wraps` on accept by `applyInvitationKeys`) and wraps it under a per-invite secret carried only
+  in the email link fragment (`#k=` → `baalda://invite/…&k=`); join codes are `<code>-<device secret>`
+  (`vault_join_wraps`, only `sha256(secret)` stored). `keys/requests` also lists members lacking a wrap
+  (`kind: "missing"`), and key holders service every vault they hold, so a conversion keys everyone.
+  The server never stores the secrets; every stored wrap came from a device that presented VK.
 - **Churn brakes** (`crypto/key-churn.ts`): ≤3 account-key replacements per user per 24 h (counted from
   `user_key_history.replaced_at` under the `user_keys` row lock; first create and same-key re-PUT free),
   ≤10 new device registrations and ≤10 new approvals per user per hour (in process). 429
@@ -1062,18 +1074,24 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   allow-lists existing tokens/links with an HMAC under VK, and they upgrade on next use. `keys/init`
   accepts only when nothing used in 30 days lacks a wrap and the check bytes match the pending row; the
   gate runs inside the init transaction under row locks (`lockGateRows`). `VAULT_KEY_CONVERSION` plus
-  the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all. Owner review (migration
-  083): owners/admins get candidate metadata (label, creator, created/last used, `allowed`/`excluded`) and
-  review them in `ConversionReviewDialog` (all checked); unchecked ones go to `vault_conversion_exclusions`
-  via `allowlist`'s `excluded` (owner/admin, pending only): never allow-listed, skipped by the gate, NOT
-  revoked (works until keyed, then needs reconnecting); a later allow-list entry deletes the exclusion.
-- **Opt-in for existing vaults** (migration 081, decided 2026-10-29): `keys/mine`'s `conversionAllowed`
-  also needs `vaults.encryption_requested_at`. `POST /api/vaults` sets it while `BAALDA_VAULT_KEYS` is on
-  (new vaults encrypt automatically); an existing vault gets it only from an owner/admin's
-  "Encrypt this vault" (`POST …/keys/request-encryption`, idempotent, one-way, no undo route, one
-  `access_audit` row `vault`/`encryption_requested`). Enforced server-side: `keys/pending` and `keys/init` answer
-  409 `encryption_not_requested` and store nothing until it is set (`crypto/conversion.ts`). Desktop: `VaultKeySection` (shown to owners and
-  admins; key reveal/restore stay owner-only), view logic in `lib/vaultKeys/sectionView.ts`.
+  the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all. No owner review any more (2026-11-01): the
+  converting device allow-lists every candidate; exclusions recorded by an earlier review
+  (`vault_conversion_exclusions`, migration 083) still stand, and the review UI is gone.
+- **Launch safety net** (decided 2026-11-01, on until the owner switches it off): while
+  `KEY_RECOVERY_PUBLIC_KEY` is set, `crypto/key-recovery.ts` seals each vault key the cache acquires to that
+  OFFLINE public key (`vault_key_recovery`, migration 085, format in `recovery-seal.ts`); the owner's
+  `scripts/key-recovery.ts rescue` opens it locally and re-issues it through `POST
+  /api/admin/key-recovery/:vaultId/grant` (`KEY_RECOVERY_ADMIN_TOKEN` + the vault key itself; audited
+  `key_recovered`). Unset ⇒ no copies and every row deleted. While on, the offline key holder can read any
+  vault: the website must say so.
+- **Every vault converts automatically** (decided 2026-11-01, supersedes the 2026-10-29 opt-in): while
+  `VAULT_KEY_CONVERSION` is on, `crypto/conversion.ts encryptionRequested` answers true for every vault, so
+  `keys/mine` reports `conversionAllowed` (0.1.98+ clients) and `keys/pending`/`keys/init` accept it;
+  `vaults.encryption_requested_at` (migration 081) matters only with the flag off. There is no
+  "Encrypt this vault" button. An owner/admin device converts only when `lib/vaultKeys/conversionSafety.ts
+  conversionSafe` holds, so a lost laptop cannot lose the vault: another member has an account key
+  (`keys/mine` unkeyed `otherMembersWithKeys`), or this account has a password wrap, or 2+ devices hold
+  the account key; else `not-safe-yet` and it re-checks on later runs.
 - **Desktops without vault keys** (`http/client-version.ts VAULT_KEYS_MIN_DESKTOP` = 0.1.98, no env
   override, no grace, missing version = old): on a KEYED vault every entry point (`requireVaultKey`'s
   refusal, plus `crypto/transport.ts refuseKeyIncapableClient` on the sync/vault-channel token mints,

@@ -43,6 +43,16 @@ describe("sign-in throttle", () => {
     expect(retry).toBeLessThanOrEqual(60);
   });
 
+  it("50 simultaneous wrong attempts get at most 5 password checks; the rest 429", async () => {
+    await signUp("burst@example.com", "correct-horse-battery");
+    const statuses = await Promise.all(
+      Array.from({ length: 50 }, (_, i) => attempt(i % 2 ? "Burst@Example.com" : "burst@example.com", `wrong-${i}`, `10.1.0.${i + 1}`).then((r) => r.status)),
+    );
+    expect(statuses.filter((s) => s === 401).length).toBeLessThanOrEqual(5);
+    expect(statuses.filter((s) => s === 429).length).toBeGreaterThanOrEqual(45);
+    expect(statuses.every((s) => s === 401 || s === 429)).toBe(true);
+  });
+
   it("escalates the lockout 1 min → 5 min → 15 min", async () => {
     const email = "ladder@example.com";
     const expected = [60, 300, 900, 900];

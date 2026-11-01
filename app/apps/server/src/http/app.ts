@@ -11,6 +11,7 @@ import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from "better-a
 import { config } from "../config.js";
 import { auth } from "../auth/auth.js";
 import { throttledSignIn } from "../auth/signin-throttle.js";
+import { accountKeyPepper, clearPasswordWrap, upgradeLoginHash } from "../auth/login-pepper.js";
 import {
   CLIENT_VERSION_HEADER,
   clientVersionPolicy,
@@ -40,6 +41,7 @@ import { bugReportRoutes } from "./routes/bug-reports.js";
 import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
 import { createVaultKeyRoutes } from "./routes/vault-keys.js";
+import { createKeyRecoveryRoutes } from "./routes/key-recovery.js";
 import { createMcpKeyRoutes } from "./routes/mcp-keys.js";
 import { vaultKeyHeader } from "../crypto/transport.js";
 import { vaultKeysEnabled, VAULT_KEYS_FEATURE } from "../crypto/config.js";
@@ -362,7 +364,32 @@ export function createApp(deps: AppDeps): Hono {
 
   // Better Auth owns everything under /api/auth (web-standard Request handler).
   // Email sign-in passes the per-account failure throttle first (#237).
-  app.post("/api/auth/sign-in/email", (c) => throttledSignIn(c.req.raw, auth.handler));
+  // With ACCOUNT_KEY_PEPPER set, a successful sign-in also upgrades an old
+  // unpeppered login hash to `p1$` in place (seamless keys F, best-effort).
+  app.post("/api/auth/sign-in/email", async (c) => {
+    const creds = accountKeyPepper()
+      ? ((await c.req.raw.clone().json().catch(() => null)) as { email?: unknown; password?: unknown } | null)
+      : null;
+    const res = await throttledSignIn(c.req.raw, auth.handler);
+    if (res.ok && typeof creds?.email === "string" && typeof creds.password === "string") {
+      await upgradeLoginHash({ email: creds.email.trim() }, creds.password);
+    }
+    return res;
+  });
+  // A successful password change leaves the account key's password wrap under
+  // the old password's unlock key, so it can never open again: clear it (the
+  // reset path does the same in `onPasswordReset`). Session read BEFORE the
+  // handler, which may revoke it (`revokeOtherSessions`).
+  app.post("/api/auth/change-password", async (c) => {
+    const session = await getSession(c);
+    const res = await auth.handler(c.req.raw);
+    if (res.ok && session) {
+      await clearPasswordWrap(session.userId).catch((err: unknown) =>
+        console.error(`[auth] clearing the password wrap after a change failed: ${(err as Error).name}`),
+      );
+    }
+    return res;
+  });
   app.on(["GET", "POST"], "/api/auth/*", async (c) => {
     // OAuth connector tokens are stored as hashes (W3): the token endpoint is
     // wrapped, and Better Auth's HTTP session probe (which would accept a
@@ -401,6 +428,7 @@ export function createApp(deps: AppDeps): Hono {
   // header middleware only decodes X-Baalda-VK; it never logs or caches it.
   app.use("/api/*", vaultKeyHeader);
   app.route("/api", createVaultKeyRoutes());
+  app.route("/api", createKeyRecoveryRoutes());
   app.route("/api", createMcpKeyRoutes());
   app.route(
     "/api",

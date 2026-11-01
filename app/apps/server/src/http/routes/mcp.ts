@@ -19,7 +19,7 @@ import { TOOLS, TOOLS_BY_NAME } from "../../mcp/tools.js";
 import { mcpBuckets, rateLimitKey, toolCallCost } from "../../mcp/rate-limit.js";
 import { inc } from "../../metrics/sync-metrics.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
-import { KEY_REQUIRED_CODE, VK_HEADER } from "../../crypto/transport.js";
+import { keyRequiredResponse, VK_HEADER } from "../../crypto/transport.js";
 import { keysForMint } from "../../mcp/token-keys.js";
 
 /**
@@ -337,10 +337,7 @@ export function createMcpRoutes(deps: McpDeps): Hono {
     if (vaultKeysEnabled()) {
       const mint = await keysForMint(org, c.req.header(VK_HEADER), pool);
       if (mint.missing.length > 0) {
-        return c.json(
-          { error: "This vault needs its key. Open Baalda on a device that has it.", code: KEY_REQUIRED_CODE },
-          409,
-        );
+        return keyRequiredResponse(c, mint.missing[0] ?? null);
       }
       vaultKeys = mint.keys;
     }

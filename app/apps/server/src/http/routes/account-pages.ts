@@ -193,6 +193,29 @@ accountPageRoutes.get("/email-verified", (c) => {
   );
 });
 
+/**
+ * Seamless keys B5: the invite secret arrives in the link's FRAGMENT (`#k=`),
+ * which a browser never sends to the server. This script, run in the browser,
+ * copies a well-formed one onto the app deep link as `&k=` (button and
+ * auto-redirect) and strips it from the address bar. The server-rendered HTML
+ * never contains the secret.
+ */
+function inviteHandOffScript(deepLink: string): string {
+  return `(function () {
+  var link = ${JSON.stringify(deepLink)};
+  try {
+    var m = /(?:^#|&)k=([0-9A-HJKMNP-TV-Z]{26})(?:&|$)/.exec(location.hash || "");
+    if (m) {
+      link += "&k=" + m[1];
+      var a = document.getElementById("open-invite");
+      if (a) a.setAttribute("href", link);
+      if (history.replaceState) history.replaceState(null, "", location.pathname + location.search);
+    }
+  } catch (e) {}
+  location.href = link;
+})();`;
+}
+
 // ── Invitation landing page ──────────────────────────────────────────────────
 accountPageRoutes.get("/invite/:id", async (c) => {
   const id = c.req.param("id");
@@ -235,13 +258,13 @@ accountPageRoutes.get("/invite/:id", async (c) => {
     <p class="sub"><b>${esc(who)}</b> invited <b>${esc(inv.email)}</b> to this vault${
       inv.role === "admin" ? " as an admin" : ""
     }.</p>
-    <a class="btn primary" href="${esc(deepLink)}" style="display:flex;text-decoration:none">Open in ${esc(
+    <a id="open-invite" class="btn primary" href="${esc(deepLink)}" style="display:flex;text-decoration:none">Open in ${esc(
       BRAND_NAME,
     )}</a>
     <p class="sub" style="margin-top:18px">Sign in with <b>${esc(
       inv.email,
     )}</b> (or create an account with that address) and you'll land in the vault.</p>
     <p class="foot">Don't have ${esc(BRAND_NAME)} yet? <a href="https://baalda.com" rel="noopener">Get it</a>, then open this link again.</p>
-    <script>location.href = ${JSON.stringify(deepLink)};</script>`;
+    <script>${inviteHandOffScript(deepLink)}</script>`;
   return c.html(page({ title: `Join ${inv.organizationName}`, body }));
 });

@@ -56,6 +56,36 @@ describe("409 key_required", () => {
     expect(calls[1][VAULT_KEY_HEADER]).toBe("S0VZ");
   });
 
+  it("a note path learns its vault from the refusal and retries with that vault's key", async () => {
+    const { api, calls } = client([
+      new Response(JSON.stringify({ code: "key_required", vaultId: "v1" }), { status: 409 }),
+      new Response("[]", { status: 200 }),
+    ]);
+    let key: string | null = null;
+    const asked: string[] = [];
+    api.setVaultKeyResolver((id) => (id === "v1" ? key : null));
+    api.setKeyRequiredHandler(async (id) => {
+      asked.push(id);
+      key = "S0VZ";
+      return true;
+    });
+    expect(await api.listNoteVersions("d1")).toEqual([]);
+    expect(asked).toEqual(["v1"]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0][VAULT_KEY_HEADER]).toBeUndefined();
+    expect(calls[1][VAULT_KEY_HEADER]).toBe("S0VZ");
+  });
+
+  it("a refusal naming no vault on a note path stays an error, without asking for a key", async () => {
+    const { api, calls } = client([keyRequired()]);
+    let asked = false;
+    api.setKeyRequiredHandler(async () => (asked = true));
+    const err = await api.listNoteVersions("d1").catch((e: unknown) => e);
+    expect((err as ApiError).status).toBe(409);
+    expect(asked).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
   it("stays an error (never an empty server) when the key cannot be had", async () => {
     const { api, calls } = client([keyRequired(), keyRequired()]);
     api.setKeyRequiredHandler(async () => true);

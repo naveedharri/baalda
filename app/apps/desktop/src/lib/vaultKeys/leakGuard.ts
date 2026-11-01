@@ -15,6 +15,8 @@ export function containsVaultKey(text: string): boolean {
   if (typeof text !== "string" || !text) return false;
   const lower = text.toLowerCase();
   if (lower.includes(FILE_HEADER)) return true;
+  // Seamless keys: an invite link's `k=<S>` and a join code's `<code>-<J>` open a vault key too.
+  if (/(?:[#?&]k=[0-9a-z]{26}(?![0-9a-z])|(?<![0-9a-z-])[0-9a-z]{8}-[0-9a-z]{26}(?![0-9a-z]))/.test(lower)) return true;
   // Numbers and punctuation ("1. word") separate tokens; only letters count.
   const tokens = lower.match(/[a-z]+/g) ?? [];
   let run: string[] = [];
