@@ -49,7 +49,7 @@ export function vaultKeySectionView(opts: {
 }
 
 /** Account Settings → Profile: the line under "Your security code". */
-export const SECURITY_CODE_HINT = "Teammates may ask you to read this out to confirm a new device or key.";
+export const SECURITY_CODE_HINT = "Teammates may ask you to read this out if your security key changes, to confirm it is really you.";
 
 /**
  * The person's OWN security code (the same `shortFingerprint` teammates see in
