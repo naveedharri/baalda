@@ -35,6 +35,8 @@ import { Avatar } from "./Avatar";
 import { serverFailureMessage } from "./serverFailureMessage";
 import { SecurityCodeField } from "./SecurityCodeField";
 import { VaultKeySection } from "./VaultKeySection";
+import { onVaultKeyEvent, vaultKeyStateFor } from "../lib/vaultKeys/runtime";
+import { syncManager } from "../lib/sync/docSession";
 import { SettingsModal } from "./SettingsModal";
 import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
@@ -989,7 +991,52 @@ export { AccountSettings as default };
 const ENCRYPTED = ["Note text", "Version history", "Search index", "Public link tokens"];
 const NOT_ENCRYPTED = ["Note titles and folder names", "Attachments and files", "Who is in the vault and their access"];
 
+/** The hero card's words for one vault-key state. */
+function encryptionStatus(
+  state: string | null | undefined,
+  synced: boolean,
+): { tone: "on" | "wait" | "off" | "warn"; title: string; detail: string } {
+  if (!synced) {
+    return { tone: "off", title: "Nothing to show yet", detail: "Open a synced vault to see whether it is encrypted." };
+  }
+  switch (state) {
+    case "ready":
+      return {
+        tone: "on",
+        title: "Encrypted",
+        detail: "Note text, history and search are stored encrypted. This computer holds the key.",
+      };
+    case "waiting-for-teammate":
+      return {
+        tone: "wait",
+        title: "Waiting for the key",
+        detail: "A teammate's device shares it automatically, usually within 2 minutes of them being online.",
+      };
+    case "unkeyed":
+      return {
+        tone: "off",
+        title: "Not encrypted",
+        detail: "An owner or admin can turn it on in Vault Settings, General. Turning it on is permanent.",
+      };
+    case "needs-account-key":
+    case "security-warning":
+    case "key-mismatch":
+      return {
+        tone: "warn",
+        title: "Needs attention",
+        detail: "This computer cannot use the vault key right now. See the details below.",
+      };
+    default:
+      return {
+        tone: "off",
+        title: "Not available on this server",
+        detail: "This server does not have vault encryption turned on yet.",
+      };
+  }
+}
+
 /**
+ * Account Settings → Encryption: everything about vault keys on one page./**
  * Account Settings → Encryption: everything about vault keys on one page.
  * The open vault's status and key actions (the same card Vault Settings →
  * General leads with), this account's security code, and what the key covers.
@@ -1004,28 +1051,44 @@ function EncryptionTab() {
   const canManage = me?.role === "owner" || me?.role === "admin";
   const isOwner = me?.role === "owner";
 
+  const [, bump] = useState(0);
+  useEffect(() => onVaultKeyEvent(() => bump((n) => n + 1)), []);
+  const synced = !!(activeOrg && syncEnabled);
+  const status = encryptionStatus(synced ? vaultKeyStateFor(syncManager.registry.vaultId)?.state : null, synced);
+
   return (
     <div className="encryption-page">
+      <section className={`encryption-hero is-${status.tone}`}>
+        <span className="encryption-hero-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 3 4.5 6v5.5c0 4.6 3.1 8.4 7.5 9.5 4.4-1.1 7.5-4.9 7.5-9.5V6L12 3Z" />
+            {status.tone === "on" ? <path d="m8.8 12.2 2.2 2.2 4.3-4.6" /> : <path d="M12 8.5v4M12 15.5h.01" />}
+          </svg>
+        </span>
+        <div className="encryption-hero-text">
+          <span className="encryption-hero-vault">{synced ? activeOrg!.name : "No synced vault open"}</span>
+          <h3>{status.title}</h3>
+          <p>{status.detail}</p>
+        </div>
+      </section>
+
       <p className="encryption-lede">
-        Your notes are encrypted in our database with a key only your team&apos;s devices hold.
+        Notes are encrypted in our database with a key only your team&apos;s devices hold.
         Backups and admin tools see only scrambled text.
       </p>
 
-      <div className="subhead">{activeOrg && syncEnabled ? activeOrg.name : "This vault"}</div>
-      {activeOrg && syncEnabled ? (
-        <VaultKeySection vaultName={activeOrg.name} isOwner={isOwner} canManage={canManage} />
-      ) : (
-        <p className="muted">Open a synced vault to see its encryption.</p>
-      )}
+      {synced && <VaultKeySection vaultName={activeOrg!.name} isOwner={isOwner} canManage={canManage} />}
 
-      <div className="subhead">Your security code</div>
-      <div className="profile-rows">
-        <SecurityCodeField />
+      {/* Hidden by CSS until this computer has an account key to show. */}
+      <div className="encryption-code">
+        <div className="subhead">Your security code</div>
+        <div className="profile-rows">
+          <SecurityCodeField />
+        </div>
+        <p className="muted encryption-note">
+          Teammates compare this code with yours when they share a vault key with you.
+        </p>
       </div>
-      <p className="muted encryption-note">
-        Teammates compare this code with yours when they share a vault key with you. It only
-        appears once this computer holds your account key.
-      </p>
 
       <div className="subhead">What the key covers</div>
       <div className="encryption-cover">

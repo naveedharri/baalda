@@ -2868,3 +2868,24 @@ html:not(.rd-off) .checkpoint-confirm .modal-header { margin-bottom: 8px; }
 html:not(.rd-off) .checkpoint-confirm p { margin: 0 0 20px; line-height: 1.55; }
 html:not(.rd-off) .checkpoint-confirm-actions { justify-content: flex-end; gap: 8px; }
 html:not(.rd-off) .checkpoint-confirm-actions .primary.danger { background: var(--danger); color: #fff; }
+
+/* Account Settings → Encryption: a status hero that carries the page. */
+html:not(.rd-off) .encryption-hero {
+  display: flex; align-items: center; gap: 22px; padding: 26px 28px; border-radius: 18px;
+  background: var(--rd-surface); box-shadow: var(--rd-card-shadow);
+  --enc-fg: var(--text-tertiary); --enc-bg: rgba(var(--rd-ink), 0.05);
+}
+html:not(.rd-off) .encryption-hero.is-on { --enc-fg: var(--success); --enc-bg: var(--success-soft); background: linear-gradient(135deg, var(--success-soft), var(--rd-surface) 55%); }
+html:not(.rd-off) .encryption-hero.is-wait { --enc-fg: #b7791f; --enc-bg: rgba(245, 158, 11, 0.14); }
+html:not(.rd-off) .encryption-hero.is-warn { --enc-fg: var(--danger); --enc-bg: rgba(187, 67, 58, 0.1); }
+html:not(.rd-off) .encryption-hero-icon {
+  flex: none; width: 64px; height: 64px; border-radius: 18px; display: grid; place-items: center;
+  color: var(--enc-fg); background: var(--enc-bg);
+}
+html:not(.rd-off) .encryption-hero-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+html:not(.rd-off) .encryption-hero-vault { font: 600 11px var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); }
+html:not(.rd-off) .encryption-hero h3 { margin: 0; font: 600 22px var(--font-display); color: var(--enc-fg); }
+html:not(.rd-off) .encryption-hero.is-off h3 { color: var(--text-primary); }
+html:not(.rd-off) .encryption-hero p { margin: 0; color: var(--text-secondary); font-size: var(--fs-sm); line-height: 1.5; max-width: 620px; }
+html:not(.rd-off) .encryption-code { display: flex; flex-direction: column; gap: 12px; }
+html:not(.rd-off) .encryption-code:not(:has(.profile-row)) { display: none; }
