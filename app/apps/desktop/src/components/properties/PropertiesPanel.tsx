@@ -657,6 +657,8 @@ function TextValue({
         className="prop-input"
         value={shown}
         readOnly={readOnly}
+        // An empty value says it takes typing, like the tag row's "Add a tag…".
+        placeholder={readOnly ? undefined : "Add a value…"}
         aria-label={entry.key}
         aria-autocomplete={suggestable ? "list" : undefined}
         onFocus={() => suggestable && valueSg.setOpen(true)}

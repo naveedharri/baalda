@@ -906,6 +906,15 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     fontSize: "var(--fs-sm)",
     color: "var(--text-primary)",
   },
+  // Empty fields say they take input (placeholder), and every field shows a
+  // soft hover fill so it reads as clickable before you click it.
+  ".prop-input::placeholder, .prop-chip-input::placeholder": {
+    color: "var(--text-tertiary)",
+  },
+  ".prop-row:not(.is-readonly) .prop-input:hover, .prop-row:not(.is-readonly) .prop-chips:hover": {
+    background: "var(--bg-hover)",
+    borderRadius: "var(--radius-sm)",
+  },
   ".prop-name:hover:not(:read-only), .prop-input:hover:not(:read-only)": {
     backgroundColor: "var(--bg-subtle)",
   },
