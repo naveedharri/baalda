@@ -27,22 +27,16 @@ describe("vault key UI", () => {
     expect(memberDisplayName(members, "u9")).toBe("A teammate");
   });
 
-  it("Vault Settings offers Encrypt only for an unrequested vault, to owners and admins", () => {
+  it("Vault Settings never offers or explains encryption for an unkeyed vault (automatic, no opt-in)", () => {
     const view = (state: VaultKeyState | null, role: "owner" | "admin" | "member", hasWords = false) =>
       vaultKeySectionView({ hasWords, state, isOwner: role === "owner", canManage: role !== "member" });
-    const unrequested: VaultKeyState = { state: "unkeyed", conversionAllowed: false, encryptionRequested: false };
-    const requested: VaultKeyState = { state: "unkeyed", conversionAllowed: false, encryptionRequested: true };
-
-    expect(view(unrequested, "owner")).toBe("encrypt-offer");
-    expect(view(unrequested, "admin")).toBe("encrypt-offer");
-    expect(view(unrequested, "member")).toBe("hidden");
-    expect(view(requested, "owner")).toBe("setting-up");
-    expect(view(requested, "admin")).toBe("setting-up");
-    expect(view(requested, "member")).toBe("hidden");
-    // An older server that converts on its own never gets a button.
-    expect(view({ state: "unkeyed", conversionAllowed: true }, "admin")).toBe("setting-up");
-    // A server without opt-in (no encryptionRequested) has no request route: no button.
-    expect(view({ state: "unkeyed", conversionAllowed: false }, "owner")).toBe("hidden");
+    for (const state of [
+      { state: "unkeyed", conversionAllowed: false, encryptionRequested: false },
+      { state: "unkeyed", conversionAllowed: true, encryptionRequested: true },
+      { state: "unkeyed", conversionAllowed: true },
+    ] as VaultKeyState[]) {
+      for (const role of ["owner", "admin", "member"] as const) expect(view(state, role)).toBe("hidden");
+    }
     // Unknown state: nothing.
     expect(view(null, "owner")).toBe("hidden");
     // The key itself stays owner-only.

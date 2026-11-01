@@ -10,7 +10,6 @@ import { api } from "../auth/authManager";
 import {
   ApiError,
   rateLimitedMessage,
-  type AllowlistCandidate,
   type InviteManyInput,
   type InviteManyResult,
 } from "../api";
@@ -207,9 +206,7 @@ export type VaultKeyEvent =
   /** The server's churn brake refused a key step (429 rate_limited): its plain message. */
   | { kind: "rate-limited"; message: string }
   /** Lost every device: a new account key exists; teammates confirm `code`. */
-  | { kind: "fresh-key"; code: string }
-  /** Converting: the owner reviews these connections before any is allow-listed. */
-  | { kind: "conversion-review"; vaultId: string; candidates: AllowlistCandidate[] };
+  | { kind: "fresh-key"; code: string };
 
 const listeners = new Set<(e: VaultKeyEvent) => void>();
 /** UI: recovery kit, "<name>'s security key changed", the "given access" toast. */
@@ -316,7 +313,6 @@ function sessionFor(userId: string) {
     keysAllowed: () => keysAllowed,
     selfUserId: () => userId,
     deviceId: installDeviceId,
-    reviewConnections: true,
     canConvert: async (vaultId) => {
       const orgId = orgFor(vaultId);
       if (!orgId) return false;
@@ -372,11 +368,10 @@ async function runOnce(): Promise<void> {
       await serviceVault(c, vaultId);
       await serviceOtherVaults(c, vaultId);
       return;
-    } else if (conv === "needs-review") {
-      const candidates = c.session.pendingConversionReview(vaultId);
-      if (candidates) emit({ kind: "conversion-review", vaultId, candidates });
     }
-    if ((conv === "waiting-ready" || conv === "needs-review") && !c.conversionTimer) {
+    // `not-safe-yet` waits for the normal 2-minute run (it turns safe once the
+    // person types their password, a teammate gets an account key, etc.).
+    if (conv === "waiting-ready" && !c.conversionTimer) {
       // Keep the pending key warm: ask again every minute while open.
       c.conversionTimer = setTimeout(() => {
         c.conversionTimer = null;
@@ -591,17 +586,6 @@ export async function vaultKeysEnsure(vaultId: string): Promise<boolean> {
   noteVaultKeyState(vaultId, state);
   emit({ kind: "vault", vaultId, state });
   return state.state === "ready";
-}
-
-/** Connections waiting for the owner's review of the open vault's conversion. */
-export function pendingConversionReview(vaultId: string | null | undefined): AllowlistCandidate[] | null {
-  return (vaultId && current?.session.pendingConversionReview(vaultId)) || null;
-}
-
-/** The owner answered the review (`keep` = checked candidate keys): post it now. */
-export function submitConversionReview(vaultId: string, keep: ReadonlySet<string>): void {
-  current?.session.submitConversionReview(vaultId, keep);
-  vaultKeysNudge();
 }
 
 /** The open session, for the approval/restore screens. */
