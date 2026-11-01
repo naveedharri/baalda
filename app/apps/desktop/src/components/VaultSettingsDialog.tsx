@@ -873,7 +873,7 @@ function FreezeRootRow({ canManage }: { canManage: boolean }) {
   return (
     <>
       <div className="menu-sep" />
-      <label className="menu-row toggle-row">
+      <label className="menu-row toggle-row freeze-root-row">
         <span className="menu-row-label">
           Freeze vault root
           <span className="field-hint">

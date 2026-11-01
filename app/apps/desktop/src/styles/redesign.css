@@ -2818,12 +2818,18 @@ html:not(.rd-off) .checkpoint-revert:hover { background: var(--bg-hover); }
 /* General: the icon picker, Freeze vault root and the folder path sit on the
    page, split by hairlines, instead of each in its own card. */
 html:not(.rd-off) .settings-content > .vault-icon-settings,
-html:not(.rd-off) .settings-content > .toggle-row,
+html:not(.rd-off) .settings-content > .freeze-root-row,
 html:not(.rd-off) .settings-content > .join-code-row {
   background: transparent; box-shadow: none; border-radius: 0; padding: 0;
 }
-html:not(.rd-off) .settings-content > .toggle-row {
+html:not(.rd-off) .settings-content > .freeze-root-row {
   padding-top: var(--sp-4); border-top: 1px solid rgba(var(--rd-ink), 0.07);
+}
+/* Every other toggle row (Appearance, Notifications) is a grouped card row
+   like its neighbours: same white fill and 18px inset. An older rule stripped
+   all toggle rows to bare text flush with the card edge. */
+html:not(.rd-off) .settings-content > .toggle-row:not(.freeze-root-row) {
+  background: var(--rd-surface); padding: 16px 18px;
 }
 html:not(.rd-off) .vault-icon-settings .vault-icon-customise {
   background: transparent; box-shadow: none; padding: var(--sp-2) 0 0;
