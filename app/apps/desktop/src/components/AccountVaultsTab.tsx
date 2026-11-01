@@ -17,20 +17,13 @@ import { readOrgVaults, useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
 import { InvitationRows, useFreshInvitations } from "./InvitationRows";
 import { ConfirmDialog } from "./ConfirmDialog";
-import {
-  LOCATE_FOLDER,
-  RESTORE_HERE,
-  VaultFolderMissingRowActions,
-} from "./VaultFolderMissing";
+import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
 import { useResetLocalCopy } from "./useResetLocalCopy";
 import { type RowAction, RowActionsMenu } from "./RowActionsMenu";
 import { VaultTile } from "./VaultSwitcher";
 import {
-  type AccountVaultsView,
   localCardLabels,
-  readAccountVaultsView,
   vaultCardLabels,
-  folderMissingCardActions,
   vaultSlugLabel,
 } from "../lib/accountVaultsView";
 import { LimitNudge } from "./LimitNudge";
@@ -118,13 +111,14 @@ export function AccountVaultsTab() {
     null,
   );
   const [actionError, setActionError] = useState<string | null>(null);
-  // List rows or cards for the synced vaults; remembered on this device.
-  const [view] = useState<AccountVaultsView>(readAccountVaultsView);
   // The vault whose page is open (a card was clicked); null = the list.
   const [pageOrgId, setPageOrgId] = useState<string | null>(null);
   // Split view (list on the left, the selected vault's page on the right).
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
   const [vaultQuery, setVaultQuery] = useState("");
+  // Synced vaults and local folders get equal billing: one switch picks which
+  // list fills the page.
+  const [scope, setScope] = useState<"synced" | "local">(session ? "synced" : "local");
   // Free-plan vault-cap hit while creating — shows an upgrade nudge instead.
   const [limitNudge, setLimitNudge] = useState<{ kind: LimitKind; limit: number | null } | null>(
     null,
@@ -567,6 +561,29 @@ export function AccountVaultsTab() {
     ...localsShown.filter((r) => !(!syncEnabled && vault?.path === r.path)),
   ];
 
+  const scopeSwitch = (
+    <span className="vaults-scope" role="tablist" aria-label="Which vaults">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={scope === "synced"}
+        className={scope === "synced" ? "is-on" : undefined}
+        onClick={() => setScope("synced")}
+      >
+        Synced <b>{organizations.length}</b>
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={scope === "local"}
+        className={scope === "local" ? "is-on" : undefined}
+        onClick={() => setScope("local")}
+      >
+        On this device <b>{localsOrdered.length}</b>
+      </button>
+    </span>
+  );
+
   // The open vault page, when a card was clicked and the vault still exists.
   const pageOrg = session && pageOrgId ? organizations.find((o) => o.id === pageOrgId) ?? null : null;
   const renderPage = (o: (typeof organizations)[number], withBack = true) => {
@@ -647,10 +664,10 @@ export function AccountVaultsTab() {
           <div className="menu-sep" />
         </>
       )}
-      {session && (
+      {session && scope === "synced" && (
         <>
       <div className="subhead account-vaults-head">
-        <span>Synced vaults ({organizations.length})</span>
+        {scopeSwitch}
         <span className="account-vaults-head-actions">
           {!creating && !joining && (
           <>
@@ -831,11 +848,10 @@ export function AccountVaultsTab() {
         </>
       )}
 
-      {(localsOrdered.length > 0 || session) && (
+      {(localsOrdered.length > 0 || session) && (!session || scope === "local") && (
         <>
-          {session && <div className="menu-sep" />}
           <div className="subhead account-vaults-head">
-            <span>Local folders on this computer ({localsOrdered.length})</span>
+            {session ? scopeSwitch : <span>Local folders on this computer ({localsOrdered.length})</span>}
             {session && (
               <span className="account-vaults-head-actions">
                 <AsyncButton
@@ -848,93 +864,25 @@ export function AccountVaultsTab() {
               </span>
             )}
           </div>
-          {localsOrdered.length > 0 && view === "grid" && (
-            <div className="vault-grid">
+          {localsOrdered.length === 0 ? (
+            <div className="vaults-local-empty">
+              <b>No local folders yet</b>
+              <span>Folders you open on this computer without syncing show up here.</span>
+            </div>
+          ) : (
+            <ul className="vaults-split-items vaults-local-list" aria-label="Local folders on this computer">
               {localsOrdered.map((r) => {
                 const isCurrent = !syncEnabled && vault?.path === r.path;
                 const labels = localCardLabels(r);
-                const open = () => {
-                  if (!isCurrent && !busy) void switchToLocal(r.path);
-                };
                 return (
-                  <div
-                    key={r.path}
-                    className={`vault-grid-card${isCurrent ? " current" : ""}`}
-                    role="button"
-                    tabIndex={0}
-                    title={r.path}
-                    aria-label={isCurrent ? `${r.name}, current folder` : `Open ${r.name}`}
-                    onClick={open}
-                    onKeyDown={(e) => {
-                      if (e.target !== e.currentTarget) return;
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        open();
-                      }
-                    }}
-                  >
-                    <span
-                      className="vault-grid-menu"
-                      onClick={(e) => e.stopPropagation()}
-                      onKeyDown={(e) => e.stopPropagation()}
-                    >
-                      <RowActionsMenu
-                        ariaLabel={`More actions for ${r.name ?? r.path}`}
-                        disabled={busy}
-                        actions={localActions(r.path, r.name ?? r.path)}
-                        align="start"
-                      />
-                    </span>
+                  <li key={r.path} className={`vaults-split-item${isCurrent ? " selected" : ""}`} title={r.path}>
                     <span className="menu-swatch vault-grid-letter" aria-hidden="true">
                       {labels.letter}
                     </span>
-                    <span className="vault-grid-name" title={labels.name}>{labels.name}</span>
-                    <span className="muted vault-grid-meta" title={labels.meta}>{labels.meta}</span>
-                    <span
-                      className="vault-grid-foot"
-                      onClick={(e) => e.stopPropagation()}
-                      onKeyDown={(e) => e.stopPropagation()}
-                    >
-                      {isCurrent && rootMissing ? (
-                        <CardFolderMissingChip
-                          synced={false}
-                          busy={busy}
-                          onRestore={() => undefined}
-                          onLocate={recover(() => useStore.getState().locateVaultFolder())}
-                        />
-                      ) : isCurrent ? (
-                        <span className="member-role">Current</span>
-                      ) : (
-                        <AsyncButton
-                          className="vault-switch-chip"
-                          disabled={busy}
-                          onClick={() => switchToLocal(r.path)}
-                        >
-                          Open here
-                        </AsyncButton>
-                      )}
+                    <span className="vaults-split-text">
+                      <span className="vaults-split-name">{labels.name}</span>
+                      <span className="vaults-split-meta">{r.path}</span>
                     </span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          {localsOrdered.length > 0 && view !== "grid" && (
-          <ul className="member-list vault-list">
-            {localsOrdered.map((r) => {
-              const isCurrent = !syncEnabled && vault?.path === r.path;
-              return (
-                <li key={r.path}>
-                  <span className="menu-swatch" aria-hidden="true">
-                    {r.name[0]?.toUpperCase() ?? "?"}
-                  </span>
-                  <span className="member-name">
-                    {r.name}
-                    <span className="muted vault-folder" title={r.path}>
-                      {" · Local"}
-                    </span>
-                  </span>
-                  <span className="vault-row-actions">
                     {isCurrent && rootMissing ? (
                       <VaultFolderMissingRowActions
                         synced={false}
@@ -943,14 +891,14 @@ export function AccountVaultsTab() {
                         onLocate={recover(() => useStore.getState().locateVaultFolder())}
                       />
                     ) : isCurrent ? (
-                      <span className="member-role">Current</span>
+                      <span className="vaults-split-open">Open now</span>
                     ) : (
                       <AsyncButton
-                        className="link-btn"
+                        className="vault-switch-chip"
                         disabled={busy}
                         onClick={() => switchToLocal(r.path)}
                       >
-                        Switch
+                        Open here
                       </AsyncButton>
                     )}
                     <RowActionsMenu
@@ -958,11 +906,10 @@ export function AccountVaultsTab() {
                       disabled={busy}
                       actions={localActions(r.path, r.name ?? r.path)}
                     />
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
+                  </li>
+                );
+              })}
+            </ul>
           )}
           {foreignFootnote && <p className="muted account-vaults-footnote">{foreignFootnote}</p>}
         </>
@@ -1108,31 +1055,3 @@ export function AccountVaultsTab() {
 }
 
 
-/**
- * A card's folder-missing recovery as ONE foot-row chip, the "Switch here"
- * chip's style, so the card keeps its neighbours' shape. Any other action
- * lives in the card's ⋯ menu (`folderMissingCardActions`).
- */
-function CardFolderMissingChip({
-  synced,
-  busy,
-  onRestore,
-  onLocate,
-}: {
-  synced: boolean;
-  busy: boolean;
-  onRestore: () => Promise<unknown> | unknown;
-  onLocate: () => Promise<unknown> | unknown;
-}) {
-  const { chip } = folderMissingCardActions(synced);
-  return (
-    <AsyncButton
-      className="vault-switch-chip"
-      disabled={busy}
-      title="This vault's folder is gone from this device."
-      onClick={chip === "restore" ? onRestore : onLocate}
-    >
-      {chip === "restore" ? RESTORE_HERE : LOCATE_FOLDER}
-    </AsyncButton>
-  );
-}
