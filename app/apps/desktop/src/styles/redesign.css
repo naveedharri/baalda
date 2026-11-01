@@ -2776,6 +2776,6 @@ html:not(.rd-off) .sidebar-header-id .vault-tile { margin-left: -2px; }
 /* The empty "Set a home" box starts on the icon line (x=20) instead of 8px
    left of it; its right edge stays on the checkbox column. */
 html:not(.rd-off) .home-sidebar-row.is-unset {
-  margin-left: 8px !important;
+  margin-left: 0 !important;
   width: calc(var(--sidebar-layout-w, 300px) - 62px) !important;
 }
