@@ -73,6 +73,8 @@ const TABLES = [
   "invitation_vault_keys",
   "vault_join_wraps",
   "vault_key_recovery",
+  "server_secrets",
+  "server_secret_fingerprints",
   '"user"',
 ];
 

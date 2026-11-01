@@ -1053,7 +1053,9 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   (`user_keys.priv_wrapped_password`, under `POST /api/me/keys/unlock`'s HKDF(HMAC(`ACCOUNT_KEY_PEPPER`,
   password))). Anyone with the password can open that person's vaults: the owner chose this (2026-11-01).
   The pepper also makes login hashes `p1$` (rehashed on sign-in), so a DB dump alone cannot test passwords;
-  it must never change, and unset turns all of this off. Google-only accounts and stale wraps (after a
+  it must never change. `auth/pepper-boot.ts` settles it at boot: env wins; unset with vault keys on, the
+  server generates one once into `server_secrets` (migration 086; a stolen DB then includes it); unset with
+  keys off, off. A fingerprint is recorded and a different or missing pepper REFUSES THE BOOT. Google-only accounts and stale wraps (after a
   reset) fall back to one-click approval on an existing device (code shown, not typed). A session alone
   never yields keys. There is no account recovery kit.
 - **Seamless keys** (2026-11-01, contract in `members/invitation-keys.ts` + `docs/VAULT_KEYS.md`): the
