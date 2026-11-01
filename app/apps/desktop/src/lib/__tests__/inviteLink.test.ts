@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildInviteLink, isInvitationExpired, parseInviteDeepLink } from "../inviteLink";
+import { buildInviteLink, isInvitationExpired, parseInviteDeepLink, redactInviteSecret } from "../inviteLink";
 import { parseConnectLink } from "../connectLink";
 import { parseNoteLink } from "../shareLink";
 
@@ -128,5 +128,19 @@ describe("isInvitationExpired (#268)", () => {
     expect(isInvitationExpired(undefined, now)).toBe(false);
     expect(isInvitationExpired(null, now)).toBe(false);
     expect(isInvitationExpired("not a date", now)).toBe(false);
+  });
+});
+
+describe("redactInviteSecret", () => {
+  // The invite secret k opens a vault key: a failed deep link is logged
+  // without it (contract: never in logs, errors, toasts or bug reports).
+  it("drops k from a deep link, keeps the rest, leaves other text alone", () => {
+    const k = "0123456789ABCDEFGHJKMNPQRS";
+    expect(redactInviteSecret(`baalda://invite/abc?server=https%3A%2F%2Fx.test&k=${k}`)).toBe(
+      "baalda://invite/abc?server=https%3A%2F%2Fx.test&k=<redacted>",
+    );
+    expect(redactInviteSecret(`baalda://invite/abc?k=${k}&server=x`)).toBe("baalda://invite/abc?k=<redacted>&server=x");
+    expect(redactInviteSecret(`https://x.test/invite/abc#k=${k}`)).toBe("https://x.test/invite/abc#k=<redacted>");
+    expect(redactInviteSecret("baalda://invite/abc?server=x")).toBe("baalda://invite/abc?server=x");
   });
 });

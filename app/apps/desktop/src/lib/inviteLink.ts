@@ -86,6 +86,11 @@ export function parseInviteDeepLink(url: string): InviteDeepLink | null {
   };
 }
 
+/** A link safe to log: the invite secret `k` (it opens a vault key) replaced. */
+export function redactInviteSecret(url: string): string {
+  return String(url).replace(/([#?&]k=)[^&#\s]*/g, "$1<redacted>");
+}
+
 /**
  * Has this invitation's link stopped working? Better Auth leaves an expired row
  * at status "pending", so the members list has to read the date to label it and
