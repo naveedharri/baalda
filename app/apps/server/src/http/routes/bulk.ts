@@ -562,6 +562,10 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
   routes.post("/vaults/:vaultId/files/batch", async (c) => {
     const auth = await gate(c);
     if (auth instanceof Response) return auth;
+    // A build without vault keys registers no file in a keyed vault (426): its
+    // bytes would be refused anyway, leaving a `files` row with nothing behind it.
+    const outdated = await refuseKeyIncapableClient(c, auth.vaultId);
+    if (outdated) return outdated;
     const body = await c.req.json().catch(() => null);
     const items = readItems(body, config.batchMaxFiles);
     if (!Array.isArray(items)) return c.json(items, 400);

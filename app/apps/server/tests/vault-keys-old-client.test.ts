@@ -101,6 +101,13 @@ function entryPoints(s: Awaited<ReturnType<typeof setup>>) {
       { relPath: "attachments/x.png", sha256: "a".repeat(64), size: 3, mime: "image/png" },
     ],
     ["GET", `/vaults/${s.vaultId}/search?q=hello`, undefined],
+    // File registration: the bytes would be refused, so no byte-less `files` row.
+    ["POST", "/files", { vaultId: s.vaultId, path: "report.pdf", docId: "11111111-2222-4333-8444-999999999999" }],
+    [
+      "POST",
+      `/vaults/${s.vaultId}/files/batch`,
+      { items: [{ relPath: "pic.png", sha256: "b".repeat(64), size: 3, mime: "image/png" }] },
+    ],
   ] as const;
 }
 
@@ -224,6 +231,12 @@ describe("vault keys: desktops that predate them", () => {
     expect(boot.status).toBeLessThan(300);
     const search = await call(s.owner, "GET", `/vaults/${s.vaultId}/search?q=plain`, old);
     expect(search.status).toBe(200);
+    const file = await call(s.owner, "POST", "/files", old, { vaultId: s.vaultId, path: "r.pdf" });
+    expect(file.status).toBeLessThan(300);
+    const files = await call(s.owner, "POST", `/vaults/${s.vaultId}/files/batch`, old, {
+      items: [{ relPath: "p.png", sha256: "b".repeat(64), size: 3, mime: "image/png" }],
+    });
+    expect(files.status).toBe(200);
   });
 
   it("flag off: a keyed row is never consulted (old builds unaffected)", async () => {
