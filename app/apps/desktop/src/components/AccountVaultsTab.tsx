@@ -676,21 +676,7 @@ export function AccountVaultsTab() {
             </button>
           </>
           )}
-        </span>
-      </div>
-      {/* Split view: the vault list on the left, the selected vault's page on
-          the right (its role, plan, folder, usage and actions). Opens on the
-          vault you are in. */}
-      <div className="vaults-split">
-        <div className="vaults-split-list">
-          <input
-            className="vaults-search"
-            type="search"
-            placeholder="Search vaults"
-            aria-label="Search vaults"
-            value={vaultQuery}
-            onChange={(e) => setVaultQuery(e.target.value)}
-          />
+          {/* The form opens where its button was, so nothing else moves. */}
         {(creating || joining) && (
           <div className="vault-tab-actions">
             {creating ? (
@@ -765,6 +751,21 @@ export function AccountVaultsTab() {
             ) : null}
           </div>
         )}
+        </span>
+      </div>
+      {/* Split view: the vault list on the left, the selected vault's page on
+          the right (its role, plan, folder, usage and actions). Opens on the
+          vault you are in. */}
+      <div className="vaults-split">
+        <div className="vaults-split-list">
+          <input
+            className="vaults-search"
+            type="search"
+            placeholder="Search vaults"
+            aria-label="Search vaults"
+            value={vaultQuery}
+            onChange={(e) => setVaultQuery(e.target.value)}
+          />
           <ul className="vaults-split-items" role="listbox" aria-label="Synced vaults">
             {ordered
               .filter((o) => !vaultQuery.trim() || o.name.toLowerCase().includes(vaultQuery.trim().toLowerCase()))

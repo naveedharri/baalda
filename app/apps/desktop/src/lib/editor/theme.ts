@@ -442,9 +442,10 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     overflowWrap: "normal",
     wordBreak: "normal",
   },
+  // No fill: the header reads as bold text over a stronger rule.
   ".cm-md-table th": {
-    backgroundColor: "var(--bg-subtle)",
     fontWeight: "700",
+    borderBottomColor: "var(--border-strong)",
   },
 
   // ---- The editable table (./table/TableWidget) ----
@@ -502,7 +503,7 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     fontSize: "0.9em",
     padding: "0.1em 0.3em",
     borderRadius: "var(--radius-sm)",
-    backgroundColor: "var(--bg-subtle)",
+    boxShadow: "inset 0 0 0 1px var(--border-strong)",
   },
   ".cm-md-table .cm-md-cell-content .cm-md-link, .cm-md-table .cm-md-cell-content .cm-wikilink":
     {
@@ -1082,7 +1083,8 @@ export const markdownHighlightSpec = [
       fontFamily: "var(--font-mono)",
       fontSize: "0.9em",
       color: "var(--text-primary)",
-      background: "var(--bg-subtle)",
+      // An outline, not a filled chip.
+      boxShadow: "inset 0 0 0 1px var(--border-strong)",
       padding: "0.1em 0.35em",
       borderRadius: "var(--radius-sm)",
     },

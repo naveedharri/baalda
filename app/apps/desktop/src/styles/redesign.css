@@ -2714,9 +2714,10 @@ html:not(.rd-off) .conn-recent-label {
 }
 @keyframes rd-chip-in-top { from { opacity: 0; translate: 0 -8px; } to { opacity: 1; translate: 0 0; } }
 
-/* Editor fills are neutral, not cream: table headers, inline code chips, code
-   wells and embeds read as quiet grey on the white page. A translucent ink
-   keeps them neutral over whatever sits underneath. */
-html:not(.rd-off):not([data-theme="dark"]) .cm-editor {
-  --bg-subtle: rgba(var(--rd-ink), 0.045);
-}
+/* Vaults: New vault / Join with code open their form in the header, in the
+   buttons' own spot, at the buttons' height, so the list never shifts. */
+.account-vaults-head-actions .vault-tab-actions { margin: 0; }
+.account-vaults-head-actions .vault-tab-form { width: 380px; max-width: 100%; font-size: var(--fs-sm); font-weight: 400; }
+.account-vaults-head-actions .vault-tab-form input,
+.account-vaults-head-actions .vault-tab-form button { height: 34px; font-size: var(--fs-sm); }
+.account-vaults-head-actions .vault-tab-form button { padding: 0 14px; font-weight: 600; }
