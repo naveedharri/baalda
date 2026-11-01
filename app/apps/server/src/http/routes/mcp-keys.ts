@@ -40,6 +40,7 @@ import { verifyVk } from "../../crypto/vk-check.js";
 import { verifyAllowMac } from "../../crypto/token-wrap.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
+import { KEYING_REQUIRES_ADMIN, mayKeyVault } from "./vault-keys.js";
 
 const MAX_ENTRIES = 2000;
 
@@ -223,6 +224,14 @@ export function createMcpKeyRoutes(): Hono {
     // Prove the caller holds the key this check is for.
     const vk = presented(c);
     if (!vk || !verifyVk(vk, m.vaultId, vkCheck)) return keyRequired(c);
+    // Converting is for owners/admins (`mayKeyVault`): the converting device
+    // is the only key holder until it shares the key.
+    const role = await orgRole(m.orgId, m.userId);
+    const { rows: creator } = await pool.query<{ by: string | null }>(
+      "SELECT encryption_requested_by AS by FROM vaults WHERE id = $1",
+      [m.vaultId],
+    );
+    if (!mayKeyVault(role, m.userId, creator[0]?.by ?? null)) return c.json(KEYING_REQUIRES_ADMIN, 403);
     if (await loadVkCheck(m.vaultId, pool)) {
       return c.json({ error: "This vault already has a key", code: "already_keyed" }, 409);
     }

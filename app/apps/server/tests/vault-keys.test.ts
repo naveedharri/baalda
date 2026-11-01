@@ -69,6 +69,8 @@ describe("vault key routes", () => {
 
   it("init: the first claimer wins, a second init is 409", async () => {
     const s = await setup();
+    // Two key-capable people (keying is owner/admin only) race.
+    await pool.query(`UPDATE member SET role = 'admin' WHERE "userId" = $1`, [s.member.userId]);
     const [a, b] = await Promise.all([init(s), init(s, s.member)]);
     expect([a.status, b.status].sort()).toEqual([201, 409]);
     const { rows } = await pool.query("SELECT phase, generation FROM vault_crypto_state WHERE vault_id = $1", [s.vaultId]);

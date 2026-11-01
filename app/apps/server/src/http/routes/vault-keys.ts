@@ -82,6 +82,21 @@ async function membership(vaultId: string, userId: string, db: Queryable = pool)
   return role ? { orgId, role } : null;
 }
 
+/** 403 body: keying (or converting) a vault is for owners and admins. */
+export const KEYING_REQUIRES_ADMIN = {
+  error: "Only an owner or admin can encrypt this vault",
+  code: "keying_requires_admin",
+} as const;
+
+/**
+ * Who may key a vault: an owner/admin, or the person who created it (POST
+ * /api/vaults stamps `encryption_requested_by`; only owners/admins create
+ * vaults, so this matters only if they were demoted since).
+ */
+export function mayKeyVault(role: string | null | undefined, userId: string, createdBy: string | null): boolean {
+  return role === "owner" || role === "admin" || (createdBy !== null && createdBy === userId);
+}
+
 async function holdsWrap(vaultId: string, userId: string, db: Queryable = pool): Promise<boolean> {
   const { rows } = await db.query(
     "SELECT 1 FROM vault_key_wraps WHERE vault_id = $1 AND user_id = $2 LIMIT 1",
@@ -142,13 +157,24 @@ export function createVaultKeyRoutes(): Hono {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const { rows } = await client.query<{ vk_check: Buffer | null; encryption_requested_at: Date | null }>(
-        "SELECT vk_check, encryption_requested_at FROM vaults WHERE id = $1 FOR UPDATE",
+      const { rows } = await client.query<{
+        vk_check: Buffer | null;
+        encryption_requested_at: Date | null;
+        encryption_requested_by: string | null;
+      }>(
+        "SELECT vk_check, encryption_requested_at, encryption_requested_by FROM vaults WHERE id = $1 FOR UPDATE",
         [vaultId],
       );
       if (!rows[0]) {
         await client.query("ROLLBACK");
         return c.json({ error: "Unknown vault" }, 404);
+      }
+      // Only an owner/admin (or the person who created this vault) may key it:
+      // whoever keys it is its only key holder until they share it, so a plain
+      // member keying the team's vault would lock everyone else out.
+      if (!mayKeyVault(member.role, session.userId, rows[0].encryption_requested_by)) {
+        await client.query("ROLLBACK");
+        return c.json(KEYING_REQUIRES_ADMIN, 403);
       }
       if (rows[0].vk_check) {
         await client.query("ROLLBACK");
