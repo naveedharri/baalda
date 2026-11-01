@@ -21,6 +21,7 @@ import {
 } from "../lib/updater";
 import { useStore } from "../store";
 import { updateView } from "../lib/updateView";
+import appIcon from "../assets/brand/app-icon.png";
 import {
   CHARACTER_PREFIX,
   PROFILE_CHARACTER_SEEDS,
@@ -988,7 +989,7 @@ function UpdateCard({
   return (
     <div className={`update-card is-${view.tone}`}>
       <div className="update-card-row">
-        <span className="update-card-mark" aria-hidden="true">B</span>
+        <img className="update-card-mark is-icon" src={appIcon} alt="" aria-hidden="true" />
         <div className="update-card-text">
           <span className="update-card-title">{view.title}</span>
           <span className="update-card-sub" role="status" aria-live="polite">
