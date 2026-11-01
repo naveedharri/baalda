@@ -1622,6 +1622,16 @@ export default function App() {
 
     const onKey = async (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
+      // Copy by keyboard even when no native Edit menu item claims ⌘C first (a
+      // menu that has it consumes the key before it gets here). Copy only: a
+      // second copy is harmless where the native one also runs, a second cut
+      // is not.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === "c") {
+        const sel = window.getSelection();
+        const inField = document.activeElement?.closest("input, textarea, .cm-editor");
+        if (inField || (sel && !sel.isCollapsed)) document.execCommand("copy");
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "h") {
         e.preventDefault();
         void useStore.getState().openHome().catch((err) => toast(String(err), "error"));

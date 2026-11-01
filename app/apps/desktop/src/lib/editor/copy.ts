@@ -93,7 +93,15 @@ export function richNoteCopy(notePath: string, read: ReadCopyAttachment) {
       event.preventDefault();
       // No bytes to embed: the copy event's own clipboardData carries both
       // flavours and nothing else touches the pasteboard.
-      const plain = plainNoteCopy(text, notePath);
+      // Building the rich copy must never cost the copy itself: on any
+      // failure the selection still goes out as plain text.
+      let plain: ReturnType<typeof plainNoteCopy>;
+      try {
+        plain = plainNoteCopy(text, notePath);
+      } catch {
+        event.clipboardData?.setData("text/plain", text);
+        return true;
+      }
       if (plain && event.clipboardData) {
         event.clipboardData.setData("text/html", plain.html);
         event.clipboardData.setData("text/plain", plain.text);

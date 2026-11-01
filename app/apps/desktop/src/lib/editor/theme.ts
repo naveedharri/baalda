@@ -126,18 +126,22 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     outline: "none",
   },
 
-  // [[wiki-links]]: accent text that grows a soft rounded chip on hover.
+  // [[wiki-links]] read as links: the link colour (not the violet accent the
+  // rest of the editor uses) and an underline that firms up on hover. In the
+  // body face even inside inline code, so a link never passes for code.
   ".cm-wikilink": {
-    color: "var(--accent)",
+    color: "var(--link)",
     cursor: "pointer",
-    borderRadius: "var(--radius-sm)",
-    padding: "0 2px",
-    margin: "0 -2px",
-    transition: "background-color var(--t-fast) var(--ease)",
+    fontFamily: "var(--editor-font-family, var(--font-body))",
+    backgroundColor: "transparent",
+    textDecoration: "underline",
+    textDecorationThickness: "1px",
+    textUnderlineOffset: "3px",
+    textDecorationColor: "color-mix(in srgb, var(--link) 45%, transparent)",
+    transition: "text-decoration-color var(--t-fast) var(--ease)",
   },
   ".cm-wikilink:hover": {
-    backgroundColor: "var(--accent-soft)",
-    textDecoration: "none",
+    textDecorationColor: "var(--link)",
   },
   // A link to a note that does not exist: greyed out, and inert to the mouse
   // (a click places the caret; it never creates the note). `--text-tertiary`
