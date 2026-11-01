@@ -7,15 +7,15 @@
 html:not(.rd-off) {
   /* Redesign surface tokens (dark values in the dark block below). */
   --rd-surface: #fff;
-  --rd-cream: #fcfaf6;
-  --rd-fill: #f3efe6;
-  --rd-fill-soft: #f6f3ec;
+  --rd-cream: #faf9f8;
+  --rd-fill: #efeeea;
+  --rd-fill-soft: #f3f2ef;
   --rd-chip: #1a1920;
   --rd-ink: 11, 10, 16;
-  /* Very light cream canvas, white cards. */
+  /* Very light cream canvas at 15% saturation (hue 40), white cards. */
   --bg-app: var(--rd-cream);
   --bg-card: var(--rd-cream);
-  --bg-subtle: #f6f3ed;
+  --bg-subtle: #f4f2ef;
   --text-primary: var(--rd-chip);
   --text-secondary: #55545e;
   --text-tertiary: #85848f;
