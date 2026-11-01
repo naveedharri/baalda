@@ -605,6 +605,19 @@ describe("converting an existing vault", () => {
     expect(await s.convertVault("v1")).toBe("converted");
   });
 
+  it("a vault that is not safe yet never fetches the member list (role check comes last)", async () => {
+    const canConvert = vi.fn(async () => true);
+    const { srv, s } = await ownerSetup({ canConvert });
+    srv.conv.allowed = true;
+    srv.conv.ready = true;
+    srv.conv.otherMembersWithKeys = 0;
+    expect(await s.convertVault("v1")).toBe("not-safe-yet");
+    expect(canConvert).not.toHaveBeenCalled();
+    srv.conv.otherMembersWithKeys = 1;
+    expect(await s.convertVault("v1")).toBe("converted");
+    expect(canConvert).toHaveBeenCalledTimes(1);
+  });
+
   it("safety rule: a second approved computer is enough", async () => {
     const { srv, s } = await ownerSetup();
     srv.conv.allowed = true;

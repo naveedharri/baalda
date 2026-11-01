@@ -507,7 +507,6 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const mine = await api.getMyVaultKeys(vaultId);
     if (mine.keyed) return "already-keyed";
     if (!mine.conversionAllowed) return "not-allowed";
-    if (!(deps.canConvert && (await deps.canConvert(vaultId)))) return "not-allowed";
     const priv = await keys.getAccountPrivateKey();
     if (!priv) return "needs-account-key";
     const remote = await api.getMyKeys();
@@ -520,6 +519,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       approvedDevices: Array.isArray(remote.devices) ? remote.devices.length + 1 : undefined,
     });
     if (!safe) return "not-safe-yet";
+    // The role check reads the member list (heavy on a big vault): asked only
+    // once everything else says go, so a vault that is not safe yet does not
+    // fetch it on every run.
+    if (!(deps.canConvert && (await deps.canConvert(vaultId)))) return "not-allowed";
 
     let vk = await keys.getVaultKey(vaultId); // a crashed earlier run: same key
     if (!vk) {
@@ -871,15 +874,43 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
         out.keyChanged.push({ userId: r.userId, fingerprint: shortFingerprint(pub), publicKey: r.publicKey });
         continue;
       }
-      await api.postVaultKeyWrap(
-        vaultId,
-        { userId: r.userId, generation: held.generation, sealedVk: toBase64(sealVkTo(pub, held.vk)) },
-        held.b64,
-      );
+      try {
+        await api.postVaultKeyWrap(
+          vaultId,
+          { userId: r.userId, generation: held.generation, sealedVk: toBase64(sealVkTo(pub, held.vk)) },
+          held.b64,
+        );
+      } catch (e) {
+        // Removed from the vault after the list was read (our roster may lag
+        // a minute): skip that person, keep sealing for everyone else.
+        if (isNotMemberRefusal(e)) {
+          out.refused.push(r.userId);
+          continue;
+        }
+        throw e;
+      }
       if (!pinned) await deps.pins.set(r.userId, fp);
       out.sealed.push({ userId: r.userId, fingerprint: shortFingerprint(pub) });
     }
     return out;
+  }
+
+  /**
+   * Service runs back to back while each one fills its per-run cap (a big team
+   * right after conversion: 150 people = 3 runs now, not 3 runs 2 minutes
+   * apart). Bounded by {@link MAX_BACK_TO_BACK_RUNS}; stops at the first run
+   * that seals nobody (junk listings cannot keep it going).
+   */
+  async function serviceAllKeyRequests(vaultId: string): Promise<ServiceResult> {
+    const all: ServiceResult = { sealed: [], refused: [], keyChanged: [] };
+    for (let run = 0; run < MAX_BACK_TO_BACK_RUNS; run++) {
+      const r = await serviceKeyRequests(vaultId);
+      all.sealed.push(...r.sealed);
+      all.refused.push(...r.refused);
+      all.keyChanged.push(...r.keyChanged);
+      if (!filledRun(r)) break;
+    }
+    return all;
   }
 
   /** `X-Baalda-VK` value for a vault: verified keys only. Synchronous. */
@@ -902,6 +933,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     approveChangedKey,
     ensureVaultKey,
     serviceKeyRequests,
+    serviceAllKeyRequests,
     headerFor,
     inviteKeyMaterial,
     sealInviteResults,
@@ -940,6 +972,19 @@ export type VaultKeySession = ReturnType<typeof createVaultKeySession>;
 
 /** Most key requests handled in one run (the rest wait for the next run). */
 export const MAX_KEY_REQUESTS_PER_RUN = 50;
+/** Back-to-back service runs per cycle while each fills its cap (500 people). */
+export const MAX_BACK_TO_BACK_RUNS = 10;
+
+/** A run that sealed someone and used its whole per-run budget: more may wait. */
+export function filledRun(r: ServiceResult): boolean {
+  return r.sealed.length > 0 && r.sealed.length + r.refused.length + r.keyChanged.length >= MAX_KEY_REQUESTS_PER_RUN;
+}
+
+/** The server's 404 `not_member` for a wrap: that person left the vault. */
+function isNotMemberRefusal(e: unknown): boolean {
+  const err = e as { status?: unknown; body?: { code?: unknown } } | null;
+  return err?.status === 404 && err.body?.code === "not_member";
+}
 /** Most "a new computer is signing in" prompts raised from one listing. */
 export const MAX_PENDING_DEVICES = 5;
 

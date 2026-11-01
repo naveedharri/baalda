@@ -7,6 +7,7 @@ import type { AccountKeysBody, MyVaultKeys, VaultKeyInit } from "../api";
 import { deviceCode, generateAccountKeypair, toBase64 } from "./crypto";
 import {
   createVaultKeySession,
+  MAX_BACK_TO_BACK_RUNS,
   MAX_KEY_REQUESTS_PER_RUN,
   MAX_PENDING_DEVICES,
   type VaultKeySessionDeps,
@@ -29,7 +30,7 @@ function harness() {
       return { keyed: true, pending: false, vkCheck: v.vkCheck, generation: v.generation, wraps: [{ generation: v.generation, sealedVk: v.wrap }] };
     }),
     listVaultKeyRequests: vi.fn(async () => requests),
-    postVaultKeyWrap: vi.fn(async () => {}),
+    postVaultKeyWrap: vi.fn(async (_v: string, _w: { userId: string }, _k?: string) => {}),
     putMyKeys: vi.fn(async (b: AccountKeysBody) => void (me = b)),
     getMyKeys: vi.fn(async () => me),
     registerPendingDevice: vi.fn(async () => {}),
@@ -119,6 +120,55 @@ describe("red team 3: crafted key requests from the server", () => {
     const seen = new Set<string>();
     for (let i = 0; i < 3; i++) for (const d of await h.session.pendingDevices()) seen.add(d.deviceId);
     expect(seen.has("d-real")).toBe(true);
+  });
+
+  it("a person removed mid-run (server: not_member) is skipped; the rest are still sealed", async () => {
+    const h = harness();
+    await h.ready();
+    h.setRequests([
+      { userId: "u-gone", publicKey: pub() },
+      { userId: "u-a", publicKey: pub() },
+      { userId: "u-b", publicKey: pub() },
+    ]);
+    h.api.postVaultKeyWrap.mockImplementation(async (_v: string, w: { userId: string }) => {
+      if (w.userId === "u-gone") {
+        throw Object.assign(new Error("That person isn't a member of this vault"), { status: 404, body: { code: "not_member" } });
+      }
+    });
+    const out = await h.session.serviceKeyRequests("v1");
+    expect(out.sealed.map((s) => s.userId)).toEqual(["u-a", "u-b"]);
+    expect(out.refused).toEqual(["u-gone"]);
+    // Any other failure still stops the run (nothing silently swallowed).
+    h.api.postVaultKeyWrap.mockImplementation(async () => {
+      throw Object.assign(new Error("boom"), { status: 500 });
+    });
+    h.setRequests([{ userId: "u-c", publicKey: pub() }]);
+    await expect(h.session.serviceKeyRequests("v1")).rejects.toThrow("boom");
+  });
+
+  it("a big team is sealed back to back in one cycle (bounded), not one run per 2 minutes", async () => {
+    const h = harness();
+    await h.ready();
+    let listed = Array.from({ length: 160 }, (_, i) => ({ userId: `m${i}`, publicKey: pub() }));
+    h.api.listVaultKeyRequests.mockImplementation(async () => listed);
+    h.api.postVaultKeyWrap.mockImplementation(async (_v: string, w: { userId: string }) => {
+      listed = listed.filter((r) => r.userId !== w.userId);
+    });
+    const out = await h.session.serviceAllKeyRequests("v1");
+    expect(out.sealed).toHaveLength(160);
+    expect(h.api.listVaultKeyRequests).toHaveBeenCalledTimes(4);
+    // Junk that is never sealed (not members) stops after one run.
+    h.api.listVaultKeyRequests.mockClear();
+    h.isMember.mockImplementation(async () => false);
+    listed = Array.from({ length: 5000 }, (_, i) => ({ userId: `junk${i}`, publicKey: pub() }));
+    expect((await h.session.serviceAllKeyRequests("v1")).sealed).toHaveLength(0);
+    expect(h.api.listVaultKeyRequests).toHaveBeenCalledTimes(1);
+    // Real members beyond 10 full runs wait for the next cycle.
+    h.api.listVaultKeyRequests.mockClear();
+    h.isMember.mockImplementation(async () => true);
+    listed = Array.from({ length: 2000 }, (_, i) => ({ userId: `big${i}`, publicKey: pub() }));
+    expect((await h.session.serviceAllKeyRequests("v1")).sealed).toHaveLength(MAX_BACK_TO_BACK_RUNS * MAX_KEY_REQUESTS_PER_RUN);
+    expect(h.api.listVaultKeyRequests).toHaveBeenCalledTimes(MAX_BACK_TO_BACK_RUNS);
   });
 
   it("one person listed thousands of times with one key: sealed once, checked once", async () => {
