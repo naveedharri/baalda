@@ -17,7 +17,14 @@ import {
   type VaultKeySession,
   type VaultKeyState,
 } from "./session";
-import { forgetOrgVaultIds, forgetVaultKeyMaterial, rememberOrgVault, vaultIdsForOrg } from "./forget";
+import {
+  forgetOrgVaultIds,
+  forgetVaultKeyMaterial,
+  knownOrgVaults,
+  orgOfVault,
+  rememberOrgVault,
+  vaultIdsForOrg,
+} from "./forget";
 import { keychainPinStore, keychainVaultKeyStore } from "./store";
 
 export const SERVICE_INTERVAL_MS = 2 * 60 * 1000;
@@ -137,12 +144,30 @@ let current: {
   account: AccountKeysState | null;
 } | null = null;
 
+/**
+ * The roster a membership check reads: the vault's OWN org (background
+ * servicing covers vaults other than the open one), else the open org. One
+ * overview per org per minute, so N vaults x 50 requests is not N x 50 calls.
+ */
+const rosterMemo = new Map<string, { at: number; members: Promise<Array<{ userId: string; role?: string }>> }>();
+const ROSTER_TTL_MS = 60_000;
+function rosterOf(orgId: string): Promise<Array<{ userId: string; role?: string }>> {
+  const hit = rosterMemo.get(orgId);
+  if (hit && Date.now() - hit.at < ROSTER_TTL_MS) return hit.members;
+  const members = api.getMembersOverview(orgId).then((r) => r.members);
+  members.catch(() => rosterMemo.delete(orgId));
+  rosterMemo.set(orgId, { at: Date.now(), members });
+  return members;
+}
+
 function sessionFor(userId: string) {
   const serverUrl = api.getBaseUrl();
   const key = `${serverUrl}|${userId}`;
   if (current?.key === key) return current;
   vaultKeysClosed();
   current?.session.dispose();
+  rosterMemo.clear();
+  const orgFor = (vaultId: string) => orgOfVault(serverUrl, userId, vaultId) ?? current?.orgId ?? null;
   const session = createVaultKeySession({
     api,
     keys: keychainVaultKeyStore(serverUrl, userId),
@@ -152,18 +177,18 @@ function sessionFor(userId: string) {
     selfUserId: () => userId,
     deviceId: installDeviceId,
     reviewConnections: true,
-    canConvert: async () => {
-      const orgId = current?.orgId;
+    canConvert: async (vaultId) => {
+      const orgId = orgFor(vaultId);
       if (!orgId) return false;
+      // Fresh roster: a role change must not ride a cached answer.
       const { members } = await api.getMembersOverview(orgId);
       const role = members.find((m) => m.userId === userId)?.role;
       return role === "owner" || role === "admin";
     },
-    isMember: async (_vaultId, memberId) => {
-      const orgId = current?.orgId;
+    isMember: async (vaultId, memberId) => {
+      const orgId = orgFor(vaultId);
       if (!orgId) return false;
-      const { members } = await api.getMembersOverview(orgId);
-      return members.some((m) => m.userId === memberId);
+      return (await rosterOf(orgId)).some((m) => m.userId === memberId);
     },
   });
   api.setVaultKeyResolver((vaultId) => session.headerFor(vaultId));
@@ -201,6 +226,11 @@ async function runOnce(): Promise<void> {
       const ready: VaultKeyState = { state: "ready", generation: 1, created: true };
       noteVaultKeyState(vaultId, ready);
       emit({ kind: "vault", vaultId, state: ready });
+      // Right after keys/init: seal to every current member now, not in 2 min.
+      rosterMemo.clear();
+      await serviceVault(c, vaultId);
+      await serviceOtherVaults(c, vaultId);
+      return;
     } else if (conv === "needs-review") {
       const candidates = c.session.pendingConversionReview(vaultId);
       if (candidates) emit({ kind: "conversion-review", vaultId, candidates });
@@ -214,9 +244,41 @@ async function runOnce(): Promise<void> {
     }
     return;
   }
-  if (state.state !== "ready") return;
+  if (state.state === "ready") await serviceVault(c, vaultId);
+  await serviceOtherVaults(c, vaultId);
+}
+
+async function serviceVault(c: NonNullable<typeof current>, vaultId: string): Promise<void> {
   const result = await c.session.serviceKeyRequests(vaultId);
   if (result.sealed.length || result.keyChanged.length) emit({ kind: "serviced", vaultId, result });
+}
+
+/**
+ * Every OTHER vault this device holds a key for on this server + account
+ * (the ones recorded by `rememberOrgVault`): verify the held key against the
+ * server's check, then seal to whoever is listed. Never touches the open-vault
+ * block state (`noteVaultKeyState`). One vault's failure never stops the rest.
+ */
+async function serviceOtherVaults(c: NonNullable<typeof current>, openVaultId: string): Promise<void> {
+  const [serverUrl, userId] = splitScope(c.key);
+  if (!userId) return;
+  const seen = new Set<string>([openVaultId]);
+  for (const [, vaultId] of knownOrgVaults(serverUrl, userId)) {
+    if (seen.has(vaultId) || current !== c) continue;
+    seen.add(vaultId);
+    try {
+      if (!(await c.session.holdsVaultKey(vaultId))) continue;
+      const state = await c.session.ensureVaultKey(vaultId);
+      if (state.state === "ready") await serviceVault(c, vaultId);
+    } catch (e) {
+      console.warn("[vault-keys] background re-share failed for one vault", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
+function splitScope(key: string): [string, string] {
+  const at = key.lastIndexOf("|");
+  return at < 0 ? [key, ""] : [key.slice(0, at), key.slice(at + 1)];
 }
 
 /** Single-flight: a nudge during a run schedules exactly one more. */

@@ -3,14 +3,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApproveDevicePrompt } from "../VaultKeyPrompts";
 
-describe("ApproveDevicePrompt (red team 3)", () => {
-  it("never shows the device's code: the person must type what the new computer shows", () => {
-    const device = { deviceId: "d-evil", publicKey: "AAAA", code: "c0de f00d" };
+describe("ApproveDevicePrompt (one click, seamless keys E)", () => {
+  it("shows the device's code read-only with Approve / Not me and no typing", () => {
+    const device = { deviceId: "d1", publicKey: "AAAA", code: "c0de f00d", name: "MacBook Pro" };
     const html = renderToStaticMarkup(createElement(ApproveDevicePrompt, { device, done: () => {} }));
-    expect(html).not.toContain("c0de");
-    expect(html).not.toContain("f00d");
-    expect(html).toContain("Code shown on the new computer");
-    // Approve starts disabled until a full code is typed.
-    expect(html).toMatch(/<button[^>]*disabled[^>]*>[\s\S]*Approve/);
+    expect(html).toContain("MacBook Pro is signing in");
+    expect(html).toContain("c0de f00d");
+    expect(html).not.toContain("<input");
+    expect(html).toContain("Approve");
+    expect(html).toContain("Not me");
+    expect(html).not.toMatch(/<button[^>]*disabled[^>]*>[\s\S]*Approve/);
   });
 });

@@ -274,10 +274,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
   }
 
   /**
-   * The person approved `device` by TYPING the code the new computer shows:
-   * seal our account key to it. The prompt never displays the code, so a
-   * device row the person never started (a server's or database writer's own
-   * key) cannot be approved by clicking through.
+   * The person approved `device` (one click; the prompt shows the code
+   * read-only and passes it back): seal our account key to it. The code must
+   * still match the listed public key, so a row whose key and code disagree is
+   * never approved.
    */
   async function approveDevice(device: PendingDevice, typedCode: string): Promise<boolean> {
     if (!(await enabled()) || accountMismatch) return false;
@@ -683,6 +683,10 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     ensureVaultKey,
     serviceKeyRequests,
     headerFor,
+    /** Does this device's keychain hold a key for the vault (verified or not)? */
+    async holdsVaultKey(vaultId: string): Promise<boolean> {
+      return verified.has(vaultId) || (await keys.getVaultKey(vaultId)) !== null;
+    },
     /** Membership ended / vault gone: stop serving this vault's key (memory only;
      *  the keychain copy goes through `forget.ts`). */
     forgetVerified(vaultId: string) {
