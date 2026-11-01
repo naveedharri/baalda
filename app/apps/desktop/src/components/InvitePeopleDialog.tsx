@@ -64,6 +64,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
   const [role, setRole] = useState<"member" | "admin">("member");
   const [access, setAccess] = useState<InviteAccess>("default");
   const [code, setCode] = useState<string | null>(null);
+  const shortCode = code ? code.split("-")[0]! : "";
   const [results, setResults] = useState<InviteManyResult[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [limit, setLimit] = useState<{ kind: LimitKind; limit: number | null } | null>(null);
@@ -156,11 +157,18 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
             <div className="invite-code-card">
               <p className="invite-code-lead">Anyone with this code can join {vaultName}</p>
               {code ? (
-                <div className="invite-code-tiles" aria-label={`Join code ${code}`}>
-                  {code.split("").map((ch, i) => (
-                    <span key={i} className={i === Math.floor(code.length / 2) ? "gap" : undefined}>{ch}</span>
-                  ))}
-                </div>
+                <>
+                  {/* Tiles show the vault's 8-character code; a device that holds the
+                      vault key appends `-<key>` (26 chars), which only travels by Copy. */}
+                  <div className="invite-code-tiles" aria-label={`Join code ${code}`}>
+                    {shortCode.split("").map((ch, i) => (
+                      <span key={i} className={i === Math.floor(shortCode.length / 2) ? "gap" : undefined}>{ch}</span>
+                    ))}
+                  </div>
+                  {shortCode !== code && (
+                    <p className="invite-code-note">Copy it to share: the copied code includes a key, so they get in right away.</p>
+                  )}
+                </>
               ) : (
                 <p className="invite-code-lead">Loading the code…</p>
               )}

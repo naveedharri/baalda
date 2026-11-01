@@ -2480,6 +2480,7 @@ html:not(.rd-off) .invite-code-tiles span {
   font: 500 22px var(--font-mono); color: var(--text-primary);
 }
 html:not(.rd-off) .invite-code-tiles span.gap { margin-left: 10px; }
+html:not(.rd-off) .invite-code-note { margin: 0; max-width: 360px; text-align: center; font-size: var(--fs-sm); color: var(--text-tertiary); line-height: 1.45; }
 html:not(.rd-off) .invite-copy { min-width: 132px; }
 html:not(.rd-off) .invite-copy.is-copied,
 html:not(.rd-off) .invite-copy.is-copied:hover { background: var(--rdc-2f7a46, #2f7a46); box-shadow: 0 8px 18px -8px rgba(47, 122, 70, 0.55); }
@@ -3052,6 +3053,10 @@ html:not(.rd-off) .sidebar .tree-row.selected { --rd-row-bg: var(--rd-surface); 
 html:not(.rd-off) .sidebar .tree-row.selected::after {
   box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 2px 6px -2px rgba(var(--rd-ink), 0.1);
 }
+/* Agent Skills row: the tree rows' highlight, same light purple and the same
+   12px-from-each-side span (38px past the old right edge, like `right: -2px`). */
+html:not(.rd-off) .skills-shortcut-row { width: calc(var(--sidebar-layout-w, 300px) - 16px); padding-right: 10px; border-radius: 9px; }
+html:not(.rd-off) .skills-shortcut-row:hover { background: var(--bg-hover); }
 
 /* Account Settings → Vaults: Synced and On this device carry equal weight,
    one switch at the top picks which list fills the page. */

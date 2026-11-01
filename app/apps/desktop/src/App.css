@@ -11394,23 +11394,36 @@ body.access-board-grabbing * {
 .vaults-split {
   display: grid;
   grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
-  gap: var(--sp-4);
+  /* Search on its own row, so the detail starts level with the LIST, not
+     with the search box above it. */
+  grid-template-areas:
+    "search ."
+    "list detail";
+  column-gap: var(--sp-4);
+  row-gap: var(--sp-2);
   align-items: start;
 }
 @media (max-width: 860px) {
   .vaults-split {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "search" "list" "detail";
   }
 }
 .vaults-split-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  min-width: 0;
+  /* Its children (search, list) take their own grid areas. */
+  display: contents;
 }
 .vaults-search {
+  grid-area: search;
   width: 100%;
   height: 36px;
+}
+.vaults-split-list > .vaults-split-items {
+  grid-area: list;
+  min-width: 0;
+}
+.vaults-split-detail {
+  grid-area: detail;
 }
 .vaults-split-list .vault-tab-actions {
   margin: 0;
