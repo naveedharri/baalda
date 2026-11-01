@@ -21,6 +21,8 @@
     (every app still installs it). Ask before each release: silent, or notes?
 -->
 
+## 0.1.99
+
 ## 0.1.98
 
 - **A fresh new look** across the app, with cleaner settings, menus and sidebar.
