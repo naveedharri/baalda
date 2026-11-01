@@ -46,7 +46,10 @@ export const proseSelection = layer({
         // the widget's spacing above it. While you type in one of its cells
         // the wash stays off: you are editing, not selecting.
         const block = view.lineBlockAt(pos);
-        if (block.type !== BlockType.Text) {
+        // Only a replaced range (a rendered table) is drawn as one box. A line
+        // carrying widgets beside its text (the title and properties sit
+        // before line 1) has an array type and is painted like any other line.
+        if (block.type === BlockType.WidgetRange) {
           const rect = widgetBox(view, block.from);
           if (rect) out.push(rect);
           pos = block.to + 1;

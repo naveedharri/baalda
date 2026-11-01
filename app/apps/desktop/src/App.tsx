@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { EditorView } from "@codemirror/view";
 import "./App.css";
 import "./styles/redesign.css";
 import { AccountMenu } from "./components/AccountMenu";
@@ -1622,6 +1623,20 @@ export default function App() {
 
     const onKey = async (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
+      // ⌘A / Ctrl+A with nothing focused (after a click on the tab strip, the
+      // sidebar or empty space) selects the open note, not the whole window.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === "a") {
+        const ae = document.activeElement;
+        const inField = ae?.closest("input, textarea, [contenteditable='true'], .cm-editor");
+        const host = document.querySelector<HTMLElement>(".editor-pane .cm-editor, .cm-editor");
+        const view = !inField && host ? EditorView.findFromDOM(host) : null;
+        if (view) {
+          e.preventDefault();
+          view.focus();
+          view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+        }
+        return;
+      }
       // Copy by keyboard even when no native Edit menu item claims ⌘C first (a
       // menu that has it consumes the key before it gets here). Copy only: a
       // second copy is harmless where the native one also runs, a second cut
