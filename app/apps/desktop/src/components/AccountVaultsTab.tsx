@@ -579,7 +579,7 @@ export function AccountVaultsTab() {
         className={scope === "local" ? "is-on" : undefined}
         onClick={() => setScope("local")}
       >
-        On this device <b>{localsOrdered.length}</b>
+        Local <b>{localsOrdered.length}</b>
       </button>
     </span>
   );
