@@ -128,7 +128,7 @@ export function GraphControls(props: GraphControlsProps): React.JSX.Element {
         <div className="graph-control-group-title">Forces</div>
         {fixedShape && (
           <p className="graph-control-note">
-            Radial and Ring are fixed shapes, so forces don&apos;t move them. Drag a note to place it.
+            Radial and Ring are fixed shapes, so forces don&apos;t move them. A dragged note springs back to its place.
           </p>
         )}
         {slider("charge", fixedShape)}

@@ -313,8 +313,8 @@ type Drag =
       startY: number;
       moved: boolean;
     }
-  // Radial / Ring: a note dragged off its fixed spot. No physics there, so it
-  // simply follows the pointer and stays where it is dropped.
+  // Radial / Ring: a note dragged off its fixed spot. It follows the pointer
+  // and springs back to its place when let go.
   | {
       type: "spot";
       node: SimNode;
@@ -327,6 +327,9 @@ type Drag =
 
 /** A note's place on the globe this frame: screen-world position and depth. */
 type Placed = SimNode & { gx?: number; gy?: number; gz?: number };
+
+/** Seconds a released Radial / Ring note takes to spring back to its spot. */
+const TEMPLATE_SPRING_S = 1.1;
 
 /** Switching shape glides every note from where it was to where it goes. */
 const MORPH_MS = 850;
@@ -599,8 +602,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       | { shape: TemplateShape; nodes: SimNode[]; pos: Float32Array; group: Int32Array; r: number; index: Map<SimNode, number> }
       | null,
     // Radial / Ring: notes the user dragged off their spot, as world offsets.
-    // Kept until the shape or the visible set changes.
     templateOffsets: new Map<SimNode, { dx: number; dy: number }>(),
+    // Released notes springing back to their Radial / Ring spot.
+    templateSprings: new Map<SimNode, { dx: number; dy: number; t0: number }>(),
     seededEdges: 0,
     idleTimer: 0,
     // Large global graphs offload the force sim to a Web Worker so the UI thread
@@ -1120,6 +1124,19 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         t = { shape, nodes, ...L, index: new Map(nodes.map((n, i) => [n, i])) };
         S.template = t;
         S.templateOffsets.clear();
+        S.templateSprings.clear();
+      }
+      const now = performance.now();
+      for (const [n, sp] of S.templateSprings) {
+        // A damped spring: overshoots a touch, then settles, like the flat graph.
+        const t = (now - sp.t0) / 1000;
+        if (t >= TEMPLATE_SPRING_S) {
+          S.templateSprings.delete(n);
+          S.templateOffsets.delete(n);
+          continue;
+        }
+        const k = Math.exp(-6 * t) * Math.cos(11 * t);
+        S.templateOffsets.set(n, { dx: sp.dx * k, dy: sp.dy * k });
       }
       for (let i = 0; i < nodes.length; i++) {
         const p = nodes[i] as Placed;
@@ -2001,6 +2018,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       canvas!.classList.add("is-dragging");
       if (S.view !== "flat" && !S.globe.on && hit) {
         // Radial / Ring: a press on a note moves that note, not the view.
+        S.templateSprings.delete(hit);
         const off = S.templateOffsets.get(hit);
         S.drag = {
           type: "spot",
@@ -2131,7 +2149,21 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         requestDraw();
       }
       if (drag?.type === "spot") {
-        if (!drag.moved) useStore.getState().openNoteByPath(drag.node.path).then(onClose);
+        if (!drag.moved) {
+          useStore.getState().openNoteByPath(drag.node.path).then(onClose);
+        } else {
+          // Let go: the note springs back to its place in the shape.
+          const off = S.templateOffsets.get(drag.node);
+          if (off) {
+            S.templateSprings.set(drag.node, { dx: off.dx, dy: off.dy, t0: performance.now() });
+            const tick = () => {
+              if (!S.templateSprings.size) return;
+              requestDraw();
+              requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+          }
+        }
         requestDraw();
       }
       if (drag?.type === "node") {
