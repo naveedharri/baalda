@@ -871,11 +871,21 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
         out.keyChanged.push({ userId: r.userId, fingerprint: shortFingerprint(pub), publicKey: r.publicKey });
         continue;
       }
-      await api.postVaultKeyWrap(
-        vaultId,
-        { userId: r.userId, generation: held.generation, sealedVk: toBase64(sealVkTo(pub, held.vk)) },
-        held.b64,
-      );
+      try {
+        await api.postVaultKeyWrap(
+          vaultId,
+          { userId: r.userId, generation: held.generation, sealedVk: toBase64(sealVkTo(pub, held.vk)) },
+          held.b64,
+        );
+      } catch (e) {
+        // Removed from the vault after the list was read (our roster may lag
+        // a minute): skip that person, keep sealing for everyone else.
+        if (isNotMemberRefusal(e)) {
+          out.refused.push(r.userId);
+          continue;
+        }
+        throw e;
+      }
       if (!pinned) await deps.pins.set(r.userId, fp);
       out.sealed.push({ userId: r.userId, fingerprint: shortFingerprint(pub) });
     }
@@ -940,6 +950,12 @@ export type VaultKeySession = ReturnType<typeof createVaultKeySession>;
 
 /** Most key requests handled in one run (the rest wait for the next run). */
 export const MAX_KEY_REQUESTS_PER_RUN = 50;
+
+/** The server's 404 `not_member` for a wrap: that person left the vault. */
+function isNotMemberRefusal(e: unknown): boolean {
+  const err = e as { status?: unknown; body?: { code?: unknown } } | null;
+  return err?.status === 404 && err.body?.code === "not_member";
+}
 /** Most "a new computer is signing in" prompts raised from one listing. */
 export const MAX_PENDING_DEVICES = 5;
 

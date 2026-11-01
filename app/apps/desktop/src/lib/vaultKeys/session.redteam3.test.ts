@@ -29,7 +29,7 @@ function harness() {
       return { keyed: true, pending: false, vkCheck: v.vkCheck, generation: v.generation, wraps: [{ generation: v.generation, sealedVk: v.wrap }] };
     }),
     listVaultKeyRequests: vi.fn(async () => requests),
-    postVaultKeyWrap: vi.fn(async () => {}),
+    postVaultKeyWrap: vi.fn(async (_v: string, _w: { userId: string }, _k?: string) => {}),
     putMyKeys: vi.fn(async (b: AccountKeysBody) => void (me = b)),
     getMyKeys: vi.fn(async () => me),
     registerPendingDevice: vi.fn(async () => {}),
@@ -119,6 +119,30 @@ describe("red team 3: crafted key requests from the server", () => {
     const seen = new Set<string>();
     for (let i = 0; i < 3; i++) for (const d of await h.session.pendingDevices()) seen.add(d.deviceId);
     expect(seen.has("d-real")).toBe(true);
+  });
+
+  it("a person removed mid-run (server: not_member) is skipped; the rest are still sealed", async () => {
+    const h = harness();
+    await h.ready();
+    h.setRequests([
+      { userId: "u-gone", publicKey: pub() },
+      { userId: "u-a", publicKey: pub() },
+      { userId: "u-b", publicKey: pub() },
+    ]);
+    h.api.postVaultKeyWrap.mockImplementation(async (_v: string, w: { userId: string }) => {
+      if (w.userId === "u-gone") {
+        throw Object.assign(new Error("That person isn't a member of this vault"), { status: 404, body: { code: "not_member" } });
+      }
+    });
+    const out = await h.session.serviceKeyRequests("v1");
+    expect(out.sealed.map((s) => s.userId)).toEqual(["u-a", "u-b"]);
+    expect(out.refused).toEqual(["u-gone"]);
+    // Any other failure still stops the run (nothing silently swallowed).
+    h.api.postVaultKeyWrap.mockImplementation(async () => {
+      throw Object.assign(new Error("boom"), { status: 500 });
+    });
+    h.setRequests([{ userId: "u-c", publicKey: pub() }]);
+    await expect(h.session.serviceKeyRequests("v1")).rejects.toThrow("boom");
   });
 
   it("one person listed thousands of times with one key: sealed once, checked once", async () => {
