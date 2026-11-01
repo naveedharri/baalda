@@ -2894,7 +2894,7 @@ html:not(.rd-off) .encryption-code:not(:has(.profile-row)) { display: none; }
    so flipping the choice changes only the ring, never the size or text line. */
 html:not(.rd-off) .conn-options { align-items: stretch; }
 html:not(.rd-off) .conn-option { line-height: 1.4; font-size: 14px; margin: 0; appearance: none; }
-html:not(.rd-off) .conn-b > .conn-address { width: 100%; }
+html:not(.rd-off) .settings-content .conn-address { width: 100%; }
 
 /* Account menu: the status sits at the top of the menu, the first thing the
    pointer meets; the profile line stays at the bottom over the account row. */
@@ -2928,11 +2928,13 @@ html:not(.rd-off) .ai-skill-icon { flex: none; width: 34px; height: 34px; border
 html:not(.rd-off) .ai-skills { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 /* The address now sits on the page, not inside a white card, so it needs its
    own white field and edge to read as something to type in. */
-html:not(.rd-off) .conn-b > .conn-address {
+html:not(.rd-off) .settings-content .conn-address {
   height: 42px; padding: 0 14px; border: 0; border-radius: 12px;
-  background: var(--rd-surface); color: var(--text-primary); font-size: 14px;
-  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.14);
+  background: var(--bg-surface, #fff); color: var(--text-primary); font-size: 14px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.2), 0 1px 2px rgba(var(--rd-ink), 0.06);
 }
+html:not(.rd-off) .settings-content .conn-address::placeholder { color: var(--text-tertiary); }
+html:not(.rd-off) .settings-content .conn-address:focus { box-shadow: 0 0 0 1.5px var(--text-primary), 0 0 0 4px rgba(var(--rd-ink), 0.06); }
 
 /* Plan & Billing loading: card shapes instead of a bare "Loading…". */
 html:not(.rd-off) .plan-skeleton .plan-card { display: flex; flex-direction: column; align-items: flex-start; min-height: 210px; }
@@ -3004,3 +3006,22 @@ html:not(.rd-off) .plan-skeleton-legend { display: flex; flex-direction: column;
 .sidebar-update.is-error .sidebar-update-text b { color: var(--danger); }
 .sidebar-update-btn { flex: none; height: 26px; padding: 0 10px; border-radius: 8px; border: 0; font-size: 12px; font-weight: 600; cursor: pointer; background: var(--bg-surface); color: var(--text-primary); box-shadow: 0 0 0 1px rgba(var(--rd-ink, 0,0,0), 0.12); }
 .sidebar-update.is-ready .sidebar-update-btn { box-shadow: none; }
+
+/* Account Settings → About: the update card, then one card of rows. */
+html:not(.rd-off) .about-tab { display: flex; flex-direction: column; gap: 16px; }
+html:not(.rd-off) .about-rows .profile-row { grid-template-columns: minmax(200px, 260px) 1fr; }
+html:not(.rd-off) .about-inline { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+html:not(.rd-off) .about-value { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text-primary); }
+html:not(.rd-off) .about-live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+html:not(.rd-off) .about-signout { height: 34px; padding: 0 14px; border-radius: 10px; border: 0; cursor: pointer; font-weight: 600; font-size: 13.5px; background: var(--rd-surface); color: var(--danger); box-shadow: 0 0 0 1px rgba(187, 67, 58, 0.25); }
+html:not(.rd-off) .about-signout:hover { background: rgba(187, 67, 58, 0.06); }
+html:not(.rd-off) .about-agents { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; width: 100%; }
+html:not(.rd-off) .about-agent { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; background: var(--bg-app); min-width: 0; }
+html:not(.rd-off) .about-agent-glyph { flex: none; width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; background: var(--rd-surface); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.08); }
+html:not(.rd-off) .about-agent-glyph svg, html:not(.rd-off) .about-agent-glyph img { width: 18px; height: 18px; }
+html:not(.rd-off) .about-agent-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+html:not(.rd-off) .about-agent-text b { font-size: 14.5px; font-weight: 600; }
+html:not(.rd-off) .about-agent-version { font-weight: 400; font-size: 12.5px; color: var(--text-tertiary); margin-left: 4px; }
+html:not(.rd-off) .about-agent-text small { font-size: 12.5px; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html:not(.rd-off) .about-agent-tag { flex: none; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--success-soft); color: var(--success); }
+html:not(.rd-off) .about-agent-tag.is-off { background: rgba(var(--rd-ink), 0.06); color: var(--text-secondary); }

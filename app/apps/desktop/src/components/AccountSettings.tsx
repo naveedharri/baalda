@@ -28,7 +28,7 @@ import {
   PROFILE_IMAGE_PX,
 } from "../lib/profileAvatar";
 import { imageFileToSquareDataUrl } from "../lib/squareImage";
-import { InstalledAgentsStatus } from "./DashboardAgentRunner";
+import { InstalledAgentsList } from "./DashboardAgentRunner";
 import { AccountPlanTab } from "./AccountPlanTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
 import { AiToolsTab } from "./skills/AiToolsTab";
@@ -861,6 +861,8 @@ export function ConnectionTab() {
 
 function AboutTab({ onClose }: { onClose: () => void }) {
   const update = useUpdateState();
+  const serverUrl = useStore((s) => s.serverUrl);
+  const email = useStore((s) => s.session?.user.email ?? "");
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -923,22 +925,48 @@ function AboutTab({ onClose }: { onClose: () => void }) {
         onRestart={() => void relaunchForUpdate()}
       />
 
-      <InstalledAgentsStatus />
-
-      <div className="menu-sep" />
-      <button
-        className="menu-item danger"
-        onClick={() => {
-          onClose();
-          void useStore.getState().signOut();
-        }}
-      >
-        <Icon>
-          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-          <path d="M16 17l5-5-5-5M21 12H9" />
-        </Icon>
-        <span className="menu-item-label">Sign out</span>
-      </button>
+      <div className="profile-rows about-rows">
+        <div className="profile-row profile-row-top">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Installed agents</span>
+            <span className="profile-row-hint">Used to update dashboards. Found when Baalda starts.</span>
+          </div>
+          <div className="profile-row-control">
+            <InstalledAgentsList />
+          </div>
+        </div>
+        <div className="profile-row">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Server</span>
+            <span className="profile-row-hint">Where your notes sync.</span>
+          </div>
+          <div className="profile-row-control about-inline">
+            <span className="about-value">
+              <span className="about-live-dot" aria-hidden="true" />
+              {serverHost(serverUrl)}
+            </span>
+          </div>
+        </div>
+        <div className="profile-row">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Account</span>
+            <span className="profile-row-hint">Signing out keeps your notes on this computer.</span>
+          </div>
+          <div className="profile-row-control about-inline">
+            <span className="about-value">{email}</span>
+            <button
+              type="button"
+              className="about-signout"
+              onClick={() => {
+                onClose();
+                void useStore.getState().signOut();
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
