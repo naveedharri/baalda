@@ -316,75 +316,105 @@ function ProfileTab() {
 
   return (
     <div className="account-profile">
-      {/* The picture is chosen right where it's shown: upload / reset beside
-          the big avatar, the character gallery just under it. */}
-      <div className="profile-hero">
-        <Avatar
-          label={trimmedName || session.user.email}
-          image={trimmedImage || null}
-          userId={session.user.id}
-        />
-        <div className="profile-hero-meta">
-          <strong>{trimmedName || "—"}</strong>
-          <span className="muted">{session.user.email}</span>
+      {/* Settings rows: title + one-line hint on the left, the control on the
+          right, so a section title, a label and a value never read alike. */}
+      <div className="profile-rows">
+        <div className="profile-row">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Photo</span>
+            <span className="profile-row-hint">
+              A picture or a character. Teammates see it in the sidebar and on your cursor.
+            </span>
+          </div>
+          <div className="profile-row-control profile-photo-control">
+            <Avatar
+              label={trimmedName || session.user.email}
+              image={trimmedImage || null}
+              userId={session.user.id}
+            />
+            <ProfilePictureActions image={trimmedImage} onChange={changeImage} onError={setError} />
+          </div>
         </div>
-        <ProfilePictureActions image={trimmedImage} onChange={changeImage} onError={setError} />
-      </div>
-      <ProfileCharacterGrid
-        label={trimmedName || session.user.email}
-        userId={session.user.id}
-        image={trimmedImage}
-        onChange={changeImage}
-      />
 
-      <label className="field">
-        <span className="field-label">Display name</span>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onFocus={() => {
-            nameFocused.current = true;
-          }}
-          onBlur={() => {
-            nameFocused.current = false;
-            // Leaving the field saves now rather than after the pause.
-            if (nameDraft && nameDraft !== savedName) void persist({ name: nameDraft });
-          }}
-          placeholder="Your name"
-          autoComplete="name"
-        />
-      </label>
+        <div className="profile-row profile-row-top">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Character</span>
+            <span className="profile-row-hint">Pick one instead of a photo.</span>
+          </div>
+          <div className="profile-row-control">
+            <ProfileCharacterGrid
+              label={trimmedName || session.user.email}
+              userId={session.user.id}
+              image={trimmedImage}
+              onChange={changeImage}
+            />
+          </div>
+        </div>
 
+        <div className="profile-row">
+          <label className="profile-row-label" htmlFor="profile-display-name">
+            <span className="profile-row-title">Display name</span>
+            <span className="profile-row-hint">Shown next to your notes and cursor.</span>
+          </label>
+          <div className="profile-row-control">
+            <input
+              id="profile-display-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onFocus={() => {
+                nameFocused.current = true;
+              }}
+              onBlur={() => {
+                nameFocused.current = false;
+                // Leaving the field saves now rather than after the pause.
+                if (nameDraft && nameDraft !== savedName) void persist({ name: nameDraft });
+              }}
+              placeholder="Your name"
+              autoComplete="name"
+            />
+          </div>
+        </div>
 
-      <label className="field">
-        <span className="field-label">Email</span>
-        <input value={session.user.email} disabled readOnly />
-        {/* Verification state, live: the confirmation link bounces back into
-            the app (`baalda://verified`), which re-reads the session, so this
-            flips without a reload. `emailVerified` is absent on very old
-            servers — say nothing rather than "not confirmed" then. */}
-        {session.user.emailVerified === true && (
-          <span className="field-hint">Email confirmed ✓</span>
-        )}
-        {session.user.emailVerified === false && (
-          <span className="field-hint">
-            Not confirmed yet. Check your inbox for the confirmation email.{" "}
-            <button
-              type="button"
-              className="linkish"
-              disabled={resendBusy}
-              onClick={() => void resendConfirmation()}
-            >
-              {resendBusy ? "Sending…" : resendState === "sent" ? "Sent ✓" : "Resend it"}
-            </button>
-            {resendState && resendState !== "sent" && (
-              <span className="update-status error"> {resendState}</span>
+        <div className="profile-row profile-row-top">
+          <div className="profile-row-label">
+            <span className="profile-row-title">Email</span>
+            <span className="profile-row-hint">Used to sign in and for invitations.</span>
+          </div>
+          <div className="profile-row-control">
+            <div className="profile-email">
+              <span className="profile-email-value">{session.user.email}</span>
+              {/* Verification state, live: the confirmation link bounces back
+                  into the app (`baalda://verified`), which re-reads the session,
+                  so this flips without a reload. `emailVerified` is absent on
+                  very old servers: say nothing rather than "not confirmed". */}
+              {session.user.emailVerified === true && (
+                <span className="profile-pill ok">Confirmed</span>
+              )}
+              {session.user.emailVerified === false && (
+                <span className="profile-pill warn">Not confirmed</span>
+              )}
+            </div>
+            {session.user.emailVerified === false && (
+              <span className="profile-row-hint profile-email-hint">
+                Check your inbox for the confirmation email.{" "}
+                <button
+                  type="button"
+                  className="linkish"
+                  disabled={resendBusy}
+                  onClick={() => void resendConfirmation()}
+                >
+                  {resendBusy ? "Sending…" : resendState === "sent" ? "Sent ✓" : "Resend it"}
+                </button>
+                {resendState && resendState !== "sent" && (
+                  <span className="update-status error"> {resendState}</span>
+                )}
+              </span>
             )}
-          </span>
-        )}
-      </label>
+          </div>
+        </div>
 
-      <SecurityCodeField />
+        <SecurityCodeField />
+      </div>
 
       {error && <div className="auth-error">{error}</div>}
 
@@ -423,7 +453,7 @@ function ProfilePictureActions({
     <div className="profile-hero-actions">
       {image && (
         <button type="button" className="link-btn" onClick={() => onChange("")}>
-          Reset
+          Use default
         </button>
       )}
       <button type="button" className="secondary sm" onClick={() => fileRef.current?.click()}>
@@ -457,7 +487,6 @@ function ProfileCharacterGrid({
 }) {
   return (
     <div className="profile-characters">
-      <span className="field-label">Or pick a character</span>
       <div className="profile-character-grid" role="radiogroup" aria-label="Character">
         <button
           type="button"

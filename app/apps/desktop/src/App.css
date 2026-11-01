@@ -8574,17 +8574,11 @@ button.secondary:active:not(:disabled),
 .profile-characters {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
-  padding: var(--sp-3) var(--sp-4) var(--sp-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-subtle);
 }
 .profile-character-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, 40px);
-  justify-content: space-between;
-  gap: var(--sp-3) var(--sp-2);
+  gap: var(--sp-2);
 }
 .profile-character-option {
   display: inline-flex;
@@ -8608,7 +8602,7 @@ button.secondary:active:not(:disabled),
 }
 .profile-character-option.active .avatar {
   box-shadow:
-    0 0 0 2px var(--bg-subtle),
+    0 0 0 2px var(--bg-surface),
     0 0 0 3.5px var(--text-primary);
 }
 /* Autosave feedback under the profile form; reserves its line so nothing jumps. */
@@ -11242,4 +11236,149 @@ body.access-board-grabbing * {
   font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text-primary);
+}
+
+/* ---- Account settings → Profile: settings rows ----
+   One card of rows: title + one-line hint on the left, the control on the
+   right. Four distinct levels (page title, row title, hint, value), so a
+   heading, a label and a value never read alike. */
+.profile-rows {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 1px 2px rgba(11, 10, 16, 0.04);
+}
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: 18px 22px;
+}
+.profile-row + .profile-row {
+  border-top: 1px solid var(--border);
+}
+.profile-row.profile-row-top {
+  align-items: flex-start;
+}
+.profile-row-label {
+  width: 240px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.profile-row-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.profile-row-hint {
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--text-tertiary);
+}
+.profile-row-control {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.profile-row-control > input {
+  width: 100%;
+}
+.profile-photo-control {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-4);
+}
+.profile-photo-control .avatar {
+  width: 56px;
+  height: 56px;
+  font-size: var(--fs-md);
+}
+.profile-photo-control .profile-hero-actions {
+  margin-left: 0;
+  flex-direction: row-reverse;
+}
+.profile-email {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-height: 40px;
+  padding: 0 6px 0 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+.profile-email-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profile-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 11px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.profile-pill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.profile-pill.warn {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: color-mix(in srgb, var(--warning) 70%, var(--text-primary));
+}
+.profile-pill.ok {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: color-mix(in srgb, var(--success) 75%, var(--text-primary));
+}
+.profile-email-hint .linkish {
+  font-weight: 600;
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+.profile-code-row {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.profile-code {
+  display: flex;
+  gap: var(--sp-2);
+}
+.profile-code > span {
+  padding: 7px 11px;
+  border-radius: 9px;
+  background: var(--bg-subtle);
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-primary);
+}
+@media (max-width: 760px) {
+  .profile-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--sp-3);
+  }
+  .profile-row-label {
+    width: auto;
+  }
 }
