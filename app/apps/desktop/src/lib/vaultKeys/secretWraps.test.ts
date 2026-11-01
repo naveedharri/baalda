@@ -13,6 +13,7 @@ import {
   newSecret,
   openSealedVk,
   secretHash,
+  shortFingerprint,
   toBase64,
   unwrapVkWithSecret,
   wrapVkWithSecret,
@@ -169,7 +170,9 @@ describe("invite-time keys (B1/B2/B4)", () => {
       { email: "a@x.com", invitationId: "i1", emailed: true, publicKey: toBase64(a.publicKey), inviteeUserId: "u9" },
       { email: "b@x.com", invitationId: "i2", emailed: true, publicKey: null, inviteeUserId: null },
     ]);
-    expect(sealed).toEqual(["u9"]);
+    // Every seal is named in the "Gave <name> the vault key" toast (contract A),
+    // so a seal to a key the server handed out is never silent.
+    expect(sealed).toEqual([{ userId: "u9", fingerprint: shortFingerprint(a.publicKey) }]);
     const [vaultId, invitationId, body, header] = api.putInviteWrap.mock.calls[0];
     expect([vaultId, invitationId, header]).toEqual(["v1", "i1", toBase64(v.vk)]);
     expect(body.publicKey).toBe(toBase64(a.publicKey));

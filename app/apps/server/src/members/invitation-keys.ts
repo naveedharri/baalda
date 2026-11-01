@@ -90,8 +90,9 @@ export async function storeInvitationWrap(
  * path with a live invite). Each accepted invitation's direct seal becomes the
  * new member's `vault_key_wraps` row when it was sealed to their CURRENT
  * account key; a seal to an older key is useless to them and is skipped.
- * `ON CONFLICT DO NOTHING`: an existing wrap is never overwritten. The row is
- * kept (its secret wrap stays fetchable) until the invitation is deleted.
+ * `ON CONFLICT DO NOTHING`: an existing wrap is never overwritten. Once the
+ * invitee holds a current wrap the invitation's key row is spent and deleted
+ * (`dropSpentInvitationKeys`); until then its secret wrap stays fetchable.
  * Best-effort: membership is committed already, so a failure is logged and
  * never fails the accept. Returns the number of wraps stored.
  */
@@ -126,9 +127,74 @@ export async function applyInvitationKeys(
         rows.map((r) => r.vault_id),
       ]);
     }
+    const { rows: vaults } = await db.query<{ vault_id: string }>(
+      "SELECT DISTINCT vault_id FROM invitation_vault_keys WHERE invitation_id = ANY($1::text[])",
+      [[...input.invitationIds]],
+    );
+    for (const v of vaults) await dropSpentInvitationKeys({ vaultId: v.vault_id, userId: input.userId }, db);
     return rows.length;
   } catch (err) {
     console.error(`[invitation-keys] applying invitation keys in ${input.organizationId} failed: ${(err as Error).message}`);
     return 0;
   }
+}
+
+/**
+ * A fresh wrap at the vault's CURRENT generation for `u`: not one sealed
+ * before they last replaced their account key (`keys/mine` never counts those).
+ */
+const HOLDS_CURRENT_WRAP = `EXISTS (
+  SELECT 1 FROM vault_key_wraps w
+    JOIN vaults cv ON cv.id = w.vault_id
+    LEFT JOIN user_keys k ON k.user_id = w.user_id
+   WHERE w.vault_id = ivk.vault_id AND w.user_id = u.id
+     AND w.generation = COALESCE(cv.key_generation, 1)
+     AND (k.key_changed_at IS NULL OR w.created_at >= k.key_changed_at))`;
+
+/**
+ * Lifetime: an invitation's key row (secret wrap and direct seal) exists only
+ * to get the key to the invitee. Once they hold a current wrap of their own it
+ * is spent, and the secret behind it still sits in an email: delete it. Run
+ * after B3's insert and whenever a wrap lands for someone (POST keys/wraps).
+ * Returns the rows deleted.
+ */
+export async function dropSpentInvitationKeys(
+  input: { vaultId: string; userId: string },
+  db: Queryable = defaultPool,
+): Promise<number> {
+  const { rowCount } = await db.query(
+    `DELETE FROM invitation_vault_keys ivk
+      USING invitation i, vaults v, "user" u
+      WHERE ivk.invitation_id = i.id AND ivk.vault_id = $1
+        AND v.id = ivk.vault_id AND i."organizationId" = v.organization_id
+        AND u.id = $2 AND lower(i.email) = lower(u.email)
+        AND ${HOLDS_CURRENT_WRAP}`,
+    [input.vaultId, input.userId],
+  );
+  return rowCount ?? 0;
+}
+
+/**
+ * Periodic sweep (the invitation sweep tick): key rows whose invitation can no
+ * longer deliver anything (cancelled, rejected, expired unaccepted) or whose
+ * job is done or void (accepted and the invitee holds a current wrap, or
+ * accepted and the invitee is no longer a member). A deleted invitation's row
+ * goes by cascade. Returns the rows deleted.
+ */
+export async function sweepInvitationKeys(db: Queryable = defaultPool): Promise<number> {
+  const { rowCount } = await db.query(
+    `DELETE FROM invitation_vault_keys ivk
+      USING invitation i
+      WHERE ivk.invitation_id = i.id
+        AND (
+          i.status IN ('canceled', 'rejected')
+          OR (i.status = 'pending' AND i."expiresAt" <= now())
+          OR (i.status = 'accepted' AND NOT EXISTS (
+                SELECT 1 FROM member m JOIN "user" mu ON mu.id = m."userId"
+                 WHERE m."organizationId" = i."organizationId" AND lower(mu.email) = lower(i.email)))
+          OR (i.status = 'accepted' AND EXISTS (
+                SELECT 1 FROM "user" u WHERE lower(u.email) = lower(i.email) AND ${HOLDS_CURRENT_WRAP}))
+        )`,
+  );
+  return rowCount ?? 0;
 }

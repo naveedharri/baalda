@@ -543,7 +543,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     // Seamless keys (C): a displayed code is `<org code>-<device secret J>`.
     // Only the part before the first `-` is the org's code; J never leaves
     // this line (not stored, not logged). Plain 8-char codes work as before.
-    const code = typeof body.code === "string" ? body.code.trim().split("-")[0].toUpperCase() : "";
+    const code = typeof body.code === "string" ? body.code.trim().split("-")[0].trim().toUpperCase() : "";
     if (!code) return c.json({ error: "code is required" }, 400);
 
     const { rows } = await pool.query<{ organization_id: string; name: string }>(

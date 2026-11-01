@@ -15,6 +15,7 @@ import { testAppDeps } from "./helpers/app.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, bearerHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
 import { markEncryptionRequested, seedMember, seedVault } from "./helpers/seed.js";
+import { sweepInvitationKeys } from "../src/members/invitation-keys.js";
 
 const app = createApp(testAppDeps());
 const b64 = (b: Buffer) => b.toString("base64");
@@ -150,7 +151,7 @@ describe("seamless vault keys", () => {
     expect(JSON.stringify(mail)).not.toContain("#k=");
   });
 
-  it("B2+B3+B4: a direct seal to the invitee's current key becomes their wrap on accept; secret wrap stays fetchable", async () => {
+  it("B2+B3+B4: a direct seal to the invitee's current key becomes their wrap on accept; the invitation's key row then goes", async () => {
     const s = await setup();
     const invitee = await signUp("invitee@seamless.test");
     const pk = await publishKey(invitee);
@@ -181,8 +182,13 @@ describe("seamless vault keys", () => {
     const mine = await call(invitee, "GET", `/vaults/${s.vaultId}/keys/mine`);
     expect(mine.status).toBe(200);
 
+    // They hold a current wrap now: the secret wrap (and the seal) are not
+    // needed any more and must not outlive that (the secret sits in an email).
+    void wrappedVk;
     const fetched = await call(invitee, "GET", `/vaults/${s.vaultId}/keys/invite-wrap`);
-    expect(await fetched.json()).toEqual({ wraps: [{ invitationId, generation: 1, wrappedVk }] });
+    expect(await fetched.json()).toEqual({ wraps: [] });
+    const { rows: ivk } = await pool.query("SELECT 1 FROM invitation_vault_keys WHERE invitation_id = $1", [invitationId]);
+    expect(ivk).toHaveLength(0);
     // Another member never sees someone else's invitation wraps.
     expect(await (await call(s.member, "GET", `/vaults/${s.vaultId}/keys/invite-wrap`)).json()).toEqual({ wraps: [] });
 
@@ -209,6 +215,80 @@ describe("seamless vault keys", () => {
     expect(wraps).toHaveLength(0);
   });
 
+  async function inviteWithSecret(s: Awaited<ReturnType<typeof setup>>, email: string) {
+    const res = await call(s.owner, "POST", `/orgs/${s.orgId}/invitations`, {
+      emails: [email],
+      vaultKeys: { vaultId: s.vaultId, generation: 1, items: [{ email, wrappedVk: b64(randomBytes(72)), secret: secret() }] },
+    }, s.vk);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { results: Array<{ invitationId: string }> }).results[0].invitationId;
+  }
+  const ivkIds = async () =>
+    (await pool.query<{ invitation_id: string }>("SELECT invitation_id FROM invitation_vault_keys ORDER BY 1")).rows.map(
+      (r) => r.invitation_id,
+    );
+
+  it("B4: the secret wrap goes once the invitee's own current wrap lands (self-wrap after adopting)", async () => {
+    const s = await setup();
+    const invitee = await signUp("selfwrap@seamless.test");
+    const invitationId = await inviteWithSecret(s, "selfwrap@seamless.test");
+    await auth.api.acceptInvitation({ headers: bearerHeaders(invitee), body: { invitationId } });
+    // No account key at invite time: nothing applied on accept, the secret wrap waits.
+    expect(await ivkIds()).toEqual([invitationId]);
+    const fetched = (await (await call(invitee, "GET", `/vaults/${s.vaultId}/keys/invite-wrap`)).json()) as { wraps: unknown[] };
+    expect(fetched.wraps).toHaveLength(1);
+    // An old-generation wrap is not enough.
+    await pool.query(
+      "INSERT INTO vault_key_wraps (vault_id, user_id, generation, sealed_vk, sealed_by_user_id) VALUES ($1, $2, 7, $3, $2)",
+      [s.vaultId, invitee.userId, randomBytes(80)],
+    );
+    await publishKey(invitee);
+    // A refused self-wrap (no key presented) changes nothing.
+    expect((await call(invitee, "POST", `/vaults/${s.vaultId}/keys/wraps`, {
+      userId: invitee.userId, generation: 1, sealedVk: b64(randomBytes(80)),
+    })).status).toBe(409);
+    expect(await ivkIds()).toEqual([invitationId]);
+    // The invitee opened the secret wrap and self-seals with the key: gone.
+    expect((await call(invitee, "POST", `/vaults/${s.vaultId}/keys/wraps`, {
+      userId: invitee.userId, generation: 1, sealedVk: b64(randomBytes(80)),
+    }, s.vk)).status).toBe(201);
+    expect(await ivkIds()).toEqual([]);
+    expect(await (await call(invitee, "GET", `/vaults/${s.vaultId}/keys/invite-wrap`)).json()).toEqual({ wraps: [] });
+  });
+
+  it("sweep: drops key rows of cancelled, rejected, expired and spent invitations; keeps live and still-needed ones", async () => {
+    const s = await setup();
+    const live = await inviteWithSecret(s, "live@seamless.test");
+    const cancelled = await inviteWithSecret(s, "again@seamless.test");
+    const resent = await inviteWithSecret(s, "again@seamless.test"); // cancels the first
+    const rejected = await inviteWithSecret(s, "rejected@seamless.test");
+    await pool.query("UPDATE invitation SET status = 'rejected' WHERE id = $1", [rejected]);
+    const expired = await inviteWithSecret(s, "expired@seamless.test");
+    await pool.query(`UPDATE invitation SET "expiresAt" = now() - interval '1 hour' WHERE id = $1`, [expired]);
+    // Accepted, no key yet: still needed.
+    const waiting = await signUp("waiting@seamless.test");
+    const waitingInv = await inviteWithSecret(s, "waiting@seamless.test");
+    await auth.api.acceptInvitation({ headers: bearerHeaders(waiting), body: { invitationId: waitingInv } });
+    // Accepted, then removed from the vault: spent.
+    const gone = await signUp("gone@seamless.test");
+    const goneInv = await inviteWithSecret(s, "gone@seamless.test");
+    await auth.api.acceptInvitation({ headers: bearerHeaders(gone), body: { invitationId: goneInv } });
+    await pool.query(`DELETE FROM member WHERE "userId" = $1`, [gone.userId]);
+    // Accepted and already holding a current wrap (a row from before the hooks): spent.
+    const keyed = await signUp("keyed@seamless.test");
+    const keyedInv = await inviteWithSecret(s, "keyed@seamless.test");
+    await auth.api.acceptInvitation({ headers: bearerHeaders(keyed), body: { invitationId: keyedInv } });
+    await pool.query(
+      "INSERT INTO vault_key_wraps (vault_id, user_id, generation, sealed_vk, sealed_by_user_id) VALUES ($1, $2, 1, $3, $2)",
+      [s.vaultId, keyed.userId, randomBytes(80)],
+    );
+    expect((await ivkIds()).sort()).toEqual([live, cancelled, resent, rejected, expired, waitingInv, goneInv, keyedInv].sort());
+
+    expect(await sweepInvitationKeys()).toBe(5);
+    expect((await ivkIds()).sort()).toEqual([live, resent, waitingInv].sort());
+    expect(await sweepInvitationKeys()).toBe(0);
+  });
+
   it("B3 on the join-code path with a live invitation", async () => {
     const s = await setup();
     const invitee = await signUp("bycode@seamless.test");
@@ -226,6 +306,16 @@ describe("seamless vault keys", () => {
       s.vaultId, invitee.userId,
     ]);
     expect(rows).toHaveLength(1);
+  });
+
+  it("C: a long code typed in lower case with spaces around the dash still joins", async () => {
+    const s = await setup();
+    await pool.query("UPDATE session SET \"activeOrganizationId\" = $1 WHERE \"userId\" = $2", [s.orgId, s.owner.userId]);
+    const code = ((await (await call(s.owner, "GET", "/orgs/join-code")).json()) as { code: string }).code;
+    const joiner = await signUp("spaced@seamless.test");
+    const joined = await call(joiner, "POST", "/orgs/join", { code: `  ${code.toLowerCase()} - ${secret().toLowerCase()} ` });
+    expect(joined.status).toBe(200);
+    expect(await joined.json()).toMatchObject({ organizationId: s.orgId, alreadyMember: false });
   });
 
   it("C: join-code secret wraps: owner/admin with the key, current code only, member fetch, capped, gone with the code", async () => {

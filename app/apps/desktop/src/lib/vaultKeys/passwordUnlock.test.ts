@@ -142,6 +142,9 @@ describe("F wire shapes", () => {
   });
   it("401 wrong_password, 409 no_password, 503 password_unlock_off", async () => {
     expect(await client(401, { error: "wrong_password" }).unlockAccountKey("pw")).toBe("wrong-password");
+    // The server's real shape, and a 401 that is about the session, not the password.
+    expect(await client(401, { error: "Wrong password", code: "wrong_password" }).unlockAccountKey("pw")).toBe("wrong-password");
+    expect(await client(401, { error: "Authentication required" }).unlockAccountKey("pw")).toBe("unavailable");
     expect(await client(409, { error: "no_password" }).unlockAccountKey("pw")).toBe("unavailable");
     expect(await client(503, { error: "password_unlock_off" }).unlockAccountKey("pw")).toBe("unavailable");
   });

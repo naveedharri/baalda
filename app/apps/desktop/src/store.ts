@@ -22,6 +22,7 @@ import {
   joinCodeSecret,
 } from "./lib/vaultKeys/runtime";
 import { loadRememberedPassword } from "./lib/rememberedPassword";
+import { allowLaunchUnlock, runLaunchUnlock } from "./lib/vaultKeys/launchUnlock";
 import { clearVaultKeyCache } from "./lib/vaultKeys/store";
 import {
   colorsAdopted,
@@ -3465,7 +3466,11 @@ export const useStore = create<AppStore>((set, get) => ({
       // Seamless keys F: the password unlocks this account's key before any
       // vault opens (so a new computer needs no approval). Bounded; any
       // failure falls back to one-click approval and never blocks sign-in.
-      if (session) await passwordUnlockBounded(session.user.id, password);
+      if (session) {
+        // A good manual password: launch-time unlock may run again.
+        allowLaunchUnlock(authManager.getServerUrl(), session.user.id);
+        await passwordUnlockBounded(session.user.id, password);
+      }
       set({ session, authStatus: session ? "signed-in" : "signed-out" });
       if (session) {
         await get().refreshVault();
@@ -5682,8 +5687,14 @@ async function passwordUnlockBounded(userId: string, password: string): Promise<
 
 async function launchPasswordUnlock(serverUrl: string, userId: string, email: string | null | undefined): Promise<void> {
   if (!email) return;
-  const password = await loadRememberedPassword(serverUrl, email).catch(() => "");
-  if (password) await vaultKeysPasswordUnlock(userId, password);
+  // A stale remembered password is tried once, never on every launch (each
+  // try counts in the sign-in throttle); see lib/vaultKeys/launchUnlock.ts.
+  await runLaunchUnlock({
+    server: serverUrl,
+    userId,
+    loadPassword: () => loadRememberedPassword(serverUrl, email),
+    unlock: (password) => vaultKeysPasswordUnlock(userId, password),
+  });
 }
 
 function errMsg(e: unknown): string {

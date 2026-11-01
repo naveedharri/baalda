@@ -110,7 +110,7 @@ describe.skipIf(!BASE)("seamless vault keys (live server)", () => {
     expect(results[0].invitationId).toBeTruthy();
     expect(results[0].inviteeUserId).toBe(mate.userId);
     expect(results[0].publicKey).toBeTruthy();
-    expect(await ownerDevice.sealInviteResults(vault.id, results)).toEqual([mate.userId]);
+    expect((await ownerDevice.sealInviteResults(vault.id, results)).map((s) => s.userId)).toEqual([mate.userId]);
 
     await mate.api.acceptInvitation(results[0].invitationId!);
     expect(await mateDevice.gateVaultOpen(vault.id)).toBe("proceed");

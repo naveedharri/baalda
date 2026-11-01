@@ -733,10 +733,13 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
    * B2: invitees who already have an account key get the VK sealed to it now
    * (the server installs it on acceptance when the key still matches). TOFU:
    * a pinned, different key is never sealed to. Best-effort per invitee.
+   * Returns each seal with its fingerprint: the caller raises the same "Gave
+   * <name> the vault key" toast as for a request, since the key sealed to came
+   * from the server (first contact) and must never be sealed to silently.
    */
-  async function sealInviteResults(vaultId: string, results: InviteManyResult[]): Promise<string[]> {
+  async function sealInviteResults(vaultId: string, results: InviteManyResult[]): Promise<SealedFor[]> {
     const held = verified.get(vaultId);
-    const sealed: string[] = [];
+    const sealed: SealedFor[] = [];
     if (!held || accountMismatch || !api.putInviteWrap) return sealed;
     for (const r of results) {
       if (!r?.invitationId || r.error || typeof r.publicKey !== "string" || typeof r.inviteeUserId !== "string") continue;
@@ -753,7 +756,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
           held.b64,
         );
         if (!pinned) await deps.pins.set(r.inviteeUserId, fp);
-        sealed.push(r.inviteeUserId);
+        sealed.push({ userId: r.inviteeUserId, fingerprint: shortFingerprint(pub) });
       } catch (e) {
         console.warn("[vault-keys] invite seal skipped", e instanceof Error ? e.name : "error");
       }
