@@ -2754,3 +2754,8 @@ html:not(.rd-off) .sidebar .tree-row.selected:hover { background: transparent !i
 /* Vault menu: the status is words only. The dot was drawn green for every
    vault, local ones included, so it said nothing. */
 html:not(.rd-off) .vault-switcher .vault-card-sub::before { display: none; }
+
+/* The menu's avatar carries the same presence light as the account row it
+   covers, sitting on the menu's surface. */
+html:not(.rd-off) .account-popover .rd-prof .sm-host { position: relative; }
+html:not(.rd-off) .account-popover .rd-prof .presence-light { border-color: var(--bg-surface); z-index: 2; }

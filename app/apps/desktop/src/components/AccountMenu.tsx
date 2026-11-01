@@ -534,6 +534,8 @@ export function AccountMenu() {
           onPin={menu.pin}
           seenInvites={seenInvites}
           invitesPanelOpen={invitesPanelOnOpen}
+          presence={presence}
+          presenceLabel={presenceLabel}
           onOpenAccount={() => {
             useStore.getState().requestAccountSettings("profile");
           }}
@@ -628,10 +630,16 @@ function AccountPopover({
   onOpenAccount,
   seenInvites,
   invitesPanelOpen,
+  presence,
+  presenceLabel,
   onPointerEnter,
   onPointerLeave,
   onPin,
 }: {
+  /** The account row's presence light, repeated on the profile line the menu
+   *  draws over it, so the dot does not vanish when the menu opens. */
+  presence: string;
+  presenceLabel: string;
   onClose: () => void;
   onOpenAccount: () => void;
   seenInvites: Set<string>;
@@ -667,7 +675,7 @@ function AccountPopover({
       onFocusCapture={onPin}
     >
       <div className="rd-prof">
-        <span className="sm-host"><LazyAvatar label={session.user.name || session.user.email} image={session.user.image} userId={session.user.id} /><StatusMoment status={activityStatus} size={44} image={session.user.image} /></span>
+        <span className="sm-host"><LazyAvatar label={session.user.name || session.user.email} image={session.user.image} userId={session.user.id} /><StatusMoment status={activityStatus} size={44} image={session.user.image} /><span className={`presence-light ${presence}`} aria-label={presenceLabel} /></span>
         <div className="rd-prof-text">
           <b>{session.user.name || session.user.email}</b>
           {session.user.name && <small>{session.user.email}</small>}
