@@ -746,6 +746,11 @@ button.primary.hero:hover:not(:disabled) {
 .app.sidebar-hidden {
   --sidebar-layout-w: 0px;
 }
+/* Dragging the sidebar edge: no easing, so the column and the rows sized from
+   --sidebar-layout-w move together with the pointer (see SidebarResizer). */
+.sidebar-resizing .app {
+  transition: none;
+}
 
 /* ---- Window drag regions ----
    macOS uses an overlay titlebar and Windows disables native decorations,
