@@ -115,6 +115,18 @@ export function keychainVaultKeyStore(serverUrl: string, userId: string) {
   };
 }
 
+/** C: the join-code suffix J, per (server, org, code, generation), and its
+ *  "join wrap uploaded" marker. Keychain only. */
+export const joinSecretName = (serverUrl: string, orgId: string, code: string, generation: number) =>
+  `baalda.keys:join|${serverUrl}|${orgId}|${code}|${generation}`;
+export async function getKeychainString(name: string): Promise<string | null> {
+  return io.get(name);
+}
+export async function setKeychainString(name: string, value: string): Promise<void> {
+  await io.set(name, value);
+  if ((await io.get(name)) !== value) throw new Error("the keychain did not keep the value");
+}
+
 /** The ephemeral link-a-device key (deleted once the account key is adopted). */
 export const deviceLinkKeyName = (serverUrl: string, userId: string) => `baalda.keys:link|${serverUrl}|${userId}`;
 

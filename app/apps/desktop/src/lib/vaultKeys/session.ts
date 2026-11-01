@@ -17,6 +17,8 @@
 import type {
   AccountKeysBody,
   AllowlistCandidate,
+  InviteManyInput,
+  InviteManyResult,
   AllowlistEntry,
   MyVaultKeys,
   PendingDevice,
@@ -43,6 +45,11 @@ import {
   shortFingerprint,
   unwrapAccountKeyWithUnlock,
   wrapAccountKeyWithUnlock,
+  newSecret,
+  secretHash,
+  unwrapVkWithSecret,
+  wrapVkWithSecret,
+  type SecretPurpose,
   toBase64,
   verifyVk,
   vaultKeyToWords,
@@ -80,7 +87,22 @@ export interface VaultKeysApi {
   /** Seamless keys F (optional: older test fakes omit them ⇒ always E). */
   unlockAccountKey?(password: string): Promise<{ unlockKey: string } | "wrong-password" | "unavailable">;
   putPasswordWrap?(privWrapped: string): Promise<void>;
+  /** Seamless keys B/C (optional: older fakes omit them ⇒ today's behaviour). */
+  putInviteWrap?(
+    vaultId: string,
+    invitationId: string,
+    body: { sealedVk: string; publicKey: string; generation: number },
+    vkBase64: string,
+  ): Promise<void>;
+  putJoinWrap?(
+    vaultId: string,
+    body: { secretHash: string; wrappedVk: string; generation: number; code: string },
+    vkBase64: string,
+  ): Promise<"stored" | "stale-code">;
 }
+
+/** What adopting a secret-wrapped key did (B4 / C). */
+export type SecretAdoptResult = "adopted" | "already" | "no-match" | "refused";
 
 /** The keychain store, scoped to the current server + user by the caller. */
 export interface VaultKeyStore {
@@ -704,6 +726,129 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     return { state: "ready", generation };
   }
 
+  /** Seal the verified VK to this account's own key (other devices read it). */
+  async function sealToSelf(vaultId: string, vk: Uint8Array, generation: number): Promise<void> {
+    const self = deps.selfUserId();
+    const priv = await keys.getAccountPrivateKey();
+    const remote = priv ? await api.getMyKeys() : null;
+    if (!self || !priv || !remote || !sameKey(publicKeyFromPrivate(priv), remote.publicKey)) return;
+    await api.postVaultKeyWrap(
+      vaultId,
+      { userId: self, generation, sealedVk: toBase64(sealVkTo(publicKeyFromPrivate(priv), vk)) },
+      toBase64(vk),
+    );
+  }
+
+  /**
+   * B1: per-invitee secret wraps of the verified VK, or null when this device
+   * holds no verified key (then it invites exactly as before). The secrets go
+   * only into the request body; nothing here keeps them.
+   */
+  function inviteKeyMaterial(
+    vaultId: string,
+    emails: string[],
+  ): { vaultKeys: NonNullable<InviteManyInput["vaultKeys"]>; vkBase64: string } | null {
+    const held = verified.get(vaultId);
+    if (!held || accountMismatch) return null;
+    const items = emails.map((email) => {
+      const secret = newSecret();
+      return {
+        email,
+        secret,
+        wrappedVk: toBase64(wrapVkWithSecret(secret, "invite", vaultId, held.generation, held.vk)),
+      };
+    });
+    return { vaultKeys: { vaultId, generation: held.generation, items }, vkBase64: held.b64 };
+  }
+
+  /**
+   * B2: invitees who already have an account key get the VK sealed to it now
+   * (the server installs it on acceptance when the key still matches). TOFU:
+   * a pinned, different key is never sealed to. Best-effort per invitee.
+   */
+  async function sealInviteResults(vaultId: string, results: InviteManyResult[]): Promise<string[]> {
+    const held = verified.get(vaultId);
+    const sealed: string[] = [];
+    if (!held || accountMismatch || !api.putInviteWrap) return sealed;
+    for (const r of results) {
+      if (!r?.invitationId || r.error || typeof r.publicKey !== "string" || typeof r.inviteeUserId !== "string") continue;
+      try {
+        const pub = fromBase64(r.publicKey);
+        if (pub.length !== 32) continue;
+        const fp = keyFingerprint(pub);
+        const pinned = await deps.pins.get(r.inviteeUserId);
+        if (pinned && pinned !== fp) continue;
+        await api.putInviteWrap(
+          vaultId,
+          r.invitationId,
+          { sealedVk: toBase64(sealVkTo(pub, held.vk)), publicKey: r.publicKey, generation: held.generation },
+          held.b64,
+        );
+        if (!pinned) await deps.pins.set(r.inviteeUserId, fp);
+        sealed.push(r.inviteeUserId);
+      } catch (e) {
+        console.warn("[vault-keys] invite seal skipped", e instanceof Error ? e.name : "error");
+      }
+    }
+    return sealed;
+  }
+
+  /**
+   * B4 / C: open a secret-wrapped VK, verify it against the vault's check,
+   * store it, then self-seal. A held confirmed key that verifies is kept; one
+   * that does NOT verify is never replaced (same rule as `ensureVaultKey`).
+   */
+  async function adoptFromSecret(
+    vaultId: string,
+    purpose: SecretPurpose,
+    secret: string,
+    wraps: Array<{ generation: number; wrappedVk: string }>,
+  ): Promise<SecretAdoptResult> {
+    if (!(await enabled()) || accountMismatch) return "refused";
+    const mine = await api.getMyVaultKeys(vaultId);
+    if (!mine.keyed || mine.pending) return "no-match";
+    const check = fromBase64(mine.vkCheck);
+    const held = await keys.getVaultKey(vaultId);
+    if (held && (await verifyVk(held, vaultId, check))) {
+      await confirmed(vaultId);
+      accept(vaultId, held, mine.generation);
+      return "already";
+    }
+    if (held && !(await keys.isVaultKeyProvisional(vaultId))) return "refused";
+    for (const w of wraps) {
+      if (!w || w.generation !== mine.generation || typeof w.wrappedVk !== "string") continue;
+      let vk: Uint8Array;
+      try {
+        vk = unwrapVkWithSecret(secret, purpose, vaultId, w.generation, fromBase64(w.wrappedVk));
+      } catch {
+        continue;
+      }
+      if (vk.length !== 32 || !(await verifyVk(vk, vaultId, check))) continue;
+      await keys.setVaultKey(vaultId, vk);
+      await confirmed(vaultId);
+      accept(vaultId, vk, mine.generation);
+      await sealToSelf(vaultId, vk, mine.generation).catch(() => {});
+      return "adopted";
+    }
+    return "no-match";
+  }
+
+  /** C: upload the join wrap for `<code>-<secret>` (admin device with the key). */
+  async function uploadJoinWrap(vaultId: string, secret: string, code: string): Promise<"stored" | "stale-code" | "no-key"> {
+    const held = verified.get(vaultId);
+    if (!held || accountMismatch || !api.putJoinWrap) return "no-key";
+    return api.putJoinWrap(
+      vaultId,
+      {
+        secretHash: secretHash(secret),
+        wrappedVk: toBase64(wrapVkWithSecret(secret, "join", vaultId, held.generation, held.vk)),
+        generation: held.generation,
+        code,
+      },
+      held.b64,
+    );
+  }
+
   /** Key holder: seal the VK for each requester who is a current member. */
   async function serviceKeyRequests(vaultId: string): Promise<ServiceResult> {
     const out: ServiceResult = { sealed: [], refused: [], keyChanged: [] };
@@ -787,6 +932,14 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     ensureVaultKey,
     serviceKeyRequests,
     headerFor,
+    inviteKeyMaterial,
+    sealInviteResults,
+    adoptFromSecret,
+    uploadJoinWrap,
+    /** The verified key's generation, else null. */
+    heldGeneration(vaultId: string): number | null {
+      return verified.get(vaultId)?.generation ?? null;
+    },
     /** Does this device's keychain hold a key for the vault (verified or not)? */
     async holdsVaultKey(vaultId: string): Promise<boolean> {
       return verified.has(vaultId) || (await keys.getVaultKey(vaultId)) !== null;

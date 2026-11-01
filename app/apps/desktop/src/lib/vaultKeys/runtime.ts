@@ -7,7 +7,15 @@
 // server without the `vault-keys` feature.
 
 import { api } from "../auth/authManager";
-import { ApiError, rateLimitedMessage, type AllowlistCandidate } from "../api";
+import {
+  ApiError,
+  rateLimitedMessage,
+  type AllowlistCandidate,
+  type InviteManyInput,
+  type InviteManyResult,
+} from "../api";
+import { decodeSecret, encodeCrockford, newSecret, secretHash, type SecretPurpose } from "./crypto";
+import { getKeychainString, joinSecretName, setKeychainString } from "./store";
 import { runFreshAccountKey, type FreshKeyResult } from "./recovery";
 import {
   createVaultKeySession,
@@ -26,6 +34,136 @@ import {
   vaultIdsForOrg,
 } from "./forget";
 import { keychainPinStore, keychainVaultKeyStore } from "./store";
+
+// ── invite secret S / join suffix J (seamless keys B4/B5, C) ────────────────
+// Memory only (never localStorage, never logged): held until the vault opens,
+// at most `SECRET_HOLD_MS`, then used once to fetch and open the wrapped key.
+
+export const SECRET_HOLD_MS = 30 * 60 * 1000;
+const inviteSecrets = new Map<string, { secret: string; until: number }>();
+const orgSecrets = new Map<string, { purpose: SecretPurpose; secret: string; until: number }>();
+
+/** Canonical form (Crockford, upper case) or null when it is not a secret. */
+function canonicalSecret(secret: string | null | undefined): string | null {
+  const raw = secret ? decodeSecret(secret) : null;
+  if (!raw) return null;
+  const out = encodeCrockford(raw);
+  raw.fill(0);
+  return out;
+}
+
+/** B5: the `k` of a `baalda://invite/<id>?k=…` link, until the invite is accepted. */
+export function rememberInviteSecret(invitationId: string, secret: string | null | undefined): void {
+  const s = canonicalSecret(secret);
+  if (s) inviteSecrets.set(invitationId, { secret: s, until: Date.now() + SECRET_HOLD_MS });
+}
+
+/** The invitation was accepted into `orgId`: its secret now waits for that vault. */
+export function claimInviteSecret(invitationId: string, orgId: string): void {
+  const held = inviteSecrets.get(invitationId);
+  inviteSecrets.delete(invitationId);
+  if (held && held.until > Date.now()) orgSecrets.set(orgId, { purpose: "invite", secret: held.secret, until: held.until });
+}
+
+/** C: joined `orgId` with `<code>-<J>`: J waits for that vault to open. */
+export function offerJoinSecret(orgId: string, secret: string | null | undefined): void {
+  const s = canonicalSecret(secret);
+  if (s) orgSecrets.set(orgId, { purpose: "join", secret: s, until: Date.now() + SECRET_HOLD_MS });
+}
+
+/** Split a typed join code `<code>-<J>`: the part after the first `-` when it is a secret. */
+export function joinCodeSecret(typed: string): string | null {
+  const t = typed.trim();
+  const dash = t.indexOf("-");
+  return dash > 0 ? canonicalSecret(t.slice(dash + 1)) : null;
+}
+
+/** Fetch + open the wrapped key a held secret unlocks for this vault (once). */
+async function consumeSecretFor(session: VaultKeySession, userId: string, orgId: string | null, vaultId: string) {
+  if (!orgId) return;
+  const held = orgSecrets.get(orgId);
+  if (!held) return;
+  if (held.until <= Date.now()) {
+    orgSecrets.delete(orgId);
+    return;
+  }
+  try {
+    const wraps =
+      held.purpose === "invite"
+        ? await api.getInviteWraps(vaultId)
+        : await api.getJoinWrap(vaultId, secretHash(held.secret)).then((w) => (w ? [w] : []));
+    const result = await session.adoptFromSecret(vaultId, held.purpose, held.secret, wraps);
+    // Any definitive answer ends it; a network error keeps it for the next run.
+    orgSecrets.delete(orgId);
+    if (result === "adopted" || result === "already") rememberOrgVault(api.getBaseUrl(), userId, orgId, vaultId);
+  } catch (e) {
+    console.warn("[vault-keys] secret key fetch failed", e instanceof ApiError ? e.status : "error");
+  }
+}
+
+/**
+ * B1/B2: invite, wrapping the vault key for each invitee when THIS device
+ * holds the org's verified key. Without it, or if the key part is refused,
+ * the invitation goes exactly as before.
+ */
+export async function inviteWithVaultKeys(orgId: string, input: InviteManyInput): Promise<InviteManyResult[]> {
+  const c = current;
+  const [serverUrl, userId] = c ? splitScope(c.key) : ["", ""];
+  const vaultId = c
+    ? [...(c.orgId === orgId && c.vaultId ? [c.vaultId] : []), ...vaultIdsForOrg(serverUrl, userId, orgId)].find(
+        (id) => c.session.headerFor(id),
+      ) ?? null
+    : null;
+  let material: ReturnType<VaultKeySession["inviteKeyMaterial"]> = null;
+  try {
+    material = c && vaultId ? c.session.inviteKeyMaterial(vaultId, input.emails) : null;
+  } catch {
+    material = null;
+  }
+  if (!c || !vaultId || !material) return api.inviteMany(orgId, input);
+  let results: InviteManyResult[];
+  try {
+    results = await api.inviteMany(orgId, { ...input, vaultKeys: material.vaultKeys }, material.vkBase64);
+  } catch (e) {
+    // The key proof was refused (key_required / outdated): invite as today.
+    if (e instanceof ApiError && (e.status === 409 || e.status === 426)) return api.inviteMany(orgId, input);
+    throw e;
+  }
+  await c.session.sealInviteResults(vaultId, results).catch(() => []);
+  return results;
+}
+
+/**
+ * C: the join code to SHOW. An admin device holding the org's verified key
+ * shows `<code>-<J>` (J in the keychain per server/org/code/generation, its
+ * wrap uploaded once); anything else, or any failure, shows the plain code.
+ */
+export async function vaultKeysJoinCode(orgId: string, code: string): Promise<string> {
+  try {
+    const c = current;
+    if (!c || !code) return code;
+    const [serverUrl, userId] = splitScope(c.key);
+    const ids = [...(c.orgId === orgId && c.vaultId ? [c.vaultId] : []), ...vaultIdsForOrg(serverUrl, userId, orgId)];
+    const vaultId = ids.find((id) => c.session.headerFor(id));
+    const generation = vaultId ? c.session.heldGeneration(vaultId) : null;
+    if (!vaultId || generation == null) return code;
+    const name = joinSecretName(serverUrl, orgId, code, generation);
+    let secret = canonicalSecret(await getKeychainString(name));
+    if (!secret) {
+      secret = newSecret();
+      await setKeychainString(name, secret);
+    }
+    if ((await getKeychainString(`${name}|up`)) !== "1") {
+      const r = await c.session.uploadJoinWrap(vaultId, secret, code);
+      if (r !== "stored") return code;
+      await setKeychainString(`${name}|up`, "1");
+    }
+    return `${code}-${secret}`;
+  } catch (e) {
+    console.warn("[vault-keys] join code key skipped", e instanceof ApiError ? e.status : "error");
+    return code;
+  }
+}
 
 export const SERVICE_INTERVAL_MS = 2 * 60 * 1000;
 
@@ -217,6 +355,7 @@ async function runOnce(): Promise<void> {
     const devices = await c.session.pendingDevices();
     if (devices.length) emit({ kind: "pending-devices", devices });
   }
+  await consumeSecretFor(c.session, splitScope(c.key)[1], c.orgId, vaultId);
   // The vault's own state is asked even without a ready account key: an
   // unkeyed vault must be able to leave the open-time pause.
   const state = await c.session.ensureVaultKey(vaultId);
@@ -393,6 +532,7 @@ export async function vaultKeysGate(opts: {
     const c = sessionFor(opts.userId);
     c.orgId = opts.orgId;
     rememberOrgVault(api.getBaseUrl(), opts.userId, opts.orgId, opts.vaultId);
+    await consumeSecretFor(c.session, opts.userId, opts.orgId, opts.vaultId);
     return c.session.gateVaultOpen(opts.vaultId);
   };
   let timer: ReturnType<typeof setTimeout> | null = null;

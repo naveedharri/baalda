@@ -11,6 +11,7 @@ import type {
   TeamAccessMode,
 } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
+import { inviteWithVaultKeys } from "../lib/vaultKeys/runtime";
 import { freeLimitOf } from "../lib/billing";
 import { rosterCache, type RosterSnapshot } from "../lib/membersAccessCaches";
 import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
@@ -410,7 +411,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
 
   const resend = (inv: InvitationOverview) => run(async () => {
     if (!orgId) return;
-    const [result] = await authManager.api.inviteMany(orgId, {
+    const [result] = await inviteWithVaultKeys(orgId, {
       emails: [inv.email],
       role: inv.role === "admin" ? "admin" : "member",
       access: inv.access,

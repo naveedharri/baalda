@@ -16,6 +16,10 @@ import {
   vaultKeysGate,
   vaultKeysMembershipEnded,
   vaultKeysPasswordUnlock,
+  rememberInviteSecret,
+  claimInviteSecret,
+  offerJoinSecret,
+  joinCodeSecret,
 } from "./lib/vaultKeys/runtime";
 import { loadRememberedPassword } from "./lib/rememberedPassword";
 import { clearVaultKeyCache } from "./lib/vaultKeys/store";
@@ -2969,6 +2973,8 @@ export const useStore = create<AppStore>((set, get) => ({
   openInviteLink: async (url) => {
     const link = parseInviteDeepLink(url);
     if (!link) return;
+    // B5: the invite secret rides in memory until the vault opens.
+    rememberInviteSecret(link.invitationId, link.secret);
 
     // 1. Wrong server? Park the invite and ask. A deep link must never repoint
     // this device on its own — that value decides where a password gets posted
@@ -4587,6 +4593,9 @@ export const useStore = create<AppStore>((set, get) => ({
         null;
     }
     if (orgId) {
+      // B4: the invite's secret (if the link carried one) unlocks this vault's
+      // key as soon as it opens; claimed before the switch so the gate sees it.
+      claimInviteSecret(invitationId, orgId);
       await get().setActiveOrganization(orgId);
     }
     // The invite card is spent — leaving it up would offer to accept an
@@ -4603,7 +4612,10 @@ export const useStore = create<AppStore>((set, get) => ({
     // This flow owns the session from here: a detached `initAuth` still
     // restoring the previous one must not land its state on top of ours.
     ++authInitGen;
+    // C: `<code>-<J>` goes to the server as typed (it reads the part before
+    // the first `-`); J stays in memory until the vault opens.
     const joined = await authManager.api.joinVault(code.trim());
+    offerJoinSecret(joined.organizationId, joinCodeSecret(code));
     // The code was good, so the welcome screen's join flow is over: disarm the
     // landing suppression before switching in (it's module state, and leaving it
     // armed would silently strand the NEXT sign-in on the welcome screen).

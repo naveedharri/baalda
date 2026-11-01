@@ -492,6 +492,13 @@ export interface InviteManyInput {
   role: "member" | "admin";
   /** null = whatever the vault's New members setting says. */
   access: TeamAccessMode | null;
+  /** Seamless keys B1: the vault key wrapped per invitee under a one-time
+   *  secret (sent with `X-Baalda-VK`). Omitted by a device without the key. */
+  vaultKeys?: {
+    vaultId: string;
+    generation: number;
+    items: Array<{ email: string; wrappedVk: string; secret: string }>;
+  };
 }
 
 export interface InviteManyResult {
@@ -499,6 +506,20 @@ export interface InviteManyResult {
   invitationId?: string;
   emailed: boolean;
   error?: string;
+  /** B1: the invited address's existing account key, when it has one. */
+  publicKey?: string | null;
+  inviteeUserId?: string | null;
+}
+
+/** B4: a secret-wrapped vault key of an invitation to the caller. */
+export interface InviteWrap {
+  invitationId: string;
+  generation: number;
+  wrappedVk: string;
+}
+export interface JoinWrap {
+  generation: number;
+  wrappedVk: string;
 }
 
 /** What a whole-vault mode change actually did. */
@@ -3914,13 +3935,64 @@ export class ApiClient {
 
   /** Invite several addresses at once, each carrying a role and an access level.
    * A 402 `member_limit_reached` throws like {@link inviteMember}. */
-  async inviteMany(orgId: string, input: InviteManyInput): Promise<InviteManyResult[]> {
+  async inviteMany(orgId: string, input: InviteManyInput, vkBase64?: string): Promise<InviteManyResult[]> {
     const { data } = await this.request<{ results: InviteManyResult[] }>(
       "POST",
       `/api/orgs/${encodeURIComponent(orgId)}/invitations`,
-      { body: input },
+      { body: input, headers: input.vaultKeys && vkBase64 ? { [VAULT_KEY_HEADER]: vkBase64 } : undefined },
     );
     return data.results ?? [];
+  }
+
+  /** B2: the vault key sealed to an invitee's existing account key. */
+  async putInviteWrap(
+    vaultId: string,
+    invitationId: string,
+    body: { sealedVk: string; publicKey: string; generation: number },
+    vkBase64: string,
+  ): Promise<void> {
+    await this.request(
+      "PUT",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/invite-wraps/${encodeURIComponent(invitationId)}`,
+      { body, headers: { [VAULT_KEY_HEADER]: vkBase64 } },
+    );
+  }
+
+  /** B4: `{ wraps: [...] }` of invitations to the caller for this vault. */
+  async getInviteWraps(vaultId: string): Promise<InviteWrap[]> {
+    const { data } = await this.request<{ wraps?: InviteWrap[] }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/invite-wrap`,
+    );
+    return Array.isArray(data?.wraps) ? data.wraps : [];
+  }
+
+  /** C: the admin's join wrap; `stale-code` when the org's code moved on (409). */
+  async putJoinWrap(
+    vaultId: string,
+    body: { secretHash: string; wrappedVk: string; generation: number; code: string },
+    vkBase64: string,
+  ): Promise<"stored" | "stale-code"> {
+    try {
+      await this.request("PUT", `/api/vaults/${encodeURIComponent(vaultId)}/keys/join-wraps`, {
+        body,
+        headers: { [VAULT_KEY_HEADER]: vkBase64 },
+      });
+      return "stored";
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && errorCodeOf(e.body) === "stale_code") return "stale-code";
+      throw e;
+    }
+  }
+
+  /** C: `{ wrap: {...} | null }` for the joiner's secret hash. */
+  async getJoinWrap(vaultId: string, secretHashHex: string): Promise<JoinWrap | null> {
+    const { data } = await this.request<{ wrap?: JoinWrap | null }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/join-wrap?h=${encodeURIComponent(secretHashHex)}`,
+    );
+    const w = data?.wrap;
+    return w && typeof w.wrappedVk === "string" && typeof w.generation === "number" ? w : null;
   }
 
   /**
