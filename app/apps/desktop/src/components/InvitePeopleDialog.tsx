@@ -2,6 +2,7 @@ import { createPortal } from "react-dom";
 import { useEffect, useState } from "react";
 import type { InviteManyResult, TeamAccessMode } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
+import { inviteWithVaultKeys, vaultKeysJoinCode } from "../lib/vaultKeys/runtime";
 import { classifyLimitError, freeLimitOf, invitePrewarning, limitFromError, peopleLimitReason, type LimitKind } from "../lib/billing";
 import { buildInviteLink } from "../lib/inviteLink";
 import { isValidEmail, splitEmails } from "../lib/membersAccess";
@@ -74,7 +75,11 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
 
   useEffect(() => {
     let live = true;
-    authManager.api.getJoinCode().then((c) => { if (live) setCode(c); }).catch(() => {});
+    authManager.api
+      .getJoinCode()
+      .then((c) => vaultKeysJoinCode(orgId, c))
+      .then((c) => { if (live) setCode(c); })
+      .catch(() => {});
     return () => { live = false; };
   }, []);
 
@@ -101,7 +106,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
     setChips(all);
     setDraft("");
     try {
-      const out = await authManager.api.inviteMany(orgId, {
+      const out = await inviteWithVaultKeys(orgId, {
         emails: all,
         role,
         access: access === "default" ? null : access,

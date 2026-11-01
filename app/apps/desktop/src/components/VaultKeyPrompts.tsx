@@ -43,24 +43,23 @@ const promptKey = (p: Prompt) =>
 const nameOf = (userId: string) => memberDisplayName(useStore.getState().members, userId);
 
 /**
- * "A new computer is signing in as you": approved only by TYPING the code the
- * new computer shows. The code is never displayed here, so a device the person
- * did not start (a row a server or database writer added with its own key)
- * cannot be approved by clicking through.
+ * "<device> is signing in": one click, Approve or Not me (seamless keys, E).
+ * The code is shown read-only so the person can glance at the new computer;
+ * nothing is typed. This deliberately replaces the earlier typed-code step
+ * (owner decision 2026-11-01): the prompt only ever appears for this
+ * account's own pending devices, and the new device keeps showing its code.
  */
 export function ApproveDevicePrompt({ device, done }: { device: PendingDeviceView; done: () => void }) {
-  const [typed, setTyped] = useState("");
-  const ready = typed.replace(/[\s-]/g, "").length === 8;
+  const name = device.name?.trim() || "A new computer";
   return (
     <ConfirmDialog
-      title="A new computer is signing in as you"
+      title={`${name} is signing in`}
       tone="accent"
       confirmLabel="Approve"
-      cancelLabel="Deny"
-      confirmDisabled={!ready}
+      cancelLabel="Not me"
       onConfirm={async () => {
-        const ok = await currentVaultKeySession()?.approveDevice(device, typed);
-        toast(ok ? "Computer approved." : "That code does not match. Nothing was approved.", ok ? "success" : "error");
+        const ok = await currentVaultKeySession()?.approveDevice(device, device.code);
+        toast(ok ? "Computer approved." : "Could not approve that computer. Nothing was approved.", ok ? "success" : "error");
         done();
       }}
       onCancel={() => {
@@ -69,18 +68,10 @@ export function ApproveDevicePrompt({ device, done }: { device: PendingDeviceVie
       }}
     >
       <p>
-        If you are setting up Baalda on another computer, type the code it shows. If you are not, choose Deny.
+        If you are setting up Baalda on another computer, approve it. It shows the code{" "}
+        <strong aria-label="Code shown on the new computer">{device.code}</strong>. If this is not you, choose Not
+        me.
       </p>
-      <input
-        type="text"
-        aria-label="Code shown on the new computer"
-        placeholder="abcd 1234"
-        autoComplete="off"
-        spellCheck={false}
-        maxLength={12}
-        value={typed}
-        onChange={(e) => setTyped(e.target.value)}
-      />
     </ConfirmDialog>
   );
 }
@@ -110,7 +101,9 @@ export function VaultKeyPrompts() {
       } else if (e.kind === "pending-devices") {
         for (const device of e.devices) push({ kind: "approve-device", device });
       } else if (e.kind === "serviced") {
-        for (const s of e.result.sealed) toast(`Gave ${nameOf(s.userId)} the vault key · ${s.fingerprint}`);
+        for (const s of e.result.sealed) {
+          toast(`Gave ${e.names?.[s.userId] ?? nameOf(s.userId)} the vault key · ${s.fingerprint}`);
+        }
         for (const change of e.result.keyChanged) push({ kind: "key-changed", vaultId: e.vaultId, change });
       }
     });

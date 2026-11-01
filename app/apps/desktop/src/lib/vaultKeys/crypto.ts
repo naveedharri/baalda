@@ -303,6 +303,153 @@ export function vaultKeyFileText(vaultName: string, vaultId: string, vk: Uint8Ar
 
 // ---- recovery phrase --------------------------------------------------------
 
+// ---- secret wraps: invite secret S / join suffix J (seamless keys B, C) -----
+// wrapKey = HKDF-SHA256(ikm = secret bytes, salt = "baalda-secret-wrap-v1",
+// info = purpose + "|" + vaultId); wrappedVk = nonce(24) || XChaCha20-Poly1305
+// with AAD "bd-secret|" + purpose + "|" + vaultId + "|" + generation.
+// Secrets are 16 random bytes in Crockford base32 (26 chars, no padding).
+// Memory or the OS keychain only: never logged, stored in localStorage or shown
+// in an error.
+
+export type SecretPurpose = "invite" | "join";
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+export const SECRET_BYTES = 16;
+export const SECRET_CHARS = 26;
+
+export function encodeCrockford(bytes: Uint8Array): string {
+  let out = "";
+  let buf = 0;
+  let bits = 0;
+  for (const b of bytes) {
+    buf = (buf << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += CROCKFORD[(buf >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+    buf &= (1 << bits) - 1;
+  }
+  if (bits > 0) out += CROCKFORD[(buf << (5 - bits)) & 31];
+  return out;
+}
+
+/** 26 Crockford chars → 16 bytes, or null (case-insensitive; I/L→1, O→0). */
+export function decodeSecret(text: string): Uint8Array | null {
+  if (typeof text !== "string") return null;
+  const s = text.trim().toUpperCase().replace(/[IL]/g, "1").replace(/O/g, "0");
+  if (s.length !== SECRET_CHARS) return null;
+  const out = new Uint8Array(SECRET_BYTES);
+  let buf = 0;
+  let bits = 0;
+  let i = 0;
+  for (const ch of s) {
+    const v = CROCKFORD.indexOf(ch);
+    if (v < 0) return null;
+    buf = (buf << 5) | v;
+    bits += 5;
+    if (bits >= 8) {
+      if (i < SECRET_BYTES) out[i++] = (buf >>> (bits - 8)) & 0xff;
+      bits -= 8;
+    }
+    buf &= (1 << bits) - 1;
+  }
+  return i === SECRET_BYTES ? out : null;
+}
+
+export function newSecret(): string {
+  return encodeCrockford(randomBytes(SECRET_BYTES));
+}
+
+export const secretWrapAad = (purpose: SecretPurpose, vaultId: string, generation: number) =>
+  enc.encode(`bd-secret|${purpose}|${vaultId}|${generation}`);
+
+function secretWrapKey(secret: Uint8Array, purpose: SecretPurpose, vaultId: string): Uint8Array {
+  return hkdf(sha256, secret, enc.encode("baalda-secret-wrap-v1"), enc.encode(`${purpose}|${vaultId}`), 32);
+}
+
+export function wrapVkWithSecret(
+  secret: string,
+  purpose: SecretPurpose,
+  vaultId: string,
+  generation: number,
+  vk: Uint8Array,
+): Uint8Array {
+  const raw = decodeSecret(secret);
+  if (!raw || vk.length !== VK_BYTES) throw new Error("bad secret wrap input");
+  const key = secretWrapKey(raw, purpose, vaultId);
+  const nonce = randomBytes(24);
+  const ct = xchacha20poly1305(key, nonce, secretWrapAad(purpose, vaultId, generation)).encrypt(vk);
+  raw.fill(0);
+  key.fill(0);
+  const out = new Uint8Array(24 + ct.length);
+  out.set(nonce, 0);
+  out.set(ct, 24);
+  return out;
+}
+
+/** Throws when it does not open (wrong secret, purpose, vault or generation). */
+export function unwrapVkWithSecret(
+  secret: string,
+  purpose: SecretPurpose,
+  vaultId: string,
+  generation: number,
+  wrapped: Uint8Array,
+): Uint8Array {
+  const raw = decodeSecret(secret);
+  if (!raw || wrapped.length <= 24) throw new Error("bad secret wrap");
+  const key = secretWrapKey(raw, purpose, vaultId);
+  try {
+    return xchacha20poly1305(key, wrapped.subarray(0, 24), secretWrapAad(purpose, vaultId, generation)).decrypt(
+      wrapped.subarray(24),
+    );
+  } finally {
+    raw.fill(0);
+    key.fill(0);
+  }
+}
+
+/** hex sha256(utf8(J)), the join-wrap lookup key. */
+export function secretHash(secret: string): string {
+  const h = sha256(enc.encode(secret));
+  return Array.from(h, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// ---- password wrap of the account key (seamless keys F) --------------------
+// XChaCha20-Poly1305 under the server's `unlockKey`, nonce(24) || ct, AAD
+// utf8("bd-acct-pw|" + userId + "|" + publicKeyB64). Desktop only.
+
+const PW_NONCE = 24;
+export const accountPasswordAad = (userId: string, publicKeyB64: string) =>
+  enc.encode(`bd-acct-pw|${userId}|${publicKeyB64}`);
+
+export function wrapAccountKeyWithUnlock(
+  unlockKey: Uint8Array,
+  userId: string,
+  publicKeyB64: string,
+  privateKey: Uint8Array,
+): Uint8Array {
+  if (unlockKey.length !== 32) throw new Error("unlock key must be 32 bytes");
+  const nonce = randomBytes(PW_NONCE);
+  const ct = xchacha20poly1305(unlockKey, nonce, accountPasswordAad(userId, publicKeyB64)).encrypt(privateKey);
+  const out = new Uint8Array(PW_NONCE + ct.length);
+  out.set(nonce, 0);
+  out.set(ct, PW_NONCE);
+  return out;
+}
+
+/** Throws when the wrap does not open (wrong key, other user/public key, tampered). */
+export function unwrapAccountKeyWithUnlock(
+  unlockKey: Uint8Array,
+  userId: string,
+  publicKeyB64: string,
+  wrapped: Uint8Array,
+): Uint8Array {
+  if (unlockKey.length !== 32 || wrapped.length <= PW_NONCE) throw new Error("malformed password wrap");
+  return xchacha20poly1305(unlockKey, wrapped.subarray(0, PW_NONCE), accountPasswordAad(userId, publicKeyB64)).decrypt(
+    wrapped.subarray(PW_NONCE),
+  );
+}
+
 export type Argon2Params = { m: number; t: number; p: number };
 /** m in KiB: 64 MiB, t = 3, p = 1. */
 export const RECOVERY_ARGON2: Argon2Params = { m: 64 * 1024, t: 3, p: 1 };

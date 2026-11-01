@@ -84,6 +84,17 @@ export function orgOfVault(serverUrl: string, userId: string, vaultId: string): 
   return null;
 }
 
+/** Every [orgId, vaultId] this device recorded for (server, user). */
+export function knownOrgVaults(serverUrl: string, userId: string): Array<[string, string]> {
+  const orgs = readMap()[scopeKey(serverUrl, userId)] ?? {};
+  const out: Array<[string, string]> = [];
+  for (const [orgId, ids] of Object.entries(orgs)) {
+    if (!Array.isArray(ids)) continue;
+    for (const id of ids) if (typeof id === "string" && id) out.push([orgId, id]);
+  }
+  return out;
+}
+
 export function forgetOrgVaultIds(serverUrl: string, userId: string, orgId: string): void {
   const m = readMap();
   const k = scopeKey(serverUrl, userId);
