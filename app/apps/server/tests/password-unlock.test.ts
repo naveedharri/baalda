@@ -122,6 +122,15 @@ describe("password unlocks the account key (F)", () => {
     expect(signin.status).toBe(429);
   });
 
+
+  it("50 simultaneous wrong unlocks get at most 5 password checks; the rest 429", async () => {
+    const u = await signUp("burst@unlock.test", "password-burst-1");
+    const statuses = await Promise.all(
+      Array.from({ length: 50 }, (_, i) => call(u, "POST", "/api/me/keys/unlock", { password: `wrong-${i}` }).then((r) => r.status)),
+    );
+    expect(statuses.filter((s) => s === 401).length).toBeLessThanOrEqual(5);
+    expect(statuses.filter((s) => s === 429).length).toBeGreaterThanOrEqual(45);
+  });
   it("unlock: Google-only account → 409 no_password; no session → 401", async () => {
     const u = await signUp("google@unlock.test", "password-g-1");
     await pool.query(`DELETE FROM account WHERE "userId" = $1 AND "providerId" = 'credential'`, [u.userId]);

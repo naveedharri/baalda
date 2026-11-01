@@ -44,7 +44,13 @@ import {
   upgradeLoginHash,
   verifyPassword,
 } from "../../auth/login-pepper.js";
-import { clearThrottle, lockedForSeconds, recordFailure, throttledResponse } from "../../auth/signin-throttle.js";
+import {
+  clearThrottle,
+  lockedForSeconds,
+  recordFailure,
+  throttledResponse,
+  withPasswordSlot,
+} from "../../auth/signin-throttle.js";
 import {
   KEY_REPLACEMENT_WINDOW_MS,
   MAX_KEY_REPLACEMENTS,
@@ -734,20 +740,27 @@ export function createVaultKeyRoutes(): Hono {
     }
     // Shares the email sign-in throttle (#237): a locked account is refused
     // before any check, and a wrong password here counts as a failed sign-in.
-    const wait = await lockedForSeconds(session.email);
-    if (wait > 0) return throttledResponse(wait);
-    const { rows } = await pool.query<{ password: string | null }>(
-      `SELECT password FROM account WHERE "userId" = $1 AND "providerId" = 'credential' AND password IS NOT NULL LIMIT 1`,
-      [session.userId],
-    );
-    if (!rows[0]?.password) {
-      return c.json({ error: "This account signs in without a password", code: "no_password" }, 409);
-    }
-    if (!(await verifyPassword({ hash: rows[0].password, password }))) {
-      await recordFailure(session.email);
-      return c.json({ error: "Wrong password", code: "wrong_password" }, 401);
-    }
-    await clearThrottle(session.email);
+    // Check → verify → record run in the account's password slot (one at a
+    // time per email, across instances), so a burst cannot outrun the lock.
+    const verdict = await withPasswordSlot(session.email, async () => {
+      const wait = await lockedForSeconds(session.email);
+      if (wait > 0) return throttledResponse(wait);
+      const { rows } = await pool.query<{ password: string | null }>(
+        `SELECT password FROM account WHERE "userId" = $1 AND "providerId" = 'credential' AND password IS NOT NULL LIMIT 1`,
+        [session.userId],
+      );
+      if (!rows[0]?.password) {
+        return c.json({ error: "This account signs in without a password", code: "no_password" }, 409);
+      }
+      if (!(await verifyPassword({ hash: rows[0].password, password }))) {
+        await recordFailure(session.email);
+        return c.json({ error: "Wrong password", code: "wrong_password" }, 401);
+      }
+      await clearThrottle(session.email);
+      return "ok" as const;
+    });
+    if (verdict === null) return throttledResponse(1); // slot stayed busy
+    if (verdict !== "ok") return verdict;
     await upgradeLoginHash({ userId: session.userId }, password);
     const key = deriveUnlockKey(pepper, session.userId, password);
     const unlockKey = key.toString("base64");
