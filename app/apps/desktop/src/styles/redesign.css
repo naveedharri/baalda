@@ -3084,3 +3084,13 @@ html:not(.rd-off) .vaults-local-empty {
   background: var(--rd-surface); box-shadow: var(--rd-card-shadow); color: var(--text-secondary); font-size: 13px;
 }
 html:not(.rd-off) .vaults-local-empty b { color: var(--text-primary); font-size: 15px; }
+
+/* Select All (⌘A / Ctrl+A) reaches only what you can read and edit. On macOS
+   the native Edit menu performs it before the page sees the key, so it would
+   otherwise paint the sidebar, tabs, buttons and the note's header chrome too.
+   App chrome is not text to select; the note, inputs and dialogs still are. */
+.sidebar, .tab-strip, .editor-topbar, .header-actions,
+.inline-title-adds, .properties-add, .backlinks-float > button {
+  -webkit-user-select: none; user-select: none;
+}
+.sidebar input, .sidebar textarea, .tab-strip input { -webkit-user-select: text; user-select: text; }

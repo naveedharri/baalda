@@ -1725,8 +1725,30 @@ export default function App() {
         return;
       }
     };
+    // macOS runs Edit → Select All itself, before the page sees ⌘A, and selects
+    // the document rather than the note. When a selection appears that swallows
+    // the whole note while no field has focus, hand it to the editor as its own
+    // select-all, so it is highlighted, copyable and editable like one.
+    const onSelectionChange = () => {
+      const sel = document.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+      if (document.querySelector(".modal")) return;
+      const ae = document.activeElement;
+      if (ae && ae !== document.body && ae.closest("input, textarea, .cm-editor")) return;
+      const content = document.querySelector<HTMLElement>(".cm-editor .cm-content");
+      if (!content || !sel.containsNode(content, false)) return;
+      const view = EditorView.findFromDOM(content.closest(".cm-editor") as HTMLElement);
+      if (!view) return;
+      sel.removeAllRanges();
+      view.focus();
+      view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("selectionchange", onSelectionChange);
+    };
   }, []);
 
   // Only while we still don't know WHICH folder to show. `setVault` lands
