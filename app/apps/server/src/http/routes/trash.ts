@@ -7,6 +7,14 @@ import { getSession } from "../session.js";
 import { ACCOUNT_READ_ONLY_BODY } from "../../permissions/http-gates.js";
 
 import { ORIGIN_HEADER } from "./registry.js";
+import { docCryptoOf, KEY_REQUIRED_CODE, KeyRequiredError, requireVaultKey } from "../../crypto/transport.js";
+
+/** `requireVaultKey`'s refusal, carried out of the service to be returned as-is. */
+class KeyRefusal extends Error {
+  constructor(readonly response: Response) {
+    super("vault key refused");
+  }
+}
 
 export interface TrashRouteDeps {
   onRegistryChanged?: (vaultId: string, origin: string | null) => void;
@@ -34,9 +42,20 @@ export function createTrashRoutes(deps: TrashRouteDeps): Hono {
   routes.get("/notes/:docId/trash-content", async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
+    // W3: a keyed vault's text is read with THIS request's key (Rule 1): 409
+    // `key_required` without it, 426 for a build that predates vault keys.
+    const cryptoFor = async (vaultId: string) => {
+      const vkr = await requireVaultKey(c, vaultId);
+      if (!vkr.ok) throw new KeyRefusal(vkr.response);
+      return docCryptoOf(vaultId, vkr);
+    };
     try {
-      return c.json(await trashContent(session.userId, c.req.param("docId")));
+      return c.json(await trashContent(session.userId, c.req.param("docId"), cryptoFor));
     } catch (err) {
+      if (err instanceof KeyRefusal) return err.response;
+      if (err instanceof KeyRequiredError) {
+        return c.json({ error: "This vault needs its key. Open Baalda on a device that has it.", code: KEY_REQUIRED_CODE }, 409);
+      }
       if (err instanceof TrashError) return c.json({ error: err.message, code: err.code }, err.status);
       throw err;
     }
