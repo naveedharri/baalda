@@ -822,20 +822,32 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     fontSize: "var(--fs-sm)",
     color: "var(--danger)",
   },
-  ".inline-title-add": {
+  // A note with no properties: Add tags · Add property · Add date, always
+  // visible but quiet (it used to be invisible until hovered).
+  ".inline-title-adds": {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "6px",
     alignSelf: "flex-start",
+  },
+  ".inline-title-add": {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "6px",
+    height: "28px",
+    padding: "0 10px",
     border: "0",
-    background: "transparent",
-    padding: "0",
+    borderRadius: "8px",
+    background: "var(--bg-subtle)",
     cursor: "pointer",
     fontSize: "var(--fs-sm)",
     color: "var(--text-tertiary)",
-    opacity: "0",
-    transition: "opacity 120ms ease",
+    transition: "background 120ms ease, color 120ms ease",
   },
-  // A note with no properties shows no chrome until you reach for it.
-  ".cm-note-title:hover .inline-title-add, .inline-title-add:focus-visible": {
-    opacity: "1",
+  ".inline-title-add svg": { width: "14px", height: "14px", flex: "none" },
+  ".inline-title-add:hover, .inline-title-add:focus-visible": {
+    background: "var(--bg-hover)",
+    color: "var(--text-primary)",
   },
 
   // Same rule as `.cm-note-title`: padding only, no vertical margin. The gap

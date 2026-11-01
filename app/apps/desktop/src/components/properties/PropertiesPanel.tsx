@@ -102,16 +102,24 @@ function freeKey(taken: ReadonlySet<string>): string {
  * not in the file has nowhere to live — and a pending row would have to survive
  * a widget that does not exist yet when the note has no frontmatter at all.
  */
-export function addPropertyToNote(view: EditorView): boolean {
+export function addPropertyToNote(
+  view: EditorView,
+  /** A specific property to add (the title's Add tags / Add date); default: a
+   *  blank text property under a free name. A preset whose key the note
+   *  already has adds nothing. */
+  preset?: { key: string; value: PropValue },
+): boolean {
   if (view.state.readOnly) return false;
   const fm = findFrontmatter(view.state.doc);
   const parsed = fm ? parseFrontmatter(view.state.doc, fm) : null;
   if (parsed && !parsed.ok) return false; // never rewrite YAML we can't read
   const entries = parsed?.ok ? parsed.entries : [];
-  const key = freeKey(new Set(entries.map((e) => e.key)));
+  const taken = new Set(entries.map((e) => e.key));
+  if (preset && taken.has(preset.key)) return false;
+  const key = preset?.key ?? freeKey(taken);
   dispatch(
     view,
-    planAddProperty(view.state.doc, fm, entries, key, { kind: "text", value: "" }),
+    planAddProperty(view.state.doc, fm, entries, key, preset?.value ?? { kind: "text", value: "" }),
   );
   pendingFocus.set(view, key);
   return true;
