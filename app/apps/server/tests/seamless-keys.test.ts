@@ -228,6 +228,16 @@ describe("seamless vault keys", () => {
     expect(rows).toHaveLength(1);
   });
 
+  it("C: a long code typed in lower case with spaces around the dash still joins", async () => {
+    const s = await setup();
+    await pool.query("UPDATE session SET \"activeOrganizationId\" = $1 WHERE \"userId\" = $2", [s.orgId, s.owner.userId]);
+    const code = ((await (await call(s.owner, "GET", "/orgs/join-code")).json()) as { code: string }).code;
+    const joiner = await signUp("spaced@seamless.test");
+    const joined = await call(joiner, "POST", "/orgs/join", { code: `  ${code.toLowerCase()} - ${secret().toLowerCase()} ` });
+    expect(joined.status).toBe(200);
+    expect(await joined.json()).toMatchObject({ organizationId: s.orgId, alreadyMember: false });
+  });
+
   it("C: join-code secret wraps: owner/admin with the key, current code only, member fetch, capped, gone with the code", async () => {
     const s = await setup();
     await pool.query("UPDATE session SET \"activeOrganizationId\" = $1 WHERE \"userId\" = $2", [s.orgId, s.owner.userId]);
