@@ -2763,7 +2763,8 @@ html:not(.rd-off) .account-popover .rd-prof .presence-light { border-color: var(
 /* One right-hand column: the NOTES header's last icon (the select checkbox)
    is centred 49px in from the sidebar's right edge. The sync dots, each
    row's ⋯, the Agent Skills count and the bug icon all centre on it.
-   (Measured live: dots were 7.5px left of it, the bug icon 23px right.) */
+   (Measured live: dots were 7.5px left of it, the bug icon 23px right of it
+   with its old 8px margin, so it now gets 31px.) */
 html:not(.rd-off) .sidebar .filetree-scroll .tree-sync { transform: translateX(15.5px); }
 html:not(.rd-off) .sidebar .filetree-scroll .tree-more { transform: translateX(-12.5px); }
-html:not(.rd-off) .sidebar-footer .identity-bug { margin-right: 23px; }
+html:not(.rd-off) .sidebar-footer .identity-bug { margin-right: 31px; }
