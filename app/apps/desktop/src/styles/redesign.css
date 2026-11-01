@@ -2930,11 +2930,11 @@ html:not(.rd-off) .ai-skills { list-style: none; margin: 0; padding: 0; display:
    own white field and edge to read as something to type in. */
 html:not(.rd-off) .settings-content .conn-address {
   height: 42px; padding: 0 14px; border: 0; border-radius: 12px;
-  background: var(--bg-surface, #fff); color: var(--text-primary); font-size: 14px;
-  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.2), 0 1px 2px rgba(var(--rd-ink), 0.06);
+  background: var(--bg-surface, #fff) !important; color: var(--text-primary); font-size: 14px;
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.2), 0 1px 2px rgba(var(--rd-ink), 0.06) !important;
 }
 html:not(.rd-off) .settings-content .conn-address::placeholder { color: var(--text-tertiary); }
-html:not(.rd-off) .settings-content .conn-address:focus { box-shadow: 0 0 0 1.5px var(--text-primary), 0 0 0 4px rgba(var(--rd-ink), 0.06); }
+html:not(.rd-off) .settings-content .conn-address:focus { box-shadow: 0 0 0 1.5px var(--text-primary), 0 0 0 4px rgba(var(--rd-ink), 0.06) !important; }
 
 /* Plan & Billing loading: card shapes instead of a bare "Loading…". */
 html:not(.rd-off) .plan-skeleton .plan-card { display: flex; flex-direction: column; align-items: flex-start; min-height: 210px; }
