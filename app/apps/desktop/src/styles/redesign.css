@@ -3038,11 +3038,7 @@ html:not(.rd-off) .about-agent-text > b { font-size: 14px; }
 html:not(.rd-off) .about-agent-text > small { font-size: 12px !important; line-height: 1.4; }
 html:not(.rd-off) .about-agent-version { font-size: 12px; }
 
-/* File sidebar rows share the settings menu's hover: the light accent tint
-   (--bg-hover), with the open note one step deeper. The highlight now runs
-   from the Home box's left edge (12px) to its right edge, so the row's ⋯ and
-   sync dot sit inside it and every box in the sidebar shares both edges. */
-html:not(.rd-off) .sidebar .tree-row:hover { --rd-row-bg: var(--bg-hover); }
-html:not(.rd-off) .sidebar .tree-row.selected { --rd-row-bg: var(--bg-active); }
-html:not(.rd-off) .sidebar .tree-row::after { right: 28px; }
-html:not(.rd-off) .sidebar .home-sidebar-row:hover:not(.is-unset) { background: var(--bg-hover) !important; }
+/* The row highlight (hover, open note) spans the sidebar evenly: 12px in from
+   the left edge and 12px in from the right, so neither side looks short. The
+   ⋯ and sync dot now sit inside it. Colours unchanged. */
+html:not(.rd-off) .sidebar .tree-row::after { left: 9px; right: -2px; }
