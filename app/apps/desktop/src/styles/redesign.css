@@ -2495,7 +2495,7 @@ html:not(.rd-off) .invite-foot .confirm-actions { margin: 0; display: flex; gap:
 /* Import and export (redesign): one card of action rows, each an icon tile, a
    title with a one-line hint, and a quiet button. No loud violet buttons and no
    half-empty second card. */
-html:not(.rd-off) .io-tab { display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 640px; }
+html:not(.rd-off) .io-tab { display: flex; flex-direction: column; gap: 12px; width: 100%; }
 html:not(.rd-off) .io-list {
   background: var(--rd-surface); border-radius: 16px; padding: 6px;
   box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 1px 2px rgba(var(--rd-ink), 0.03);
@@ -2732,3 +2732,17 @@ html:not(.rd-off) .account-popover > .rd-prof .rd-prof-text b {
 html:not(.rd-off) .account-popover > .rd-prof .rd-prof-text small {
   font-size: 11px; line-height: 13px; color: var(--text-tertiary);
 }
+
+/* Account Settings → Encryption. */
+.encryption-page { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
+.encryption-page .subhead { margin-top: 12px; }
+.encryption-lede { margin: 0; font-size: var(--fs-md); color: var(--text-secondary); line-height: 1.5; }
+.encryption-note { margin: 0; }
+.encryption-page .profile-rows:empty { display: none; }
+.encryption-cover { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.encryption-cover-col { padding: 14px 16px; border-radius: 12px; box-shadow: var(--rd-card-shadow); background: var(--bg-surface, #fff); }
+.encryption-cover-title { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); font-weight: 600; color: var(--text-secondary); }
+.encryption-cover-title::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--text-tertiary); }
+.encryption-cover-title.is-on { color: var(--success); }
+.encryption-cover-title.is-on::before { background: var(--success); }
+.encryption-cover ul { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-sm); color: var(--text-primary); }

@@ -34,6 +34,7 @@ import { AiToolsTab } from "./skills/AiToolsTab";
 import { Avatar } from "./Avatar";
 import { serverFailureMessage } from "./serverFailureMessage";
 import { SecurityCodeField } from "./SecurityCodeField";
+import { VaultKeySection } from "./VaultKeySection";
 import { SettingsModal } from "./SettingsModal";
 import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
@@ -99,6 +100,16 @@ const ACCOUNT_TABS: Array<{ id: AccountTab; label: string; icon: React.ReactNode
         <rect x="14" y="3" width="7" height="7" rx="1.5" />
         <rect x="3" y="14" width="7" height="7" rx="1.5" />
         <rect x="14" y="14" width="7" height="7" rx="1.5" />
+      </Icon>
+    ),
+  },
+  {
+    id: "encryption",
+    label: "Encryption",
+    icon: (
+      <Icon>
+        <rect x="4" y="11" width="16" height="10" rx="2" />
+        <path d="M8 11V7a4 4 0 0 1 8 0v4" />
       </Icon>
     ),
   },
@@ -213,6 +224,8 @@ export function AccountSettings({
             <AccountPlanTab />
           ) : tab === "vaults" ? (
             <AccountVaultsTab />
+          ) : tab === "encryption" ? (
+            <EncryptionTab />
           ) : tab === "appearance" ? (
             <AppearanceTab />
           ) : tab === "notifications" ? (
@@ -412,8 +425,6 @@ function ProfileTab() {
             )}
           </div>
         </div>
-
-        <SecurityCodeField />
       </div>
 
       {error && <div className="auth-error">{error}</div>}
@@ -972,3 +983,73 @@ function Icon({ children }: { children: React.ReactNode }) {
 }
 
 export { AccountSettings as default };
+
+/** What is encrypted and what is not. Plain words, and never "end to end":
+ *  the server process sees plaintext while it works (docs/VAULT_KEYS.md). */
+const ENCRYPTED = ["Note text", "Version history", "Search index", "Public link tokens"];
+const NOT_ENCRYPTED = ["Note titles and folder names", "Attachments and files", "Who is in the vault and their access"];
+
+/**
+ * Account Settings → Encryption: everything about vault keys on one page.
+ * The open vault's status and key actions (the same card Vault Settings →
+ * General leads with), this account's security code, and what the key covers.
+ */
+function EncryptionTab() {
+  const session = useStore((s) => s.session);
+  const organizations = useStore((s) => s.organizations);
+  const members = useStore((s) => s.members);
+  const syncEnabled = useStore((s) => s.syncEnabled);
+  const activeOrg = organizations.find((o) => o.id === session?.activeOrganizationId) ?? null;
+  const me = members.find((m) => m.userId === session?.user.id);
+  const canManage = me?.role === "owner" || me?.role === "admin";
+  const isOwner = me?.role === "owner";
+
+  return (
+    <div className="encryption-page">
+      <p className="encryption-lede">
+        Your notes are encrypted in our database with a key only your team&apos;s devices hold.
+        Backups and admin tools see only scrambled text.
+      </p>
+
+      <div className="subhead">{activeOrg && syncEnabled ? activeOrg.name : "This vault"}</div>
+      {activeOrg && syncEnabled ? (
+        <VaultKeySection vaultName={activeOrg.name} isOwner={isOwner} canManage={canManage} />
+      ) : (
+        <p className="muted">Open a synced vault to see its encryption.</p>
+      )}
+
+      <div className="subhead">Your security code</div>
+      <div className="profile-rows">
+        <SecurityCodeField />
+      </div>
+      <p className="muted encryption-note">
+        Teammates compare this code with yours when they share a vault key with you. It only
+        appears once this computer holds your account key.
+      </p>
+
+      <div className="subhead">What the key covers</div>
+      <div className="encryption-cover">
+        <div className="encryption-cover-col">
+          <span className="encryption-cover-title is-on">Encrypted</span>
+          <ul>
+            {ENCRYPTED.map((x) => (
+              <li key={x}>{x}</li>
+            ))}
+          </ul>
+        </div>
+        <div className="encryption-cover-col">
+          <span className="encryption-cover-title">Not encrypted</span>
+          <ul>
+            {NOT_ENCRYPTED.map((x) => (
+              <li key={x}>{x}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+      <p className="muted encryption-note">
+        The server reads notes in memory while it works, to index search and keep versions, so
+        this is encryption at rest, not end to end.
+      </p>
+    </div>
+  );
+}
