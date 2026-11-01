@@ -2746,3 +2746,11 @@ html:not(.rd-off) .account-popover > .rd-prof .rd-prof-text small {
 .encryption-cover-title.is-on { color: var(--success); }
 .encryption-cover-title.is-on::before { background: var(--success); }
 .encryption-cover ul { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-sm); color: var(--text-primary); }
+
+/* An open note under the pointer keeps ONE highlight: the inset layer. The
+   older full-row "selected:hover" fill outranked the transparent row. */
+html:not(.rd-off) .sidebar .tree-row.selected:hover { background: transparent !important; }
+
+/* Vault menu: the status is words only. The dot was drawn green for every
+   vault, local ones included, so it said nothing. */
+html:not(.rd-off) .vault-switcher .vault-card-sub::before { display: none; }
