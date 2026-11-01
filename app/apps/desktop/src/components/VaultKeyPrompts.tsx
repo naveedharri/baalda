@@ -101,7 +101,9 @@ export function VaultKeyPrompts() {
       } else if (e.kind === "pending-devices") {
         for (const device of e.devices) push({ kind: "approve-device", device });
       } else if (e.kind === "serviced") {
-        for (const s of e.result.sealed) toast(`Gave ${nameOf(s.userId)} the vault key · ${s.fingerprint}`);
+        for (const s of e.result.sealed) {
+          toast(`Gave ${e.names?.[s.userId] ?? nameOf(s.userId)} the vault key · ${s.fingerprint}`);
+        }
         for (const change of e.result.keyChanged) push({ kind: "key-changed", vaultId: e.vaultId, change });
       }
     });

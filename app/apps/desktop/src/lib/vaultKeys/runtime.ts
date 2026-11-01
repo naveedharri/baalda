@@ -62,7 +62,8 @@ let memoDeviceId: string | null = null;
 export type VaultKeyEvent =
   | { kind: "account"; state: AccountKeysState }
   | { kind: "vault"; vaultId: string; state: VaultKeyState }
-  | { kind: "serviced"; vaultId: string; result: ServiceResult }
+  /** `names`: display names from THAT vault's own roster (userId → name). */
+  | { kind: "serviced"; vaultId: string; result: ServiceResult; names?: Record<string, string> }
   /** Another device asks to sign in as us: "Approve?" with its code. */
   | { kind: "pending-devices"; devices: PendingDeviceView[] }
   /** The server's churn brake refused a key step (429 rate_limited): its plain message. */
@@ -149,9 +150,10 @@ let current: {
  * servicing covers vaults other than the open one), else the open org. One
  * overview per org per minute, so N vaults x 50 requests is not N x 50 calls.
  */
-const rosterMemo = new Map<string, { at: number; members: Promise<Array<{ userId: string; role?: string }>> }>();
+type RosterRow = { userId: string; role?: string; name?: string | null; email?: string | null };
+const rosterMemo = new Map<string, { at: number; members: Promise<RosterRow[]> }>();
 const ROSTER_TTL_MS = 60_000;
-function rosterOf(orgId: string): Promise<Array<{ userId: string; role?: string }>> {
+function rosterOf(orgId: string): Promise<RosterRow[]> {
   const hit = rosterMemo.get(orgId);
   if (hit && Date.now() - hit.at < ROSTER_TTL_MS) return hit.members;
   const members = api.getMembersOverview(orgId).then((r) => r.members);
@@ -250,7 +252,28 @@ async function runOnce(): Promise<void> {
 
 async function serviceVault(c: NonNullable<typeof current>, vaultId: string): Promise<void> {
   const result = await c.session.serviceKeyRequests(vaultId);
-  if (result.sealed.length || result.keyChanged.length) emit({ kind: "serviced", vaultId, result });
+  if (!result.sealed.length && !result.keyChanged.length) return;
+  emit({ kind: "serviced", vaultId, result, names: await namesFor(c, vaultId, result) });
+}
+
+/** Names for the toast from the vault's OWN org roster (the cached one the
+ *  membership check read), so a background vault's seal is named right. */
+async function namesFor(c: NonNullable<typeof current>, vaultId: string, result: ServiceResult) {
+  const [serverUrl, userId] = splitScope(c.key);
+  const orgId = orgOfVault(serverUrl, userId, vaultId) ?? c.orgId;
+  if (!orgId) return undefined;
+  try {
+    const roster = await rosterOf(orgId);
+    const names: Record<string, string> = {};
+    for (const s of [...result.sealed, ...result.keyChanged]) {
+      const m = roster.find((r) => r.userId === s.userId);
+      const name = m?.name?.trim() || m?.email || "";
+      if (name) names[s.userId] = name;
+    }
+    return names;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
