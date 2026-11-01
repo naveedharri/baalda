@@ -2941,3 +2941,10 @@ html:not(.rd-off) .plan-skeleton-seats { flex-direction: row !important; align-i
 html:not(.rd-off) .plan-skeleton-ring { width: 112px; height: 112px; border-radius: 50%; border: 12px solid rgba(var(--rd-ink), 0.06); flex: none; animation: rd-skel-pulse 1.4s ease-in-out infinite; }
 html:not(.rd-off) .plan-skeleton-legend { display: flex; flex-direction: column; gap: 12px; }
 @keyframes rd-skel-pulse { 50% { opacity: 0.55; } }
+
+/* Welcome: the big wordmark is back (2026-11-01). Its width is its own again,
+   min(42vw, 670px), not the button row's; the buttons stay centred under it. */
+.vault-picker-card .product-name { justify-self: center; }
+.vault-picker-card .product-name .wordmark { width: min(42vw, 670px); }
+.vault-picker-card > .vault-actions { justify-self: center; }
+.vault-picker-card > .recent-list { max-width: 520px; justify-self: center; }
