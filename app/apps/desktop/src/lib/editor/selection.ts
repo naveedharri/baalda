@@ -42,23 +42,13 @@ export const proseSelection = layer({
       const to = Math.min(r.to, vTo);
       for (let pos = from; pos <= to; ) {
         // A block widget (a rendered table, a code well) gets ONE rect over
-        // its box, inset to the prose column like the widget itself
-        // (`cm-block-inset`). Measured per line it came out as a full-width
-        // band from the scroller's edge, wider than anything on the page.
+        // what it actually draws: the table's own box, not the column and not
+        // the widget's spacing above it. While you type in one of its cells
+        // the wash stays off: you are editing, not selecting.
         const block = view.lineBlockAt(pos);
         if (block.type !== BlockType.Text) {
-          const box = proseColumn(view);
-          if (box) {
-            out.push(
-              new RectangleMarker(
-                "cm-proseSelection",
-                box.left,
-                box.top + block.top,
-                box.width,
-                block.bottom - block.top,
-              ),
-            );
-          }
+          const rect = widgetBox(view, block.from);
+          if (rect) out.push(rect);
           pos = block.to + 1;
           continue;
         }
@@ -72,23 +62,37 @@ export const proseSelection = layer({
     return out;
   },
   update(u) {
-    return u.docChanged || u.selectionSet || u.viewportChanged || u.geometryChanged;
+    return u.docChanged || u.selectionSet || u.viewportChanged || u.geometryChanged || u.focusChanged;
   },
 });
 
-/** The prose column in layer coordinates: the content box minus the
- *  `--editor-pad-x` inset every `.cm-line` carries. */
-function proseColumn(view: EditorView): { left: number; top: number; width: number } | null {
-  const line = view.contentDOM.querySelector(":scope > .cm-line");
-  if (!line) return null;
-  const content = view.contentDOM.getBoundingClientRect();
-  const scroller = view.scrollDOM.getBoundingClientRect();
-  const cs = getComputedStyle(line);
-  const padL = parseFloat(cs.paddingLeft) || 0;
-  const padR = parseFloat(cs.paddingRight) || 0;
-  return {
-    left: content.left + padL - scroller.left + view.scrollDOM.scrollLeft,
-    top: content.top - scroller.top + view.scrollDOM.scrollTop,
-    width: Math.max(0, content.width - padL - padR),
-  };
+/** The selection rect for the block widget starting at `from`, in layer
+ *  coordinates, or null when it is being edited or not drawn. */
+function widgetBox(view: EditorView, from: number): RectangleMarker | null {
+  for (const child of Array.from(view.contentDOM.children)) {
+    if (!(child instanceof HTMLElement) || child.classList.contains("cm-line")) continue;
+    let at: number;
+    try {
+      at = view.posAtDOM(child, 0);
+    } catch {
+      continue;
+    }
+    if (at !== from) continue;
+    if (child.contains(document.activeElement)) return null;
+    const drawn = (child.querySelector("table") as HTMLElement | null) ?? child;
+    const r = drawn.getBoundingClientRect();
+    const clip = child.getBoundingClientRect();
+    const left = Math.max(r.left, clip.left);
+    const right = Math.min(r.right, clip.right);
+    if (right <= left || r.height <= 0) return null;
+    const scroller = view.scrollDOM.getBoundingClientRect();
+    return new RectangleMarker(
+      "cm-proseSelection",
+      left - scroller.left + view.scrollDOM.scrollLeft,
+      r.top - scroller.top + view.scrollDOM.scrollTop,
+      right - left,
+      r.height,
+    );
+  }
+  return null;
 }
