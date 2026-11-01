@@ -186,6 +186,35 @@ describe("invite-time keys (B1/B2/B4)", () => {
   });
 });
 
+describe("adoption against keys/mine answers", () => {
+  it("a 202 pending answer (member without a wrap) still adopts, after the check verifies", async () => {
+    const v = await keyedVault("v1");
+    const s1 = newSecret();
+    const pending: MyVaultKeys = { keyed: true, pending: true, vkCheck: v.vkCheck, generation: 1 };
+    const keys = store();
+    const s = sessionOf(fakeApi(pending), keys);
+    const good = [{ generation: 1, wrappedVk: toBase64(wrapVkWithSecret(s1, "invite", "v1", 1, v.vk)) }];
+    const bad = [{ generation: 1, wrappedVk: toBase64(wrapVkWithSecret(s1, "invite", "v1", 1, generateVaultKey())) }];
+    expect(await s.adoptFromSecret("v1", "invite", s1, bad)).toBe("no-match");
+    expect(keys.setVaultKey).not.toHaveBeenCalled();
+    expect(await s.adoptFromSecret("v1", "invite", s1, good)).toBe("adopted");
+    expect(keys.vks.get("v1")).toEqual(v.vk);
+  });
+  it("a pending answer without a check, or an unkeyed vault, is no-match", async () => {
+    const vk = generateVaultKey();
+    const s1 = newSecret();
+    const wraps = [{ generation: 1, wrappedVk: toBase64(wrapVkWithSecret(s1, "join", "v1", 1, vk)) }];
+    for (const mine of [
+      { keyed: true, pending: true } as MyVaultKeys,
+      { keyed: false, pending: false, conversionAllowed: false } as MyVaultKeys,
+    ]) {
+      const keys = store();
+      expect(await sessionOf(fakeApi(mine), keys).adoptFromSecret("v1", "join", s1, wraps)).toBe("no-match");
+      expect(keys.setVaultKey).not.toHaveBeenCalled();
+    }
+  });
+});
+
 describe("join codes (C)", () => {
   it("the admin's join wrap opens with J for the joiner", async () => {
     const v = await keyedVault("v1");

@@ -806,7 +806,9 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
   ): Promise<SecretAdoptResult> {
     if (!(await enabled()) || accountMismatch) return "refused";
     const mine = await api.getMyVaultKeys(vaultId);
-    if (!mine.keyed || mine.pending) return "no-match";
+    // A member with no wrap of their own yet gets 202 pending, which still
+    // carries the check: that is exactly who a secret wrap is for.
+    if (!mine.keyed || !mine.vkCheck || mine.generation === undefined) return "no-match";
     const check = fromBase64(mine.vkCheck);
     const held = await keys.getVaultKey(vaultId);
     if (held && (await verifyVk(held, vaultId, check))) {
