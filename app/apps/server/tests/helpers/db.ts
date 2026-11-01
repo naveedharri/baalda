@@ -70,6 +70,8 @@ const TABLES = [
   "user_device_registrations",
   "user_key_history",
   "vault_key_wrap_history",
+  "invitation_vault_keys",
+  "vault_join_wraps",
   '"user"',
 ];
 
