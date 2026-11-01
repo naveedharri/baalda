@@ -12,7 +12,7 @@ import {
   type VaultCheckpoint,
 } from "../lib/api";
 import { toast } from "../lib/toast";
-import { agoFromIso, checkpointTitle, noteCountLabel } from "./versionFormat";
+import { noteCountLabel } from "./versionFormat";
 import { RowActionsMenu } from "./RowActionsMenu";
 import { authManager } from "../lib/auth/authManager";
 import {
@@ -1933,26 +1933,18 @@ function VersioningTab({ canManage }: { canManage: boolean }) {
       )}
       {confirming && (
         <div className="modal-backdrop" onClick={() => setConfirming(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal checkpoint-confirm" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2>Revert the entire vault?</h2>
             </div>
             <p className="muted">
-              Every note goes back to{" "}
-              <strong>
-                {checkpointTitle(
-                  confirming.label,
-                  confirming.kind,
-                  confirming.createdAt,
-                  now,
-                )}
-              </strong>{" "}
-              ({agoFromIso(confirming.createdAt, now)}): content, names and
+              Every note goes back to <strong>{checkpointName(confirming)}</strong> from{" "}
+              {checkpointWhen(confirming.createdAt, now)}: content, names and
               folders, for every member, live. Notes created since then are
               moved to trash. Attachments are not reverted. A checkpoint of the
               current state is taken first, so this can be undone.
             </p>
-            <div className="banner-actions">
+            <div className="banner-actions checkpoint-confirm-actions">
               <button className="secondary" onClick={() => setConfirming(null)}>
                 Cancel
               </button>

@@ -2859,3 +2859,10 @@ html:not(.rd-off) .vault-usage-tile + .vault-usage-tile { border-left: 1px solid
 html:not(.rd-off) .vault-usage-value { font-family: var(--font-body); font-size: 22px; font-weight: 600; }
 html:not(.rd-off) .plan-pro .billing-plan-name { color: var(--text-primary); }
 html:not(.rd-off) .plan-header.is-team .billing-plan-name { color: var(--text-primary); background: none; -webkit-text-fill-color: currentColor; }
+
+/* Revert confirm: text right under the title, actions on the right, and the
+   destructive action in red rather than violet. */
+html:not(.rd-off) .checkpoint-confirm .modal-header { margin-bottom: 8px; }
+html:not(.rd-off) .checkpoint-confirm p { margin: 0 0 20px; line-height: 1.55; }
+html:not(.rd-off) .checkpoint-confirm-actions { justify-content: flex-end; gap: 8px; }
+html:not(.rd-off) .checkpoint-confirm-actions .primary.danger { background: var(--danger); color: #fff; }
