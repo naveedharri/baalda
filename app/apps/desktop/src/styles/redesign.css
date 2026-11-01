@@ -2931,10 +2931,11 @@ html:not(.rd-off) .ai-skills { list-style: none; margin: 0; padding: 0; display:
 html:not(.rd-off) .settings-content .conn-address {
   height: 42px; padding: 0 14px; border: 0; border-radius: 12px;
   background: var(--bg-surface, #fff) !important; color: var(--text-primary); font-size: 14px;
-  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.2), 0 1px 2px rgba(var(--rd-ink), 0.06) !important;
+  box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.08), 0 4px 14px -8px rgba(var(--rd-ink), 0.12) !important;
+  outline: none;
 }
 html:not(.rd-off) .settings-content .conn-address::placeholder { color: var(--text-tertiary); }
-html:not(.rd-off) .settings-content .conn-address:focus { box-shadow: 0 0 0 1.5px var(--text-primary), 0 0 0 4px rgba(var(--rd-ink), 0.06) !important; }
+html:not(.rd-off) .settings-content .conn-address:focus { outline: none; box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.1), 0 6px 18px -8px rgba(var(--rd-ink), 0.18) !important; }
 
 /* Plan & Billing loading: card shapes instead of a bare "Loading…". */
 html:not(.rd-off) .plan-skeleton .plan-card { display: flex; flex-direction: column; align-items: flex-start; min-height: 210px; }
