@@ -1810,7 +1810,13 @@ export class ApiClient {
       return { unlockKey: data.unlockKey };
     } catch (e) {
       if (e instanceof ApiError) {
-        if (e.status === 401) return "wrong-password";
+        // Only the server's password verdict is "wrong": a 401 for a session
+        // that is gone says nothing about the password (and must never switch
+        // off the launch-time unlock, lib/vaultKeys/launchUnlock.ts).
+        if (e.status === 401) {
+          const b = e.body as { code?: unknown; error?: unknown } | null;
+          return b?.code === "wrong_password" || b?.error === "wrong_password" ? "wrong-password" : "unavailable";
+        }
         if (e.status === 409 || e.status === 503 || e.status === 404) return "unavailable";
       }
       throw e;

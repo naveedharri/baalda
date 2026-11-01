@@ -5,7 +5,11 @@
 //       conversion, so a lost laptop is recoverable from them), or
 //   (b) this account has a password wrap of its account key (password unlock
 //       works on a new laptop), or
-//   (c) this account has 2+ approved devices.
+//   (c) this account has 2+ approved devices. Known gap, kept on purpose: the
+//       count is `/me/keys` device rows + 1, and a device that was uninstalled
+//       without being revoked still has a row, so (c) can over-count. The
+//       launch safety net (server recovery copies sealed to an offline key)
+//       covers that window.
 // Unknown counts (an older server that does not report them) count as not met.
 // Not safe yet means "ask again on a later run", never an error.
 

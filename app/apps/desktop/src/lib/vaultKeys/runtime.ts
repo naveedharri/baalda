@@ -19,6 +19,7 @@ import { runFreshAccountKey, type FreshKeyResult } from "./recovery";
 import {
   createVaultKeySession,
   type AccountKeysState,
+  type PasswordUnlockResult,
   type PendingDeviceView,
   type ServiceResult,
   type VaultKeySession,
@@ -450,15 +451,17 @@ function splitScope(key: string): [string, string] {
  * every failure (wrong password, throttle, server without F) leaves one-click
  * approval in charge and never blocks the sign-in.
  */
-export async function vaultKeysPasswordUnlock(userId: string, password: string): Promise<void> {
+export async function vaultKeysPasswordUnlock(userId: string, password: string): Promise<PasswordUnlockResult | "error"> {
   try {
     const c = sessionFor(userId);
     const result = await c.session.unlockWithPassword(password);
     if (result === "unlocked" && c.vaultId) vaultKeysNudge();
+    return result;
   } catch (e) {
     const limited = rateLimitedMessage(e);
     if (limited) emit({ kind: "rate-limited", message: limited });
     console.warn("[vault-keys] password unlock skipped", e instanceof ApiError ? e.status : "error");
+    return "error";
   }
 }
 
