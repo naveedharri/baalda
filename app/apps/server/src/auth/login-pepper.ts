@@ -22,10 +22,16 @@ export const PASSWORD_UNLOCK_OFF = "password_unlock_off";
 
 let warnedBadPepper = false;
 
+/** The server-generated pepper (`auth/pepper-boot.ts`), used only when the env sets none. */
+let storedPepper: Buffer | null = null;
+export function useStoredPepper(pepper: Buffer | null): void {
+  storedPepper = pepper;
+}
+
 /** The pepper, or null when F is off. Read per call so tests can stub the env. */
 export function accountKeyPepper(): Buffer | null {
   const raw = (process.env.ACCOUNT_KEY_PEPPER ?? "").trim();
-  if (!raw) return null;
+  if (!raw) return storedPepper;
   const buf = /^[A-Za-z0-9+/_-]+={0,2}$/.test(raw)
     ? Buffer.from(raw.replace(/-/g, "+").replace(/_/g, "/"), "base64")
     : Buffer.alloc(0);

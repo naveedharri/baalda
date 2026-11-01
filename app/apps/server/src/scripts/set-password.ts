@@ -21,6 +21,7 @@
 
 import { randomBytes, randomUUID } from "node:crypto";
 import { clearPasswordWrap, hashPassword } from "../auth/login-pepper.js";
+import { resolvePepperAtBoot } from "../auth/pepper-boot.js";
 import { pool, closePool } from "../db/pool.js";
 
 function usage(msg?: string): never {
@@ -69,6 +70,8 @@ async function main(): Promise<void> {
   const { id: userId, email: storedEmail } = user.rows[0];
 
   // Same hashing as auth.ts (argon2id; peppered `p1$` when ACCOUNT_KEY_PEPPER is set).
+  // Hash under the same pepper the server uses (env or server-generated).
+  await resolvePepperAtBoot();
   const hashed = await hashPassword(password);
 
   const client = await pool.connect();
