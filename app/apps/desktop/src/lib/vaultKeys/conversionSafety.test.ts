@@ -19,4 +19,9 @@ describe("conversionSafe (zero data loss before converting)", () => {
     expect(conversionSafe({ hasPasswordWrap: false })).toBe(false);
     expect(conversionSafe({ otherMembersWithKeys: null, hasPasswordWrap: false, approvedDevices: null })).toBe(false);
   });
+  it("the launch safety net alone is a way back (a Google-only solo owner on one computer)", () => {
+    expect(conversionSafe({ otherMembersWithKeys: 0, hasPasswordWrap: false, approvedDevices: 1, recoveryNet: true })).toBe(true);
+    expect(conversionSafe({ otherMembersWithKeys: 0, hasPasswordWrap: false, approvedDevices: 1, recoveryNet: false })).toBe(false);
+    expect(conversionSafe({ otherMembersWithKeys: 0, hasPasswordWrap: false, approvedDevices: 1 })).toBe(false);
+  });
 });

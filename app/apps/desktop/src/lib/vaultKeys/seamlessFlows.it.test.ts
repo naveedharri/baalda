@@ -211,7 +211,7 @@ describe.skipIf(!BASE)("seamless vault keys (live server)", () => {
     expect(mateDevice.headerFor(vault.id)).toBe(ownerDevice.headerFor(vault.id));
   }, 90_000);
 
-  it("7. a SOLO account converts only once its password wraps the account key", async () => {
+  it("7. a SOLO account converts only once its password wraps the account key (at once while the safety net is on)", async () => {
     const tag = newTag();
     const solo = await signUp("solo", tag);
     const org = await solo.api.createOrganization({ name: `Seamless ${tag}`, slug: `seamless-${tag}` });
@@ -226,6 +226,14 @@ describe.skipIf(!BASE)("seamless vault keys (live server)", () => {
 
     const vault = await solo.api.createVault({ name: `Seamless ${tag}`, organizationId: org.id });
     expect((await soloDevice.ensureVaultKey(vault.id)).state).toBe("unkeyed");
+    const before = await solo.api.getMyVaultKeys(vault.id);
+    if (!before.keyed && before.recoveryNet) {
+      // Launch safety net on: Baalda can rescue a lost key, so it encrypts at once.
+      let first = await soloDevice.convertVault(vault.id);
+      for (let i = 0; i < 3 && first === "waiting-ready"; i++) first = await soloDevice.convertVault(vault.id);
+      expect(first).toBe("converted");
+      return;
+    }
     expect(await soloDevice.convertVault(vault.id)).toBe("not-safe-yet");
     const mine = await solo.api.getMyVaultKeys(vault.id);
     console.log("[seamless-it 7] keys/mine after not-safe-yet", JSON.stringify(mine));

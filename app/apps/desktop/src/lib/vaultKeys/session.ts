@@ -517,6 +517,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       hasPasswordWrap: typeof remote.privWrappedPassword === "string" && remote.privWrappedPassword.length > 0,
       // The first computer has no device row; every approved one adds one.
       approvedDevices: Array.isArray(remote.devices) ? remote.devices.length + 1 : undefined,
+      recoveryNet: mine.recoveryNet === true,
     });
     if (!safe) return "not-safe-yet";
     // The role check reads the member list (heavy on a big vault): asked only
