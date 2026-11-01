@@ -303,6 +303,42 @@ export function vaultKeyFileText(vaultName: string, vaultId: string, vk: Uint8Ar
 
 // ---- recovery phrase --------------------------------------------------------
 
+// ---- password wrap of the account key (seamless keys F) --------------------
+// XChaCha20-Poly1305 under the server's `unlockKey`, nonce(24) || ct, AAD
+// utf8("bd-acct-pw|" + userId + "|" + publicKeyB64). Desktop only.
+
+const PW_NONCE = 24;
+export const accountPasswordAad = (userId: string, publicKeyB64: string) =>
+  enc.encode(`bd-acct-pw|${userId}|${publicKeyB64}`);
+
+export function wrapAccountKeyWithUnlock(
+  unlockKey: Uint8Array,
+  userId: string,
+  publicKeyB64: string,
+  privateKey: Uint8Array,
+): Uint8Array {
+  if (unlockKey.length !== 32) throw new Error("unlock key must be 32 bytes");
+  const nonce = randomBytes(PW_NONCE);
+  const ct = xchacha20poly1305(unlockKey, nonce, accountPasswordAad(userId, publicKeyB64)).encrypt(privateKey);
+  const out = new Uint8Array(PW_NONCE + ct.length);
+  out.set(nonce, 0);
+  out.set(ct, PW_NONCE);
+  return out;
+}
+
+/** Throws when the wrap does not open (wrong key, other user/public key, tampered). */
+export function unwrapAccountKeyWithUnlock(
+  unlockKey: Uint8Array,
+  userId: string,
+  publicKeyB64: string,
+  wrapped: Uint8Array,
+): Uint8Array {
+  if (unlockKey.length !== 32 || wrapped.length <= PW_NONCE) throw new Error("malformed password wrap");
+  return xchacha20poly1305(unlockKey, wrapped.subarray(0, PW_NONCE), accountPasswordAad(userId, publicKeyB64)).decrypt(
+    wrapped.subarray(PW_NONCE),
+  );
+}
+
 export type Argon2Params = { m: number; t: number; p: number };
 /** m in KiB: 64 MiB, t = 3, p = 1. */
 export const RECOVERY_ARGON2: Argon2Params = { m: 64 * 1024, t: 3, p: 1 };

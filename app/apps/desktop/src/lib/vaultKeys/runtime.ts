@@ -7,7 +7,7 @@
 // server without the `vault-keys` feature.
 
 import { api } from "../auth/authManager";
-import { rateLimitedMessage, type AllowlistCandidate } from "../api";
+import { ApiError, rateLimitedMessage, type AllowlistCandidate } from "../api";
 import { runFreshAccountKey, type FreshKeyResult } from "./recovery";
 import {
   createVaultKeySession,
@@ -279,6 +279,24 @@ async function serviceOtherVaults(c: NonNullable<typeof current>, openVaultId: s
 function splitScope(key: string): [string, string] {
   const at = key.lastIndexOf("|");
   return at < 0 ? [key, ""] : [key.slice(0, at), key.slice(at + 1)];
+}
+
+/**
+ * Seamless keys F: right after a successful password sign-in, and at launch
+ * with a remembered password. The password is used for one call and dropped;
+ * every failure (wrong password, throttle, server without F) leaves one-click
+ * approval in charge and never blocks the sign-in.
+ */
+export async function vaultKeysPasswordUnlock(userId: string, password: string): Promise<void> {
+  try {
+    const c = sessionFor(userId);
+    const result = await c.session.unlockWithPassword(password);
+    if (result === "unlocked" && c.vaultId) vaultKeysNudge();
+  } catch (e) {
+    const limited = rateLimitedMessage(e);
+    if (limited) emit({ kind: "rate-limited", message: limited });
+    console.warn("[vault-keys] password unlock skipped", e instanceof ApiError ? e.status : "error");
+  }
 }
 
 /** Single-flight: a nudge during a run schedules exactly one more. */

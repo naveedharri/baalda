@@ -15,7 +15,9 @@ import {
   vaultKeysEarlyChannel,
   vaultKeysGate,
   vaultKeysMembershipEnded,
+  vaultKeysPasswordUnlock,
 } from "./lib/vaultKeys/runtime";
+import { loadRememberedPassword } from "./lib/rememberedPassword";
 import { clearVaultKeyCache } from "./lib/vaultKeys/store";
 import {
   colorsAdopted,
@@ -3392,6 +3394,9 @@ export const useStore = create<AppStore>((set, get) => ({
       set({ serverUrl: authManager.getServerUrl() });
       if (session) {
         set({ session, authStatus: "signed-in", authError: null });
+        // Seamless keys F at launch: a remembered password refreshes the
+        // account key's password wrap (or unlocks it). Background; never blocks.
+        void launchPasswordUnlock(authManager.getServerUrl(), session.user.id, session.user.email);
         // Independent of each other: the vault roster + invitations, and the
         // billing feature flag. Serial, these were two round trips in front of
         // the landing for no reason.
@@ -3451,6 +3456,10 @@ export const useStore = create<AppStore>((set, get) => ({
     try {
       await authManager.signIn({ email, password });
       const session = await authManager.currentSession();
+      // Seamless keys F: the password unlocks this account's key before any
+      // vault opens (so a new computer needs no approval). Bounded; any
+      // failure falls back to one-click approval and never blocks sign-in.
+      if (session) await passwordUnlockBounded(session.user.id, password);
       set({ session, authStatus: session ? "signed-in" : "signed-out" });
       if (session) {
         await get().refreshVault();
@@ -5644,6 +5653,25 @@ function requireSyncedVaultId(get: () => AppStore): string {
     throw new Error("Turn on sync for this vault to use checkpoints.");
   }
   return vaultId;
+}
+
+/** Password unlock of the account key, capped so sign-in never waits long. */
+const PASSWORD_UNLOCK_WAIT_MS = 8_000;
+async function passwordUnlockBounded(userId: string, password: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  await Promise.race([
+    vaultKeysPasswordUnlock(userId, password),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, PASSWORD_UNLOCK_WAIT_MS);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+}
+
+async function launchPasswordUnlock(serverUrl: string, userId: string, email: string | null | undefined): Promise<void> {
+  if (!email) return;
+  const password = await loadRememberedPassword(serverUrl, email).catch(() => "");
+  if (password) await vaultKeysPasswordUnlock(userId, password);
 }
 
 function errMsg(e: unknown): string {

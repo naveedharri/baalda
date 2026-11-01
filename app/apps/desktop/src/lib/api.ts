@@ -1569,6 +1569,8 @@ export interface PendingDevice {
 }
 export interface AccountKeysBody {
   publicKey: string;
+  /** The account key wrapped under the password unlock key (seamless keys F). */
+  privWrappedPassword?: string | null;
   /** Optional since the owner decision: the VAULT key is the recovery path. */
   privWrappedRecovery?: string;
 }
@@ -1764,6 +1766,33 @@ export class ApiClient {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;
     }
+  }
+
+  /**
+   * `POST /api/me/keys/unlock` (seamless keys F). The password is the body
+   * only: never logged, never in an error. `wrong-password` (401),
+   * `unavailable` (409 `no_password` / 503 `password_unlock_off` / 404 on an
+   * older server); anything else (429 throttle, 5xx) throws.
+   */
+  async unlockAccountKey(password: string): Promise<{ unlockKey: string } | "wrong-password" | "unavailable"> {
+    try {
+      const { data } = await this.request<{ unlockKey?: string }>("POST", "/api/me/keys/unlock", {
+        body: { password },
+      });
+      if (typeof data?.unlockKey !== "string") throw new ApiError(500, "Unexpected unlock answer");
+      return { unlockKey: data.unlockKey };
+    } catch (e) {
+      if (e instanceof ApiError) {
+        if (e.status === 401) return "wrong-password";
+        if (e.status === 409 || e.status === 503 || e.status === 404) return "unavailable";
+      }
+      throw e;
+    }
+  }
+
+  /** `PUT /api/me/keys/password-wrap` → `{ stored: true }`. */
+  async putPasswordWrap(privWrapped: string): Promise<void> {
+    await this.request("PUT", "/api/me/keys/password-wrap", { body: { privWrapped } });
   }
 
   /** Approve a pending device: the account private key sealed to its key. */

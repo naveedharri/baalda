@@ -41,6 +41,8 @@ import {
   sealTo,
   sealVkTo,
   shortFingerprint,
+  unwrapAccountKeyWithUnlock,
+  wrapAccountKeyWithUnlock,
   toBase64,
   verifyVk,
   vaultKeyToWords,
@@ -75,6 +77,9 @@ export interface VaultKeysApi {
     excluded?: Array<{ kind: string; id: string }>,
   ): Promise<{ rejected: string[] }>;
   getConversionReady(vaultId: string, vkBase64: string): Promise<boolean>;
+  /** Seamless keys F (optional: older test fakes omit them ⇒ always E). */
+  unlockAccountKey?(password: string): Promise<{ unlockKey: string } | "wrong-password" | "unavailable">;
+  putPasswordWrap?(privWrapped: string): Promise<void>;
 }
 
 /** The keychain store, scoped to the current server + user by the caller. */
@@ -164,6 +169,20 @@ export type RestoreResult =
 
 export type PendingDeviceView = PendingDevice & { code: string };
 
+/** What a password unlock did (seamless keys F). Every non-`unlocked` answer
+ *  leaves today's path (one-click approval) in charge. */
+export type PasswordUnlockResult =
+  | "unlocked"
+  | "wrap-written"
+  | "wrap-current"
+  | "fallback"
+  | "unavailable"
+  | "wrong-password"
+  | "disabled";
+
+/** A key that arrives this long after a password sign-in still gets a wrap. */
+export const PASSWORD_WRAP_WINDOW_MS = 15 * 60 * 1000;
+
 export type SealedFor = { userId: string; fingerprint: string };
 export type ServiceResult = {
   /** Sealed: the toast shows `fingerprint` (short form). */
@@ -197,9 +216,93 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
 
   /** Set when the server's account key is not ours: every key step refuses. */
   let accountMismatch = false;
+  /** The derived unlock key (never the password) while a key may still arrive
+   *  after a password sign-in (`PASSWORD_WRAP_WINDOW_MS`). Memory only. */
+  let pendingUnlock: { key: Uint8Array; until: number } | null = null;
+  const now = () => Date.now();
   const enabled = async () => (await deps.features()).has(VAULT_KEYS);
 
   async function ensureAccountKeys(): Promise<AccountKeysState> {
+    const state = await ensureAccountKeysInner();
+    if (state.state === "ready" && pendingUnlock) await writeLateWrap().catch(() => {});
+    return state;
+  }
+
+  /** The key arrived within the window after a password sign-in: wrap it now. */
+  async function writeLateWrap(): Promise<void> {
+    const pending = pendingUnlock;
+    if (!pending || now() > pending.until) {
+      pendingUnlock = null;
+      return;
+    }
+    const self = deps.selfUserId();
+    const priv = await keys.getAccountPrivateKey();
+    const remote = await api.getMyKeys();
+    if (!self || !priv || !remote || !sameKey(publicKeyFromPrivate(priv), remote.publicKey) || !api.putPasswordWrap) return;
+    if (!wrapOpens(pending.key, self, remote)) {
+      await api.putPasswordWrap(toBase64(wrapAccountKeyWithUnlock(pending.key, self, remote.publicKey, priv)));
+    }
+    pendingUnlock = null;
+  }
+
+  function wrapOpens(unlockKey: Uint8Array, self: string, remote: AccountKeysBody): Uint8Array | null {
+    if (!remote.privWrappedPassword) return null;
+    try {
+      const priv = unwrapAccountKeyWithUnlock(unlockKey, self, remote.publicKey, fromBase64(remote.privWrappedPassword));
+      return priv.length === 32 && sameKey(publicKeyFromPrivate(priv), remote.publicKey) ? priv : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Seamless keys F: the password (memory only, never stored or logged here)
+   * unlocks the account key. Holding the key: (re)write the password wrap when
+   * missing or stale. Not holding it: adopt the wrap only when it opens AND
+   * its public key is the one `/me/keys` names, then the device is ready with
+   * no approval. Anything else falls back to one-click approval (E).
+   */
+  async function unlockWithPassword(password: string): Promise<PasswordUnlockResult> {
+    if (!(await enabled()) || accountMismatch) return "disabled";
+    if (!api.unlockAccountKey || !api.putPasswordWrap) return "unavailable";
+    const self = deps.selfUserId();
+    if (!self) return "fallback";
+    const answer = await api.unlockAccountKey(password);
+    if (answer === "wrong-password" || answer === "unavailable") return answer;
+    let unlockKey: Uint8Array;
+    try {
+      unlockKey = fromBase64(answer.unlockKey);
+    } catch {
+      return "fallback";
+    }
+    if (unlockKey.length !== 32) return "fallback";
+    const remote = await api.getMyKeys();
+    const local = await keys.getAccountPrivateKey();
+    if (!remote) {
+      // No account key yet: the first run publishes one; wrap it then.
+      pendingUnlock = { key: unlockKey, until: now() + PASSWORD_WRAP_WINDOW_MS };
+      return "fallback";
+    }
+    if (local) {
+      if (!sameKey(publicKeyFromPrivate(local), remote.publicKey)) {
+        accountMismatch = true;
+        return "disabled";
+      }
+      if (wrapOpens(unlockKey, self, remote)) return "wrap-current";
+      await api.putPasswordWrap(toBase64(wrapAccountKeyWithUnlock(unlockKey, self, remote.publicKey, local)));
+      return "wrap-written";
+    }
+    const priv = wrapOpens(unlockKey, self, remote);
+    if (!priv) {
+      pendingUnlock = { key: unlockKey, until: now() + PASSWORD_WRAP_WINDOW_MS };
+      return "fallback";
+    }
+    await keys.setAccountPrivateKey(priv);
+    await keys.deleteDeviceLinkKey().catch(() => {});
+    return "unlocked";
+  }
+
+  async function ensureAccountKeysInner(): Promise<AccountKeysState> {
     if (!(await enabled())) return { state: "disabled" };
     const local = await keys.getAccountPrivateKey();
     const remote = await api.getMyKeys();
@@ -668,6 +771,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
 
   const session = {
     ensureAccountKeys,
+    unlockWithPassword,
     restoreWithVaultKey,
     revealVaultKey,
     convertVault,
@@ -699,6 +803,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       reviewDecisions.clear();
       pendingReviews.clear();
       accountMismatch = false;
+      pendingUnlock = null;
       keys.clearCache();
     },
     dispose() {
