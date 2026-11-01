@@ -442,10 +442,10 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     overflowWrap: "normal",
     wordBreak: "normal",
   },
-  // No fill: the header reads as bold text over a stronger rule.
+  // A soft sage header, the same green family as the Synced pill.
   ".cm-md-table th": {
+    backgroundColor: "var(--success-soft)",
     fontWeight: "700",
-    borderBottomColor: "var(--border-strong)",
   },
 
   // ---- The editable table (./table/TableWidget) ----
@@ -503,7 +503,7 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     fontSize: "0.9em",
     padding: "0.1em 0.3em",
     borderRadius: "var(--radius-sm)",
-    boxShadow: "inset 0 0 0 1px var(--border-strong)",
+    backgroundColor: "var(--success-soft)",
   },
   ".cm-md-table .cm-md-cell-content .cm-md-link, .cm-md-table .cm-md-cell-content .cm-wikilink":
     {
@@ -1083,8 +1083,7 @@ export const markdownHighlightSpec = [
       fontFamily: "var(--font-mono)",
       fontSize: "0.9em",
       color: "var(--text-primary)",
-      // An outline, not a filled chip.
-      boxShadow: "inset 0 0 0 1px var(--border-strong)",
+      background: "var(--success-soft)",
       padding: "0.1em 0.35em",
       borderRadius: "var(--radius-sm)",
     },
