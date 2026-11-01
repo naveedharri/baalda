@@ -45,6 +45,9 @@ export function useHoverMenu() {
     // Bridge the small gap between the trigger and the menu without flicker.
     closeTimer.current = setTimeout(() => {
       closeTimer.current = null;
+      // Someone typing in the menu (a vault name, a join code) keeps it open.
+      const active = document.activeElement;
+      if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) return;
       setMode((current) => nextHoverMenuMode(current, "leave-elapsed"));
     }, HOVER_MENU_CLOSE_MS);
   }, [cancelHoverClose]);
