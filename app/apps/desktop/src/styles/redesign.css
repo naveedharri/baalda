@@ -2902,3 +2902,27 @@ html:not(.rd-off) .account-popover > .rd-status {
   order: -1; margin-top: 0; margin-bottom: 4px; padding: 4px 0 8px;
   border-top: 0; border-bottom: 1px solid var(--border);
 }
+
+/* Account Settings → AI tools (option B): two profile-style rows. */
+html:not(.rd-off) .ai-tools-lede { margin: 0; color: var(--text-secondary); font-size: var(--fs-md); }
+html:not(.rd-off) .ai-tools-rows .profile-row { grid-template-columns: minmax(200px, 260px) 1fr; }
+html:not(.rd-off) .ai-tools-list { display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0; }
+html:not(.rd-off) .ai-tools-actions { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
+html:not(.rd-off) .ai-tool,
+html:not(.rd-off) .ai-skill { display: flex; align-items: center; gap: 14px; padding: 10px 14px; border-radius: 12px; min-width: 0; }
+html:not(.rd-off) .ai-tool:nth-child(odd),
+html:not(.rd-off) .ai-skill:nth-child(odd) { background: var(--bg-app); }
+html:not(.rd-off) .ai-tool { cursor: pointer; }
+html:not(.rd-off) .ai-tool-logos { flex: none; min-width: 34px; display: inline-flex; gap: 3px; }
+html:not(.rd-off) .ai-tool-text,
+html:not(.rd-off) .ai-skill-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+html:not(.rd-off) .ai-tool-name,
+html:not(.rd-off) .ai-skill-name { font-weight: 600; font-size: 14.5px; color: var(--text-primary); }
+html:not(.rd-off) .ai-tool-path { font: 12px var(--font-mono); color: var(--text-tertiary); background: none; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html:not(.rd-off) .ai-skill-meta { font-size: 12.5px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html:not(.rd-off) .ai-tool-tag,
+html:not(.rd-off) .ai-skill-tag { flex: none; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--success-soft); color: var(--success); }
+html:not(.rd-off) .ai-tool-tag.is-off,
+html:not(.rd-off) .ai-skill-tag.is-optional { background: rgba(var(--rd-ink), 0.06); color: var(--text-secondary); }
+html:not(.rd-off) .ai-skill-icon { flex: none; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
+html:not(.rd-off) .ai-skills { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
