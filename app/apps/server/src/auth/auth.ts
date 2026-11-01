@@ -2,7 +2,7 @@ import { attributeMembershipEvent, auditRequestActor } from "../audit/access.js"
 import { betterAuth } from "better-auth";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { bearer, mcp, organization } from "better-auth/plugins";
-import { hashPassword, verifyPassword } from "./login-pepper.js";
+import { clearPasswordWrap, hashPassword, verifyPassword } from "./login-pepper.js";
 import pg from "pg";
 import { config } from "../config.js";
 import { workMem } from "../db/pool.js";
@@ -157,8 +157,12 @@ export const auth = betterAuth({
     revokeSessionsOnPasswordReset: true,
     // A completed reset proves ownership of the address: lift any sign-in
     // lockout on it (#237, auth/signin-throttle.ts).
-    onPasswordReset: async ({ user }: { user: { email: string } }) => {
+    onPasswordReset: async ({ user }: { user: { id: string; email: string } }) => {
       await clearThrottle(user.email);
+      // The account key's password wrap is under the old password: now dead.
+      await clearPasswordWrap(user.id).catch((err: unknown) =>
+        console.error(`[auth] clearing the password wrap after a reset failed: ${(err as Error).name}`),
+      );
     },
   },
   ...(mailerOn

@@ -150,4 +150,53 @@ describe("password unlocks the account key (F)", () => {
     const { rows } = await pool.query("SELECT priv_wrapped_password FROM user_key_history WHERE user_id = $1", [u.userId]);
     expect(rows.map((r) => r.priv_wrapped_password?.toString("base64"))).toEqual([wrap]);
   });
+
+  // The wrap sits under an unlock key derived from the password it was made
+  // with. After ANY password change it can never open again, but a non-null
+  // column tells the desktop's conversion rule "a lost laptop is recoverable
+  // by password": a solo owner would convert on a dead wrap and lose the vault
+  // with the laptop. Every password change clears it; the in-place p1$ rehash
+  // (same password, same unlock key) never does.
+  it("a password change or reset clears the now-dead password wrap; the p1$ rehash keeps it", async () => {
+    const u = await signUp("stale@unlock.test", "password-stale-1");
+    expect((await call(u, "PUT", "/api/me/keys", { publicKey: b64(randomBytes(32)) })).status).toBe(200);
+    const wrap = b64(randomBytes(96));
+    const wrapped = async () =>
+      ((await (await call(u, "GET", "/api/me/keys")).json()) as { privWrappedPassword: string | null }).privWrappedPassword;
+
+    // In-place rehash of an old unpeppered hash: same password, wrap kept.
+    expect((await call(u, "PUT", "/api/me/keys/password-wrap", { privWrapped: wrap })).status).toBe(200);
+    const legacy = await argonHash("password-stale-1", { algorithm: Algorithm.Argon2id });
+    await pool.query(`UPDATE account SET password = $2 WHERE "userId" = $1 AND "providerId" = 'credential'`, [u.userId, legacy]);
+    expect((await call(null, "POST", "/api/auth/sign-in/email", { email: "stale@unlock.test", password: "password-stale-1" })).status).toBe(200);
+    expect((await storedHash(u.userId)).startsWith("p1$")).toBe(true);
+    expect(await wrapped()).toBe(wrap);
+    expect((await call(u, "POST", "/api/me/keys/unlock", { password: "password-stale-1" })).status).toBe(200);
+    expect(await wrapped()).toBe(wrap);
+
+    // Better Auth's change-password (session kept): cleared.
+    const changed = await call(u, "POST", "/api/auth/change-password", {
+      currentPassword: "password-stale-1",
+      newPassword: "password-stale-2",
+    });
+    expect(changed.status).toBe(200);
+    expect((await storedHash(u.userId)).startsWith("p1$")).toBe(true);
+    expect(await wrapped()).toBeNull();
+    // A refused change (wrong current password) clears nothing.
+    expect((await call(u, "PUT", "/api/me/keys/password-wrap", { privWrapped: wrap })).status).toBe(200);
+    const refused = await call(u, "POST", "/api/auth/change-password", {
+      currentPassword: "not-the-password",
+      newPassword: "password-stale-3",
+    });
+    expect(refused.ok).toBe(false);
+    expect(await wrapped()).toBe(wrap);
+
+    // Reset by email link (revokes sessions): cleared.
+    expect((await call(null, "POST", "/api/password-reset/request", { email: "stale@unlock.test" })).status).toBe(200);
+    const mail = [...memoryOutbox].reverse().find((m) => m.to === "stale@unlock.test" && /reset/i.test(m.subject))!;
+    const token = mail.text.match(/\/reset-password\?token=([A-Za-z0-9._-]+)/)![1];
+    expect((await call(null, "POST", "/api/auth/reset-password", { newPassword: "password-stale-4", token })).status).toBe(200);
+    const { rows } = await pool.query("SELECT priv_wrapped_password, password_wrap_at FROM user_keys WHERE user_id = $1", [u.userId]);
+    expect(rows[0]).toEqual({ priv_wrapped_password: null, password_wrap_at: null });
+  });
 });

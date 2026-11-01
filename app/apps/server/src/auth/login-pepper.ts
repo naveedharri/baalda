@@ -93,6 +93,22 @@ export async function upgradeLoginHash(by: { email?: string; userId?: string }, 
 }
 
 /**
+ * The password changed (change-password, reset, admin set): the account key's
+ * password wrap sits under the OLD password's unlock key and can never open
+ * again. Clear it, so `GET /me/keys` never reports a dead wrap as the "lost
+ * laptop is recoverable by password" fact the desktop's conversion rule reads;
+ * a device holding the key writes a fresh one at its next password sign-in.
+ * Never called by `upgradeLoginHash` (same password, same unlock key).
+ */
+export async function clearPasswordWrap(userId: string, db: Pick<typeof pool, "query"> = pool): Promise<void> {
+  await db.query(
+    `UPDATE user_keys SET priv_wrapped_password = NULL, password_wrap_at = NULL
+      WHERE user_id = $1 AND priv_wrapped_password IS NOT NULL`,
+    [userId],
+  );
+}
+
+/**
  * unlockKey = HKDF-SHA256(ikm = HMAC-SHA256(pepper, utf8(password)),
  * salt = utf8(userId), info = utf8("baalda-account-unlock-v1")), 32 bytes.
  */

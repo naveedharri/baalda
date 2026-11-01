@@ -11,7 +11,7 @@ import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from "better-a
 import { config } from "../config.js";
 import { auth } from "../auth/auth.js";
 import { throttledSignIn } from "../auth/signin-throttle.js";
-import { accountKeyPepper, upgradeLoginHash } from "../auth/login-pepper.js";
+import { accountKeyPepper, clearPasswordWrap, upgradeLoginHash } from "../auth/login-pepper.js";
 import {
   CLIENT_VERSION_HEADER,
   clientVersionPolicy,
@@ -372,6 +372,20 @@ export function createApp(deps: AppDeps): Hono {
     const res = await throttledSignIn(c.req.raw, auth.handler);
     if (res.ok && typeof creds?.email === "string" && typeof creds.password === "string") {
       await upgradeLoginHash({ email: creds.email.trim() }, creds.password);
+    }
+    return res;
+  });
+  // A successful password change leaves the account key's password wrap under
+  // the old password's unlock key, so it can never open again: clear it (the
+  // reset path does the same in `onPasswordReset`). Session read BEFORE the
+  // handler, which may revoke it (`revokeOtherSessions`).
+  app.post("/api/auth/change-password", async (c) => {
+    const session = await getSession(c);
+    const res = await auth.handler(c.req.raw);
+    if (res.ok && session) {
+      await clearPasswordWrap(session.userId).catch((err: unknown) =>
+        console.error(`[auth] clearing the password wrap after a change failed: ${(err as Error).name}`),
+      );
     }
     return res;
   });

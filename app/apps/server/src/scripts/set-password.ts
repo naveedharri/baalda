@@ -20,7 +20,7 @@
 // ============================================================================
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { hashPassword } from "../auth/login-pepper.js";
+import { clearPasswordWrap, hashPassword } from "../auth/login-pepper.js";
 import { pool, closePool } from "../db/pool.js";
 
 function usage(msg?: string): never {
@@ -90,6 +90,8 @@ async function main(): Promise<void> {
       );
       created = true;
     }
+    // The account key's password wrap was made under the old password: dead now.
+    await clearPasswordWrap(userId, client);
     const sessions = await client.query(`DELETE FROM session WHERE "userId" = $1`, [userId]);
     await client.query("COMMIT");
 
