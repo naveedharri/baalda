@@ -128,7 +128,13 @@ export async function inviteWithVaultKeys(orgId: string, input: InviteManyInput)
     if (e instanceof ApiError && (e.status === 409 || e.status === 426)) return api.inviteMany(orgId, input);
     throw e;
   }
-  await c.session.sealInviteResults(vaultId, results).catch(() => []);
+  const sealed = await c.session.sealInviteResults(vaultId, results).catch(() => []);
+  if (sealed.length) {
+    // Same toast as a request seal: the key sealed to came from the server.
+    const names: Record<string, string> = {};
+    for (const r of results) if (r.inviteeUserId && r.email) names[r.inviteeUserId] = r.email;
+    emit({ kind: "serviced", vaultId, result: { sealed, refused: [], keyChanged: [] }, names });
+  }
   return results;
 }
 
