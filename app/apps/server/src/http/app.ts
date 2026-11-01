@@ -41,6 +41,7 @@ import { bugReportRoutes } from "./routes/bug-reports.js";
 import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
 import { createVaultKeyRoutes } from "./routes/vault-keys.js";
+import { createKeyRecoveryRoutes } from "./routes/key-recovery.js";
 import { createMcpKeyRoutes } from "./routes/mcp-keys.js";
 import { vaultKeyHeader } from "../crypto/transport.js";
 import { vaultKeysEnabled, VAULT_KEYS_FEATURE } from "../crypto/config.js";
@@ -413,6 +414,7 @@ export function createApp(deps: AppDeps): Hono {
   // header middleware only decodes X-Baalda-VK; it never logs or caches it.
   app.use("/api/*", vaultKeyHeader);
   app.route("/api", createVaultKeyRoutes());
+  app.route("/api", createKeyRecoveryRoutes());
   app.route("/api", createMcpKeyRoutes());
   app.route(
     "/api",

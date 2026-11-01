@@ -72,6 +72,7 @@ const TABLES = [
   "vault_key_wrap_history",
   "invitation_vault_keys",
   "vault_join_wraps",
+  "vault_key_recovery",
   '"user"',
 ];
 

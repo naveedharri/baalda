@@ -114,6 +114,12 @@ since its last re-index waits for the next one.
   join codes carry a device secret after a dash. The server stores the wraps, never the secrets. Key holders
   also share keys for every vault they hold (not only the open one) with any member who lacks one, so
   encrypting an existing vault keys the whole team without anyone waiting.
+- **Launch safety net (temporary).** While `KEY_RECOVERY_PUBLIC_KEY` is set, the server keeps one copy of
+  each vault key sealed to a recovery public key whose private half is kept offline by Baalda. A stolen
+  database or backup cannot open these copies. If someone is locked out, `scripts/key-recovery.ts rescue`
+  (run on the owner's own computer) opens the copy and re-issues the key to that member's current account
+  key. While it is on, the holder of the offline key can read any vault, and the website says so. Unsetting
+  the variable stops new copies and deletes every existing one.
 - **Owner vault key.** Owners can reveal the vault key in Vault Settings → General ("Show vault key") to copy
   or save it. It is never emailed or sent anywhere. An owner who has lost every device restores with it.
 - **Conversion of an existing vault.** The first owner/admin device on a supporting version registers a

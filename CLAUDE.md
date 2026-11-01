@@ -1077,6 +1077,13 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all. No owner review any more (2026-11-01): the
   converting device allow-lists every candidate; exclusions recorded by an earlier review
   (`vault_conversion_exclusions`, migration 083) still stand, and the review UI is gone.
+- **Launch safety net** (decided 2026-11-01, on until the owner switches it off): while
+  `KEY_RECOVERY_PUBLIC_KEY` is set, `crypto/key-recovery.ts` seals each vault key the cache acquires to that
+  OFFLINE public key (`vault_key_recovery`, migration 085, format in `recovery-seal.ts`); the owner's
+  `scripts/key-recovery.ts rescue` opens it locally and re-issues it through `POST
+  /api/admin/key-recovery/:vaultId/grant` (`KEY_RECOVERY_ADMIN_TOKEN` + the vault key itself; audited
+  `key_recovered`). Unset ⇒ no copies and every row deleted. While on, the offline key holder can read any
+  vault: the website must say so.
 - **Every vault converts automatically** (decided 2026-11-01, supersedes the 2026-10-29 opt-in): while
   `VAULT_KEY_CONVERSION` is on, `crypto/conversion.ts encryptionRequested` answers true for every vault, so
   `keys/mine` reports `conversionAllowed` (0.1.98+ clients) and `keys/pending`/`keys/init` accept it;
