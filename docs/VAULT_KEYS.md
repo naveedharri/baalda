@@ -22,15 +22,14 @@ The feature is **off by default**. With it off, the server behaves exactly as it
 Turn on `BAALDA_VAULT_KEYS` first, upgrade desktops, raise `MIN_CLIENT_VERSION`, and only then turn on
 `VAULT_KEY_CONVERSION`. A vault no member opens after that stays unkeyed until someone does.
 
-**Which vaults get keyed.** New vaults created while `BAALDA_VAULT_KEYS` is on are encrypted
-automatically (`POST /api/vaults` records `vaults.encryption_requested_at`). Existing vaults stay
-exactly as they are until an owner or admin clicks **Encrypt this vault** in Vault Settings → General
-(`POST /api/vaults/:vaultId/keys/request-encryption`: owner/admin only, idempotent, one-way; there is no
-undo, and the first request is recorded in the access history). `GET …/keys/mine` on an unkeyed vault
-answers `encryptionRequested` and `conversionAllowed`, which is the rollout gate above AND a recorded
-request. The server enforces it: `keys/pending` and `keys/init` refuse an unrequested vault with 409
-`encryption_not_requested` and store nothing, whatever the client. Plain members see nothing until the
-vault is keyed.
+**Which vaults get keyed.** Every vault, automatically. New vaults created while `BAALDA_VAULT_KEYS` is on
+are encrypted from the start. While `VAULT_KEY_CONVERSION` is on, every existing vault counts as asked to
+encrypt, and the first owner or admin device on a supporting version converts it when it opens it. There is
+no button and no review. That device first checks that losing a laptop could not lose the vault: another
+member already has an account key (and receives the vault key at conversion), or the account has a
+password-unlock wrap, or two or more computers hold the account key. Until one holds, the vault stays as it
+is and the check repeats. With `VAULT_KEY_CONVERSION` off, only a vault with a recorded request
+(`vaults.encryption_requested_at`) may be keyed.
 
 ## What is encrypted
 
@@ -117,15 +116,12 @@ since its last re-index waits for the next one.
   encrypting an existing vault keys the whole team without anyone waiting.
 - **Owner vault key.** Owners can reveal the vault key in Vault Settings → General ("Show vault key") to copy
   or save it. It is never emailed or sent anywhere. An owner who has lost every device restores with it.
-- **Conversion of an existing vault** (after an owner/admin asked for it). The first owner/admin device on a supporting version registers a pending
-  key. Before anything is allow-listed, the owner/admin reviews every existing MCP token, Claude/ChatGPT
-  connection and public link (name, who created it, last used), all checked by default. Checked ones are
-  allow-listed by the device and upgraded on their next use. An unchecked one is recorded as excluded
-  (`vault_conversion_exclusions`): it is never allow-listed, keeps working until the vault is keyed (nothing
-  is revoked), does not hold the conversion, and needs reconnecting afterwards. Re-checking it in a later
-  review allow-lists it again. The vault is keyed only when nothing used in the last 30 days and not
-  excluded still lacks its own wrap; until then everything works exactly as before. A connection idle for
-  more than 30 days needs one reconnect after conversion.
+- **Conversion of an existing vault.** The first owner/admin device on a supporting version registers a
+  pending key and allow-lists every existing MCP token, Claude/ChatGPT connection and public link; each is
+  upgraded on its next use. (A connection an earlier review excluded stays excluded and needs reconnecting
+  after conversion.) The vault is keyed only when nothing used in the last 30 days still lacks its own
+  wrap; until then everything works exactly as before. A connection idle for more than 30 days needs one
+  reconnect after conversion.
 
 ## Older desktops
 

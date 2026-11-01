@@ -23,7 +23,7 @@
 
 ## 0.1.98
 
-- **Encrypted vaults.** New vaults are encrypted with a key only your team's devices hold, so Baalda's database, backups and staff see only scrambled data. Existing vaults can turn it on in Vault Settings.
+- **Encrypted vaults.** New vaults are encrypted with a key only your team's devices hold, so Baalda's database, backups and staff see only scrambled data. Your existing vaults are encrypted automatically; nothing for you to do.
 - **Your vault key.** Owners can view and save their vault key in Vault Settings → General, to get back in on a new computer.
 - **Nothing extra to do.** Invited teammates, people joining by code and your own new computer get the key automatically when they sign in. Use a strong, unique password: it protects your keys.
 - **Safer and steadier**, with security fixes for shared links and access changes, and faster search in large vaults.

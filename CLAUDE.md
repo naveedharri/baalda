@@ -1074,18 +1074,17 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   allow-lists existing tokens/links with an HMAC under VK, and they upgrade on next use. `keys/init`
   accepts only when nothing used in 30 days lacks a wrap and the check bytes match the pending row; the
   gate runs inside the init transaction under row locks (`lockGateRows`). `VAULT_KEY_CONVERSION` plus
-  the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all. Owner review (migration
-  083): owners/admins get candidate metadata (label, creator, created/last used, `allowed`/`excluded`) and
-  review them in `ConversionReviewDialog` (all checked); unchecked ones go to `vault_conversion_exclusions`
-  via `allowlist`'s `excluded` (owner/admin, pending only): never allow-listed, skipped by the gate, NOT
-  revoked (works until keyed, then needs reconnecting); a later allow-list entry deletes the exclusion.
-- **Opt-in for existing vaults** (migration 081, decided 2026-10-29): `keys/mine`'s `conversionAllowed`
-  also needs `vaults.encryption_requested_at`. `POST /api/vaults` sets it while `BAALDA_VAULT_KEYS` is on
-  (new vaults encrypt automatically); an existing vault gets it only from an owner/admin's
-  "Encrypt this vault" (`POST …/keys/request-encryption`, idempotent, one-way, no undo route, one
-  `access_audit` row `vault`/`encryption_requested`). Enforced server-side: `keys/pending` and `keys/init` answer
-  409 `encryption_not_requested` and store nothing until it is set (`crypto/conversion.ts`). Desktop: `VaultKeySection` (shown to owners and
-  admins; key reveal/restore stay owner-only), view logic in `lib/vaultKeys/sectionView.ts`.
+  the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all. No owner review any more (2026-11-01): the
+  converting device allow-lists every candidate; exclusions recorded by an earlier review
+  (`vault_conversion_exclusions`, migration 083) still stand, and the review UI is gone.
+- **Every vault converts automatically** (decided 2026-11-01, supersedes the 2026-10-29 opt-in): while
+  `VAULT_KEY_CONVERSION` is on, `crypto/conversion.ts encryptionRequested` answers true for every vault, so
+  `keys/mine` reports `conversionAllowed` (0.1.98+ clients) and `keys/pending`/`keys/init` accept it;
+  `vaults.encryption_requested_at` (migration 081) matters only with the flag off. There is no
+  "Encrypt this vault" button. An owner/admin device converts only when `lib/vaultKeys/conversionSafety.ts
+  conversionSafe` holds, so a lost laptop cannot lose the vault: another member has an account key
+  (`keys/mine` unkeyed `otherMembersWithKeys`), or this account has a password wrap, or 2+ devices hold
+  the account key; else `not-safe-yet` and it re-checks on later runs.
 - **Desktops without vault keys** (`http/client-version.ts VAULT_KEYS_MIN_DESKTOP` = 0.1.98, no env
   override, no grace, missing version = old): on a KEYED vault every entry point (`requireVaultKey`'s
   refusal, plus `crypto/transport.ts refuseKeyIncapableClient` on the sync/vault-channel token mints,
