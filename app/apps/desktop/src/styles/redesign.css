@@ -2790,3 +2790,23 @@ html:not(.rd-off) .account-vault-page .vault-switch-chip {
 }
 html:not(.rd-off) .vaults-split-detail .vault-switch-chip:hover:not(:disabled),
 html:not(.rd-off) .account-vault-page .vault-switch-chip:hover:not(:disabled) { opacity: 0.88; }
+
+/* Version history (option B): two profile-style rows, New checkpoint and
+   Checkpoints, each checkpoint a quiet card with Revert and a ⋯ menu. */
+html:not(.rd-off) .versioning-tab { display: flex; flex-direction: column; gap: 16px; }
+html:not(.rd-off) .versioning-lede { margin: 0; max-width: 720px; color: var(--text-secondary); font-size: var(--fs-md); line-height: 1.5; }
+html:not(.rd-off) .versioning-rows .profile-row { grid-template-columns: minmax(200px, 300px) 1fr; }
+html:not(.rd-off) .checkpoint-create { display: flex; gap: 8px; width: 100%; }
+html:not(.rd-off) .checkpoint-create input { flex: 1; min-width: 0; height: 38px; border-radius: 10px; background: var(--bg-subtle); border: 0; padding: 0 14px; }
+html:not(.rd-off) .checkpoint-ink-btn { height: 38px; padding: 0 16px; border-radius: 10px; border: 0; background: var(--text-primary); color: var(--bg-surface); font-weight: 600; }
+html:not(.rd-off) .checkpoint-ink-btn:disabled { opacity: 0.45; }
+html:not(.rd-off) .checkpoint-cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; width: 100%; }
+html:not(.rd-off) .checkpoint-card { display: flex; align-items: center; gap: 14px; padding: 10px 12px; border-radius: 12px; }
+html:not(.rd-off) .checkpoint-card:nth-child(odd) { background: var(--bg-app); }
+html:not(.rd-off) .checkpoint-icon { flex: none; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--success-soft); color: var(--success); }
+html:not(.rd-off) .checkpoint-icon.is-manual { background: var(--accent-soft); color: var(--accent); }
+html:not(.rd-off) .checkpoint-card .checkpoint-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+html:not(.rd-off) .checkpoint-card .checkpoint-title { font-weight: 600; font-size: 14.5px; color: var(--text-primary); }
+html:not(.rd-off) .checkpoint-card .checkpoint-sub { font-size: 12.5px; color: var(--text-tertiary); }
+html:not(.rd-off) .checkpoint-revert { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px; border-radius: 10px; border: 0; background: var(--bg-surface, #fff); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.12); color: var(--text-primary); font-weight: 600; font-size: 13.5px; cursor: pointer; }
+html:not(.rd-off) .checkpoint-revert:hover { background: var(--bg-hover); }
