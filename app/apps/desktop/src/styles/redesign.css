@@ -2895,3 +2895,10 @@ html:not(.rd-off) .encryption-code:not(:has(.profile-row)) { display: none; }
 html:not(.rd-off) .conn-options { align-items: stretch; }
 html:not(.rd-off) .conn-option { line-height: 1.4; font-size: 14px; margin: 0; appearance: none; }
 html:not(.rd-off) .conn-b > .conn-address { width: 100%; }
+
+/* Account menu: the status sits at the top of the menu, the first thing the
+   pointer meets; the profile line stays at the bottom over the account row. */
+html:not(.rd-off) .account-popover > .rd-status {
+  order: -1; margin-top: 0; margin-bottom: 4px; padding: 4px 0 8px;
+  border-top: 0; border-bottom: 1px solid var(--border);
+}
