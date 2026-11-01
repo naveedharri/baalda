@@ -20,6 +20,7 @@ import {
   useUpdateState,
 } from "../lib/updater";
 import { useStore } from "../store";
+import { updateView } from "../lib/updateView";
 import {
   CHARACTER_PREFIX,
   PROFILE_CHARACTER_SEEDS,
@@ -876,7 +877,6 @@ function AboutTab({ onClose }: { onClose: () => void }) {
     update.phase === "ready";
 
   let statusText: string | null = null;
-  let statusError = false;
   switch (update.phase) {
     case "checking":
       statusText = "Checking for updates…";
@@ -906,48 +906,22 @@ function AboutTab({ onClose }: { onClose: () => void }) {
       break;
     case "error":
       statusText = `Couldn't check for updates: ${update.message}`;
-      statusError = true;
       break;
     case "failed":
       statusText = `Couldn't install version ${update.version}${update.message ? `: ${update.message}` : ""}`;
-      statusError = true;
       break;
   }
 
   return (
     <div className="about-tab">
-      {/* One row: version + status on the left, the action on the right. The
-          status line is always rendered (empty when idle) so a check never
-          shifts the row; the button keeps a fixed width for the same reason. */}
-      <div className="about-update-row">
-        <div className="about-update-text">
-          <div className="about-version">
-            <span className="menu-row-label">Current version</span>
-            <span className="mono">{version ?? "…"}</span>
-          </div>
-          <span className={`update-status${statusError ? " error" : ""}`} role="status" aria-live="polite">
-            {statusText}
-          </span>
-        </div>
-        {/* The one moment worth an accent button: the bytes are in and we are
-            holding the restart for a pause in typing. Someone who is done can
-            take it now. (The check button is disabled in this phase anyway.) */}
-        {update.phase === "ready" ? (
-          <button className="primary sm about-update-btn" onClick={() => void relaunchForUpdate()}>
-            Restart now
-          </button>
-        ) : (
-          <button
-            className="secondary sm about-update-btn"
-            disabled={busy}
-            aria-busy={busy}
-            onClick={() => void checkAndAutoInstall()}
-          >
-            {busy && <span className="btn-spinner" aria-hidden="true" />}
-            <span>{update.phase === "checking" ? "Checking…" : busy ? "Updating…" : "Check for updates"}</span>
-          </button>
-        )}
-      </div>
+      {/* One card for every update state, so nothing jumps between steps. */}
+      <UpdateCard
+        view={updateView(update, version)}
+        statusText={statusText}
+        busy={busy}
+        onCheck={() => void checkAndAutoInstall()}
+        onRestart={() => void relaunchForUpdate()}
+      />
 
       <InstalledAgentsStatus />
 
@@ -965,6 +939,51 @@ function AboutTab({ onClose }: { onClose: () => void }) {
         </Icon>
         <span className="menu-item-label">Sign out</span>
       </button>
+    </div>
+  );
+}
+
+/** About's update card: mark, version and status, the one action, progress. */
+function UpdateCard({
+  view,
+  statusText,
+  busy,
+  onCheck,
+  onRestart,
+}: {
+  view: ReturnType<typeof updateView>;
+  statusText: string | null;
+  busy: boolean;
+  onCheck: () => void;
+  onRestart: () => void;
+}) {
+  return (
+    <div className={`update-card is-${view.tone}`}>
+      <div className="update-card-row">
+        <span className="update-card-mark" aria-hidden="true">B</span>
+        <div className="update-card-text">
+          <span className="update-card-title">{view.title}</span>
+          <span className="update-card-sub" role="status" aria-live="polite">
+            {view.tone === "ok" || view.tone === "ready" ? <span className="update-card-dot" aria-hidden="true" /> : null}
+            {view.sub || statusText}
+          </span>
+        </div>
+        {view.tone === "busy" && view.percent === null && <span className="btn-spinner update-card-spin" aria-hidden="true" />}
+        {view.action === "restart" ? (
+          <button type="button" className="update-card-btn is-ink" onClick={onRestart}>
+            Restart now
+          </button>
+        ) : view.action ? (
+          <button type="button" className="update-card-btn" disabled={busy} onClick={onCheck}>
+            {view.action === "retry" ? "Try again" : "Check for updates"}
+          </button>
+        ) : null}
+      </div>
+      {view.percent !== null && (
+        <span className="update-card-bar" aria-hidden="true">
+          <b style={{ width: `${view.percent}%` }} />
+        </span>
+      )}
     </div>
   );
 }
