@@ -2666,3 +2666,30 @@ html:not(.rd-off) .invites-flyout {
   border-radius: 18px;
   box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.06), 0 2px 4px rgba(var(--rd-ink), 0.05), 0 30px 60px -16px rgba(11, 10, 16, 0.25);
 }
+
+/* ---- Type hierarchy pass (2026-11-01) ----
+   Sidebar section labels: the app font, not the wide monospace. */
+html:not(.rd-off) .pinned-label,
+html:not(.rd-off) .filetree-head .section-label {
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: rgba(var(--rd-ink), 0.55);
+}
+/* Settings section titles are headings, not footnotes: sentence case, the
+   body size, full ink. Their explanation lines (.muted) stay a step smaller
+   and greyer, so title, hint and content read as three distinct levels. */
+html:not(.rd-off) .settings-content > .subhead,
+html:not(.rd-off) .settings-content .subhead,
+html:not(.rd-off) .account-vaults-head {
+  margin: var(--sp-5) 0 var(--sp-1);
+  font: 600 15px var(--font-body);
+  letter-spacing: -0.005em;
+  text-transform: none;
+  color: var(--text-primary);
+}
+html:not(.rd-off) .settings-content .muted {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
