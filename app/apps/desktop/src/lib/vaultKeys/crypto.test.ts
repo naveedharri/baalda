@@ -162,6 +162,10 @@ describe("vault key words", () => {
     expect(wordsToVaultKey(words.split(" ").slice(0, 12).join(" "))).toBeNull();
     const file = vaultKeyFileText("Team notes", "v1", vk);
     expect(file).toContain('"Team notes"');
-    expect(file).toContain(" 1. " + words.split(" ")[0]);
+    // The key is one clean line, and a numbered or punctuated paste still restores.
+    expect(file.split("\n")).toContain(words);
+    const numbered = words.split(" ").map((w, i) => `${i + 1}. ${w}`).join("\n");
+    expect(wordsToVaultKey(numbered)).toEqual(vk);
+    expect(wordsToVaultKey(`${words.split(" ").join(", ")}.`)).toEqual(vk);
   });
 });

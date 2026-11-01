@@ -280,23 +280,25 @@ export function vaultKeyToWords(vk: Uint8Array): string {
 
 /** The VK the words encode, or null for anything that is not 24 valid words. */
 export function wordsToVaultKey(words: string): Uint8Array | null {
-  const p = normalizePhrase(words);
+  // Forgiving about what a person pastes: numbering ("1."), punctuation and line
+  // breaks from a saved or emailed copy are dropped (every key word is letters).
+  const p = normalizePhrase(words.replace(/[^\p{L}\s]+/gu, " "));
   if (p.split(" ").length !== 24 || !validateMnemonic(p, english)) return null;
   const vk = mnemonicToEntropy(p, english);
   return vk.length === VK_BYTES ? vk : null;
 }
 
-/** Text for "Save to file": vault name, id and the 24 numbered words. */
+/** Text for "Save to file" / "Email it to myself": the 24 words on ONE line, so
+ *  the whole key copies cleanly into "Restore with vault key". */
 export function vaultKeyFileText(vaultName: string, vaultId: string, vk: Uint8Array): string {
-  const words = vaultKeyToWords(vk).split(" ");
-  const lines = words.map((w, i) => `${String(i + 1).padStart(2, " ")}. ${w}`);
   return [
     `Baalda vault key for "${vaultName}"`,
     `Vault id: ${vaultId}`,
     "",
-    "Anyone with these 24 words can read this vault. Keep them somewhere safe.",
+    "Anyone with this key can read this vault. Keep it somewhere safe.",
+    "To use it: Vault Settings > General > Restore with vault key, then paste the line below.",
     "",
-    ...lines,
+    vaultKeyToWords(vk),
     "",
   ].join("\n");
 }

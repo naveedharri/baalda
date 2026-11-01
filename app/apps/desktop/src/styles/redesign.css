@@ -3133,3 +3133,20 @@ html:not(.rd-off) .conn-foot button.primary:disabled { opacity: 0.35; }
 html:not(.rd-off) .mcp-new-token { background: var(--accent); color: #fff; }
 html:not(.rd-off) .mcp-new-token:hover { background: var(--accent-hover); }
 html:not(.rd-off) .conn-foot button.primary { height: 34px; padding: 0 16px; border-radius: 10px; font-size: 13.5px; font-weight: 600; }
+
+/* Vault Settings → General: "Important: save your vault key" (SaveVaultKeyCard). */
+html:not(.rd-off) .save-key-card {
+  display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; padding: 16px 18px;
+  border-radius: 14px; background: color-mix(in srgb, var(--accent-soft) 45%, var(--rd-surface));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+html:not(.rd-off) .save-key-head { display: flex; gap: 12px; align-items: flex-start; }
+html:not(.rd-off) .save-key-badge {
+  flex: none; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 8px;
+  background: var(--accent); color: #fff; font: 700 15px var(--font-body);
+}
+html:not(.rd-off) .save-key-title { font: 600 15px var(--font-body); color: var(--text-primary); }
+html:not(.rd-off) .save-key-desc { margin: 4px 0 0; font-size: var(--fs-sm); color: var(--text-secondary); line-height: 1.5; max-width: 640px; }
+html:not(.rd-off) .save-key-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-left: 40px; }
+html:not(.rd-off) .save-key-panel { display: flex; flex-direction: column; gap: 8px; padding-left: 40px; max-width: 560px; }
+html:not(.rd-off) .save-key-panel > button { align-self: flex-start; }

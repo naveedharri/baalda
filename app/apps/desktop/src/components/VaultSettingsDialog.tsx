@@ -59,6 +59,8 @@ import { VaultDashboardsTab } from "./VaultDashboardsTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
 import { SkillsTab } from "./skills/SkillsTab";
 import { VaultKeySection } from "./VaultKeySection";
+import { SaveVaultKeyCard } from "./SaveVaultKeyCard";
+import { syncManager } from "../lib/sync/docSession";
 import { AGENT_SKILLS_ICON_PATH } from "./skills/parts";
 
 // Defined in `lib/settingsTabs.ts` so the store can name a tab without importing
@@ -468,6 +470,10 @@ function GeneralTab({
 
   return (
     <>
+      {/* Only an owner with no other way back sees it; it renders nothing otherwise. */}
+      {isSynced && isOwner && syncManager.registry.vaultId && (
+        <SaveVaultKeyCard vaultId={syncManager.registry.vaultId} vaultName={activeOrgName ?? "Vault"} />
+      )}
       {iconIdentity && (
         <>
           {/* One icon per vault. A synced vault's belongs to the org: members see
