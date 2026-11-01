@@ -51,6 +51,11 @@ vi.mock("./session", () => ({
         fake.serviced.push(v);
         return { sealed: [], refused: [], keyChanged: [] };
       },
+      // The runtime runs requests back to back through this one.
+      serviceAllKeyRequests: async (v: string) => {
+        fake.serviced.push(v);
+        return { sealed: [], refused: [], keyChanged: [] };
+      },
       gateVaultOpen: async () => "proceed",
       unlockWithPassword: async () => "unlocked",
     };
