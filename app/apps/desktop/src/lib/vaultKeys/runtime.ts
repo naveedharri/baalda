@@ -385,7 +385,7 @@ async function runOnce(): Promise<void> {
 }
 
 async function serviceVault(c: NonNullable<typeof current>, vaultId: string): Promise<void> {
-  const result = await c.session.serviceKeyRequests(vaultId);
+  const result = await c.session.serviceAllKeyRequests(vaultId);
   if (!result.sealed.length && !result.keyChanged.length) return;
   emit({ kind: "serviced", vaultId, result, names: await namesFor(c, vaultId, result) });
 }

@@ -892,6 +892,24 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     return out;
   }
 
+  /**
+   * Service runs back to back while each one fills its per-run cap (a big team
+   * right after conversion: 150 people = 3 runs now, not 3 runs 2 minutes
+   * apart). Bounded by {@link MAX_BACK_TO_BACK_RUNS}; stops at the first run
+   * that seals nobody (junk listings cannot keep it going).
+   */
+  async function serviceAllKeyRequests(vaultId: string): Promise<ServiceResult> {
+    const all: ServiceResult = { sealed: [], refused: [], keyChanged: [] };
+    for (let run = 0; run < MAX_BACK_TO_BACK_RUNS; run++) {
+      const r = await serviceKeyRequests(vaultId);
+      all.sealed.push(...r.sealed);
+      all.refused.push(...r.refused);
+      all.keyChanged.push(...r.keyChanged);
+      if (!filledRun(r)) break;
+    }
+    return all;
+  }
+
   /** `X-Baalda-VK` value for a vault: verified keys only. Synchronous. */
   function headerFor(vaultId: string): string | null {
     return verified.get(vaultId)?.b64 ?? null;
@@ -912,6 +930,7 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     approveChangedKey,
     ensureVaultKey,
     serviceKeyRequests,
+    serviceAllKeyRequests,
     headerFor,
     inviteKeyMaterial,
     sealInviteResults,
@@ -950,6 +969,13 @@ export type VaultKeySession = ReturnType<typeof createVaultKeySession>;
 
 /** Most key requests handled in one run (the rest wait for the next run). */
 export const MAX_KEY_REQUESTS_PER_RUN = 50;
+/** Back-to-back service runs per cycle while each fills its cap (500 people). */
+export const MAX_BACK_TO_BACK_RUNS = 10;
+
+/** A run that sealed someone and used its whole per-run budget: more may wait. */
+export function filledRun(r: ServiceResult): boolean {
+  return r.sealed.length > 0 && r.sealed.length + r.refused.length + r.keyChanged.length >= MAX_KEY_REQUESTS_PER_RUN;
+}
 
 /** The server's 404 `not_member` for a wrap: that person left the vault. */
 function isNotMemberRefusal(e: unknown): boolean {
