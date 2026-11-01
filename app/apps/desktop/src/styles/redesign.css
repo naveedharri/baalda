@@ -2810,3 +2810,52 @@ html:not(.rd-off) .checkpoint-card .checkpoint-title { font-weight: 600; font-si
 html:not(.rd-off) .checkpoint-card .checkpoint-sub { font-size: 12.5px; color: var(--text-tertiary); }
 html:not(.rd-off) .checkpoint-revert { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px; border-radius: 10px; border: 0; background: var(--bg-surface, #fff); box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.12); color: var(--text-primary); font-weight: 600; font-size: 13.5px; cursor: pointer; }
 html:not(.rd-off) .checkpoint-revert:hover { background: var(--bg-hover); }
+
+/* ============================================================
+   Settings: open sections, not box after box (2026-11-01).
+   ============================================================ */
+
+/* General: the icon picker, Freeze vault root and the folder path sit on the
+   page, split by hairlines, instead of each in its own card. */
+html:not(.rd-off) .settings-content > .vault-icon-settings,
+html:not(.rd-off) .settings-content > .toggle-row,
+html:not(.rd-off) .settings-content > .join-code-row {
+  background: transparent; box-shadow: none; border-radius: 0; padding: 0;
+}
+html:not(.rd-off) .settings-content > .toggle-row {
+  padding-top: var(--sp-4); border-top: 1px solid rgba(var(--rd-ink), 0.07);
+}
+html:not(.rd-off) .vault-icon-settings .vault-icon-customise {
+  background: transparent; box-shadow: none; padding: var(--sp-2) 0 0;
+}
+html:not(.rd-off) .settings-content .vault-root-path { background: transparent; padding: 0; }
+
+/* Danger zone: one red-edged card, its actions as rows inside it. */
+html:not(.rd-off) .vault-local-only-card:has(+ .vault-local-only-card) {
+  border-bottom-left-radius: 0; border-bottom-right-radius: 0;
+}
+html:not(.rd-off) .vault-local-only-card + .vault-local-only-card {
+  margin-top: calc(-1 * var(--sp-4));
+  border-top-left-radius: 0; border-top-right-radius: 0;
+  border-top: 1px solid rgba(187, 67, 58, 0.12);
+}
+html:not(.rd-off) .vault-local-only-card { background: var(--rd-surface); }
+
+/* Activity status: the chosen status is a neutral row with an ink check,
+   not a violet band. */
+html:not(.rd-off) .status-options .menu-item.active { background: rgba(var(--rd-ink), 0.045); }
+html:not(.rd-off) .status-options .menu-item.active svg:last-child,
+html:not(.rd-off) .status-options .menu-item.active .menu-check { color: var(--text-primary); }
+
+/* Usage: the four numbers are columns inside the one card, split by
+   hairlines, not four more cards; numbers in the body face. */
+html:not(.rd-off) .vault-usage-tiles { gap: 0; }
+html:not(.rd-off) .vault-usage-tile {
+  border: 0; border-radius: 0; background: transparent; box-shadow: none;
+  padding: var(--sp-1) var(--sp-5);
+}
+html:not(.rd-off) .vault-usage-tile:first-child { padding-left: 0; }
+html:not(.rd-off) .vault-usage-tile + .vault-usage-tile { border-left: 1px solid rgba(var(--rd-ink), 0.07); }
+html:not(.rd-off) .vault-usage-value { font-family: var(--font-body); font-size: 22px; font-weight: 600; }
+html:not(.rd-off) .plan-pro .billing-plan-name { color: var(--text-primary); }
+html:not(.rd-off) .plan-header.is-team .billing-plan-name { color: var(--text-primary); }
