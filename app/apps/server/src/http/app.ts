@@ -11,6 +11,7 @@ import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from "better-a
 import { config } from "../config.js";
 import { auth } from "../auth/auth.js";
 import { throttledSignIn } from "../auth/signin-throttle.js";
+import { accountKeyPepper, upgradeLoginHash } from "../auth/login-pepper.js";
 import {
   CLIENT_VERSION_HEADER,
   clientVersionPolicy,
@@ -362,7 +363,18 @@ export function createApp(deps: AppDeps): Hono {
 
   // Better Auth owns everything under /api/auth (web-standard Request handler).
   // Email sign-in passes the per-account failure throttle first (#237).
-  app.post("/api/auth/sign-in/email", (c) => throttledSignIn(c.req.raw, auth.handler));
+  // With ACCOUNT_KEY_PEPPER set, a successful sign-in also upgrades an old
+  // unpeppered login hash to `p1$` in place (seamless keys F, best-effort).
+  app.post("/api/auth/sign-in/email", async (c) => {
+    const creds = accountKeyPepper()
+      ? ((await c.req.raw.clone().json().catch(() => null)) as { email?: unknown; password?: unknown } | null)
+      : null;
+    const res = await throttledSignIn(c.req.raw, auth.handler);
+    if (res.ok && typeof creds?.email === "string" && typeof creds.password === "string") {
+      await upgradeLoginHash({ email: creds.email.trim() }, creds.password);
+    }
+    return res;
+  });
   app.on(["GET", "POST"], "/api/auth/*", async (c) => {
     // OAuth connector tokens are stored as hashes (W3): the token endpoint is
     // wrapped, and Better Auth's HTTP session probe (which would accept a

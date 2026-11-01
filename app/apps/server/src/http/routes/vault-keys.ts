@@ -14,6 +14,8 @@
 // GET  /api/vaults/:vaultId/keys/invite-wrap                 my invitations' secret wraps
 // PUT  /api/vaults/:vaultId/keys/join-wraps                  VK wrapped under a join secret (owner/admin + VK)
 // GET  /api/vaults/:vaultId/keys/join-wrap?h=                one join-secret wrap (member)
+// POST /api/me/keys/unlock                  password → unlock key (F; ACCOUNT_KEY_PEPPER)
+// PUT  /api/me/keys/password-wrap           account key wrapped under the unlock key (F)
 // GET  /api/me/keys                         my key pair record
 // PUT  /api/me/keys                         set my public key (recovery wrap optional)
 // PUT  /api/me/devices/:deviceId/key        my private key wrapped for a device
@@ -34,6 +36,14 @@ import {
 } from "../../crypto/conversion.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
+import {
+  PASSWORD_UNLOCK_OFF,
+  accountKeyPepper,
+  deriveUnlockKey,
+  upgradeLoginHash,
+  verifyPassword,
+} from "../../auth/login-pepper.js";
+import { clearThrottle, lockedForSeconds, recordFailure, throttledResponse } from "../../auth/signin-throttle.js";
 import {
   KEY_REPLACEMENT_WINDOW_MS,
   MAX_KEY_REPLACEMENTS,
@@ -106,6 +116,7 @@ export function createVaultKeyRoutes(): Hono {
   };
   routes.use("/vaults/:vaultId/keys/*", flagGate);
   routes.use("/me/keys", flagGate);
+  routes.use("/me/keys/*", flagGate);
   routes.use("/me/devices", flagGate);
   routes.use("/me/devices/*", flagGate);
 
@@ -589,19 +600,27 @@ export function createVaultKeyRoutes(): Hono {
   routes.get("/me/keys", async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
-    const { rows } = await pool.query<{ public_key: Buffer; priv_wrapped_recovery: Buffer | null; key_changed_at: Date | null }>(
-      "SELECT public_key, priv_wrapped_recovery, key_changed_at FROM user_keys WHERE user_id = $1",
+    const { rows } = await pool.query<{
+      public_key: Buffer;
+      priv_wrapped_recovery: Buffer | null;
+      priv_wrapped_password: Buffer | null;
+      key_changed_at: Date | null;
+    }>(
+      "SELECT public_key, priv_wrapped_recovery, priv_wrapped_password, key_changed_at FROM user_keys WHERE user_id = $1",
       [session.userId],
     );
     const { rows: devices } = await pool.query<{ device_id: string; priv_wrapped: Buffer }>(
       "SELECT device_id, priv_wrapped FROM user_device_keys WHERE user_id = $1 AND revoked_at IS NULL ORDER BY device_id",
       [session.userId],
     );
-    if (!rows[0]) return c.json({ publicKey: null, privWrappedRecovery: null, keyChangedAt: null, devices: [] });
+    if (!rows[0]) {
+      return c.json({ publicKey: null, privWrappedRecovery: null, privWrappedPassword: null, keyChangedAt: null, devices: [] });
+    }
     return c.json({
       keyChangedAt: rows[0].key_changed_at,
       publicKey: rows[0].public_key.toString("base64"),
       privWrappedRecovery: rows[0].priv_wrapped_recovery?.toString("base64") ?? null,
+      privWrappedPassword: rows[0].priv_wrapped_password?.toString("base64") ?? null,
       devices: devices.map((d) => ({ deviceId: d.device_id, privWrapped: d.priv_wrapped.toString("base64") })),
     });
   });
@@ -623,8 +642,13 @@ export function createVaultKeyRoutes(): Hono {
     let refusedFor = 0;
     try {
       await client.query("BEGIN");
-      const { rows: cur } = await client.query<{ public_key: Buffer; priv_wrapped_recovery: Buffer | null; created_at: Date }>(
-        "SELECT public_key, priv_wrapped_recovery, created_at FROM user_keys WHERE user_id = $1 FOR UPDATE",
+      const { rows: cur } = await client.query<{
+        public_key: Buffer;
+        priv_wrapped_recovery: Buffer | null;
+        priv_wrapped_password: Buffer | null;
+        created_at: Date;
+      }>(
+        "SELECT public_key, priv_wrapped_recovery, priv_wrapped_password, created_at FROM user_keys WHERE user_id = $1 FOR UPDATE",
         [session.userId],
       );
       if (!cur[0]) {
@@ -647,12 +671,15 @@ export function createVaultKeyRoutes(): Hono {
           await client.query("ROLLBACK");
         } else {
           await client.query(
-            `INSERT INTO user_key_history (user_id, public_key, priv_wrapped_recovery, created_at)
-             VALUES ($1, $2, $3, $4)`,
-            [session.userId, cur[0].public_key, cur[0].priv_wrapped_recovery, cur[0].created_at],
+            `INSERT INTO user_key_history (user_id, public_key, priv_wrapped_recovery, priv_wrapped_password, created_at)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [session.userId, cur[0].public_key, cur[0].priv_wrapped_recovery, cur[0].priv_wrapped_password, cur[0].created_at],
           );
+          // The password wrap held the OLD private key: kept in history, cleared
+          // here so no device unlocks a key that no longer matches publicKey.
           await client.query(
-            `UPDATE user_keys SET public_key = $2, priv_wrapped_recovery = $3, created_at = now(), key_changed_at = now()
+            `UPDATE user_keys SET public_key = $2, priv_wrapped_recovery = $3, created_at = now(), key_changed_at = now(),
+                    priv_wrapped_password = NULL, password_wrap_at = NULL
               WHERE user_id = $1`,
             [session.userId, publicKey, recovery],
           );
@@ -678,6 +705,60 @@ export function createVaultKeyRoutes(): Hono {
       );
     }
     return c.json({ saved: true, replaced });
+  });
+
+  // ── Seamless keys F: the password unlocks the account key. The unlock key is
+  // derived with the server-only pepper, so the database alone (hashes +
+  // `priv_wrapped_password`) never yields it. Never log the body or the key.
+  routes.post("/me/keys/unlock", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const pepper = accountKeyPepper();
+    if (!pepper) return c.json({ error: "Password unlock is off on this server", code: PASSWORD_UNLOCK_OFF }, 503);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    const password = typeof body?.password === "string" ? body.password : "";
+    if (!password || password.length > 1024) {
+      return c.json({ error: "password is required", code: "invalid_argument" }, 400);
+    }
+    // Shares the email sign-in throttle (#237): a locked account is refused
+    // before any check, and a wrong password here counts as a failed sign-in.
+    const wait = await lockedForSeconds(session.email);
+    if (wait > 0) return throttledResponse(wait);
+    const { rows } = await pool.query<{ password: string | null }>(
+      `SELECT password FROM account WHERE "userId" = $1 AND "providerId" = 'credential' AND password IS NOT NULL LIMIT 1`,
+      [session.userId],
+    );
+    if (!rows[0]?.password) {
+      return c.json({ error: "This account signs in without a password", code: "no_password" }, 409);
+    }
+    if (!(await verifyPassword({ hash: rows[0].password, password }))) {
+      await recordFailure(session.email);
+      return c.json({ error: "Wrong password", code: "wrong_password" }, 401);
+    }
+    await clearThrottle(session.email);
+    await upgradeLoginHash({ userId: session.userId }, password);
+    const key = deriveUnlockKey(pepper, session.userId, password);
+    const unlockKey = key.toString("base64");
+    key.fill(0);
+    c.header("Cache-Control", "no-store");
+    return c.json({ unlockKey });
+  });
+
+  routes.put("/me/keys/password-wrap", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    if (!accountKeyPepper()) {
+      return c.json({ error: "Password unlock is off on this server", code: PASSWORD_UNLOCK_OFF }, 503);
+    }
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    const privWrapped = b64(body?.privWrapped);
+    if (!privWrapped) return c.json({ error: "privWrapped is required", code: "invalid_argument" }, 400);
+    const { rowCount } = await pool.query(
+      "UPDATE user_keys SET priv_wrapped_password = $2, password_wrap_at = now() WHERE user_id = $1",
+      [session.userId, privWrapped],
+    );
+    if (!rowCount) return c.json({ error: "This account has no security key yet", code: "no_account_key" }, 409);
+    return c.json({ stored: true });
   });
 
   const deviceIdOk = (d: string) => /^[A-Za-z0-9._-]{1,128}$/.test(d);

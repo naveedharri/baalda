@@ -16,7 +16,6 @@ import { announceMemberJoined, announceMemberRemoved } from "../../sync/member-e
 import { announceInvitationGone } from "../../sync/user-events.js";
 import { applyInvitationAccess } from "../../members/invitation-access.js";
 import { applyInvitationKeys } from "../../members/invitation-keys.js";
-import { vaultKeysEnabled } from "../../crypto/config.js";
 import { billingEnabled } from "../../config.js";
 import { dispatchMail, emailEnabled } from "../../email/mailer.js";
 import { memberLeftEmail, youLeftVaultEmail } from "../../email/templates.js";
@@ -626,9 +625,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
         { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
       );
       // Seamless keys (B3): the invite's direct seal applies here too.
-      if (vaultKeysEnabled()) {
-        await applyInvitationKeys({ invitationIds: [liveInvite.id], organizationId, userId: session.userId });
-      }
+      await applyInvitationKeys({ invitationIds: [liveInvite.id], organizationId, userId: session.userId });
     }
 
     // Announce to teammates already live in the vault (this path bypasses

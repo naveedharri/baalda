@@ -13,6 +13,7 @@
 // (X-Baalda-VK, `requireVaultKey`). Nothing here can open a vault from rows.
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
+import { vaultKeysEnabled } from "../crypto/config.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -100,6 +101,9 @@ export async function applyInvitationKeys(
 ): Promise<number> {
   if (input.invitationIds.length === 0) return 0;
   try {
+    // Inside the try: even a malformed BAALDA_VAULT_KEYS (which throws) can
+    // never fail an accept.
+    if (!vaultKeysEnabled()) return 0;
     const { rows } = await db.query<{ vault_id: string }>(
       `INSERT INTO vault_key_wraps (vault_id, user_id, generation, sealed_vk, sealed_by_user_id)
        SELECT ivk.vault_id, $3, ivk.sealed_generation, ivk.sealed_vk,

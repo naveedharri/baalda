@@ -20,7 +20,7 @@
 // ============================================================================
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { Algorithm, hash as argonHash } from "@node-rs/argon2";
+import { hashPassword } from "../auth/login-pepper.js";
 import { pool, closePool } from "../db/pool.js";
 
 function usage(msg?: string): never {
@@ -68,8 +68,8 @@ async function main(): Promise<void> {
   }
   const { id: userId, email: storedEmail } = user.rows[0];
 
-  // Same algorithm and options as auth.ts (argon2id, library defaults).
-  const hashed = await argonHash(password, { algorithm: Algorithm.Argon2id });
+  // Same hashing as auth.ts (argon2id; peppered `p1$` when ACCOUNT_KEY_PEPPER is set).
+  const hashed = await hashPassword(password);
 
   const client = await pool.connect();
   try {
