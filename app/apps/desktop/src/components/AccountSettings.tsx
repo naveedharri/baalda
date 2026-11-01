@@ -1017,8 +1017,8 @@ function encryptionStatus(
     case "unkeyed":
       return {
         tone: "off",
-        title: "Not encrypted",
-        detail: "An owner or admin can turn it on in Vault Settings, General. Turning it on is permanent.",
+        title: "Not encrypted yet",
+        detail: "Every vault is encrypted automatically. This one switches over on its own as soon as its key can't be lost.",
       };
     case "needs-account-key":
     case "security-warning":

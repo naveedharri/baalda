@@ -2933,3 +2933,11 @@ html:not(.rd-off) .conn-b > .conn-address {
   background: var(--rd-surface); color: var(--text-primary); font-size: 14px;
   box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.14);
 }
+
+/* Plan & Billing loading: card shapes instead of a bare "Loading…". */
+html:not(.rd-off) .plan-skeleton .plan-card { display: flex; flex-direction: column; align-items: flex-start; min-height: 210px; }
+html:not(.rd-off) .plan-skeleton .skel-line { display: block; }
+html:not(.rd-off) .plan-skeleton-seats { flex-direction: row !important; align-items: center !important; gap: 24px; }
+html:not(.rd-off) .plan-skeleton-ring { width: 112px; height: 112px; border-radius: 50%; border: 12px solid rgba(var(--rd-ink), 0.06); flex: none; animation: rd-skel-pulse 1.4s ease-in-out infinite; }
+html:not(.rd-off) .plan-skeleton-legend { display: flex; flex-direction: column; gap: 12px; }
+@keyframes rd-skel-pulse { 50% { opacity: 0.55; } }

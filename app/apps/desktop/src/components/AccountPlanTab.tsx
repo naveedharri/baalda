@@ -31,6 +31,7 @@ import { ManageSeatsDialog } from "./ManageSeatsDialog";
 import { PlanHeader } from "./PlanHeader";
 import { SeatUsageBreakdown } from "./SeatUsageBreakdown";
 import { UpgradeDialog } from "./UpgradeDialog";
+import "./editor.css";
 
 /** Compact absolute date, same shape as the vault Billing tab's. */
 function formatDate(iso: string): string {
@@ -150,7 +151,7 @@ export function AccountPlanTab() {
       </>
     );
   }
-  if (!data) return <div className="muted">Loading…</div>;
+  if (!data) return <PlanSkeleton />;
 
   const { config, account, usage } = data;
   if (data.state === "disabled") {
@@ -653,5 +654,28 @@ function SelfHostedPlan({
         </>
       )}
     </>
+  );
+}
+
+/** Plan & Billing while the account loads: the two cards' shapes, shimmering. */
+function PlanSkeleton() {
+  return (
+    <div className="plan-cards plan-skeleton" aria-busy="true" aria-label="Loading your plan">
+      <div className="billing-card plan-card">
+        <span className="skel-line" style={{ width: 90, height: 11 }} />
+        <span className="skel-line" style={{ width: 140, height: 28, marginTop: 14 }} />
+        <span className="skel-line" style={{ width: "70%", height: 12, marginTop: 14 }} />
+        <span className="skel-line" style={{ width: "55%", height: 12, marginTop: 8 }} />
+        <span className="skel-line" style={{ width: 130, height: 34, marginTop: 24, borderRadius: 10 }} />
+      </div>
+      <div className="billing-card plan-card plan-skeleton-seats">
+        <span className="plan-skeleton-ring" />
+        <span className="plan-skeleton-legend">
+          <span className="skel-line" style={{ width: 120, height: 12 }} />
+          <span className="skel-line" style={{ width: 90, height: 12 }} />
+          <span className="skel-line" style={{ width: 100, height: 12 }} />
+        </span>
+      </div>
+    </div>
   );
 }
