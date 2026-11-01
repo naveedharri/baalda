@@ -90,8 +90,8 @@ export const SETTING_RANGES = {
   linkDistance: { min: 1, max: 400, step: 0.5 },
   linkStrength: { min: 0, max: 1, step: 0.02 },
   gravity: { min: 0, max: 1, step: 0.01 },
-  nodeSize: { min: 0.4, max: 4, step: 0.1 },
-  edgeThickness: { min: 0.4, max: 4, step: 0.1 },
+  nodeSize: { min: 0.05, max: 4, step: 0.05 },
+  edgeThickness: { min: 0.1, max: 4, step: 0.05 },
   labelScale: { min: 0, max: 2, step: 0.05 },
   minDegree: { min: 0, max: 20, step: 1 },
 } as const;

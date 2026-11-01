@@ -312,6 +312,17 @@ type Drag =
       startX: number;
       startY: number;
       moved: boolean;
+    }
+  // Radial / Ring: a note dragged off its fixed spot. No physics there, so it
+  // simply follows the pointer and stays where it is dropped.
+  | {
+      type: "spot";
+      node: SimNode;
+      startX: number;
+      startY: number;
+      fromDx: number;
+      fromDy: number;
+      moved: boolean;
     };
 
 /** A note's place on the globe this frame: screen-world position and depth. */
@@ -587,6 +598,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     template: null as
       | { shape: TemplateShape; nodes: SimNode[]; pos: Float32Array; group: Int32Array; r: number; index: Map<SimNode, number> }
       | null,
+    // Radial / Ring: notes the user dragged off their spot, as world offsets.
+    // Kept until the shape or the visible set changes.
+    templateOffsets: new Map<SimNode, { dx: number; dy: number }>(),
     seededEdges: 0,
     idleTimer: 0,
     // Large global graphs offload the force sim to a Web Worker so the UI thread
@@ -1105,11 +1119,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         const L = templateLayout(nodes, shape);
         t = { shape, nodes, ...L, index: new Map(nodes.map((n, i) => [n, i])) };
         S.template = t;
+        S.templateOffsets.clear();
       }
       for (let i = 0; i < nodes.length; i++) {
         const p = nodes[i] as Placed;
-        p.gx = t.pos[i * 2];
-        p.gy = t.pos[i * 2 + 1];
+        const off = S.templateOffsets.get(nodes[i]);
+        p.gx = t.pos[i * 2] + (off?.dx ?? 0);
+        p.gy = t.pos[i * 2 + 1] + (off?.dy ?? 0);
         p.gz = 1;
       }
     }
@@ -1983,9 +1999,23 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const hit = nodeAt(sx, sy);
       canvas!.setPointerCapture(e.pointerId);
       canvas!.classList.add("is-dragging");
+      if (S.view !== "flat" && !S.globe.on && hit) {
+        // Radial / Ring: a press on a note moves that note, not the view.
+        const off = S.templateOffsets.get(hit);
+        S.drag = {
+          type: "spot",
+          node: hit,
+          startX: e.clientX,
+          startY: e.clientY,
+          fromDx: off?.dx ?? 0,
+          fromDy: off?.dy ?? 0,
+          moved: false,
+        };
+        return;
+      }
       if (S.view !== "flat") {
-        // A press on the globe spins it, and on Radial / Ring it pans: those
-        // shapes are fixed, so nothing is pinned or pulled.
+        // A press on the globe spins it, and on Radial / Ring empty space pans:
+        // those shapes are fixed, so nothing is pinned or pulled.
         S.globe.target = null;
         S.globe.lastTouch = performance.now();
         S.drag = { type: "pan", lastX: e.clientX, lastY: e.clientY, moved: false, pick: hit };
@@ -2037,6 +2067,18 @@ export function GraphView({ onClose }: { onClose: () => void }) {
             drag.lastY = e.clientY;
             requestDraw();
           }
+        } else if (drag.type === "spot") {
+          const dx = e.clientX - drag.startX;
+          const dy = e.clientY - drag.startY;
+          if (!drag.moved && Math.hypot(dx, dy) > CLICK_DRAG_THRESHOLD) drag.moved = true;
+          if (drag.moved) {
+            S.templateOffsets.set(drag.node, {
+              dx: drag.fromDx + dx / S.camera.k,
+              dy: drag.fromDy + dy / S.camera.k,
+            });
+            clearHoverTips();
+            requestDraw();
+          }
         } else {
           const { x: wx, y: wy } = screenToWorld(sx, sy);
           drag.node.fx = wx;
@@ -2086,6 +2128,10 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           if (S.globe.on && viewPos(pick).z < GLOBE_FACE_TO_OPEN) turnToFace(pick);
           else useStore.getState().openNoteByPath(pick.path).then(onClose);
         }
+        requestDraw();
+      }
+      if (drag?.type === "spot") {
+        if (!drag.moved) useStore.getState().openNoteByPath(drag.node.path).then(onClose);
         requestDraw();
       }
       if (drag?.type === "node") {

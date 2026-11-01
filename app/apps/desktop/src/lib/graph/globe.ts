@@ -7,8 +7,9 @@
 // relative size and neighbours stay neighbours. The outermost notes reach
 // ~3/4 of the way round, leaving a quiet pole at the back instead of a seam.
 
-/** Below this many visible notes the graph draws flat: a few dots on a globe look lost. */
-export const GLOBE_MIN_NODES = 150;
+/** Below this many visible notes the graph draws flat. Kept low (was 150) so a
+ *  small vault still reads as a round globe instead of silently going flat. */
+export const GLOBE_MIN_NODES = 8;
 /** How far round the sphere the edge of the layout reaches (2 = all the way). */
 const WRAP = 1.7;
 /** Tilt limit so the globe can never flip upside down while dragging. */
