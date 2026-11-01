@@ -3120,3 +3120,4 @@ html:not(.rd-off) .conn-foot button.primary {
 html:not(.rd-off) .conn-foot button.primary:disabled { opacity: 0.35; }
 html:not(.rd-off) .mcp-new-token { background: var(--accent); color: #fff; }
 html:not(.rd-off) .mcp-new-token:hover { background: var(--accent-hover); }
+html:not(.rd-off) .conn-foot button.primary { height: 34px; padding: 0 16px; border-radius: 10px; font-size: 13.5px; font-weight: 600; }
