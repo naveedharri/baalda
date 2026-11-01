@@ -3111,3 +3111,12 @@ html:not(.rd-off) .mcp-rows .mcp-empty {
   border: 0; border-radius: 12px; padding: 22px; text-align: center;
   background: var(--bg-app); color: var(--text-tertiary); font-size: 13px;
 }
+
+/* Button rule (2026-11-02): a button that acts right away is black; a button
+   that opens a dialog is the accent purple. */
+html:not(.rd-off) .conn-foot button.primary {
+  background: var(--text-primary); color: var(--bg-surface); border-color: transparent;
+}
+html:not(.rd-off) .conn-foot button.primary:disabled { opacity: 0.35; }
+html:not(.rd-off) .mcp-new-token { background: var(--accent); color: #fff; }
+html:not(.rd-off) .mcp-new-token:hover { background: var(--accent-hover); }
