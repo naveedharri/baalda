@@ -417,13 +417,13 @@ html:not(.rd-off) .modal-backdrop {
   }
   /* Dialogs rise in over a fading backdrop. */
   .modal-backdrop { animation: rd-fade 160ms var(--ease) both; }
-  .modal { animation: rd-rise 200ms var(--ease) both; }
+  .modal { animation: rd-rise 200ms var(--ease) backwards; }
 
   /* The open note's row settles into its white pill. */
-  .tree-row.selected { animation: rd-lift 180ms var(--ease) both; }
+  .tree-row.selected { animation: rd-lift 180ms var(--ease) backwards; }
 
   /* Switching notes: the page eases in instead of snapping. */
-  .editor-wrap .cm-editor { animation: rd-note-in 180ms var(--ease) both; }
+  .editor-wrap .cm-editor { animation: rd-note-in 180ms var(--ease) backwards; }
 
   /* Ticking a task gives a tiny bounce. */
   .cm-editor .cm-task-checkbox:checked { animation: rd-tick 220ms var(--ease) both; }
@@ -1958,8 +1958,8 @@ html:not(.rd-off) .width-preview-page {
 html:not(.rd-off) .width-preview-col {
   border-inline: 0;
   border-radius: 4px;
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
-  outline: 6px solid color-mix(in srgb, var(--accent) 6%, transparent);
+  background: transparent;
+  outline: 0;
 }
 html:not(.rd-off) .width-preview-text { color: var(--text-tertiary); }
 html:not(.rd-off) .width-preview-text strong { font-weight: 600; color: var(--text-primary); }
@@ -2129,8 +2129,12 @@ html:not(.rd-off) .account-vault-page > .subhead { margin: 22px 0 8px 2px; line-
   .modal-backdrop.rd-exit { animation: rd-out-fade 150ms var(--ease) both; pointer-events: none; }
   .modal-backdrop.rd-exit > * { animation: rd-out-sink 150ms var(--ease) both; }
   .settings-backdrop { animation: rd-fade 170ms var(--ease) both; }
-  .settings-backdrop > * { animation: rd-rise 210ms var(--ease) both; }
-  .settings-content.rd-tab-in { animation: rd-tab-glide 170ms var(--ease) both; }
+  /* `backwards`, not `both`: a fill that outlives the animation keeps the
+     transform in effect, which makes this panel the containing block for every
+     fixed dialog opened inside it (New vault and Join with code landed off
+     to the side). Same entrance, nothing left behind. */
+  .settings-backdrop > * { animation: rd-rise 210ms var(--ease) backwards; }
+  .settings-content.rd-tab-in { animation: rd-tab-glide 170ms var(--ease) backwards; }
   .settings-nav .menu-item { transition: background-color 120ms var(--ease), color 120ms var(--ease); }
 }
 
@@ -2608,7 +2612,7 @@ html:not(.rd-off) .whats-new-cta:focus-visible {
 
 /* Connection, "Cloud or your own" (chosen 2026-10-30): two choice cards, the
    address only for your own server, recent servers as chips, one Connect. */
-html:not(.rd-off) .conn-b { display: flex; flex-direction: column; gap: 16px; max-width: 720px; }
+html:not(.rd-off) .conn-b { display: flex; flex-direction: column; gap: 16px; }
 html:not(.rd-off) .conn-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 html:not(.rd-off) .conn-option {
   position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left;
@@ -2693,3 +2697,19 @@ html:not(.rd-off) .settings-content .muted {
   font-size: var(--fs-xs);
   color: var(--text-tertiary);
 }
+
+/* Connection fills the page like the other settings pages (it stopped at
+   720px and left the right half empty); its Recent label uses the app font. */
+html:not(.rd-off) .conn-recent-label {
+  font: 600 11.5px var(--font-body);
+  letter-spacing: 0.04em;
+}
+
+/* View only chip: at the top of the note, under the tab bar, where it is seen
+   before you try to type (it sat at the bottom edge). Slides down into place. */
+.rd-viewonly {
+  top: 58px;
+  bottom: auto;
+  animation-name: rd-chip-in-top;
+}
+@keyframes rd-chip-in-top { from { opacity: 0; translate: 0 -8px; } to { opacity: 1; translate: 0 0; } }
