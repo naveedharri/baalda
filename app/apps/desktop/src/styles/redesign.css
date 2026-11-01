@@ -2768,3 +2768,7 @@ html:not(.rd-off) .account-popover .rd-prof .presence-light { border-color: var(
 html:not(.rd-off) .sidebar .filetree-scroll .tree-sync { transform: translateX(15.5px); }
 html:not(.rd-off) .sidebar .filetree-scroll .tree-more { transform: translateX(-12.5px); }
 html:not(.rd-off) .sidebar-footer .identity-bug { margin-right: 31px; }
+
+/* Left column: every icon starts at x=20 (Home, folders, Skills, avatar, the
+   HOME and NOTES labels). The vault tile sat at 22. */
+html:not(.rd-off) .sidebar-header-id .vault-tile { margin-left: -2px; }
