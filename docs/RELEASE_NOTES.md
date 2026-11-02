@@ -21,6 +21,8 @@
     (every app still installs it). Ask before each release: silent, or notes?
 -->
 
+## 0.1.104
+
 ## 0.1.103
 
 ## 0.1.102
