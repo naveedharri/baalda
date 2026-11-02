@@ -2,6 +2,14 @@ import { tokenize } from "./embedder.js";
 
 /** Upper bound on a stored token set, in UTF-16 code units (all ASCII here). */
 export const SEARCH_TOKENS_MAX = 64 * 1024;
+/**
+ * The bound for a keyed row's token set, which lives only inside its sealed
+ * blobs and is matched in app memory: the 64 KB bound serves the plaintext
+ * column and its SQL fallback. A note past 64 KB of distinct words otherwise
+ * had every worded search open its whole sealed body (140 notes, 111 MB per
+ * search on one vault, 2026-11-02).
+ */
+export const SEALED_TOKENS_MAX = 1024 * 1024;
 
 /**
  * Characters whose lowercase may differ between JS `toLowerCase()` and
@@ -48,7 +56,7 @@ export function hasUnsafeLowercase(text: string): boolean {
  * finds today — when the set would pass {@link SEARCH_TOKENS_MAX}, or when the
  * text holds a character {@link hasUnsafeLowercase} flags.
  */
-export function searchTokenSet(text: string): string | null {
+export function searchTokenSet(text: string, max = SEARCH_TOKENS_MAX): string | null {
   if (hasUnsafeLowercase(text)) return null;
   const seen = new Set<string>();
   const parts: string[] = [];
@@ -57,10 +65,15 @@ export function searchTokenSet(text: string): string | null {
     if (seen.has(t)) continue;
     seen.add(t);
     len = parts.length === 0 ? t.length : len + 1 + t.length;
-    if (len > SEARCH_TOKENS_MAX) return null;
+    if (len > max) return null;
     parts.push(t);
   }
   return parts.join(" ");
+}
+
+/** {@link searchTokenSet} for a keyed row's sealed blobs, up to {@link SEALED_TOKENS_MAX}. */
+export function sealedTokenSet(text: string): string | null {
+  return searchTokenSet(text, SEALED_TOKENS_MAX);
 }
 
 /** How many of the (unique) query tokens occur in a stored token set. */

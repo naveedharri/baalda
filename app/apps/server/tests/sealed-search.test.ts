@@ -8,7 +8,8 @@ import { indexDoc, pendingSearchPasses, searchNoteIndex } from "../src/index/ind
 import { backfillVault } from "../src/crypto/backfill.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { aadFor, open, seal } from "../src/crypto/envelope.js";
-import { isUncompressedScore, openScoreRow } from "../src/index/sealed-index.js";
+import { isUncompressedScore, openScoreRow, openSearchRow, sealScoreRow, sealSearchRow } from "../src/index/sealed-index.js";
+import { SEARCH_TOKENS_MAX } from "../src/index/search-tokens.js";
 import { vaultKeyCache } from "../src/crypto/key-cache.js";
 import { KeyRequiredError } from "../src/crypto/transport.js";
 import type { DocCrypto } from "../src/crypto/doc-crypto.js";
@@ -165,6 +166,45 @@ describe("sealed note_index (W3)", () => {
       expect(isUncompressedScore(open(keyed.key, aadFor("note_index", "search_score_enc", keyed.vaultId, r.doc_id), r.search_score_enc))).toBe(false);
     }
     expect(await Promise.all(["revenue plan", "lemon", "zzz"].map(search))).toEqual(before);
+  });
+
+  it("a note past 64 KB of distinct words ranks from its score blob; the backfill gives old rows their token set", async () => {
+    const keyed = await corpus(true);
+    // ~12k distinct words, well past the plaintext bound.
+    const big = `${Array.from({ length: 12_000 }, (_, i) => `w${i.toString(36)}x`).join(" ")} lemon revenue`;
+    const bigId = await seedNote(keyed.vaultId, null, "big.md");
+    keyed.ids[bigId] = "big.md";
+    await appendUpdate(bigId, updateWith(big), pool, 1000, keyed.crypto);
+    const release = vaultKeyCache.acquire(keyed.vaultId, keyed.key, 1);
+    for (const id of Object.keys(keyed.ids)) await indexDoc(id);
+    release();
+    expect(big.length).toBeGreaterThan(SEARCH_TOKENS_MAX);
+    const scoreOf = async () =>
+      openScoreRow(keyed.crypto!, bigId, (await pool.query("SELECT search_score_enc FROM note_index WHERE doc_id = $1", [bigId])).rows[0].search_score_enc);
+    expect(typeof (await scoreOf()).tokens).toBe("string");
+    const queries = ["revenue plan", "lemon", "w1zx", "big", "zzz", ""];
+    const search = (query: string) =>
+      searchNoteIndex({ vaultId: keyed.vaultId, query, k: 10, readableDocIds: Object.keys(keyed.ids), includeFiles: false, crypto: keyed.crypto });
+    const now = await Promise.all(queries.map(search));
+
+    // As written before: no token set in either blob, so search opens the body.
+    const { rows } = await pool.query("SELECT search_enc FROM note_index WHERE doc_id = $1", [bigId]);
+    const full = openSearchRow(keyed.crypto!, bigId, rows[0].search_enc);
+    await pool.query("UPDATE note_index SET search_enc = $2, search_score_enc = $3 WHERE doc_id = $1", [
+      bigId,
+      sealSearchRow(keyed.crypto!, bigId, { ...full, tokens: null }),
+      sealScoreRow(keyed.crypto!, bigId, { vector: full.vector!, tokens: null }),
+    ]);
+    expect((await scoreOf()).tokens).toBeNull();
+    expect(await Promise.all(queries.map(search))).toEqual(now);
+
+    await pool.query("INSERT INTO vault_crypto_state (vault_id, phase, generation) VALUES ($1, 'keyed', 1) ON CONFLICT DO NOTHING", [keyed.vaultId]);
+    const hold = vaultKeyCache.acquire(keyed.vaultId, keyed.key, 1);
+    expect(await backfillVault(keyed.vaultId, { throttleMs: 0 })).toBe("complete");
+    hold();
+    expect(typeof (await scoreOf()).tokens).toBe("string");
+    expect(await Promise.all(queries.map(search))).toEqual(now);
+    expect(now[2].some((h) => h.docId === bigId)).toBe(true);
   });
 
   it("concurrent searches of one vault share a pass and get exactly their own results", async () => {
