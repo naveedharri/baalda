@@ -1,5 +1,13 @@
 import type { DocCrypto } from "../crypto/doc-crypto.js";
-import { indexCryptoFor, openBlobTextRow, openSearchRow, sealSearchRow } from "./sealed-index.js";
+import {
+  indexCryptoFor,
+  openBlobTextRow,
+  openScoreRow,
+  openSearchRow,
+  sealScoreRow,
+  sealSearchRow,
+  type SealedScoreRow,
+} from "./sealed-index.js";
 import { KeyRequiredError, loadVkCheck } from "../crypto/transport.js";
 import { vaultKeyCache } from "../crypto/key-cache.js";
 import * as Y from "yjs";
@@ -235,31 +243,31 @@ async function indexNoteRow(
   const heads = await cachedRefHeads(note.vault_id, db);
 
   if (crypto) {
-    // Keyed: content, vector and tokens go ONLY into the sealed `search_enc`.
+    const tokens = searchTokenSet(`${title ?? ""} ${content}`) ?? null;
+    // Keyed: content, vector and tokens go ONLY into the sealed `search_enc`
+    // (and vector + tokens again into `search_score_enc`, what ranking opens).
     // The plaintext columns are not written, and never nulled here: an old row
     // keeps its stale plaintext until the separate null-out step (W3 rule).
     // `ref_text` is not written either: the attachment rule decides a sealed
     // row from its decrypted body in memory (`permissions/sealed-refs.ts`),
     // which is the same answer the excerpt gives.
     await db.query(
-      `INSERT INTO note_index (doc_id, vault_id, title, updated_at, ref_heads, search_enc)
-       VALUES ($1, $2, $3, now(), $4::text[], $5)
+      `INSERT INTO note_index (doc_id, vault_id, title, updated_at, ref_heads, search_enc, search_score_enc)
+       VALUES ($1, $2, $3, now(), $4::text[], $5, $6)
        ON CONFLICT (doc_id) DO UPDATE
          SET vault_id = EXCLUDED.vault_id,
              title = EXCLUDED.title,
              updated_at = now(),
              ref_heads = EXCLUDED.ref_heads,
-             search_enc = EXCLUDED.search_enc`,
+             search_enc = EXCLUDED.search_enc,
+             search_score_enc = EXCLUDED.search_score_enc`,
       [
         docId,
         note.vault_id,
         title,
         heads,
-        sealSearchRow(crypto, docId, {
-          body: content,
-          vector,
-          tokens: searchTokenSet(`${title ?? ""} ${content}`) ?? null,
-        }),
+        sealSearchRow(crypto, docId, { body: content, vector, tokens }),
+        sealScoreRow(crypto, docId, { vector, tokens }),
       ],
     );
   } else await db.query(
@@ -564,10 +572,13 @@ export async function searchNoteIndex(opts: {
       search_tokens: string | null;
       matched_legacy: number | null;
       search_enc: Buffer | null;
+      search_score_enc: Buffer | null;
       title: string | null;
     }>(
+      // A sealed row with a score blob sends only that (~1 KB), never the body.
       `SELECT ni.doc_id,
-              ni.search_enc,
+              CASE WHEN ni.search_score_enc IS NULL THEN ni.search_enc END AS search_enc,
+              ni.search_score_enc,
               ni.title,
               ni.vector,
               CASE WHEN $6::boolean THEN NULL ELSE ni.search_tokens END AS search_tokens,
@@ -586,6 +597,16 @@ export async function searchNoteIndex(opts: {
     );
     if (rows.length === 0) break;
     for (const r of rows) {
+      if (r.search_score_enc) {
+        if (!opts.crypto) throw new KeyRequiredError();
+        const score = scoreFromSealed(opts.crypto, r.doc_id, r.search_score_enc, qVec, qTokens, legacySql);
+        if (score !== null) {
+          scored.push({ docId: r.doc_id, score });
+          continue;
+        }
+        // Unopenable, or a row that needs its body: the full row, as before.
+        r.search_enc = await fullSealedRow(db, r.doc_id);
+      }
       if (r.search_enc) {
         // Sealed row: same score from the decrypted fields. No token set means
         // the pre-068 rule, substring-counted over the same "title body" text.
@@ -665,6 +686,37 @@ export async function searchNoteIndex(opts: {
   return [...hits, ...fileHits]
     .sort((a, b) => b.score - a.score || (a.kind === b.kind ? 0 : a.kind === "note" ? -1 : 1))
     .slice(0, opts.k);
+}
+
+/** A sealed row's score from its small score blob, or null when it cannot
+ *  answer alone (unopenable, or no token set and the query has words). */
+function scoreFromSealed(
+  crypto: DocCrypto,
+  docId: string,
+  sealed: Buffer,
+  qVec: number[],
+  qTokens: string[],
+  legacySql: boolean,
+): number | null {
+  let s: SealedScoreRow;
+  try {
+    s = openScoreRow(crypto, docId, sealed);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(s.vector)) return null;
+  if (qTokens.length > 0 && (s.tokens === null || legacySql)) return null;
+  const sim = cosineSimilarity(qVec, s.vector);
+  const matched = qTokens.length > 0 ? keywordMatchCount(qTokens, s.tokens!) : 0;
+  return sim + (qTokens.length > 0 ? 0.1 * (matched / qTokens.length) : 0);
+}
+
+async function fullSealedRow(db: Queryable, docId: string): Promise<Buffer | null> {
+  const { rows } = await db.query<{ search_enc: Buffer | null }>(
+    "SELECT search_enc FROM note_index WHERE doc_id = $1",
+    [docId],
+  );
+  return rows[0]?.search_enc ?? null;
 }
 
 /** The pre-068 SQL rule in app memory: query tokens found as substrings of lower(text). */

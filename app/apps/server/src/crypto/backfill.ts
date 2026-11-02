@@ -36,7 +36,8 @@
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { inc } from "../metrics/sync-metrics.js";
-import { openBlobTextRow, openSearchRow, sealBlobTextRow, sealSearchRow } from "../index/sealed-index.js";
+import { openBlobTextRow, openScoreRow, openSearchRow, sealBlobTextRow, sealScoreRow, sealSearchRow } from "../index/sealed-index.js";
+import { searchTokenSet } from "../index/search-tokens.js";
 import { openNoteTextBytes, sealNoteText } from "../versions/texts.js";
 import { sha256Hex } from "../versions/capture.js";
 import { indexDoc, setIndexDeferredHook } from "../index/indexer.js";
@@ -58,6 +59,10 @@ export const BACKFILL_TABLES = [
   "note_texts",
   "note_versions_inline",
   "checkpoint_docs_inline",
+  // Not plaintext: the ranking half of an already-sealed `search_enc` row
+  // (`note_index.search_score_enc`). Never counted by `encryptionStatus`, so it
+  // neither delays the null-out nor reads as plaintext remaining.
+  "note_index_score",
 ] as const;
 export type BackfillTable = (typeof BACKFILL_TABLES)[number];
 
@@ -172,6 +177,8 @@ async function runBatch(
       return batchInlineTexts("note_versions_inline", c, after, limit, db);
     case "checkpoint_docs_inline":
       return batchInlineTexts("checkpoint_docs_inline", c, after, limit, db);
+    case "note_index_score":
+      return batchNoteIndexScore(c, after, limit, db);
   }
 }
 
@@ -281,6 +288,58 @@ async function batchDocSnapshots(c: DocCrypto, after: string | null, limit: numb
 function searchJson(body: string, vectorText: string | null, tokens: string | null): Buffer {
   const vector = vectorText === null ? null : (JSON.parse(vectorText) as number[]);
   return Buffer.from(JSON.stringify({ body, vector, tokens }), "utf8");
+}
+
+/**
+ * A sealed search row without its score blob: open it, seal vector + tokens
+ * apart. A row with no token set gets one from its body now, so the score blob
+ * answers alone. Written only while `search_enc` is still the row just read.
+ */
+async function batchNoteIndexScore(c: DocCrypto, after: string | null, limit: number, db: Queryable): Promise<BatchResult> {
+  const { rows } = await db.query<{ doc_id: string; title: string | null; search_enc: Buffer }>(
+    byteBudgeted(
+      `SELECT doc_id, title, search_enc
+         FROM note_index
+        WHERE vault_id = $1 AND doc_id > $2 AND search_enc IS NOT NULL AND search_score_enc IS NULL
+        ORDER BY doc_id
+        LIMIT $3`,
+      "x.search_enc",
+      "x.doc_id",
+      4,
+    ),
+    [c.vaultId, after ?? "", limit, BACKFILL_BATCH_BYTES],
+  );
+  for (const r of rows) {
+    let full: ReturnType<typeof openSearchRow>;
+    try {
+      full = openSearchRow(c, r.doc_id, r.search_enc);
+    } catch {
+      metric("note_index_score", "verify_failed");
+      continue;
+    }
+    const score = {
+      vector: full.vector,
+      tokens: full.tokens ?? searchTokenSet(`${r.title ?? ""} ${full.body}`) ?? null,
+    };
+    const json = Buffer.from(JSON.stringify(score), "utf8");
+    const sealed = sealVerified(
+      "note_index_score",
+      r.doc_id,
+      json,
+      () => sealScoreRow(c, r.doc_id, score),
+      (s) => Buffer.from(JSON.stringify(openScoreRow(c, r.doc_id, s)), "utf8"),
+    );
+    if (!sealed) continue;
+    await write(
+      "note_index_score",
+      r.doc_id,
+      `UPDATE note_index SET search_score_enc = $2
+        WHERE doc_id = $1 AND vault_id = $4 AND search_score_enc IS NULL AND search_enc = $3`,
+      [r.doc_id, sealed, r.search_enc, c.vaultId],
+      db,
+    );
+  }
+  return { ...scanned(rows), last: rows.at(-1)?.doc_id ?? after };
 }
 
 async function batchNoteIndex(c: DocCrypto, after: string | null, limit: number, db: Queryable): Promise<BatchResult> {

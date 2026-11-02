@@ -33,6 +33,26 @@ export function openSearchRow(c: DocCrypto, docId: string, sealed: Buffer): Seal
   return JSON.parse(open(c.key, aad(c.vaultId, docId), sealed).toString("utf8")) as SealedSearchRow;
 }
 
+/** What ranking needs, sealed apart from the body (`note_index.search_score_enc`).
+ *  `tokens` null = a row whose score needs the body (the pre-068 substring
+ *  rule): search opens the full row for that one. */
+export interface SealedScoreRow {
+  vector: number[];
+  tokens: string | null;
+}
+
+function scoreAad(vaultId: string, docId: string): Buffer {
+  return aadFor("note_index", "search_score_enc", vaultId, docId);
+}
+
+export function sealScoreRow(c: DocCrypto, docId: string, row: SealedScoreRow): Buffer {
+  return seal(c.key, scoreAad(c.vaultId, docId), Buffer.from(JSON.stringify(row), "utf8"), c.generation);
+}
+
+export function openScoreRow(c: DocCrypto, docId: string, sealed: Buffer): SealedScoreRow {
+  return JSON.parse(open(c.key, scoreAad(c.vaultId, docId), sealed).toString("utf8")) as SealedScoreRow;
+}
+
 function blobAad(vaultId: string, blobId: string): Buffer {
   return aadFor("blob_text", "search_enc", vaultId, blobId);
 }
