@@ -7381,7 +7381,7 @@ export class SyncManager implements InboundHost {
           epoch,
         ),
       putBytes: (input) => api.uploadBytesTo(input),
-      downloadUrl: (blobId) => api.blobDownloadUrl(blobId),
+      downloadUrl: (blobId) => api.blobDownloadUrl(blobId, vaultId),
       fetchToFile: (input) => ipc.downloadAttachment(input, epoch),
       // ---- Tree binaries: the `files` row that carries their ACL ----------
       localFileIds: async () =>
