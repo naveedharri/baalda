@@ -14,7 +14,7 @@ import type { SyncContext } from "../src/sync/hocuspocus.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { vaultKeyCache } from "../src/crypto/key-cache.js";
 import { pendingKeyCache } from "../src/crypto/conversion.js";
-import { allowMac } from "../src/crypto/token-wrap.js";
+import { allowMac, wrapSecret } from "../src/crypto/token-wrap.js";
 import { hashOAuthToken } from "../src/mcp/oauth-token-hash.js";
 import { resetMcpBadTokens } from "../src/http/routes/mcp.js";
 import { testAppDeps } from "./helpers/app.js";
@@ -356,6 +356,94 @@ describe("OAuth connector tokens: hashed storage + vault keys", () => {
     const r = await refresh(refreshToken);
     expect(r.status).toBe(200);
     expect((await tool(r.body.access_token!, "read_note", { docId: s.docId })).data.content).toBe("hello");
+  });
+
+  /** Allow-list g1, key the vault, then no desktop anywhere. */
+  async function keyedWithAllowListedGrant() {
+    const s = await setup();
+    await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk);
+    await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/allowlist`, {
+      entries: [{ kind: "oauth_grant", id: "g1", mac: b64(allowMac(s.vk, "g1", sha(s.refreshToken))) }],
+    }, s.vk);
+    const init = await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/init`, {
+      vkCheck: b64(s.vkCheck),
+      generation: 1,
+      sealedVkForSelf: b64(randomBytes(80)),
+    }, s.vk);
+    expect(init.status).toBe(201);
+    noDesktops();
+    return s;
+  }
+  const newestGrant = async () =>
+    (await pool.query<{ id: string }>(`SELECT id FROM "oauthAccessToken" ORDER BY "createdAt" DESC, id DESC LIMIT 1`)).rows[0].id;
+  const keysOf = async (id: string) =>
+    (await pool.query("SELECT 1 FROM oauth_grant_keys WHERE grant_id = $1", [id])).rowCount;
+
+  it("an allow-listed grant refreshed twice with no desktop online still upgrades on a later refresh", async () => {
+    vi.stubEnv("BAALDA_VAULT_KEYS", "on");
+    const s = await keyedWithAllowListedGrant();
+    const r1 = await refresh(s.refreshToken);
+    expect(r1.status).toBe(200);
+    const g2 = await newestGrant();
+    expect(await keysOf(g2)).toBe(0);
+    expect((await pool.query("SELECT root_grant_id FROM oauth_grant_carry WHERE grant_id = $1", [g2])).rows).toEqual([
+      { root_grant_id: "g1" },
+    ]);
+    expect((await tool(r1.body.access_token!, "read_note", { docId: s.docId })).isError).toBe(true);
+
+    const r2 = await refresh(r1.body.refresh_token!);
+    const g3 = await newestGrant();
+    expect((await pool.query("SELECT root_grant_id FROM oauth_grant_carry WHERE grant_id = $1", [g3])).rows).toEqual([
+      { root_grant_id: "g1" },
+    ]);
+
+    // Someone opens Baalda; the next refresh upgrades.
+    vaultKeyCache.holdForRequest(s.vaultId, s.vk, 1); // a member's app connects
+    const r3 = await refresh(r2.body.refresh_token!);
+    expect(r3.status).toBe(200);
+    const g4 = await newestGrant();
+    expect(await keysOf(g4)).toBe(2);
+    expect(await keysOf(g3)).toBe(1); // the consumed row's refresh wrap
+    noDesktops();
+    const read = await tool(r3.body.access_token!, "read_note", { docId: s.docId });
+    expect(read.isError, read.text).toBe(false);
+  });
+
+  it("a refresh while a key is held upgrades directly, with no carry", async () => {
+    vi.stubEnv("BAALDA_VAULT_KEYS", "on");
+    const s = await keyedWithAllowListedGrant();
+    vaultKeyCache.holdForRequest(s.vaultId, s.vk, 1); // a member's app connects
+    expect((await refresh(s.refreshToken)).status).toBe(200);
+    expect(await keysOf(await newestGrant())).toBe(2);
+    expect((await pool.query("SELECT 1 FROM oauth_grant_carry")).rowCount).toBe(0);
+  });
+
+  it("a carry inserted into the database never yields a key, even with real root values", async () => {
+    vi.stubEnv("BAALDA_VAULT_KEYS", "on");
+    const s = await keyedWithAllowListedGrant();
+    const { rows } = await pool.query<{ mac: Buffer }>("SELECT mac FROM oauth_grant_allow WHERE grant_id = 'g1'");
+    const fakeRefresh = "RefreshForgedByDatabaseWriterAbcde";
+    await pool.query(
+      `INSERT INTO "oauthAccessToken" (id, "accessToken", "refreshToken", "accessTokenExpiresAt", "refreshTokenExpiresAt", "clientId", "userId", scopes)
+       VALUES ('gx', 'AccessForgedByDatabaseWriterAbcdef', $1, now() + interval '1 hour', now() + interval '7 days', $2, $3, 'openid offline_access')`,
+      [fakeRefresh, CLIENT, s.owner.userId],
+    );
+    // The attacker copies g1's root entry but cannot seal g1's refresh token,
+    // which the database never held: a guess (and a tampered MAC) both fail.
+    for (const [sealed, mac] of [
+      [Buffer.from("a guess at the root token"), rows[0].mac],
+      [Buffer.from(s.refreshToken), randomBytes(32)],
+    ] as const) {
+      await pool.query("DELETE FROM oauth_grant_carry");
+      await pool.query(
+        `INSERT INTO oauth_grant_carry (grant_id, vault_id, root_grant_id, root_refresh_hash, root_mac, wrapped_root_refresh)
+         VALUES ('gx', $1, 'g1', $2, $3, $4)`,
+        [s.vaultId, sha(s.refreshToken), mac, wrapSecret(fakeRefresh, "oauth-carry", "oauth_grant_carry", "wrapped_root_refresh", s.vaultId, "gx:carry", sealed)],
+      );
+      vaultKeyCache.holdForRequest(s.vaultId, s.vk, 1); // a member's app connects
+      await refresh(fakeRefresh);
+      expect((await pool.query("SELECT 1 FROM oauth_grant_keys")).rowCount).toBe(0);
+    }
   });
 
   it("a grant inserted into the database never gets a key", async () => {

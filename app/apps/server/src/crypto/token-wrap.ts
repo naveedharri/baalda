@@ -14,7 +14,7 @@
 import { createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 import { KEY_BYTES, aadFor, open, seal } from "./envelope.js";
 
-export type WrapPurpose = "mcp-vk" | "link" | "oauth-access" | "oauth-refresh" | "oauth-consent";
+export type WrapPurpose = "mcp-vk" | "link" | "oauth-access" | "oauth-refresh" | "oauth-consent" | "oauth-carry";
 
 const SALT = Buffer.from("baalda-token-wrap-v1", "ascii");
 
@@ -54,6 +54,45 @@ export function unwrapVk(
   try {
     const vk = open(kek, aadFor(table, "wrapped_vk", vaultId, rowKey), wrapped);
     return vk.length === KEY_BYTES ? vk : null;
+  } catch {
+    return null;
+  } finally {
+    kek.fill(0);
+  }
+}
+
+/** Any small secret sealed under a token-derived key (the OAuth carry's root
+ *  refresh token). Same envelope as {@link wrapVk}, its own column in the AAD. */
+export function wrapSecret(
+  secret: string,
+  purpose: WrapPurpose,
+  table: string,
+  column: string,
+  vaultId: string,
+  rowKey: string,
+  plaintext: Buffer,
+): Buffer {
+  const kek = deriveTokenKek(secret, purpose, vaultId);
+  try {
+    return seal(kek, aadFor(table, column, vaultId, rowKey), plaintext, 1);
+  } finally {
+    kek.fill(0);
+  }
+}
+
+/** The sealed secret, or null on any failure (wrong token, moved row, tampering). */
+export function unwrapSecret(
+  secret: string,
+  purpose: WrapPurpose,
+  table: string,
+  column: string,
+  vaultId: string,
+  rowKey: string,
+  wrapped: Buffer,
+): Buffer | null {
+  const kek = deriveTokenKek(secret, purpose, vaultId);
+  try {
+    return open(kek, aadFor(table, column, vaultId, rowKey), wrapped);
   } catch {
     return null;
   } finally {

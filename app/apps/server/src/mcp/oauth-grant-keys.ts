@@ -17,13 +17,20 @@
 //   token))). On its next refresh or call, while a VK is held in memory, the
 //   MAC is checked and the wraps are stored. A row inserted into the database
 //   has no valid MAC and never gets a key.
+// - An allow-listed grant REFRESHED while no key is held: the new row gets a
+//   carry (`oauth_grant_carry`): the root grant's allow entry plus the root's
+//   refresh token sealed under the new refresh token. A later refresh with a
+//   key held opens it, checks the token against the root hash and the root MAC
+//   with the key, and stores the wraps. Without this, one unattended hourly
+//   refresh cost the connection its claim (2026-11-02).
 // VKs unwrapped for a call are handed to that call only, never cached.
+import { createHash } from "node:crypto";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { vaultKeysEnabled } from "../crypto/config.js";
 import { vaultKeyCache } from "../crypto/key-cache.js";
 import { heldKey } from "../crypto/conversion.js";
-import { unwrapVk, verifyAllowMac, wrapVk } from "../crypto/token-wrap.js";
+import { unwrapSecret, unwrapVk, verifyAllowMac, wrapSecret, wrapVk } from "../crypto/token-wrap.js";
 import { verifyVk } from "../crypto/vk-check.js";
 import { orgVaultChecks, type HeldKey } from "./token-keys.js";
 import type { IssuedGrant } from "./oauth-token-endpoint.js";
@@ -102,6 +109,78 @@ async function allowListedKey(
     return null;
   }
   return vk;
+}
+
+const CARRY = "oauth_grant_carry";
+const CARRY_COLUMN = "wrapped_root_refresh";
+
+/** An allow-listed root grant, as carried across refreshes (see {@link CARRY}). */
+interface CarriedClaim {
+  rootGrantId: string;
+  rootRefreshHash: string;
+  rootMac: Buffer;
+  /** The root's refresh token: the possession proof. Zeroed by the caller. */
+  rootRefresh: Buffer;
+}
+
+/** The claim `grantId` holds on `vaultId`: its own allow entry (root = itself,
+ *  proved by the refresh token just presented) or a carry it can open with that
+ *  token. Null when it holds neither. */
+async function claimOf(
+  grantId: string,
+  refreshToken: string,
+  refreshHashHex: string,
+  vaultId: string,
+  db: Queryable,
+): Promise<CarriedClaim | null> {
+  const { rows: allow } = await db.query<{ mac: Buffer }>(
+    "SELECT mac FROM oauth_grant_allow WHERE grant_id = $1 AND vault_id = $2",
+    [grantId, vaultId],
+  );
+  if (allow[0]) {
+    return { rootGrantId: grantId, rootRefreshHash: refreshHashHex, rootMac: allow[0].mac, rootRefresh: Buffer.from(refreshToken, "utf8") };
+  }
+  const { rows } = await db.query<{ root_grant_id: string; root_refresh_hash: string; root_mac: Buffer; wrapped_root_refresh: Buffer }>(
+    `SELECT root_grant_id, root_refresh_hash, root_mac, wrapped_root_refresh FROM ${CARRY} WHERE grant_id = $1 AND vault_id = $2`,
+    [grantId, vaultId],
+  );
+  const c = rows[0];
+  if (!c) return null;
+  const rootRefresh = unwrapSecret(refreshToken, "oauth-carry", CARRY, CARRY_COLUMN, vaultId, `${grantId}:carry`, c.wrapped_root_refresh);
+  if (!rootRefresh) return null;
+  return { rootGrantId: c.root_grant_id, rootRefreshHash: c.root_refresh_hash, rootMac: c.root_mac, rootRefresh };
+}
+
+/** The key, when `claim` is genuine: the sealed token hashes to the root's
+ *  hash and the root MAC verifies under the held key. Null otherwise. */
+function keyForClaim(
+  claim: CarriedClaim,
+  v: { vaultId: string; check: Buffer; generation: number; pending: boolean },
+): Buffer | null {
+  if (createHash("sha256").update(claim.rootRefresh).digest("hex") !== claim.rootRefreshHash) return null;
+  const vk = heldKey(v.vaultId, { check: v.check, generation: v.generation, pending: v.pending }, vaultKeyCache);
+  if (!vk) return null;
+  if (!verifyAllowMac(vk, claim.rootGrantId, claim.rootRefreshHash, claim.rootMac)) {
+    vk.fill(0);
+    return null;
+  }
+  return vk;
+}
+
+/** Hand the claim to the new grant, sealed under its refresh token. */
+async function storeCarry(grantId: string, refreshToken: string, vaultId: string, claim: CarriedClaim, db: Queryable): Promise<void> {
+  await db.query(
+    `INSERT INTO ${CARRY} (grant_id, vault_id, root_grant_id, root_refresh_hash, root_mac, wrapped_root_refresh)
+     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (grant_id, vault_id) DO NOTHING`,
+    [
+      grantId,
+      vaultId,
+      claim.rootGrantId,
+      claim.rootRefreshHash,
+      claim.rootMac,
+      wrapSecret(refreshToken, "oauth-carry", CARRY, CARRY_COLUMN, vaultId, `${grantId}:carry`, claim.rootRefresh),
+    ],
+  );
 }
 
 /**
@@ -209,11 +288,31 @@ export async function rewrapOnIssue(grant: IssuedGrant, db: Queryable = defaultP
     for (const v of checks) {
       let vk: Buffer | null = null;
       if (grant.previous) {
+        const prev = grant.previous;
         vk =
-          (await openWrap(grant.previous.refreshToken, grant.previous.grantId, "refresh", v, db)) ??
-          (await allowListedKey(grant.previous.grantId, grant.previous.refreshHashHex, v, db));
+          (await openWrap(prev.refreshToken, prev.grantId, "refresh", v, db)) ??
+          (await allowListedKey(prev.grantId, prev.refreshHashHex, v, db));
+        if (!vk) {
+          // An allow entry or carry with no key held: verify it now if a key is
+          // held, else pass it on to the new row. A claim that fails while a key
+          // IS held is never passed on.
+          const claim = await claimOf(prev.grantId, prev.refreshToken, prev.refreshHashHex, v.vaultId, db);
+          if (claim) {
+            try {
+              const held = heldKey(v.vaultId, { check: v.check, generation: v.generation, pending: v.pending }, vaultKeyCache);
+              if (held) {
+                held.fill(0);
+                vk = keyForClaim(claim, v);
+              } else if (grant.refreshToken) {
+                await storeCarry(grant.grantId, grant.refreshToken, v.vaultId, claim, db);
+              }
+            } finally {
+              claim.rootRefresh.fill(0);
+            }
+          }
+        }
         // The consumed row is covered too (its refresh token stays valid).
-        if (vk) await storeWrap(grant.previous.refreshToken, grant.previous.grantId, "refresh", v.vaultId, vk, v.generation, db);
+        if (vk) await storeWrap(prev.refreshToken, prev.grantId, "refresh", v.vaultId, vk, v.generation, db);
       } else {
         const c = fromConsent.find((k) => k.vaultId === v.vaultId && k.generation === v.generation);
         if (c && verifyVk(c.key, v.vaultId, v.check)) vk = Buffer.from(c.key);
