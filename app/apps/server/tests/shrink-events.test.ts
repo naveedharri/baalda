@@ -1,4 +1,6 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { randomBytes } from "node:crypto";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { createApp } from "../src/http/app.js";
 import { applyDetached } from "../src/sync/doc-batch.js";
 import { createVersionCapture, recordVersion } from "../src/versions/capture.js";
@@ -56,7 +58,10 @@ describe("shrink events", () => {
     vault = await seedVault(org);
     await seedVaultGrant(org, "edit");
   });
-  afterEach(() => setShrinkHook(null));
+  afterEach(() => {
+    setShrinkHook(null);
+    vi.unstubAllEnvs();
+  });
 
   it("a real shrink produces one item with the right sizes", async () => {
     const docId = await seedNote(vault, null, "n.md", owner.userId);
@@ -133,5 +138,30 @@ describe("shrink events", () => {
     expect(body.truncated).toBe(true);
 
     expect((await get(member, `/api/vaults/${vault}/shrink-events?since=nope`)).status).toBe(400);
+  });
+
+  it("on an encrypted vault, sizes are read with the request's key; without it, refused", async () => {
+    vi.stubEnv("BAALDA_VAULT_KEYS", "on");
+    const vk = randomBytes(32);
+    await pool.query("UPDATE vaults SET vk_check = $2, key_generation = 1 WHERE id = $1", [vault, makeVkCheck(vk, vault)]);
+    const crypto = { vaultId: vault, key: vk, generation: 1 };
+    const docId = await seedNote(vault, null, "k.md", owner.userId);
+    const actor = { userId: owner.userId, crypto };
+    await applyDetached(vault, docId, (d) => d.getText("content").insert(0, "left"), actor);
+    await recordVersion({ vaultId: vault, docId, content: BODY, cause: "pre-shrink", authorId: null, crypto });
+
+    const withKey = await app.fetch(
+      new Request(`http://local/api/vaults/${vault}/shrink-events`, {
+        headers: { ...authHeaders(member), "x-baalda-vk": vk.toString("base64") },
+      }),
+    );
+    expect(withKey.status).toBe(200);
+    const body = (await withKey.json()) as Events;
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0]).toMatchObject({ docId, beforeChars: BODY.length, afterChars: 4 });
+
+    // Refused, never a 500 (an unversioned client gets 426, a current one 409).
+    const noKey = await get(member, `/api/vaults/${vault}/shrink-events`);
+    expect([409, 426]).toContain(noKey.status);
   });
 });

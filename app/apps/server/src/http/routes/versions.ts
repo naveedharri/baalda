@@ -376,13 +376,19 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     ]);
     const readable = candidateRows.map((r) => r.doc_id).filter((d) => live.has(d) || deleted.has(d));
     if (readable.length === 0) return c.json({ items: [], truncated: false, afterIsCurrent: true });
+    // Lengths of a keyed vault's texts are read with THIS request's key.
+    const vkr = await requireVaultKey(c, vaultId);
+    if (!vkr.ok) return vkr.response;
+    const crypto = docCryptoOf(vaultId, vkr);
 
     const { rows } = await pool.query<{
       id: string;
       doc_id: string;
       rel_path: string;
       created_at: Date;
-      before_chars: number;
+      before_chars: number | null;
+      content_enc: Buffer | null;
+      sha256: string;
       deleted: boolean;
     }>(
       `SELECT v.id, v.doc_id, n.rel_path, v.created_at,
@@ -404,7 +410,7 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     const current = new Map<string, number>();
     for (let i = 0; i < docIds.length; i += 8) {
       await Promise.all(
-        docIds.slice(i, i + 8).map(async (d) => current.set(d, (await extractDocText(d)).length)),
+        docIds.slice(i, i + 8).map(async (d) => current.set(d, (await extractDocText(d, pool, crypto)).length)),
       );
     }
     return c.json({
@@ -413,7 +419,11 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
         docId: r.doc_id,
         relPath: r.rel_path,
         capturedAt: r.created_at.toISOString(),
-        beforeChars: r.before_chars,
+        beforeChars:
+          r.before_chars ??
+          resolveText({ content: null, content_enc: r.content_enc }, { vaultId, docId: r.doc_id, sha: r.sha256 }, crypto)
+            ?.length ??
+          0,
         afterChars: current.get(r.doc_id) ?? 0,
         deleted: r.deleted,
       })),

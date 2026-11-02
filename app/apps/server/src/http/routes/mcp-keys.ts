@@ -21,6 +21,7 @@
 // "(VK)" = the request must carry `X-Baalda-VK`, verified against the vault's
 // check (keyed, or pending). Never logged.
 import { bareHashHex } from "../../mcp/oauth-token-hash.js";
+import { grantPairsSql } from "../../mcp/grant-pairs.js";
 import { Hono, type Context } from "hono";
 import { pool } from "../../db/pool.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
@@ -82,8 +83,8 @@ async function oauthGrants(orgId: string, id?: string): Promise<Array<{ id: stri
   const { rows } = await pool.query<{ id: string; refresh: string }>(
     `SELECT a.id, a."refreshToken" AS refresh
        FROM "oauthAccessToken" a
-       JOIN mcp_oauth_vault m ON m.client_id = a."clientId" AND m.user_id = a."userId"
-      WHERE m.organization_id = $1 AND a."refreshTokenExpiresAt" > now()
+       JOIN ${grantPairsSql("$1")} m ON m.client_id = a."clientId" AND m.user_id = a."userId"
+      WHERE a."refreshTokenExpiresAt" > now()
         AND ($2::text IS NULL OR a.id = $2)
       ORDER BY a."createdAt", a.id`,
     [orgId, id ?? null],
@@ -103,8 +104,8 @@ async function belongsHere(kind: string, id: string, orgId: string, vaultId: str
       : kind === "oauth_grant"
         ? pool.query(
             `SELECT 1 FROM "oauthAccessToken" a
-               JOIN mcp_oauth_vault m ON m.client_id = a."clientId" AND m.user_id = a."userId"
-              WHERE a.id = $1 AND m.organization_id = $2`,
+               JOIN ${grantPairsSql("$2")} m ON m.client_id = a."clientId" AND m.user_id = a."userId"
+              WHERE a.id = $1`,
             [id, orgId],
           )
         : pool.query("SELECT 1 FROM public_links WHERE id = $1 AND vault_id = $2", [id, vaultId]);
@@ -161,10 +162,10 @@ async function reviewCandidates(orgId: string, vaultId: string): Promise<ReviewC
             EXISTS (SELECT 1 FROM oauth_grant_allow g WHERE g.grant_id = a.id AND g.vault_id = $2) AS allowed,
             ${excludedSql("oauth_grant", "a.id")} AS excluded
        FROM "oauthAccessToken" a
-       JOIN mcp_oauth_vault m ON m.client_id = a."clientId" AND m.user_id = a."userId"
+       JOIN ${grantPairsSql("$1")} m ON m.client_id = a."clientId" AND m.user_id = a."userId"
        LEFT JOIN "oauthApplication" app ON app."clientId" = a."clientId"
        LEFT JOIN "user" u ON u.id = a."userId"
-      WHERE m.organization_id = $1 AND a."refreshTokenExpiresAt" > now()
+      WHERE a."refreshTokenExpiresAt" > now()
       ORDER BY a."createdAt", a.id`,
     [orgId, vaultId],
   );
