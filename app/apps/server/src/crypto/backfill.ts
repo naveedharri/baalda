@@ -36,7 +36,16 @@
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { inc } from "../metrics/sync-metrics.js";
-import { openBlobTextRow, openScoreRow, openSearchRow, sealBlobTextRow, sealScoreRow, sealSearchRow } from "../index/sealed-index.js";
+import {
+  openBlobScoreRow,
+  openBlobTextRow,
+  openScoreRow,
+  openSearchRow,
+  sealBlobScoreRow,
+  sealBlobTextRow,
+  sealScoreRow,
+  sealSearchRow,
+} from "../index/sealed-index.js";
 import { searchTokenSet } from "../index/search-tokens.js";
 import { openNoteTextBytes, sealNoteText } from "../versions/texts.js";
 import { sha256Hex } from "../versions/capture.js";
@@ -63,6 +72,7 @@ export const BACKFILL_TABLES = [
   // (`note_index.search_score_enc`). Never counted by `encryptionStatus`, so it
   // neither delays the null-out nor reads as plaintext remaining.
   "note_index_score",
+  "blob_text_score",
 ] as const;
 export type BackfillTable = (typeof BACKFILL_TABLES)[number];
 
@@ -179,6 +189,8 @@ async function runBatch(
       return batchInlineTexts("checkpoint_docs_inline", c, after, limit, db);
     case "note_index_score":
       return batchNoteIndexScore(c, after, limit, db);
+    case "blob_text_score":
+      return batchBlobTextScore(c, after, limit, db);
   }
 }
 
@@ -296,9 +308,9 @@ function searchJson(body: string, vectorText: string | null, tokens: string | nu
  * answers alone. Written only while `search_enc` is still the row just read.
  */
 async function batchNoteIndexScore(c: DocCrypto, after: string | null, limit: number, db: Queryable): Promise<BatchResult> {
-  const { rows } = await db.query<{ doc_id: string; title: string | null; search_enc: Buffer }>(
+  const { rows } = await db.query<{ doc_id: string; title: string | null; search_enc: Buffer; updated_at: string }>(
     byteBudgeted(
-      `SELECT doc_id, title, search_enc
+      `SELECT doc_id, title, search_enc, updated_at::text AS updated_at
          FROM note_index
         WHERE vault_id = $1 AND doc_id > $2 AND search_enc IS NOT NULL AND search_score_enc IS NULL
         ORDER BY doc_id
@@ -333,13 +345,59 @@ async function batchNoteIndexScore(c: DocCrypto, after: string | null, limit: nu
     await write(
       "note_index_score",
       r.doc_id,
+      // A re-index since the read moved `updated_at` (and wrote its own score).
       `UPDATE note_index SET search_score_enc = $2
-        WHERE doc_id = $1 AND vault_id = $4 AND search_score_enc IS NULL AND search_enc = $3`,
-      [r.doc_id, sealed, r.search_enc, c.vaultId],
+        WHERE doc_id = $1 AND vault_id = $4 AND search_score_enc IS NULL AND updated_at = $3::timestamptz`,
+      [r.doc_id, sealed, r.updated_at, c.vaultId],
       db,
     );
   }
   return { ...scanned(rows), last: rows.at(-1)?.doc_id ?? after };
+}
+
+/** The file half of {@link batchNoteIndexScore} (`blob_text.search_score_enc`). */
+async function batchBlobTextScore(c: DocCrypto, after: string | null, limit: number, db: Queryable): Promise<BatchResult> {
+  const { rows } = await db.query<{ blob_id: string; search_enc: Buffer; updated_at: string }>(
+    byteBudgeted(
+      `SELECT blob_id, search_enc, updated_at::text AS updated_at
+         FROM blob_text
+        WHERE vault_id = $1 AND blob_id > $2 AND search_enc IS NOT NULL AND search_score_enc IS NULL
+        ORDER BY blob_id
+        LIMIT $3`,
+      "x.search_enc",
+      "x.blob_id",
+      4,
+    ),
+    [c.vaultId, after ?? "", limit, BACKFILL_BATCH_BYTES],
+  );
+  for (const r of rows) {
+    let full: ReturnType<typeof openBlobTextRow>;
+    try {
+      full = openBlobTextRow(c, r.blob_id, r.search_enc);
+    } catch {
+      metric("blob_text_score", "verify_failed");
+      continue;
+    }
+    const score = { vector: full.vector, tokens: full.tokens ?? searchTokenSet(full.body) ?? null };
+    const json = Buffer.from(JSON.stringify(score), "utf8");
+    const sealed = sealVerified(
+      "blob_text_score",
+      r.blob_id,
+      json,
+      () => sealBlobScoreRow(c, r.blob_id, score),
+      (s) => Buffer.from(JSON.stringify(openBlobScoreRow(c, r.blob_id, s)), "utf8"),
+    );
+    if (!sealed) continue;
+    await write(
+      "blob_text_score",
+      r.blob_id,
+      `UPDATE blob_text SET search_score_enc = $2
+        WHERE blob_id = $1 AND vault_id = $4 AND search_score_enc IS NULL AND updated_at = $3::timestamptz`,
+      [r.blob_id, sealed, r.updated_at, c.vaultId],
+      db,
+    );
+  }
+  return { ...scanned(rows), last: rows.at(-1)?.blob_id ?? after };
 }
 
 async function batchNoteIndex(c: DocCrypto, after: string | null, limit: number, db: Queryable): Promise<BatchResult> {

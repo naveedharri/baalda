@@ -1,6 +1,7 @@
 import type { DocCrypto } from "../crypto/doc-crypto.js";
 import {
   indexCryptoFor,
+  openBlobScoreRow,
   openBlobTextRow,
   openScoreRow,
   openSearchRow,
@@ -761,6 +762,7 @@ async function searchBlobText(opts: {
 }): Promise<NoteSearchHit[]> {
   const { rows } = await opts.db.query<{
     search_enc: Buffer | null;
+    search_score_enc: Buffer | null;
     blob_id: string;
     doc_id: string | null;
     rel_path: string | null;
@@ -769,8 +771,10 @@ async function searchBlobText(opts: {
     search_tokens: string | null;
     matched_legacy: number | null;
   }>(
+    // A sealed row with a score blob sends only that (~1 KB), never the text.
     `SELECT bt.blob_id,
-            bt.search_enc,
+            CASE WHEN bt.search_score_enc IS NULL THEN bt.search_enc END AS search_enc,
+            bt.search_score_enc,
             b.doc_id,
             b.rel_path,
             b.filename,
@@ -792,11 +796,29 @@ async function searchBlobText(opts: {
     [opts.vaultId, opts.readableDocIds, opts.qTokens, opts.vaultWideReader, FILE_SEARCH_CAP, opts.legacySql],
   );
 
-  const scored = rows.map((r) => {
+  const scored: NoteSearchHit[] = [];
+  for (const r of rows) {
     const relPath = r.rel_path ?? "";
     let vector = r.vector;
     let matchedSealed: number | null = null;
-    if (r.search_enc) {
+    if (r.search_score_enc) {
+      if (!opts.crypto) throw new KeyRequiredError();
+      let s: SealedScoreRow | null = null;
+      try {
+        s = openBlobScoreRow(opts.crypto, r.blob_id, r.search_score_enc);
+      } catch {
+        s = null;
+      }
+      // Answers alone unless the match needs the text (no token set, legacy
+      // mode, a non-ASCII rel_path): then the full row, as before.
+      if (s && Array.isArray(s.vector) && s.tokens !== null && !opts.legacySql && !/[^\x01-\x7f]/.test(relPath)) {
+        vector = s.vector;
+        matchedSealed = keywordMatchCount(opts.qTokens, `${searchTokenSet(relPath) ?? ""} ${s.tokens}`);
+      } else {
+        r.search_enc = await fullBlobTextRow(opts.db, r.blob_id);
+      }
+    }
+    if (r.search_enc && matchedSealed === null) {
       // W3 sealed row: the same formula over the decrypted fields. The SQL
       // count (no stored set, a non-ASCII rel_path, or legacy mode) becomes the
       // identical substring count over lower(rel_path || ' ' || body).
@@ -822,7 +844,7 @@ async function searchBlobText(opts: {
         ? (r.matched_legacy ?? 0)
         : keywordMatchCount(opts.qTokens, `${searchTokenSet(relPath) ?? ""} ${r.search_tokens}`);
     const boost = opts.qTokens.length > 0 ? 0.1 * (matched / opts.qTokens.length) : 0;
-    return {
+    scored.push({
       docId: r.doc_id,
       blobId: r.blob_id,
       relPath,
@@ -830,9 +852,17 @@ async function searchBlobText(opts: {
       ext: extOf(relPath),
       score: sim + boost,
       kind: "file" as const,
-    };
-  });
+    } as NoteSearchHit);
+  }
   return scored.sort((a, b) => b.score - a.score).slice(0, opts.k);
+}
+
+async function fullBlobTextRow(db: Queryable, blobId: string): Promise<Buffer | null> {
+  const { rows } = await db.query<{ search_enc: Buffer | null }>(
+    "SELECT search_enc FROM blob_text WHERE blob_id = $1",
+    [blobId],
+  );
+  return rows[0]?.search_enc ?? null;
 }
 
 /** Filename stem of a rel_path, used as a fallback title. */
