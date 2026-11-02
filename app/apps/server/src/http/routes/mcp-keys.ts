@@ -205,7 +205,7 @@ const keyRequired = (c: Context) =>
 
 export function createMcpKeyRoutes(): Hono {
   const routes = new Hono();
-  const paths = ["pending", "allowlist-candidates", "allowlist", "conversion-ready"];
+  const paths = ["pending", "pending/shares", "allowlist-candidates", "allowlist", "conversion-ready"];
   for (const p of paths) {
     routes.use(`/vaults/:vaultId/keys/${p}`, async (c, next) => {
       if (!vaultKeysEnabled()) return c.json({ error: "Not found" }, 404);
@@ -253,6 +253,55 @@ export function createMcpKeyRoutes(): Hono {
     await verifyPresentedKey(m.vaultId, vk, pool);
     // 200 on the first and every identical repeat (desktop contract).
     return c.json({ pending: true, generation }, 200);
+  });
+
+  // The pending key for the other owners/admins, so the conversion does not
+  // wait on the one computer that started it. Only a device presenting the
+  // PENDING key (verified against its check) lists targets or stores a share;
+  // a share is a sealed box to the target's account key, like a vault wrap.
+  routes.get("/vaults/:vaultId/keys/pending/shares", async (c) => {
+    const m = await member(c);
+    if (m instanceof Response) return m;
+    const state = await verifyPresentedKey(m.vaultId, presented(c), pool);
+    if (!state?.pending) return keyRequired(c);
+    if (!isManager(await orgRole(m.orgId, m.userId))) return c.json(KEYING_REQUIRES_ADMIN, 403);
+    const { rows } = await pool.query<{ user_id: string; public_key: Buffer; shared: boolean }>(
+      `SELECT m."userId" AS user_id, k.public_key,
+              EXISTS (SELECT 1 FROM vault_pending_key_shares s
+                       WHERE s.vault_id = $2 AND s.user_id = m."userId"
+                         AND (k.key_changed_at IS NULL OR s.created_at >= k.key_changed_at)) AS shared
+         FROM member m JOIN user_keys k ON k.user_id = m."userId"
+        WHERE m."organizationId" = $1 AND m.role IN ('owner', 'admin') AND m."userId" <> $3
+        ORDER BY m."userId"`,
+      [m.orgId, m.vaultId, m.userId],
+    );
+    return c.json(rows.map((r) => ({ userId: r.user_id, publicKey: r.public_key.toString("base64"), shared: r.shared })));
+  });
+
+  routes.post("/vaults/:vaultId/keys/pending/shares", async (c) => {
+    const m = await member(c);
+    if (m instanceof Response) return m;
+    const state = await verifyPresentedKey(m.vaultId, presented(c), pool);
+    if (!state?.pending) return keyRequired(c);
+    if (!isManager(await orgRole(m.orgId, m.userId))) return c.json(KEYING_REQUIRES_ADMIN, 403);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    const userId = typeof body?.userId === "string" ? body.userId : "";
+    const sealedVk = b64(body?.sealedVk, 1024);
+    if (!userId || !sealedVk || userId === m.userId) {
+      return c.json({ error: "userId and sealedVk are required", code: "invalid_argument" }, 400);
+    }
+    const role = await orgRole(m.orgId, userId);
+    const { rowCount: hasKey } = await pool.query("SELECT 1 FROM user_keys WHERE user_id = $1", [userId]);
+    if (!isManager(role ?? null) || !hasKey) {
+      return c.json({ error: "Only an owner or admin with an account key can receive it", code: "invalid_target" }, 400);
+    }
+    await pool.query(
+      `INSERT INTO vault_pending_key_shares (vault_id, user_id, sealed_vk, sealed_by_user_id) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (vault_id, user_id) DO UPDATE SET sealed_vk = EXCLUDED.sealed_vk,
+         sealed_by_user_id = EXCLUDED.sealed_by_user_id, created_at = now()`,
+      [m.vaultId, userId, sealedVk, m.userId],
+    );
+    return c.json({ shared: true }, 200);
   });
 
   routes.get("/vaults/:vaultId/keys/allowlist-candidates", async (c) => {

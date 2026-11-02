@@ -22,9 +22,12 @@
 //      pending row; it refuses otherwise (409 `conversion_not_ready` /
 //      `pending_mismatch`). Backfill and sealing start only after init, so the
 //      vault's content is readable to MCP and links the whole time.
-//
-// OAuth grants (slice 2) have no wraps yet, so any grant active in the last 30
-// days keeps the vault pending: conservative on purpose.
+//      A link with no recorded view in 30 days does not hold the vault (it
+//      upgrades on its next view while any member's key is held), nor does an
+//      OAuth row whose refresh token was replaced over an hour ago.
+//   5. SHARE. The claiming device seals the pending key to the other
+//      owners/admins (`keys/pending/shares`), so any of their open apps keeps
+//      it warm, allow-lists new credentials and finishes the conversion.
 import type pg from "pg";
 import { VaultKeyCache } from "./key-cache.js";
 import { loadVkCheck } from "./transport.js";
@@ -129,8 +132,7 @@ export async function conversionBlockers(
   const { rows: links } = await db.query<{ id: string }>(
     `SELECT id FROM public_links l
       WHERE vault_id = $1
-        AND (last_viewed_at > now() - make_interval(days => $3)
-             OR view_tracking_since > now() - make_interval(days => $3))
+        AND last_viewed_at > now() - make_interval(days => $3)
         AND (wrapped_vk IS NULL OR wrap_generation IS DISTINCT FROM $2)
         AND NOT EXISTS (SELECT 1 FROM vault_conversion_exclusions x
                          WHERE x.vault_id = $1 AND x.kind = 'public_link' AND x.item_id = l.id)
@@ -148,6 +150,9 @@ export async function conversionBlockers(
         -- usable refresh token (offline_access, unexpired) a refresh wrap.
         AND NOT EXISTS (SELECT 1 FROM vault_conversion_exclusions x
                          WHERE x.vault_id = $1 AND x.kind = 'oauth_grant' AND x.item_id = a.id)
+        -- Replaced by a refresh over an hour ago: its successor carries on.
+        AND NOT EXISTS (SELECT 1 FROM oauth_grant_consumed r
+                         WHERE r.grant_id = a.id AND r.consumed_at < now() - interval '1 hour')
         AND (
           (a."accessTokenExpiresAt" > now() AND NOT EXISTS (
              SELECT 1 FROM oauth_grant_keys k WHERE k.grant_id = a.id AND k.vault_id = $1

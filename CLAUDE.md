@@ -1079,6 +1079,12 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all. No owner review any more (2026-11-01): the
   converting device allow-lists every candidate; exclusions recorded by an earlier review
   (`vault_conversion_exclusions`, migration 083) still stand, and the review UI is gone.
+  Since 0.1.102 (migration 087): the claiming device seals the pending key to the other owners/admins
+  (`vault_pending_key_shares`, `keys/pending/shares`, deleted at init); their `convertVault` takes it over
+  (`keys/mine` `pendingShare`, replacing only a provisional key, after `keys/pending` accepts its check).
+  The gate ignores links with no `last_viewed_at` in 30 days and OAuth rows consumed by a refresh over an
+  hour ago (`oauth_grant_consumed`, written by `oauth-token-endpoint.ts`). Grants with no
+  `mcp_oauth_vault` row count for the user's sole vault (`mcp/grant-pairs.ts`, the SQL twin of `grantOrg`).
 - **Launch safety net** (decided 2026-11-01, on until the owner switches it off): while
   `KEY_RECOVERY_PUBLIC_KEY` is set, `crypto/key-recovery.ts` seals each vault key the cache acquires to that
   OFFLINE public key (`vault_key_recovery`, migration 085, format in `recovery-seal.ts`); the owner's

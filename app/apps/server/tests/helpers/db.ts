@@ -74,6 +74,8 @@ const TABLES = [
   "vault_join_wraps",
   "vault_key_recovery",
   "server_secrets",
+  "vault_pending_key_shares",
+  "oauth_grant_consumed",
   "server_secret_fingerprints",
   '"user"',
 ];

@@ -127,7 +127,11 @@ since its last re-index waits for the next one.
   upgraded on its next use. (A connection an earlier review excluded stays excluded and needs reconnecting
   after conversion.) The vault is keyed only when nothing used in the last 30 days still lacks its own
   wrap; until then everything works exactly as before. A connection idle for more than 30 days needs one
-  reconnect after conversion.
+  reconnect after conversion. Two things do not hold the vault: a public link with no recorded view in 30
+  days (it picks up the key on its next view while any member's app holds it), and a Claude/ChatGPT login
+  whose refresh token was exchanged for a newer one over an hour ago. The device that starts the
+  conversion seals the pending key to the other owners/admins (`keys/pending/shares`, same pinned-key
+  checks as sealing a vault key), so any of their open apps keeps it moving and can finish it.
 
 ## Older desktops
 
