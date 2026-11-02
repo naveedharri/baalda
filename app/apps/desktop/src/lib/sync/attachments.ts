@@ -567,6 +567,21 @@ class HiddenFile extends Error {
 }
 
 /**
+ * The server has no folder row for this tree binary's parent yet
+ * (`path_folder_mismatch`): typically the registry pass that creates it has
+ * not run. The file waits, queued, for a later pass. Its bytes never go up
+ * without a `files` row: the server refuses a tree path without one
+ * (`invalid_rel_path`), and that refusal was remembered for 24 hours, so a file
+ * dropped into a new folder stayed unsynced for a day (2026-11-02).
+ */
+class ParentNotRegistered extends Error {
+  constructor() {
+    super("path_folder_mismatch");
+    this.name = "ParentNotRegistered";
+  }
+}
+
+/**
  * The server refused an upload because this device's base is stale (409
  * `stale_base`): a teammate uploaded a newer version since. `current` is the
  * server's version, which the pass downloads instead (keeping the local bytes
@@ -1176,6 +1191,9 @@ export class AttachmentSync {
    * pass.
    */
   private readonly registerRefused = new Set<string>();
+  /** Paths whose last `files` registration answered `path_folder_mismatch`
+   *  (see {@link ParentNotRegistered}); read once by the upload that asked. */
+  private readonly parentMissing = new Set<string>();
   /** Lower-cased paths the server answered `not_readable` for — see
    *  {@link HiddenFile}. Left alone until the path leaves the disk, the listing
    *  starts naming it (access came back), or the user retries it. */
@@ -1719,6 +1737,11 @@ export class AttachmentSync {
             if (this.fileStates.delete(a.relPath)) this.publishFileStates();
             return;
           }
+          if (e instanceof ParentNotRegistered) {
+            this.setFileState(a.relPath, "queued");
+            console.info(`[attachments] ${a.relPath} waits for its folder to reach the server`);
+            return;
+          }
           if (e instanceof StaleBase) {
             // A teammate's newer version landed first. Ours goes to the trash
             // copy and theirs comes down — never a retry that retires theirs.
@@ -2035,6 +2058,7 @@ export class AttachmentSync {
     // permission resolver answers for. A failure here is not fatal — the bytes
     // still go, with the pre-Stage-A path heuristic deciding who may read them.
     let docId = register ? undefined : await this.ensureFileRow(a);
+    if (docId === undefined && this.parentMissing.delete(a.relPath)) throw new ParentNotRegistered();
     if (this.unreadable.has(pathKey(a.relPath))) throw new HiddenFile();
     /** Record the row a one-step upload created or bound to — exactly what
      *  `ensureFileRow` records after `POST /api/files`. */
@@ -2103,6 +2127,7 @@ export class AttachmentSync {
           this.unreadable.add(pathKey(a.relPath));
           throw new HiddenFile();
         }
+        if (errCode(e) === "path_folder_mismatch") throw new ParentNotRegistered();
         this.oneStepDeclined.add(a.relPath);
         return this.uploadOneClaimed(a, healed);
       }
@@ -2749,6 +2774,7 @@ export class AttachmentSync {
         this.unreadable.add(pathKey(relPath));
         return undefined;
       }
+      if (code === "path_folder_mismatch") this.parentMissing.add(relPath);
       const permanent = status != null && status >= 400 && status < 500 && status !== 400;
       if (permanent) this.registerRefused.add(relPath);
       console.warn(
