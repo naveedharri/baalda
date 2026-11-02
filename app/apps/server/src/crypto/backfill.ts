@@ -37,8 +37,11 @@ import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { inc } from "../metrics/sync-metrics.js";
 import {
+  isUncompressedScore,
+  openBlobScorePlain,
   openBlobScoreRow,
   openBlobTextRow,
+  openScorePlain,
   openScoreRow,
   openSearchRow,
   sealBlobScoreRow,
@@ -73,6 +76,10 @@ export const BACKFILL_TABLES = [
   // neither delays the null-out nor reads as plaintext remaining.
   "note_index_score",
   "blob_text_score",
+  // Score blobs written before they were compressed, re-sealed compressed in
+  // place (same content). Also never counted by `encryptionStatus`.
+  "note_index_score_pack",
+  "blob_text_score_pack",
 ] as const;
 export type BackfillTable = (typeof BACKFILL_TABLES)[number];
 
@@ -191,6 +198,10 @@ async function runBatch(
       return batchNoteIndexScore(c, after, limit, db);
     case "blob_text_score":
       return batchBlobTextScore(c, after, limit, db);
+    case "note_index_score_pack":
+      return batchScorePack("note_index_score_pack", c, after, limit, db);
+    case "blob_text_score_pack":
+      return batchScorePack("blob_text_score_pack", c, after, limit, db);
   }
 }
 
@@ -353,6 +364,64 @@ async function batchNoteIndexScore(c: DocCrypto, after: string | null, limit: nu
     );
   }
   return { ...scanned(rows), last: rows.at(-1)?.doc_id ?? after };
+}
+
+/**
+ * An uncompressed score blob re-sealed compressed: the same vector and token
+ * set, a third of the bytes search has to receive. Written only while the row
+ * still holds exactly the blob just read, so a re-index in between wins.
+ */
+async function batchScorePack(
+  table: "note_index_score_pack" | "blob_text_score_pack",
+  c: DocCrypto,
+  after: string | null,
+  limit: number,
+  db: Queryable,
+): Promise<BatchResult> {
+  const notes = table === "note_index_score_pack";
+  const [tbl, key] = notes ? ["note_index", "doc_id"] : ["blob_text", "blob_id"];
+  const { rows } = await db.query<{ id: string; search_score_enc: Buffer }>(
+    byteBudgeted(
+      `SELECT ${key} AS id, search_score_enc
+         FROM ${tbl}
+        WHERE vault_id = $1 AND ${key} > $2 AND search_score_enc IS NOT NULL
+        ORDER BY ${key}
+        LIMIT $3`,
+      "x.search_score_enc",
+      "x.id",
+      4,
+    ),
+    [c.vaultId, after ?? "", limit, BACKFILL_BATCH_BYTES],
+  );
+  for (const r of rows) {
+    let plain: Buffer;
+    try {
+      plain = notes ? openScorePlain(c, r.id, r.search_score_enc) : openBlobScorePlain(c, r.id, r.search_score_enc);
+    } catch {
+      metric(table, "verify_failed");
+      continue;
+    }
+    if (!isUncompressedScore(plain)) continue;
+    const score = JSON.parse(plain.toString("utf8")) as Parameters<typeof sealScoreRow>[2];
+    const json = Buffer.from(JSON.stringify(score), "utf8");
+    const sealed = sealVerified(
+      table,
+      r.id,
+      json,
+      () => (notes ? sealScoreRow(c, r.id, score) : sealBlobScoreRow(c, r.id, score)),
+      (s) => Buffer.from(JSON.stringify(notes ? openScoreRow(c, r.id, s) : openBlobScoreRow(c, r.id, s)), "utf8"),
+    );
+    if (!sealed) continue;
+    await write(
+      table,
+      r.id,
+      `UPDATE ${tbl} SET search_score_enc = $2
+        WHERE ${key} = $1 AND vault_id = $4 AND search_score_enc = $3`,
+      [r.id, sealed, r.search_score_enc, c.vaultId],
+      db,
+    );
+  }
+  return { ...scanned(rows), last: rows.at(-1)?.id ?? after };
 }
 
 /** The file half of {@link batchNoteIndexScore} (`blob_text.search_score_enc`). */
