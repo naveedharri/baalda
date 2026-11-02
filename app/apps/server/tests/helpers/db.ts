@@ -76,6 +76,7 @@ const TABLES = [
   "server_secrets",
   "vault_pending_key_shares",
   "oauth_grant_consumed",
+  "oauth_grant_carry",
   "server_secret_fingerprints",
   '"user"',
 ];
