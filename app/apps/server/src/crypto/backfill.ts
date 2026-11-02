@@ -62,6 +62,32 @@ export const BACKFILL_TABLES = [
 export type BackfillTable = (typeof BACKFILL_TABLES)[number];
 
 export const BACKFILL_BATCH = 200;
+/**
+ * Bytes one batch may hold. Rows are taken in order until this is reached (a
+ * row larger than it goes alone), because 200 rows of version text can be a
+ * few hundred MB: each is held as plaintext, sealed copy and verify-open at
+ * once, and a vault with 10 MB versions took the server down (2026-11-02).
+ */
+export const BACKFILL_BATCH_BYTES = 16 * 1024 * 1024;
+
+/** `sql` (already ordered and LIMITed) cut to the rows that fit
+ *  {@link BACKFILL_BATCH_BYTES}; at least one. `size` and `order` name columns
+ *  of `sql`'s output as `x.<col>`. The budget is parameter `$<budgetParam>`. */
+function byteBudgeted(sql: string, size: string, order: string, budgetParam: number): string {
+  return `SELECT * FROM (
+            SELECT x.*, count(*) OVER () AS scanned_rows, coalesce(octet_length(${size}), 0) AS row_bytes,
+                   sum(coalesce(octet_length(${size}), 0)) OVER (ORDER BY ${order}) AS run_bytes
+              FROM (${sql}) x) b
+           WHERE b.run_bytes - b.row_bytes < $${budgetParam}
+           ORDER BY ${order.replaceAll("x.", "b.")}`;
+}
+
+/** Rows the keyset LIMIT scanned, and whether the byte budget left some of
+ *  them for the next batch (then the table is not done, however few came). */
+function scanned(rows: unknown[]): { rows: number; more: boolean } {
+  const n = rows.length === 0 ? 0 : Number((rows[0] as { scanned_rows?: unknown }).scanned_rows ?? rows.length);
+  return { rows: n, more: rows.length < n };
+}
 export const BACKFILL_THROTTLE_MS = 50;
 /** Batches one vault may run per tick, so one big vault cannot starve others. */
 export const BACKFILL_BATCHES_PER_TICK = 50;
@@ -109,6 +135,8 @@ const VAULT_DOCS = `(SELECT id FROM notes WHERE vault_id = $1 UNION ALL SELECT i
 interface BatchResult {
   rows: number;
   last: string | null;
+  /** The byte budget cut this batch short: rows remain past `last`. */
+  more?: boolean;
 }
 
 /** One keyset batch of one table. Returns how many rows were read. */
@@ -166,14 +194,19 @@ async function write(table: BackfillTable, rowKey: string, sql: string, params: 
 
 async function batchDocUpdates(c: DocCrypto, after: string | null, limit: number, db: Queryable): Promise<BatchResult> {
   const { rows } = await db.query<{ id: string; doc_id: string; update: Buffer }>(
-    `SELECT u.id::text AS id, u.doc_id, u.update
-       FROM doc_updates u
-      WHERE u.doc_id IN ${VAULT_DOCS}
-        AND u.id > $2::bigint
-        AND u.update_enc IS NULL AND u.update IS NOT NULL
-      ORDER BY u.id
-      LIMIT $3`,
-    [c.vaultId, after ?? "0", limit],
+    byteBudgeted(
+      `SELECT u.id::text AS id, u.doc_id, u.update
+         FROM doc_updates u
+        WHERE u.doc_id IN ${VAULT_DOCS}
+          AND u.id > $2::bigint
+          AND u.update_enc IS NULL AND u.update IS NOT NULL
+        ORDER BY u.id
+        LIMIT $3`,
+      `x."update"`,
+      "x.id::bigint",
+      4,
+    ),
+    [c.vaultId, after ?? "0", limit, BACKFILL_BATCH_BYTES],
   );
   for (const r of rows) {
     const sealed = sealVerified(
@@ -193,19 +226,24 @@ async function batchDocUpdates(c: DocCrypto, after: string | null, limit: number
       db,
     );
   }
-  return { rows: rows.length, last: rows.at(-1)?.id ?? after };
+  return { ...scanned(rows), last: rows.at(-1)?.id ?? after };
 }
 
 async function batchDocSnapshots(c: DocCrypto, after: string | null, limit: number, db: Queryable): Promise<BatchResult> {
   const { rows } = await db.query<{ doc_id: string; snapshot: Buffer; seq: string | null }>(
-    `SELECT s.doc_id, s.snapshot, s.seq::text AS seq
-       FROM doc_snapshots s
-      WHERE s.doc_id IN ${VAULT_DOCS}
-        AND s.doc_id > $2
-        AND s.snapshot_enc IS NULL AND s.snapshot IS NOT NULL
-      ORDER BY s.doc_id
-      LIMIT $3`,
-    [c.vaultId, after ?? "", limit],
+    byteBudgeted(
+      `SELECT s.doc_id, s.snapshot, s.seq::text AS seq
+         FROM doc_snapshots s
+        WHERE s.doc_id IN ${VAULT_DOCS}
+          AND s.doc_id > $2
+          AND s.snapshot_enc IS NULL AND s.snapshot IS NOT NULL
+        ORDER BY s.doc_id
+        LIMIT $3`,
+      "x.snapshot",
+      "x.doc_id",
+      4,
+    ),
+    [c.vaultId, after ?? "", limit, BACKFILL_BATCH_BYTES],
   );
   for (const r of rows) {
     const sealed = sealVerified(
@@ -226,7 +264,7 @@ async function batchDocSnapshots(c: DocCrypto, after: string | null, limit: numb
       db,
     );
   }
-  return { rows: rows.length, last: rows.at(-1)?.doc_id ?? after };
+  return { ...scanned(rows), last: rows.at(-1)?.doc_id ?? after };
 }
 
 /** The sealed JSON a search row's plaintext columns stand for. */
@@ -243,12 +281,17 @@ async function batchNoteIndex(c: DocCrypto, after: string | null, limit: number,
     search_tokens: string | null;
     updated_at: string;
   }>(
-    `SELECT doc_id, content, vector::text AS vector, search_tokens, updated_at::text AS updated_at
-       FROM note_index
-      WHERE vault_id = $1 AND doc_id > $2 AND search_enc IS NULL
-      ORDER BY doc_id
-      LIMIT $3`,
-    [c.vaultId, after ?? "", limit],
+    byteBudgeted(
+      `SELECT doc_id, content, vector::text AS vector, search_tokens, updated_at::text AS updated_at
+         FROM note_index
+        WHERE vault_id = $1 AND doc_id > $2 AND search_enc IS NULL
+        ORDER BY doc_id
+        LIMIT $3`,
+      "x.content",
+      "x.doc_id",
+      4,
+    ),
+    [c.vaultId, after ?? "", limit, BACKFILL_BATCH_BYTES],
   );
   for (const r of rows) {
     const json = searchJson(r.content, r.vector, r.search_tokens);
@@ -273,7 +316,7 @@ async function batchNoteIndex(c: DocCrypto, after: string | null, limit: number,
       db,
     );
   }
-  return { rows: rows.length, last: rows.at(-1)?.doc_id ?? after };
+  return { ...scanned(rows), last: rows.at(-1)?.doc_id ?? after };
 }
 
 async function batchBlobText(c: DocCrypto, after: string | null, limit: number, db: Queryable): Promise<BatchResult> {
@@ -284,12 +327,17 @@ async function batchBlobText(c: DocCrypto, after: string | null, limit: number, 
     search_tokens: string | null;
     updated_at: string;
   }>(
-    `SELECT blob_id, content, vector::text AS vector, search_tokens, updated_at::text AS updated_at
-       FROM blob_text
-      WHERE vault_id = $1 AND blob_id > $2 AND search_enc IS NULL
-      ORDER BY blob_id
-      LIMIT $3`,
-    [c.vaultId, after ?? "", limit],
+    byteBudgeted(
+      `SELECT blob_id, content, vector::text AS vector, search_tokens, updated_at::text AS updated_at
+         FROM blob_text
+        WHERE vault_id = $1 AND blob_id > $2 AND search_enc IS NULL
+        ORDER BY blob_id
+        LIMIT $3`,
+      "x.content",
+      "x.blob_id",
+      4,
+    ),
+    [c.vaultId, after ?? "", limit, BACKFILL_BATCH_BYTES],
   );
   for (const r of rows) {
     const json = searchJson(r.content, r.vector, r.search_tokens);
@@ -314,18 +362,23 @@ async function batchBlobText(c: DocCrypto, after: string | null, limit: number, 
       db,
     );
   }
-  return { rows: rows.length, last: rows.at(-1)?.blob_id ?? after };
+  return { ...scanned(rows), last: rows.at(-1)?.blob_id ?? after };
 }
 
 async function batchNoteTexts(c: DocCrypto, after: string | null, limit: number, db: Queryable): Promise<BatchResult> {
   const [afterDoc, afterSha] = after ? (JSON.parse(after) as [string, string]) : ["", ""];
   const { rows } = await db.query<{ doc_id: string; sha256: string; content: string }>(
-    `SELECT doc_id, sha256, content
-       FROM note_texts
-      WHERE vault_id = $1 AND (doc_id, sha256) > ($2, $3) AND content_enc IS NULL
-      ORDER BY doc_id, sha256
-      LIMIT $4`,
-    [c.vaultId, afterDoc, afterSha, limit],
+    byteBudgeted(
+      `SELECT doc_id, sha256, content
+         FROM note_texts
+        WHERE vault_id = $1 AND (doc_id, sha256) > ($2, $3) AND content_enc IS NULL
+        ORDER BY doc_id, sha256
+        LIMIT $4`,
+      "x.content",
+      "x.doc_id, x.sha256",
+      5,
+    ),
+    [c.vaultId, afterDoc, afterSha, limit, BACKFILL_BATCH_BYTES],
   );
   for (const r of rows) {
     const key = `${r.doc_id}:${r.sha256}`;
@@ -347,7 +400,7 @@ async function batchNoteTexts(c: DocCrypto, after: string | null, limit: number,
     );
   }
   const last = rows.at(-1);
-  return { rows: rows.length, last: last ? JSON.stringify([last.doc_id, last.sha256]) : after };
+  return { ...scanned(rows), last: last ? JSON.stringify([last.doc_id, last.sha256]) : after };
 }
 
 /** An inline row's hash matches its text (only such a row has a sealed form). */
@@ -383,11 +436,11 @@ async function batchInlineTexts(
           WHERE k.vault_id = $1 AND d.checkpoint_id || ':' || d.doc_id > $2 AND d.content IS NOT NULL
             AND ${INLINE_SHA_OK("d")} AND ${NO_SEALED_TEXT("d")}
           ORDER BY d.checkpoint_id || ':' || d.doc_id LIMIT $3`;
-  const { rows } = await db.query<{ key: string; doc_id: string; sha256: string; content: string }>(sql, [
-    c.vaultId,
-    after ?? (table === "note_versions_inline" ? "0" : ""),
-    limit,
-  ]);
+  const order = table === "note_versions_inline" ? "x.key::bigint" : "x.key";
+  const { rows } = await db.query<{ key: string; doc_id: string; sha256: string; content: string }>(
+    byteBudgeted(sql, "x.content", order, 4),
+    [c.vaultId, after ?? (table === "note_versions_inline" ? "0" : ""), limit, BACKFILL_BATCH_BYTES],
+  );
   for (const r of rows) {
     // Belt for the SQL hash check: never seal a text under a sha it does not have.
     if (sha256Hex(r.content) !== r.sha256) continue;
@@ -409,7 +462,7 @@ async function batchInlineTexts(
       db,
     );
   }
-  return { rows: rows.length, last: rows.at(-1)?.key ?? after };
+  return { ...scanned(rows), last: rows.at(-1)?.key ?? after };
 }
 
 // ── status ──────────────────────────────────────────────────────────────────
@@ -735,7 +788,7 @@ export async function backfillVault(vaultId: string, opts: BackfillOptions = {})
           try {
             const res = await runBatch(table, crypto, cur.after, batchSize, db);
             cur.after = res.last;
-            if (res.rows < batchSize) cur.done = true;
+            if (res.rows < batchSize && !res.more) cur.done = true;
           } finally {
             crypto.key.fill(0);
           }
