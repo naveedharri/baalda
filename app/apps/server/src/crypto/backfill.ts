@@ -94,6 +94,14 @@ export const BACKFILL_BATCHES_PER_TICK = 50;
 export const BACKFILL_TICK_MS = 30_000;
 /** A completed vault is re-counted at most this often (late plaintext rows). */
 export const BACKFILL_RECHECK_MS = 60 * 60_000;
+/**
+ * Least time between two recounts of one vault, and the recount's own time
+ * limit. The recount hashes every inline version text, which on a large vault
+ * outlasts the pool's 15 s statement timeout; it then failed on every 30 s
+ * tick, a full scan each time (2026-11-02).
+ */
+export const BACKFILL_RECOUNT_GAP_MS = 10 * 60_000;
+export const BACKFILL_RECOUNT_TIMEOUT_MS = 120_000;
 
 interface TableCursor {
   /** Keyset position: the last key handled (JSON-encoded for composite keys). */
@@ -107,6 +115,8 @@ export interface BackfillCursors {
   /** ISO time the last full recount found nothing left. */
   completedAt?: string;
   checkedAt?: string;
+  /** ISO time the last recount started (see {@link BACKFILL_RECOUNT_GAP_MS}). */
+  recountAt?: string;
   /** ISO time of the last index catch-up (see `catchUpIndex`). */
   indexedAt?: string;
   /** ISO time of the last full staleness reconciliation (`reconcileIndexQueue`). */
@@ -480,7 +490,28 @@ export interface EncryptionStatus {
 }
 
 /** Remaining plaintext-only rows per table, for an admin script and the null-out gate. */
-export async function encryptionStatus(vaultId: string, db: Queryable = defaultPool): Promise<EncryptionStatus> {
+export async function encryptionStatus(
+  vaultId: string,
+  db: Queryable = defaultPool,
+  timeoutMs?: number,
+): Promise<EncryptionStatus> {
+  // A longer limit than the pool's needs its own connection and transaction.
+  const client = timeoutMs && "connect" in db ? await (db as ClientSource).connect() : null;
+  try {
+    if (client) {
+      await client.query("BEGIN");
+      await client.query(`SET LOCAL statement_timeout = ${Math.floor(timeoutMs!)}`);
+    }
+    return await countRemaining(vaultId, client ?? db);
+  } finally {
+    if (client) {
+      await client.query("ROLLBACK").catch(() => {});
+      client.release();
+    }
+  }
+}
+
+async function countRemaining(vaultId: string, db: Queryable): Promise<EncryptionStatus> {
   const { rows } = await db.query<Record<string, string>>(
     `SELECT
        (SELECT count(*) FROM doc_updates
@@ -550,6 +581,7 @@ async function loadCursors(vaultId: string, db: Queryable): Promise<BackfillCurs
     passes: c.passes ?? 0,
     completedAt: c.completedAt ?? undefined,
     checkedAt: c.checkedAt,
+    recountAt: c.recountAt,
     indexedAt: c.indexedAt,
     reconciledAt: c.reconciledAt,
   };
@@ -769,6 +801,7 @@ export async function backfillVault(vaultId: string, opts: BackfillOptions = {})
 
     let batches = 0;
     let prevTotal = Number.POSITIVE_INFINITY;
+    let recounted = false;
     for (;;) {
       for (const table of BACKFILL_TABLES) {
         const cur = cursors.tables[table] ?? { after: null, done: false };
@@ -799,8 +832,17 @@ export async function backfillVault(vaultId: string, opts: BackfillOptions = {})
       }
       // Every table reached its end. Rows replaced behind a cursor (a plaintext
       // compaction rewriting a snapshot, a skipped row) are found by a recount;
-      // those tables start over. Bounded by the batch budget.
-      const status = await encryptionStatus(vaultId, db);
+      // those tables start over. Bounded by the batch budget, and spaced across
+      // runs: a recount is a full scan, so one a previous run just made (or
+      // that timed out) waits. Within this run, progress re-passes freely.
+      const lastRecount = Date.parse(cursors.recountAt ?? "");
+      if (!recounted && Number.isFinite(lastRecount) && Date.now() - lastRecount < BACKFILL_RECOUNT_GAP_MS) {
+        return "stalled";
+      }
+      recounted = true;
+      cursors.recountAt = new Date().toISOString();
+      await saveCursors(vaultId, cursors, db);
+      const status = await encryptionStatus(vaultId, db, BACKFILL_RECOUNT_TIMEOUT_MS);
       const now = new Date().toISOString();
       if (status.total === 0) {
         cursors.completedAt ??= now;
