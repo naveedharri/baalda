@@ -29,6 +29,7 @@ import type pg from "pg";
 import { VaultKeyCache } from "./key-cache.js";
 import { loadVkCheck } from "./transport.js";
 import { verifyVk } from "./vk-check.js";
+import { grantPairsSql } from "../mcp/grant-pairs.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -138,10 +139,9 @@ export async function conversionBlockers(
   );
   const { rows: oauth } = await db.query<{ n: string }>(
     `SELECT count(*) AS n FROM "oauthAccessToken" a
-       JOIN mcp_oauth_vault m ON m.client_id = a."clientId" AND m.user_id = a."userId"
-       JOIN vaults v ON v.organization_id = m.organization_id
-      WHERE v.id = $1
-        AND GREATEST(a."createdAt", a."updatedAt", a."accessTokenExpiresAt")
+       JOIN ${grantPairsSql("(SELECT organization_id FROM vaults WHERE id = $1)")} m
+         ON m.client_id = a."clientId" AND m.user_id = a."userId"
+      WHERE GREATEST(a."createdAt", a."updatedAt", a."accessTokenExpiresAt")
             > now() - make_interval(days => $2)
         -- A grant is covered once every token that can still act holds a wrap
         -- for this generation: a live access token needs an access wrap, a

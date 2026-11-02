@@ -208,6 +208,53 @@ describe("OAuth connector tokens: hashed storage + vault keys", () => {
     expect((await tool(r2.body.access_token!, "read_note", { docId: s.docId })).data.content).toBe("secret plan");
   });
 
+  it("a grant from before vault bindings (the user's sole vault) is allow-listed, holds the conversion, and keeps working", async () => {
+    vi.stubEnv("BAALDA_VAULT_KEYS", "on");
+    const s = await setup();
+    await pool.query("DELETE FROM mcp_oauth_vault");
+    expect((await tool(s.access, "read_note", { docId: s.docId })).isError).toBe(false);
+
+    expect(
+      (await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk)).status,
+    ).toBe(200);
+    const cand = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`, undefined, s.vk)).json();
+    expect(cand).toMatchObject([{ kind: "oauth_grant", id: "g1", hash: sha(s.refreshToken) }]);
+    const blocked = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/conversion-ready`, undefined, s.vk)).json();
+    expect(blocked).toMatchObject({ ready: false, blockers: { oauthGrants: 1 } });
+    const allow = await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/allowlist`, {
+      entries: [{ kind: "oauth_grant", id: "g1", mac: b64(allowMac(s.vk, "g1", sha(s.refreshToken))) }],
+    }, s.vk);
+    expect(await allow.json()).toMatchObject({ rejected: [] });
+
+    expect((await tool(s.access, "read_note", { docId: s.docId })).isError).toBe(false);
+    const r1 = await refresh(s.refreshToken);
+    expect(r1.status).toBe(200);
+    const ready = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/conversion-ready`, undefined, s.vk)).json();
+    expect(ready).toMatchObject({ ready: true });
+    const init = await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/init`, {
+      vkCheck: b64(s.vkCheck),
+      generation: 1,
+      sealedVkForSelf: b64(randomBytes(80)),
+    }, s.vk);
+    expect(init.status).toBe(201);
+    noDesktops();
+
+    const read = await tool(r1.body.access_token!, "read_note", { docId: s.docId });
+    expect(read.isError, read.text).toBe(false);
+    const r2 = await refresh(r1.body.refresh_token!);
+    expect((await tool(r2.body.access_token!, "read_note", { docId: s.docId })).isError).toBe(false);
+  });
+
+  it("an unbound grant of a user with several vaults belongs to none of them", async () => {
+    vi.stubEnv("BAALDA_VAULT_KEYS", "on");
+    const s = await setup();
+    await pool.query("DELETE FROM mcp_oauth_vault");
+    await createOrg(s.owner, "Second", `second-${Date.now()}-${randomBytes(3).toString("hex")}`);
+    await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk);
+    const cand = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`, undefined, s.vk)).json();
+    expect(cand.filter((c: { kind: string }) => c.kind === "oauth_grant")).toEqual([]);
+  });
+
   it("a new connection to a keyed vault is finished by the desktop, then works with zero desktops online", async () => {
     vi.stubEnv("BAALDA_VAULT_KEYS", "on");
     const s = await setup();
