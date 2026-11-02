@@ -93,6 +93,48 @@ describe("pending key shares", () => {
     expect((await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/pending/shares`, undefined, s.vk)).status).toBe(409);
   });
 
+  it("another admin takes over a claim its device stopped renewing 5 minutes ago, and finishes", async () => {
+    const s = await setup();
+    const vk2 = randomBytes(32);
+    const check2 = makeVkCheck(vk2, s.vaultId);
+    const claim2 = () => api(s.admin, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(check2), generation: 1 }, vk2);
+    // Something the abandoned key made: an allow-list entry and a share.
+    await pool.query("INSERT INTO oauth_grant_allow (grant_id, vault_id, mac) VALUES ('g-old', $1, $2)", [s.vaultId, randomBytes(32)]);
+    await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending/shares`, { userId: s.admin.userId, sealedVk: b64(randomBytes(80)) }, s.vk);
+
+    // A live claim (renewed just now) is never taken.
+    expect((await claim2()).status).toBe(409);
+    expect((await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk)).status).toBe(200);
+    expect((await claim2()).status).toBe(409);
+
+    await pool.query("UPDATE vault_pending_keys SET refreshed_at = now() - interval '6 minutes'");
+    expect((await claim2()).status).toBe(200);
+    const { rows } = await pool.query<{ vk_check: Buffer; created_by: string }>("SELECT vk_check, created_by FROM vault_pending_keys");
+    expect(rows[0].vk_check.equals(check2)).toBe(true);
+    expect(rows[0].created_by).toBe(s.admin.userId);
+    expect((await pool.query("SELECT 1 FROM oauth_grant_allow")).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM vault_pending_key_shares")).rowCount).toBe(0);
+
+    // The old device, back now, is the one refused; the new claimer finishes.
+    expect((await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk)).status).toBe(409);
+    const init = await api(s.admin, "POST", `/vaults/${s.vaultId}/keys/init`, {
+      vkCheck: b64(check2),
+      generation: 1,
+      sealedVkForSelf: b64(randomBytes(80)),
+    }, vk2);
+    expect(init.status).toBe(201);
+  });
+
+  it("a plain member cannot take over an abandoned claim", async () => {
+    const s = await setup();
+    await pool.query("UPDATE vault_pending_keys SET refreshed_at = now() - interval '1 hour'");
+    const vk2 = randomBytes(32);
+    const res = await api(s.plain, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(makeVkCheck(vk2, s.vaultId)), generation: 1 }, vk2);
+    expect(res.status).toBe(403);
+    const { rows } = await pool.query<{ vk_check: Buffer }>("SELECT vk_check FROM vault_pending_keys");
+    expect(rows[0].vk_check.equals(s.vkCheck)).toBe(true);
+  });
+
   it("refuses without the pending key, for a plain member, and to a plain member", async () => {
     const s = await setup();
     const share = { userId: s.admin.userId, sealedVk: b64(randomBytes(80)) };
