@@ -876,6 +876,9 @@ describe("inbound folder deletion", () => {
     expect(asked()).not.toContain("Team/Local");
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
     expect(asked().filter((p) => p.startsWith("Team"))).toEqual([]);
+    // The file uploader asks the same question (`isHeldCreate`).
+    expect(reg.isInsideDeadFolder("Team/Local/report.pdf")).toBe(true);
+    expect(reg.isInsideDeadFolder("Other/report.pdf")).toBe(false);
   });
 
   it("re-registers a deleted folder whose removal failed once the user adds a note to it", async () => {

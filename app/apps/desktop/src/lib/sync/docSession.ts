@@ -7340,9 +7340,10 @@ export class SyncManager implements InboundHost {
       // missing — without this the debounced pass downloads it back before the
       // queue has even decided.
       isDeletePending: (relPath) => this.binaryDeletes?.isPending(relPath) ?? false,
-      // A file inside a folder the server refused to create waits with the
-      // folder, like the notes in it: each ask would be `path_folder_mismatch`.
-      isHeldCreate: (relPath) => registry.isHeldRefusal(relPath),
+      // A file inside a folder the server refused to create, or inside a kept
+      // folder a teammate deleted, waits with the folder like the notes in it:
+      // each ask would be `path_folder_mismatch`.
+      isHeldCreate: (relPath) => registry.isHeldRefusal(relPath) || registry.isInsideDeadFolder(relPath),
       listServer: () => api.listVaultBlobs(vaultId),
       // The legacy pair: still the whole flow for a server that predates the
       // intent route, and the fallback the client drops to on its 404.
