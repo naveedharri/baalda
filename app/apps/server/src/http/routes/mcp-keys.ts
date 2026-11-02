@@ -30,6 +30,7 @@ import {
   ENCRYPTION_NOT_REQUESTED,
   encryptionRequested,
   loadPendingCheck,
+  pendingKeyCache,
   vaultCheckState,
   vaultHasKeyMaterial,
   verifyPresentedKey,
@@ -202,6 +203,59 @@ async function reviewCandidates(orgId: string, vaultId: string): Promise<ReviewC
 const keyRequired = (c: Context) =>
   c.json({ error: "This needs the vault's key from your device", code: KEY_REQUIRED_CODE }, 409);
 
+/**
+ * A claim its device has not renewed for this long is abandoned: a conversion
+ * takes seconds, and the claiming app renews on every run while it is open.
+ * Decided 2026-11-02 (5 minutes): another owner/admin then takes it over.
+ */
+export const PENDING_CLAIM_ABANDONED_MS = 5 * 60_000;
+
+/**
+ * Replace an abandoned pending key with the caller's, in one transaction. Safe
+ * because nothing is sealed before `keys/init` (the route has already refused
+ * a vault with key material): what the old key made is only the allow-list,
+ * the wraps of upgraded tokens/grants/links and the shares, and every one of
+ * them is under the abandoned key, so it is removed here and the new claimer's
+ * device allow-lists again. The old device, back later, finds the vault keyed
+ * and receives the key like any member. True when the caller now holds the claim.
+ */
+async function takeOverAbandonedClaim(vaultId: string, vkCheck: Buffer, generation: number, userId: string): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<{ abandoned: boolean }>(
+      `SELECT refreshed_at < now() - make_interval(secs => $2::double precision) AS abandoned
+         FROM vault_pending_keys WHERE vault_id = $1 FOR UPDATE`,
+      [vaultId, PENDING_CLAIM_ABANDONED_MS / 1000],
+    );
+    if (!rows[0]?.abandoned) {
+      await client.query("ROLLBACK");
+      return false;
+    }
+    await client.query("DELETE FROM mcp_token_allow WHERE vault_id = $1", [vaultId]);
+    await client.query("DELETE FROM mcp_token_keys WHERE vault_id = $1", [vaultId]);
+    await client.query("DELETE FROM oauth_grant_allow WHERE vault_id = $1", [vaultId]);
+    await client.query("DELETE FROM oauth_grant_keys WHERE vault_id = $1", [vaultId]);
+    await client.query("DELETE FROM oauth_grant_carry WHERE vault_id = $1", [vaultId]);
+    await client.query("UPDATE public_links SET allow_mac = NULL, wrapped_vk = NULL, wrap_generation = NULL WHERE vault_id = $1", [vaultId]);
+    await client.query("DELETE FROM vault_pending_key_shares WHERE vault_id = $1", [vaultId]);
+    await client.query(
+      `UPDATE vault_pending_keys SET vk_check = $2, generation = $3, created_by = $4, created_at = now(), refreshed_at = now()
+        WHERE vault_id = $1`,
+      [vaultId, vkCheck, generation, userId],
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  pendingKeyCache.evict(vaultId);
+  console.info(`[vault-keys] vault=${vaultId} abandoned conversion claim taken over`);
+  return true;
+}
+
 export function createMcpKeyRoutes(): Hono {
   const routes = new Hono();
   const paths = ["pending", "pending/shares", "allowlist-candidates", "allowlist", "conversion-ready"];
@@ -244,10 +298,15 @@ export function createMcpKeyRoutes(): Hono {
        ON CONFLICT (vault_id) DO NOTHING`,
       [m.vaultId, vkCheck, generation, m.userId],
     );
-    // Never replace key material: the same check again is idempotent, another is 409.
+    // The same check again is idempotent (and renews the claim); another is
+    // 409 unless the claim was abandoned, then this caller takes it over.
     const cur = await loadPendingCheck(m.vaultId, pool);
     if (!cur || !cur.vkCheck.equals(vkCheck) || cur.generation !== generation) {
-      return c.json({ error: "This vault is already being converted with another key", code: "pending_mismatch" }, 409);
+      if (!(await takeOverAbandonedClaim(m.vaultId, vkCheck, generation, m.userId))) {
+        return c.json({ error: "This vault is already being converted with another key", code: "pending_mismatch" }, 409);
+      }
+    } else {
+      await pool.query("UPDATE vault_pending_keys SET refreshed_at = now() WHERE vault_id = $1", [m.vaultId]);
     }
     await verifyPresentedKey(m.vaultId, vk, pool);
     // 200 on the first and every identical repeat (desktop contract).
