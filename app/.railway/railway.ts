@@ -179,7 +179,7 @@ export default defineRailway((ctx) => {
       healthcheckTimeout: 300,
       restartPolicyType: "ON_FAILURE",
       restartPolicyMaxRetries: 5,
-      limitOverride: { containers: { memoryBytes: 1073741824 } },
+      limitOverride: { containers: { memoryBytes: 3000000000 } },
     },
     env: Object.fromEntries(SERVER_ENV.map((name) => [name, preserve()])),
   });
