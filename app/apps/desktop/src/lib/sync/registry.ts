@@ -4870,10 +4870,33 @@ export class VaultRegistry {
     checkpoint: Checkpointer<VaultSyncConfig>,
   ): Promise<boolean> {
     let mutated = false;
-    const ordered = [...folders].sort(
-      (a, b) => a.path.split("/").length - b.path.split("/").length,
-    );
-    const chunks = chunked(ordered, BATCH_MAX_FOLDERS);
+    // One depth at a time: chunks of the same depth run in parallel, but a
+    // chunk never races the chunk holding its parents. Sorted chunks ran
+    // together refused every folder whose parent was still in flight
+    // ("No folder at …"), and each note inside it with them (2026-11-02, a
+    // 9,500-folder import).
+    const byDepth = new Map<number, TreeNode[]>();
+    for (const f of folders) {
+      const depth = f.path.split("/").length;
+      const level = byDepth.get(depth);
+      if (level) level.push(f);
+      else byDepth.set(depth, [f]);
+    }
+    for (const depth of [...byDepth.keys()].sort((a, b) => a - b)) {
+      if (this.stopRun()) break;
+      if (await this.registerFolderChunks(vaultId, chunked(byDepth.get(depth)!, BATCH_MAX_FOLDERS), checkpoint)) {
+        mutated = true;
+      }
+    }
+    return mutated;
+  }
+
+  private async registerFolderChunks(
+    vaultId: string,
+    chunks: TreeNode[][],
+    checkpoint: Checkpointer<VaultSyncConfig>,
+  ): Promise<boolean> {
+    let mutated = false;
     await runPool(
       chunks,
       async (group) => {
