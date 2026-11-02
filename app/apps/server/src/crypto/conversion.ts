@@ -16,15 +16,10 @@
 //      stores VK wrapped under that token's own secret. The desktop keeps the
 //      pending key warm by polling `GET …/keys/conversion-ready` with
 //      `X-Baalda-VK` (each verified poll holds it for the cache grace period).
-//   4. CONVERT. `conversion-ready` turns true once no token used, no link
-//      viewed, and no OAuth grant active in the last 30 days lacks a wrap.
-//      Only then does `keys/init` accept, with the SAME check bytes as the
-//      pending row; it refuses otherwise (409 `conversion_not_ready` /
-//      `pending_mismatch`). Backfill and sealing start only after init, so the
-//      vault's content is readable to MCP and links the whole time.
-//      A link with no recorded view in 30 days does not hold the vault (it
-//      upgrades on its next view while any member's key is held), nor does an
-//      OAuth row whose refresh token was replaced over an hour ago.
+//   4. CONVERT. `keys/init` accepts with the SAME check bytes as the pending
+//      row (409 `pending_mismatch` otherwise). Since 2026-11-02 it no longer
+//      waits for every connection to hold a wrap: allow-listed ones keep
+//      upgrading on use after init; the rest reconnect once.
 //   5. SHARE. The claiming device seals the pending key to the other
 //      owners/admins (`keys/pending/shares`), so any of their open apps keeps
 //      it warm, allow-lists new credentials and finishes the conversion.
@@ -172,10 +167,6 @@ export async function conversionBlockers(
   };
 }
 
-export function isReady(b: ConversionBlockers): boolean {
-  return b.tokens.length === 0 && b.links.length === 0 && b.oauthGrants === 0;
-}
-
 /**
  * Opt-in (migration 081): an existing vault is keyed only after an owner/admin
  * asked for it (`keys/request-encryption`), or it was created with vault keys
@@ -269,8 +260,13 @@ export async function lockGateRows(db: Queryable, vaultId: string): Promise<void
  * The `keys/init` gate (call it inside the init transaction, after
  * {@link lockGateRows}): null = may key the vault now; else the 409 body. With
  * a pending row, init must present the SAME check bytes and generation (the
- * wraps made while pending are under that key). With or without one, nothing
- * active may lack a wrap: keying it would cut that connection off.
+ * wraps made while pending are under that key).
+ *
+ * Decided 2026-11-02: the vault no longer waits for its connections. Each one
+ * allow-listed before init still gets its key on its next use while a member's
+ * key is held; one that cannot (an OAuth login renewed meanwhile, a token or
+ * link first used after its allow-list) is reconnected or recreated once.
+ * `conversionBlockers` stays as information (conversion-ready reports it).
  */
 export async function initGate(
   vaultId: string,
@@ -281,14 +277,6 @@ export async function initGate(
   const pending = await loadPendingCheck(vaultId, db);
   if (pending && (!pending.vkCheck.equals(vkCheck) || pending.generation !== generation)) {
     return { error: "This vault is being converted with a different key", code: "pending_mismatch" };
-  }
-  const b = await conversionBlockers(vaultId, generation, db);
-  if (!isReady(b)) {
-    return {
-      error: "Connected AI tools and public links are still being upgraded; try again later",
-      code: "conversion_not_ready",
-      blockers: { tokens: b.tokens.length, links: b.links.length, oauthGrants: b.oauthGrants },
-    };
   }
   return null;
 }

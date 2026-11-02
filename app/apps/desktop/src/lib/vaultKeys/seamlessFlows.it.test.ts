@@ -211,7 +211,7 @@ describe.skipIf(!BASE)("seamless vault keys (live server)", () => {
     expect(mateDevice.headerFor(vault.id)).toBe(ownerDevice.headerFor(vault.id));
   }, 90_000);
 
-  it("9. another admin's app takes over a conversion the owner's app started, and finishes it", async () => {
+  it("9. an existing vault with an active MCP token encrypts on the first run, and the token keeps working", async () => {
     const tag = newTag();
     const owner = await signUp("owner", tag);
     const org = await owner.api.createOrganization({ name: `Seamless ${tag}`, slug: `seamless-${tag}` });
@@ -221,7 +221,6 @@ describe.skipIf(!BASE)("seamless vault keys (live server)", () => {
     await admin.api.joinVault(await owner.api.getJoinCode());
     await owner.api.updateMemberRole(org.id, admin.userId, "admin");
 
-    // An MCP token used today holds the conversion until it gets the key.
     const minted = await owner.api.createMcpToken(`it-${tag}`);
     const mcp = async () => {
       const res = await fetch(`${BASE}/api/mcp`, {
@@ -235,29 +234,20 @@ describe.skipIf(!BASE)("seamless vault keys (live server)", () => {
     };
     expect(await mcp()).toBe(true);
 
+    // No waiting for the token (decided 2026-11-02): the first owner run converts.
     const ownerDevice = device(owner, () => org.id, { canConvert: true });
     expect((await ownerDevice.ensureAccountKeys()).state).toBe("ready");
-    expect(await ownerDevice.convertVault(vault.id)).toBe("waiting-ready");
+    expect(await ownerDevice.convertVault(vault.id)).toBe("converted");
 
-    // The admin's app arrives second: its own key loses the claim.
-    const adminDevice = device(admin, () => org.id, { canConvert: true });
+    // The owner's app holds the key: the token's next call picks it up.
+    expect(await mcp()).toBe(true);
+
+    // The admin gets the key from the owner's background run, like any member.
+    const adminDevice = device(admin, () => org.id);
     expect((await adminDevice.ensureAccountKeys()).state).toBe("ready");
-    expect(await adminDevice.convertVault(vault.id)).toBe("claimed-elsewhere");
-
-    // The owner's next run shares the pending key; the admin's app takes over.
-    expect(await ownerDevice.convertVault(vault.id)).toBe("waiting-ready");
-    expect(await adminDevice.convertVault(vault.id)).toBe("waiting-ready");
-
-    // The token is used while only the admin's app keeps the key warm.
-    expect(await mcp()).toBe(true);
-    let conv = await adminDevice.convertVault(vault.id);
-    for (let i = 0; i < 3 && conv === "waiting-ready"; i++) conv = await adminDevice.convertVault(vault.id);
-    expect(conv).toBe("converted");
-
-    // Same key everywhere, and the token keeps working on the encrypted vault.
-    expect((await ownerDevice.ensureVaultKey(vault.id)).state).toBe("ready");
-    expect(ownerDevice.headerFor(vault.id)).toBe(adminDevice.headerFor(vault.id));
-    expect(await mcp()).toBe(true);
+    await ownerDevice.serviceKeyRequests(vault.id);
+    expect(await adminDevice.gateVaultOpen(vault.id)).toBe("proceed");
+    expect(adminDevice.headerFor(vault.id)).toBe(ownerDevice.headerFor(vault.id));
   }, 90_000);
 
   it("7. a SOLO account converts only once its password wraps the account key (at once while the safety net is on)", async () => {

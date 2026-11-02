@@ -178,7 +178,7 @@ describe("OAuth connector tokens: hashed storage + vault keys", () => {
       entries: [{ kind: "oauth_grant", id: "g1", mac: b64(allowMac(s.vk, "g1", sha(s.refreshToken))) }],
     }, s.vk);
     const blocked = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/conversion-ready`, undefined, s.vk)).json();
-    expect(blocked).toMatchObject({ ready: false, blockers: { oauthGrants: 1 } });
+    expect(blocked).toMatchObject({ ready: true, blockers: { oauthGrants: 1 } });
 
     // While the key is held: the old access token upgrades on use, and the
     // refresh gives the new pair its wraps (and covers the consumed row).
@@ -208,7 +208,7 @@ describe("OAuth connector tokens: hashed storage + vault keys", () => {
     expect((await tool(r2.body.access_token!, "read_note", { docId: s.docId })).data.content).toBe("secret plan");
   });
 
-  it("a grant from before vault bindings (the user's sole vault) is allow-listed, holds the conversion, and keeps working", async () => {
+  it("a grant from before vault bindings (the user's sole vault) is allow-listed and keeps working after conversion", async () => {
     vi.stubEnv("BAALDA_VAULT_KEYS", "on");
     const s = await setup();
     await pool.query("DELETE FROM mcp_oauth_vault");
@@ -220,7 +220,7 @@ describe("OAuth connector tokens: hashed storage + vault keys", () => {
     const cand = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`, undefined, s.vk)).json();
     expect(cand).toMatchObject([{ kind: "oauth_grant", id: "g1", hash: sha(s.refreshToken) }]);
     const blocked = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/conversion-ready`, undefined, s.vk)).json();
-    expect(blocked).toMatchObject({ ready: false, blockers: { oauthGrants: 1 } });
+    expect(blocked).toMatchObject({ ready: true, blockers: { oauthGrants: 1 } });
     const allow = await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/allowlist`, {
       entries: [{ kind: "oauth_grant", id: "g1", mac: b64(allowMac(s.vk, "g1", sha(s.refreshToken))) }],
     }, s.vk);

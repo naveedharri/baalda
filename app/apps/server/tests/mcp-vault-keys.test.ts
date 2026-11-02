@@ -220,10 +220,8 @@ describe("MCP tokens and public links with vault keys", () => {
     expect((await tool(token, "read_note", { docId: s.docId })).data.content).toBe("before");
 
     const ready0 = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/conversion-ready`)).json();
-    expect(ready0).toMatchObject({ pending: true, ready: false, blockers: { tokens: 1 } });
-    const blocked = await init(s);
-    expect(blocked.status).toBe(409);
-    expect((await blocked.json()).code).toBe("conversion_not_ready");
+    // Reported, but the vault does not wait for it (decided 2026-11-02).
+    expect(ready0).toMatchObject({ pending: true, ready: true, blockers: { tokens: 1 } });
 
     // The desktop vouches for the token with a MAC under VK.
     expect((await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`)).status).toBe(409);
@@ -265,7 +263,7 @@ describe("MCP tokens and public links with vault keys", () => {
     }
   });
 
-  it("the init gate's rows are locked in its transaction: a token use waits for the init to commit", async () => {
+  it("the init gate's rows are locked in its transaction; a recently used token no longer stops the init", async () => {
     const s = await setup();
     const { row } = await createMcpToken({ userId: s.owner.userId, organizationId: s.orgId }, "racer");
     const initTx = await pool.connect();
@@ -285,12 +283,36 @@ describe("MCP tokens and public links with vault keys", () => {
       initTx.release();
       other.release();
     }
-    // Once the token has been used, the gate (now in-transaction) refuses.
+    // A token used today no longer holds the vault.
     await pool.query("UPDATE mcp_tokens SET last_used_at = now() WHERE id = $1", [row.id]);
-    const res = await init(s);
-    expect(res.status).toBe(409);
-    expect((await res.json()).code).toBe("conversion_not_ready");
-    expect((await pool.query("SELECT vk_check FROM vaults WHERE id = $1", [s.vaultId])).rows[0].vk_check).toBeNull();
+    expect((await init(s)).status).toBe(201);
+  });
+
+  it("a used token missed before init: the vault converts at once, the token catches up once a member's key is held", async () => {
+    const s = await setup();
+    const { token, row } = await createMcpToken({ userId: s.owner.userId, organizationId: s.orgId }, "late");
+    expect((await tool(token, "update_note", { docId: s.docId, content: "before" })).isError).toBe(false);
+    await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk);
+    await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/allowlist`, {
+      entries: [{ kind: "mcp_token", id: row.id, mac: b64(allowMac(s.vk, row.id, sha(token))) }],
+    }, s.vk);
+    expect((await init(s)).status).toBe(201);
+
+    // Nobody's app holds the key: a clear refusal that says what to do.
+    noDesktops();
+    const missed = await tool(token, "read_note", { docId: s.docId });
+    expect(missed.isError).toBe(true);
+    expect(missed.text).toContain("reconnect Baalda");
+
+    // A teammate's app connects (key held): the next call upgrades it for good.
+    const release = vaultKeyCache.acquire(s.vaultId, Buffer.from(s.vk), 1);
+    try {
+      expect((await tool(token, "read_note", { docId: s.docId })).data.content).toBe("before");
+    } finally {
+      release();
+    }
+    noDesktops();
+    expect((await tool(token, "read_note", { docId: s.docId })).data.content).toBe("before");
   });
 
   it("an idle (30+ days) token does not hold up conversion; a fresh vault converts at once", async () => {
@@ -374,7 +396,7 @@ describe("MCP tokens and public links with vault keys", () => {
     expect(allowMac(vk, "tok-1", sha("x")).equals(want)).toBe(true);
   });
 
-  it("an active OAuth grant is a candidate and keeps the vault pending until slice 2", async () => {
+  it("an active OAuth grant is a candidate; the vault does not wait for it", async () => {
     const s = await setup();
     await pool.query(
       `INSERT INTO "oauthApplication" (id, name, "clientId", "redirectUrls", type) VALUES ('app1', 'Claude', 'client1', 'https://x', 'public')`,
@@ -398,8 +420,8 @@ describe("MCP tokens and public links with vault keys", () => {
     ).json();
     expect(posted.accepted).toBe(1);
     const ready = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/conversion-ready`, undefined, s.vk)).json();
-    expect(ready).toMatchObject({ ready: false, blockers: { oauthGrants: 1 } });
-    expect((await init(s)).status).toBe(409);
+    expect(ready).toMatchObject({ ready: true, blockers: { oauthGrants: 1 } });
+    expect((await init(s)).status).toBe(201);
   });
 
   it("the conversion routes are not there with the flag off", async () => {

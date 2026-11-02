@@ -100,7 +100,9 @@ export class McpToolError extends Error {
 }
 
 const KEY_REQUIRED_MESSAGE =
-  "This vault needs its key for this connection. Open Baalda on a device that has it, then try again.";
+  "This connection does not have this vault's key yet. It picks it up automatically the next time someone on " +
+  "the team has Baalda open; if it still fails after that, reconnect Baalda in this app's connector settings " +
+  "(for a token, make a new one in Baalda: Vault Settings > MCP).";
 
 /**
  * W3: the caller's verified key for a keyed vault, unwrapped from the token's
