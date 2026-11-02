@@ -25,6 +25,22 @@ describe("X-Baalda-VK header", () => {
     expect(seen[0][VAULT_KEY_HEADER]).toBe("S0VZ");
     expect(seen[1][VAULT_KEY_HEADER]).toBeUndefined();
   });
+
+  it("an attachment download link carries its vault's key on the first request", async () => {
+    const seen: Record<string, string>[] = [];
+    const api = new ApiClient({
+      baseUrl: "http://s",
+      token: "t",
+      fetchImpl: async (_url, init) => {
+        seen.push((init?.headers ?? {}) as Record<string, string>);
+        return new Response(JSON.stringify({ url: "https://b/x", expiresAt: null, direct: true }), { status: 200 });
+      },
+    });
+    api.setVaultKeyResolver((id) => (id === "v1" ? "S0VZ" : null));
+    await api.blobDownloadUrl("b1", "v1");
+    expect(seen).toHaveLength(1);
+    expect(seen[0][VAULT_KEY_HEADER]).toBe("S0VZ");
+  });
 });
 
 describe("409 key_required", () => {

@@ -4420,14 +4420,17 @@ export class ApiClient {
    * that carries exactly the headers `direct` calls for. 404 = a server that
    * predates this; the caller falls back to {@link downloadBlob}.
    */
-  async blobDownloadUrl(blobId: string): Promise<BlobDownloadTarget> {
+  async blobDownloadUrl(blobId: string, vaultId?: string | null): Promise<BlobDownloadTarget> {
     if (this.blobUrlSupported === false) {
       throw new BlobTransportError(404, "not_found", "server has no blob url route");
     }
     try {
+      // The path does not name the vault: scope it so a keyed vault's key rides
+      // on the first request instead of after a `key_required` refusal.
       const { data } = await this.request<BlobDownloadTarget>(
         "GET",
         `/api/blobs/${encodeURIComponent(blobId)}/url`,
+        { vaultScope: vaultId },
       );
       this.blobUrlSupported = true;
       return data;
