@@ -581,9 +581,14 @@ export async function searchNoteIndex(opts: {
               CASE WHEN ni.search_score_enc IS NULL THEN ni.search_enc END AS search_enc,
               ni.search_score_enc,
               ni.title,
-              ni.vector,
-              CASE WHEN $6::boolean THEN NULL ELSE ni.search_tokens END AS search_tokens,
-              CASE WHEN ni.search_tokens IS NULL OR $6::boolean THEN (
+              -- The plaintext columns only for a plaintext row: a sealed row
+              -- keeps its pre-keying copy until the null-out, and scanning
+              -- that (hundreds of MB on a big vault) for a result the sealed
+              -- branch never reads made every search slow.
+              CASE WHEN ni.search_enc IS NULL AND ni.search_score_enc IS NULL THEN ni.vector END AS vector,
+              CASE WHEN $6::boolean OR ni.search_enc IS NOT NULL OR ni.search_score_enc IS NOT NULL THEN NULL
+                   ELSE ni.search_tokens END AS search_tokens,
+              CASE WHEN ni.search_enc IS NULL AND ni.search_score_enc IS NULL AND (ni.search_tokens IS NULL OR $6::boolean) THEN (
                 SELECT count(*) FROM unnest($4::text[]) AS t(tok)
                  WHERE position(t.tok IN lower(coalesce(ni.title, '') || ' ' || ni.content)) > 0
               )::int END AS matched_legacy
@@ -778,9 +783,12 @@ async function searchBlobText(opts: {
             b.doc_id,
             b.rel_path,
             b.filename,
-            bt.vector,
-            CASE WHEN $6::boolean THEN NULL ELSE bt.search_tokens END AS search_tokens,
-            CASE WHEN bt.search_tokens IS NULL OR $6::boolean OR b.rel_path ~ '[^\x01-\x7f]' THEN (
+            -- Plaintext columns only for a plaintext row (see the note query).
+            CASE WHEN bt.search_enc IS NULL AND bt.search_score_enc IS NULL THEN bt.vector END AS vector,
+            CASE WHEN $6::boolean OR bt.search_enc IS NOT NULL OR bt.search_score_enc IS NOT NULL THEN NULL
+                 ELSE bt.search_tokens END AS search_tokens,
+            CASE WHEN bt.search_enc IS NULL AND bt.search_score_enc IS NULL
+                  AND (bt.search_tokens IS NULL OR $6::boolean OR b.rel_path ~ '[^\x01-\x7f]') THEN (
               SELECT count(*) FROM unnest($3::text[]) AS t(tok)
                WHERE position(t.tok IN lower(coalesce(b.rel_path, '') || ' ' || bt.content)) > 0
             )::int END AS matched_legacy
