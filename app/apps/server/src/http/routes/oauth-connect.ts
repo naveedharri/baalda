@@ -195,6 +195,8 @@ oauthConnectRoutes.get("/oauth/consent/status", async (c) => {
   if (!session) return c.json({ error: "Authentication required" }, 401);
   const view = await consentFor(c.req.query("id") ?? "", session.userId);
   if (!view) return c.json({ error: "Not found" }, 404);
+  // No keyed vault (any more) behind it: the page may continue on its own.
+  if (!view.approved && !(await consentNeedsDesktop(view.organizationId))) return c.json({ approved: true });
   return c.json({ approved: view.approved });
 });
 
@@ -408,7 +410,7 @@ oauthConnectRoutes.post("/oauth/consent", async (c) => {
         400,
       );
     }
-    // A keyed (or converting) vault: only the user's desktop can hand over the
+    // A keyed vault: only the user's desktop can hand over the
     // vault key (security rule 2). Until it has, show the hand-off page; it
     // re-submits this same form once the desktop finished.
     if (await consentNeedsDesktop(organizationId)) {

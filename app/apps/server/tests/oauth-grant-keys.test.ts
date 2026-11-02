@@ -245,6 +245,31 @@ describe("OAuth connector tokens: hashed storage + vault keys", () => {
     expect((await tool(r2.body.access_token!, "read_note", { docId: s.docId })).isError).toBe(false);
   });
 
+  it("connecting a converting (not yet keyed) vault needs no desktop step", async () => {
+    vi.stubEnv("BAALDA_VAULT_KEYS", "on");
+    const s = await setup();
+    await pool.query("DELETE FROM mcp_oauth_vault");
+    expect(
+      (await api(s.owner, "POST", `/vaults/${s.vaultId}/keys/pending`, { vkCheck: b64(s.vkCheck), generation: 1 }, s.vk)).status,
+    ).toBe(200);
+    // A page left waiting from before continues on its own.
+    await pool.query(
+      `INSERT INTO oauth_consents (id, user_id, client_id, organization_id, expires_at)
+       VALUES ('stuck', $1, $2, $3, now() + interval '10 minutes')`,
+      [s.owner.userId, CLIENT, s.orgId],
+    );
+    const status = await app.request(`/oauth/consent/status?id=stuck`, { headers: authHeaders(s.owner) });
+    expect(await status.json()).toEqual({ approved: true });
+
+    const allow = await app.request("/oauth/consent", {
+      method: "POST",
+      headers: { authorization: `Bearer ${s.owner.token}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ consent_code: "cc", client_id: CLIENT, organization_id: s.orgId, decision: "allow" }).toString(),
+    });
+    expect(await allow.text()).not.toContain("Open Baalda on your computer to finish connecting");
+    expect((await pool.query("SELECT 1 FROM mcp_oauth_vault")).rowCount).toBe(1);
+  });
+
   it("an unbound grant of a user with several vaults belongs to none of them", async () => {
     vi.stubEnv("BAALDA_VAULT_KEYS", "on");
     const s = await setup();
