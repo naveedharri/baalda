@@ -1055,6 +1055,14 @@ export interface AttachmentSyncDeps {
    * bare, and the pass after the queue settles registers or adopts it.
    */
   isRenamePending?: () => boolean;
+  /**
+   * Is this path inside a folder whose create the server refused for access
+   * (`registry.isHeldRefusal`)? The server has no row for that folder, so every
+   * file in it answers `path_folder_mismatch`, which reads as transient and was
+   * asked again on every pass. Held files wait until the registry re-asks the
+   * folder, exactly as the notes in it do.
+   */
+  isHeldCreate?: (relPath: string) => boolean;
   /** The extracted text the INDEX holds for a path (`ipc.getFileText`). */
   fileText?: (
     relPath: string,
@@ -1231,6 +1239,12 @@ export class AttachmentSync {
     if (!sha256 || !this.refusals.has(bytesRefusalKey(sha256))) return false;
     this.permanentSkips.add(sha256);
     return true;
+  }
+
+  /** Inside a folder the server refused to create (see `deps.isHeldCreate`).
+   *  `attachments/` drops have no folder row, so they are never held. */
+  private isHeldCreate(relPath: string): boolean {
+    return !isUnderAttachments(relPath) && (this.deps.isHeldCreate?.(relPath) ?? false);
   }
 
   /** Record a refusal retrying cannot change. Keyed by content: changed bytes
@@ -1643,7 +1657,9 @@ export class AttachmentSync {
     //
     // A server with one-step file upload (`files-with-bytes`) registers each new
     // file WITH its bytes in the intent, so there is nothing to pre-fill.
-    if (!(await this.oneStepFilesEnabled())) await this.preregisterFiles(toUpload);
+    if (!(await this.oneStepFilesEnabled())) {
+      await this.preregisterFiles(toUpload.filter((a) => !this.isHeldCreate(a.relPath)));
+    }
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
 
     let uploaded = 0;
@@ -1667,6 +1683,10 @@ export class AttachmentSync {
           this.embedRefusedUntil.delete(a.sha256);
         }
         if (this.unreadable.has(pathKey(a.relPath))) return;
+        if (this.isHeldCreate(a.relPath)) {
+          this.setFileState(a.relPath, "error");
+          return;
+        }
         // An unregistered path while the delete queue is still trying to settle a
         // window is very likely the arrival half of a rename it is about to pair.
         // The WHOLE file waits, not just its registration: uploading it now would
