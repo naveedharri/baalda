@@ -84,6 +84,13 @@ export interface VaultKeysApi {
     excluded?: Array<{ kind: string; id: string }>,
   ): Promise<{ rejected: string[] }>;
   getConversionReady(vaultId: string, vkBase64: string): Promise<boolean>;
+  /** Pending key shares (optional: older fakes omit them ⇒ only the claiming
+   *  device converts, as before). */
+  listPendingShareTargets?(
+    vaultId: string,
+    vkBase64: string,
+  ): Promise<Array<{ userId: string; publicKey: string; shared: boolean }>>;
+  postPendingShare?(vaultId: string, body: { userId: string; sealedVk: string }, vkBase64: string): Promise<void>;
   /** Seamless keys F (optional: older test fakes omit them ⇒ always E). */
   unlockAccountKey?(password: string): Promise<{ unlockKey: string } | "wrong-password" | "unavailable">;
   putPasswordWrap?(privWrapped: string): Promise<void>;
@@ -526,6 +533,30 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     if (!(deps.canConvert && (await deps.canConvert(vaultId)))) return "not-allowed";
 
     let vk = await keys.getVaultKey(vaultId); // a crashed earlier run: same key
+    // Another owner/admin's device started this conversion and sealed its
+    // pending key to us: take it over (replacing only a key of ours the server
+    // never confirmed), once the server agrees it is the pending one.
+    if (mine.pendingShare && (!vk || (await keys.isVaultKeyProvisional(vaultId)))) {
+      let shared: Uint8Array | null = null;
+      try {
+        shared = openSealedVk(priv, fromBase64(mine.pendingShare));
+      } catch {
+        shared = null; // sealed to an older account key: wait for a fresh share
+      }
+      if (shared && shared.length === 32 && (!vk || toBase64(shared) !== toBase64(vk))) {
+        const check = toBase64(await makeStableVkCheck(shared, vaultId, 1));
+        const taken = await api.registerPendingVaultKey(
+          vaultId,
+          { vkCheck: check, generation: 1, deviceId: deps.deviceId() },
+          toBase64(shared),
+        );
+        if (taken === "registered") {
+          await keys.setVaultKeyProvisional(vaultId, true);
+          await keys.setVaultKey(vaultId, shared);
+          vk = shared;
+        }
+      }
+    }
     if (!vk) {
       vk = generateVaultKey();
       // Provisional until the server confirms it (another claim may win). The
@@ -539,6 +570,8 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const vkB64 = toBase64(vk);
     const claim = await api.registerPendingVaultKey(vaultId, { vkCheck, generation, deviceId: deps.deviceId() }, vkB64);
     if (claim === "claimed") return "claimed-elsewhere";
+    // Let every other owner/admin's open app carry it on (idempotent per poll).
+    await sharePendingKey(vaultId, vk, vkB64).catch((e) => console.warn("[vault-keys] pending key share failed:", e));
 
     // Re-run on every poll: credentials minted while pending must be listed
     // too. Every connection is kept (no owner review): MCP tokens, AI
@@ -571,6 +604,28 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     await confirmed(vaultId);
     accept(vaultId, vk, generation);
     return "converted";
+  }
+
+  /** Seal the pending key to each other owner/admin not holding it yet, with
+   *  the same membership and pinned-key checks as sealing a vault key. */
+  async function sharePendingKey(vaultId: string, vk: Uint8Array, vkB64: string): Promise<void> {
+    if (!api.listPendingShareTargets || !api.postPendingShare) return;
+    const targets = await api.listPendingShareTargets(vaultId, vkB64);
+    for (const t of targets) {
+      if (t.shared) continue;
+      let pub: Uint8Array;
+      try {
+        pub = fromBase64(t.publicKey);
+      } catch {
+        continue;
+      }
+      if (pub.length !== 32 || !(await deps.isMember(vaultId, t.userId))) continue;
+      const fp = keyFingerprint(pub);
+      const pinned = await deps.pins.get(t.userId);
+      if (pinned && pinned !== fp) continue;
+      await api.postPendingShare(vaultId, { userId: t.userId, sealedVk: toBase64(sealVkTo(pub, vk)) }, vkB64);
+      if (!pinned) await deps.pins.set(t.userId, fp);
+    }
   }
 
   /**

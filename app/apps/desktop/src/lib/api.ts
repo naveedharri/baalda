@@ -1556,6 +1556,9 @@ export type MyVaultKeys =
       otherMembersWithKeys?: number;
       /** The launch safety net is on: a lost laptop is recoverable by Baalda. */
       recoveryNet?: boolean;
+      /** Another owner/admin's device started converting and sealed the
+       *  pending key to this account (base64 sealed box). */
+      pendingShare?: string;
     }
   | { keyed: true; pending: true; vkCheck?: string; generation?: number }
   | ({ keyed: true; pending: false } & MyVaultKeysBody);
@@ -1744,6 +1747,7 @@ export class ApiClient {
         encryptionRequested?: unknown;
         otherMembersWithKeys?: unknown;
         recoveryNet?: unknown;
+        pendingShare?: unknown;
       };
       return {
         keyed: false,
@@ -1752,6 +1756,7 @@ export class ApiClient {
         encryptionRequested: typeof d.encryptionRequested === "boolean" ? d.encryptionRequested : undefined,
         otherMembersWithKeys: typeof d.otherMembersWithKeys === "number" ? d.otherMembersWithKeys : undefined,
         recoveryNet: d.recoveryNet === true,
+        ...(typeof d.pendingShare === "string" ? { pendingShare: d.pendingShare } : {}),
       };
     }
     if (status === 202 || data?.pending) {
@@ -1899,6 +1904,29 @@ export class ApiClient {
     );
     const list = Array.isArray(data) ? data : (data?.candidates ?? []);
     return list.filter((c) => typeof c?.id === "string" && typeof c?.hash === "string");
+  }
+
+  /** Other owners/admins who could hold the pending key (`shared`: they have it). */
+  async listPendingShareTargets(
+    vaultId: string,
+    vkBase64: string,
+  ): Promise<Array<{ userId: string; publicKey: string; shared: boolean }>> {
+    const { data } = await this.request<Array<{ userId: string; publicKey: string; shared: boolean }>>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/keys/pending/shares`,
+      { headers: { [VAULT_KEY_HEADER]: vkBase64 } },
+    );
+    return (Array.isArray(data) ? data : []).filter(
+      (t) => typeof t?.userId === "string" && typeof t?.publicKey === "string",
+    );
+  }
+
+  /** The pending key sealed to another owner/admin's account key. */
+  async postPendingShare(vaultId: string, body: { userId: string; sealedVk: string }, vkBase64: string): Promise<void> {
+    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/pending/shares`, {
+      body,
+      headers: { [VAULT_KEY_HEADER]: vkBase64 },
+    });
   }
 
   /** `rejected`: ids whose MAC the server could not verify (logged, retried next poll).

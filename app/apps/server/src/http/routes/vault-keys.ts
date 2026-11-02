@@ -224,6 +224,7 @@ export function createVaultKeyRoutes(): Hono {
         [vaultId, generation],
       );
       await client.query("DELETE FROM vault_pending_keys WHERE vault_id = $1", [vaultId]);
+      await client.query("DELETE FROM vault_pending_key_shares WHERE vault_id = $1", [vaultId]);
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK");
@@ -265,8 +266,19 @@ export function createVaultKeyRoutes(): Hono {
           WHERE m."organizationId" = (SELECT organization_id FROM vaults WHERE id = $1) AND m."userId" <> $2`,
         [vaultId, session.userId],
       );
+      // Another owner/admin's device started converting and sealed the pending
+      // key to this account (mcp-keys.ts `keys/pending/shares`).
+      const { rows: share } = await pool.query<{ sealed_vk: Buffer }>(
+        `SELECT s.sealed_vk FROM vault_pending_key_shares s
+           JOIN vault_pending_keys p ON p.vault_id = s.vault_id
+           LEFT JOIN user_keys k ON k.user_id = s.user_id
+          WHERE s.vault_id = $1 AND s.user_id = $2
+            AND (k.key_changed_at IS NULL OR s.created_at >= k.key_changed_at)`,
+        [vaultId, session.userId],
+      );
       return c.json({
         keyed: false,
+        ...(share[0] ? { pendingShare: share[0].sealed_vk.toString("base64") } : {}),
         conversionAllowed: gate && encryptionRequested,
         encryptionRequested,
         otherMembersWithKeys: others[0]?.n ?? 0,

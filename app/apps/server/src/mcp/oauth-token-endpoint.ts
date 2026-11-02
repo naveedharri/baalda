@@ -102,6 +102,14 @@ export async function handleMcpToken(
     const refreshToken = typeof issued.refresh_token === "string" ? issued.refresh_token : undefined;
     const grantId = await hashIssuedRow(db, issued.access_token, refreshToken);
     if (consumed?.legacyPlaintext) await hashRowInPlace(db, consumed.id);
+    // The presented refresh token now has a successor: the conversion gate
+    // stops waiting for this row an hour later (crypto/conversion.ts).
+    if (consumed) {
+      await db.query(
+        "INSERT INTO oauth_grant_consumed (grant_id) VALUES ($1) ON CONFLICT (grant_id) DO NOTHING",
+        [consumed.id],
+      );
+    }
     if (grantId && hooks.onIssued) {
       await hooks.onIssued({ grantId, accessToken: issued.access_token, refreshToken, previous }, db);
     }
