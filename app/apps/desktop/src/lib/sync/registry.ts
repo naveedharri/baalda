@@ -830,6 +830,10 @@ export class VaultRegistry {
   /** Folder paths (pathKey) the server refused to register with
    *  `no_write_access` during the current pass. */
   private noWriteFolderRefusals = new Set<string>();
+  /** Folder ids the last listing named as deleted (`tombstones`); with
+   *  {@link revokedFolders} it says which kept local folders are dead
+   *  (see {@link isInsideDeadFolder}). */
+  private deadFolderIds = new Set<string>();
   /** Tree-binary relPath → server `files` id (see `VaultSyncConfig.files`).
    *  Deliberately NOT part of `byPath`/`byDocId`: those two are the CRDT note
    *  join, and a binary has no Y.Doc, no bridge and no content upload. */
@@ -2103,6 +2107,14 @@ export class VaultRegistry {
    * inside a held FOLDER: the server would refuse each child ("no folder at …")
    * on every pull, one row per file. They are asked once the folder registers.
    */
+  isInsideDeadFolder(path: string): boolean {
+    if (this.deadFolderIds.size === 0) return false;
+    for (let i = path.lastIndexOf("/"); i > 0; i = path.lastIndexOf("/", i - 1)) {
+      if (this.deadFolderIds.has(this.revokedFolders.get(path.slice(0, i)) ?? "")) return true;
+    }
+    return false;
+  }
+
   isHeldRefusal(path: string): boolean {
     if (this.heldRefused.size === 0) return false;
     const now = Date.now();
@@ -4150,6 +4162,7 @@ export class VaultRegistry {
     );
     const listedFolderIds = new Set(serverFolders.map((f) => f.id));
     const deadFolderIds = new Set(folderRegistry.tombstones ?? []);
+    this.deadFolderIds = deadFolderIds;
     const onDiskFoldersCi = new Set(folders.map((f) => pathKey(f.path)));
     for (const [rp, id] of [...this.folderByPath]) {
       if (serverFolderByPathCi.get(pathKey(rp)) !== id) {
@@ -4245,12 +4258,7 @@ export class VaultRegistry {
     // server has no parent for it, so each ask is "No folder at …" on every
     // pass. Such a folder waits; a NOTE made inside re-registers the parent
     // (`newLocalWork` above), and then its subfolders go too.
-    const insideDeadFolder = (path: string): boolean => {
-      for (let i = path.lastIndexOf("/"); i > 0; i = path.lastIndexOf("/", i - 1)) {
-        if (deadFolderIds.has(this.revokedFolders.get(path.slice(0, i)) ?? "")) return true;
-      }
-      return false;
-    };
+    const insideDeadFolder = (path: string): boolean => this.isInsideDeadFolder(path);
     const missingFolders = folders.filter(
       (f) =>
         !this.folderByPath.has(f.path) &&
