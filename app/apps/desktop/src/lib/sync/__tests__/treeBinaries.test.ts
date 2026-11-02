@@ -302,6 +302,26 @@ describe("tree binaries register as `files` rows", () => {
     expect(registerFile).toHaveBeenCalledTimes(2);
   });
 
+  it("does not ask for a file inside a folder the server refused to create", async () => {
+    // The folder has no server row (`no_write_access`), so every file in it
+    // would answer `path_folder_mismatch` on every pass. It waits with the
+    // folder; a file elsewhere still goes.
+    const registerFile = vi.fn(async ({ id }: { relPath: string; id: string }) => id);
+    let held = true;
+    const { sync, log } = makeVault(
+      [{ relPath: "Locked/report.docx" }, { relPath: "Team/plan.pdf" }],
+      { registerFile, isHeldCreate: (p) => held && p.startsWith("Locked/") },
+    );
+    await sync.reconcile();
+    expect(registerFile.mock.calls.map(([a]) => a.relPath)).toEqual(["Team/plan.pdf"]);
+    expect(log.intents.map((i) => i.relPath)).toEqual(["Team/plan.pdf"]);
+
+    // The registry re-asks the folder and it registers: the file goes next pass.
+    held = false;
+    await sync.reconcile();
+    expect(log.intents.map((i) => i.relPath)).toContain("Locked/report.docx");
+  });
+
   it("keeps asking after a failure that was never a decision (offline, 5xx)", async () => {
     // A refusal is a decision; a dropped connection is not. Treating the second
     // as the first would cost the file its doc_id — and its real ACL — for the

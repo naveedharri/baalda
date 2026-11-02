@@ -2103,7 +2103,7 @@ export class VaultRegistry {
    * inside a held FOLDER: the server would refuse each child ("no folder at …")
    * on every pull, one row per file. They are asked once the folder registers.
    */
-  private isHeldRefusal(path: string): boolean {
+  isHeldRefusal(path: string): boolean {
     if (this.heldRefused.size === 0) return false;
     const now = Date.now();
     let key = pathKey(path);
