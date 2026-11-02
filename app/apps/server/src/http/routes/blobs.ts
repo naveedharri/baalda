@@ -1,4 +1,4 @@
-import { sealBlobTextRow } from "../../index/sealed-index.js";
+import { sealBlobScoreRow, sealBlobTextRow } from "../../index/sealed-index.js";
 import { docCryptoOf, refuseKeyIncapableClient, requireVaultKey } from "../../crypto/transport.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Readable, Transform } from "node:stream";
@@ -1889,27 +1889,27 @@ blobRoutes.put("/vaults/:vaultId/blobs/:blobId/text", async (c) => {
   if (!vkr.ok) return vkr.response;
   const textCrypto = docCryptoOf(vaultId, vkr);
   if (textCrypto) {
+    const vector = embed(stored);
+    const tokens = searchTokenSet(stored) ?? null;
     await pool.query(
-      `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, source, updated_at, search_enc)
-       VALUES ($1, $2, $3, $4, '', $5, now(), $6)
+      `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, source, updated_at, search_enc, search_score_enc)
+       VALUES ($1, $2, $3, $4, '', $5, now(), $6, $7)
        ON CONFLICT (blob_id) DO UPDATE
          SET vault_id = EXCLUDED.vault_id,
              doc_id = EXCLUDED.doc_id,
              chars = EXCLUDED.chars,
              source = EXCLUDED.source,
              updated_at = now(),
-             search_enc = EXCLUDED.search_enc`,
+             search_enc = EXCLUDED.search_enc,
+             search_score_enc = EXCLUDED.search_score_enc`,
       [
         row.id,
         vaultId,
         row.doc_id,
         chars,
         source,
-        sealBlobTextRow(textCrypto, row.id, {
-          body: stored,
-          vector: embed(stored),
-          tokens: searchTokenSet(stored) ?? null,
-        }),
+        sealBlobTextRow(textCrypto, row.id, { body: stored, vector, tokens }),
+        sealBlobScoreRow(textCrypto, row.id, { vector, tokens }),
       ],
     );
     return c.body(null, 204);

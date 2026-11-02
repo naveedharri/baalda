@@ -4,6 +4,8 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { searchNoteIndex } from "../src/index/indexer.js";
+import { backfillVault } from "../src/crypto/backfill.js";
+import { vaultKeyCache } from "../src/crypto/key-cache.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { KeyRequiredError } from "../src/crypto/transport.js";
 import { VAULT_KEYS_MIN_DESKTOP } from "../src/http/client-version.js";
@@ -89,6 +91,34 @@ describe("sealed blob_text (W3)", () => {
     await expect(
       searchNoteIndex({ vaultId: keyedVault, query: "revenue", k: 5, readableDocIds: [], vaultWideReader: true }),
     ).rejects.toBeInstanceOf(KeyRequiredError);
+  });
+
+  it("files rank from the small score blob; a missing or damaged one falls back to the full row", async () => {
+    const keyedVault = await seedVault(org, "Keyed");
+    const blob = await upload(owner.token, keyedVault, "attachments/q3.xlsx");
+    const vk = randomBytes(32);
+    await pool.query("UPDATE vaults SET vk_check = $2, key_generation = 1 WHERE id = $1", [keyedVault, makeVkCheck(vk, keyedVault)]);
+    expect((await putText(owner.token, keyedVault, blob, vk)).status).toBe(204);
+    expect((await pool.query("SELECT 1 FROM blob_text WHERE blob_id = $1 AND search_score_enc IS NOT NULL", [blob.id])).rowCount).toBe(1);
+    const crypto = { vaultId: keyedVault, key: vk, generation: 1 };
+    const search = () =>
+      Promise.all(["revenue north", "q3", "nothing here"].map((query) =>
+        searchNoteIndex({ vaultId: keyedVault, query, k: 5, readableDocIds: [], vaultWideReader: true, crypto })));
+    const before = await search();
+
+    await pool.query("UPDATE blob_text SET search_score_enc = $2 WHERE blob_id = $1", [blob.id, randomBytes(64)]);
+    expect(await search()).toEqual(before);
+    await pool.query("UPDATE blob_text SET search_score_enc = NULL WHERE blob_id = $1", [blob.id]);
+    expect(await search()).toEqual(before);
+
+    await pool.query("INSERT INTO vault_crypto_state (vault_id, phase, generation) VALUES ($1, 'keyed', 1) ON CONFLICT DO NOTHING", [keyedVault]);
+    vaultKeyCache.clear();
+    const hold = vaultKeyCache.acquire(keyedVault, vk, 1);
+    expect(await backfillVault(keyedVault, { throttleMs: 0 })).toBe("complete");
+    hold();
+    vaultKeyCache.clear();
+    expect((await pool.query("SELECT 1 FROM blob_text WHERE blob_id = $1 AND search_score_enc IS NOT NULL", [blob.id])).rowCount).toBe(1);
+    expect(await search()).toEqual(before);
   });
 
   it("a keyed rewrite leaves an older plaintext row's columns untouched", async () => {

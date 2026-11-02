@@ -66,6 +66,19 @@ export function openBlobTextRow(c: DocCrypto, blobId: string, sealed: Buffer): S
   return JSON.parse(open(c.key, blobAad(c.vaultId, blobId), sealed).toString("utf8")) as SealedSearchRow;
 }
 
+function blobScoreAad(vaultId: string, blobId: string): Buffer {
+  return aadFor("blob_text", "search_score_enc", vaultId, blobId);
+}
+
+/** A file's ranking data, sealed apart from its text (`blob_text.search_score_enc`). */
+export function sealBlobScoreRow(c: DocCrypto, blobId: string, row: SealedScoreRow): Buffer {
+  return seal(c.key, blobScoreAad(c.vaultId, blobId), Buffer.from(JSON.stringify(row), "utf8"), c.generation);
+}
+
+export function openBlobScoreRow(c: DocCrypto, blobId: string, sealed: Buffer): SealedScoreRow {
+  return JSON.parse(open(c.key, blobScoreAad(c.vaultId, blobId), sealed).toString("utf8")) as SealedScoreRow;
+}
+
 /**
  * Background indexing's view of a vault's key: `undefined` = unkeyed (today's
  * plaintext path), `null` = keyed but no member connected (defer: write
