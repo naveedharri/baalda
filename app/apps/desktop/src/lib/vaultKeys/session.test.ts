@@ -241,6 +241,36 @@ describe("vault key session", () => {
     expect(await member.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
   });
 
+  it("a key held from before the account had a key pair is sealed to the account on the next open", async () => {
+    const srv = fakeServer();
+    const ownerKeys = fakeKeys();
+    const owner = session({ api: srv.api, keys: ownerKeys });
+    await owner.ensureAccountKeys();
+    await owner.ensureVaultKey("v1");
+    srv.as("u2");
+    srv.setMe(null);
+    // The member's device took the key (join code / invite link) with no
+    // account key yet: it holds the vault key, the server has no wrap for them.
+    const keys = fakeKeys();
+    await keys.setVaultKey("v1", ownerKeys.vks.get("v1")!);
+    const member = session({ api: srv.api, keys, selfUserId: () => "u2", keysAllowed: () => false });
+    const pending = () =>
+      srv.api.getMyVaultKeys.mockResolvedValueOnce({ keyed: true, pending: true, vkCheck: srv.vaults.get("v1")!.vkCheck, generation: 1 });
+    pending();
+    expect(await member.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
+    expect(srv.posted).toEqual([]); // no account key: nothing to seal to
+
+    await member.ensureAccountKeys();
+    pending();
+    expect(await member.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
+    expect(srv.posted.map((p) => p.userId)).toEqual(["u2"]);
+    const priv = (await keys.getAccountPrivateKey())!;
+    expect(openSealedVk(priv, fromBase64(srv.vaults.get("v1")!.wraps.get("u2")!))).toEqual(ownerKeys.vks.get("v1"));
+    // Now a wrap exists: the next open seals nothing more.
+    expect(await member.ensureVaultKey("v1")).toEqual({ state: "ready", generation: 1 });
+    expect(srv.posted).toHaveLength(1);
+  });
+
   it("seals a `missing` member (no request filed) exactly like a request, and reports it as sealed", async () => {
     const srv = fakeServer();
     const ownerKeys = fakeKeys();
