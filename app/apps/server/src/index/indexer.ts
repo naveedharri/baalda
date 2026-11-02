@@ -1,3 +1,4 @@
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { DocCrypto } from "../crypto/doc-crypto.js";
 import {
   indexCryptoFor,
@@ -472,6 +473,14 @@ export interface NoteSearchHit {
 const SEARCH_BATCH = 2000;
 
 /**
+ * Sealed rows scored between yields to the event loop. Opening a score blob is
+ * synchronous work; a 14k-note vault searched 20 times a minute by one AI
+ * client held the loop for seconds at a time and slowed every other request
+ * on the server (2026-11-02). Same results, other requests answered between.
+ */
+const SEARCH_YIELD_EVERY = 250;
+
+/**
  * How many `blob_text` rows one query may score.
  *
  * Files are capped where notes are not, and the asymmetry is deliberate: a
@@ -604,7 +613,8 @@ export async function searchNoteIndex(opts: {
       [opts.vaultId, docIds, after, qTokens, SEARCH_BATCH, legacySql],
     );
     if (rows.length === 0) break;
-    for (const r of rows) {
+    for (const [i, r] of rows.entries()) {
+      if (i > 0 && i % SEARCH_YIELD_EVERY === 0) await yieldToEventLoop();
       if (r.search_score_enc) {
         if (!opts.crypto) throw new KeyRequiredError();
         const score = scoreFromSealed(opts.crypto, r.doc_id, r.search_score_enc, qVec, qTokens, legacySql);
@@ -807,7 +817,8 @@ async function searchBlobText(opts: {
   );
 
   const scored: NoteSearchHit[] = [];
-  for (const r of rows) {
+  for (const [i, r] of rows.entries()) {
+    if (i > 0 && i % SEARCH_YIELD_EVERY === 0) await yieldToEventLoop();
     const relPath = r.rel_path ?? "";
     let vector = r.vector;
     let matchedSealed: number | null = null;
