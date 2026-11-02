@@ -109,7 +109,7 @@ describe("conversion review (owner unchecks connections)", () => {
     expect((await tool(dropped.token, "update_note", { docId: s.docId, content: "before" })).isError).toBe(false);
 
     const ready0 = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/conversion-ready`, undefined, s.vk)).json();
-    expect(ready0).toMatchObject({ ready: false, blockers: { tokens: 2 } });
+    expect(ready0).toMatchObject({ ready: true, blockers: { tokens: 2 } });
 
     // A plain member cannot exclude anything.
     const refused = await api(s.member, "POST", `/vaults/${s.vaultId}/keys/allowlist`, {
@@ -165,9 +165,9 @@ describe("conversion review (owner unchecks connections)", () => {
     }, s.vk);
     cand = (await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/allowlist-candidates`, undefined, s.vk)).json()) as any[];
     expect(cand[0]).toMatchObject({ allowed: true, excluded: false });
-    // Back to waiting for its wrap, as any allow-listed token does.
+    // Reported as lacking its wrap again (the vault never waits for it).
     const ready = await (await api(s.owner, "GET", `/vaults/${s.vaultId}/keys/conversion-ready`, undefined, s.vk)).json();
-    expect(ready).toMatchObject({ ready: false, blockers: { tokens: 1 } });
+    expect(ready).toMatchObject({ ready: true, blockers: { tokens: 1 } });
   });
 
   it("an excluded public link stops holding the gate too, and keeps working while pending", async () => {

@@ -29,7 +29,6 @@ import {
   conversionBlockers,
   ENCRYPTION_NOT_REQUESTED,
   encryptionRequested,
-  isReady,
   loadPendingCheck,
   vaultCheckState,
   vaultHasKeyMaterial,
@@ -447,7 +446,9 @@ export function createMcpKeyRoutes(): Hono {
       keyed: Boolean(state && !state.pending),
       pending: Boolean(state?.pending),
       generation,
-      ready: isReady(b),
+      // Never waits any more (crypto/conversion.ts initGate); `blockers` says
+      // what has not picked up the key yet.
+      ready: true,
       blockers: { tokens: b.tokens.length, links: b.links.length, oauthGrants: b.oauthGrants },
     });
   });

@@ -1073,9 +1073,11 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
 - **Owner vault key:** owners reveal it in Vault Settings → General ("Show vault key"); no popup, never
   emailed. "Restore with vault key" verifies against `vk_check`.
 - **Conversion gate + MCP upgrade** (`crypto/conversion.ts`): a device registers a pending key,
-  allow-lists existing tokens/links with an HMAC under VK, and they upgrade on next use. `keys/init`
-  accepts only when nothing used in 30 days lacks a wrap and the check bytes match the pending row; the
-  gate runs inside the init transaction under row locks (`lockGateRows`). `VAULT_KEY_CONVERSION` plus
+  allow-lists existing tokens/links with an HMAC under VK, and they upgrade on next use while a member's
+  key is held. `keys/init` accepts when the check bytes match the pending row (`lockGateRows` + `initGate`
+  inside the init transaction). Decided 2026-11-02: it NO LONGER waits for connections (`conversion-ready`
+  is always ready and only reports `blockers`); one that cannot upgrade (an OAuth login renewed while no key
+  was held, a link nobody viewed) is reconnected or recreated once, and MCP says so (`KEY_REQUIRED_MESSAGE`). `VAULT_KEY_CONVERSION` plus
   the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all. No owner review any more (2026-11-01): the
   converting device allow-lists every candidate; exclusions recorded by an earlier review
   (`vault_conversion_exclusions`, migration 083) still stand, and the review UI is gone.
