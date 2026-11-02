@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Connector consent finished by the desktop (W3, security rule 2). For a vault
-// that is keyed (or converting), the browser consent page cannot complete on
+// that is keyed, the browser consent page cannot complete on
 // its own: the server must never wrap a key from its cache for a user flow.
 // It opens an `oauth_consents` row and shows "Open Baalda on your computer to
 // finish connecting" with a `<scheme>://oauth-consent?id=…` deep link. The
@@ -22,10 +22,17 @@ import { orgVaultChecks } from "./token-keys.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
+/** Keyed vaults of the org. A converting (pending) vault is still plaintext:
+ *  a new grant there connects as before and is allow-listed and upgraded like
+ *  any existing one, so it never waits for a device holding the pending key. */
+async function keyedChecks(orgId: string, db: Queryable) {
+  return (await orgVaultChecks(orgId, db)).filter((c) => !c.pending);
+}
+
 /** Does connecting this vault need the desktop step? */
 export async function consentNeedsDesktop(orgId: string, db: Queryable = defaultPool): Promise<boolean> {
   if (!vaultKeysEnabled()) return false;
-  return (await orgVaultChecks(orgId, db)).length > 0;
+  return (await keyedChecks(orgId, db)).length > 0;
 }
 
 /** An approved consent whose keys this process still holds, or null. */
@@ -143,7 +150,7 @@ export async function consentFor(id: string, userId: string, db: Queryable = def
 export type CompleteResult = { ok: true } | { ok: false; status: 404 | 409; code: string };
 
 /**
- * The desktop finishes a consent: every keyed or converting vault of the org
+ * The desktop finishes a consent: every keyed vault of the org
  * must be covered by a presented key that verifies (`X-Baalda-VK`: one bare
  * base64 key, or `vaultId=<b64>` pairs). Nothing is stored unless all verify.
  */
@@ -155,7 +162,7 @@ export async function completeConsent(
 ): Promise<CompleteResult> {
   const view = await consentFor(id, userId, db);
   if (!view) return { ok: false, status: 404, code: "not_found" };
-  const checks = await orgVaultChecks(view.organizationId, db);
+  const checks = await keyedChecks(view.organizationId, db);
   const offered: Array<{ vaultId: string | null; key: Buffer }> = [];
   for (const part of (vkHeader ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
     const eq = part.indexOf("=", 1);
