@@ -860,6 +860,24 @@ describe("inbound folder deletion", () => {
     expect(disk.folders.has("Team")).toBe(false);
   });
 
+  it("never asks for a local subfolder of a deleted folder it could not remove", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("Team");
+    // Made here and never on the server: it is what keeps "Team" from emptying.
+    disk.folders.add("Team/Local");
+    disk.folders.add("Team/Local/Deeper");
+    const { api, reg } = await twoPasses({
+      disk,
+      first: { notes: [], folders: [{ id: "f1", path: "Team" }] },
+      then: { notes: [], folders: [], folderTombstones: ["f1"] },
+      patch: () => vi.mocked(ipc.deleteFolderIfEmpty).mockRejectedValue(new Error("directory not empty")),
+    });
+    const asked = () => vi.mocked(api.createFolder).mock.calls.map(([f]) => (f as { path: string }).path);
+    expect(asked()).not.toContain("Team/Local");
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(asked().filter((p) => p.startsWith("Team"))).toEqual([]);
+  });
+
   it("re-registers a deleted folder whose removal failed once the user adds a note to it", async () => {
     const disk = new FakeDisk();
     disk.folders.add("Team");

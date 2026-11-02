@@ -4241,11 +4241,22 @@ export class VaultRegistry {
       ...serverFolders.map((f) => f.path),
       ...serverNotes.map((n) => noteRelPath(n)).filter((p): p is string => !!p),
     ]);
+    // Inside a folder a teammate deleted that this disk could not remove: the
+    // server has no parent for it, so each ask is "No folder at …" on every
+    // pass. Such a folder waits; a NOTE made inside re-registers the parent
+    // (`newLocalWork` above), and then its subfolders go too.
+    const insideDeadFolder = (path: string): boolean => {
+      for (let i = path.lastIndexOf("/"); i > 0; i = path.lastIndexOf("/", i - 1)) {
+        if (deadFolderIds.has(this.revokedFolders.get(path.slice(0, i)) ?? "")) return true;
+      }
+      return false;
+    };
     const missingFolders = folders.filter(
       (f) =>
         !this.folderByPath.has(f.path) &&
         !this.unmaterializable.skipShadow(f.path, strippedServer) &&
         !deadFolderIds.has(this.revokedFolders.get(f.path) ?? "") &&
+        !insideDeadFolder(f.path) &&
         !this.hiddenPaths.has(pathKey(f.path)) &&
         !this.isOwnDelete(f.path) &&
         !this.isHeldRefusal(f.path),
