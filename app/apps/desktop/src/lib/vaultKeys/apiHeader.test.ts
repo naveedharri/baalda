@@ -41,6 +41,21 @@ describe("X-Baalda-VK header", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0][VAULT_KEY_HEADER]).toBe("S0VZ");
   });
+
+  it("a server-served download link carries the client version; a presigned one is untouched", async () => {
+    const answers = [
+      { url: "http://s/api/blobs/b1", expiresAt: null, direct: false },
+      { url: "https://bucket/x?sig=1", expiresAt: null, direct: true },
+    ];
+    const api = new ApiClient({
+      baseUrl: "http://s",
+      token: "t",
+      fetchImpl: async () => new Response(JSON.stringify(answers.shift()), { status: 200 }),
+    });
+    const own = await api.blobDownloadUrl("b1", "v1");
+    expect(own.url).toMatch(/^http:\/\/s\/api\/blobs\/b1\?.+=/);
+    expect((await api.blobDownloadUrl("b2", "v1")).url).toBe("https://bucket/x?sig=1");
+  });
 });
 
 describe("409 key_required", () => {

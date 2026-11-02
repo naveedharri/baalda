@@ -4433,7 +4433,9 @@ export class ApiClient {
         { vaultScope: vaultId },
       );
       this.blobUrlSupported = true;
-      return data;
+      // Not `direct`: the bytes come from this server's own route, which a keyed
+      // vault answers `426` without the client version (`withClientVersion`).
+      return data.direct ? data : { ...data, url: withClientVersion(data.url) };
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) this.blobUrlSupported = false;
       throw asBlobError(e);

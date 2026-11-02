@@ -20,6 +20,7 @@ import type { NoteBridge } from "../bridge";
 import { bridgeManager, createTauriBridgeIO, sha256Hex } from "../bridge/adapter";
 import {
   ACCESS_CHECK_MAX,
+  VAULT_KEY_HEADER,
   isServerTooOld,
   type NoteLastEdited,
   type SessionInfo,
@@ -7469,7 +7470,12 @@ export class SyncManager implements InboundHost {
       fetchBytes: (url, headers) => api.downloadBytesFrom(url, headers),
       // Only ever applied to a download URL the SERVER serves; a presigned one
       // is fetched clean (see `sync/attachments.ts`).
-      authHeaders: () => api.authHeaders(),
+      // Plus the vault key: the server's own download route reads a keyed vault
+      // only with it (Postgres-stored bytes; a presigned URL gets no headers).
+      authHeaders: () => {
+        const vk = api.vaultKeyFor(vaultId);
+        return { ...api.authHeaders(), ...(vk ? { [VAULT_KEY_HEADER]: vk } : {}) };
+      },
       notify: (text, tone) => toast(text, tone ?? "error"),
       // The sidebar's dot on a `.pdf` row. Scope-guarded like every other
       // emission here: a pass that spans a vault switch must not paint the new
