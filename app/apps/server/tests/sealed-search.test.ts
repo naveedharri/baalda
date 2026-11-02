@@ -187,6 +187,7 @@ describe("sealed note_index (W3)", () => {
     expect(together[queries.length]).toEqual((alone[0] as unknown[]).length ? await search("revenue", 1) : []);
     // The first search starts alone; the other eight share the next pass.
     expect(reads).toBeLessThanOrEqual(3);
+    await new Promise((r) => setImmediate(r)); // the drain loop ends on the next turn
     expect(pendingSearchPasses()).toBe(0);
 
     // A different readable set never shares a pass, and sees only its own notes.
