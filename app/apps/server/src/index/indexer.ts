@@ -20,7 +20,8 @@ import { pool as defaultPool } from "../db/pool.js";
 import { loadDocState } from "../yjs/persistence.js";
 import { purgeBlobRefs, replaceBlobRefs } from "../blobs/refs.js";
 import { cachedRefHeads, refText } from "../blobs/ref-windows.js";
-import { cosineSimilarity, embed, tokenize } from "./embedder.js";
+import { cosineSimilarity, EMBED_DIM, embed, tokenize } from "./embedder.js";
+import { loadPages, pageMatchCount, pageMatchCountWithPath, vocabMasks } from "./search-pages.js";
 import { keywordMatchCount, searchTokenSet } from "./search-tokens.js";
 
 /**
@@ -661,18 +662,45 @@ function joinPass(scope: PassScope, query: PassQuery): Promise<NoteSearchHit[]> 
 async function drainPasses(key: string, queue: PassWaiter[]): Promise<void> {
   try {
     while (queue.length > 0) {
-      const batch = queue.splice(0, SEARCH_PASS_MAX);
-      try {
-        // The first waiter's key is the one used: its caller zeroes it only
-        // after its promise settles, which is after this pass.
-        const results = await searchPass(batch[0].scope, batch.map((w) => w.query));
-        batch.forEach((w, i) => w.resolve(results[i]));
-      } catch (err) {
-        for (const w of batch) w.reject(err);
-      }
+      // The batch is taken once a slot is free, so searches that arrived
+      // during the wait ride along.
+      await withPassSlot(async () => {
+        const batch = queue.splice(0, SEARCH_PASS_MAX);
+        try {
+          // The first waiter's key is the one used: its caller zeroes it only
+          // after its promise settles, which is after this pass.
+          const results = await searchPass(batch[0].scope, batch.map((w) => w.query));
+          batch.forEach((w, i) => w.resolve(results[i]));
+        } catch (err) {
+          for (const w of batch) w.reject(err);
+        }
+      });
     }
   } finally {
     passQueues.delete(key);
+  }
+}
+
+/**
+ * Keyed search passes running at once, server-wide. A pass is CPU work in this
+ * process (opening and scoring rows); past this many, more of them only slow
+ * every other request down. A pass waiting for a slot keeps collecting
+ * searches of its own vault, so the wait is shared too.
+ */
+const SEARCH_PASSES_AT_ONCE = 2;
+let passesRunning = 0;
+const passSlotWaiters: Array<() => void> = [];
+
+async function withPassSlot<T>(run: () => Promise<T>): Promise<T> {
+  if (passesRunning < SEARCH_PASSES_AT_ONCE) passesRunning++;
+  else await new Promise<void>((resolve) => passSlotWaiters.push(resolve));
+  try {
+    return await run();
+  } finally {
+    // Handed straight to the next waiter, so a newcomer cannot take it first.
+    const next = passSlotWaiters.shift();
+    if (next) next();
+    else passesRunning--;
   }
 }
 
@@ -704,101 +732,149 @@ async function searchPass(scope: PassScope, queries: PassQuery[]): Promise<NoteS
   // Phase 1: score every candidate, retaining only id + score per note.
   const scored: Array<Array<{ docId: string; score: number }>> = queries.map(() => []);
   const all = queries.map((_, qi) => qi);
-  let after = "";
-  for (; docIds.length > 0; ) {
-    const { rows } = await db.query<{
-      doc_id: string;
-      vector: number[] | null;
-      search_tokens: string | null;
-      matched_legacy: number[] | null;
-      search_enc: Buffer | null;
-      search_score_enc: Buffer | null;
-      title: string | null;
-    }>(
-      // A sealed row with a score blob sends only that, never the body.
-      `SELECT ni.doc_id,
-              CASE WHEN ni.search_score_enc IS NULL THEN ni.search_enc END AS search_enc,
-              ni.search_score_enc,
-              ni.title,
-              -- The plaintext columns only for a plaintext row: a sealed row
-              -- keeps its pre-keying copy until the null-out, and scanning
-              -- that (hundreds of MB on a big vault) for a result the sealed
-              -- branch never reads made every search slow.
-              CASE WHEN ni.search_enc IS NULL AND ni.search_score_enc IS NULL THEN ni.vector END AS vector,
-              CASE WHEN $6::boolean OR ni.search_enc IS NOT NULL OR ni.search_score_enc IS NOT NULL THEN NULL
-                   ELSE ni.search_tokens END AS search_tokens,
-              -- One count per query, in query order.
-              CASE WHEN ni.search_enc IS NULL AND ni.search_score_enc IS NULL AND (ni.search_tokens IS NULL OR $6::boolean) THEN ARRAY(
-                SELECT coalesce(c.n, 0)::int
-                  FROM generate_series(0, $7::int - 1) AS g(i)
-                  LEFT JOIN (
-                    SELECT t.qi, count(*) AS n
-                      FROM unnest($4::text[], $8::int[]) AS t(tok, qi)
-                     WHERE position(t.tok IN lower(coalesce(ni.title, '') || ' ' || ni.content)) > 0
-                     GROUP BY t.qi
-                  ) c ON c.qi = g.i
-                 ORDER BY g.i
-              ) END AS matched_legacy
-         FROM note_index ni
-         JOIN notes n ON n.id = ni.doc_id AND n.deleted_at IS NULL
-        WHERE ni.vault_id = $1
-          AND ni.doc_id = ANY($2::text[])
-          AND ni.doc_id > $3
-        ORDER BY ni.doc_id
-        LIMIT $5`,
-      [scope.vaultId, docIds, after, flatTokens, SEARCH_BATCH, legacySql, queries.length, flatQuery],
-    );
-    if (rows.length === 0) break;
-    for (const [i, r] of rows.entries()) {
-      if (i > 0 && i % SEARCH_YIELD_EVERY === 0) await yieldToEventLoop();
-      let rest = all;
-      let searchEnc = r.search_enc;
-      if (r.search_score_enc) {
-        if (!crypto) throw new KeyRequiredError();
-        const s = openScoreOrNull(crypto, r.doc_id, r.search_score_enc);
-        const needBody: number[] = [];
-        for (const qi of all) {
-          const q = queries[qi];
-          // Answers alone unless unopenable, or the query has words and the
-          // row has no token set (the pre-068 rule needs the body).
-          if (s && Array.isArray(s.vector) && !(q.qTokens.length > 0 && (s.tokens === null || legacySql))) {
-            const matched = q.qTokens.length > 0 ? keywordMatchCount(q.qTokens, s.tokens!) : 0;
-            scored[qi].push({ docId: r.doc_id, score: boosted(q, cosineSimilarity(q.qVec, s.vector), matched) });
-          } else {
-            needBody.push(qi);
+
+  /** Score the rows of `ids` (doc_id order), one `emit` per row per query. */
+  const scoreRows = async (ids: string[], emit: (qi: number, docId: string, score: number) => void) => {
+    let after = "";
+    for (; ids.length > 0; ) {
+      const { rows } = await db.query<{
+        doc_id: string;
+        vector: number[] | null;
+        search_tokens: string | null;
+        matched_legacy: number[] | null;
+        search_enc: Buffer | null;
+        search_score_enc: Buffer | null;
+        title: string | null;
+      }>(
+        // A sealed row with a score blob sends only that, never the body.
+        `SELECT ni.doc_id,
+                CASE WHEN ni.search_score_enc IS NULL THEN ni.search_enc END AS search_enc,
+                ni.search_score_enc,
+                ni.title,
+                -- The plaintext columns only for a plaintext row: a sealed row
+                -- keeps its pre-keying copy until the null-out, and scanning
+                -- that (hundreds of MB on a big vault) for a result the sealed
+                -- branch never reads made every search slow.
+                CASE WHEN ni.search_enc IS NULL AND ni.search_score_enc IS NULL THEN ni.vector END AS vector,
+                CASE WHEN $6::boolean OR ni.search_enc IS NOT NULL OR ni.search_score_enc IS NOT NULL THEN NULL
+                     ELSE ni.search_tokens END AS search_tokens,
+                -- One count per query, in query order.
+                CASE WHEN ni.search_enc IS NULL AND ni.search_score_enc IS NULL AND (ni.search_tokens IS NULL OR $6::boolean) THEN ARRAY(
+                  SELECT coalesce(c.n, 0)::int
+                    FROM generate_series(0, $7::int - 1) AS g(i)
+                    LEFT JOIN (
+                      SELECT t.qi, count(*) AS n
+                        FROM unnest($4::text[], $8::int[]) AS t(tok, qi)
+                       WHERE position(t.tok IN lower(coalesce(ni.title, '') || ' ' || ni.content)) > 0
+                       GROUP BY t.qi
+                    ) c ON c.qi = g.i
+                   ORDER BY g.i
+                ) END AS matched_legacy
+           FROM note_index ni
+           JOIN notes n ON n.id = ni.doc_id AND n.deleted_at IS NULL
+          WHERE ni.vault_id = $1
+            AND ni.doc_id = ANY($2::text[])
+            AND ni.doc_id > $3
+          ORDER BY ni.doc_id
+          LIMIT $5`,
+        [scope.vaultId, ids, after, flatTokens, SEARCH_BATCH, legacySql, queries.length, flatQuery],
+      );
+      if (rows.length === 0) break;
+      for (const [i, r] of rows.entries()) {
+        if (i > 0 && i % SEARCH_YIELD_EVERY === 0) await yieldToEventLoop();
+        let rest = all;
+        let searchEnc = r.search_enc;
+        if (r.search_score_enc) {
+          if (!crypto) throw new KeyRequiredError();
+          const s = openScoreOrNull(crypto, r.doc_id, r.search_score_enc);
+          const needBody: number[] = [];
+          for (const qi of all) {
+            const q = queries[qi];
+            // Answers alone unless unopenable, or the query has words and the
+            // row has no token set (the pre-068 rule needs the body).
+            if (s && Array.isArray(s.vector) && !(q.qTokens.length > 0 && (s.tokens === null || legacySql))) {
+              const matched = q.qTokens.length > 0 ? keywordMatchCount(q.qTokens, s.tokens!) : 0;
+              emit(qi, r.doc_id, boosted(q, cosineSimilarity(q.qVec, s.vector), matched));
+            } else {
+              needBody.push(qi);
+            }
           }
+          if (needBody.length === 0) continue;
+          // Unopenable, or a row that needs its body: the full row, as before.
+          rest = needBody;
+          searchEnc = await fullSealedRow(db, r.doc_id);
         }
-        if (needBody.length === 0) continue;
-        // Unopenable, or a row that needs its body: the full row, as before.
-        rest = needBody;
-        searchEnc = await fullSealedRow(db, r.doc_id);
-      }
-      if (searchEnc) {
-        // Sealed row: same score from the decrypted fields. No token set means
-        // the pre-068 rule, substring-counted over the same "title body" text.
-        if (!crypto) throw new KeyRequiredError();
-        const sealed = openSearchRow(crypto, r.doc_id, searchEnc);
+        if (searchEnc) {
+          // Sealed row: same score from the decrypted fields. No token set means
+          // the pre-068 rule, substring-counted over the same "title body" text.
+          if (!crypto) throw new KeyRequiredError();
+          const sealed = openSearchRow(crypto, r.doc_id, searchEnc);
+          for (const qi of rest) {
+            const q = queries[qi];
+            const sim = sealed.vector ? cosineSimilarity(q.qVec, sealed.vector) : 0;
+            const matched =
+              sealed.tokens !== null && !legacySql
+                ? keywordMatchCount(q.qTokens, sealed.tokens)
+                : legacySubstringCount(q.qTokens, `${r.title ?? ""} ${sealed.body}`);
+            emit(qi, r.doc_id, boosted(q, sim, matched));
+          }
+          continue;
+        }
         for (const qi of rest) {
           const q = queries[qi];
-          const sim = sealed.vector ? cosineSimilarity(q.qVec, sealed.vector) : 0;
+          const sim = r.vector ? cosineSimilarity(q.qVec, r.vector) : 0;
           const matched =
-            sealed.tokens !== null && !legacySql
-              ? keywordMatchCount(q.qTokens, sealed.tokens)
-              : legacySubstringCount(q.qTokens, `${r.title ?? ""} ${sealed.body}`);
-          scored[qi].push({ docId: r.doc_id, score: boosted(q, sim, matched) });
+            r.search_tokens !== null ? keywordMatchCount(q.qTokens, r.search_tokens) : (r.matched_legacy?.[qi] ?? 0);
+          emit(qi, r.doc_id, boosted(q, sim, matched));
+        }
+      }
+      after = rows[rows.length - 1].doc_id;
+      if (rows.length < SEARCH_BATCH) break;
+    }
+  };
+
+  // Keyed: rows on a fresh search page are scored from the page; the rest
+  // (edited since the page was built, never paged, a page that did not open)
+  // from their own rows, exactly as without pages.
+  const pages = crypto && !legacySql && docIds.length > 0 ? await loadPages(db, "note", crypto) : null;
+  if (!pages || pages.rows.size === 0) {
+    await scoreRows(docIds, (qi, docId, score) => scored[qi].push({ docId, score }));
+  } else {
+    const { rows: live } = await db.query<{ doc_id: string; stamp: string }>(
+      `SELECT ni.doc_id, ni.updated_at::text AS stamp
+         FROM note_index ni
+         JOIN notes n ON n.id = ni.doc_id AND n.deleted_at IS NULL
+        WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
+        ORDER BY ni.doc_id`,
+      [scope.vaultId, docIds],
+    );
+    const stale = live.filter((r) => pages.rows.get(r.doc_id)?.stamp !== r.stamp).map((r) => r.doc_id);
+    const fromRows = new Map<string, number[]>();
+    await scoreRows(stale, (qi, docId, score) => {
+      let s = fromRows.get(docId);
+      if (!s) fromRows.set(docId, (s = new Array<number>(queries.length)));
+      s[qi] = score;
+    });
+    const masks = pages.pages.map((page) => queries.map((q) => vocabMasks(page, q.qTokens)));
+    const scratch = new Uint32Array(Math.max(1, ...queries.map((q) => Math.ceil(q.qTokens.length / 32))));
+    // In doc_id order, the order the row walk scores in, so ties sort the same.
+    for (const [i, r] of live.entries()) {
+      if (i > 0 && i % SEARCH_YIELD_EVERY === 0) await yieldToEventLoop();
+      const at = pages.rows.get(r.doc_id);
+      if (at && at.stamp === r.stamp) {
+        const page = pages.pages[at.page];
+        const vec = page.vectors.subarray(at.row * EMBED_DIM, (at.row + 1) * EMBED_DIM) as unknown as number[];
+        for (const qi of all) {
+          const q = queries[qi];
+          const matched = q.qTokens.length > 0 ? pageMatchCount(page, at.row, masks[at.page][qi], scratch) : 0;
+          scored[qi].push({ docId: r.doc_id, score: boosted(q, cosineSimilarity(q.qVec, vec), matched) });
         }
         continue;
       }
-      for (const qi of rest) {
-        const q = queries[qi];
-        const sim = r.vector ? cosineSimilarity(q.qVec, r.vector) : 0;
-        const matched =
-          r.search_tokens !== null ? keywordMatchCount(q.qTokens, r.search_tokens) : (r.matched_legacy?.[qi] ?? 0);
-        scored[qi].push({ docId: r.doc_id, score: boosted(q, sim, matched) });
-      }
+      const s = fromRows.get(r.doc_id);
+      if (!s) continue; // gone between the two reads
+      for (const qi of all) if (s[qi] !== undefined) scored[qi].push({ docId: r.doc_id, score: s[qi] });
     }
-    after = rows[rows.length - 1].doc_id;
-    if (rows.length < SEARCH_BATCH) break;
   }
 
   const fileHits = scope.includeFiles
@@ -908,7 +984,7 @@ async function searchBlobText(
   flatQuery: number[],
 ): Promise<NoteSearchHit[][]> {
   const { db, legacySql, crypto } = scope;
-  const { rows } = await db.query<{
+  const fullRows = (only: string[] | null) => db.query<{
     search_enc: Buffer | null;
     search_score_enc: Buffer | null;
     blob_id: string;
@@ -950,14 +1026,26 @@ async function searchBlobText(
           (b.doc_id IS NOT NULL AND b.doc_id = ANY($2::text[]))
           OR (b.doc_id IS NULL AND $4::boolean)
         )
+        AND ($9::text[] IS NULL OR bt.blob_id = ANY($9::text[]))
       ORDER BY bt.blob_id
       LIMIT $5`,
-    [scope.vaultId, scope.docIds, flatTokens, scope.vaultWideReader, FILE_SEARCH_CAP, legacySql, queries.length, flatQuery],
+    [scope.vaultId, scope.docIds, flatTokens, scope.vaultWideReader, FILE_SEARCH_CAP, legacySql, queries.length, flatQuery, only],
   );
+  type FileRow = Awaited<ReturnType<typeof fullRows>>["rows"][number];
 
-  const scored: NoteSearchHit[][] = queries.map(() => []);
-  for (const [i, r] of rows.entries()) {
-    if (i > 0 && i % SEARCH_YIELD_EVERY === 0) await yieldToEventLoop();
+  const hitOf = (r: { blob_id: string; doc_id: string | null; rel_path: string | null; filename: string | null }, score: number) => {
+    const relPath = r.rel_path ?? "";
+    return {
+      docId: r.doc_id,
+      blobId: r.blob_id,
+      relPath,
+      title: r.filename ?? (relPath ? (relPath.split("/").pop() ?? relPath) : r.blob_id),
+      ext: extOf(relPath),
+      score,
+      kind: "file" as const,
+    } as NoteSearchHit;
+  };
+  const scoreFileRow = async (r: FileRow, emit: (qi: number, hit: NoteSearchHit) => void) => {
     const relPath = r.rel_path ?? "";
     const nonAsciiPath = /[^\x01-\x7f]/.test(relPath);
     let scoreRow: SealedScoreRow | null = null;
@@ -1013,15 +1101,71 @@ async function searchBlobText(
           ? (r.matched_legacy?.[qi] ?? 0)
           : keywordMatchCount(q.qTokens, `${pathTokens} ${r.search_tokens}`);
       const boost = q.qTokens.length > 0 ? 0.1 * (matched / q.qTokens.length) : 0;
-      scored[qi].push({
-        docId: r.doc_id,
-        blobId: r.blob_id,
-        relPath,
-        title: r.filename ?? (relPath ? (relPath.split("/").pop() ?? relPath) : r.blob_id),
-        ext: extOf(relPath),
-        score: sim + boost,
-        kind: "file" as const,
-      } as NoteSearchHit);
+      emit(qi, hitOf(r, sim + boost));
+    }
+  };
+
+  const scored: NoteSearchHit[][] = queries.map(() => []);
+  // Keyed: files on a fresh search page are scored from the page (unless the
+  // live rel_path is non-ASCII, which needs the text); the rest row by row.
+  const pages = crypto && !legacySql ? await loadPages(db, "file", crypto) : null;
+  if (!pages || pages.rows.size === 0) {
+    const { rows } = await fullRows(null);
+    for (const [i, r] of rows.entries()) {
+      if (i > 0 && i % SEARCH_YIELD_EVERY === 0) await yieldToEventLoop();
+      await scoreFileRow(r, (qi, hit) => scored[qi].push(hit));
+    }
+  } else {
+    // The same candidates in the same order and window as the row query.
+    const { rows: live } = await db.query<{ blob_id: string; doc_id: string | null; rel_path: string | null; filename: string | null; stamp: string }>(
+      `SELECT bt.blob_id, b.doc_id, b.rel_path, b.filename, bt.updated_at::text AS stamp
+         FROM blob_text bt
+         JOIN blobs b ON b.id = bt.blob_id AND b.status = 'ready'
+        WHERE bt.vault_id = $1
+          AND (
+            (b.doc_id IS NOT NULL AND b.doc_id = ANY($2::text[]))
+            OR (b.doc_id IS NULL AND $3::boolean)
+          )
+        ORDER BY bt.blob_id
+        LIMIT $4`,
+      [scope.vaultId, scope.docIds, scope.vaultWideReader, FILE_SEARCH_CAP],
+    );
+    const paged = (r: (typeof live)[number]) =>
+      pages.rows.get(r.blob_id)?.stamp === r.stamp && !/[^\x01-\x7f]/.test(r.rel_path ?? "");
+    const stale = live.filter((r) => !paged(r)).map((r) => r.blob_id);
+    const fromRows = new Map<string, NoteSearchHit[]>();
+    if (stale.length > 0) {
+      const { rows } = await fullRows(stale);
+      for (const [i, r] of rows.entries()) {
+        if (i > 0 && i % SEARCH_YIELD_EVERY === 0) await yieldToEventLoop();
+        await scoreFileRow(r, (qi, hit) => {
+          let h = fromRows.get(r.blob_id);
+          if (!h) fromRows.set(r.blob_id, (h = new Array<NoteSearchHit>(queries.length)));
+          h[qi] = hit;
+        });
+      }
+    }
+    const masks = pages.pages.map((page) => queries.map((q) => vocabMasks(page, q.qTokens)));
+    const scratch = new Uint32Array(Math.max(1, ...queries.map((q) => Math.ceil(q.qTokens.length / 32))));
+    for (const [i, r] of live.entries()) {
+      if (i > 0 && i % SEARCH_YIELD_EVERY === 0) await yieldToEventLoop();
+      if (!paged(r)) {
+        const h = fromRows.get(r.blob_id);
+        if (h) for (let qi = 0; qi < queries.length; qi++) if (h[qi]) scored[qi].push(h[qi]);
+        continue;
+      }
+      const at = pages.rows.get(r.blob_id)!;
+      const page = pages.pages[at.page];
+      const vec = page.vectors.subarray(at.row * EMBED_DIM, (at.row + 1) * EMBED_DIM) as unknown as number[];
+      // rel_path tokens are matched live, as in the row path: a query token
+      // counts once if it is in the path's tokens OR the page's.
+      const pathTokens = searchTokenSet(r.rel_path ?? "") ?? "";
+      for (let qi = 0; qi < queries.length; qi++) {
+        const q = queries[qi];
+        const matched = q.qTokens.length > 0 ? pageMatchCountWithPath(page, at.row, masks[at.page][qi], scratch, q.qTokens, pathTokens) : 0;
+        const boost = q.qTokens.length > 0 ? 0.1 * (matched / q.qTokens.length) : 0;
+        scored[qi].push(hitOf(r, cosineSimilarity(q.qVec, vec) + boost));
+      }
     }
   }
   return scored.map((s, qi) => s.sort((a, b) => b.score - a.score).slice(0, queries[qi].k));

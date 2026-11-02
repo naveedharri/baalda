@@ -49,6 +49,7 @@ import {
   sealScoreRow,
   sealSearchRow,
 } from "../index/sealed-index.js";
+import { refreshSearchPages } from "../index/search-pages.js";
 import { searchTokenSet } from "../index/search-tokens.js";
 import { openNoteTextBytes, sealNoteText } from "../versions/texts.js";
 import { sha256Hex } from "../versions/capture.js";
@@ -1058,6 +1059,23 @@ export async function backfillVault(vaultId: string, opts: BackfillOptions = {})
   }
 }
 
+/** A keyed vault's search pages (notes, then files), with a fresh key copy each. */
+async function refreshVaultSearchPages(vaultId: string, cache: VaultKeyCache, db: ClientSource): Promise<void> {
+  for (const kind of ["note", "file"] as const) {
+    const crypto = await heldCrypto(vaultId, cache, db);
+    if (!crypto) return;
+    try {
+      const t = Date.now();
+      const outcome = await refreshSearchPages(crypto, kind, db);
+      if (outcome === "built") console.log(`[search-pages] vault=${vaultId} kind=${kind} built ms=${Date.now() - t}`);
+    } catch (err) {
+      console.error(`[search-pages] vault=${vaultId} kind=${kind} build failed:`, err);
+    } finally {
+      crypto.key.fill(0);
+    }
+  }
+}
+
 // ── scheduler ───────────────────────────────────────────────────────────────
 
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -1083,6 +1101,8 @@ export async function backfillTick(opts: BackfillOptions = {}): Promise<void> {
         // The delayed, compared plaintext removal; gated on its own (retention,
         // fresh recount, key held). Cheap once the vault is sealed.
         if (outcome === "complete") await nullOutVault(vault_id, { maxBatches: BACKFILL_BATCHES_PER_TICK, db: opts.db, cache: opts.cache });
+        // Search pages: rebuilt here, from the held key, once enough rows changed.
+        if (outcome === "complete") await refreshVaultSearchPages(vault_id, cache, db);
       } catch (err) {
         console.error(`[backfill] vault ${vault_id} failed:`, err);
       }
