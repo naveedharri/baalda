@@ -302,6 +302,53 @@ describe("tree binaries register as `files` rows", () => {
     expect(registerFile).toHaveBeenCalledTimes(2);
   });
 
+  it("a file whose folder has not reached the server yet waits for it, bytes and all", async () => {
+    // The registry pass that creates `New/` has not run: the server answers
+    // path_folder_mismatch. Uploading the bytes bare was refused too
+    // (`invalid_rel_path`) and that refusal held the file back for a day.
+    let folderThere = false;
+    const registerFile = vi.fn(async ({ id }: { relPath: string; id: string }) => {
+      if (!folderThere) throw serverError(400, "path_folder_mismatch");
+      return id;
+    });
+    const { sync, log } = makeVault([{ relPath: "New/report.docx" }], { registerFile });
+    await sync.reconcile();
+    expect(log.intents).toEqual([]);
+    expect(log.legacyUploads).toEqual([]);
+
+    folderThere = true;
+    await sync.reconcile();
+    expect(log.intents.map((i) => i.relPath)).toEqual(["New/report.docx"]);
+    expect(log.intents[0].docId).toBe("local-id-0");
+  });
+
+  it("one-step: a folder not on the server yet costs one refused intent, nothing more", async () => {
+    let folderThere = false;
+    const registerFile = vi.fn(async ({ id }: { relPath: string; id: string }) => id);
+    const intents: Array<{ register?: unknown; docId?: string | null }> = [];
+    const { sync } = makeVault([{ relPath: "New/report.docx" }], {
+      registerFile,
+      filesWithBytes: async () => true,
+      createIntent: async (input) => {
+        intents.push({ register: input.register, docId: input.docId });
+        if (!folderThere) throw serverError(400, "path_folder_mismatch");
+        return {
+          blobId: "blob-1",
+          completeUrl: "https://api.test/blobs/blob-1/complete",
+          upload: { kind: "single" as const, method: "PUT", url: "https://s3.test/put", headers: {}, expiresAt: Date.now() + 60_000, direct: true },
+        };
+      },
+    });
+    await sync.reconcile();
+    expect(intents).toHaveLength(1);
+    expect(registerFile).not.toHaveBeenCalled();
+
+    folderThere = true;
+    await sync.reconcile();
+    expect(intents).toHaveLength(2);
+    expect(intents[1].register).toBeTruthy();
+  });
+
   it("does not ask for a file inside a folder the server refused to create", async () => {
     // The folder has no server row (`no_write_access`), so every file in it
     // would answer `path_folder_mismatch` on every pass. It waits with the
