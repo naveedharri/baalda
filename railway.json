@@ -12,7 +12,7 @@
     "restartPolicyMaxRetries": 5,
     "limitOverride": {
       "containers": {
-        "memoryBytes": 1073741824
+        "memoryBytes": 3000000000
       }
     }
   }
