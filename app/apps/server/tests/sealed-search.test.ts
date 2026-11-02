@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { pool } from "../src/db/pool.js";
 import { appendUpdate } from "../src/yjs/persistence.js";
 import { indexDoc, searchNoteIndex } from "../src/index/indexer.js";
+import { backfillVault } from "../src/crypto/backfill.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { vaultKeyCache } from "../src/crypto/key-cache.js";
 import { KeyRequiredError } from "../src/crypto/transport.js";
@@ -104,6 +105,34 @@ describe("sealed note_index (W3)", () => {
     await expect(
       searchNoteIndex({ vaultId: keyed.vaultId, query: "revenue", k: 10, readableDocIds: Object.keys(keyed.ids), includeFiles: false }),
     ).rejects.toBeInstanceOf(KeyRequiredError);
+  });
+
+  it("ranking reads the small score blob; a missing or damaged one falls back to the full row", async () => {
+    const keyed = await corpus(true);
+    const release = vaultKeyCache.acquire(keyed.vaultId, keyed.key, 1);
+    for (const id of Object.keys(keyed.ids)) await indexDoc(id);
+    release();
+    expect(
+      (await pool.query("SELECT 1 FROM note_index WHERE vault_id = $1 AND search_score_enc IS NOT NULL", [keyed.vaultId])).rowCount,
+    ).toBe(4);
+    const search = (query: string) =>
+      searchNoteIndex({ vaultId: keyed.vaultId, query, k: 10, readableDocIds: Object.keys(keyed.ids), includeFiles: false, crypto: keyed.crypto });
+    const before = await Promise.all(["revenue plan", "lemon", "zzz"].map(search));
+
+    await pool.query("UPDATE note_index SET search_score_enc = $2 WHERE vault_id = $1", [keyed.vaultId, randomBytes(64)]);
+    expect(await Promise.all(["revenue plan", "lemon", "zzz"].map(search))).toEqual(before);
+    await pool.query("UPDATE note_index SET search_score_enc = NULL WHERE vault_id = $1", [keyed.vaultId]);
+    expect(await Promise.all(["revenue plan", "lemon", "zzz"].map(search))).toEqual(before);
+
+    // The backfill gives every sealed row its score blob back.
+    await pool.query("INSERT INTO vault_crypto_state (vault_id, phase, generation) VALUES ($1, 'keyed', 1) ON CONFLICT DO NOTHING", [keyed.vaultId]);
+    const hold = vaultKeyCache.acquire(keyed.vaultId, keyed.key, 1);
+    expect(await backfillVault(keyed.vaultId, { throttleMs: 0 })).toBe("complete");
+    hold();
+    expect(
+      (await pool.query("SELECT 1 FROM note_index WHERE vault_id = $1 AND search_score_enc IS NOT NULL", [keyed.vaultId])).rowCount,
+    ).toBe(4);
+    expect(await Promise.all(["revenue plan", "lemon", "zzz"].map(search))).toEqual(before);
   });
 
   it("a keyed re-index never nulls an existing plaintext row's columns", async () => {

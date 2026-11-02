@@ -2,6 +2,9 @@ import { inc } from "../metrics/sync-metrics.js";
 import { McpToolError, type McpContext } from "./service.js";
 import { TOOLS, TOOLS_BY_NAME } from "./tools.js";
 
+/** Tool calls slower than this are logged by name (see `tools/call`). */
+const SLOW_TOOL_MS = 5000;
+
 /**
  * A minimal, spec-compliant MCP server over JSON-RPC 2.0, transport-agnostic.
  * The HTTP route (routes/mcp.ts) feeds us one parsed JSON-RPC message plus the
@@ -134,6 +137,7 @@ export async function handleMcpMessage(
       // Outcome counters per tool — names and codes only, never arguments —
       // so an error rate seen in a client's dashboard can be split into
       // refusals (by code) and crashes from the `[sync-metrics]` lines.
+      const started = Date.now();
       try {
         const data = await tool.handler(ctx, args);
         inc(`mcp.tool.${tool.name}.ok`);
@@ -149,6 +153,10 @@ export async function handleMcpMessage(
         inc(`mcp.tool.${tool.name}.internal`);
         console.error(`[mcp] tool ${params.name} failed:`, err);
         return ok(msg.id, toolError("Internal error running the tool"));
+      } finally {
+        // A slow call names itself (tool and org only, never arguments).
+        const ms = Date.now() - started;
+        if (ms > SLOW_TOOL_MS) console.warn(`[mcp] slow tool=${tool.name} org=${ctx.auth.organizationId} ms=${ms}`);
       }
     }
 
