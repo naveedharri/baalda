@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pool } from "../src/db/pool.js";
 import { appendUpdate } from "../src/yjs/persistence.js";
-import { indexDoc, searchNoteIndex } from "../src/index/indexer.js";
+import { indexDoc, pendingSearchPasses, searchNoteIndex } from "../src/index/indexer.js";
 import { backfillVault } from "../src/crypto/backfill.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { aadFor, open, seal } from "../src/crypto/envelope.js";
@@ -165,6 +165,38 @@ describe("sealed note_index (W3)", () => {
       expect(isUncompressedScore(open(keyed.key, aadFor("note_index", "search_score_enc", keyed.vaultId, r.doc_id), r.search_score_enc))).toBe(false);
     }
     expect(await Promise.all(["revenue plan", "lemon", "zzz"].map(search))).toEqual(before);
+  });
+
+  it("concurrent searches of one vault share a pass and get exactly their own results", async () => {
+    const keyed = await corpus(true);
+    const release = vaultKeyCache.acquire(keyed.vaultId, keyed.key, 1);
+    for (const id of Object.keys(keyed.ids)) await indexDoc(id);
+    release();
+    const readable = Object.keys(keyed.ids);
+    const queries = ["revenue plan", "lemon", "", "engineers designer", "zzz", "plan", "cake poppy", "churn"];
+    const search = (query: string, k = 10) =>
+      searchNoteIndex({ vaultId: keyed.vaultId, query, k, readableDocIds: readable, crypto: keyed.crypto });
+    const alone: unknown[] = [];
+    for (const q of queries) alone.push(await search(q));
+
+    const spy = vi.spyOn(pool, "query");
+    const together = await Promise.all([...queries.map((q) => search(q)), search("revenue", 1)]);
+    const reads = spy.mock.calls.filter(([sql]) => typeof sql === "string" && sql.includes("FROM note_index ni") && sql.includes("LIMIT $5")).length;
+    spy.mockRestore();
+    expect(together.slice(0, queries.length)).toEqual(alone);
+    expect(together[queries.length]).toEqual((alone[0] as unknown[]).length ? await search("revenue", 1) : []);
+    // The first search starts alone; the other eight share the next pass.
+    expect(reads).toBeLessThanOrEqual(3);
+    expect(pendingSearchPasses()).toBe(0);
+
+    // A different readable set never shares a pass, and sees only its own notes.
+    const one = readable.slice(0, 1);
+    const [narrow, wide] = await Promise.all([
+      searchNoteIndex({ vaultId: keyed.vaultId, query: "plan", k: 10, readableDocIds: one, crypto: keyed.crypto }),
+      search("plan"),
+    ]);
+    expect(narrow.every((h) => one.includes(h.docId!))).toBe(true);
+    expect(wide).toEqual(await search("plan"));
   });
 
   it("a keyed re-index never nulls an existing plaintext row's columns", async () => {
