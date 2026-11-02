@@ -4,6 +4,7 @@
 // AAD bound to (note_index, search_enc, vaultId, docId), holding everything
 // search needs: the full text (so the pre-068 substring rule still works when
 // a row has no token set), the embedding vector and the token set.
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { vaultKeysEnabled } from "../crypto/config.js";
@@ -41,16 +42,48 @@ export interface SealedScoreRow {
   tokens: string | null;
 }
 
+/**
+ * A score blob's plaintext. The JSON is deflated behind a leading 0x00 byte:
+ * a token set plus a 256-number vector averaged 8 KB per note uncompressed, and
+ * a 14k-note vault's search spent most of its time just receiving 108 MB of
+ * them (2026-11-02). Older blobs are plain JSON (first byte `{`) and still open.
+ */
+const SCORE_DEFLATED = 0x00;
+/** Far above any real row (token sets cap at 64 KB); the plaintext is ours and
+ *  authenticated, this only bounds a bug. */
+const SCORE_MAX_BYTES = 4 * 1024 * 1024;
+
+function encodeScore(row: SealedScoreRow): Buffer {
+  return Buffer.concat([Buffer.of(SCORE_DEFLATED), deflateRawSync(JSON.stringify(row))]);
+}
+
+function decodeScore(plain: Buffer): SealedScoreRow {
+  const json = plain[0] === SCORE_DEFLATED
+    ? inflateRawSync(plain.subarray(1), { maxOutputLength: SCORE_MAX_BYTES })
+    : plain;
+  return JSON.parse(json.toString("utf8")) as SealedScoreRow;
+}
+
+/** True when a score blob's plaintext is the older uncompressed JSON. */
+export function isUncompressedScore(plain: Buffer): boolean {
+  return plain[0] !== SCORE_DEFLATED;
+}
+
 function scoreAad(vaultId: string, docId: string): Buffer {
   return aadFor("note_index", "search_score_enc", vaultId, docId);
 }
 
 export function sealScoreRow(c: DocCrypto, docId: string, row: SealedScoreRow): Buffer {
-  return seal(c.key, scoreAad(c.vaultId, docId), Buffer.from(JSON.stringify(row), "utf8"), c.generation);
+  return seal(c.key, scoreAad(c.vaultId, docId), encodeScore(row), c.generation);
 }
 
 export function openScoreRow(c: DocCrypto, docId: string, sealed: Buffer): SealedScoreRow {
-  return JSON.parse(open(c.key, scoreAad(c.vaultId, docId), sealed).toString("utf8")) as SealedScoreRow;
+  return decodeScore(openScorePlain(c, docId, sealed));
+}
+
+/** A score blob's raw plaintext (either encoding). */
+export function openScorePlain(c: DocCrypto, docId: string, sealed: Buffer): Buffer {
+  return open(c.key, scoreAad(c.vaultId, docId), sealed);
 }
 
 function blobAad(vaultId: string, blobId: string): Buffer {
@@ -72,11 +105,16 @@ function blobScoreAad(vaultId: string, blobId: string): Buffer {
 
 /** A file's ranking data, sealed apart from its text (`blob_text.search_score_enc`). */
 export function sealBlobScoreRow(c: DocCrypto, blobId: string, row: SealedScoreRow): Buffer {
-  return seal(c.key, blobScoreAad(c.vaultId, blobId), Buffer.from(JSON.stringify(row), "utf8"), c.generation);
+  return seal(c.key, blobScoreAad(c.vaultId, blobId), encodeScore(row), c.generation);
 }
 
 export function openBlobScoreRow(c: DocCrypto, blobId: string, sealed: Buffer): SealedScoreRow {
-  return JSON.parse(open(c.key, blobScoreAad(c.vaultId, blobId), sealed).toString("utf8")) as SealedScoreRow;
+  return decodeScore(openBlobScorePlain(c, blobId, sealed));
+}
+
+/** A file score blob's raw plaintext (either encoding). */
+export function openBlobScorePlain(c: DocCrypto, blobId: string, sealed: Buffer): Buffer {
+  return open(c.key, blobScoreAad(c.vaultId, blobId), sealed);
 }
 
 /**

@@ -463,11 +463,13 @@ export interface NoteSearchHit {
 }
 
 /**
- * How many note_index rows to score per round trip. Only a doc id, a 256-float
- * vector and a small integer cross the wire per row (~2-3 KB), so a batch peaks
- * around 1 MB regardless of vault size. Note BODIES never leave Postgres.
+ * How many note_index rows to score per round trip. A row sends its vector and
+ * token set (plaintext columns, or a compressed sealed score blob of ~1.5 KB),
+ * so a batch is a few MB regardless of vault size. Note BODIES never leave
+ * Postgres. Every batch re-sends the whole readable id list, so fewer, larger
+ * batches: at 500, a 14k-note vault re-sent it 28 times per search.
  */
-const SEARCH_BATCH = 500;
+const SEARCH_BATCH = 2000;
 
 /**
  * How many `blob_text` rows one query may score.

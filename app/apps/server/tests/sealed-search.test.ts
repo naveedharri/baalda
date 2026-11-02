@@ -7,6 +7,8 @@ import { appendUpdate } from "../src/yjs/persistence.js";
 import { indexDoc, searchNoteIndex } from "../src/index/indexer.js";
 import { backfillVault } from "../src/crypto/backfill.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
+import { aadFor, open, seal } from "../src/crypto/envelope.js";
+import { isUncompressedScore, openScoreRow } from "../src/index/sealed-index.js";
 import { vaultKeyCache } from "../src/crypto/key-cache.js";
 import { KeyRequiredError } from "../src/crypto/transport.js";
 import type { DocCrypto } from "../src/crypto/doc-crypto.js";
@@ -132,6 +134,36 @@ describe("sealed note_index (W3)", () => {
     expect(
       (await pool.query("SELECT 1 FROM note_index WHERE vault_id = $1 AND search_score_enc IS NOT NULL", [keyed.vaultId])).rowCount,
     ).toBe(4);
+    expect(await Promise.all(["revenue plan", "lemon", "zzz"].map(search))).toEqual(before);
+  });
+
+  it("an uncompressed score blob still ranks, and the backfill re-seals it compressed", async () => {
+    const keyed = await corpus(true);
+    const release = vaultKeyCache.acquire(keyed.vaultId, keyed.key, 1);
+    for (const id of Object.keys(keyed.ids)) await indexDoc(id);
+    release();
+    const search = (query: string) =>
+      searchNoteIndex({ vaultId: keyed.vaultId, query, k: 10, readableDocIds: Object.keys(keyed.ids), includeFiles: false, crypto: keyed.crypto });
+    const before = await Promise.all(["revenue plan", "lemon", "zzz"].map(search));
+
+    // The format written before compression: the JSON sealed as is.
+    for (const id of Object.keys(keyed.ids)) {
+      const { rows } = await pool.query("SELECT search_score_enc FROM note_index WHERE doc_id = $1", [id]);
+      const plainJson = Buffer.from(JSON.stringify(openScoreRow(keyed.crypto!, id, rows[0].search_score_enc)), "utf8");
+      const old = seal(keyed.key, aadFor("note_index", "search_score_enc", keyed.vaultId, id), plainJson, 1);
+      await pool.query("UPDATE note_index SET search_score_enc = $2 WHERE doc_id = $1", [id, old]);
+    }
+    expect(await Promise.all(["revenue plan", "lemon", "zzz"].map(search))).toEqual(before);
+
+    await pool.query("INSERT INTO vault_crypto_state (vault_id, phase, generation) VALUES ($1, 'keyed', 1) ON CONFLICT DO NOTHING", [keyed.vaultId]);
+    const hold = vaultKeyCache.acquire(keyed.vaultId, keyed.key, 1);
+    expect(await backfillVault(keyed.vaultId, { throttleMs: 0 })).toBe("complete");
+    hold();
+    const { rows } = await pool.query("SELECT doc_id, search_score_enc FROM note_index WHERE vault_id = $1", [keyed.vaultId]);
+    expect(rows).toHaveLength(4);
+    for (const r of rows) {
+      expect(isUncompressedScore(open(keyed.key, aadFor("note_index", "search_score_enc", keyed.vaultId, r.doc_id), r.search_score_enc))).toBe(false);
+    }
     expect(await Promise.all(["revenue plan", "lemon", "zzz"].map(search))).toEqual(before);
   });
 
