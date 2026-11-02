@@ -384,6 +384,7 @@ export function AccountMenu() {
               onClose={() => exitThen(() => closeSettingsDialog("vault"))}
               onRequestSignIn={() => setAuthOpen(true)}
               initialTab={settingsTab}
+              initialSection={settingsRequest?.section}
             />
           </Suspense>
         )}
@@ -549,6 +550,7 @@ export function AccountMenu() {
             key={settingsRequest?.token ?? 0}
             onClose={() => exitThen(() => closeSettingsDialog("vault"))}
             initialTab={settingsTab}
+            initialSection={settingsRequest?.section}
           />
         </Suspense>
       )}

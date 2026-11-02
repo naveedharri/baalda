@@ -42,6 +42,7 @@ import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
 import { createVaultKeyRoutes } from "./routes/vault-keys.js";
 import { createKeyRecoveryRoutes } from "./routes/key-recovery.js";
+import { createMessageRoutes, MESSAGES_FEATURE } from "./routes/messages.js";
 import { createMcpKeyRoutes } from "./routes/mcp-keys.js";
 import { vaultKeyHeader } from "../crypto/transport.js";
 import { vaultKeysEnabled, VAULT_KEYS_FEATURE } from "../crypto/config.js";
@@ -271,6 +272,8 @@ export function createApp(deps: AppDeps): Hono {
         ACCESS_BOARD_FEATURE,
         SKILLS_FEATURE,
         SKILL_ACCESS_FEATURE,
+        // In-app messages (`/api/messages`, docs/MESSAGES.md).
+        MESSAGES_FEATURE,
         // Client-held vault keys (W3), only while BAALDA_VAULT_KEYS is on.
         ...(vaultKeysEnabled() ? [VAULT_KEYS_FEATURE] : []),
       ],
@@ -424,6 +427,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api", accessAuditRoutes);
   app.route("/api", createAppearanceRoutes(deps));
   app.route("/api", createSkillRoutes());
+  app.route("/api", createMessageRoutes());
   // Client-held vault keys (W3): off unless BAALDA_VAULT_KEYS is on. The
   // header middleware only decodes X-Baalda-VK; it never logs or caches it.
   app.use("/api/*", vaultKeyHeader);

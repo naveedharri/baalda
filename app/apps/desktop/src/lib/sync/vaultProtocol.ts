@@ -59,7 +59,7 @@ export interface HelloFrame {
 }
 
 /** What this build can handle beyond the original protocol. Sent in `hello`. */
-export const CLIENT_CAPS = ["voice", "revocation-batches", "bulk-regrant", "member-removed", "invitations"];
+export const CLIENT_CAPS = ["voice", "revocation-batches", "bulk-regrant", "member-removed", "invitations", "messages"];
 
 /** A teammate's live "who's viewing what" state (mirror of the server type).
  *  `docId` null means the user isn't viewing anything (or left) — clear them. */
@@ -167,6 +167,8 @@ export type ServerControl =
   /** The vault's team skills changed (publish, delivery, pin, delete,
    *  settings): a hint to refetch the skills manifest, nothing more. */
   | { t: "skills-changed"; orgId: string }
+  /** This user's pending messages changed: a hint to refetch `GET /api/messages`. */
+  | { t: "messages-changed" }
   | ({ t: "presence" } & PresenceState)
   /** A new release exists (#269): a hint to run the normal update check now. */
   | { t: "version-available"; version: string }
@@ -296,6 +298,7 @@ export function parseServerControl(text: string): ServerControl | null {
     const orgId = (v as { orgId?: unknown }).orgId;
     return typeof orgId === "string" && orgId ? { t: "skills-changed", orgId } : null;
   }
+  if (t === "messages-changed") return { t: "messages-changed" };
   if (t === "presence") {
     const o = v as Record<string, unknown>;
     if (

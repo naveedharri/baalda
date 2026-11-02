@@ -16,6 +16,7 @@ import {
 import { decodeSecret, encodeCrockford, newSecret, secretHash, type SecretPurpose } from "./crypto";
 import { getKeychainString, joinSecretName, setKeychainString } from "./store";
 import { runFreshAccountKey, type FreshKeyResult } from "./recovery";
+import { reportSavedFlagOnce } from "./reportSavedFlag";
 import {
   createVaultKeySession,
   type AccountKeysState,
@@ -399,7 +400,11 @@ async function runOnce(): Promise<void> {
     }
     return;
   }
-  if (state.state === "ready") await serviceVault(c, vaultId);
+  if (state.state === "ready") {
+    // A save recorded only on this device (before the server kept it).
+    void reportSavedFlagOnce(vaultId);
+    await serviceVault(c, vaultId);
+  }
   await serviceOtherVaults(c, vaultId);
 }
 

@@ -21,6 +21,7 @@ import { rememberAvatarImage } from "./avatarIdentity";
 import { parseHealth, type ServerHealth } from "./serverFeatures";
 import { CLIENT_OUTDATED_CODE, CLIENT_VERSION, CLIENT_VERSION_PARAM } from "./clientVersion";
 import { APP_CHANNEL, APP_SCHEME } from "./deepLinkScheme";
+import type { DeliveredMessage, MessageReceiptEvent } from "./messages/types";
 
 /**
  * Which build starts a checkout, so the server's success page hands back to
@@ -1775,6 +1776,37 @@ export class ApiClient {
       otherKeyHolders: typeof data.otherKeyHolders === "number" ? data.otherKeyHolders : undefined,
       recoveryNet: data.recoveryNet === true,
     };
+  }
+
+  /** The owner kept this vault's key (`file` = saved to a file, `confirmed` = said so). */
+  async markVaultKeySaved(vaultId: string, method: "file" | "confirmed"): Promise<void> {
+    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/keys/saved`, { body: { method } });
+  }
+
+  /** Pending server-driven messages for this user; an older server (404) has none. */
+  /**
+   * Pending messages for this user. `showing` names the one on screen, so the
+   * server keeps it in the answer until it is acted on (here or elsewhere)
+   * instead of hiding it for having just been shown.
+   */
+  async listMessages(showing?: { id: string; orgId: string | null }): Promise<DeliveredMessage[]> {
+    const qs = showing
+      ? `?showing=${encodeURIComponent(showing.id)}&showingOrg=${encodeURIComponent(showing.orgId ?? "")}`
+      : "";
+    try {
+      const { data } = await this.request<{ messages?: DeliveredMessage[] }>("GET", `/api/messages${qs}`);
+      return Array.isArray(data?.messages) ? data.messages : [];
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return [];
+      throw e;
+    }
+  }
+
+  async sendMessageReceipt(
+    id: string,
+    body: { orgId: string | null; event: MessageReceiptEvent; actionId?: string },
+  ): Promise<void> {
+    await this.request("POST", `/api/messages/${encodeURIComponent(id)}/receipt`, { body });
   }
 
   /** A Google-only account adds a Baalda password (`POST /api/me/password`). */

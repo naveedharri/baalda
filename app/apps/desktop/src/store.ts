@@ -711,8 +711,9 @@ interface AppStore {
    * tab re-fire, exactly like `revealRequest`: opening settings is an event, not
    * a state.
    */
-  settingsRequest: { tab: SettingsTab; token: number } | null;
-  requestSettings: (tab: SettingsTab) => void;
+  settingsRequest: { tab: SettingsTab; section?: string; token: number } | null;
+  /** `section` scrolls to (and briefly highlights) `[data-settings-section]` in that tab. */
+  requestSettings: (tab: SettingsTab, section?: string) => void;
   /** Bumped to ask the open Settings dialog to close (an action in it opened
    *  something in the editor area behind it). */
   settingsDismissToken: number;
@@ -2851,7 +2852,7 @@ export const useStore = create<AppStore>((set, get) => ({
     }));
   },
 
-  requestSettings: (tab) => {
+  requestSettings: (tab, section) => {
     // The vault list lives in Account Settings → Vaults (2026-10-07). Signed
     // out there is no account page, so Vault Settings keeps it for local folders.
     if (tab === "vaults" && get().session) {
@@ -2859,7 +2860,7 @@ export const useStore = create<AppStore>((set, get) => ({
       return;
     }
     set((s) => ({
-      settingsRequest: { tab, token: (s.settingsRequest?.token ?? 0) + 1 },
+      settingsRequest: { tab, section, token: (s.settingsRequest?.token ?? 0) + 1 },
       settingsDialog: "vault",
     }));
   },

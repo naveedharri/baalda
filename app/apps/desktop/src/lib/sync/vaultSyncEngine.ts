@@ -14,6 +14,7 @@ import type { VaultAppearanceSettings } from "../appearanceSettings";
 import { ApiClient, ApiError } from "../api";
 import { markOnce } from "../perf";
 import { notifyInvitationFrame } from "../invitationLive";
+import { notifyMessagesChanged } from "../messages/live";
 import { statusFromWire, type ActivityStatus } from "../prefs";
 import {
   bytesToBase64,
@@ -943,6 +944,8 @@ export class VaultSyncEngine {
         this.onAppearanceChanged?.({ orgId: control.orgId, settings: control.settings });
       } else if (control.t === "skills-changed") {
         this.onSkillsChanged?.(control.orgId);
+      } else if (control.t === "messages-changed") {
+        notifyMessagesChanged();
       } else if (control.t === "presence") {
         // A teammate's viewing state changed — feed the sidebar roster.
         this.onPresence?.({

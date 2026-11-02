@@ -45,6 +45,8 @@ import { GraphButton } from "./components/GraphButton";
 import { TabBar } from "./components/TabBar";
 import { VirtualTabHost } from "./components/VirtualTabHost";
 import { Toasts } from "./components/Toasts";
+import { MessagePopup } from "./components/MessagePopup";
+import { MessageBanner } from "./components/MessageBanner";
 import { VaultKeyPrompts } from "./components/VaultKeyPrompts";
 import { VaultKeyWaitingNotice } from "./components/VaultKeyWaitingNotice";
 import { toast } from "./lib/toast";
@@ -1866,6 +1868,7 @@ export default function App() {
             rightPanelOpen={rightPanelOpen} onOpen={useStore.getState().closeRightPanel} />
           <MemberJoinedBanner />
           <WhatsNewModal />
+          <MessagePopup />
           {/* Sits flush against the top of the window now that there's no system
               title bar above it (`titleBarStyle: "Overlay"`), which is where the
               reclaimed ~28px comes from — and that makes it the strip you'd expect
@@ -1962,6 +1965,7 @@ export default function App() {
           <VaultRootMissingBanner />
           <VaultRootRestoredBanner />
           <VaultKeyWaitingNotice />
+          <MessageBanner />
           <AccountLapsedNotice />
           <ClosedAppChangesBanner />
           <NotSyncingBanner />

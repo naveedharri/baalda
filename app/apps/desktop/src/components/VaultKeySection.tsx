@@ -13,8 +13,6 @@
 // false`), one more line says so (`conversionLine`); once sealed, none.
 
 import { useEffect, useState, type ReactNode } from "react";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import * as ipc from "../lib/ipc";
 import { toast } from "../lib/toast";
 import { syncManager } from "../lib/sync/docSession";
 import { api } from "../lib/auth/authManager";
@@ -24,7 +22,8 @@ import {
   vaultKeyStateFor,
 } from "../lib/vaultKeys/runtime";
 import { conversionLine, vaultKeySectionView } from "../lib/vaultKeys/sectionView";
-import { vaultKeyFileText, wordsToVaultKey } from "../lib/vaultKeys/crypto";
+import { saveVaultKeyToFile } from "../lib/vaultKeys/saveKeyFile";
+import { recordVaultKeySaved } from "../lib/vaultKeys/reportSavedFlag";
 import { AsyncButton } from "./AsyncButton";
 import { CopyField } from "./McpTab";
 
@@ -93,27 +92,11 @@ export function VaultKeySection({
     // An admin (not the owner) of an encrypted vault still sees its status.
     return state?.state === "ready" ? <EncryptionCard converting={converting} /> : null;
   }
-  const saveKeyFile = async (keyWords: string) => {
-    const vk = wordsToVaultKey(keyWords);
-    if (!vk) return;
-    const dest = await saveDialog({
-      defaultPath: `${vaultName} vault key.txt`,
-      filters: [{ name: "Text", extensions: ["txt"] }],
-    });
-    if (!dest) {
-      vk.fill(0);
-      return;
-    }
-    try {
-      await ipc.saveTextFile(dest, vaultKeyFileText(vaultName, vaultId, vk));
-    } catch (e) {
-      // The refusal (inside a vault folder, a link) is plain words.
-      toast(e instanceof Error ? e.message : String(e), "error");
-      return;
-    } finally {
-      vk.fill(0);
-    }
-    toast("Vault key saved.");
+  const saveKeyFile = () => saveVaultKeyToFile(vaultId, vaultName);
+  const confirmSaved = async () => {
+    await recordVaultKeySaved(vaultId, "confirmed");
+    toast("Got it.");
+    setShown(null);
   };
 
   return (
@@ -130,7 +113,7 @@ export function VaultKeySection({
         </span>
         {words && !shown && (
           <>
-            <AsyncButton className="secondary sm" onClick={() => saveKeyFile(words)}>
+            <AsyncButton className="secondary sm" onClick={saveKeyFile}>
               Save to file
             </AsyncButton>
             <button type="button" className="encryption-ink-btn" onClick={() => setShown(words)}>
@@ -149,12 +132,15 @@ export function VaultKeySection({
         <div className="vault-key-panel">
           <CopyField value={shown} label="vault key" wrap sensitive />
           <div className="row">
-            <AsyncButton className="secondary sm" onClick={() => saveKeyFile(shown)}>
+            <AsyncButton className="secondary sm" onClick={saveKeyFile}>
               Save to file
             </AsyncButton>
             <button type="button" className="secondary sm" onClick={() => setShown(null)}>
               Hide
             </button>
+            <AsyncButton className="ghost sm" onClick={confirmSaved}>
+              I&apos;ve saved it
+            </AsyncButton>
           </div>
         </div>
       )}
@@ -223,7 +209,7 @@ function KeyIcon() {
  */
 function EncryptionCard({ converting, children }: { converting: string | null; children?: ReactNode }) {
   return (
-    <>
+    <div data-settings-section="security">
       <div className="menu-sep" />
       <div className="subhead">Security</div>
       <section className="encryption-card" aria-label="Encryption">
@@ -247,6 +233,6 @@ function EncryptionCard({ converting, children }: { converting: string | null; c
         </div>
         {children && <div className="encryption-card-foot">{children}</div>}
       </section>
-    </>
+    </div>
   );
 }
