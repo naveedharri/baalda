@@ -21,6 +21,25 @@ import {
 import { isTransientPath } from "./transient.js";
 
 /**
+ * Log one `path_folder_mismatch` by WHICH parent check refused it, never the
+ * path: a device that keeps naming a deleted parent folder shows up as
+ * `unknown_parent` on every launch, which the code alone does not tell apart
+ * from a path that is simply malformed.
+ */
+function logMismatch(kind: "folder" | "note" | "file", vaultId: string, path: string, message: string): void {
+  const reason = /^Unknown (parent )?folder/.test(message)
+    ? "unknown_parent"
+    : /different vault/.test(message)
+      ? "other_vault_parent"
+      : message.startsWith("No folder at")
+        ? "missing_parent"
+        : message.startsWith("Invalid")
+          ? "invalid_path"
+          : "parent_path_differs";
+  console.warn(`[registry] ${kind} path_folder_mismatch reason=${reason} vault=${vaultId} depth=${path.split("/").length}`);
+}
+
+/**
  * Registration of ONE structural row — the shared body of `POST /api/folders`,
  * `POST /api/notes`, `POST /api/files` and their `/batch` twins.
  *
@@ -423,6 +442,7 @@ export async function registerFolder(
     storedPath = loc.relPath;
   } catch (err) {
     if (err instanceof TreeOpError) {
+      logMismatch("folder", ctx.vaultId, input.path, err.message);
       return { status: "error", code: "path_folder_mismatch", message: err.message };
     }
     throw err;
@@ -680,6 +700,7 @@ async function registerNotesWithinQuota(ctx: RegisterCtx, inputs: NoteInput[], r
       storedRelPath = loc.relPath;
     } catch (err) {
       if (err instanceof TreeOpError) {
+        logMismatch("note", ctx.vaultId, input.relPath, err.message);
         results[index] = { status: "error", code: "path_folder_mismatch", message: err.message };
         continue;
       }
@@ -1050,6 +1071,7 @@ export async function registerFile(
     storedPath = loc.relPath;
   } catch (err) {
     if (err instanceof TreeOpError) {
+      logMismatch("file", ctx.vaultId, input.path, err.message);
       return { status: "error", code: "path_folder_mismatch", message: err.message };
     }
     throw err;
