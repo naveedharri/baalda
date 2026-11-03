@@ -428,6 +428,11 @@ async function deleteVaultEverywhere(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    // The pool's 15 s per statement is for requests that read; a vault with
+    // 10k notes and 755 MB of history needed longer to delete its log, and
+    // every attempt rolled back (2026-11-03). Rows are only locked, never
+    // lost, until the commit, so a slow delete costs time, not data.
+    await client.query("SET LOCAL statement_timeout = '10min'");
     if (docIds.length) {
       await client.query("DELETE FROM doc_updates WHERE doc_id = ANY($1)", [docIds]);
       await client.query("DELETE FROM doc_snapshots WHERE doc_id = ANY($1)", [docIds]);
