@@ -1256,8 +1256,9 @@ permission resolution and readable-set listings. Explicit denies and vault postu
 Migration 057 records the owner as creator of null-creator files, notes and folders only in a sole-owner legacy vault with no ACL rows;
 it writes no share or audit row and never changes an explicit rule. Revoked confirmed attachments are
 DELETED from the ex-reader's disk (`registry.ts removeRevokedBinary`, 2026-11-03: a recovery copy left
-them readable in `.context/trash` for good); only a file this user created moves atomically to
-`.context/trash` instead, like a revoked note's own unsent work. A failed removal leaves the
+them readable in `.context/trash` for good), but only while the file still hashes to its agreed
+`fileBases` sha; a file edited here since (or with no base, or an unreadable hash) and a file this
+user created move atomically to `.context/trash` instead, like a revoked note's unseen work. A failed removal leaves the
 file and identity intact. Activity reports kept copies and reveals binaries in the file manager;
 binary recovery must never use the Markdown comparison or text-restore pipeline.
 
