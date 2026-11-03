@@ -36,7 +36,8 @@ function logMismatch(kind: "folder" | "note" | "file", vaultId: string, path: st
         : message.startsWith("Invalid")
           ? "invalid_path"
           : "parent_path_differs";
-  console.warn(`[registry] ${kind} path_folder_mismatch reason=${reason} vault=${vaultId} depth=${path.split("/").length}`);
+  const depth = path.split("/").length;
+  console.warn(`[registry] ${kind} path_folder_mismatch reason=${reason} vault=${vaultId} depth=${depth}`);
 }
 
 /**
