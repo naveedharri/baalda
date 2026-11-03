@@ -1651,7 +1651,7 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
   // had no route at all, because they are in none of the listings the note plan
   // reads.
 
-  it("moves a named, access-checked binary to recovery and forgets its files row", async () => {
+  it("deletes a named, access-checked binary and forgets its files row", async () => {
     const disk = new FakeDisk();
     disk.notes.set("a.md", "d1");
     disk.binaries.add("Team/report.pdf");
@@ -1665,21 +1665,21 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     });
 
     expect(disk.binaries.has("Team/report.pdf")).toBe(false);
-    expect(disk.deleted).toEqual([]);
-    expect(disk.trashed).toEqual([{ from: "Team/report.pdf", to: expect.stringContaining(".context/trash/") }]);
+    // Deleted, not moved aside: a copy in `.context/trash` left a revoked file
+    // readable on the ex-reader's disk for good.
+    expect(disk.deleted).toEqual(["Team/report.pdf"]);
+    expect(disk.trashed).toEqual([]);
     // The note beside it is untouched: the binary pass reads `localFiles` only.
     expect(disk.notes.has("a.md")).toBe(true);
-    expect(r.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: disk.trashed[0].to }]);
+    expect(r.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: null }]);
     // The mapping goes with the file, or the next `hello` re-announces an id
     // whose file is not here and the server names it revoked on every connect.
     expect(r.reg.getFileId("Team/report.pdf")).toBeNull();
     expect(r.reg.fileDocIds()).toEqual([]);
-    expect(reconcileReport.items()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "keptLocally", docId: "file-1", detail: disk.trashed[0].to }),
-    ]));
+    expect(reconcileReport.items().some((i) => i.kind === "keptLocally")).toBe(false);
   });
 
-  it("forgets the files row even when the vault changes after the binary was trashed", async () => {
+  it("forgets the files row even when the vault changes after the binary was deleted", async () => {
     const disk = new FakeDisk();
     disk.notes.set("a.md", "d1");
     disk.binaries.add("Team/report.pdf");
@@ -1700,10 +1700,10 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
         files: { "Team/report.pdf": "file-1" },
         named: new Set(["file-1"]),
         patch: () => {
-          const trash = vi.mocked(ipc.trashNote).getMockImplementation()!;
-          vi.mocked(ipc.trashNote).mockImplementation((async (...a: Parameters<typeof trash>) => {
-            const out = await trash(...a);
-            paused = true; // the vault changed while the move was in flight
+          const remove = vi.mocked(ipc.deleteFile).getMockImplementation()!;
+          vi.mocked(ipc.deleteFile).mockImplementation((async (...a: Parameters<typeof remove>) => {
+            const out = await remove(...a);
+            paused = true; // the vault changed while the delete was in flight
             return out;
           }) as never);
         },
@@ -1715,7 +1715,7 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     }
   });
 
-  it("leaves the binary and its identity when recovery storage cannot be written", async () => {
+  it("leaves the binary and its identity when it cannot be deleted", async () => {
     const disk = new FakeDisk();
     disk.notes.set("a.md", "d1");
     disk.binaries.add("report.pdf");
@@ -1726,7 +1726,7 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
       authority: true,
       files: { "report.pdf": "file-1" },
       named: new Set(["file-1"]),
-      patch: () => { vi.mocked(ipc.trashNote).mockRejectedValue(new Error("disk full")); },
+      patch: () => { vi.mocked(ipc.deleteFile).mockRejectedValue(new Error("permission denied")); },
     });
     expect(disk.binaries.has("report.pdf")).toBe(true);
     expect(disk.deleted).toEqual([]);
@@ -1838,7 +1838,7 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     expect(disk.binaries.has("Team/report.pdf")).toBe(true);
   });
 
-  it("preserves the uploader's revoked binary in recovery too", async () => {
+  it("keeps the uploader's own revoked binary in recovery instead of deleting it", async () => {
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     disk.binaries.add("Team/report.pdf");
