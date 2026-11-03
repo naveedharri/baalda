@@ -2417,9 +2417,13 @@ export class VaultRegistry {
    *    told this removal was ours, or it propagates it back as a user delete and
    *    the owner loses their copy of a file they only meant to stop sharing.
    *
-   * Keep the exact local bytes in recovery storage: confirmation only proves
-   * an earlier upload, and a wrong server revocation must not destroy work.
-   * `trashNote` atomically moves any file, including binaries.
+   * Someone else's file is DELETED, like a revoked note: access removal is a
+   * confidentiality act, and a copy in `.context/trash` left it readable on
+   * the ex-reader's disk for good (reported 2026-11-03). Confirmation is what
+   * makes that safe: the owner's copy is on the server and their own disk.
+   * A file THIS user created keeps its bytes in recovery storage instead, the
+   * way a revoked note keeps its author's unsent work: it was theirs before it
+   * was shared. `trashNote` atomically moves any file, including binaries.
    */
   private async removeRevokedBinary(gone: InboundTrash): Promise<boolean> {
     // The one refusal, and the same shape the note rail's `isPushed` makes: the
@@ -2443,7 +2447,12 @@ export class VaultRegistry {
     try {
       let trashedTo: string | null;
       try {
-        trashedTo = await ipc.trashNote(gone.path, recoveryStamp(), this.epoch());
+        if (this.authoredDocs.has(gone.docId)) {
+          trashedTo = await ipc.trashNote(gone.path, recoveryStamp(), this.epoch());
+        } else {
+          await ipc.deleteFile(gone.path, this.epoch());
+          trashedTo = null;
+        }
       } catch (e) {
         if (ipc.isVaultMismatch(e) || this.stale()) return false;
         // A confirmed absence is idempotent. Any other failure keeps the file

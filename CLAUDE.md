@@ -1254,9 +1254,11 @@ including parent folders and across restart; filesystem failures are distinct fr
 Tree-file authorship uses `files.created_by` consistently in direct, prefetched and indexed
 permission resolution and readable-set listings. Explicit denies and vault postures still apply.
 Migration 057 records the owner as creator of null-creator files, notes and folders only in a sole-owner legacy vault with no ACL rows;
-it writes no share or audit row and never changes an explicit rule. Revoked confirmed attachments move
-atomically to `.context/trash` before their identity is forgotten. Failed recovery leaves the
-file and identity intact. Activity reports these copies and reveals binaries in the file manager;
+it writes no share or audit row and never changes an explicit rule. Revoked confirmed attachments are
+DELETED from the ex-reader's disk (`registry.ts removeRevokedBinary`, 2026-11-03: a recovery copy left
+them readable in `.context/trash` for good); only a file this user created moves atomically to
+`.context/trash` instead, like a revoked note's own unsent work. A failed removal leaves the
+file and identity intact. Activity reports kept copies and reveals binaries in the file manager;
 binary recovery must never use the Markdown comparison or text-restore pipeline.
 
 Account Settings → Connection remembers up to eight normalized server addresses locally,
