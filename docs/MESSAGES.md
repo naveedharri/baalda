@@ -119,7 +119,8 @@ What a person did is stored per account on the server, so it holds on every comp
 
 ## Examples
 
-A reminder to owners to save their vault key, once per vault, until they do:
+A reminder to owners to save their vault key, once per vault, until they do. It shows when the
+vault finishes encrypting, then again an hour later for as long as the key is unsaved:
 
 ```json
 {
@@ -129,7 +130,7 @@ A reminder to owners to save their vault key, once per vault, until they do:
   "perVault": true,
   "display": { "kind": "popup", "size": "medium", "dismissible": false },
   "trigger": { "on": "vault-open", "delaySeconds": 8 },
-  "frequency": { "mode": "until-done", "minHoursBetweenShows": 24 },
+  "frequency": { "mode": "until-done", "minHoursBetweenShows": 1 },
   "priority": 100,
   "icon": "key",
   "tone": "important",
@@ -138,7 +139,7 @@ A reminder to owners to save their vault key, once per vault, until they do:
   "actions": [
     { "id": "save", "kind": "save-vault-key", "label": "Save to file", "style": "primary", "then": "done" },
     { "id": "open", "kind": "open-settings", "target": "vault:general#security", "label": "Show key", "then": "close" },
-    { "id": "later", "kind": "remind-later", "hours": 72, "label": "Remind me later", "then": "snooze" },
+    { "id": "later", "kind": "remind-later", "hours": 1, "label": "Remind me later", "then": "snooze" },
     { "id": "already", "kind": "done", "label": "I already saved it", "style": "quiet", "then": "done" }
   ]
 }

@@ -233,6 +233,9 @@ export function createVaultKeyRoutes(): Hono {
     } finally {
       client.release();
     }
+    // The vault just became keyed, so the "save your key" message now applies.
+    // The app asked for messages when the vault opened, before this.
+    announceUserMessagesChanged(session.userId);
     // The converting device presents the key it just set: warm the cache so
     // notes written around the conversion (queued in index_pending while the
     // key lived only in the pending cache) are drained now, not when a vault

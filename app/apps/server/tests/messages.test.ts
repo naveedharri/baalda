@@ -5,6 +5,7 @@ import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { VAULT_KEYS_MIN_DESKTOP } from "../src/http/client-version.js";
+import { setMessagesPublisher, type MessagesChangedEvent } from "../src/messages/events.js";
 import { testAppDeps } from "./helpers/app.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
@@ -183,5 +184,67 @@ describe("messages", () => {
     expect(await ids("?showing=one-shot&showingOrg=some-org")).toEqual([]);
     await receipt("one-shot", "dismiss");
     expect(await ids("?showing=one-shot&showingOrg=")).toEqual([]);
+  });
+
+  it("a per-vault message for other vaults does not crowd out the open vault", async () => {
+    const s = await setup();
+    await keyVault(s.vaultId);
+    const orgs = [s.orgId];
+    for (let i = 0; i < 6; i++) {
+      const org = await createOrg(s.owner, `Team ${i}`, `msg-${Date.now()}-${i}`);
+      await keyVault(await seedVault(org.id));
+      orgs.push(org.id);
+    }
+    await admin("POST", "/messages", base("save-key", { condition: "vault-key-not-saved", priority: 100 }));
+    await admin("POST", "/messages", base("everyone"));
+    const list = async (q: string) => {
+      const res = await call(s.owner, "GET", `/messages${q}`);
+      return ((await res.json()) as { messages: { spec: { id: string }; orgId: string | null }[] }).messages.map(
+        (m) => [m.spec.id, m.orgId],
+      );
+    };
+
+    // A build that doesn't name the open vault still gets the capped list.
+    const old = await list("");
+    expect(old).toHaveLength(5);
+    expect(old.some(([id]) => id === "everyone")).toBe(false);
+
+    const open = orgs[6];
+    expect(await list(`?org=${open}`)).toEqual([
+      ["save-key", open],
+      ["everyone", null],
+    ]);
+    // No synced vault open: only what isn't tied to a vault.
+    expect(await list("?org=")).toEqual([["everyone", null]]);
+    // The message on screen stays in the list after a vault switch.
+    expect(await list(`?org=${open}&showing=save-key&showingOrg=${orgs[0]}`)).toContainEqual(["save-key", orgs[0]]);
+  });
+
+  it("keying a vault tells the owner's apps to ask for messages again", async () => {
+    vi.stubEnv("VAULT_KEY_CONVERSION", "on");
+    const s = await setup();
+    const events: MessagesChangedEvent[] = [];
+    setMessagesPublisher((e) => events.push(e));
+    try {
+      const vk = randomBytes(32);
+      const res = await app.request(`/api/vaults/${s.vaultId}/keys/init`, {
+        method: "POST",
+        headers: {
+          ...authHeaders(s.owner),
+          "content-type": "application/json",
+          "x-baalda-version": "0.1.111",
+          "x-baalda-vk": vk.toString("base64"),
+        },
+        body: JSON.stringify({
+          vkCheck: makeVkCheck(vk, s.vaultId).toString("base64"),
+          generation: 1,
+          sealedVkForSelf: randomBytes(80).toString("base64"),
+        }),
+      });
+      expect(res.status).toBe(201);
+      expect(events).toContainEqual({ scope: "user", userId: s.owner.userId });
+    } finally {
+      setMessagesPublisher(null);
+    }
   });
 });

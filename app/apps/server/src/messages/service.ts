@@ -116,6 +116,8 @@ export async function pendingMessages(
   clientVersion: string | null | undefined,
   db: Queryable = pool,
   showing: ShowingPair | null = null,
+  /** The open vault's org (null: none). Undefined: a build that doesn't say, gets every vault. */
+  openOrgId?: string | null,
 ): Promise<DeliveredMessage[]> {
   const ctx = await loadUserContext(userId, db);
   if (!ctx) return [];
@@ -154,6 +156,9 @@ export async function pendingMessages(
     for (const t of targets) {
       const r = byKey.get(`${id}\0${t.orgId ?? ""}`);
       const isShowing = showing?.messageId === id && (showing.orgId ?? "") === (t.orgId ?? "");
+      // The app only shows a per-vault message in that vault, so the copies for
+      // other vaults must not use up MAX_DELIVERED and crowd this one out.
+      if (openOrgId !== undefined && t.orgId && t.orgId !== openOrgId && !isShowing) continue;
       if (!receiptAllows(spec, r, now, isShowing)) continue;
       out.push({
         spec: publicSpec(spec),
