@@ -105,7 +105,10 @@ async function refresh(): Promise<void> {
   if (!running || preview || s.authStatus !== "signed-in" || !s.vault) return;
   let list: DeliveredMessage[];
   try {
-    list = await api.listMessages(current ? { id: current.spec.id, orgId: current.delivered.orgId } : undefined);
+    list = await api.listMessages(
+      context().openOrgId,
+      current ? { id: current.spec.id, orgId: current.delivered.orgId } : undefined,
+    );
   } catch (e) {
     console.warn("messages fetch failed:", e);
     return;

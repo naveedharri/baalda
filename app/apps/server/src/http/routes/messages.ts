@@ -66,7 +66,10 @@ export function createMessageRoutes(): Hono {
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const showingId = c.req.query("showing");
     const showing = showingId ? { messageId: showingId, orgId: c.req.query("showingOrg") || null } : null;
-    const messages = await pendingMessages(session.userId, reportedClientVersion(c), pool, showing);
+    // `org` is the open vault ("" for none); builds that don't send it get every vault.
+    const org = c.req.query("org");
+    const openOrgId = org === undefined ? undefined : org || null;
+    const messages = await pendingMessages(session.userId, reportedClientVersion(c), pool, showing, openOrgId);
     return c.json({ messages });
   });
 

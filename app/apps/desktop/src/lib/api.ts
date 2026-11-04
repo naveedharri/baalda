@@ -1789,12 +1789,17 @@ export class ApiClient {
    * server keeps it in the answer until it is acted on (here or elsewhere)
    * instead of hiding it for having just been shown.
    */
-  async listMessages(showing?: { id: string; orgId: string | null }): Promise<DeliveredMessage[]> {
-    const qs = showing
-      ? `?showing=${encodeURIComponent(showing.id)}&showingOrg=${encodeURIComponent(showing.orgId ?? "")}`
-      : "";
+  async listMessages(
+    openOrgId: string | null,
+    showing?: { id: string; orgId: string | null },
+  ): Promise<DeliveredMessage[]> {
+    const params = new URLSearchParams({ org: openOrgId ?? "" });
+    if (showing) {
+      params.set("showing", showing.id);
+      params.set("showingOrg", showing.orgId ?? "");
+    }
     try {
-      const { data } = await this.request<{ messages?: DeliveredMessage[] }>("GET", `/api/messages${qs}`);
+      const { data } = await this.request<{ messages?: DeliveredMessage[] }>("GET", `/api/messages?${params}`);
       return Array.isArray(data?.messages) ? data.messages : [];
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return [];
