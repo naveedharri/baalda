@@ -38,6 +38,7 @@ import {
   vaultHasKeyMaterial,
 } from "../../crypto/conversion.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
+import { announceUserMessagesChanged } from "../../messages/events.js";
 import { getSession } from "../session.js";
 import {
   PASSWORD_UNLOCK_OFF,
@@ -398,6 +399,51 @@ export function createVaultKeyRoutes(): Hono {
     } finally {
       client.release();
     }
+  });
+
+  // An owner saved the vault key to a file (or confirmed they hold it), for
+  // the CURRENT generation. Clears the `vault-key-not-saved` message; a new
+  // generation asks again. Records only the method, never the key.
+  routes.post("/vaults/:vaultId/keys/saved", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const member = await membership(vaultId, session.userId);
+    if (!member) return c.json({ error: "Unknown vault" }, 404);
+    if (member.role !== "owner") return c.json({ error: "Only the owner can save the vault key", code: "owner_required" }, 403);
+    const body = (await c.req.json().catch(() => null)) as { method?: unknown } | null;
+    const method = body?.method;
+    if (method !== "file" && method !== "confirmed") {
+      return c.json({ error: "method must be file or confirmed", code: "invalid_argument" }, 400);
+    }
+    const { rows } = await pool.query<{ vk_check: Buffer | null; key_generation: number | null }>(
+      "SELECT vk_check, key_generation FROM vaults WHERE id = $1",
+      [vaultId],
+    );
+    if (!rows[0]?.vk_check) return c.json({ error: "This vault has no key yet", code: "not_keyed" }, 409);
+    const generation = rows[0].key_generation ?? 1;
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO vault_key_backups (org_id, user_id, generation, method) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (org_id, user_id, generation) DO UPDATE SET method = EXCLUDED.method, saved_at = now()`,
+        [member.orgId, session.userId, generation, method],
+      );
+      await client.query(
+        `INSERT INTO access_audit (organization_id, actor_user_id, actor_name, entity_type, entity_id, action, before_state, after_state)
+         VALUES ($1, $2, (SELECT name FROM "user" WHERE id = $2), 'vault', $3, 'vault_key_saved', NULL, $4::jsonb)`,
+        [member.orgId, session.userId, vaultId, JSON.stringify({ method })],
+      );
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+    announceUserMessagesChanged(session.userId);
+    return c.json({ ok: true });
   });
 
   routes.get("/vaults/:vaultId/keys/requests", async (c) => {

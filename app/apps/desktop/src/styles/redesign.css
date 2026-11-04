@@ -2771,9 +2771,9 @@ html:not(.rd-off) .account-popover .rd-prof .presence-light { border-color: var(
 /* One right-hand column: the NOTES header's last icon (the select checkbox)
    is centred 49px in from the sidebar's right edge. The sync dots, each
    row's ⋯, the Agent Skills count and the bug icon all centre on it.
-   (Measured live: dots were 7.5px left of it, the bug icon 23px right of it
-   with its old 8px margin, so it now gets 31px.) */
-html:not(.rd-off) .sidebar .filetree-scroll .tree-sync { transform: translateX(15.5px); }
+   (Measured live: the bug icon was 23px right of it with its old 8px margin,
+   so it now gets 31px. The dots already sit on the column with the 8px
+   shift above; 15.5px here put them 7.5px right of it, 2026-11-03.) */
 html:not(.rd-off) .sidebar .filetree-scroll .tree-more { transform: translateX(-12.5px); }
 html:not(.rd-off) .sidebar-footer .identity-bug { margin-right: 31px; }
 
@@ -3061,8 +3061,10 @@ html:not(.rd-off) .sidebar .tree-row.selected::after {
   box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 2px 6px -2px rgba(var(--rd-ink), 0.1);
 }
 /* Agent Skills row: the tree rows' highlight, same light purple and the same
-   12px-from-each-side span (38px past the old right edge, like `right: -2px`). */
-html:not(.rd-off) .skills-shortcut-row { width: calc(var(--sidebar-layout-w, 300px) - 16px); padding-right: 10px; border-radius: 9px; }
+   12px-from-each-side span (38px past the old right edge, like `right: -2px`).
+   The extra width goes into the right padding, so the count stays centred on
+   the checkbox column with the dots and the bug icon (it was 28px right). */
+html:not(.rd-off) .skills-shortcut-row { width: calc(var(--sidebar-layout-w, 300px) - 16px); padding-right: 38px; border-radius: 9px; }
 html:not(.rd-off) .skills-shortcut-row:hover { background: var(--bg-hover); }
 
 /* Account Settings → Vaults: Synced and On this device carry equal weight,

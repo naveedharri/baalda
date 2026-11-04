@@ -682,6 +682,11 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
       // A key restored on this device earlier still counts when it verifies.
       if (held && mine.vkCheck && mine.generation !== undefined && (await verifyVk(held, vaultId, fromBase64(mine.vkCheck)))) {
         await confirmed(vaultId);
+        // "Pending" with a key that opens the check: this account holds no
+        // wrap, e.g. the key came from a join code or invite link before the
+        // account had a key pair to seal it to. Seal it now, or the account's
+        // other devices never get it and this one is refused as a key holder.
+        await sealToSelf(vaultId, held, mine.generation).catch(() => {});
         return accept(vaultId, held, mine.generation);
       }
       if (heldConfirmed) {
@@ -695,6 +700,9 @@ export function createVaultKeySession(deps: VaultKeySessionDeps) {
     const local = held;
     if (local && (await verifyVk(local, vaultId, vkCheck))) {
       await confirmed(vaultId);
+      if (!mine.wraps.some((w) => w.generation === mine.generation)) {
+        await sealToSelf(vaultId, local, mine.generation).catch(() => {});
+      }
       return accept(vaultId, local, mine.generation);
     }
     verified.delete(vaultId);

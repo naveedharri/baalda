@@ -50,7 +50,7 @@ import {
   sealSearchRow,
 } from "../index/sealed-index.js";
 import { refreshSearchPages } from "../index/search-pages.js";
-import { searchTokenSet } from "../index/search-tokens.js";
+import { sealedTokenSet } from "../index/search-tokens.js";
 import { openNoteTextBytes, sealNoteText } from "../versions/texts.js";
 import { sha256Hex } from "../versions/capture.js";
 import { indexDoc, setIndexDeferredHook } from "../index/indexer.js";
@@ -81,6 +81,10 @@ export const BACKFILL_TABLES = [
   // place (same content). Also never counted by `encryptionStatus`.
   "note_index_score_pack",
   "blob_text_score_pack",
+  // Score blobs of rows past the old 64 KB token bound, given their token set
+  // so search stops opening the whole sealed body. Also never counted.
+  "note_index_score_tokens",
+  "blob_text_score_tokens",
 ] as const;
 export type BackfillTable = (typeof BACKFILL_TABLES)[number];
 
@@ -203,6 +207,10 @@ async function runBatch(
       return batchScorePack("note_index_score_pack", c, after, limit, db);
     case "blob_text_score_pack":
       return batchScorePack("blob_text_score_pack", c, after, limit, db);
+    case "note_index_score_tokens":
+      return batchScoreTokens("note_index_score_tokens", c, after, limit, db);
+    case "blob_text_score_tokens":
+      return batchScoreTokens("blob_text_score_tokens", c, after, limit, db);
   }
 }
 
@@ -343,7 +351,7 @@ async function batchNoteIndexScore(c: DocCrypto, after: string | null, limit: nu
     }
     const score = {
       vector: full.vector,
-      tokens: full.tokens ?? searchTokenSet(`${r.title ?? ""} ${full.body}`) ?? null,
+      tokens: full.tokens ?? sealedTokenSet(`${r.title ?? ""} ${full.body}`) ?? null,
     };
     const json = Buffer.from(JSON.stringify(score), "utf8");
     const sealed = sealVerified(
@@ -425,6 +433,95 @@ async function batchScorePack(
   return { ...scanned(rows), last: rows.at(-1)?.id ?? after };
 }
 
+/**
+ * A score blob with no token set (its row passed the old 64 KB bound) given
+ * one from its sealed body, up to `SEALED_TOKENS_MAX`: the same set the
+ * row's substring rule matches, so the score blob then answers alone. The
+ * vector is kept and must equal the body's; written only while both blobs are
+ * still the ones just read. Bodies are opened one at a time and a batch stops
+ * after {@link BACKFILL_BATCH_BYTES} of them.
+ */
+async function batchScoreTokens(
+  table: "note_index_score_tokens" | "blob_text_score_tokens",
+  c: DocCrypto,
+  after: string | null,
+  limit: number,
+  db: Queryable,
+): Promise<BatchResult> {
+  const notes = table === "note_index_score_tokens";
+  const [tbl, key] = notes ? ["note_index", "doc_id"] : ["blob_text", "blob_id"];
+  const { rows } = await db.query<{ id: string; search_score_enc: Buffer }>(
+    byteBudgeted(
+      `SELECT ${key} AS id, search_score_enc
+         FROM ${tbl}
+        WHERE vault_id = $1 AND ${key} > $2 AND search_score_enc IS NOT NULL AND search_enc IS NOT NULL
+        ORDER BY ${key}
+        LIMIT $3`,
+      "x.search_score_enc",
+      "x.id",
+      4,
+    ),
+    [c.vaultId, after ?? "", limit, BACKFILL_BATCH_BYTES],
+  );
+  let bodyBytes = 0;
+  for (const [i, r] of rows.entries()) {
+    if (bodyBytes >= BACKFILL_BATCH_BYTES) {
+      return { rows: i, last: rows[i - 1].id, more: true };
+    }
+    let score: { vector: number[]; tokens: string | null };
+    try {
+      score = notes ? openScoreRow(c, r.id, r.search_score_enc) : openBlobScoreRow(c, r.id, r.search_score_enc);
+    } catch {
+      metric(table, "verify_failed");
+      continue;
+    }
+    if (score.tokens !== null) continue;
+    const { rows: fullRows } = await db.query<{ title: string | null; search_enc: Buffer }>(
+      `SELECT ${notes ? "title" : "NULL::text AS title"}, search_enc FROM ${tbl} WHERE ${key} = $1 AND vault_id = $2`,
+      [r.id, c.vaultId],
+    );
+    const enc = fullRows[0]?.search_enc;
+    if (!enc) continue;
+    bodyBytes += enc.length;
+    let full: ReturnType<typeof openSearchRow>;
+    try {
+      full = notes ? openSearchRow(c, r.id, enc) : openBlobTextRow(c, r.id, enc);
+    } catch {
+      metric(table, "verify_failed");
+      continue;
+    }
+    const sameVector =
+      Array.isArray(full.vector) &&
+      Array.isArray(score.vector) &&
+      full.vector.length === score.vector.length &&
+      full.vector.every((x, d) => Object.is(x, score.vector[d]));
+    const tokens = full.tokens ?? sealedTokenSet(notes ? `${fullRows[0].title ?? ""} ${full.body}` : full.body);
+    if (!sameVector || tokens === null) {
+      metric(table, "skipped");
+      continue;
+    }
+    const next = { vector: score.vector, tokens };
+    const json = Buffer.from(JSON.stringify(next), "utf8");
+    const sealed = sealVerified(
+      table,
+      r.id,
+      json,
+      () => (notes ? sealScoreRow(c, r.id, next) : sealBlobScoreRow(c, r.id, next)),
+      (s) => Buffer.from(JSON.stringify(notes ? openScoreRow(c, r.id, s) : openBlobScoreRow(c, r.id, s)), "utf8"),
+    );
+    if (!sealed) continue;
+    await write(
+      table,
+      r.id,
+      `UPDATE ${tbl} SET search_score_enc = $2
+        WHERE ${key} = $1 AND vault_id = $4 AND search_score_enc = $3 AND search_enc = $5`,
+      [r.id, sealed, r.search_score_enc, c.vaultId, enc],
+      db,
+    );
+  }
+  return { ...scanned(rows), last: rows.at(-1)?.id ?? after };
+}
+
 /** The file half of {@link batchNoteIndexScore} (`blob_text.search_score_enc`). */
 async function batchBlobTextScore(c: DocCrypto, after: string | null, limit: number, db: Queryable): Promise<BatchResult> {
   const { rows } = await db.query<{ blob_id: string; search_enc: Buffer; updated_at: string }>(
@@ -448,7 +545,7 @@ async function batchBlobTextScore(c: DocCrypto, after: string | null, limit: num
       metric("blob_text_score", "verify_failed");
       continue;
     }
-    const score = { vector: full.vector, tokens: full.tokens ?? searchTokenSet(full.body) ?? null };
+    const score = { vector: full.vector, tokens: full.tokens ?? sealedTokenSet(full.body) ?? null };
     const json = Buffer.from(JSON.stringify(score), "utf8");
     const sealed = sealVerified(
       "blob_text_score",

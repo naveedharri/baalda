@@ -38,6 +38,8 @@ export const NOTICE_PRIORITY = [
   "note-limit",
   "create-refusal",
   "removed-on-disk",
+  // A server-driven message shown as a banner (lib/messages).
+  "message",
   "attachment-local-only",
 ] as const;
 

@@ -22,7 +22,7 @@ import { purgeBlobRefs, replaceBlobRefs } from "../blobs/refs.js";
 import { cachedRefHeads, refText } from "../blobs/ref-windows.js";
 import { cosineSimilarity, EMBED_DIM, embed, tokenize } from "./embedder.js";
 import { loadPages, pageMatchCount, pageMatchCountWithPath, vocabMasks } from "./search-pages.js";
-import { keywordMatchCount, searchTokenSet } from "./search-tokens.js";
+import { keywordMatchCount, searchTokenSet, sealedTokenSet } from "./search-tokens.js";
 
 /**
  * Note indexing engine (spec: links + vectors).
@@ -247,7 +247,7 @@ async function indexNoteRow(
   const heads = await cachedRefHeads(note.vault_id, db);
 
   if (crypto) {
-    const tokens = searchTokenSet(`${title ?? ""} ${content}`) ?? null;
+    const tokens = sealedTokenSet(`${title ?? ""} ${content}`) ?? null;
     // Keyed: content, vector and tokens go ONLY into the sealed `search_enc`
     // (and vector + tokens again into `search_score_enc`, what ranking opens).
     // The plaintext columns are not written, and never nulled here: an old row

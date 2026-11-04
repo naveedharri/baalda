@@ -19,7 +19,7 @@ import { relAssetPath } from "../../render/note-html.js";
 import { config } from "../../config.js";
 import { pgText } from "../../db/text.js";
 import { embed } from "../../index/embedder.js";
-import { searchTokenSet } from "../../index/search-tokens.js";
+import { searchTokenSet, sealedTokenSet } from "../../index/search-tokens.js";
 import { ByteBudget } from "../../blobs/admission.js";
 import {
   BLOB_MIME_ENFORCE,
@@ -1890,7 +1890,7 @@ blobRoutes.put("/vaults/:vaultId/blobs/:blobId/text", async (c) => {
   const textCrypto = docCryptoOf(vaultId, vkr);
   if (textCrypto) {
     const vector = embed(stored);
-    const tokens = searchTokenSet(stored) ?? null;
+    const tokens = sealedTokenSet(stored) ?? null;
     await pool.query(
       `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, source, updated_at, search_enc, search_score_enc)
        VALUES ($1, $2, $3, $4, '', $5, now(), $6, $7)

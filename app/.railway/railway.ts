@@ -49,6 +49,8 @@ const SERVER_ENV = [
   "ACCOUNT_KEY_PEPPER",
   "KEY_RECOVERY_PUBLIC_KEY",
   "KEY_RECOVERY_ADMIN_TOKEN",
+  // Messages to users (docs/MESSAGES.md): admin endpoints; unset = off.
+  "BAALDA_ADMIN_TOKEN",
   // Attachment access rule mode: text | shadow (default) | refs.
   "ATTACHMENT_ACL_MODE",
   "NODE_OPTIONS",

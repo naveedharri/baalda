@@ -4503,6 +4503,17 @@ button.secondary.about-update-btn:disabled {
      dialogs tab bodies render. See `components/SettingsModal.tsx`. */
   animation: fade-in var(--t-fast) var(--ease) both;
 }
+
+/* A section opened by name (`requestSettings(tab, section)`): a brief accent
+   wash that fades, so the eye lands on it after the scroll. */
+.settings-section-flash {
+  border-radius: var(--radius-lg);
+  animation: settings-section-flash 1.2s ease-out;
+}
+@keyframes settings-section-flash {
+  0%, 25% { background: var(--bg-active); box-shadow: 0 0 0 6px var(--bg-active); }
+  100% { background: transparent; box-shadow: 0 0 0 6px transparent; }
+}
 /* A team section that isn't available until the vault is synced. Shown
    greyed in the nav (discoverable), with a lock glyph. */
 .settings-nav .menu-item.locked {
@@ -11570,4 +11581,160 @@ body.access-board-grabbing * {
   width: 16px;
   text-align: center;
   color: var(--text-tertiary);
+}
+
+/* messages
+   Server-driven messages (lib/messages). The popup rides the shared .modal /
+   .modal-backdrop chrome; the tile is the Security card's, tinted by tone. */
+.message-popup {
+  position: relative;
+  width: 520px;
+  max-width: 92vw;
+  max-height: min(80vh, 640px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: var(--sp-6);
+  outline: none;
+  --message-tint: var(--accent);
+}
+.message-popup.size-small { width: 400px; }
+.message-popup.size-large { width: 600px; }
+.message-popup.tone-important { --message-tint: var(--success); }
+.message-popup.tone-warning { --message-tint: var(--warning, #d97706); }
+.message-popup.tone-success { --message-tint: var(--success); }
+.message-tile {
+  width: 46px;
+  height: 46px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--message-tint) 14%, transparent);
+  color: color-mix(in srgb, var(--message-tint) 80%, var(--text-primary));
+}
+.message-tile svg {
+  width: 24px;
+  height: 24px;
+}
+.message-title {
+  margin: var(--sp-4) 0 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--text-primary);
+}
+.message-body {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+.message-body p {
+  margin: 0 0 var(--sp-3);
+}
+.message-body p:last-child {
+  margin-bottom: 0;
+}
+.message-body b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.message-body a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+}
+/* When the row is too narrow it wraps upward-first: the real buttons stay on
+   the top line and the quiet choices drop to a line beneath them. */
+.message-actions {
+  align-self: stretch;
+  display: flex;
+  flex-wrap: wrap-reverse;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-3);
+  margin-top: var(--sp-5);
+}
+.message-actions button {
+  white-space: nowrap;
+}
+.message-actions-quiet {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-left: calc(-1 * var(--sp-2));
+}
+.message-actions-main {
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+/* The dark main action, like the Security card's "Show vault key". */
+.message-btn-primary {
+  height: 34px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--text-primary);
+  color: var(--bg-surface);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.message-btn-primary:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.message-actions button.secondary {
+  height: 34px;
+  padding: 0 16px;
+  border-radius: 9px;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+.message-actions .message-btn-quiet {
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.message-close {
+  position: absolute;
+  top: var(--sp-4);
+  right: var(--sp-4);
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.message-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.message-banner-text p {
+  display: inline;
+  margin: 0;
+}
+@media (max-width: 520px) {
+  .message-actions,
+  .message-actions-quiet,
+  .message-actions-main {
+    flex-direction: column-reverse;
+    align-items: stretch;
+    margin-left: 0;
+  }
+  .message-actions button {
+    width: 100%;
+  }
 }

@@ -19,10 +19,12 @@ import {
   setSkillsChangedPublisher,
 } from "./sync/member-events.js";
 import { publishUserEvent, setUserEventPublisher } from "./sync/user-events.js";
+import { setMessagesPublisher } from "./messages/events.js";
 import { backfillIndex, setLiveDocLookup } from "./index/indexer.js";
 import { backfillRefWindows } from "./blobs/ref-windows.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
+import { startTokenFill, stopTokenFill } from "./index/token-fill.js";
 import { startKeyRecovery, stopKeyRecovery } from "./crypto/key-recovery.js";
 import { resolvePepperAtBoot } from "./auth/pepper-boot.js";
 import { startCryptoBackfill, stopCryptoBackfill } from "./crypto/backfill.js";
@@ -155,6 +157,18 @@ async function main() {
       .catch(broadcastFailed("skills-changed"));
   });
   // Soft delete / restore / purge → open Activity feeds refetch Trash (#260).
+  // Messages (messages/events.ts): "all" rides the one process-wide topic every
+  // instance listens on; "user" rides that user's topic like invitations do.
+  await vaultChannel.listenForMessages();
+  setMessagesPublisher((event) => {
+    if (event.scope === "all") {
+      void vaultChannel.publishMessagesChanged().catch(broadcastFailed("messages-changed"));
+    } else {
+      void publishUserEvent(pubsub, event.userId, { t: "messages-changed" }).catch(
+        broadcastFailed("messages-changed"),
+      );
+    }
+  });
   setTrashActivityPublisher((vaultId) => {
     void vaultChannel.publishActivityChanged(vaultId).catch(broadcastFailed("activity-changed"));
   });
@@ -411,6 +425,9 @@ async function main() {
   startBlobGc();
   // Trash retention: notes past `purge_after` lose their CRDT, versions and row.
   startTrashPurge();
+  // Keyword sets for unkeyed vaults' rows indexed before migration 068, so
+  // their search stops counting words over every body in SQL.
+  startTokenFill();
   // W3: seals a keyed vault's pre-existing plaintext rows while a member's
   // key is held. No-op with BAALDA_VAULT_KEYS off.
   startCryptoBackfill();
@@ -439,6 +456,7 @@ async function main() {
     versionCapture?.stop();
     stopBlobGc();
     stopTrashPurge();
+    stopTokenFill();
     stopKeyRecovery();
     stopCryptoBackfill();
     stopLapseScheduler();

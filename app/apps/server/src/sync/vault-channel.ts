@@ -3,7 +3,7 @@ import type { IncomingMessage, Server as HttpServer } from "node:http";
 import type { Socket } from "node:net";
 import { config } from "../config.js";
 import { type PubSub, vaultTopic } from "./pubsub.js";
-import { decodeUserEvent, USER_EVENTS_CAP, userTopic } from "./user-events.js";
+import { decodeUserEvent, MESSAGES_CAP, USER_EVENTS_CAP, userTopic } from "./user-events.js";
 import { verifyVaultToken } from "../tokens/vault-token.js";
 import { listReadableDocsInVault, type SharedVaultReads } from "../permissions/vault-docs.js";
 import { listEmptyDocs, loadDocDiff } from "../yjs/persistence.js";
@@ -29,6 +29,9 @@ import {
   encodePubsubOrgChanged,
   encodePubsubAppearanceChanged,
   encodePubsubSkillsChanged,
+  encodePubsubMessagesChanged,
+  MESSAGES_TOPIC,
+  PS_MESSAGES_CHANGED,
   type AppearanceChange,
   type OrgChange,
   encodePubsubRejected,
@@ -368,6 +371,21 @@ export class VaultChannel {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubSkillsChanged(orgId));
   }
 
+  /** In-app messages changed for everyone. Rides {@link MESSAGES_TOPIC}, which
+   *  every instance subscribes to once ({@link listenForMessages}), so the hint
+   *  reaches connections on every instance, not only this one. */
+  async publishMessagesChanged(): Promise<void> {
+    await this.pubsub.publish(MESSAGES_TOPIC, encodePubsubMessagesChanged());
+  }
+
+  /** Subscribe this process to the fleet-wide messages topic. Call once from
+   *  the entrypoint; returns the unsubscribe. */
+  async listenForMessages(): Promise<() => void> {
+    return this.pubsub.subscribe(MESSAGES_TOPIC, (p) => {
+      if (p[0] === PS_MESSAGES_CHANGED) this.broadcastMessagesChanged();
+    });
+  }
+
   /** A read-only connection's edit was dropped (`ready`-independent; see the
    *  `rejected` frame). Every instance forwards it to that user's sockets. */
   async publishRejected(vaultId: string, userId: string, docId: string): Promise<void> {
@@ -461,6 +479,14 @@ export class VaultChannel {
   broadcastVersionAvailable(version: string): number {
     let told = 0;
     for (const conn of [...this.connections]) if (conn.hintVersionAvailable(version)) told++;
+    return told;
+  }
+
+  /** Tell every authenticated connection on THIS instance that advertises the
+   *  `messages` cap to refetch its messages. Returns how many were told. */
+  broadcastMessagesChanged(): number {
+    let told = 0;
+    for (const conn of [...this.connections]) if (conn.hintMessagesChanged()) told++;
     return told;
   }
 
@@ -771,13 +797,15 @@ class VaultConnection {
     if (this.closed || this.ws.readyState !== this.ws.OPEN) return;
     for (const u of held ?? []) if (this.readable.has(u.docId)) this.forwardLive(u.docId, u.update);
 
-    // Events addressed to this USER (an invitation to another vault) ride
-    // whichever vault channel they have open. Opt-in by cap: an old client
-    // would not know the frame.
-    if (this.caps.has(USER_EVENTS_CAP)) {
+    // Events addressed to this USER (an invitation to another vault, a change
+    // to their messages) ride whichever vault channel they have open. Opt-in by
+    // cap, per frame: an old client would not know the frame.
+    if (this.caps.has(USER_EVENTS_CAP) || this.caps.has(MESSAGES_CAP)) {
       const offUser = await this.pubsub.subscribe(userTopic(this.userId), (p) => {
         const event = decodeUserEvent(p);
-        if (event && !this.closed) this.send(event);
+        if (!event || this.closed) return;
+        const cap = event.t === "messages-changed" ? MESSAGES_CAP : USER_EVENTS_CAP;
+        if (this.caps.has(cap)) this.send(event);
       });
       if (this.closed || this.ws.readyState !== this.ws.OPEN) {
         offUser();
@@ -1640,6 +1668,14 @@ class VaultConnection {
   hintVersionAvailable(version: string): boolean {
     if (!this.helloSeen || !this.userId) return false;
     this.send({ t: "version-available", version });
+    return true;
+  }
+
+  /** Forward a messages hint once this connection has authenticated, if its
+   *  client advertises the `messages` cap. */
+  hintMessagesChanged(): boolean {
+    if (!this.helloSeen || !this.userId || !this.caps.has(MESSAGES_CAP)) return false;
+    this.send({ t: "messages-changed" });
     return true;
   }
 

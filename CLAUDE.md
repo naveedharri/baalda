@@ -919,6 +919,15 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `file` (dedupe, or `adopted` = bind to that row) or complete's; a 402
   `attachment_sync_requires_pro` registers nothing and raises the usual notice, and any other
   registration refusal sends that file down the old path once.
+- **Messages to users** (`messages/`, `http/routes/messages.ts`, migration 095, `docs/MESSAGES.md`):
+  operator-created popup/banner/toast messages in `app_messages` (spec JSONB, validated on write;
+  audience filters, named `condition` such as `vault-key-not-saved` (unknown ⇒ nobody), allowlisted
+  action kinds, per-message frequency). Desktops read `GET /api/messages` and post receipts per
+  (message, user, org), so done/snooze holds on every device. Admin routes `/api/admin/messages`
+  need `x-baalda-admin-token` = `BAALDA_ADMIN_TOKEN` (404 when unset or wrong); `pnpm messages`
+  wraps them. Writes push `{t: "messages-changed"}` to `messages`-cap connections: scope all over
+  the process-wide `messages` pub/sub topic (`PS_MESSAGES_CHANGED` 0x10, subscribed once per
+  instance), scope user over `user:{id}` (`messages/events.ts`, wired in `index.ts`).
 - `metrics/sync-metrics.ts` — in-process counters, no deps, no DB writes, reset on restart. Every 60 s,
   only when something changed, one line `[sync-metrics] {"windowS":60,"counters":{…}}` with DELTAS
   (sum across lines and instances): `seed.applied`/`appliedBytes`/`covered`/`conflict`/`refused`/
@@ -1007,7 +1016,7 @@ plaintext token per note; revoke = DELETE), `vault_checkpoint_blobs` + `checkpoi
 change in prod) · `BETTER_AUTH_URL` · `PORT` (3010) · `HOCUSPOCUS_PORT` (3011) · `SYNC_TOKEN_TTL_SECONDS`
 (600) · `COMPACTION_THRESHOLD` (50) · `TRASH_RETENTION_DAYS` (30) · `CORS_ORIGINS` (optional) · `OPENAI_API_KEY` (optional) ·
 `EMAIL_FROM` + `SMTP_URL` | `RESEND_API_KEY` (optional; turns on password reset, sign-up verification
-and invitation emails — `src/email/mailer.ts`; unset ⇒ none offered, like Google OAuth) · `BUG_REPORT_EMAIL` (optional; with email on, the desktop's sidebar bug icon emails reports
+and invitation emails — `src/email/mailer.ts`; unset ⇒ none offered, like Google OAuth) · `BAALDA_ADMIN_TOKEN` (optional, ≥32 chars; turns on the messages admin routes, `docs/MESSAGES.md`) · `BUG_REPORT_EMAIL` (optional; with email on, the desktop's sidebar bug icon emails reports
 there, Reply-To = reporter — `http/routes/bug-reports.ts`; unset ⇒ the icon is hidden) ·
 billing (managed/Polar only; self-hosters leave all unset ⇒ unlimited): `POLAR_ACCESS_TOKEN` +
 `POLAR_WEBHOOK_SECRET` + `POLAR_SERVER` · `BILLING_MODEL` (`vault`|`team`, default `vault`) ·
@@ -1105,8 +1114,7 @@ yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-
   (d) 2026-11-01: while the launch safety net is on (`keys/mine` `recoveryNet`), every vault converts,
   Google-only solo owners included. Owners with no other way back (no password wrap, one computer, no
   teammate holding the key: keyed `keys/mine` `otherKeyHolders` 0) see `SaveVaultKeyCard` at the top of
-  Vault Settings → General: Save to file, Email it to myself (their own mail app via `mailto:`, never our
-  mailer), Show key, and for Google-only accounts "Set a password instead" (`POST /api/me/password`, Better
+  Vault Settings → General: Save to file, Show key, and for Google-only accounts "Set a password instead" (`POST /api/me/password`, Better
   Auth `setPassword`, then the password unlock writes the wrap). The key file is one line of 24 words;
   `wordsToVaultKey` ignores numbering and punctuation.
 - **Desktops without vault keys** (`http/client-version.ts VAULT_KEYS_MIN_DESKTOP` = 0.1.98, no env
@@ -1246,9 +1254,12 @@ including parent folders and across restart; filesystem failures are distinct fr
 Tree-file authorship uses `files.created_by` consistently in direct, prefetched and indexed
 permission resolution and readable-set listings. Explicit denies and vault postures still apply.
 Migration 057 records the owner as creator of null-creator files, notes and folders only in a sole-owner legacy vault with no ACL rows;
-it writes no share or audit row and never changes an explicit rule. Revoked confirmed attachments move
-atomically to `.context/trash` before their identity is forgotten. Failed recovery leaves the
-file and identity intact. Activity reports these copies and reveals binaries in the file manager;
+it writes no share or audit row and never changes an explicit rule. Revoked confirmed attachments are
+DELETED from the ex-reader's disk (`registry.ts removeRevokedBinary`, 2026-11-03: a recovery copy left
+them readable in `.context/trash` for good), but only while the file still hashes to its agreed
+`fileBases` sha; a file edited here since (or with no base, or an unreadable hash) and a file this
+user created move atomically to `.context/trash` instead, like a revoked note's unseen work. A failed removal leaves the
+file and identity intact. Activity reports kept copies and reveals binaries in the file manager;
 binary recovery must never use the Markdown comparison or text-restore pipeline.
 
 Account Settings → Connection remembers up to eight normalized server addresses locally,

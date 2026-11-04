@@ -715,6 +715,13 @@ It writes a fresh argon2id hash (creating the credential for a Google-only
 account) and revokes the account's live sessions. In Docker, run the compiled
 copy inside the container: `docker exec -it <container> node dist/scripts/set-password.js someone@example.com`.
 
+## Messages to users
+
+Your server can show its users a popup, banner or toast in the desktop app, with no app release:
+set `BAALDA_ADMIN_TOKEN` (at least 32 random characters) and create messages with
+`pnpm messages` from `app/apps/server`. Unset, the feature is off. See
+[MESSAGES.md](MESSAGES.md) for the message format and examples.
+
 ## Point the desktop app at your server
 
 An account belongs to **one server**. A teammate who signs up on the managed

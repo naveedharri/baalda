@@ -21,10 +21,16 @@ export type UserEvent =
       inviterName: string;
       role: string;
     }
-  | { t: "invitation-gone"; invitationId: string };
+  | { t: "invitation-gone"; invitationId: string }
+  /** This user's in-app messages changed (`messages/events.ts` scope "user").
+   *  Forwarded only to connections that also advertise {@link MESSAGES_CAP}. */
+  | { t: "messages-changed" };
 
 /** The hello cap that opts a connection into user-addressed events. */
 export const USER_EVENTS_CAP = "invitations";
+
+/** The hello cap that opts a connection into `messages-changed` hints. */
+export const MESSAGES_CAP = "messages";
 
 export function userTopic(userId: string): string {
   return `user:${userId}`;
@@ -37,6 +43,7 @@ export function encodeUserEvent(event: UserEvent): Uint8Array {
 export function decodeUserEvent(payload: Uint8Array): UserEvent | null {
   try {
     const v = JSON.parse(new TextDecoder().decode(payload)) as Partial<UserEvent>;
+    if (v.t === "messages-changed") return { t: "messages-changed" };
     if (v.t === "invitation-gone" && typeof v.invitationId === "string") {
       return { t: "invitation-gone", invitationId: v.invitationId };
     }

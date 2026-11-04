@@ -205,10 +205,13 @@ export function VaultSettingsDialog({
   onClose,
   onRequestSignIn,
   initialTab,
+  initialSection,
 }: {
   onClose: () => void;
   onRequestSignIn?: () => void;
   initialTab?: SettingsTab;
+  /** A `[data-settings-section]` in the opening tab to scroll to and highlight. */
+  initialSection?: string;
 }) {
   const session = useStore((s) => s.session);
   const organizations = useStore((s) => s.organizations);
@@ -225,6 +228,24 @@ export function VaultSettingsDialog({
   const [tabReset, setTabReset] = useState(0);
   const contentRef = useRef<HTMLElement>(null);
   useEffect(() => { if (contentRef.current) contentRef.current.scrollTop = 0; }, [tab, tabReset]);
+  useEffect(() => {
+    // The section can render a beat after the tab (it loads its own state), so
+    // look for it for up to 3 s, once per opening.
+    if (!initialSection) return;
+    let tries = 0;
+    const timer = window.setInterval(() => {
+      const el = contentRef.current?.querySelector<HTMLElement>(
+        `[data-settings-section="${CSS.escape(initialSection)}"]`,
+      );
+      if (!el && ++tries < 30) return;
+      window.clearInterval(timer);
+      if (!el) return;
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      el.classList.add("settings-section-flash");
+      window.setTimeout(() => el.classList.remove("settings-section-flash"), 1400);
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [initialSection]);
   const setTab = (t: SettingsTab) => setTabRaw(visibleTab(t));
 
   // Esc, click-away, focus and the backdrop all live in `SettingsModal`.

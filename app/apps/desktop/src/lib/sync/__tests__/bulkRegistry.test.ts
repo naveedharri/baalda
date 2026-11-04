@@ -357,6 +357,57 @@ describe("bounded concurrency", () => {
   });
 });
 
+describe("bulk folders, parents first", () => {
+  it("never sends a folder batch while its parents' batch is still in flight", async () => {
+    const { api, state } = fakeApi();
+    // Like the server: a folder whose parent is neither registered nor earlier
+    // in the same request is refused. A request sees only what had finished
+    // registering when it arrived.
+    const registered = new Set<string>();
+    const refused: string[] = [];
+    vi.mocked(api.batchCreateFolders).mockImplementation(async (_v, items) => {
+      const known = new Set(registered);
+      state.inFlight++;
+      state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
+      await tick();
+      state.inFlight--;
+      return items.map((i) => {
+        const parent = i.path.includes("/") ? i.path.slice(0, i.path.lastIndexOf("/")) : null;
+        if (parent && !known.has(parent)) {
+          refused.push(i.path);
+          return { path: i.path, id: null, status: "error" as const, code: "path_folder_mismatch", error: `No folder at ${parent}` };
+        }
+        known.add(i.path);
+        registered.add(i.path);
+        state.createdFolders.push(i.path);
+        return { path: i.path, id: `folder-${i.path}`, status: "created" as const, code: null, error: null };
+      });
+    });
+    // 1,200 top folders with one child each: several chunks per depth.
+    const t: TreeNode = {
+      id: "root",
+      name: "v",
+      path: "",
+      isDir: true,
+      children: Array.from({ length: 1200 }, (_, i) => ({
+        id: `t${i}`,
+        name: `T${i}`,
+        path: `T${i}`,
+        isDir: true,
+        children: [{ id: `t${i}c`, name: "C", path: `T${i}/C`, isDir: true, children: [] }],
+      })),
+    };
+    await reconcileWithTree(reg(api), { organizationId: ORG, vaultName: "v" }, t);
+
+    expect(refused).toEqual([]);
+    expect(state.createdFolders).toHaveLength(2400);
+    expect(state.maxInFlight).toBeGreaterThan(1); // same-depth chunks still run together
+    expect(state.maxInFlight).toBeLessThanOrEqual(REGISTRY_CONCURRENCY);
+  });
+});
+
+const reg = (api: ApiClient) => new VaultRegistry(api);
+
 describe("incremental checkpointing + resume", () => {
   it("flushes the doc map DURING the run, not once at the end", async () => {
     const cfg = configFile();

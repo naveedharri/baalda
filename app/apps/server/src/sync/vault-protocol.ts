@@ -235,6 +235,13 @@ export type ServerControl =
    */
   | { t: "version-available"; version: string }
   /**
+   * The in-app messages for this user changed (`messages/events.ts`): an
+   * operator created, edited or archived one, or the user acted on one from
+   * another device. A hint to refetch `GET /api/messages`. Sent only to
+   * clients advertising the `messages` cap; old clients ignore an unknown `t`.
+   */
+  | { t: "messages-changed" }
+  /**
    * User-addressed (sync/user-events.ts), sent only to clients advertising the
    * `invitations` cap: an invitation to ANY vault arrived for this user, or one
    * was accepted, declined or cancelled. A hint to re-read the invitation list.
@@ -510,6 +517,18 @@ export type AppearanceChange = {
 /** The vault's team skills changed — see the `skills-changed` frame. */
 export const PS_SKILLS_CHANGED = 0x0f;
 
+/** In-app messages changed for everyone (`messages/events.ts` scope "all").
+ *  Published on {@link MESSAGES_TOPIC}, never a vault topic: every instance
+ *  subscribes once and tells its own `messages`-cap connections. No body. */
+export const PS_MESSAGES_CHANGED = 0x10;
+
+/** The one process-wide topic message hints travel on. */
+export const MESSAGES_TOPIC = "messages";
+
+export function encodePubsubMessagesChanged(): Uint8Array {
+  return new Uint8Array([PS_MESSAGES_CHANGED]);
+}
+
 /** JSON body after the type: `{orgId}`. */
 export function encodePubsubSkillsChanged(orgId: string): Uint8Array {
   const body = enc.encode(JSON.stringify({ orgId }));
@@ -668,6 +687,7 @@ export type PubsubMessage =
   | { type: "org-changed"; change: OrgChange }
   | { type: "appearance-changed"; change: AppearanceChange }
   | { type: "skills-changed"; orgId: string }
+  | { type: "messages-changed" }
   | { type: "presence"; presence: PresenceState }
   | { type: "presence-query" }
   | { type: "voice"; frame: Uint8Array; speakerId: string }
@@ -790,6 +810,8 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
         return null;
       }
     }
+    case PS_MESSAGES_CHANGED:
+      return { type: "messages-changed" };
     case PS_SKILLS_CHANGED: {
       try {
         const p = JSON.parse(dec.decode(bytes.subarray(1))) as { orgId?: unknown };

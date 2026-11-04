@@ -2327,8 +2327,10 @@ export class VaultRegistry {
   /**
    * Remember which of these notes THIS user wrote.
    *
-   * Accumulative, like the baseline, and persisted for compatibility with older
-   * clients. Current removal policy does not branch on this value.
+   * Accumulative, like the baseline, and persisted: by the time a revocation
+   * needs the answer the doc is in no listing. A revoked tree binary this user
+   * created keeps a recovery copy ({@link removeRevokedBinary}); notes do not
+   * branch on it.
    */
   private learnAuthorship(serverNotes: RegisteredNote[]): void {
     const me = this.host?.localUserId?.() ?? null;
@@ -2417,11 +2419,21 @@ export class VaultRegistry {
    *    told this removal was ours, or it propagates it back as a user delete and
    *    the owner loses their copy of a file they only meant to stop sharing.
    *
-   * Keep the exact local bytes in recovery storage: confirmation only proves
-   * an earlier upload, and a wrong server revocation must not destroy work.
-   * `trashNote` atomically moves any file, including binaries.
+   * Someone else's file is DELETED, like a revoked note: access removal is a
+   * confidentiality act, and a copy in `.context/trash` left it readable on
+   * the ex-reader's disk for good (reported 2026-11-03). Only while the file
+   * on disk still hashes to its last agreed base (`fileBases`), though:
+   * confirmation proves an EARLIER upload, so a file edited here since then
+   * holds work the server never saw, and it keeps a recovery copy exactly like
+   * a revoked note with unseen work. No base, or no hash, counts as edited.
+   * A file THIS user created keeps its bytes in recovery storage too, the way
+   * a revoked note keeps its author's unsent work: it was theirs before it was
+   * shared. `trashNote` atomically moves any file, including binaries.
    */
-  private async removeRevokedBinary(gone: InboundTrash): Promise<boolean> {
+  private async removeRevokedBinary(
+    gone: InboundTrash,
+    localSha: (relPath: string) => Promise<string | null>,
+  ): Promise<boolean> {
     // The one refusal, and the same shape the note rail's `isPushed` makes: the
     // mapping is LEFT in place, so a pass that later confirms these bytes can
     // remove the file properly. It stays out of `hello.files` meanwhile
@@ -2443,7 +2455,14 @@ export class VaultRegistry {
     try {
       let trashedTo: string | null;
       try {
-        trashedTo = await ipc.trashNote(gone.path, recoveryStamp(), this.epoch());
+        const base = this.fileBases.get(gone.docId) ?? null;
+        const clean = base !== null && (await localSha(gone.path)) === base;
+        if (this.authoredDocs.has(gone.docId) || !clean) {
+          trashedTo = await ipc.trashNote(gone.path, recoveryStamp(), this.epoch());
+        } else {
+          await ipc.deleteFile(gone.path, this.epoch());
+          trashedTo = null;
+        }
       } catch (e) {
         if (ipc.isVaultMismatch(e) || this.stale()) return false;
         // A confirmed absence is idempotent. Any other failure keeps the file
@@ -2741,6 +2760,16 @@ export class VaultRegistry {
     const bulkRemoval = useBulkPath(plan.trash.length);
     /** path → `.context/trash` copy made for unseen work before removal. */
     const recovered = new Map<string, string>();
+    // The disk's binary hashes, listed once per pass and only if a revoked
+    // binary needs them. A failed listing answers null: kept, never deleted.
+    let binaryShas: Promise<Map<string, string> | null> | null = null;
+    const localBinarySha = async (relPath: string): Promise<string | null> => {
+      binaryShas ??= ipc.listBinaries(this.epoch()).then(
+        (list) => new Map(list.map((b) => [b.relPath, b.sha256])),
+        () => null,
+      );
+      return (await binaryShas)?.get(relPath) ?? null;
+    };
     for (const group of chunked(plan.trash, bulkRemoval ? 64 : INBOUND_REMOVE_CONCURRENCY)) {
       if (this.stopRun()) return { changedDisk, suppress: plan.suppress };
       const ready: InboundTrash[] = [];
@@ -2748,7 +2777,7 @@ export class VaultRegistry {
       await runPool(group, async (gone) => {
         try {
           if (gone.binary) {
-            const removed = await this.removeRevokedBinary(gone);
+            const removed = await this.removeRevokedBinary(gone, localBinarySha);
             if (removed) changedDisk = true;
             this.sink.item(removed ? "ok" : "failed");
             return;
@@ -4870,10 +4899,33 @@ export class VaultRegistry {
     checkpoint: Checkpointer<VaultSyncConfig>,
   ): Promise<boolean> {
     let mutated = false;
-    const ordered = [...folders].sort(
-      (a, b) => a.path.split("/").length - b.path.split("/").length,
-    );
-    const chunks = chunked(ordered, BATCH_MAX_FOLDERS);
+    // One depth at a time: chunks of the same depth run in parallel, but a
+    // chunk never races the chunk holding its parents. Sorted chunks ran
+    // together refused every folder whose parent was still in flight
+    // ("No folder at …"), and each note inside it with them (2026-11-02, a
+    // 9,500-folder import).
+    const byDepth = new Map<number, TreeNode[]>();
+    for (const f of folders) {
+      const depth = f.path.split("/").length;
+      const level = byDepth.get(depth);
+      if (level) level.push(f);
+      else byDepth.set(depth, [f]);
+    }
+    for (const depth of [...byDepth.keys()].sort((a, b) => a - b)) {
+      if (this.stopRun()) break;
+      if (await this.registerFolderChunks(vaultId, chunked(byDepth.get(depth)!, BATCH_MAX_FOLDERS), checkpoint)) {
+        mutated = true;
+      }
+    }
+    return mutated;
+  }
+
+  private async registerFolderChunks(
+    vaultId: string,
+    chunks: TreeNode[][],
+    checkpoint: Checkpointer<VaultSyncConfig>,
+  ): Promise<boolean> {
+    let mutated = false;
     await runPool(
       chunks,
       async (group) => {

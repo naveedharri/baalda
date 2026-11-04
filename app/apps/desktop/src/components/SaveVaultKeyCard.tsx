@@ -4,17 +4,15 @@
 // their account key, no other computer holding it, and no teammate holding the
 // vault key. Not a popup: a card that stays until they act. Any action hides it
 // (remembered on this device); setting a password removes the need entirely.
-//
-// "Email it to myself" opens THEIR mail app (mailto:) with the key filled in, so
-// the key never passes through Baalda's servers or email provider.
+// Saving to a file or "I've saved it" is also recorded on the server
+// (`reportSavedFlag.ts`); setting a password is not a key save.
 
 import { useEffect, useState } from "react";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import * as ipc from "../lib/ipc";
 import { toast } from "../lib/toast";
-import { api, authManager } from "../lib/auth/authManager";
+import { api } from "../lib/auth/authManager";
 import { currentVaultKeySession, onVaultKeyEvent, vaultKeysPasswordUnlock } from "../lib/vaultKeys/runtime";
-import { vaultKeyFileText, wordsToVaultKey } from "../lib/vaultKeys/crypto";
+import { recordVaultKeySaved, reportSavedFlagOnce, vaultKeySavedHere } from "../lib/vaultKeys/reportSavedFlag";
+import { saveVaultKeyToFile } from "../lib/vaultKeys/saveKeyFile";
 import { useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
 import { CopyField } from "./McpTab";
@@ -22,23 +20,6 @@ import { CopyField } from "./McpTab";
 /** Local dev only (`VITE_PREVIEW_SAVE_KEY_CARD=1 pnpm run dev:desktop`): show the
  *  card on any vault this owner holds the key for, to review the design. */
 const PREVIEW = import.meta.env.DEV && import.meta.env.VITE_PREVIEW_SAVE_KEY_CARD === "1";
-
-const savedKey = (vaultId: string) => `context.vaultKeySaved:${authManager.getServerUrl()}|${vaultId}`;
-
-function readSaved(vaultId: string): boolean {
-  try {
-    return localStorage.getItem(savedKey(vaultId)) === "1";
-  } catch {
-    return false;
-  }
-}
-function markSaved(vaultId: string): void {
-  try {
-    localStorage.setItem(savedKey(vaultId), "1");
-  } catch {
-    /* storage unavailable: the card simply shows again next time */
-  }
-}
 
 export function SaveVaultKeyCard({ vaultId, vaultName }: { vaultId: string; vaultName: string }) {
   const userId = useStore((s) => s.session?.user.id ?? null);
@@ -56,7 +37,10 @@ export function SaveVaultKeyCard({ vaultId, vaultName }: { vaultId: string; vaul
     let live = true;
     setNeeded(false);
     setShown(null);
-    if (readSaved(vaultId) && !PREVIEW) return;
+    if (vaultKeySavedHere(vaultId) && !PREVIEW) {
+      void reportSavedFlagOnce(vaultId);
+      return;
+    }
     void (async () => {
       const words = currentVaultKeySession()?.revealVaultKey(vaultId);
       if (!words) return; // not keyed here, or not the owner's device
@@ -79,44 +63,14 @@ export function SaveVaultKeyCard({ vaultId, vaultName }: { vaultId: string; vaul
   if (!needed) return null;
 
   const words = () => currentVaultKeySession()?.revealVaultKey(vaultId) ?? null;
-  const done = (message: string) => {
-    markSaved(vaultId);
-    toast(message);
-  };
-
   const saveToFile = async () => {
-    const w = words();
-    const vk = w ? wordsToVaultKey(w) : null;
-    if (!vk) return;
-    const dest = await saveDialog({ defaultPath: `${vaultName} vault key.txt`, filters: [{ name: "Text", extensions: ["txt"] }] });
-    try {
-      if (!dest) return;
-      await ipc.saveTextFile(dest, vaultKeyFileText(vaultName, vaultId, vk));
-    } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), "error");
-      return;
-    } finally {
-      vk.fill(0);
-    }
-    setNeeded(false);
-    done("Vault key saved.");
+    if (await saveVaultKeyToFile(vaultId, vaultName)) setNeeded(false);
   };
 
-  const emailToMyself = async () => {
-    const w = words();
-    const vk = w ? wordsToVaultKey(w) : null;
-    if (!vk) return;
-    const body = vaultKeyFileText(vaultName, vaultId, vk);
-    vk.fill(0);
-    const url = `mailto:?subject=${encodeURIComponent(`Baalda vault key for ${vaultName}`)}&body=${encodeURIComponent(body)}`;
-    try {
-      await ipc.openExternal(url);
-    } catch {
-      toast("Couldn't open your mail app. Use Save to file instead.", "error");
-      return;
-    }
+  const confirmSaved = async () => {
+    await recordVaultKeySaved(vaultId, "confirmed");
     setNeeded(false);
-    done("Opened your mail app. Send it to yourself to keep a copy.");
+    toast("Got it.");
   };
 
   const setPassword = async () => {
@@ -134,7 +88,7 @@ export function SaveVaultKeyCard({ vaultId, vaultName }: { vaultId: string; vaul
     }
     setSettingPassword(false);
     setNeeded(false);
-    done("Password set. It now also unlocks your vaults on a new computer.");
+    toast("Password set. It now also unlocks your vaults on a new computer.");
   };
 
   return (
@@ -145,7 +99,7 @@ export function SaveVaultKeyCard({ vaultId, vaultName }: { vaultId: string; vaul
           <div className="save-key-title">Important: save your vault key</div>
           <p className="save-key-desc">
             Only your devices hold this vault&apos;s key. If you lose this computer, you&apos;ll need it to get back
-            in. Keep a copy somewhere safe, like a password manager or your own email.
+            in. Keep a copy somewhere safe, like a password manager.
           </p>
           <p className="save-key-desc">
             To use it on a new computer, open the vault and choose Restore with vault key.
@@ -155,9 +109,6 @@ export function SaveVaultKeyCard({ vaultId, vaultName }: { vaultId: string; vaul
       <div className="save-key-actions">
         <AsyncButton className="primary sm" onClick={saveToFile}>
           Save to file
-        </AsyncButton>
-        <AsyncButton className="secondary sm" onClick={emailToMyself}>
-          Email it to myself
         </AsyncButton>
         <button type="button" className="secondary sm" onClick={() => setShown(shown ? null : words())}>
           {shown ? "Hide key" : "Show key"}
@@ -171,9 +122,9 @@ export function SaveVaultKeyCard({ vaultId, vaultName }: { vaultId: string; vaul
       {shown && (
         <div className="save-key-panel">
           <CopyField value={shown} label="vault key" wrap sensitive />
-          <button type="button" className="ghost sm" onClick={() => { setNeeded(false); done("Got it."); }}>
+          <AsyncButton className="ghost sm" onClick={confirmSaved}>
             I&apos;ve saved it
-          </button>
+          </AsyncButton>
         </div>
       )}
       {settingPassword && (
