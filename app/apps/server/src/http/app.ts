@@ -26,7 +26,8 @@ import { createFontRoutes } from "./fonts.js";
 import { createSkillRoutes } from "./routes/skills.js";
 import { SKILL_ACCESS_FEATURE, SKILLS_FEATURE } from "../skills/feature.js";
 import { passwordResetRoutes } from "./routes/password-reset.js";
-import { openLinkRoutes } from "./routes/open-link.js";
+import { openLinkRoutes, publicBaseUrl } from "./routes/open-link.js";
+import { esc } from "./pages.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
 import { ACCESS_BOARD_FEATURE } from "../permissions/access-board.js";
 import { blobRoutes, FILES_WITH_BYTES_FEATURE, setBlobRegistryNotifier } from "./routes/blobs.js";
@@ -172,6 +173,38 @@ export function securityTxt(contact: string | undefined, now: Date = new Date())
   ].join("\n");
 }
 
+/**
+ * The page a browser sees at `/`. The managed server points people at
+ * baalda.com; a self-hosted one (`BAALDA_DEPLOYMENT=self-hosted`) is not
+ * baalda.com, so it says how to use THIS server instead: install the desktop
+ * app and connect it here, with the `/open/connect` link that does it in one
+ * click. `selfHostedUrl` is this server's public base URL, or null on Cloud.
+ */
+export function landingPage(selfHostedUrl: string | null): string {
+  const body = selfHostedUrl
+    ? `<p>This is a self-hosted Baalda sync and MCP server. There is no web app here: notes are written in the Baalda desktop app, which syncs through this server.</p>
+<ol>
+<li>Install the desktop app from <a href="https://baalda.com">baalda.com</a>.</li>
+<li>On first launch choose <strong>Your own server</strong> (or <strong>Account settings → Connection</strong>) and enter <code>${esc(selfHostedUrl)}</code>.</li>
+</ol>
+<p>Already installed? <a href="${esc(selfHostedUrl)}/open/connect">Connect the app to this server</a>.</p>`
+    : `<p>This is the Baalda sync and MCP server. The app lives at <a href="https://baalda.com">baalda.com</a>.</p>`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Baalda</title>
+<link rel="icon" type="image/png" sizes="256x256" href="/icon.png" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+</head>
+<body style="font-family: system-ui, sans-serif; margin: 3rem;">
+<p><img src="/icon.png" alt="Baalda" width="64" height="64" /></p>
+${body}
+</body>
+</html>`;
+}
+
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
 
@@ -294,20 +327,11 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/icon.png", (c) => c.body(siteIcon, 200, iconHeaders));
   app.get("/apple-touch-icon.png", (c) => c.body(siteIcon, 200, iconHeaders));
   app.get("/", (c) =>
-    c.html(`<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Baalda</title>
-<link rel="icon" type="image/png" sizes="256x256" href="/icon.png" />
-<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-</head>
-<body style="font-family: system-ui, sans-serif; margin: 3rem;">
-<p><img src="/icon.png" alt="Baalda" width="64" height="64" /></p>
-<p>This is the Baalda sync and MCP server. The app lives at <a href="https://baalda.com">baalda.com</a>.</p>
-</body>
-</html>`),
+    c.html(
+      landingPage(
+        process.env.BAALDA_DEPLOYMENT === "self-hosted" ? publicBaseUrl(c) : null,
+      ),
+    ),
   );
 
   // RFC 9116 security.txt, read per request from SECURITY_CONTACT (e.g.
