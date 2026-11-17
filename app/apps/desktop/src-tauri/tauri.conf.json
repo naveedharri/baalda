@@ -21,6 +21,7 @@
         "minWidth": 720,
         "minHeight": 480,
         "dragDropEnabled": true,
+        "backgroundThrottling": "disabled",
         "visible": false
       }
     ],

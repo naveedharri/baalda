@@ -89,6 +89,11 @@ close button; closing the panel restores the caption controls. macOS keeps its o
 and Linux its native titlebar. Tauri drag regions retain drag and double-click
 maximize behavior.
 
+The main window sets `backgroundThrottling: "disabled"` (`tauri.conf.json`, pinned by
+`src/__tests__/backgroundThrottling.test.ts`): WKWebView otherwise suspends a background page after a
+few minutes, and since sync runs in that page, remote edits stopped reaching disk until focus (#405).
+macOS 14+ only; Windows/Linux ignore it.
+
 ## Build & run
 
 Prereqs: Node ≥ 22, Rust/cargo, Docker (for Postgres). Run `pnpm install` once from `app/`.
