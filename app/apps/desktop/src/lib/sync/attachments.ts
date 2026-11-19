@@ -1586,11 +1586,11 @@ export class AttachmentSync {
    * those exact bytes, so an unlisted copy is hidden, not missing, and putting
    * it back up would only re-announce what access removal took away.
    *
-   * Removal mirrors a revoked tree binary (`registry.removeRevokedBinary`):
-   *  - only on this pass's complete listing (a failed one never reaches here)
-   *    AND a fresh ACL signal (`revocationAuthority`);
-   *  - only a file this device DOWNLOADED (`origin: "down"`); its own upload
-   *    and anything with no recorded base (never synced) stay untouched;
+   * Also the drops of DELETED notes, which the server removes once no live note
+   * uses them. Removal:
+   *  - only on this pass's complete listing (a failed one never reaches here);
+   *  - only bytes this device agreed on with the server (a recorded base equal
+   *    to the file); anything never synced, or changed since, stays;
    *  - never a path a local note still embeds (`referencedAttachments`;
    *    unanswered ⇒ nothing is removed);
    *  - capped at max(20, half the known drops) per pass, like revocations;
@@ -1619,11 +1619,23 @@ export class AttachmentSync {
       }
       if (!base) continue;
       known++;
-      if (base.sha === a.sha256) hidden.add(a.relPath);
-      if (base.origin === "down") candidates.push({ a, base });
+      // A copy changed here since the agreement leaves only on an access
+      // change (removed outright, edited or not); a deletion takes only the
+      // agreed bytes.
+      if (base.sha !== a.sha256) {
+        if (this.deps.revocationAuthority?.()) candidates.push({ a, base });
+        continue;
+      }
+      hidden.add(a.relPath);
+      // Unlisted, and exactly the bytes this device agreed on with the server.
+      // Either access to every note embedding it was removed, or the notes were
+      // deleted and the server removed it (blobs/attachment-cleanup.ts). Both
+      // mean it leaves this disk too, unless a note here still embeds it
+      // (checked below). Before, only a fresh access change removed one, and
+      // only a downloaded one, so a deleted note's images stayed forever.
+      candidates.push({ a, base });
     }
     if (candidates.length === 0) return hidden;
-    if (!this.deps.revocationAuthority?.()) return hidden;
     if (!this.deps.referencedAttachments || !this.deps.removeLocal) return hidden;
     const cap = Math.max(20, Math.ceil(known * 0.5));
     if (candidates.length > cap) {

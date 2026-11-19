@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { processAttachmentCleanup } from "../blobs/attachment-cleanup.js";
 import { purgeExpiredTrash, scrubPurgedContent } from "./service.js";
 
 /** Hourly: cheap (one indexed SELECT on `purge_after` when nothing is due). */
@@ -16,6 +17,9 @@ async function tick(): Promise<void> {
     }
     const scrubbed = await scrubPurgedContent();
     if (scrubbed > 0) console.log(`[trash] removed late writes from ${scrubbed} deleted note(s)`);
+    // Attachments of purged notes whose vault's references were not yet
+    // current at purge time (a keyed vault still re-indexing).
+    await processAttachmentCleanup();
   } catch (err) {
     console.error("[trash] purge failed:", err);
   }

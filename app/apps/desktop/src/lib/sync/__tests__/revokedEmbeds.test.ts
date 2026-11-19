@@ -97,16 +97,16 @@ describe("revoked embeds (#408)", () => {
     expect(h.local.has(IMG)).toBe(true);
   });
 
-  it("keeps it without a fresh ACL signal, and still does not re-upload", async () => {
+  it("removes it without an ACL signal too: a deleted note's image the server removed", async () => {
     const h = harness({ authority: false });
     const sync = await downloadedThenHidden(h);
     await sync.reconcile();
-    expect(h.removed).toEqual([]);
-    expect(h.local.has(IMG)).toBe(true);
+    expect(h.removed).toEqual([IMG]);
+    expect(h.local.has(IMG)).toBe(false);
     expect(h.uploads).toEqual([]);
   });
 
-  it("never removes a file this device uploaded itself", async () => {
+  it("removes this device's own upload once the server stopped listing it and no note uses it", async () => {
     const h = harness();
     h.local.set(IMG, new Uint8Array([4, 5]));
     const sync = new AttachmentSync(h.deps);
@@ -117,9 +117,9 @@ describe("revoked embeds (#408)", () => {
     expect(h.bases.get(IMG)?.origin).toBe("up");
     h.server.clear();
     await sync.reconcile();
-    expect(h.removed).toEqual([]);
+    expect(h.removed).toEqual([IMG]);
     expect(h.trashed).toEqual([]);
-    expect(h.local.has(IMG)).toBe(true);
+    expect(h.local.has(IMG)).toBe(false);
     expect(h.uploads).toEqual([IMG]); // no second upload
   });
 

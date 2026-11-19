@@ -8,6 +8,7 @@
 // "deleted". The Trash listing and restore stay answerable for older desktops
 // and simply find nothing once the purge has run. Checkpoints keep the text
 // they captured before a delete (`note_texts`, untouched by the purge).
+import { processAttachmentCleanup, queueAttachmentCleanup } from "../blobs/attachment-cleanup.js";
 import { randomUUID } from "node:crypto";
 import { pool as defaultPool } from "../db/pool.js";
 import { orgRole, vaultOrg } from "../permissions/lookup.js";
@@ -339,6 +340,9 @@ export async function purgeExpiredTrash(
   if (ids.length === 0) return [];
   // Open Activity feeds in these vaults drop the purged rows (#260).
   for (const vaultId of new Set(rows.map((r) => r.vault_id))) trashChanged(vaultId);
+  // The drops these notes embedded, recorded before their references go: the
+  // ones no live note still uses are removed (blobs/attachment-cleanup.ts).
+  await queueAttachmentCleanup(ids, db);
   await dropContent(ids, db);
   await db.query("DELETE FROM note_versions WHERE doc_id = ANY($1::text[])", [ids]);
   // Per-note share rows are KEPT: they are access settings, not content, and a
@@ -396,9 +400,9 @@ export function purgeDeletedSoon(ids: readonly string[]): void {
   if (ids.length === 0) return;
   const batch = [...ids];
   const t = setTimeout(() => {
-    void purgeExpiredTrash(undefined, defaultPool, batch).catch((err) =>
-      console.error("[trash] purging just-deleted notes failed:", err),
-    );
+    void purgeExpiredTrash(undefined, defaultPool, batch)
+      .then((purged) => (purged.length > 0 ? processAttachmentCleanup() : 0))
+      .catch((err) => console.error("[trash] purging just-deleted notes failed:", err));
   }, PURGE_AFTER_DELETE_MS);
   if (typeof t.unref === "function") t.unref();
   const late = setTimeout(() => {

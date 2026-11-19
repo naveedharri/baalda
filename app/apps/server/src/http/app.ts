@@ -31,6 +31,7 @@ import { openLinkRoutes } from "./routes/open-link.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
 import { ACCESS_BOARD_FEATURE } from "../permissions/access-board.js";
 import { blobRoutes, FILES_WITH_BYTES_FEATURE, setBlobRegistryNotifier } from "./routes/blobs.js";
+import { setAttachmentCleanupNotifier } from "../blobs/attachment-cleanup.js";
 import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
 import { createBulkRoutes } from "./routes/bulk.js";
 import { bootstrapRoutes } from "./routes/bootstrap.js";
@@ -484,6 +485,9 @@ export function createApp(deps: AppDeps): Hono {
   // A one-step file upload (`files-with-bytes`) creates its `files` row at
   // `complete`; it owes the same registry broadcast `POST /api/files` makes.
   setBlobRegistryNotifier(deps.onRegistryChanged);
+  setAttachmentCleanupNotifier(
+    deps.onRegistryChanged ? (vaultId) => deps.onRegistryChanged?.(vaultId, null) : null,
+  );
   app.route("/api", blobRoutes);
   app.route(
     "/api",
