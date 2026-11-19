@@ -13,7 +13,7 @@
 import { markAccessTreeStale } from "../accessTreeStale";
 import { isAttachmentWanted, onAttachmentWanted } from "../attachmentArrivals";
 import type { VaultAppearanceSettings } from "../appearanceSettings";
-import { NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
+import { NOT_CREATOR_DETAIL, NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
@@ -606,6 +606,8 @@ export class SyncManager implements InboundHost {
    *  `attachments/`, a file's new bytes), which changes NO registry row, so
    *  the pull after it must run the blob mirror even when it changed nothing. */
   private attachmentsOwedByFrame = false;
+  /** Refused file deletes already reported this session (`onNotCreator`). */
+  private readonly refusedFileDeleteNoticed = new Set<string>();
   /** Consecutive completed pulls that changed nothing (the idle-pull brake). */
   private registryPullIdleStreak = 0;
   private registryPullBrakeLogged = false;
@@ -7383,6 +7385,18 @@ export class SyncManager implements InboundHost {
       onServerChanged: () => {
         this.attachments?.scheduleReconcile();
         this.embedArrivals?.nudge();
+      },
+      // Reported like a refused note delete: once per file per session.
+      onNotCreator: (relPath, fileId) => {
+        const key = `not-creator-file:${fileId ?? relPath}`;
+        if (this.refusedFileDeleteNoticed.has(key)) return;
+        this.refusedFileDeleteNoticed.add(key);
+        reconcileReport.record({
+          kind: "restoredFromServer",
+          docId: fileId ?? undefined,
+          path: relPath,
+          detail: NOT_CREATOR_DETAIL,
+        });
       },
     });
     this.stopEmbedArrivals();

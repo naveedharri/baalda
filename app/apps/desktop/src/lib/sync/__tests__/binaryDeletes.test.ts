@@ -181,6 +181,66 @@ describe("BinaryDeleteQueue", () => {
     expect(h.forgotten).toEqual([]);
   });
 
+  it("puts back a file someone else created (403 delete_not_creator)", async () => {
+    // A member deleted the owner's file on their disk. The server refuses, so
+    // the file must come back here: the mirror runs and reports it once.
+    const refused: Array<[string, string | null]> = [];
+    let mirrorRuns = 0;
+    const h = harness({
+      server: [blob("b7", "Team/owners.pdf")],
+      onDisk: [],
+      fileIds: { "Team/owners.pdf": "file-7" },
+      deleteFile: async () => {
+        throw Object.assign(new Error("not yours"), {
+          status: 403,
+          body: { error: "Only the creator", code: "delete_not_creator" },
+        });
+      },
+    });
+    h.deps.onNotCreator = (relPath, id) => refused.push([relPath, id]);
+    h.deps.onServerChanged = () => mirrorRuns++;
+    h.queue.noteChanged("Team/owners.pdf");
+    await h.queue.drain();
+
+    expect(refused).toEqual([["Team/owners.pdf", "file-7"]]);
+    expect(h.forgotten).toEqual([]);
+    expect(mirrorRuns).toBe(1);
+  });
+
+  it("runs the mirror after a 409 so an embedded file comes back down", async () => {
+    let mirrorRuns = 0;
+    const h = harness({
+      server: [blob("b9", "attachments/used.png")],
+      onDisk: [],
+      deleteBlob: async () => {
+        throw Object.assign(new Error("still used"), { status: 409, code: "blob_referenced" });
+      },
+    });
+    h.deps.onServerChanged = () => mirrorRuns++;
+    h.queue.noteChanged("attachments/used.png");
+    await h.queue.drain();
+    expect(mirrorRuns).toBe(1);
+  });
+
+  it("does not run the mirror after an unrelated failure", async () => {
+    let mirrorRuns = 0;
+    const refused: string[] = [];
+    const h = harness({
+      server: [blob("b8", "Team/x.pdf")],
+      onDisk: [],
+      fileIds: { "Team/x.pdf": "file-8" },
+      deleteFile: async () => {
+        throw Object.assign(new Error("offline"), { status: 503 });
+      },
+    });
+    h.deps.onNotCreator = (p) => refused.push(p);
+    h.deps.onServerChanged = () => mirrorRuns++;
+    h.queue.noteChanged("Team/x.pdf");
+    await h.queue.drain();
+    expect(refused).toEqual([]);
+    expect(mirrorRuns).toBe(0);
+  });
+
   it("cancels when the file is back by the time the window closes", async () => {
     const h = harness({
       local: [{ relPath: "Team/guide.pdf", sha256: "sha-b1" }],
