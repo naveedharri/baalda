@@ -3169,9 +3169,14 @@ export class ApiClient {
     return data;
   }
 
-  /** Delete a folder subtree (soft-deletes its notes). */
-  async deleteFolder(id: string): Promise<void> {
-    await this.request<unknown>("DELETE", `/api/folders/${encodeURIComponent(id)}`);
+  /**
+   * Delete a folder subtree (soft-deletes its notes). With `ifEmpty` the server
+   * removes it only when nothing live is left in it (409 `folder_not_empty`);
+   * needs the `folder-delete-if-empty` feature, an older server ignores it.
+   */
+  async deleteFolder(id: string, opts?: { ifEmpty?: boolean }): Promise<void> {
+    const q = opts?.ifEmpty ? "?ifEmpty=1" : "";
+    await this.request<unknown>("DELETE", `/api/folders/${encodeURIComponent(id)}${q}`);
   }
 
   /**

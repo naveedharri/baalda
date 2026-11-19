@@ -5875,6 +5875,64 @@ export class VaultRegistry {
     }
   }
 
+  /** Registered folder paths at or under `path`, deepest first. */
+  mappedFoldersUnder(path: string): string[] {
+    const root = pathKey(path);
+    return [...this.folderByPath.keys()]
+      .filter((p) => {
+        const k = pathKey(p);
+        return k === root || k.startsWith(root + "/");
+      })
+      .sort((a, b) => b.split("/").length - a.split("/").length || b.localeCompare(a));
+  }
+
+  /**
+   * Remove the server row of a registered folder that vanished from disk.
+   *
+   * A folder deleted outside the app reaches the server item by item: its notes
+   * through the disk-delete drain, its files through the binary queue. The
+   * folder row itself had no path at all, so every app (the deleting one too)
+   * re-created it empty on the next pull. This is that last step, and it is
+   * deliberately narrow: only once nothing beneath it is still mapped here
+   * (`busy` otherwise: a file delete still settling, or a refused delete that
+   * is being put back), and only with `?ifEmpty=1`, so the server never
+   * cascades over an item this device did not delete or cannot see (`kept`).
+   */
+  async deleteVanishedFolder(path: string): Promise<"deleted" | "busy" | "kept" | "skipped"> {
+    if (this.stale()) return "skipped";
+    const vaultId = this.serverVaultId;
+    const folderId = this.folderByPath.get(path);
+    if (!vaultId || !folderId) return "skipped";
+    const root = pathKey(path);
+    const beneath = (p: string) => {
+      const k = pathKey(p);
+      return k === root || k.startsWith(root + "/");
+    };
+    if (
+      [...this.byPath.keys(), ...this.fileByPath.keys()].some(beneath) ||
+      [...this.folderByPath.keys()].some((p) => p !== path && beneath(p))
+    ) {
+      return "busy";
+    }
+    this.markOwnDeletes([path]);
+    try {
+      await this.api.deleteFolder(folderId, { ifEmpty: true });
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 404)) {
+        this.unmarkOwnDelete(path);
+        if (e instanceof ApiError && (e.status === 409 || notCreatorCodeOf(e) || e.status === 403)) {
+          return "kept";
+        }
+        throw e;
+      }
+    }
+    if (this.stale() || this.serverVaultId !== vaultId) return "skipped";
+    this.folderByPath.delete(path);
+    this.persist();
+    this.notifyMapChanged();
+    return "deleted";
+  }
+
   private async deletePathOnServer(path: string, vaultId: string): Promise<void> {
     const folderId = this.folderByPath.get(path);
     if (folderId) {

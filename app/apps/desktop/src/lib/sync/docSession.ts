@@ -59,6 +59,7 @@ import { SEED_BATCH_MAX_ITEMS } from "./seedRegister";
 import {
   BOOTSTRAP_ONLY,
   FILES_WITH_BYTES,
+  FOLDER_DELETE_IF_EMPTY,
   serverFeatures as cachedServerFeatures,
 } from "../serverFeatures";
 import { collectCrdtGarbage } from "./crdtGc";
@@ -2576,6 +2577,11 @@ export class SyncManager implements InboundHost {
     this.renameCandidates.clear();
     const goneFolders = [...this.goneFolders.keys()];
     this.goneFolders.clear();
+    /** Vanished registered folders this drain may remove from the server once
+     *  their contents are gone (see {@link propagateGoneFolders}): not the ones
+     *  paired as moves, and none at all for a refused or held window. */
+    let foldersToRemove: string[] = goneFolders;
+    let folderStep = false;
     const folderCandidates = this.takeFolderCandidates();
     /** sha256 of files this drain already read itself (folder candidates that
      *  the index has not seen yet), for the per-note pairing below. */
@@ -2586,6 +2592,7 @@ export class SyncManager implements InboundHost {
       //    every path below read as deleted; nothing here may act on that.
       if (!(await this.checkVaultRoot(scope))) return;
       if (!scope.isCurrent()) return;
+      folderStep = true;
 
       // 0b. Folder moves (#221), BEFORE anything per-note: a registered folder
       //     that vanished paired with an unregistered one that appeared.
@@ -2598,6 +2605,7 @@ export class SyncManager implements InboundHost {
           this.pairingFolders = false;
         }
         if (!scope.isCurrent() || this.rootMissing) return;
+        foldersToRemove = foldersToRemove.filter((g) => !out.movedFrom.some((f) => isUnder(g, f)));
         pending = pending.filter((p) => !out.movedFrom.some((f) => isUnder(p.relPath, f)));
         candidates = candidates.filter((c) => !out.movedTo.some((t) => isUnder(c, t)));
         const pendingIds = new Set(pending.map((p) => p.docId));
@@ -2661,6 +2669,7 @@ export class SyncManager implements InboundHost {
       const cap = diskDeleteCap(this.registry.mappedNotes().length);
       const unpaired = new Set(candidates);
       if (unpaired.size === 0 && gone.length > cap) {
+        folderStep = false;
         await this.holdBulkDiskDelete(gone, cap, scope);
         return;
       }
@@ -2715,6 +2724,7 @@ export class SyncManager implements InboundHost {
       // …and the same cap again on what the pairing actually left, which is the
       // check this has always made.
       if (deletes.length > cap) {
+        folderStep = false;
         await this.holdBulkDiskDelete(deletes, cap, scope);
         return;
       }
@@ -2723,6 +2733,13 @@ export class SyncManager implements InboundHost {
       //    choice without manufacturing another retained copy.
       await this.propagateAndForget(deletes, scope);
     } finally {
+      if (folderStep && foldersToRemove.length > 0 && scope.isCurrent() && !this.rootMissing) {
+        try {
+          await this.propagateGoneFolders(foldersToRemove, scope);
+        } catch (e) {
+          console.warn("[sync] removing deleted folders from the server failed", e);
+        }
+      }
       this.diskDeleteDrainsInFlight = Math.max(0, this.diskDeleteDrainsInFlight - 1);
       // Whatever happened above, a batch that asked for a pull gets one now —
       // unless the vault root is gone, when no pull may run at all.
@@ -2730,6 +2747,78 @@ export class SyncManager implements InboundHost {
         this.pullAfterDiskDeletes = false;
         this.handleRegistryChanged("disk-delete-drain");
       }
+    }
+  }
+
+  /** Retries per vanished folder whose contents were still settling. */
+  private readonly goneFolderAttempts = new Map<string, number>();
+
+  /**
+   * The last step of a disk-delete window: a registered folder that vanished
+   * from disk (and was not paired as a move) leaves the server too, deepest
+   * first, once everything it held is gone. Without this the folder row
+   * outlived its notes and files, and every app, the deleting one included,
+   * re-created it empty on the next pull.
+   *
+   * Same rails as the notes: a live session, a folder still missing when the
+   * window closes, the blast-radius cap, and a server that removes only an
+   * EMPTY folder (`?ifEmpty=1`), so nothing this device did not delete (or
+   * cannot see) is ever cascaded away. A folder whose files are still being
+   * deleted is asked again a few windows later; a refused one simply stays,
+   * and the pull puts it back with whatever kept it.
+   */
+  private async propagateGoneFolders(tops: readonly string[], scope: VaultScope): Promise<void> {
+    if (!this.isLive()) return;
+    if (!(await this.serverFeatures()).has(FOLDER_DELETE_IF_EMPTY)) return;
+    if (!scope.isCurrent()) return;
+    const stillGone: string[] = [];
+    for (const top of tops) {
+      let exists = true;
+      try {
+        exists = await ipc.folderExists(`${scope.vaultPath.replace(/[\\/]+$/, "")}/${top}`);
+      } catch {
+        exists = true; // couldn't ask ⇒ never assume a delete
+      }
+      if (!exists) stillGone.push(top);
+    }
+    if (!scope.isCurrent() || stillGone.length === 0) return;
+    const all = [...new Set(stillGone.flatMap((t) => this.registry.mappedFoldersUnder(t)))].sort(
+      (a, b) => b.split("/").length - a.split("/").length || b.localeCompare(a),
+    );
+    if (all.length === 0) return;
+    const cap = diskDeleteCap(this.registry.healthInventory().folderPaths.length);
+    if (all.length > cap) {
+      console.info(`[sync] ${all.length} folders vanished at once; not removing them from the server`);
+      return;
+    }
+    const stayed: string[] = [];
+    const busyTops = new Set<string>();
+    for (const path of all) {
+      if (!scope.isCurrent()) return;
+      // A parent of a folder that stayed is not empty on the server either.
+      if (stayed.some((s) => isUnder(s, path))) continue;
+      const result = await this.registry.deleteVanishedFolder(path);
+      if (result === "deleted") {
+        this.note("info", "disk-delete", `${path} was deleted on this device and removed from the server`, { path });
+        continue;
+      }
+      if (result === "skipped") continue;
+      stayed.push(path);
+      if (result === "busy") for (const t of stillGone) if (isUnder(path, t)) busyTops.add(t);
+    }
+    for (const top of stillGone) {
+      if (!busyTops.has(top)) {
+        this.goneFolderAttempts.delete(top);
+        continue;
+      }
+      const n = (this.goneFolderAttempts.get(top) ?? 0) + 1;
+      if (n > 4) {
+        this.goneFolderAttempts.delete(top);
+        continue;
+      }
+      this.goneFolderAttempts.set(top, n);
+      this.goneFolders.set(top, Date.now());
+      this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
     }
   }
 

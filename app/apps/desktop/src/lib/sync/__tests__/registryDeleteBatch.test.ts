@@ -365,3 +365,58 @@ describe("VaultRegistry.deletePaths — older servers and folders", () => {
     expect(state.deleteBatches[0]).toHaveLength(30);
   });
 });
+
+describe("deleteVanishedFolder — a folder deleted on disk leaves the server", () => {
+  beforeEach(() => {
+    configFile();
+  });
+
+  it("removes an emptied folder deepest first, always asking ifEmpty", async () => {
+    const { api } = fakeApi();
+    const calls: Array<[string, unknown]> = [];
+    vi.mocked(api.deleteFolder).mockImplementation(async (id: string, opts?: unknown) => {
+      calls.push([id, opts]);
+    });
+    const reg = await registryWith(1, api, ["Gone", "Gone/Sub"]);
+    expect(reg.mappedFoldersUnder("Gone")).toEqual(["Gone/Sub", "Gone"]);
+
+    // The parent is not empty while its sub folder is still mapped.
+    expect(await reg.deleteVanishedFolder("Gone")).toBe("busy");
+    expect(await reg.deleteVanishedFolder("Gone/Sub")).toBe("deleted");
+    expect(await reg.deleteVanishedFolder("Gone")).toBe("deleted");
+    expect(calls).toEqual([
+      ["folder-Gone/Sub", { ifEmpty: true }],
+      ["folder-Gone", { ifEmpty: true }],
+    ]);
+    expect(reg.getFolderId("Gone")).toBeNull();
+    expect(reg.mappedFoldersUnder("Gone")).toEqual([]);
+  });
+
+  it("keeps a folder whose notes are still mapped (a refused delete put back)", async () => {
+    const { api, state } = fakeApi();
+    const reg = await registryWith(0, api, ["Kept"]);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, {
+      id: "root",
+      name: "vault",
+      path: "",
+      isDir: true,
+      children: [
+        { id: "Kept", name: "Kept", path: "Kept", isDir: true, children: [
+          { id: "k", name: "a.md", path: "Kept/a.md", isDir: false },
+        ] },
+      ],
+    });
+    expect(await reg.deleteVanishedFolder("Kept")).toBe("busy");
+    expect(state.deletedFolders).toEqual([]);
+  });
+
+  it("keeps the mapping when the server says the folder is not empty", async () => {
+    const { api } = fakeApi();
+    vi.mocked(api.deleteFolder).mockImplementation(async () => {
+      throw new ApiError(409, "This folder is not empty");
+    });
+    const reg = await registryWith(0, api, ["Shared"]);
+    expect(await reg.deleteVanishedFolder("Shared")).toBe("kept");
+    expect(reg.getFolderId("Shared")).toBe("folder-Shared");
+  });
+});

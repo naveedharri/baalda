@@ -4,6 +4,7 @@ import { accessAuditRoutes } from "./routes/access-audit.js";
 import { Hono } from "hono";
 import { readFileSync } from "node:fs";
 import { NOTES_WITH_STATE_FEATURE } from "../registry/seed-on-register.js";
+import { FOLDER_DELETE_IF_EMPTY_FEATURE } from "../registry/tree-ops.js";
 import { BOOTSTRAP_ONLY_FEATURE } from "./routes/bootstrap.js";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
@@ -274,6 +275,8 @@ export function createApp(deps: AppDeps): Hono {
         SKILL_ACCESS_FEATURE,
         // In-app messages (`/api/messages`, docs/MESSAGES.md).
         MESSAGES_FEATURE,
+        // `DELETE /api/folders/:id?ifEmpty=1` (registry/tree-ops.ts).
+        FOLDER_DELETE_IF_EMPTY_FEATURE,
         // Client-held vault keys (W3), only while BAALDA_VAULT_KEYS is on.
         ...(vaultKeysEnabled() ? [VAULT_KEYS_FEATURE] : []),
       ],

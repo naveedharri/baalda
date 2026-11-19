@@ -35,6 +35,7 @@ import {
 import {
   TreeOpError,
   deleteFolderCascade,
+  folderIsEmpty,
   findFolder,
   findNote,
   moveFolder,
@@ -840,6 +841,14 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!folderGate.ok) {
       if (folderGate.code === "account_read_only") return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json(deleteRefusal(folderGate.code), 403);
+    }
+    // `?ifEmpty=1`: a folder that vanished from a desktop's disk. Its notes and
+    // files were deleted one by one first; anything still here (a teammate's
+    // item that device cannot see, an upload that landed meanwhile) means the
+    // folder is not the caller's to remove, so refuse rather than cascade.
+    const ifEmpty = c.req.query("ifEmpty");
+    if ((ifEmpty === "1" || ifEmpty === "true") && !(await folderIsEmpty(pool, id))) {
+      return c.json({ error: "This folder is not empty", code: "folder_not_empty" }, 409);
     }
     const { deletedNoteIds } = await deleteFolderCascade(pool, id, session.userId);
     // Their derived index rows go with them (see the single-note delete below)…
