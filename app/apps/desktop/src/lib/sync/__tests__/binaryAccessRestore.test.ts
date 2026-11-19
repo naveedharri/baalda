@@ -325,7 +325,24 @@ describe("SyncManager — an ACL signal reaches the blob mirror", () => {
     vi.useRealTimers();
   });
 
-  it("leaves the mirror alone when the pull changed nothing", async () => {
+  it("leaves the mirror alone when a local pull changed nothing", async () => {
+    vi.useFakeTimers();
+    fakeRegistry.pull.mockImplementation(async () => false);
+    const { sm } = await liveManager();
+
+    sm.handleRegistryChanged("watcher");
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(fakeRegistry.pull).toHaveBeenCalled();
+    expect(sm.hasPendingAttachmentReconcile()).toBe(false);
+    sm.disable();
+    vi.useRealTimers();
+  });
+
+  it("runs the mirror after a teammate's frame even when the pull changed nothing", async () => {
+    // A teammate's embedded image under `attachments/` has no registry row: the
+    // server's frame for its completed upload changes nothing in the listing,
+    // and without this the member's disk waited for an unrelated change.
     vi.useFakeTimers();
     fakeRegistry.pull.mockImplementation(async () => false);
     const { sm } = await liveManager();
@@ -333,7 +350,8 @@ describe("SyncManager — an ACL signal reaches the blob mirror", () => {
     sm.handleRegistryChanged("registry-frame");
     await vi.advanceTimersByTimeAsync(300);
 
-    expect(sm.hasPendingAttachmentReconcile()).toBe(false);
+    expect(fakeRegistry.pull).toHaveBeenCalled();
+    expect(sm.hasPendingAttachmentReconcile()).toBe(true);
     sm.disable();
     vi.useRealTimers();
   });

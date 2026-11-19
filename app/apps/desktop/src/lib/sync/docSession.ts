@@ -601,6 +601,11 @@ export class SyncManager implements InboundHost {
   /** A frame-driven pull asked for while one was running: armed (with the
    *  gap) the moment the running pull ends. */
   private registryPullTrailing = false;
+  /** A teammate's `registry` frame landed since the last completed pull. Such
+   *  a frame also announces a blob that became ready (an embedded image under
+   *  `attachments/`, a file's new bytes), which changes NO registry row, so
+   *  the pull after it must run the blob mirror even when it changed nothing. */
+  private attachmentsOwedByFrame = false;
   /** Consecutive completed pulls that changed nothing (the idle-pull brake). */
   private registryPullIdleStreak = 0;
   private registryPullBrakeLogged = false;
@@ -1655,6 +1660,7 @@ export class SyncManager implements InboundHost {
     // "the server told us the structure moved" from "the server told us to
     // re-mint a token, and we pulled anyway" in #93.
     console.info(`[sync] registry pull requested (${reason})`);
+    if (reason === "registry-frame") this.attachmentsOwedByFrame = true;
     this.armRegistryPull(reason, opts?.fileChange === true);
   }
 
@@ -1771,6 +1777,12 @@ export class SyncManager implements InboundHost {
           // can see. A refresh replaces the tree's row objects, which reads as
           // a flicker under the pointer — needless on the common "nothing new"
           // pull (e.g. the catch-up pull every reconnect now makes).
+          // Read before the branch: a pull that changed nothing still owes the
+          // blob mirror a pass when a teammate's frame asked for it (a ready
+          // `attachments/` blob has no registry row to change).
+          const framed = this.attachmentsOwedByFrame;
+          this.attachmentsOwedByFrame = false;
+          if (!changed && framed) this.attachments?.scheduleReconcile();
           if (changed) {
             this.onRegistryChanged?.();
             // The structure moved, so the set of BINARIES this device should
