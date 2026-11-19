@@ -382,3 +382,26 @@ describe("AttachmentSync three-way, two devices on one server", () => {
     expect(a.bases.get("D")).toBe("sha:V5");
   });
 });
+
+describe("identical bytes in two folders", () => {
+  it("downloads a teammate's file whose bytes equal a separate file this device already holds", () => {
+    // mix1/data.json is bound to its own server row; mix2/data.json is a
+    // different file with the same content. It must still land.
+    const plan = planBinarySync(
+      [L("mix1/data.json", "same")],
+      [S("b1", "mix1/data.json", "same", "D1"), S("b2", "mix2/data.json", "same", "D2")],
+      ctx({ "mix1/data.json": "D1" }, { D1: "same" }),
+    );
+    expect(plan.toDownload.map((b) => b.relPath)).toEqual(["mix2/data.json"]);
+  });
+
+  it("still holds back a download whose bytes sit in an unbound local file (a possible rename)", () => {
+    const plan = planBinarySync(
+      [L("renamed/data.json", "same")],
+      [S("b2", "old/data.json", "same", "D2")],
+      ctx({}, {}),
+    );
+    expect(plan.toDownload).toEqual([]);
+  });
+});
+

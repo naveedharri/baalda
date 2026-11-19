@@ -507,6 +507,20 @@ export function planBinarySync(
       toUpload.push(a);
     }
   }
+  // Local bytes that may be a server file under a new name: a tree file with
+  // no server row of its own (an offline rename the pairing above could not
+  // prove). Such a sha holds back a download, or the old path would come back
+  // beside the renamed copy. A local file already bound to its OWN server row
+  // is a separate file and holds nothing back: a teammate's identical copy in
+  // another folder (the same logo or CSV in two projects) must still arrive.
+  // Without `ctx` nothing is bound, so every local sha holds back, as before.
+  const unboundShas = ctx
+    ? new Set(
+        local
+          .filter((a) => !decided.has(a.relPath) && !isUnderAttachments(a.relPath))
+          .map((a) => a.sha256),
+      )
+    : localShas;
   const toDownload = server.filter(
     (b) =>
       !consumed.has(b.id) &&
@@ -515,7 +529,7 @@ export function planBinarySync(
       isSafeBlobRelPath(b.relPath) &&
       // An embedded image must exist at the path the note references, even
       // when another local file happens to contain identical bytes.
-      (isUnderAttachments(b.relPath) || !localShas.has(b.sha256)) &&
+      (isUnderAttachments(b.relPath) || !unboundShas.has(b.sha256)) &&
       !localPaths.has(pathKey(b.relPath)),
   );
   return { toUpload, toDownload, toReplace, agreed, toTrash, toMove };
