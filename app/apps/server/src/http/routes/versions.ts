@@ -3,7 +3,7 @@ import { pool } from "../../db/pool.js";
 import { ACCOUNT_READ_ONLY_BODY, canEditDoc, refusedForBilling } from "../../permissions/http-gates.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { effectivePermission } from "../../permissions/resolver.js";
-import { vaultAccess } from "../../permissions/vault-docs.js";
+import { readsWholeVault } from "../../permissions/vault-docs.js";
 import { deletedReadableDocsForActivity, readableDocsForActivity } from "../../permissions/readable-cache.js";
 import { extractDocText } from "../../index/indexer.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
@@ -539,12 +539,11 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     // none — the structure would come back whole while the contents did not.
     // A Private vault's owner reverts per note instead (the routes above,
     // gated on `effectivePermission`), or opens the vault first.
-    const access = await vaultAccess(pool, session.userId, vaultId);
-    if (!access?.vaultWide) {
+    if (!(await readsWholeVault(pool, session.userId, vaultId))) {
       return c.json(
         {
           error:
-            "This vault is private, so a whole-vault revert would rewrite notes you cannot read. Revert individual notes, or set the vault to Shared first.",
+            "Some notes in this vault are hidden from you, so a whole-vault revert would rewrite notes you cannot read. Revert individual notes instead.",
           code: "no_vault_wide_access",
         },
         403,

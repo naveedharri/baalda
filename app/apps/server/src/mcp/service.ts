@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { pool } from "../db/pool.js";
 import { orgRole, resolveResource } from "../permissions/lookup.js";
 import { createResolverCache, effectivePermission, type Permission } from "../permissions/resolver.js";
-import { listReadableDocsInVault, listVisibleFolders, vaultAccess } from "../permissions/vault-docs.js";
+import { listReadableDocsInVault, listVisibleFolders, readsWholeVault } from "../permissions/vault-docs.js";
 import {
   canEditFolder,
   canReadAttachment,
@@ -1450,7 +1450,7 @@ export async function searchNotes(
   // W3: a keyed vault's sealed rows are scored with this call's own key.
   const crypto = await vaultCrypto(ctx.auth, vaultId);
   const readable = await listReadableDocsInVault(ctx.auth.userId, vaultId);
-  const access = await vaultAccess(pool, ctx.auth.userId, vaultId);
+  const wholeVault = await readsWholeVault(pool, ctx.auth.userId, vaultId);
   return writeOrToolError(() =>
     searchNoteIndex({
       vaultId,
@@ -1458,7 +1458,7 @@ export async function searchNotes(
       k: limit,
       readableDocIds: readable,
       includeFiles,
-      vaultWideReader: access?.vaultWide === true,
+      vaultWideReader: wholeVault,
       crypto,
     }),
   );

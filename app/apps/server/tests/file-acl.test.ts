@@ -159,9 +159,10 @@ describe("file ACL (blobs with a doc_id)", () => {
          VALUES ($1, $2, 'file', $3, 'user', $4, 'denied')`,
         [randomUUID(), org, fileDoc, member],
       );
-      expect((await filterReadableBlobs(member, vault, rows())).map((b) => b.id)).toEqual([
-        orphanBlob,
-      ]);
+      // A deny means the member no longer reads everything, so path-only blobs
+      // fall back to "referenced by a note you can read". This one is
+      // referenced by nothing, so it goes too.
+      expect((await filterReadableBlobs(member, vault, rows())).map((b) => b.id)).toEqual([]);
     });
   });
 

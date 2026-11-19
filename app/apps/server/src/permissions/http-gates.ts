@@ -18,7 +18,7 @@ import {
   personalVaultLevel,
   type ResolverCache,
 } from "./resolver.js";
-import { listReadableDocsInVault, vaultAccess } from "./vault-docs.js";
+import { listReadableDocsInVault, readsWholeVault, vaultAccess } from "./vault-docs.js";
 import { isAccountReadOnly } from "../billing/lapse.js";
 import { REF_WINDOW_CHARS, scheduleRefWindowRefresh } from "../blobs/ref-windows.js";
 import { inc } from "../metrics/sync-metrics.js";
@@ -264,7 +264,9 @@ export async function canReadAttachment(
   }
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return false; // unknown vault or not a member
-  if (access.vaultWide) return true; // owner/admin or vault-wide grant
+  // Only someone who reads every item may skip the reference check: a folder
+  // deny or a Private join snapshot leaves vault-wide grantees scoped too.
+  if (await readsWholeVault(db, userId, vaultId, access)) return true;
   if (!relPath) return false; // legacy blob w/o a path — no readable note to tie it to
 
   const readable = await listReadableDocsInVault(userId, vaultId, db);
@@ -418,7 +420,7 @@ export async function filterReadableBlobs<T extends BlobAclRow>(
     blobs.filter((b) => isTreeFile(b) && readableDocs.has(b.doc_id as string)),
   );
   if (rest.length > 0) {
-    const visibleRest = access.vaultWide
+    const visibleRest = (await readsWholeVault(db, userId, vaultId, access))
       ? rest
       : await filterByNoteReferenceMode(userId, vaultId, rest, await readable(), db, crypto);
     for (const b of visibleRest) keep.add(b);
