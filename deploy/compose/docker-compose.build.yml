@@ -1,0 +1,17 @@
+# Build the server image from this checkout instead of pulling the published one:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# For forks and for testing changes; the plain docker-compose.yml pulls
+# ghcr.io/naveedharri/baalda-server.
+services:
+  migrate:
+    image: baalda-server:local
+    build:
+      context: ../..
+      dockerfile: app/apps/server/Dockerfile
+  server:
+    image: baalda-server:local
+    build:
+      context: ../..
+      dockerfile: app/apps/server/Dockerfile
