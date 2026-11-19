@@ -201,6 +201,14 @@ interface VaultSyncConfig {
    */
   fileBases?: Record<string, string>;
   /**
+   * `attachments/` drops (hash-named, no `files` id) → the sha this device
+   * and the server last agreed on, and how it got here: `down` = downloaded
+   * from (or matched by) the server's listing, `up` = this device uploaded it.
+   * The identity a revoked embed's removal needs (#408): only a `down` file
+   * still hashing to its sha is removed; an `up` one is never touched.
+   */
+  attachmentBases?: Record<string, { sha: string; origin: "up" | "down" }>;
+  /**
    * Folders awaiting removal (revoked, or a deleted folder whose disk removal
    * failed), path → last server id (`VaultRegistry.revokedFolders`). The empty-only
    * removal is retried after a relaunch. Absent means none pending.
@@ -856,6 +864,8 @@ export class VaultRegistry {
   private filesConfirmed = new Set<string>();
   /** `files` id → last agreed sha256 (see `VaultSyncConfig.fileBases`). */
   private fileBases = new Map<string, string>();
+  /** `attachments/` path → agreed sha + origin (see `VaultSyncConfig.attachmentBases`). */
+  private attachmentBases = new Map<string, { sha: string; origin: "up" | "down" }>();
   /** docIds whose content this device has confirmed on the server. See
    *  `VaultSyncConfig.pushed` for why this is an optimization, not a guarantee. */
   private pushed = new Set<string>();
@@ -1423,6 +1433,7 @@ export class VaultRegistry {
     this.fileByPath.clear();
     this.filesConfirmed.clear();
     this.fileBases.clear();
+    this.attachmentBases.clear();
     this.pushed.clear();
     this.ackedSvs.clear();
     this.serverTombstones.clear();
@@ -1501,6 +1512,12 @@ export class VaultRegistry {
   }
 
   /** Server doc mapping for a note's vault-relative path, if registered. */
+  /** Did the server answer `not_readable` for this path? A note there is
+   *  hidden from this user, whatever is still on disk (#408). */
+  isHiddenNotePath(relPath: string): boolean {
+    return this.isHiddenPath(relPath);
+  }
+
   getMapping(relPath: string): DocMapping | null {
     return this.byPath.get(relPath) ?? null;
   }
@@ -1752,6 +1769,28 @@ export class VaultRegistry {
     return this.fileBases.get(docId) ?? null;
   }
 
+  /** The agreed sha + origin of an `attachments/` drop (#408), or null. */
+  getAttachmentBase(relPath: string): { sha: string; origin: "up" | "down" } | null {
+    return this.attachmentBases.get(relPath) ?? null;
+  }
+
+  /** Record what this device and the server agree an `attachments/` drop holds.
+   *  An `up` origin is sticky for the same bytes: a later listing match never
+   *  downgrades this device's own upload into a removable download. */
+  setAttachmentBase(relPath: string, sha256: string, origin: "up" | "down"): void {
+    if (this.stale() || !relPath || !sha256) return;
+    const cur = this.attachmentBases.get(relPath);
+    if (cur && cur.sha === sha256 && (cur.origin === origin || cur.origin === "up")) return;
+    this.attachmentBases.set(relPath, { sha: sha256, origin });
+    this.persist();
+  }
+
+  /** Forget an `attachments/` drop's base (the file left this disk). */
+  forgetAttachmentBase(relPath: string): void {
+    if (this.stale() || !this.attachmentBases.delete(relPath)) return;
+    this.persist();
+  }
+
   /** Record that this device and the server agree on these bytes for `docId`. */
   setFileBase(docId: string, sha256: string): void {
     if (this.stale()) return;
@@ -1851,6 +1890,15 @@ export class VaultRegistry {
     for (const id of confirmed) if (typeof id === "string" && id) this.filesConfirmed.add(id);
     for (const [id, sha] of Object.entries(bases)) {
       if (id && typeof sha === "string" && sha) this.fileBases.set(id, sha);
+    }
+  }
+
+  private adoptAttachmentBases(rec: VaultSyncConfig["attachmentBases"]): void {
+    if (!rec || typeof rec !== "object") return;
+    for (const [rp, v] of Object.entries(rec)) {
+      if (!rp || !v || typeof v.sha !== "string" || !v.sha) continue;
+      if (v.origin !== "up" && v.origin !== "down") continue;
+      this.attachmentBases.set(rp, { sha: v.sha, origin: v.origin });
     }
   }
 
@@ -2338,6 +2386,9 @@ export class VaultRegistry {
       // bytes it always did and the identical-config memo keeps working.
       ...(this.filesConfirmed.size > 0 ? { filesConfirmed: [...this.filesConfirmed] } : {}),
       ...(this.fileBases.size > 0 ? { fileBases: Object.fromEntries(this.fileBases) } : {}),
+      ...(this.attachmentBases.size > 0
+        ? { attachmentBases: Object.fromEntries(this.attachmentBases) }
+        : {}),
       ...(this.revokedFolders.size > 0
         ? { revokedFolders: Object.fromEntries(this.revokedFolders) }
         : {}),
@@ -3714,6 +3765,7 @@ export class VaultRegistry {
     }
     this.adoptRevokedFolders(cfg.revokedFolders);
     this.adoptConfigFiles(cfg.files ?? {}, cfg.filesConfirmed ?? [], cfg.fileBases ?? {});
+    this.adoptAttachmentBases(cfg.attachmentBases);
     this.pushed = new Set(cfg.pushed ?? []);
     this.ackedSvs = adoptAcked(cfg.ackedSv, null);
     this.unhydratedPlaceholders = new Set(cfg.unhydratedPlaceholders ?? []);
@@ -3898,6 +3950,7 @@ export class VaultRegistry {
     if (cfg.serverVaultId === vaultId && cfg.files) {
       this.adoptConfigFiles(cfg.files, cfg.filesConfirmed ?? [], cfg.fileBases ?? {});
     }
+    if (cfg.serverVaultId === vaultId) this.adoptAttachmentBases(cfg.attachmentBases);
     this.adoptBootstrap(cfg, vaultId);
 
     // 1b. First-run seeding. A vault the user JUST created (`seedIfEmpty`) —

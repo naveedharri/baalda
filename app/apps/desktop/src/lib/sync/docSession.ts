@@ -43,7 +43,7 @@ import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
 import { statusToWire, type ActivityStatus } from "../prefs";
 import { toast } from "../toast";
-import { AttachmentSync, routesToAttachmentSync } from "./attachments";
+import { AttachmentSync, findEmbedReferences, routesToAttachmentSync } from "./attachments";
 import { applySkippingUnsafe } from "./windowsPaths";
 import { EmbedArrivalFetcher } from "./embedArrival";
 import { BinaryDeleteQueue } from "./binaryDeletes";
@@ -1993,6 +1993,13 @@ export class SyncManager implements InboundHost {
   /** {@link InboundHost.mayRemoveRefusedEmptyFolders}: live, root present. */
   mayRemoveRefusedEmptyFolders(): boolean {
     return this.isLive() && !this.structurePaused();
+  }
+
+  /** Is this local note on its way out of the readable set (#408)? */
+  private noteIsLeaving(indexId: string, path: string): boolean {
+    const mapped = this.registry.getMapping(path)?.docId ?? null;
+    if (this.serverRevoked.has(indexId) || (mapped !== null && this.serverRevoked.has(mapped))) return true;
+    return this.registry.isHiddenNotePath(path);
   }
 
   revocationAuthority(): boolean {
@@ -4051,6 +4058,9 @@ export class SyncManager implements InboundHost {
     this.progress?.forgetDoc(docId);
 
     if (reason === "revoked") {
+      // #408: the images only this note embedded go next, while the ACL signal
+      // that removed it is still fresh. Debounced and coalesced in the mirror.
+      this.attachments?.scheduleReconcile();
       // `releaseDoc` only RELEASED this doc, which deliberately keeps its state
       // vector (a rename doesn't change content, so the manifest stays true).
       // A revocation is the other case: the doc is gone for good, and an id left
@@ -7498,6 +7508,25 @@ export class SyncManager implements InboundHost {
       // instead of being uploaded back (#215).
       listFileTombstones: () => api.listFileTombstones(vaultId),
       removeLocal: (relPath) => ipc.deleteFile(relPath, epoch).then(() => undefined),
+      // #408: `attachments/` drops only now-hidden notes embed leave this disk,
+      // under the same live + fresh-ACL-signal authority as a revoked note.
+      attachmentBase: (relPath) => registry.getAttachmentBase(relPath),
+      setAttachmentBase: (relPath, sha, origin) => registry.setAttachmentBase(relPath, sha, origin),
+      forgetAttachmentBase: (relPath) => registry.forgetAttachmentBase(relPath),
+      revocationAuthority: () => this.revocationAuthority(),
+      trashLocal: (relPath) => ipc.trashNote(relPath, trashStamp(), epoch),
+      suppressDelete: (relPath) => this.suppressBinaryDelete(relPath),
+      // Every local note's text, scanned for the file's name (hash-named, so a
+      // name match is the embed). Any read failure answers "cannot tell".
+      // A note that is itself leaving (named revoked, hidden) never keeps its
+      // images, even while its file is still on disk at check time.
+      referencedAttachments: async (paths) =>
+        findEmbedReferences(
+          paths,
+          await ipc.listNoteTitles(epoch),
+          (path) => ipc.readNote(path, epoch),
+          (n) => this.noteIsLeaving(n.id, n.path),
+        ),
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
       forgetFileId: (relPath) => registry.forgetFileId(relPath),

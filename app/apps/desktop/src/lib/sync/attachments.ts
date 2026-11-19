@@ -803,6 +803,32 @@ function baseName(relPath: string): string {
   return parts[parts.length - 1] ?? relPath;
 }
 
+/**
+ * Which of these `attachments/` paths does a local note still embed (#408)?
+ *
+ * Notes that are themselves leaving (`isLeaving`: named revoked by the server,
+ * or at a path it answered `not_readable` for, still on disk only because
+ * their removal has not run yet) are skipped, so a note on its way out never
+ * keeps its images. Hash-named files, so a name match in the note text is the
+ * embed. A read failure throws, which the caller reads as "cannot tell".
+ */
+export async function findEmbedReferences(
+  paths: readonly string[],
+  notes: ReadonlyArray<{ id: string; path: string }>,
+  readNote: (path: string) => Promise<string>,
+  isLeaving: (note: { id: string; path: string }) => boolean,
+): Promise<Set<string>> {
+  const wanted = paths.map((p) => ({ p, name: p.slice(p.lastIndexOf("/") + 1) }));
+  const hit = new Set<string>();
+  for (const n of notes) {
+    if (hit.size === wanted.length) break;
+    if (isLeaving(n)) continue;
+    const text = await readNote(n.path);
+    for (const w of wanted) if (!hit.has(w.p) && text.includes(w.name)) hit.add(w.p);
+  }
+  return hit;
+}
+
 /** Injected I/O so the sync loop is testable without Tauri or a live server. */
 export interface AttachmentSyncDeps {
   /**
@@ -936,6 +962,24 @@ export interface AttachmentSyncDeps {
    * the unit tests that assert a presign is fetched clean.
    */
   authHeaders?: () => Record<string, string>;
+  // ---- Revoked embeds (#408): `attachments/` drops only hidden notes embed ----
+  /** The sha + origin this device last agreed with the server on for an
+   *  `attachments/` path (`registry.getAttachmentBase`). */
+  attachmentBase?: (relPath: string) => { sha: string; origin: "up" | "down" } | null;
+  /** Record that agreement: `down` = downloaded/listed, `up` = uploaded here. */
+  setAttachmentBase?: (relPath: string, sha256: string, origin: "up" | "down") => void;
+  /** The file left this disk: forget its base. */
+  forgetAttachmentBase?: (relPath: string) => void;
+  /** Is a fresh ACL signal (ready.revoked / revoked frame / reauth ≤60 s) in
+   *  hand on a live session (`docSession.revocationAuthority`)? Absent ⇒ never. */
+  revocationAuthority?: () => boolean;
+  /** Of these `attachments/` paths, which does a local note still embed?
+   *  null = cannot tell, so nothing is removed. Absent ⇒ nothing is removed. */
+  referencedAttachments?: (paths: string[]) => Promise<Set<string> | null>;
+  /** Move a local file atomically into `.context/trash` (`ipc.trashNote`). */
+  trashLocal?: (relPath: string) => Promise<string>;
+  /** Tell the binary delete queue this removal was ours, not the user's. */
+  suppressDelete?: (relPath: string) => void;
   /** Tell the user something terminal happened (a full vault). */
   notify?: (text: string, tone?: "error" | "neutral" | "success") => void;
   /**
@@ -1513,6 +1557,83 @@ export class AttachmentSync {
     }, EMBED_REFUSAL_RETRY_MS);
   }
 
+  /**
+   * `attachments/` drops the server's listing no longer names for this user
+   * (#408): the notes embedding them were hidden from them. Returns the paths
+   * the upload phase must skip — this device already agreed with the server on
+   * those exact bytes, so an unlisted copy is hidden, not missing, and putting
+   * it back up would only re-announce what access removal took away.
+   *
+   * Removal mirrors a revoked tree binary (`registry.removeRevokedBinary`):
+   *  - only on this pass's complete listing (a failed one never reaches here)
+   *    AND a fresh ACL signal (`revocationAuthority`);
+   *  - only a file this device DOWNLOADED (`origin: "down"`); its own upload
+   *    and anything with no recorded base (never synced) stay untouched;
+   *  - never a path a local note still embeds (`referencedAttachments`;
+   *    unanswered ⇒ nothing is removed);
+   *  - capped at max(20, half the known drops) per pass, like revocations;
+   *  - clean (still the agreed sha) ⇒ deleted; edited here ⇒ `.context/trash`.
+   */
+  private async settleHiddenEmbeds(
+    local: LocalAttachment[],
+    server: ServerBlob[],
+  ): Promise<Set<string>> {
+    const hidden = new Set<string>();
+    const baseOf = this.deps.attachmentBase;
+    if (!baseOf) return hidden;
+    const listed = new Set(server.flatMap((b) => (b.relPath ? [pathKey(b.relPath)] : [])));
+    const candidates: Array<{ a: LocalAttachment; base: { sha: string; origin: "up" | "down" } }> = [];
+    let known = 0;
+    for (const a of local) {
+      if (!isUnderAttachments(a.relPath)) continue;
+      const base = baseOf(a.relPath);
+      if (listed.has(pathKey(a.relPath))) {
+        // Listed with the same bytes: that is agreement (repairs older installs).
+        if (server.some((b) => b.relPath && pathKey(b.relPath) === pathKey(a.relPath) && b.sha256 === a.sha256)) {
+          this.deps.setAttachmentBase?.(a.relPath, a.sha256, "down");
+        }
+        if (base) known++;
+        continue;
+      }
+      if (!base) continue;
+      known++;
+      if (base.sha === a.sha256) hidden.add(a.relPath);
+      if (base.origin === "down") candidates.push({ a, base });
+    }
+    if (candidates.length === 0) return hidden;
+    if (!this.deps.revocationAuthority?.()) return hidden;
+    if (!this.deps.referencedAttachments || !this.deps.removeLocal || !this.deps.trashLocal) return hidden;
+    const cap = Math.max(20, Math.ceil(known * 0.5));
+    if (candidates.length > cap) {
+      console.warn(
+        `[attachments] ${candidates.length} embedded files are no longer listed (cap ${cap}) — none removed`,
+      );
+      return hidden;
+    }
+    let referenced: Set<string> | null;
+    try {
+      referenced = await this.deps.referencedAttachments(candidates.map((c) => c.a.relPath));
+    } catch {
+      referenced = null;
+    }
+    if (!referenced || !this.current()) return hidden;
+    for (const { a, base } of candidates) {
+      if (!this.current()) break;
+      if (referenced.has(a.relPath)) continue;
+      this.deps.suppressDelete?.(a.relPath);
+      try {
+        if (a.sha256 === base.sha) await this.deps.removeLocal(a.relPath);
+        else await this.deps.trashLocal(a.relPath);
+        this.deps.forgetAttachmentBase?.(a.relPath);
+        this.localPathKeys.delete(pathKey(a.relPath));
+        hidden.add(a.relPath);
+      } catch (e) {
+        console.warn(`[attachments] ${a.relPath} could not be removed after access ended — kept`, e);
+      }
+    }
+    return hidden;
+  }
+
   /** Ask again once the quiet period has passed (see {@link settleTimer}). */
   private retryAfterSettle(): void {
     if (this.settleTimer) return;
@@ -1590,6 +1711,9 @@ export class AttachmentSync {
       isTombstoned: tombstoned ? (docId) => tombstoned.has(docId) : undefined,
     });
     await this.trashTombstoned(plan.toTrash);
+    // #408: `attachments/` drops this listing no longer names for us.
+    const hiddenEmbeds = await this.settleHiddenEmbeds(local, server);
+    if (!this.current()) return { uploaded: 0, downloaded: 0 };
     if (!this.attachmentSyncBlocked) await this.moveRenamedOffline(plan.toMove);
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
     const { toDownload } = plan;
@@ -1601,7 +1725,9 @@ export class AttachmentSync {
     // push, so it is settled, never registered and never queued.
     // An Office lock file never uploads (#265). Rust's listing already leaves
     // them out; this is the same rule held on the side that talks to the server.
-    const toUpload = plan.toUpload.filter((a) => a.size !== 0 && !isTransientPath(a.relPath));
+    const toUpload = plan.toUpload.filter(
+      (a) => a.size !== 0 && !isTransientPath(a.relPath) && !hiddenEmbeds.has(a.relPath),
+    );
     // Replacements grow during the upload phase: a 409 `stale_base` is one more.
     const replacements: BinaryReplace[] = [...plan.toReplace];
     for (const g of plan.agreed) {
@@ -1740,6 +1866,7 @@ export class AttachmentSync {
             uploaded++;
             // The bytes are THERE now — the one position an upload may say so.
             this.deps.confirmFileBytes?.(a.relPath);
+            if (isUnderAttachments(a.relPath)) this.deps.setAttachmentBase?.(a.relPath, a.sha256, "up");
             this.setFileState(a.relPath, "synced");
           } else {
             // The only `false` is a permanent refusal (413 too large, 415 wrong
@@ -2495,6 +2622,9 @@ export class AttachmentSync {
   /** Download one blob, then tell any embed waiting on it (`attachmentArrivals`). */
   private async downloadOne(b: ServerBlob, opts: { overwrite?: boolean } = {}): Promise<void> {
     await this.downloadOneInner(b, opts);
+    if (b.relPath && b.sha256 && isUnderAttachments(b.relPath)) {
+      this.deps.setAttachmentBase?.(b.relPath, b.sha256, "down");
+    }
     announceAttachmentArrived(b.relPath as string);
   }
 
