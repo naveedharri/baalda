@@ -193,3 +193,24 @@ describe("VaultRegistry.renamePath — a refused move is reported, not swallowed
     expect(reg.getMapping("Docs/a.md")).toBeNull();
   });
 });
+
+describe("VaultRegistry.renamePath — a move into a brand-new folder (#410)", () => {
+  it("registers the missing folders first, then moves the note into them", async () => {
+    const { reg, api, updateNote } = await registered(rootFrozen);
+    updateNote.mockReset().mockResolvedValue({} as never);
+    const createFolder = vi.mocked(api.createFolder);
+    createFolder.mockClear();
+
+    expect(await reg.renamePath("Docs/a.md", "Docs/done/old/a.md")).toBe(true);
+
+    expect(createFolder.mock.calls.map(([f]) => (f as { path: string }).path)).toEqual([
+      "Docs/done",
+      "Docs/done/old",
+    ]);
+    expect(updateNote).toHaveBeenCalledWith("srv-Docs/a.md", {
+      relPath: "Docs/done/old/a.md",
+      folderId: "folder-Docs/done/old",
+    });
+    expect(reg.getMapping("Docs/done/old/a.md")?.docId).toBe("srv-Docs/a.md");
+  });
+});

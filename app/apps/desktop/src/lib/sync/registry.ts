@@ -2892,6 +2892,24 @@ export class VaultRegistry {
           // a recovery copy under `.context/trash` first (offline
           // reconciliation D1/D7). Measured BEFORE the release, while a resident
           // bridge still answers for ops not yet in SQLite.
+          // This device deleted the note at its OLD path, and the file now sits
+          // somewhere else: a move (an outside script moving and rewriting a
+          // note, #410) that the disk-delete drain read as a delete. The user
+          // never deleted these words, so the file stays and comes back as a
+          // new note; the old id stays dead on the server.
+          if (
+            gone.reason === "deleted" && gone.deletedFrom &&
+            this.isOwnDelete(gone.deletedFrom) && !this.isOwnDelete(gone.path)
+          ) {
+            await this.host?.releaseDoc(gone.docId);
+            await ipc.rebindNoteId(gone.path, crypto.randomUUID(), this.epoch());
+            this.baselineDocs.delete(gone.docId);
+            plan.suppress.delete(gone.path);
+            changedDisk = true;
+            console.info(`[sync] ${gone.path} was moved, not deleted: keeping it as a new note`);
+            this.sink.item("ok");
+            return;
+          }
           // A note this device deleted in-app moments ago is the user's own
           // decision: no recovery copy, no report, whatever it held unpushed.
           let verdict = gone.reason !== "revoked" && this.isOwnDelete(gone.path)
@@ -5599,6 +5617,17 @@ export class VaultRegistry {
     return this.trackRegistration(this.registerFolderNow(relPath, name));
   }
 
+  /** Registers every folder of `dir` the server does not know yet, top-down. */
+  private async ensureFolderChain(dir: string): Promise<void> {
+    if (!dir) return;
+    const parts = dir.split("/");
+    for (let i = 1; i <= parts.length; i++) {
+      const path = parts.slice(0, i).join("/");
+      if (this.canonicalFolderPath(path)) continue;
+      if (!(await this.registerFolderNow(path, parts[i - 1]))) return;
+    }
+  }
+
   private async registerFolderNow(relPath: string, name: string): Promise<string | null> {
     if (this.stale()) return null;
     const vaultId = this.serverVaultId;
@@ -5680,7 +5709,16 @@ export class VaultRegistry {
     }
     const mapping = this.byPath.get(oldPath);
     if (mapping) {
-      const newFolderId = this.folderByPath.get(parentDir(newPath)) ?? null;
+      // A move into a folder made in the same breath (`mkdir done && mv …`):
+      // the watcher's folder registration may not have landed yet, and the
+      // server refuses a path whose folder it does not know. Register the
+      // missing folders first, top-down; before this, every such move was
+      // refused, the notes went back to their old paths and the moved files
+      // were left unsynced (#410).
+      await this.ensureFolderChain(parentDir(newPath));
+      if (this.stale() || this.serverVaultId !== vaultId) return false;
+      const newFolderId =
+        this.folderByPath.get(this.canonicalFolderPath(parentDir(newPath)) ?? parentDir(newPath)) ?? null;
       try {
         await this.api.updateNote(mapping.docId, { relPath: newPath, folderId: newFolderId });
       } catch (e) {

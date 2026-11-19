@@ -1500,6 +1500,35 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeRegistry.pull).toHaveBeenCalled();
   });
 
+  it("pairs a move by the index's file identity even when the text changed too (#410)", async () => {
+    // A script moves a note into a new folder and rewrites it in the same
+    // breath: no text matches, but the index followed the file itself and
+    // still keys it under the note's doc_id. That is a move, never a delete.
+    const sm = new SyncManager();
+    mapOne("Inbox/a.md");
+    await live(sm);
+    fakeDisk.files.set("Inbox/done/a.md", "rewritten after the move");
+    fakeDisk.shas.set("Inbox/done/a.md", "f".repeat(64));
+    const meta = vi.mocked(ipc.getNoteMeta);
+    const original = meta.getMockImplementation()!;
+    meta.mockImplementation(async (path: string) =>
+      path === "Inbox/done/a.md"
+        ? ({ id: "d1", path, sha256: "f".repeat(64) } as Awaited<ReturnType<typeof ipc.getNoteMeta>>)
+        : original(path),
+    );
+    try {
+      sm.handleLocalFilesChanged([
+        { path: "Inbox/done/a.md", kind: "modified" },
+        { path: "Inbox/a.md", kind: "removed" },
+      ]);
+      await drain();
+    } finally {
+      meta.mockImplementation(original);
+    }
+    expect(fakeRegistry.renamePath).toHaveBeenCalledWith("Inbox/a.md", "Inbox/done/a.md");
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+  });
+
   it("deletes when the file that appeared is a DIFFERENT note", async () => {
     const sm = new SyncManager();
     mapOne("Old.md");

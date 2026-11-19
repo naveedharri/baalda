@@ -183,6 +183,13 @@ export interface InboundTrash {
    * whole reason binaries ride this plan instead of a parallel one.
    */
   binary?: boolean;
+  /**
+   * A `deleted` note whose file is no longer where the server last knew it:
+   * the path it was deleted at (its baseline). When THIS device made that
+   * delete, the file at {@link path} is a move the disk-delete drain failed to
+   * pair (#410), so the executor keeps it as a new note instead of removing it.
+   */
+  deletedFrom?: string;
 }
 
 export interface InboundRejection {
@@ -650,7 +657,7 @@ export function planInbound(input: InboundInput): InboundPlan {
       // Belt as well as braces: if the removal is skipped or fails, this still
       // stops the note being re-registered as a ghost.
       plan.suppress.add(loc);
-      pushTrash(plan, docId, loc, "deleted");
+      pushTrash(plan, docId, loc, "deleted", false, samePath(loc, prev) ? undefined : prev);
       continue;
     }
 
@@ -767,12 +774,15 @@ function pushTrash(
   path: string,
   reason: InboundTrash["reason"],
   binary = false,
+  deletedFrom?: string,
 ): void {
   if (!(binary ? isSafeTreeBinaryPath(path) : isSafeNotePath(path))) {
     plan.rejected.push({ kind: "trash", path, docId, reason: "unsafe local path" });
     return;
   }
-  plan.trash.push({ docId, path, reason, ...(binary ? { binary: true } : {}) });
+  plan.trash.push({
+    docId, path, reason, ...(binary ? { binary: true } : {}), ...(deletedFrom ? { deletedFrom } : {}),
+  });
 }
 
 function applyBreakers(

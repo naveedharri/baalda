@@ -2699,12 +2699,18 @@ export class SyncManager implements InboundHost {
         const emptyGone = texts.filter((t) => t === "").length;
         for (const [i, item] of gone.entries()) {
           const text = texts[i];
-          const renamedTo =
-            text == null
+          // The index followed the file itself (`note_file_identity`: same
+          // filesystem identity, now at a new path): that is a move whatever
+          // the text became, e.g. a script that moves a note and rewrites it in
+          // the same breath (#410). Text matching alone deleted those notes on
+          // the server and then removed the moved files with them.
+          const byIdentity = [...unpaired].find((c) => metas.get(c)?.id === item.docId) ?? null;
+          const renamedTo = byIdentity ??
+            (text == null
               ? null
               : ((text === ""
                   ? pickUniqueEmptyRename(item.relPath, emptyGone, unpaired, (p) => metas.get(p)?.sha256)
-                  : null) ?? (await this.matchRename(text, item.relPath, unpaired, metas, scope)));
+                  : null) ?? (await this.matchRename(text, item.relPath, unpaired, metas, scope))));
           if (!scope.isCurrent()) return;
           if (renamedTo) {
             unpaired.delete(renamedTo);

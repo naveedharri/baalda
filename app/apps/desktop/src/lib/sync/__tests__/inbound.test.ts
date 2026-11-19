@@ -335,6 +335,19 @@ describe("planInbound — deletes", () => {
     expect([...p.suppress]).toEqual(["bye.md"]);
   });
 
+  it("names the old path of a tombstoned note whose file has since moved (#410)", () => {
+    // The executor keeps such a file when THIS device made the delete: it is a
+    // move the disk-delete drain misread, not a deletion.
+    const p = plan({
+      baseline: new Map([["d1", "Inbox/a.md"]]),
+      local: new Map([["d1", "Inbox/done/a.md"]]),
+      tombstones: new Set(["d1"]),
+    });
+    expect(p.trash).toEqual([
+      { docId: "d1", path: "Inbox/done/a.md", reason: "deleted", deletedFrom: "Inbox/a.md" },
+    ]);
+  });
+
   it("removes the file when a note left the listing (access revoked)", () => {
     // `GET /api/notes` is ACL-filtered, so losing access looks like a delete —
     // hence the tombstone set, which says which of the two it was. Both end in
