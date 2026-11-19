@@ -2848,3 +2848,137 @@ describe("empty folders the server refuses to register", () => {
     expect([...r.disk.folders].sort()).toEqual(["A", "A/B"]);
   });
 });
+
+
+describe("a teammate's folder delete never comes back empty (#409)", () => {
+  function goneTree(disk: FakeDisk) {
+    for (const f of ["Gone", "Gone/Sub"]) disk.folders.add(f);
+    disk.notes.set("Gone/a.md", "d1");
+    disk.notes.set("Gone/Sub/b.md", "d2");
+    return {
+      notes: [
+        { id: "d1", rel_path: "Gone/a.md" },
+        { id: "d2", rel_path: "Gone/Sub/b.md" },
+      ],
+      folders: [{ id: "f1", path: "Gone" }, { id: "f2", path: "Gone/Sub" }],
+    };
+  }
+  // A transient failure (locked file, busy disk) keeps both notes this pass.
+  const failNoteRemovalsOnce = () => {
+    const real = vi.mocked(ipc.deleteFile).getMockImplementation()!;
+    let left = 2;
+    vi.mocked(ipc.deleteFile).mockImplementation((async (...a: Parameters<typeof real>) => {
+      const [p] = a as unknown as [string];
+      if (left > 0 && p.startsWith("Gone/")) { left--; throw new Error("busy"); }
+      return real(...a);
+    }) as never);
+  };
+  const asked = (api: ReturnType<typeof fakeApi>) =>
+    vi.mocked(api.createFolder).mock.calls.map(([f]) => (f as { path: string }).path);
+
+  it("does not register Gone/ and Gone/Sub/ while their deleted notes are still on disk, then removes them", async () => {
+    const disk = new FakeDisk();
+    const first = goneTree(disk);
+    // The fresh-start pull: everything is tombstoned but this pass cannot
+    // remove the notes yet, so neither folder can empty.
+    const then: ServerState = { notes: [], tombstones: ["d1", "d2"], folders: [], folderTombstones: ["f1", "f2"] };
+    const { api, reg } = await twoPasses({ disk, first, then, patch: failNoteRemovalsOnce });
+    expect(disk.notes.has("Gone/a.md")).toBe(true);
+    expect(asked(api)).toEqual([]);
+    expect(api.createNote).not.toHaveBeenCalled();
+
+    // The next pull removes the notes: everything leaves, nothing re-registers.
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect([...disk.notes.keys()]).toEqual([]);
+    expect([...disk.folders]).toEqual([]);
+    expect(asked(api)).toEqual([]);
+  });
+
+  it("holds the pending removal across a relaunch from the persisted config", async () => {
+    const disk = new FakeDisk();
+    const first = goneTree(disk);
+    const then: ServerState = { notes: [], tombstones: ["d1", "d2"], folders: [], folderTombstones: ["f1", "f2"] };
+    const { api } = await twoPasses({ disk, first, then, patch: failNoteRemovalsOnce });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const cfg = JSON.parse(writes[writes.length - 1][0] as string);
+    expect(cfg.revokedFolders).toEqual({ Gone: "f1", "Gone/Sub": "f2" });
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1][0]);
+    const restarted = new VaultRegistry(api);
+    restarted.setInboundHost(recordingHost().host);
+    await restarted.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(asked(api)).toEqual([]);
+    await restarted.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect([...disk.folders]).toEqual([]);
+    expect(asked(api)).toEqual([]);
+  });
+
+  it("still registers a folder of the same name the user creates again later", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("Gone");
+    disk.folders.add("Gone/Sub");
+    const then: ServerState = { notes: [], folders: [], folderTombstones: ["f1", "f2"] };
+    const { api, reg } = await twoPasses({
+      disk,
+      first: { notes: [], folders: [{ id: "f1", path: "Gone" }, { id: "f2", path: "Gone/Sub" }] },
+      then,
+    });
+    expect([...disk.folders]).toEqual([]);
+    expect(asked(api)).toEqual([]);
+    // Later, the user makes a folder with the same name, nested, with a note.
+    disk.folders.add("Gone");
+    disk.folders.add("Gone/Sub");
+    disk.notes.set("Gone/Sub/fresh.md", "local-fresh");
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(asked(api)).toEqual(["Gone", "Gone/Sub"]);
+    expect(api.createNote).toHaveBeenCalledWith(expect.objectContaining({ relPath: "Gone/Sub/fresh.md" }));
+  });
+
+  it("keeps a deleted folder holding a NEW file dropped here, so the file can upload", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("Gone");
+    const { api, reg } = await twoPasses({
+      disk,
+      first: { notes: [], folders: [{ id: "f1", path: "Gone" }] },
+      then: { notes: [], folders: [], folderTombstones: ["f1"] },
+      patch: () => {
+        // Dropped while the delete was in flight: no files id, no tombstone.
+        disk.notes.set("Gone/photo.png", "bin-new");
+      },
+    });
+    expect(disk.folders.has("Gone")).toBe(true);
+    expect(asked(api)).toEqual(["Gone"]);
+    expect(reg.isInsideDeadFolder("Gone/photo.png")).toBe(false);
+  });
+
+  it("still registers an EMPTY folder of the same name re-created later", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("Gone");
+    const { api, reg } = await twoPasses({
+      disk,
+      first: { notes: [], folders: [{ id: "f1", path: "Gone" }] },
+      then: { notes: [], folders: [], folderTombstones: ["f1"] },
+    });
+    expect(disk.folders.has("Gone")).toBe(false);
+    // Reconcile re-reads config.json, so hand it the one the last pass wrote.
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1][0] as never);
+    disk.folders.add("Gone");
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(asked(api)).toEqual(["Gone"]);
+    expect(disk.folders.has("Gone")).toBe(true);
+  });
+
+  it("does not count a file the server deleted with the folder as new work", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("Gone");
+    disk.notes.set("Gone/old.png", "bin-old");
+    const { api, reg } = await twoPasses({
+      disk,
+      first: { notes: [], folders: [{ id: "f1", path: "Gone" }] },
+      then: { notes: [], folders: [], folderTombstones: ["f1"] },
+      files: { "Gone/old.png": "file-1" },
+    });
+    expect(asked(api)).toEqual([]);
+    expect(reg.isInsideDeadFolder("Gone/old.png")).toBe(true);
+  });
+});

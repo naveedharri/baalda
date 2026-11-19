@@ -118,6 +118,7 @@ import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { isSymlinkRefusal, SYMLINK_REFUSAL_REASON } from "./linkRefusals";
 import { toast } from "../toast";
 import { isHeldCreateCode } from "./createRefusals";
+import { isSafeTreeBinaryRelPath } from "./attachments";
 import { NOT_CREATOR_DETAIL, NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { vaultScopes, type VaultScope, type VaultScopeSource } from "./vaultScope";
 
@@ -706,6 +707,17 @@ function isNoteFile(path: string): boolean {
 }
 
 /** Flatten a tree into folder paths and note paths (both vault-relative). */
+/** Tree binaries (non-note files the attachment sync uploads) in a local tree. */
+function treeBinaryPaths(root: TreeNode): string[] {
+  const out: string[] = [];
+  const walk = (n: TreeNode) => {
+    if (n.isDir) for (const c of n.children ?? []) walk(c);
+    else if (!isNoteFile(n.path) && isSafeTreeBinaryRelPath(n.path)) out.push(n.path);
+  };
+  walk(root);
+  return out;
+}
+
 export function flattenTree(root: TreeNode): { folders: TreeNode[]; notes: TreeNode[] } {
   const folders: TreeNode[] = [];
   const notes: TreeNode[] = [];
@@ -3061,18 +3073,10 @@ export class VaultRegistry {
     // dropped below — re-registers under a fresh id, because content must live
     // somewhere. Either way the stale id leaves the map, so nothing can later
     // rename/color/re-register against a deleted server row.
-    // Folders a teammate DELETED (tombstoned ids), as opposed to moved or made
-    // private: one that survives the empty-only removal below still holds work
-    // of this device's — new notes the deleter never saw — and is kept (D8).
-    const tombstonedFolders = new Set<string>();
-    if (args.folderTombstones) {
-      const dead = new Set(args.folderTombstones);
-      for (const [rp, id] of new Map([...this.revokedFolders, ...this.folderByPath])) {
-        if (dead.has(id)) tombstonedFolders.add(rp);
-      }
-    }
+    // Folders a teammate DELETED that survive the empty-only removal stay
+    // pending; whether one is kept for this device's new notes (D8) is judged
+    // in the outbound half, which can tell new work from leftovers.
     const listedFolderIds = new Set(args.serverFolders.map((f) => f.id));
-    const deadFolderIds = new Set(args.folderTombstones ?? []);
     for (const path of plan.removeFolders) {
       if (this.stopRun()) break;
       const folderId = this.folderByPath.get(path) ?? this.revokedFolders.get(path);
@@ -3088,10 +3092,14 @@ export class VaultRegistry {
         // A failed child removal also keeps its parents pending. Their being
         // non-empty is not evidence of NEW local work and must not resurrect
         // an otherwise deleted subtree.
-        const pendingChild = [...this.revokedFolders].some(([child, id]) =>
-          deadFolderIds.has(id) && pathKey(child).startsWith(pathKey(path) + "/"));
-        const pending = !removed && folderId !== undefined &&
-          !listedFolderIds.has(folderId) && (!deadFolderIds.has(folderId) || pendingChild);
+        // A tombstoned folder that is not empty stays pending too (#409). Its
+        // leftovers are usually the deleted notes this pass could not remove
+        // YET (not live, a cap, an unanswered check): reading "not empty" as
+        // new local work dropped the dead id, so the outbound half registered
+        // the folder as brand-new and it came back, empty, for everyone. The
+        // outbound prune judges real new work (`newLocalWork`: an unmapped
+        // note no deletion accounts for) and only then lets it re-register.
+        const pending = !removed && folderId !== undefined && !listedFolderIds.has(folderId);
         if (pending) {
           if (this.revokedFolders.get(path) !== folderId) {
             this.revokedFolders.set(path, folderId);
@@ -3104,12 +3112,6 @@ export class VaultRegistry {
         if (removed) {
           changedDisk = true;
           this.markMaterialized(path); // our removal; one watcher echo to swallow
-        } else if (tombstonedFolders.has(path) && !own && !pending) {
-          reconcileReport.record({
-            kind: "folderKept",
-            path,
-            detail: "deleted by a teammate, kept because it still holds notes created here",
-          });
         }
       } catch (e) {
         if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
@@ -4088,6 +4090,7 @@ export class VaultRegistry {
     const serverFolders = folderRegistry.folders;
     let serverNotes = noteRegistry.notes;
     let { folders, notes } = flattenTree(workingTree);
+    let binaries = treeBinaryPaths(workingTree);
     // The paths this device already knew BEFORE this pass (#221 drift report).
     // A previous pull may have mapped a new remote note but deferred its
     // first disk write. Its absence is still an arrival, not evidence of a
@@ -4191,6 +4194,7 @@ export class VaultRegistry {
         const reread = await this.readFullTree();
         if (this.stale()) return false;
         ({ folders, notes } = flattenTree(reread));
+        binaries = treeBinaryPaths(reread);
         // The paths moved under us, so any memoized read describes the old tree.
         titlesCache = null;
         // Re-read the server's notes too: `move_note` bumps rows we may have just
@@ -4280,15 +4284,22 @@ export class VaultRegistry {
     // this the server refused every note in it ("No folder at …") forever.
     // Only judged after an inbound pass, which is what fills
     // `inboundSuppressed` with the deleted notes still on disk.
+    // A tree binary counts too when this device holds no `files` id for it:
+    // a file the server deleted with the folder is still mapped until the
+    // attachment pass trashes it, so only a NEW drop reads as new work.
+    // Without this a fresh file in a deleted folder waited forever, its
+    // upload held by `isInsideDeadFolder`.
     const newLocalWork = (rp: string): boolean => {
       const prefix = pathKey(rp) + "/";
-      return notes.some(
-        (n) =>
-          pathKey(n.path).startsWith(prefix) &&
-          !this.byPath.has(n.path) &&
-          !this.inboundSuppressed.has(n.path) &&
-          !this.deletedPaths.has(pathKey(n.path)) &&
-          !this.isOwnDelete(n.path),
+      const fresh = (p: string) =>
+        pathKey(p).startsWith(prefix) &&
+        !this.deletedPaths.has(pathKey(p)) &&
+        !this.isOwnDelete(p);
+      return (
+        notes.some(
+          (n) => fresh(n.path) && !this.byPath.has(n.path) && !this.inboundSuppressed.has(n.path),
+        ) ||
+        binaries.some((p) => fresh(p) && !this.fileByPath.has(p))
       );
     };
     for (const [rp, id] of [...this.revokedFolders]) {
