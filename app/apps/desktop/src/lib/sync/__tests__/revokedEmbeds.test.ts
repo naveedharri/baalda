@@ -42,11 +42,6 @@ function harness(opts: {
       removed.push(p);
       local.delete(p);
     },
-    trashLocal: async (p) => {
-      trashed.push(p);
-      local.delete(p);
-      return `.context/trash/${p}`;
-    },
     suppressDelete: (p) => void suppressed.push(p),
     attachmentBase: (p) => bases.get(p) ?? null,
     setAttachmentBase: (p, s, origin) => {
@@ -140,13 +135,13 @@ describe("revoked embeds (#408)", () => {
     expect(h.uploads).toEqual([IMG]);
   });
 
-  it("moves a copy edited here since the download to .context/trash", async () => {
+  it("removes a copy edited here since the download outright too", async () => {
     const h = harness();
     const sync = await downloadedThenHidden(h);
     h.local.set(IMG, new Uint8Array([9, 9]));
     await sync.reconcile();
-    expect(h.removed).toEqual([]);
-    expect(h.trashed).toEqual([IMG]);
+    expect(h.removed).toEqual([IMG]);
+    expect(h.trashed).toEqual([]);
     expect(h.local.has(IMG)).toBe(false);
   });
 

@@ -735,8 +735,8 @@ describe("inbound delete", () => {
     expect(api.createNote).not.toHaveBeenCalled();
   });
 
-  it("copies a note with unseen work to the trash before a teammate's delete removes it (D1)", async () => {
-    // Delete wins for the team; this device's unsent version stays recoverable.
+  it("removes a note with unseen work outright when a teammate deletes it (D1)", async () => {
+    // Deleted means deleted (2026-11-19): no local copy, no report.
     reconcileReport.clear();
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
@@ -749,13 +749,10 @@ describe("inbound delete", () => {
     });
 
     expect(disk.notes.has("mine.md")).toBe(false);
-    expect(disk.copies.map((c) => c.from)).toEqual(["mine.md"]);
+    expect(disk.copies).toEqual([]);
     expect(disk.deleted).toEqual(["mine.md"]);
     expect(r.reg.failures().map((f) => f.kind)).not.toContain("orphan");
-    const items = reconcileReport.items();
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ kind: "deletedByTeammate", docId: "d1", path: "mine.md" });
-    expect(items[0].detail).toBe(disk.copies[0].to);
+    expect(reconcileReport.items()).toEqual([]);
   });
 
   it("removes a stale device's copy outright, with no recovery copy", async () => {
@@ -774,7 +771,7 @@ describe("inbound delete", () => {
     expect(reconcileReport.items()).toEqual([]);
   });
 
-  it("preserves a matching deleted document in Trash when its content baseline is missing", async () => {
+  it("removes a matching deleted document outright when its content baseline is missing", async () => {
     // The index proves identity even though content acknowledgement is absent.
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
@@ -786,7 +783,7 @@ describe("inbound delete", () => {
       patch: () => vi.mocked(ipc.getDiskBase).mockResolvedValue(null as never),
     });
     expect(disk.notes.has("mine.md")).toBe(false);
-    expect(disk.copies.map((copy) => copy.from)).toEqual(["mine.md"]);
+    expect(disk.copies).toEqual([]);
     expect(r.reg.failures().map((f) => f.kind)).not.toContain("orphan");
   });
 
@@ -810,7 +807,7 @@ describe("inbound delete", () => {
     expect(r.reg.failures().map((f) => f.kind)).toContain("orphan");
   });
 
-  it("keeps unconfirmed deleted content active if its recovery copy cannot be saved", async () => {
+  it("never tries to save a copy of deleted content, so a full trash cannot block the delete", async () => {
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     disk.bodies.set("mine.md", "only local content");
@@ -823,13 +820,14 @@ describe("inbound delete", () => {
         vi.mocked(ipc.copyToTrash).mockRejectedValue(new Error("disk full"));
       },
     });
-    expect(disk.notes.has("mine.md")).toBe(true);
-    expect(disk.deleted).toEqual([]);
+    expect(disk.notes.has("mine.md")).toBe(false);
+    expect(disk.deleted).toEqual(["mine.md"]);
+    expect(vi.mocked(ipc.copyToTrash)).not.toHaveBeenCalled();
   });
 
-  it("never re-registers the dead id after its unseen work was copied aside", async () => {
+  it("never re-registers the dead id after a teammate's delete removed it", async () => {
     // Prod 2026-09-23 shape: a dead doc_id going back up every ~30 s. With the
-    // recovery copy made and the file gone, later passes must stay quiet.
+    // file gone, later passes must stay quiet.
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     disk.bodies.set("mine.md", "words nobody else has");
@@ -840,7 +838,7 @@ describe("inbound delete", () => {
       first: { notes: [{ id: "d1", rel_path: "mine.md" }] },
       then,
     });
-    expect(disk.copies.map((c) => c.from)).toEqual(["mine.md"]);
+    expect(disk.copies).toEqual([]);
     expect(disk.notes.has("mine.md")).toBe(false);
 
     for (let pass = 0; pass < 2; pass++) {
@@ -853,7 +851,7 @@ describe("inbound delete", () => {
       expect(vi.mocked(api.createNote)).not.toHaveBeenCalled();
       expect(reg.getMapping("mine.md")).toBeNull();
     }
-    expect(disk.copies).toHaveLength(1);
+    expect(disk.copies).toHaveLength(0);
   });
 });
 
@@ -946,9 +944,9 @@ describe("inbound folder deletion", () => {
     expect(vi.mocked(api.createFolder)).not.toHaveBeenCalled();
   });
 
-  it("removes a deleted folder once its mapped notes' unseen work is copied aside", async () => {
-    // Delete wins: every note inside was a MAPPED doc, so after the recovery
-    // copies the folder has nothing of this device's left and goes too.
+  it("removes a deleted folder with its mapped notes, unseen work included", async () => {
+    // Delete wins: every note inside was a MAPPED doc, so it goes outright and
+    // the folder has nothing of this device's left and goes too.
     const disk = new FakeDisk();
     disk.folders.add("Team");
     disk.notes.set("Team/mine.md", "d1");
@@ -963,7 +961,7 @@ describe("inbound folder deletion", () => {
       then: { notes: [], tombstones: ["d1"], folders: [], folderTombstones: ["f1"] },
     });
 
-    expect(disk.copies.map((c) => c.from)).toEqual(["Team/mine.md"]);
+    expect(disk.copies).toEqual([]);
     expect(disk.folders.has("Team")).toBe(false);
     expect(vi.mocked(api.createFolder)).not.toHaveBeenCalledWith(
       expect.objectContaining({ path: "Team" }),
@@ -995,7 +993,7 @@ describe("inbound folder deletion", () => {
     expect(vi.mocked(api.createFolder)).not.toHaveBeenCalled();
   });
 
-  it("removes a private folder once its mapped notes' unsent edits are kept locally (D7)", async () => {
+  it("removes a private folder with its mapped notes, unsent edits included (D7)", async () => {
     reconcileReport.clear();
     const disk = new FakeDisk();
     disk.folders.add("Getting Started");
@@ -1011,9 +1009,9 @@ describe("inbound folder deletion", () => {
       then: { notes: [], tombstones: [], folders: [], folderTombstones: [] },
     });
 
-    expect(disk.copies.map((c) => c.from)).toEqual(["Getting Started/mine.md"]);
+    expect(disk.copies).toEqual([]);
     expect(disk.folders.has("Getting Started")).toBe(false);
-    expect(reconcileReport.items().map((i) => i.kind)).toEqual(["keptLocally"]);
+    expect(reconcileReport.items()).toEqual([]);
   });
 
   it("removes the emptied old directory after a server-side folder move, and does not re-register it", async () => {
@@ -1415,21 +1413,18 @@ describe("whole-vault Private reaches the member's disk", () => {
     ).toBe(true);
   });
 
-  it("keeps a recovery copy of a revoked file holding unseen work, then removes it (D7)", async () => {
-    // Never destroy unsent edits because of someone else's permission change:
-    // the half with unseen work is copied to `.context/trash` first and
-    // reported as kept locally; the stale half is removed outright.
+  it("removes every revoked file outright, unseen work included (D7)", async () => {
+    // Access removal deletes outright (2026-11-19): nothing goes to
+    // `.context/trash`, whether or not this device had unsent edits.
     reconcileReport.clear();
     const half = N / 2;
     const r = await afterPrivate(true, { pushed: half });
 
     expect(r.disk.notes.size).toBe(0);
     expect(r.disk.deleted).toHaveLength(N);
-    expect(r.disk.copies).toHaveLength(N - half);
+    expect(r.disk.copies).toHaveLength(0);
     expect(r.reg.failures().filter((f) => f.kind === "orphan")).toHaveLength(0);
-    const kept = reconcileReport.items().filter((i) => i.kind === "keptLocally");
-    expect(kept.map((i) => i.path).sort()).toEqual(r.disk.copies.map((c) => c.from).sort());
-    expect(kept[0].detail).toMatch(/^\.context\/trash\//);
+    expect(reconcileReport.items().filter((i) => i.kind === "keptLocally")).toEqual([]);
   });
 
   it("permanently removes an author's revoked note too", async () => {
@@ -1699,10 +1694,8 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     expect(reconcileReport.items().some((i) => i.kind === "keptLocally")).toBe(false);
   });
 
-  it("keeps a recovery copy of a binary edited here since the server last agreed on it", async () => {
-    // Confirmation proves an EARLIER upload. A spreadsheet edited offline, or
-    // still inside the upload quiet period, holds work the server never saw;
-    // deleting it on a revocation would lose that work everywhere.
+  it("removes a revoked binary outright even when it was edited here", async () => {
+    // Access removal deletes outright (2026-11-19), local edits included.
     const disk = new FakeDisk();
     disk.notes.set("a.md", "d1");
     disk.binaries.add("Team/report.xlsx");
@@ -1717,16 +1710,14 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     });
 
     expect(disk.binaries.has("Team/report.xlsx")).toBe(false);
-    expect(disk.deleted).toEqual([]);
-    expect(disk.trashed).toEqual([{ from: "Team/report.xlsx", to: expect.stringContaining(".context/trash/") }]);
-    expect(r.filesRemoved).toEqual([{ path: "Team/report.xlsx", trashedTo: disk.trashed[0].to }]);
+    expect(disk.deleted).toEqual(["Team/report.xlsx"]);
+    expect(disk.trashed).toEqual([]);
+    expect(r.filesRemoved).toEqual([{ path: "Team/report.xlsx", trashedTo: null }]);
     expect(r.reg.getFileId("Team/report.xlsx")).toBeNull();
-    expect(reconcileReport.items()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "keptLocally", docId: "file-1", detail: disk.trashed[0].to }),
-    ]));
+    expect(reconcileReport.items().filter((i) => i.kind === "keptLocally")).toEqual([]);
   });
 
-  it("keeps a recovery copy when there is no agreed base or the disk cannot be hashed", async () => {
+  it("removes a revoked binary outright with no agreed base or an unhashable disk", async () => {
     for (const patch of [undefined, () => { vi.mocked(ipc.listBinaries).mockRejectedValue(new Error("busy")); }]) {
       reconcileReport.clear();
       const disk = new FakeDisk();
@@ -1742,8 +1733,8 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
         fileBases: patch ? undefined : {},
         patch,
       });
-      expect(disk.deleted).toEqual([]);
-      expect(disk.trashed).toEqual([{ from: "Team/report.pdf", to: expect.stringContaining(".context/trash/") }]);
+      expect(disk.deleted).toEqual(["Team/report.pdf"]);
+      expect(disk.trashed).toEqual([]);
     }
   });
 
@@ -1906,7 +1897,7 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     expect(disk.binaries.has("Team/report.pdf")).toBe(true);
   });
 
-  it("keeps the uploader's own revoked binary in recovery instead of deleting it", async () => {
+  it("removes the uploader's own revoked binary outright too", async () => {
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     disk.binaries.add("Team/report.pdf");
@@ -1932,9 +1923,9 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
 
     expect(disk.binaries.has("Team/report.pdf")).toBe(false);
-    expect(disk.deleted).toEqual([]);
-    expect(disk.trashed).toEqual([{ from: "Team/report.pdf", to: expect.stringContaining(".context/trash/") }]);
-    expect(host.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: disk.trashed[0].to }]);
+    expect(disk.deleted).toEqual(["Team/report.pdf"]);
+    expect(disk.trashed).toEqual([]);
+    expect(host.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: null }]);
   });
 
   it("keeps a binary whose bytes this device never confirmed upstream", async () => {
@@ -2133,22 +2124,22 @@ describe("offline reconciliation — the acknowledged state vector gate", () => 
     return { disk, reg, api, carry, then, textCopies };
   }
 
-  it("closed-app offline edit, then a teammate's delete: recovery copy first", async () => {
+  it("closed-app offline edit, then a teammate's delete: removed outright, no copy", async () => {
     const doc = new Y.Doc();
     doc.getText("content").insert(0, "synced text");
     const acked = Y.encodeStateVector(doc);
     doc.getText("content").insert(11, " + offline edit"); // made while the app was closed
     const { disk } = await deleteWith(Y.encodeStateVector(doc), acked);
-    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
+    expect(disk.copies).toEqual([]);
     expect(disk.notes.has("n.md")).toBe(false);
-    expect(reconcileReport.items().map((i) => i.kind)).toEqual(["deletedByTeammate"]);
+    expect(reconcileReport.items()).toEqual([]);
   });
 
-  it("open-but-disconnected edit (never acknowledged at all): recovery copy first", async () => {
+  it("open-but-disconnected edit (never acknowledged at all): removed outright, no copy", async () => {
     const doc = new Y.Doc();
     doc.getText("content").insert(0, "typed with no network");
     const { disk } = await deleteWith(Y.encodeStateVector(doc), null);
-    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
+    expect(disk.copies).toEqual([]);
     expect(disk.notes.has("n.md")).toBe(false);
   });
 
@@ -2171,14 +2162,14 @@ describe("offline reconciliation — the acknowledged state vector gate", () => 
     expect(vi.mocked(ipc.writeNoteIfMissing)).not.toHaveBeenCalledWith("n.md", expect.anything(), expect.anything());
   });
 
-  it("an empty file over unacked CRDT ops: the CRDT's text is what goes to the trash", async () => {
+  it("an empty file over unacked CRDT ops: nothing goes to the trash", async () => {
     const doc = new Y.Doc();
     doc.getText("content").insert(0, "only in the CRDT");
     const { textCopies, disk } = await deleteWith(Y.encodeStateVector(doc), null, {
       body: "",
       crdtText: "only in the CRDT",
     });
-    expect(textCopies).toEqual([{ path: "n.md", content: "only in the CRDT" }]);
+    expect(textCopies).toEqual([]);
     expect(disk.copies).toEqual([]);
     expect(disk.notes.has("n.md")).toBe(false);
   });
@@ -2275,7 +2266,7 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
     expect(reconcileReport.items().map((i) => i.kind)).not.toContain("keptLocally");
   });
 
-  it("keeps a recovery copy when the file holds bytes the CRDT does not", async () => {
+  it("removes a revoked note outright even when the file holds bytes the CRDT does not", async () => {
     const { disk } = await revokeWith({
       body: "the team's words + my own lines",
       localSv: svOf("the team's words"),
@@ -2283,10 +2274,10 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
       crdtText: "the team's words",
     });
     expect(disk.notes.has("n.md")).toBe(false);
-    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
+    expect(disk.copies).toEqual([]);
   });
 
-  it("keeps a recovery copy of ops beyond a real acknowledgement", async () => {
+  it("removes a revoked note outright even with ops beyond a real acknowledgement", async () => {
     const doc = new Y.Doc();
     doc.getText("content").insert(0, "synced");
     const acked = Y.encodeStateVector(doc);
@@ -2297,7 +2288,7 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
       acked,
       crdtText: "synced + typed offline",
     });
-    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
+    expect(disk.copies).toEqual([]);
     expect(disk.notes.has("n.md")).toBe(false);
   });
 
@@ -2315,7 +2306,7 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
     expect(reg.isHiddenPath("n.md")).toBe(false);
   });
 
-  it("never opens a revoked note that had to stay because its edits could not be saved", async () => {
+  it("removes a revoked note even when its trash folder is unwritable (no copy is attempted)", async () => {
     const { disk, reg } = await revokeWith({
       body: "the team's words + my own lines",
       localSv: svOf("the team's words"),
@@ -2323,9 +2314,9 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
       crdtText: "the team's words",
       copyFails: true,
     });
-    expect(disk.notes.has("n.md")).toBe(true);
-    expect(reg.isHiddenPath("n.md")).toBe(true);
-    expect(reg.isHiddenPath("N.md")).toBe(true);
+    expect(disk.notes.has("n.md")).toBe(false);
+    expect(disk.copies).toEqual([]);
+    expect(reg.failures().filter((f) => f.kind === "orphan")).toEqual([]);
   });
 
   it("removes a note an earlier version left on disk, on the next pass", async () => {
@@ -2721,20 +2712,21 @@ describe("offline reconciliation — ready.tombstones", () => {
     return { disk, reg };
   }
 
-  it("a doc named only by ready.tombstones goes down the DELETION path (recovery copy, teammate delete)", async () => {
+  it("a doc named only by ready.tombstones goes down the DELETION path (teammate delete, no copy)", async () => {
     const { disk, reg } = await pull({ readyTombstones: ["d1"], listingTombstones: [] });
     expect(reg.isServerTombstoned("d1")).toBe(true);
-    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
+    expect(disk.copies).toEqual([]);
     expect(disk.notes.has("n.md")).toBe(false);
-    expect(reconcileReport.items().map((i) => i.kind)).toEqual(["deletedByTeammate"]);
+    expect(reconcileReport.items()).toEqual([]);
   });
 
   it("without the field the pass is unchanged: the same absence reads as a revocation", async () => {
     // Today's behaviour for an older server: a small, answered absence is a
-    // revocation (kept locally), which is exactly what the field corrects.
-    const { disk } = await pull({ listingTombstones: [] });
-    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
-    expect(reconcileReport.items().map((i) => i.kind)).toEqual(["keptLocally"]);
+    // revocation, which removes the file outright like a deletion now does.
+    const { disk, reg } = await pull({ listingTombstones: [] });
+    expect(reg.isServerTombstoned("d1")).toBe(false);
+    expect(disk.copies).toEqual([]);
+    expect(reconcileReport.items()).toEqual([]);
   });
 
   it("a listing that cannot answer tombstones stays 'cannot answer'", async () => {

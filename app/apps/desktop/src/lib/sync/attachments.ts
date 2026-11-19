@@ -1586,7 +1586,7 @@ export class AttachmentSync {
    *  - never a path a local note still embeds (`referencedAttachments`;
    *    unanswered ⇒ nothing is removed);
    *  - capped at max(20, half the known drops) per pass, like revocations;
-   *  - clean (still the agreed sha) ⇒ deleted; edited here ⇒ `.context/trash`.
+   *  - removed outright, edited or not: access removal keeps no local copy.
    */
   private async settleHiddenEmbeds(
     local: LocalAttachment[],
@@ -1616,7 +1616,7 @@ export class AttachmentSync {
     }
     if (candidates.length === 0) return hidden;
     if (!this.deps.revocationAuthority?.()) return hidden;
-    if (!this.deps.referencedAttachments || !this.deps.removeLocal || !this.deps.trashLocal) return hidden;
+    if (!this.deps.referencedAttachments || !this.deps.removeLocal) return hidden;
     const cap = Math.max(20, Math.ceil(known * 0.5));
     if (candidates.length > cap) {
       console.warn(
@@ -1631,13 +1631,12 @@ export class AttachmentSync {
       referenced = null;
     }
     if (!referenced || !this.current()) return hidden;
-    for (const { a, base } of candidates) {
+    for (const { a } of candidates) {
       if (!this.current()) break;
       if (referenced.has(a.relPath)) continue;
       this.deps.suppressDelete?.(a.relPath);
       try {
-        if (a.sha256 === base.sha) await this.deps.removeLocal(a.relPath);
-        else await this.deps.trashLocal(a.relPath);
+        await this.deps.removeLocal(a.relPath);
         this.deps.forgetAttachmentBase?.(a.relPath);
         this.localPathKeys.delete(pathKey(a.relPath));
         hidden.add(a.relPath);
@@ -2085,24 +2084,23 @@ export class AttachmentSync {
    * {@link BinaryReplace}). The recovery copy comes FIRST, and a failed copy
    * stops the replacement: the local bytes are never overwritten without one.
    */
+  /** A file a teammate deleted leaves this disk outright: a delete keeps no
+   *  local copy. */
   private async trashTombstoned(items: BinaryPlan["toTrash"]): Promise<void> {
-    const keep = this.deps.keepLocalCopy;
     const remove = this.deps.removeLocal;
     for (const { local, docId } of items) {
-      if (!keep || !remove || !this.current()) {
+      if (!remove || !this.current()) {
         console.info(`[attachments] ${local.relPath} was deleted on the server — not uploading it back`);
         continue;
       }
       try {
-        const dest = await keep(local.relPath);
+        this.deps.suppressDelete?.(local.relPath);
         await remove(local.relPath);
         this.fileIds.delete(local.relPath);
         this.deps.forgetFileId?.(local.relPath);
-        console.info(
-          `[attachments] ${local.relPath} (file ${docId}) was deleted by a teammate — local copy moved to ${dest}`,
-        );
+        console.info(`[attachments] ${local.relPath} (file ${docId}) was deleted by a teammate — removed here`);
       } catch (e) {
-        console.warn(`[attachments] couldn't set aside deleted file ${local.relPath}; leaving it`, e);
+        console.warn(`[attachments] couldn't remove deleted file ${local.relPath}; leaving it`, e);
       }
     }
   }

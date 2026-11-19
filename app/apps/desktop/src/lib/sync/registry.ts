@@ -68,10 +68,6 @@ function retiredScope(scope: VaultScope): VaultScope {
   };
 }
 
-/** Timestamped `.context/trash` folder for an inbound-removal recovery copy. */
-function recoveryStamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, "-");
-}
 
 /** The server's creation timestamp for a listed note, when it says. */
 function noteCreatedAtOf(n: RegisteredNote): string | null {
@@ -2547,7 +2543,7 @@ export class VaultRegistry {
    */
   private async removeRevokedBinary(
     gone: InboundTrash,
-    localSha: (relPath: string) => Promise<string | null>,
+    _localSha: (relPath: string) => Promise<string | null>,
   ): Promise<boolean> {
     // The one refusal, and the same shape the note rail's `isPushed` makes: the
     // mapping is LEFT in place, so a pass that later confirms these bytes can
@@ -2568,22 +2564,16 @@ export class VaultRegistry {
     // BEFORE the removal, so the claim beats the watcher to the queue.
     this.host?.suppressBinaryDelete?.(gone.path);
     try {
-      let trashedTo: string | null;
+      // Access removal deletes outright: no local copy, whoever made the file
+      // and whatever was edited here (decided 2026-11-19).
+      const trashedTo: string | null = null;
       try {
-        const base = this.fileBases.get(gone.docId) ?? null;
-        const clean = base !== null && (await localSha(gone.path)) === base;
-        if (this.authoredDocs.has(gone.docId) || !clean) {
-          trashedTo = await ipc.trashNote(gone.path, recoveryStamp(), this.epoch());
-        } else {
-          await ipc.deleteFile(gone.path, this.epoch());
-          trashedTo = null;
-        }
+        await ipc.deleteFile(gone.path, this.epoch());
       } catch (e) {
         if (ipc.isVaultMismatch(e) || this.stale()) return false;
         // A confirmed absence is idempotent. Any other failure keeps the file
         // and its identity for retry; never fall back to hard deletion.
         if (await ipc.binaryExists(gone.path, this.epoch())) throw e;
-        trashedTo = null;
       }
       // The row is gone for us, so the mapping goes with it — otherwise the next
       // `hello` re-announces an id whose file is not here, the server names it
@@ -2874,7 +2864,6 @@ export class VaultRegistry {
     if (removalTotal > 0) this.sink.phase("removing", removalTotal);
     const bulkRemoval = useBulkPath(plan.trash.length);
     /** path → `.context/trash` copy made for unseen work before removal. */
-    const recovered = new Map<string, string>();
     // The disk's binary hashes, listed once per pass and only if a revoked
     // binary needs them. A failed listing answers null: kept, never deleted.
     let binaryShas: Promise<Map<string, string> | null> | null = null;
@@ -2941,47 +2930,9 @@ export class VaultRegistry {
             return;
           }
           await this.host?.releaseDoc(gone.docId);
-          if (verdict === "unseen") {
-            let dest: string | null = null;
-            try {
-              // An empty file (a placeholder never egested into) says nothing
-              // about the ops in the CRDT, and a revocation clears that CRDT:
-              // preserve its TEXT instead of an empty copy.
-              const crdtText = (await this.isEmptyOnDisk(gone.path))
-                ? ((await this.host?.localText?.(gone.docId)) ?? "")
-                : "";
-              dest = crdtText.trim().length > 0
-                ? await ipc.writeTrashCopy(gone.path, recoveryStamp(), crdtText, this.epoch())
-                : await ipc.copyToTrash(gone.path, recoveryStamp(), this.epoch());
-            } catch (e) {
-              if (ipc.isVaultMismatch(e)) throw e;
-              dest = null;
-            }
-            if (dest === null) {
-              // No copy, no removal: this file may be the only home of that work.
-              this.recordFailure({
-                kind: "orphan", path: gone.path, docId: gone.docId, code: null,
-                reason: gone.reason === "revoked"
-                  ? "access was removed while this device held unsent edits, and they could not be preserved, so it was left on disk"
-                  : "deleted on the server while this device held unsent edits, and they could not be preserved, so it was left on disk",
-              });
-              // See the tombstone note on `baselineDocs` below: releasing the
-              // claim keeps a re-imported NEW note at this path registrable.
-              if (gone.reason !== "revoked") this.baselineDocs.delete(gone.docId);
-              else this.revokedKept.set(pathKey(gone.path), gone.docId);
-              this.sink.item("failed");
-              return;
-            }
-            recovered.set(gone.path, dest);
-            // D1 + D6: offer the unseen ops to the server's trash copy of the
-            // doc. Never awaited — the local copy above is the guarantee.
-            if (gone.reason !== "revoked") {
-              this.recoverPending.add(gone.docId);
-              void Promise.resolve(this.host?.recoverDeletedDoc?.(gone.docId, gone.path))
-                .catch(() => {})
-                .finally(() => this.recoverPending.delete(gone.docId));
-            }
-          }
+          // A delete or an access removal leaves this disk outright (decided
+          // 2026-11-19): no local copy, and unsent edits are not pushed into
+          // the deleted note either. Deleted means deleted.
           if (!this.stopRun()) ready.push(gone);
         } catch (e) {
           if (ipc.isVaultMismatch(e) || this.stale()) {
@@ -3030,18 +2981,7 @@ export class VaultRegistry {
         changedDisk = true;
         this.baselineDocs.delete(gone.docId);
         this.authoredDocs.delete(gone.docId);
-        const trashedTo = recovered.get(gone.path) ?? null;
-        this.host?.noteRemoved(gone.docId, gone.path, trashedTo, gone.reason, bulkRemoval);
-        if (trashedTo !== null) {
-          reconcileReport.record({
-            kind: gone.reason !== "revoked"
-              ? "deletedByTeammate"
-              : this.isSelfRevocation(gone.docId, gone.path) ? "selfRevoked" : "keptLocally",
-            docId: gone.docId,
-            path: gone.path,
-            detail: trashedTo,
-          });
-        }
+        this.host?.noteRemoved(gone.docId, gone.path, null, gone.reason, bulkRemoval);
         this.sink.item("ok");
       }
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
