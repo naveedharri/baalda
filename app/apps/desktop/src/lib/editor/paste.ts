@@ -16,6 +16,7 @@ import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { embedMarkdown, extForMime, formatFor } from "../formats";
 import { htmlClipboardToMarkdown } from "./htmlToMarkdown";
+import { preReadLimit, refuseOversizeAttachment } from "../attachments";
 
 /** Persist image bytes and return the markdown `src` to embed (e.g. `/attachments/ab12.png`). */
 export type SaveAttachment = (bytes: Uint8Array, ext: string) => Promise<string>;
@@ -80,6 +81,7 @@ export function extForFile(file: File): string {
 async function embedFile(view: EditorView, file: File, save: SaveAttachment) {
   try {
     const ext = extForFile(file);
+    if (preReadLimit(ext) !== undefined) refuseOversizeAttachment(ext, file.size);
     const bytes = new Uint8Array(await file.arrayBuffer());
     const src = await save(bytes, ext);
     // A clipboard image often arrives nameless; `embedMarkdown` reads the
