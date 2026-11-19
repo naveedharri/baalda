@@ -510,14 +510,14 @@ export function writeHomeSectionHidden(hidden: boolean): void {
 
 /** The width the sidebar starts at, and what a double-click on the divider
  *  restores. */
-export const SIDEBAR_WIDTH_DEFAULT = 300;
+export const SIDEBAR_WIDTH_DEFAULT = 302;
 /** The default is also the floor: the resizer only ever widens the sidebar.
  *  Narrower than this and the tree header's toolbar runs out of room and pushes
  *  its last button out past the edge — so there is nothing to be gained below
  *  the width the layout was designed at. */
 export const SIDEBAR_WIDTH_MIN = SIDEBAR_WIDTH_DEFAULT;
 export const SIDEBAR_WIDTH_MAX = 560;
-/** Redesign: the wider 300px floor gives way on a window too small to hold it
+/** Redesign: the wider 302px floor gives way on a window too small to hold it
  *  next to the editor (or, on Windows, the caption buttons), down to the 264px
  *  the sidebar was originally designed at — never below. */
 export const SIDEBAR_WIDTH_SQUEEZED = 264;

@@ -18,7 +18,7 @@ import {
 
 describe("clampSidebarWidth", () => {
   it("keeps a sensible width untouched", () => {
-    expect(clampSidebarWidth(300, 1400)).toBe(300);
+    expect(clampSidebarWidth(320, 1400)).toBe(320);
   });
 
   it("holds the floor when dragged shut", () => {
@@ -61,7 +61,7 @@ describe("clampSidebarWidth", () => {
   it("still yields a usable sidebar on a window narrower than the minimum", () => {
     // Below this the floor wins: the window is too small to honour both the
     // editor's reserve and the sidebar's floor, and the sidebar keeps its
-    // squeezed floor (the 300px default floor gives way down to 264px, no more).
+    // squeezed floor (the 302px default floor gives way down to 264px, no more).
     expect(clampSidebarWidth(9000, 400)).toBe(SIDEBAR_WIDTH_SQUEEZED);
   });
 
@@ -71,7 +71,7 @@ describe("clampSidebarWidth", () => {
   });
 
   it("rounds to whole pixels", () => {
-    expect(clampSidebarWidth(300.6, 1400)).toBe(301);
+    expect(clampSidebarWidth(320.6, 1400)).toBe(321);
   });
 
   it("is idempotent — re-clamping a clamped value changes nothing", () => {
