@@ -100,4 +100,20 @@ describe("live-preview embeds by format", () => {
     expect(view.contentDOM.querySelector("video.cm-md-video")).toBeNull();
     view.destroy();
   });
+
+  it("keeps the embed showing when the caret sits just before or after it", () => {
+    // A note that is only an attachment opens with the caret at position 0.
+    const doc = "![spec](/attachments/x.pdf)";
+    const view = mount(doc + "\n");
+    view.dispatch({ effects: setFocused.of(true) });
+    view.dispatch({ selection: { anchor: 0 } });
+    expect(view.contentDOM.querySelector(".cm-md-pdf")).not.toBeNull();
+    view.dispatch({ selection: { anchor: doc.length } });
+    expect(view.contentDOM.querySelector(".cm-md-pdf")).not.toBeNull();
+    view.dispatch({ selection: { anchor: 1 } });
+    expect(view.contentDOM.querySelector(".cm-md-pdf")).toBeNull();
+    view.dispatch({ selection: { anchor: 0, head: 3 } });
+    expect(view.contentDOM.querySelector(".cm-md-pdf")).toBeNull();
+    view.destroy();
+  });
 });

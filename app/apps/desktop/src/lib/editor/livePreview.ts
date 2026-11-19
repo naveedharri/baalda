@@ -64,6 +64,7 @@ import {
   focusMoved,
   lineSpanChecker,
   revealState,
+  selectionInside,
   selectionTouches,
   setFocused,
   tokenOwner,
@@ -859,6 +860,7 @@ function buildDecorations(
   const decos: ReturnType<Decoration["range"]>[] = [];
   const isActive = activeLineChecker(state);
   const touches = selectionTouches(state);
+  const inside = selectionInside(state);
   const inFrontmatter = frontmatterChecker(state);
   const duplicateTitle = redundantInlineTitleRange(state, inlineTitle);
   const titleIsHidden =
@@ -1015,7 +1017,10 @@ function buildDecorations(
             }
             break;
           case "Image": {
-            if (isActiveToken(node)) break;
+            // The embed scope, not the TOKEN one: a caret just before or after
+            // the embed (where a freshly opened note puts it) keeps the file
+            // showing; only a caret inside its source reveals the markdown.
+            if (inside(node.from, node.to)) break;
             // Render `![alt](src)` in place; skip its child marks. WHICH
             // rendering is the format registry's call (see `embedWidget`): an
             // image inline, a PDF/video/audio/CSV as a preview block, anything
