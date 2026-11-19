@@ -383,6 +383,12 @@ export function planBinarySync(
   const localShas = new Set(local.map((a) => a.sha256));
   const localPaths = new Set(local.map((a) => pathKey(a.relPath)));
   const serverShas = new Set(server.map((b) => b.sha256));
+  /** Shas the server holds as an `attachments/` drop (no `files` row). */
+  const attachmentShas = new Set(
+    server
+      .filter((b) => !b.docId && (b.relPath == null || isUnderAttachments(b.relPath)))
+      .map((b) => b.sha256),
+  );
   /**
    * Shas some server TREE row holds at a path that is missing on this disk: the
    * bytes may be that file under a new name (an offline rename the pairing
@@ -502,6 +508,17 @@ export function planBinarySync(
 
   for (const a of local) {
     if (decided.has(a.relPath)) continue;
+    // An `attachments/` drop is on the server only as an `attachments/` row:
+    // a teammate gets embeds from those rows, never from a tree file's. The
+    // same bytes held only by a standalone file elsewhere (a PDF in a folder,
+    // and the same PDF dropped into a note) used to count as uploaded, so the
+    // embed never reached anyone. The server dedupes an attachment intent onto
+    // unclaimed rows only, so this registers the drop without a second copy
+    // being claimed by the file.
+    if (isUnderAttachments(a.relPath)) {
+      if (!attachmentShas.has(a.sha256)) toUpload.push(a);
+      continue;
+    }
     if (!serverShas.has(a.sha256)) {
       toUpload.push(a);
       continue;
