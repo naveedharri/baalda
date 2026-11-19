@@ -341,14 +341,9 @@ export async function purgeExpiredTrash(
   for (const vaultId of new Set(rows.map((r) => r.vault_id))) trashChanged(vaultId);
   await dropContent(ids, db);
   await db.query("DELETE FROM note_versions WHERE doc_id = ANY($1::text[])", [ids]);
-  // Per-note share rows use resource_type 'file' (a note id IS a doc id). Only
-  // when no live `files` row shares the id.
-  await db.query(
-    `DELETE FROM shares s
-      WHERE s.resource_type = 'file' AND s.resource_id = ANY($1::text[])
-        AND NOT EXISTS (SELECT 1 FROM files f WHERE f.id = s.resource_id)`,
-    [ids],
-  );
+  // Per-note share rows are KEPT: they are access settings, not content, and a
+  // checkpoint restore carries them over to the note it brings back
+  // (`versions/revert.ts`), so a per-note "No access" is not lost.
   return ids;
 }
 

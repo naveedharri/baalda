@@ -418,6 +418,14 @@ describe("vault checkpoints", () => {
     await seedVaultGrant(org, "edit");
     const doc = await seedNote(vault, null, "gone.md", owner.userId);
     rec.docWriter.store.set(doc, "words worth keeping");
+    // One teammate is kept out of this note.
+    const denied = await signUp("rv-denied@t.com");
+    await seedMember(org, denied.userId, "member");
+    await pool.query(
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES (gen_random_uuid()::text, $1, 'file', $2, 'user', $3, 'denied')`,
+      [org, doc, denied.userId],
+    );
     const create = await api(owner, `/api/vaults/${vault}/checkpoints`, {
       method: "POST",
       body: JSON.stringify({ label: "before the delete" }),
@@ -437,12 +445,38 @@ describe("vault checkpoints", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, docsRestored: 1 });
-    expect(rec.docWriter.store.get(doc)).toBe("words worth keeping");
-    const { rows } = await pool.query(
-      "SELECT deleted_at, purged_at, purge_after FROM notes WHERE id = $1",
+    // It comes back under a NEW id: a device offline through the delete may
+    // still hold the old id's ops, which must never merge into the restore.
+    const { rows: live } = await pool.query<{ id: string; created_by: string | null }>(
+      "SELECT id, created_by FROM notes WHERE vault_id = $1 AND rel_path = 'gone.md' AND deleted_at IS NULL",
+      [vault],
+    );
+    expect(live).toHaveLength(1);
+    expect(live[0].id).not.toBe(doc);
+    expect(live[0].created_by).toBe(owner.userId);
+    expect(rec.docWriter.store.get(live[0].id)).toBe("words worth keeping");
+    expect(rec.docWriter.store.has(doc)).toBe(false);
+    const { rows: old } = await pool.query(
+      "SELECT deleted_at IS NOT NULL AS deleted, purged_at IS NOT NULL AS purged FROM notes WHERE id = $1",
       [doc],
     );
-    expect(rows[0]).toEqual({ deleted_at: null, purged_at: null, purge_after: null });
+    expect(old[0]).toEqual({ deleted: true, purged: true });
+    // Its per-note access rows came with it.
+    const { rows: shares } = await pool.query(
+      "SELECT principal_id, permission FROM shares WHERE resource_type = 'file' AND resource_id = $1",
+      [live[0].id],
+    );
+    expect(shares).toEqual([{ principal_id: denied.userId, permission: "denied" }]);
+    // Running it again changes nothing: the restored note is already there.
+    const again = await api(owner, `/api/vaults/${vault}/checkpoints/${checkpoint.id}/revert`, {
+      method: "POST",
+    });
+    expect(again.status).toBe(200);
+    const { rows: liveAgain } = await pool.query(
+      "SELECT id FROM notes WHERE vault_id = $1 AND rel_path = 'gone.md' AND deleted_at IS NULL",
+      [vault],
+    );
+    expect(liveAgain.map((r) => r.id)).toEqual([live[0].id]);
   });
 
   it("captures structure-only for notes whose content never reached the server", async () => {
