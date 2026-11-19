@@ -89,6 +89,8 @@ openLinkRoutes.get("/open/note/:orgId/:docId", (c) => {
  */
 openLinkRoutes.get("/open/connect", (c) => {
   const server = publicBaseUrl(c);
+  // Built from the request's Host: never let a shared cache serve it to anyone else.
+  c.header("Cache-Control", "no-store");
   const deepLink = `${config.deepLinkScheme}://connect?server=${encodeURIComponent(server)}`;
   return c.html(`<!doctype html>
 <html lang="en">
@@ -149,7 +151,11 @@ export function publicBaseUrl(c: Context): string {
   const hdr = (name: string) => c.req.header(name)?.split(",")[0]?.trim() || undefined;
   const host = hdr("x-forwarded-host") ?? hdr("host");
   let base = config.betterAuthUrl;
-  if (host && HOST_RE.test(host)) {
+  // A loopback Host (an admin opening the page on the server box itself) is
+  // an address nobody else can reach: name the configured public URL instead,
+  // when there is one that is not loopback too.
+  const loopbackOnly = host !== undefined && isLoopbackHost(host) && !isLoopbackUrl(config.betterAuthUrl);
+  if (host && HOST_RE.test(host) && !loopbackOnly) {
     const forwarded = hdr("x-forwarded-proto");
     const proto =
       forwarded === "https" || forwarded === "http"
@@ -165,6 +171,21 @@ export function publicBaseUrl(c: Context): string {
   const announced = hdr("x-forwarded-prefix");
   const keep = announced && PREFIX_RE.test(announced) ? stripSlash(announced) : "";
   return stripSlash(base) + keep;
+}
+
+/** localhost, 127.x, ::1 or 0.0.0.0, with or without a port. */
+export function isLoopbackHost(host: string): boolean {
+  const name = host.startsWith("[") ? host.slice(1, host.indexOf("]")) : host.replace(/:\d+$/, "");
+  const h = name.toLowerCase();
+  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || h === "0.0.0.0" || /^127\.\d+\.\d+\.\d+$/.test(h);
+}
+
+function isLoopbackUrl(url: string): boolean {
+  try {
+    return isLoopbackHost(new URL(url).host);
+  } catch {
+    return true;
+  }
 }
 
 function safeProtocol(url: string): "http" | "https" | null {

@@ -57,6 +57,8 @@ import { createTrashRoutes } from "./routes/trash.js";
 import { createShrinkBrakeRoutes } from "./routes/shrink-brake.js";
 import { createBillingRoutes } from "./routes/billing.js";
 import { PolarBillingProvider } from "../billing/polar.js";
+import { planEnforced } from "../billing/plan.js";
+import { BRAND_NAME } from "../brand.js";
 import type { BillingProvider } from "../billing/provider.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
 import { pool } from "../db/pool.js";
@@ -176,35 +178,68 @@ export function securityTxt(contact: string | undefined, now: Date = new Date())
 }
 
 /**
- * The page a browser sees at `/`. The managed server points people at
- * baalda.com; a self-hosted one (`BAALDA_DEPLOYMENT=self-hosted`) is not
- * baalda.com, so it says how to use THIS server instead: install the desktop
- * app and connect it here, with the `/open/connect` link that does it in one
- * click. `selfHostedUrl` is this server's public base URL, or null on Cloud.
+ * The page a browser sees at `/`. The managed service points people at
+ * baalda.com. Any other server is someone's own, and sending its visitors to
+ * baalda.com walks them into signing up on the managed service by mistake, so
+ * it says how to use THIS server instead: install the app, choose "Your own
+ * server", or follow the `/open/connect` link that points the app here.
+ * `selfHostedUrl` is this server's public base URL, or null on the managed
+ * service.
  */
 export function landingPage(selfHostedUrl: string | null): string {
-  const body = selfHostedUrl
-    ? `<p>This is a self-hosted Baalda sync and MCP server. There is no web app here: notes are written in the Baalda desktop app, which syncs through this server.</p>
-<ol>
-<li>Install the desktop app from <a href="https://baalda.com">baalda.com</a>.</li>
-<li>On first launch choose <strong>Your own server</strong> (or <strong>Account settings → Connection</strong>) and enter <code>${esc(selfHostedUrl)}</code>.</li>
-</ol>
-<p>Already installed? <a href="${esc(selfHostedUrl)}/open/connect">Connect the app to this server</a>.</p>`
-    : `<p>This is the Baalda sync and MCP server. The app lives at <a href="https://baalda.com">baalda.com</a>.</p>`;
+  const brand = esc(BRAND_NAME);
+  const main = selfHostedUrl
+    ? `<h1>This is a self-hosted ${brand} server</h1>
+  <p>There is no web app here. Notes are written in the ${brand} desktop app, which syncs through this server.</p>
+  <a class="button" href="${esc(selfHostedUrl)}/open/connect">Connect ${brand} to this server</a>
+  <p>Or connect by hand: install ${brand}, choose <strong>Your own server</strong> when it opens
+     (or later in <strong>Account Settings → Connection</strong>), and enter <code>${esc(selfHostedUrl)}</code>.</p>
+  <p><a class="plain" href="https://baalda.com" rel="noopener">Get ${brand}</a></p>`
+    : `<p>This is the ${brand} sync and MCP server. The app lives at <a href="https://baalda.com">baalda.com</a>.</p>`;
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Baalda</title>
+<title>${brand}</title>
 <link rel="icon" type="image/png" sizes="256x256" href="/icon.png" />
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         display: grid; place-items: center; min-height: 100vh; margin: 0;
+         background: #f6f5f2; color: #2a2a28; }
+  main { text-align: center; padding: 2rem; }
+  h1 { font-size: 1.2rem; font-weight: 600; }
+  p { color: #6b6b66; max-width: 34rem; margin-left: auto; margin-right: auto; }
+  code { background: #eceae4; border-radius: 6px; padding: 0.1rem 0.35rem; }
+  a.button { display: inline-block; margin: 0.5rem 0 1rem; padding: 0.6rem 1.4rem;
+             border-radius: 999px; background: #2a2a28; color: #fff;
+             text-decoration: none; font-weight: 600; }
+  a.plain { color: #6b6b66; }
+</style>
 </head>
-<body style="font-family: system-ui, sans-serif; margin: 3rem;">
-<p><img src="/icon.png" alt="Baalda" width="64" height="64" /></p>
-${body}
+<body>
+<main>
+  <p><img src="/icon.png" alt="${brand}" width="64" height="64" /></p>
+  ${main}
+</main>
 </body>
 </html>`;
+}
+
+/**
+ * Is this the managed service? Only it runs with plan limits on (Cloud with
+ * billing configured). Keyed on that, not on `BAALDA_DEPLOYMENT` alone: a
+ * self-hoster who runs the image without our compose files never sets that
+ * variable, and must still not be sent to baalda.com.
+ */
+function isManagedService(): boolean {
+  try {
+    return planEnforced();
+  } catch {
+    // An unreadable BAALDA_DEPLOYMENT breaks billing, not the landing page.
+    return false;
+  }
 }
 
 export function createApp(deps: AppDeps): Hono {
@@ -330,13 +365,13 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/favicon.ico", (c) => c.body(siteIcon, 200, iconHeaders));
   app.get("/icon.png", (c) => c.body(siteIcon, 200, iconHeaders));
   app.get("/apple-touch-icon.png", (c) => c.body(siteIcon, 200, iconHeaders));
-  app.get("/", (c) =>
-    c.html(
-      landingPage(
-        process.env.BAALDA_DEPLOYMENT === "self-hosted" ? publicBaseUrl(c) : null,
-      ),
-    ),
-  );
+  app.get("/", (c) => {
+    if (isManagedService()) return c.html(landingPage(null));
+    // Names this server from the request's Host: a shared cache must never
+    // keep one visitor's answer for the next.
+    c.header("Cache-Control", "no-store");
+    return c.html(landingPage(publicBaseUrl(c)));
+  });
 
   // RFC 9116 security.txt, read per request from SECURITY_CONTACT (e.g.
   // `mailto:security@example.com`). Unset ⇒ 404, so a self-hosted server never
