@@ -355,7 +355,13 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   or `unknown` (no content baseline). For an explicit deletion, a matching local index `doc_id`
   and path establish identity even without a per-document reconciliation baseline: preserve a
   recovery copy first, then remove the active file. An unprovable identity still stays on disk;
-  a tombstone must never remove an unrelated file reusing its path. A same-path create from two devices stays
+  a tombstone must never remove an unrelated file reusing its path. A REVOCATION is stricter
+  (`registry.revokedVerdict`, decided 2026-11-19): the note leaves the disk with no copy unless
+  unsent work is PROVEN — ops beyond a recorded `ackedSv`, or file bytes differing from both
+  `diskBase` and the local CRDT text. `unknown` with a matching index id, and a never-acknowledged
+  CRDT (every view-only doc) whose text equals the file, are removed outright; an unrelated
+  local id at the path still stays. `store.openNoteByPath` refuses a path the server answered
+  `not_readable` for (`registry.isHiddenPath`) instead of opening its local bytes. A same-path create from two devices stays
   two notes: the later one by `created_at` is renamed `<stem> (conflict YYYY-MM-DD).<ext>`
   (`conflictPath`) and registered as its own note — never adopted onto the other's id. A rename made
   while the app was closed is paired back by content hash at startup (`pairClosedAppRenames`) so the
@@ -794,8 +800,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   revert (which needs vault-wide read, 403 `no_vault_wide_access`). `edit > view > none`; no grant → no sync access (403 at token mint). A blob that carries a
   `doc_id` is judged by this same resolver (`canReadAttachment` / `canWriteBlob` in
   `permissions/http-gates.ts`), so a folder share reaches the FILES in it and not only the notes;
-  a hash-named `attachments/` blob has no doc to resolve and keeps the older heuristic — vault-wide
-  readers see all, a scoped member only what a readable note references (matched on each note's
+  a hash-named `attachments/` blob has no doc to resolve and keeps the older heuristic — readers of
+  EVERY item see all (`vault-docs.ts readsWholeVault`: a vault-wide grant AND no per-user or team
+  `denied` row on a folder/file in the vault AND no Private join snapshot hiding anything; also gates
+  attachment search and whole-vault checkpoint revert), everyone else only what a readable note references (matched on each note's
   reference excerpt `note_index.ref_text` when its `ref_heads` cover the anchors, else its full text;
   `blobs/ref-windows.ts`, migration 063, #343). **New
   vaults are shared with their team by default** — `POST /api/vaults` creates the org-wide `edit`

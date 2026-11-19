@@ -2195,6 +2195,154 @@ describe("offline reconciliation — the acknowledged state vector gate", () => 
   });
 });
 
+describe("a revoked note leaves the vault unless this device proves unsent edits", () => {
+  /** Pass 1 syncs d1 into n.md; pass 2 no longer lists it and holds no
+   *  tombstone (a revocation). The CRDT and acknowledgement are as given. */
+  async function revokeWith(opts: {
+    body?: string;
+    localSv?: Uint8Array | null;
+    acked?: Uint8Array | null;
+    crdtText?: string | null;
+    noDiskBase?: boolean;
+    indexId?: string;
+    copyFails?: boolean;
+  }) {
+    reconcileReport.clear();
+    const disk = new FakeDisk();
+    disk.notes.set("n.md", "d1");
+    disk.bodies.set("n.md", opts.body ?? "the team's words");
+    install(disk);
+    if (opts.noDiskBase) vi.mocked(ipc.getDiskBase).mockResolvedValue(null as never);
+    if (opts.copyFails) {
+      vi.mocked(ipc.copyToTrash).mockRejectedValue(new Error("could not copy"));
+      vi.mocked(ipc.writeTrashCopy).mockRejectedValue(new Error("could not copy"));
+    }
+    if (opts.indexId) {
+      vi.mocked(ipc.listNoteTitles).mockResolvedValue([
+        { id: opts.indexId, path: "n.md", title: "n" },
+      ] as never);
+    }
+    const reg1 = new VaultRegistry(fakeApi({ notes: [{ id: "d1", rel_path: "n.md" }] }));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const carry = () => {
+      const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+      vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    };
+    carry();
+    const then = { notes: [], tombstones: [] };
+    const reg = new VaultRegistry(fakeApi(then));
+    const host = recordingHost();
+    (host.host as InboundHost).localStateVector = async () => opts.localSv ?? null;
+    (host.host as InboundHost).localText = async () => opts.crdtText ?? null;
+    reg.setInboundHost(host.host);
+    if (opts.acked) reg.recordAck("d1", opts.acked);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    return { disk, reg, host, carry, then };
+  }
+  const svOf = (text: string) => {
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, text);
+    return Y.encodeStateVector(doc);
+  };
+
+  it("removes a received-only note whose disk base was cleared, instead of leaving it on disk", async () => {
+    const { disk, reg } = await revokeWith({ noDiskBase: true });
+    expect(disk.notes.has("n.md")).toBe(false);
+    expect(disk.deleted).toEqual(["n.md"]);
+    expect(disk.copies).toEqual([]);
+    expect(reg.failures().map((f) => f.kind)).not.toContain("orphan");
+  });
+
+  it("still leaves alone an unrelated local file that reuses the path", async () => {
+    const { disk, reg } = await revokeWith({ noDiskBase: true, indexId: "someone-else" });
+    expect(disk.notes.has("n.md")).toBe(true);
+    expect(disk.copies).toEqual([]);
+    expect(reg.failures().map((f) => f.kind)).toContain("orphan");
+  });
+
+  it("removes a note whose CRDT was never acknowledged (every view-only note), with no recovery copy", async () => {
+    // A view-only doc records no acknowledgement, so everything it RECEIVED
+    // used to read as unseen work and was kept in .context/trash.
+    const { disk } = await revokeWith({
+      body: "the team's words",
+      localSv: svOf("the team's words"),
+      acked: null,
+      crdtText: "the team's words",
+    });
+    expect(disk.notes.has("n.md")).toBe(false);
+    expect(disk.copies).toEqual([]);
+    expect(reconcileReport.items().map((i) => i.kind)).not.toContain("keptLocally");
+  });
+
+  it("keeps a recovery copy when the file holds bytes the CRDT does not", async () => {
+    const { disk } = await revokeWith({
+      body: "the team's words + my own lines",
+      localSv: svOf("the team's words"),
+      acked: null,
+      crdtText: "the team's words",
+    });
+    expect(disk.notes.has("n.md")).toBe(false);
+    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
+  });
+
+  it("keeps a recovery copy of ops beyond a real acknowledgement", async () => {
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "synced");
+    const acked = Y.encodeStateVector(doc);
+    doc.getText("content").insert(6, " + typed offline");
+    const { disk } = await revokeWith({
+      body: "synced + typed offline",
+      localSv: Y.encodeStateVector(doc),
+      acked,
+      crdtText: "synced + typed offline",
+    });
+    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
+    expect(disk.notes.has("n.md")).toBe(false);
+  });
+
+  it("removes the reported shape: a view-only note judged unseen whose recovery copy would fail", async () => {
+    // What the report quoted: "held unsent edits, and they could not be
+    // preserved, so it was left on disk". The edits were never there.
+    const { disk, reg } = await revokeWith({
+      localSv: svOf("the team's words"),
+      acked: null,
+      crdtText: "the team's words",
+      copyFails: true,
+    });
+    expect(disk.notes.has("n.md")).toBe(false);
+    expect(reg.failures().map((f) => f.kind)).not.toContain("orphan");
+    expect(reg.isHiddenPath("n.md")).toBe(false);
+  });
+
+  it("never opens a revoked note that had to stay because its edits could not be saved", async () => {
+    const { disk, reg } = await revokeWith({
+      body: "the team's words + my own lines",
+      localSv: svOf("the team's words"),
+      acked: null,
+      crdtText: "the team's words",
+      copyFails: true,
+    });
+    expect(disk.notes.has("n.md")).toBe(true);
+    expect(reg.isHiddenPath("n.md")).toBe(true);
+    expect(reg.isHiddenPath("N.md")).toBe(true);
+  });
+
+  it("removes a note an earlier version left on disk, on the next pass", async () => {
+    // The earlier build answered "left on disk" for this state; the doc stays
+    // mapped, so the next authoritative pass judges it again under this rule.
+    const first = await revokeWith({ noDiskBase: true, indexId: "someone-else" });
+    expect(first.disk.notes.has("n.md")).toBe(true);
+    vi.mocked(ipc.listNoteTitles).mockResolvedValue([{ id: "d1", path: "n.md", title: "n" }] as never);
+    first.carry();
+    const reg = new VaultRegistry(fakeApi(first.then));
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(first.disk.notes.has("n.md")).toBe(false);
+    expect(first.disk.copies).toEqual([]);
+  });
+});
+
 describe("offline reconciliation — folder kept by this device's new notes (D8)", () => {
   it("keeps a teammate-deleted folder holding a note created here, and says so", async () => {
     reconcileReport.clear();

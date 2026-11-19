@@ -1049,6 +1049,14 @@ export class VaultRegistry {
    */
   private hiddenPaths = new Set<string>();
   /**
+   * Lower-cased path → doc_id of notes whose access was REVOKED but which could
+   * not leave the disk this pass (a recovery copy failed, or the path's
+   * identity could not be proven). Opening one would show refused content, so
+   * {@link isHiddenPath} answers true for them too. An entry leaves when the
+   * server lists that doc again (access came back) or the file is removed.
+   */
+  private revokedKept = new Map<string, string>();
+  /**
    * Lower-cased local note paths, and the doc_ids they carried, that the server
    * refused with `note_deleted`: the id names a note a teammate DELETED, and
    * this device still holds a copy it never confirmed uploading (so the inbound
@@ -1392,6 +1400,7 @@ export class VaultRegistry {
     // Paths, so they belong to the vault we are leaving.
     this.aliasPaths.clear();
     this.hiddenPaths.clear();
+    this.revokedKept.clear();
     this.deletedPaths.clear();
     this.deletedDocIds.clear();
     this.heldRefused.clear();
@@ -1985,6 +1994,49 @@ export class VaultRegistry {
    *    index identity verification and a recovery copy. Otherwise leave it
    *    untouched: a re-import under a fresh local id also lands here.
    */
+  /**
+   * A revocation takes content away, so a copy kept "just in case" is the very
+   * thing it exists to remove. Decided 2026-11-19: a revoked note is removed
+   * outright unless this device can PROVE it holds edits the server never saw.
+   * Proof is local ops beyond a recorded server acknowledgement, or file bytes
+   * that differ from both the recorded disk base and the local CRDT text.
+   *
+   * What is NOT proof:
+   *   - no disk base and no CRDT ("unknown"): the base is cleared with the CRDT,
+   *     so a note this device only ever received ends up here;
+   *   - a CRDT the server never acknowledged: a view-only doc never records an
+   *     acknowledgement, so everything it received reads as unseen.
+   * Identity still has to be proven (the local index ties this path to this
+   * doc id), so an unrelated file reusing the path is never touched.
+   */
+  private async revokedVerdict(
+    gone: { docId: string; path: string },
+    verdict: "unseen" | "unknown",
+    titles: () => Promise<Array<{ path: string; id: string }>>,
+  ): Promise<"none" | "unseen" | "unknown"> {
+    if (verdict === "unseen") {
+      // Ops beyond a real acknowledgement are this device's own work.
+      if (this.ackedSvOf(gone.docId) !== null) return "unseen";
+      const crdt = (await this.host?.localText?.(gone.docId)) ?? null;
+      // Without a CRDT the verdict came from file bytes that differ from the
+      // recorded disk base: edits made on disk. Keep them.
+      if (crdt === null) return "unseen";
+      let file: string | null;
+      try {
+        file = await ipc.readNote(gone.path, this.epoch());
+      } catch (e) {
+        if (ipc.isVaultMismatch(e) || this.stale()) throw e;
+        file = null;
+      }
+      // A file that differs from the CRDT holds bytes nothing else has.
+      if (file !== null && file.trim().length > 0 && file !== crdt) return "unseen";
+    }
+    const indexed = await titles();
+    return indexed.some((note) => note.id === gone.docId && samePath(note.path, gone.path))
+      ? "none"
+      : verdict;
+  }
+
   async unseenWorkVerdict(
     docId: string,
     relPath: string | null,
@@ -2793,6 +2845,9 @@ export class VaultRegistry {
           let verdict = gone.reason !== "revoked" && this.isOwnDelete(gone.path)
             ? "none"
             : await this.unseenWorkVerdict(gone.docId, gone.path);
+          if (gone.reason === "revoked" && verdict !== "none") {
+            verdict = await this.revokedVerdict(gone, verdict, args.titles);
+          }
           if (verdict === "unknown" && gone.reason === "deleted") {
             // No content baseline is not the same as no identity. Newly created
             // or never-opened files can lack CRDT/disk-base state, while the
@@ -2850,6 +2905,7 @@ export class VaultRegistry {
               // See the tombstone note on `baselineDocs` below: releasing the
               // claim keeps a re-imported NEW note at this path registrable.
               if (gone.reason !== "revoked") this.baselineDocs.delete(gone.docId);
+              else this.revokedKept.set(pathKey(gone.path), gone.docId);
               this.sink.item("failed");
               return;
             }
@@ -2902,10 +2958,12 @@ export class VaultRegistry {
       for (const gone of ready) {
         const out = byPath.get(gone.path);
         if (!out || out.error) {
+          if (gone.reason === "revoked") this.revokedKept.set(pathKey(gone.path), gone.docId);
           this.sink.item(this.recordFailure({ kind: "inbound", path: gone.path, docId: gone.docId,
             reason: out?.error ?? "local cleanup did not return a result", code: null }));
           continue;
         }
+        this.revokedKept.delete(pathKey(gone.path));
         changedDisk = true;
         this.baselineDocs.delete(gone.docId);
         this.authoredDocs.delete(gone.docId);
@@ -4101,6 +4159,10 @@ export class VaultRegistry {
     // A note listed again is readable again: its "you lost this" report line
     // (kept locally / deleted by a teammate) no longer holds this session.
     reconcileReport.forgetReadable(new Set(serverNotes.map((n) => noteDocId(n))));
+    if (this.revokedKept.size > 0) {
+      const listed = new Set(serverNotes.map((n) => noteDocId(n)));
+      for (const [key, docId] of this.revokedKept) if (listed.has(docId)) this.revokedKept.delete(key);
+    }
 
     // 1. Inbound: apply the server's structural changes to disk. Runs first so the
     //    outbound steps below see a tree that already agrees about paths.
@@ -5405,6 +5467,16 @@ export class VaultRegistry {
    * checkpointer. It used to read config.json, merge one key and rewrite the
    * whole file per note — O(N) bytes each, O(N²) for a vault being filled in.
    */
+  /**
+   * Did the server say this user cannot see what sits at `relPath`
+   * (`not_readable`)? The UI must not open such a file from its local copy:
+   * whatever is on disk there is content this user was refused.
+   */
+  isHiddenPath(relPath: string): boolean {
+    const key = pathKey(relPath);
+    return this.hiddenPaths.has(key) || this.revokedKept.has(key);
+  }
+
   registerNote(
     relPath: string,
     title: string | null,
