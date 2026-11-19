@@ -29,8 +29,8 @@ import { toast } from "../toast";
 import { reconcileReport } from "./reconcileReport";
 
 export const REJECTION_WINDOW_MS = 60_000;
-export const READ_ONLY_DETAIL = "read-only: your edit was not accepted; a copy is in .context/trash";
-export const READ_ONLY_TOAST = "This note is read-only for you, so your edit was not saved. A copy is in .context/trash.";
+export const READ_ONLY_DETAIL = "read-only: your edit was not accepted";
+export const READ_ONLY_TOAST = "This note is read-only for you, so your edit was not saved.";
 
 /** Session state. Module state on purpose: the vault channel (and its handler)
  *  is rebuilt on every reconnect and vault switch. */
@@ -55,8 +55,6 @@ export interface ReadOnlyRejectionDeps {
   pathOf(docId: string): string | null;
   /** This device's local text for `docId` (open bridge, resident, or CRDT store). */
   localText(docId: string): Promise<string | null>;
-  /** `ipc.writeTrashCopy`, epoch-pinned; resolves to the trash-relative path. */
-  writeTrashCopy(path: string, stamp: string, content: string): Promise<string>;
   /** Whether the user really edited `docId` this session. Default {@link hasLocalEdit}. */
   userEdited?(docId: string): boolean;
   /** The transient notice. Default: the app's standard auto-fading toast. */
@@ -163,15 +161,14 @@ export class ReadOnlyRejections {
     return this.handle(docId);
   }
 
-  /** Save one recovery copy and report it (the toast only for a real edit). */
-  private async keep(docId: string, path: string, text: string, now: number): Promise<void> {
-    const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
-    const dest = await this.deps.writeTrashCopy(path, stamp, text);
+  /** Report a refused edit (the toast only for a real edit). No copy is kept
+   *  (decided 2026-11-19): the server's text replaces it. */
+  private async keep(docId: string, path: string, _text: string, _now: number): Promise<void> {
     copied.add(docId);
     const edited = (this.deps.userEdited ?? hasLocalEdit)(docId);
     if (!edited) {
       // Stale ops replayed on open, or a file that drifted: keep the copy, tell nobody.
-      console.info(`[sync] read-only sync for ${path} carried old local ops; copy at ${dest}`);
+      console.info(`[sync] read-only sync for ${path} carried old local ops; replaced`);
       return;
     }
     if (!announced.has(docId)) {
@@ -179,7 +176,7 @@ export class ReadOnlyRejections {
       reconcileReport.record({ kind: "keptLocally", docId, path, detail: READ_ONLY_DETAIL });
       (this.deps.notify ?? ((t: string) => toast(t, "neutral")))(READ_ONLY_TOAST);
     }
-    console.info(`[sync] read-only push for ${path} was rejected; local copy at ${dest}`);
+    console.info(`[sync] read-only push for ${path} was rejected; replaced by the server's text`);
   }
 
   clear(): void {

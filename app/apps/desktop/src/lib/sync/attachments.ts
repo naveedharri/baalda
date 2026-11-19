@@ -883,8 +883,7 @@ export interface AttachmentSyncDeps {
   /** Ids of tree files the server deleted (`GET /vaults/:id/file-tombstones`).
    *  Absent or failing: no suppression this pass (the older behaviour). */
   listFileTombstones?: () => Promise<string[]>;
-  /** Remove a local tree binary outright (`ipc.deleteFile`) — used only after
-   *  {@link keepLocalCopy} put its bytes in `.context/trash`. */
+  /** Remove a local tree binary outright (`ipc.deleteFile`). */
   removeLocal?: (relPath: string) => Promise<void>;
   /** LEGACY upload: POST the whole body in one shot. The fallback for a server
    *  with no intent route, and the reason that route stays forever. `docId` is
@@ -990,8 +989,6 @@ export interface AttachmentSyncDeps {
   /** Of these `attachments/` paths, which does a local note still embed?
    *  null = cannot tell, so nothing is removed. Absent ⇒ nothing is removed. */
   referencedAttachments?: (paths: string[]) => Promise<Set<string> | null>;
-  /** Move a local file atomically into `.context/trash` (`ipc.trashNote`). */
-  trashLocal?: (relPath: string) => Promise<string>;
   /** Tell the binary delete queue this removal was ours, not the user's. */
   suppressDelete?: (relPath: string) => void;
   /** Tell the user something terminal happened (a full vault). */
@@ -1102,12 +1099,6 @@ export interface AttachmentSyncDeps {
    */
   fileBase?: (docId: string) => string | null;
   setFileBase?: (docId: string, sha256: string) => void;
-  /**
-   * Copy a local binary into `.context/trash` before a server version replaces
-   * it (`ipc.copyToTrash`). Absent: a replacement that needs a recovery copy is
-   * not made — the local file is never overwritten without one.
-   */
-  keepLocalCopy?: (relPath: string) => Promise<string>;
   /** Forget a mapping whose path is not this file's any more — the other half
    *  of an adoption, so `.context/config.json` never names two ids for one
    *  file (`registry.forgetFileId`). */
@@ -1967,12 +1958,6 @@ export class AttachmentSync {
     const replaces = replacements.filter((r) => {
       if (this.attachmentSyncBlocked) return false;
       if (this.deps.isDeletePending?.(r.local.relPath)) return false;
-      if (r.keepCopy && !this.deps.keepLocalCopy) {
-        console.warn(
-          `[attachments] ${r.local.relPath} differs from the server's version and no recovery copy can be kept — leaving it alone`,
-        );
-        return false;
-      }
       return true;
     });
     const total = downloads.length + replaces.length;
@@ -2067,8 +2052,8 @@ export class AttachmentSync {
     if (kept.length > 0 && this.current()) {
       this.deps.notify?.(
         kept.length === 1
-          ? `A newer version of ${baseName(kept[0])} was synced from your team. Your local copy is saved in the vault's recovery folder.`
-          : `Newer versions of ${kept.length} files were synced from your team. Your local copies are saved in the vault's recovery folder.`,
+          ? `A newer version of ${baseName(kept[0])} was synced from your team and replaced your local changes.`
+          : `Newer versions of ${kept.length} files were synced from your team and replaced your local changes.`,
         "neutral",
       );
     }
@@ -2144,13 +2129,10 @@ export class AttachmentSync {
 
   private async replaceOne(r: BinaryReplace, kept: string[]): Promise<void> {
     const relPath = r.local.relPath;
+    // Both sides changed (or no shared base): the server's version wins and
+    // no local copy is kept (decided 2026-11-19: nothing goes to .context/trash).
     if (r.keepCopy) {
-      const keep = this.deps.keepLocalCopy;
-      if (!keep) throw new Error(`no recovery copy transport for ${relPath}`);
-      const dest = await keep(relPath);
-      console.info(
-        `[attachments] ${relPath} (${r.reason}) — local copy kept at ${dest}; downloading the server's version`,
-      );
+      console.info(`[attachments] ${relPath} (${r.reason}) — replaced by the server's version`);
       kept.push(relPath);
     } else {
       console.info(`[attachments] ${relPath} changed on the server — downloading the newer version`);

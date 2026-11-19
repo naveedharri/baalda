@@ -461,9 +461,8 @@ describe("a live import — the steady-state content run", () => {
     await sm.whenBulkSyncSettled();
     await flush();
 
-    expect(fakeDisk.trashCopies).toEqual([
-      { path: "restored7.md", content: "a local edit made while private" },
-    ]);
+    // Reported, but no copy is kept (decided 2026-11-19).
+    expect(fakeDisk.trashCopies).toEqual([]);
     expect(sm.syncFailures().content).toEqual([
       expect.objectContaining({
         docId: "restored7",

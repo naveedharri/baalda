@@ -29,7 +29,7 @@ export const RECONCILE_KIND_LABEL: Record<ReconcileKind, string> = {
   restoredFromServer: "Restored",
   renamedConflict: "Renamed",
   folderKept: "Folder kept",
-  externalEditSaved: "Saved to trash",
+  externalEditSaved: "Replaced",
   conflictKeptServer: "Teammate's version kept",
 };
 
@@ -73,9 +73,9 @@ function keptNotesLine(group: ReconcileItem[]): string {
     return `${notes(n)} ${one ? "is" : "are"} kept on this device only: you no longer have access.`;
   }
   if (ro === n) {
-    return `${notes(n)} ${one ? "is" : "are"} read-only for you, so your ${one ? "edit was" : "edits were"} not accepted. A copy is in .context/trash.`;
+    return `${notes(n)} ${one ? "is" : "are"} read-only for you, so your ${one ? "edit was" : "edits were"} not accepted.`;
   }
-  return `${notes(n)} ${one ? "is" : "are"} kept on this device only: you no longer have access, or can only read ${one ? "it" : "them"}. Copies are in .context/trash.`;
+  return `${notes(n)} ${one ? "is" : "are"} kept on this device only: you no longer have access, or can only read ${one ? "it" : "them"}.`;
 }
 
 function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
@@ -119,7 +119,7 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
       if (files > 0) {
         const oneFile = files === 1;
         parts.push(
-          `${files.toLocaleString()} ${oneFile ? "file was" : "files were"} moved to .context/trash because access was removed. You can find the recovery copies in Activity.`,
+          `${files.toLocaleString()} ${oneFile ? "file was" : "files were"} removed from this device because access was removed.`,
         );
       }
       return parts.join(" ");
@@ -127,11 +127,11 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
     case "selfRevoked":
       return `You removed your own access to ${items}; ${one ? "its copy stays" : "their copies stay"} on this device.`;
     case "externalEditSaved":
-      return `${notes(n)} changed by another app while you were offline could not be merged. Your ${one ? "version was" : "versions were"} saved to .context/trash.`;
+      return `${notes(n)} changed by another app while you were offline could not be merged. The synced ${one ? "version replaced it" : "versions replaced them"}.`;
     case "conflictKeptServer":
       return one
-        ? `${base(group[0].path)}: a teammate's version was kept; your text is saved in recovery.`
-        : `${notes(n)}: a teammate's version was kept; your text is saved in recovery.`;
+        ? `${base(group[0].path)}: a teammate's version was kept and replaced your text.`
+        : `${notes(n)}: a teammate's version was kept and replaced your text.`;
     case "folderKept":
       return one
         ? `Folder ${base(group[0].path)} was kept because you added notes to it.`

@@ -401,7 +401,7 @@ describe("HTTP merge: the kept-server conflict is reported", () => {
     reconcileReport.clear();
   });
 
-  it("differing text: exactly one entry, with the recovery path and the doc id", async () => {
+  it("differing text: exactly one entry with the doc id, and no copy", async () => {
     const serverText = "# Plan\nTeam line\n";
     const fileText = "# Plan\nMy line\n";
     const h = makeHarness({ [PATH]: fileText });
@@ -414,11 +414,7 @@ describe("HTTP merge: the kept-server conflict is reported", () => {
     const items = reconcileReport.items();
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "conflictKeptServer", docId: "winner", path: PATH });
-    expect(items[0].detail).toMatch(/^\.context\/trash\/.+\/Note0\.md$/);
-    // The copy holds the local text that lost.
-    const calls = vi.mocked(ipc.writeTrashCopy).mock.calls;
-    expect(calls).toHaveLength(1);
-    expect(calls[0][2]).toBe(fileText);
+    expect(ipc.writeTrashCopy).not.toHaveBeenCalled();
     b.destroy();
   });
 

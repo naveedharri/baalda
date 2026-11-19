@@ -230,10 +230,6 @@ export interface StructureNotice {
   /** Renames, moves or deletes were made while the app was closed. */
   closedAppChanges: boolean;
 }
-/** Timestamped folder name for a genuine unsendable-edit recovery copy. */
-function trashStamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, "-");
-}
 /**
  * How long the download phase may wait for the vault channel's `ready` before
  * the run stops reporting "Syncing…" and admits the channel is unreachable.
@@ -3929,8 +3925,6 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
-        writeTrashCopy: (relPath, stamp, content) =>
-          ipc.writeTrashCopy(relPath, stamp, content, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       markAcked: (docId, sv) => this.registry.recordAck?.(docId, sv),
@@ -6108,8 +6102,6 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
-        writeTrashCopy: (relPath, stamp, content) =>
-          ipc.writeTrashCopy(relPath, stamp, content, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       // Everything here is work by construction — the batch already decided it
@@ -6281,8 +6273,6 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
-        writeTrashCopy: (relPath, stamp, content) =>
-          ipc.writeTrashCopy(relPath, stamp, content, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       // The server's word beats our checkpoint: a doc it holds no content for is
@@ -7158,8 +7148,6 @@ export class SyncManager implements InboundHost {
     const readOnlyRejections = new ReadOnlyRejections({
       pathOf: (docId) => this.registry.pathForDocId(docId),
       localText: (docId) => this.localText(docId),
-      writeTrashCopy: (path, stamp, content) =>
-        ipc.writeTrashCopy(path, stamp, content, scope.vaultEpoch),
       readFile: (path) => ipc.readNote(path, scope.vaultEpoch),
       serverState: (docId) => this.pullServerState(docId, scope),
       replaceLocal: (docId, path, update, text) =>
@@ -7168,16 +7156,13 @@ export class SyncManager implements InboundHost {
         this.currentDocId === docId || this.docStore?.suppressedDoc() === docId,
     });
     this.readOnlyRejections = readOnlyRejections;
-    // A read-only doc's file never enters its CRDT; a differing file is kept
-    // as a quiet recovery copy (once per doc per session) before the doc's
-    // text is written back over it.
+    // A read-only doc's file never enters its CRDT; the doc's text is written
+    // back over a differing file, with no copy kept (decided 2026-11-19).
     setReadOnlyCopyKeeper(async (docId, path, text) => {
       if (!scope.isCurrent()) return false;
       if (this.readOnlyCopied.has(docId) || text.trim().length === 0) return true;
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const dest = await ipc.writeTrashCopy(path, stamp, text, scope.vaultEpoch);
       this.readOnlyCopied.add(docId);
-      console.info(`[sync] ${path} is read-only for you; the file's differing text is at ${dest}`);
+      console.info(`[sync] ${path} is read-only for you; the file's differing text is replaced`);
       return true;
     });
     this.vaultEngine = new VaultSyncEngine({
@@ -7623,8 +7608,6 @@ export class SyncManager implements InboundHost {
       fileBase: (docId) => registry.getFileBase(docId),
       setFileBase: (docId, sha) => registry.setFileBase(docId, sha),
       // The recovery copy a server version replaces a divergent local one after.
-      keepLocalCopy: (relPath) =>
-        ipc.copyToTrash(relPath, trashStamp(), epoch),
       // A teammate deleted the file: a stale local copy goes to the trash
       // instead of being uploaded back (#215).
       listFileTombstones: () => api.listFileTombstones(vaultId),
@@ -7635,7 +7618,6 @@ export class SyncManager implements InboundHost {
       setAttachmentBase: (relPath, sha, origin) => registry.setAttachmentBase(relPath, sha, origin),
       forgetAttachmentBase: (relPath) => registry.forgetAttachmentBase(relPath),
       revocationAuthority: () => this.revocationAuthority(),
-      trashLocal: (relPath) => ipc.trashNote(relPath, trashStamp(), epoch),
       suppressDelete: (relPath) => this.suppressBinaryDelete(relPath),
       // Every local note's text, scanned for the file's name (hash-named, so a
       // name match is the embed). Any read failure answers "cannot tell".
@@ -7916,23 +7898,15 @@ export class SyncManager implements InboundHost {
     if (fileText.length === 0) return true; // a download placeholder has no edit to lose
     if (fileText === bridge.serialize()) return true; // converged — nothing to keep
     this.unsendableReported.add(docId);
-    let dest: string | null = null;
-    try {
-      dest = await ipc.writeTrashCopy(relPath, trashStamp(), fileText, scope?.vaultEpoch);
-    } catch (e) {
-      if (ipc.isVaultMismatch(e)) return false;
-      console.warn(`[sync] couldn't keep a copy of ${relPath}`, e);
-    }
+    // No copy is kept (decided 2026-11-19): the edit is reported, then replaced.
     this.registry.recordFailure({
       kind: "note",
       path: relPath,
       docId,
-      reason:
-        "edit could not be sent: no write access" +
-        (dest ? `; copy saved to ${dest}` : "; the local copy could not be saved either"),
+      reason: "edit could not be sent: no write access",
       code: null,
     });
-    return dest != null;
+    return true;
   }
 
   currentSync(): DocSync | null {

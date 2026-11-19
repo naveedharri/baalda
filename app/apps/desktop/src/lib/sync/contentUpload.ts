@@ -100,18 +100,6 @@ export interface ContentUploadDeps {
    * short-circuit and the size ceiling.
    */
   readFile?(relPath: string): Promise<string>;
-  /**
-   * Keep a recoverable copy of a note's text under `.context/trash/<stamp>/`
-   * (`ipc.writeTrashCopy`, epoch-pinned), answering where it landed.
-   *
-   * Used for exactly one case: a doc this user may READ but not write, whose
-   * file on disk holds bytes the CRDT does not. The pull's `flushEgest` is about
-   * to put the server's copy there, and the server is the truth for a doc you
-   * cannot write — but destroying the local bytes without a copy is not
-   * something an app may do. Optional, like {@link readFile}: a host that can't
-   * make a copy reports the problem and leaves the durable file untouched.
-   */
-  writeTrashCopy?(relPath: string, stamp: string, content: string): Promise<string>;
 }
 
 /**
@@ -793,23 +781,15 @@ export class ContentUploader {
     // disk. The caller's provenance callback is deliberately stricter than
     // `fileText.length === 0`: a real user truncation must still be recovered.
     if (this.opts.isUnhydratedPlaceholder?.(docId, relPath, fileText)) return true;
-    let dest: string | null = null;
-    try {
-      dest =
-        (await this.opts.deps.writeTrashCopy?.(relPath, trashStamp(), fileText)) ?? null;
-    } catch (e) {
-      console.warn(`[upload] couldn't keep a copy of ${relPath}`, e);
-    }
+    // No copy is kept (decided 2026-11-19): the edit is reported, then replaced.
     this.report({
       docId,
       relPath,
-      reason:
-        "edit could not be sent: no write access" +
-        (dest ? `; copy saved to ${dest}` : "; the local copy could not be saved either"),
+      reason: "edit could not be sent: no write access",
       permanent: true,
       kind: "no-write-access",
     });
-    return dest != null;
+    return true;
   }
 
   /** Record a failure WITHOUT touching the progress counters or the streak —
@@ -860,12 +840,6 @@ export class ContentUploader {
       );
     }
   }
-}
-
-/** One `.context/trash/<stamp>/` folder per save, the same shape the disk-delete
- *  drain and the inbound trash executor use. */
-function trashStamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
 function terminalReason(status: string): string {

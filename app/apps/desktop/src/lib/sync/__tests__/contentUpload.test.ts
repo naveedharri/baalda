@@ -192,11 +192,6 @@ function rig(opts: RigOptions) {
       release: (docId) => store.demote(docId),
       connect,
       ...(opts.readFile ? { readFile: (relPath: string) => harness.io.readFile(relPath) } : {}),
-      writeTrashCopy: async (relPath: string, stamp: string, content: string) => {
-        if (opts.failTrash) throw new Error("disk full");
-        trashed.push({ relPath, content });
-        return `.context/trash/${stamp}/${relPath}`;
-      },
     },
     isPushed: (id) => pushedSet.has(id),
     markPushed: (id) => {
@@ -398,12 +393,10 @@ describe("ContentUploader — pushing local content", () => {
     });
     await r.uploader.run();
 
-    expect(r.trashed).toEqual([
-      { relPath: "Note.md", content: "an edit nobody can send" },
-    ]);
+    expect(r.trashed).toEqual([]);
     const failure = r.uploader.failedDocs().find((f) => f.docId === "d1");
     expect(failure?.reason).toContain("no write access");
-    expect(failure?.reason).toContain(".context/trash/");
+    expect(failure?.reason).not.toContain(".context/trash");
     expect(failure?.permanent).toBe(true);
     expect(failure?.kind).toBe("no-write-access");
     // The server's copy still lands on disk, and the doc still settles: there is
@@ -459,30 +452,10 @@ describe("ContentUploader — pushing local content", () => {
     });
     await r.uploader.run();
 
-    expect(r.trashed).toEqual([{ relPath: "Note.md", content: "" }]);
+    expect(r.trashed).toEqual([]);
     expect(r.uploader.failedDocs()[0]).toMatchObject({ kind: "no-write-access" });
   });
 
-  it("never overwrites a divergent read-only file when its recovery copy fails", async () => {
-    const server = new FakeServer();
-    server.seed("d1", "theirs");
-    const r = rig({
-      files: { "Note.md": "mine" },
-      notes: [{ docId: "d1", relPath: "Note.md" }],
-      server,
-      behaviour: { readOnly: new Set(["d1"]) },
-      readFile: true,
-      failTrash: true,
-    });
-    const out = await r.uploader.run();
-    expect(out.failed).toBe(1);
-    expect(r.harness.fs.get("Note.md")).toBe("mine");
-    expect(r.marked).toEqual([]);
-    expect(r.uploader.failedDocs()[0]).toMatchObject({
-      kind: "no-write-access",
-      permanent: true,
-    });
-  });
 });
 
 describe("ContentUploader — idempotency (must never double content)", () => {
