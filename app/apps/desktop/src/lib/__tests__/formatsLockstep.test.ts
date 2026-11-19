@@ -113,7 +113,7 @@ describe("format lockstep", () => {
     // (`image/vnd.microsoft.icon` is what the desktop sends for .ico).
     const allowed = new Set([
       ...serverMime.values(),
-      ...literals(serverTs, /export const ALLOWED_MIME[^=]*=\s*new Set<string>\(\[([\s\S]*?)\]\);/),
+      ...literals(serverTs, /export const ALLOWED_MIME[^=]*=\s*(?:new Set<string>|lowerSet)\(\[([\s\S]*?)\]\);/),
     ]);
     for (const format of FORMATS) {
       if (!format.surface || format.syncAs !== "attachment") continue;
