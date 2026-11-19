@@ -8,7 +8,7 @@
 // "deleted". The Trash listing and restore stay answerable for older desktops
 // and simply find nothing once the purge has run. Checkpoints keep the text
 // they captured before a delete (`note_texts`, untouched by the purge).
-import { processAttachmentCleanup, queueAttachmentCleanup } from "../blobs/attachment-cleanup.js";
+import { processAttachmentCleanup } from "../blobs/attachment-cleanup.js";
 import { randomUUID } from "node:crypto";
 import { pool as defaultPool } from "../db/pool.js";
 import { orgRole, vaultOrg } from "../permissions/lookup.js";
@@ -340,9 +340,8 @@ export async function purgeExpiredTrash(
   if (ids.length === 0) return [];
   // Open Activity feeds in these vaults drop the purged rows (#260).
   for (const vaultId of new Set(rows.map((r) => r.vault_id))) trashChanged(vaultId);
-  // The drops these notes embedded, recorded before their references go: the
-  // ones no live note still uses are removed (blobs/attachment-cleanup.ts).
-  await queueAttachmentCleanup(ids, db);
+  // (`dropContent` → `purgeNoteIndex` queues the drops these notes embedded;
+  // the delete routes usually did already. See blobs/attachment-cleanup.ts.)
   await dropContent(ids, db);
   await db.query("DELETE FROM note_versions WHERE doc_id = ANY($1::text[])", [ids]);
   // Per-note share rows are KEPT: they are access settings, not content, and a
@@ -406,9 +405,11 @@ export function purgeDeletedSoon(ids: readonly string[]): void {
   }, PURGE_AFTER_DELETE_MS);
   if (typeof t.unref === "function") t.unref();
   const late = setTimeout(() => {
-    void scrubPurgedContent(batch).catch((err) =>
-      console.error("[trash] scrubbing late writes failed:", err),
-    );
+    void scrubPurgedContent(batch)
+      // A second chance for attachments the first pass deferred (a teammate's
+      // note edited but not yet re-indexed); the hourly sweep is the backstop.
+      .then(() => processAttachmentCleanup())
+      .catch((err) => console.error("[trash] scrubbing late writes failed:", err));
   }, SCRUB_AFTER_DELETE_MS);
   if (typeof late.unref === "function") late.unref();
 }

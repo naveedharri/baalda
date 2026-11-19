@@ -6,6 +6,7 @@ import { seedBlob, seedNote, seedOrg, seedVault } from "./helpers/seed.js";
 import { replaceBlobRefs } from "../src/blobs/refs.js";
 import { processAttachmentCleanup } from "../src/blobs/attachment-cleanup.js";
 import { purgeExpiredTrash } from "../src/trash/service.js";
+import { purgeNoteIndex } from "../src/index/indexer.js";
 
 /**
  * A deleted note's attachments leave the server once no live note uses them
@@ -30,6 +31,9 @@ async function noteWith(path: string, markdown: string): Promise<string> {
 
 async function deleteAndPurge(id: string): Promise<void> {
   await pool.query("UPDATE notes SET deleted_at = now(), purge_after = now() WHERE id = $1", [id]);
+  // What every delete route does at once, before the purge (the references
+  // are gone by the time the purge runs).
+  await purgeNoteIndex([id]);
   await purgeExpiredTrash(undefined, pool, [id]);
 }
 
@@ -76,6 +80,25 @@ describe("attachments of a purged note", () => {
     await pool.query("DELETE FROM index_pending WHERE doc_id = $1", [other]);
     expect(await processAttachmentCleanup()).toBe(1);
     expect(await blobAt("attachments/k.png")).toBe(0);
+  });
+
+  it("waits while another note was edited after its last index (an embed moved into it)", async () => {
+    await seedBlob(vaultId, orgId, "attachments/moved.png");
+    const a = await noteWith("A.md", "![x](/attachments/moved.png)");
+    const b = await noteWith("B.md", "nothing yet");
+    // B's CRDT now holds the pasted embed; its re-index has not run.
+    await pool.query("UPDATE note_index SET updated_at = now() - interval '1 minute' WHERE doc_id = $1", [b]);
+    await pool.query("INSERT INTO doc_updates (doc_id, seq, update) VALUES ($1, 1, '\\x00'::bytea)", [b]);
+
+    await deleteAndPurge(a);
+    expect(await processAttachmentCleanup()).toBe(0);
+    expect(await blobAt("attachments/moved.png")).toBe(1);
+
+    // The re-index lands with the embed: the image is used, and stays.
+    await pool.query("UPDATE note_index SET updated_at = now() WHERE doc_id = $1", [b]);
+    await replaceBlobRefs(b, vaultId, "![x](/attachments/moved.png)");
+    expect(await processAttachmentCleanup()).toBe(0);
+    expect(await blobAt("attachments/moved.png")).toBe(1);
   });
 
   it("rebuilds an unkeyed vault's references from the index before trusting them", async () => {

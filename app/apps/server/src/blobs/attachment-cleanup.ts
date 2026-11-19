@@ -74,8 +74,10 @@ export async function refsAreCurrent(vaultId: string, db: Queryable = defaultPoo
     }
     await db.query("UPDATE vaults SET blob_refs_version = $2 WHERE id = $1", [vaultId, BLOB_REFS_VERSION]);
   }
-  // Every live note with content must have been indexed by now: a note still
-  // queued, or one with CRDT content and no index row, may reference anything.
+  // Every live note's references must reflect its latest text. A note still
+  // queued, one with CRDT content and no index row, or one edited since it was
+  // last indexed (an embed cut from the deleted note and pasted here, say) may
+  // reference anything, so the vault waits for its next sweep.
   const { rows: gaps } = await db.query<{ gap: boolean }>(
     `SELECT EXISTS (SELECT 1 FROM index_pending WHERE vault_id = $1)
           OR EXISTS (
@@ -84,6 +86,18 @@ export async function refsAreCurrent(vaultId: string, db: Queryable = defaultPoo
                   AND NOT EXISTS (SELECT 1 FROM note_index ni WHERE ni.doc_id = n.id)
                   AND (EXISTS (SELECT 1 FROM doc_updates u WHERE u.doc_id = n.id)
                     OR EXISTS (SELECT 1 FROM doc_snapshots s WHERE s.doc_id = n.id))
+             )
+          OR EXISTS (
+               SELECT 1 FROM notes n
+                 JOIN note_index ni ON ni.doc_id = n.id
+                WHERE n.vault_id = $1 AND n.deleted_at IS NULL
+                  -- Recent only: indexing follows an edit within seconds, and
+                  -- a row some background step appended without a re-index
+                  -- (a converting compaction's merged row) must not hold the
+                  -- vault's cleanup back forever.
+                  AND EXISTS (SELECT 1 FROM doc_updates u
+                               WHERE u.doc_id = n.id AND u.created_at > ni.updated_at
+                                 AND u.created_at > now() - interval '10 minutes')
              ) AS gap`,
     [vaultId],
   );
