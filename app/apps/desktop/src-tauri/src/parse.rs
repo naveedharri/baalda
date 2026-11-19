@@ -15,6 +15,11 @@ pub struct ParsedLink {
     pub raw: String,
     /// Byte offset of the link in the full file content.
     pub position: i64,
+    /// A standard markdown link (`[text](notes/x.md)`): `target` is a file
+    /// path relative to the linking note (or to the vault root when it starts
+    /// with `/`), resolved by [`stored_target`]. `false` for `[[wikilinks]]`,
+    /// whose target is a name.
+    pub relative: bool,
 }
 
 /// Everything we derive from a single note's bytes.
@@ -46,6 +51,91 @@ static TAG_RE: Lazy<Regex> =
 
 // `[[target]]`, `[[target|alias]]`, `[[target#heading]]`.
 static WIKILINK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]\n]+)\]\]").unwrap());
+
+// `[text](destination)` and `[text](<destination with spaces>)`, with an
+// optional "title". Images (`![…](…)`) are excluded by the caller, which checks
+// the byte before the match (the `regex` crate has no lookbehind).
+static MDLINK_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"\[([^\]\n]*)\]\(\s*(<[^>\n]+>|[^)\s]+)(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)"#).unwrap()
+});
+
+// A URL scheme (`https:`, `mailto:`, `baalda:`) or a Windows drive: not a note
+// in this vault.
+static SCHEME_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Za-z][A-Za-z0-9+.-]*:").unwrap());
+
+/// The note a markdown link points at, as a percent-decoded path without its
+/// `#fragment`/`?query`, or `None` when it is not a link to a note in this
+/// vault (a web URL, an anchor in the same note, an image or other file).
+fn markdown_note_target(dest: &str) -> Option<String> {
+    let dest = dest.trim();
+    let dest = dest
+        .strip_prefix('<')
+        .and_then(|d| d.strip_suffix('>'))
+        .unwrap_or(dest)
+        .trim();
+    if dest.is_empty() || dest.starts_with('#') || dest.starts_with("//") || SCHEME_RE.is_match(dest) {
+        return None;
+    }
+    let path = dest.split(['#', '?']).next().unwrap_or("");
+    let path = percent_decode(path);
+    let lower = path.to_lowercase();
+    if !(lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".mdx")) {
+        return None;
+    }
+    Some(path)
+}
+
+/// `%20` → space, `%C3%A9` → `é`. Anything that does not decode to UTF-8 is
+/// kept as written.
+fn percent_decode(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// What the index stores as a link's target (`links.dst_path_raw`). A
+/// wikilink keeps its name; a markdown link becomes a vault-relative path,
+/// resolved against the folder of the note at `src_rel` (`./`, `../`, and a
+/// leading `/` for the vault root). A path that climbs out of the vault keeps
+/// only its file name, which still resolves by name.
+pub fn stored_target(src_rel: &str, link: &ParsedLink) -> String {
+    if !link.relative {
+        return link.target.clone();
+    }
+    let mut parts: Vec<&str> = if link.target.starts_with('/') {
+        Vec::new()
+    } else {
+        src_rel.rsplit_once('/').map(|(dir, _)| dir.split('/').collect()).unwrap_or_default()
+    };
+    for seg in link.target.trim_start_matches('/').split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return link.target.rsplit('/').next().unwrap_or(&link.target).to_string();
+                }
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
 
 // First ATX H1 (`# Title`) on its own line.
 static H1_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^#\s+(.+?)\s*$").unwrap());
@@ -286,8 +376,31 @@ pub fn parse_note(content: &str, stem: &str) -> ParsedNote {
             target,
             raw,
             position: (offset + m.start()) as i64,
+            relative: false,
         });
     }
+    // Standard markdown links to notes (#402), the form most editors and AI
+    // tools write. Same literal rule: nothing inside code or comments.
+    let bytes = body.as_bytes();
+    for cap in MDLINK_RE.captures_iter(body) {
+        let m = cap.get(0).unwrap();
+        if literals[m.start()..m.end()].iter().any(|literal| *literal) {
+            continue;
+        }
+        // `![alt](x)` is an image; `\[x](y)` is escaped text.
+        if m.start() > 0 && matches!(bytes[m.start() - 1], b'!' | b'\\') {
+            continue;
+        }
+        let Some(target) = markdown_note_target(&cap[2]) else { continue };
+        let text = cap[1].trim();
+        links.push(ParsedLink {
+            target,
+            raw: if text.is_empty() { cap[2].to_string() } else { text.to_string() },
+            position: (offset + m.start()) as i64,
+            relative: true,
+        });
+    }
+    links.sort_by_key(|l| l.position);
 
     let title = derive_title(fm_val.as_ref(), body, stem);
 
@@ -543,5 +656,40 @@ mod tests {
         assert_eq!(strip_html_tags("a <b>b</b> c"), "a b c");
         assert_eq!(strip_html_tags("text <div unterminated"), "text");
         assert_eq!(strip_html_tags("<!-- comment -->kept"), "kept");
+    }
+
+    // ---- #402: standard markdown note links ------------------------------
+
+    #[test]
+    fn markdown_links_to_notes_are_links() {
+        let p = parse_note("See [Persona](persona.md) and [[Wiki]].", "s");
+        let got: Vec<_> = p.links.iter().map(|l| (l.target.as_str(), l.raw.as_str(), l.relative)).collect();
+        assert_eq!(got, vec![("persona.md", "Persona", true), ("Wiki", "Wiki", false)]);
+    }
+
+    #[test]
+    fn markdown_links_skip_images_urls_anchors_files_and_code() {
+        let text = "![img](pic.md) [web](https://x.com/a.md) [mail](mailto:a@b.md) [h](#part) \
+                    [pdf](doc.pdf) \\[esc](e.md) `[code](c.md)`\n```\n[fenced](f.md)\n```\n";
+        assert!(parse_note(text, "s").links.is_empty(), "{:?}", parse_note(text, "s").links);
+    }
+
+    #[test]
+    fn markdown_links_decode_names_and_drop_fragments() {
+        let p = parse_note("[a](My%20Note.md#Part) [b](<other note.md>) [c](caf%C3%A9.md?x=1) [d](./x.MD)", "s");
+        let targets: Vec<_> = p.links.iter().map(|l| l.target.as_str()).collect();
+        assert_eq!(targets, vec!["My Note.md", "other note.md", "café.md", "./x.MD"]);
+    }
+
+    #[test]
+    fn stored_target_resolves_against_the_linking_note() {
+        let link = |t: &str| ParsedLink { target: t.into(), raw: String::new(), position: 0, relative: true };
+        assert_eq!(stored_target("a/b/company.md", &link("persona.md")), "a/b/persona.md");
+        assert_eq!(stored_target("a/b/company.md", &link("../persona.md")), "a/persona.md");
+        assert_eq!(stored_target("a/b/company.md", &link("./x/y.md")), "a/b/x/y.md");
+        assert_eq!(stored_target("a/b/company.md", &link("/root.md")), "root.md");
+        assert_eq!(stored_target("company.md", &link("../../out.md")), "out.md");
+        let wiki = ParsedLink { target: "Name".into(), raw: "Name".into(), position: 0, relative: false };
+        assert_eq!(stored_target("a/company.md", &wiki), "Name");
     }
 }
