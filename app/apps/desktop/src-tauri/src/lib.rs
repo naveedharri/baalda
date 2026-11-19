@@ -81,7 +81,21 @@ pub fn run() {
     // exits. On macOS the OS already routes links to the running app; the
     // plugin is harmless there and keeps one code path.
     #[cfg(desktop)]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}));
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        // A second launch (Start menu, dock, a `baalda://` link) exits here
+        // and hands over to this copy. Bring this copy's window forward —
+        // showing it if it never got revealed — instead of doing nothing:
+        // before, a relaunch while the first copy was still starting (or
+        // hidden) looked exactly like the app failing to open (#351).
+        log::info!("[window] another launch handed over to this one; revealing the window");
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        } else {
+            log::warn!("[window] another launch handed over, but the main window does not exist yet");
+        }
+    }));
 
     // The UI's own log. A `console.log` inside a WKWebView goes to the Web
     // Inspector and nowhere else, so anything the React layer measures about
@@ -149,6 +163,13 @@ pub fn run() {
         // account and access — the link carries ids, never content or a grant.
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
+            // How far startup got, for a machine we cannot reproduce on (#351):
+            // the main window and its webview were built before this runs.
+            log::info!(
+                "[startup] Baalda {} setting up; main window {}",
+                app.package_info().version,
+                if app.get_webview_window("main").is_some() { "created" } else { "missing" }
+            );
             agent_runner::warm_detection(app.handle());
             // Updater is desktop-only; register it here so mobile builds skip it.
             #[cfg(desktop)]
