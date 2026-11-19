@@ -131,7 +131,7 @@ Commands registered in `lib.rs`; `AppState` (`state.rs`) is one `Mutex` over `{ 
 Errors: single `AppError(String)` (`error.rs`).
 - `vault.rs` — path safety (`resolve_in_vault` rejects `..`/absolute/escape); ignores `.context/`, `.git`, dotfiles.
 - `tree.rs` — recursive walk to nested `TreeNode`; surfaces exactly `vault.rs ALLOWED_EXTS` (notes,
-  images, pdf, office docs, audio/video, csv/json/code, zip) and hides the root `attachments/` folder.
+  images, pdf, office docs, audio/video, csv/json/code, archives zip/tar/tgz/gz/7z) and hides the root `attachments/` folder.
   **`ALLOWED_EXTS` and `NOTE_EXTS` are ONE contract with the desktop's format registry**
   (`src/lib/formats.ts` — `SURFACED_EXTS`/`NOTE_EXTS`, the single authority for what a file is: how it
   surfaces, opens, embeds, uploads and syncs) and with the `NOTE_EXTS` literals in `sync/registry.ts` /

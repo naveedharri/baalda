@@ -811,6 +811,29 @@ describe("AttachmentSync upload transport (intent → PUT → complete)", () => 
       "attachments/ok.png",
     ]);
   });
+
+  // #407: an older server refuses a type the app now syncs (.tar/.gz/.7z) with
+  // 415. Never retried, and said ONCE in plain words, not once per file/pass.
+  it("tells the person once when the server refuses a file type (415)", async () => {
+    const notices: string[] = [];
+    const { deps, log } = makeTransport(
+      [
+        { relPath: "attachments/site.tar.gz", bytes: new Uint8Array([1]) },
+        { relPath: "attachments/photos.7z", bytes: new Uint8Array([3]) },
+        { relPath: "attachments/ok.png", bytes: new Uint8Array([2]) },
+      ],
+      ({ relPath }) =>
+        relPath === "attachments/ok.png" ? SINGLE_INTENT : serverError(415, "unsupported_media_type"),
+      { notify: (text) => notices.push(text) },
+    );
+    const sync = new AttachmentSync(deps);
+
+    await sync.reconcile();
+    await sync.reconcile();
+    expect(log.intents.filter((i) => i.relPath !== "attachments/ok.png")).toHaveLength(2);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("this server does not accept this file type");
+  });
 });
 
 // ── The sidebar's file dots ────────────────────────────────────────────────

@@ -99,6 +99,31 @@ describe("format lockstep", () => {
     }
   });
 
+  // #407: a surfaced binary syncs only if the server will store its upload
+  // type. `.tar`/`.gz`/`.7z` were missing on both sides; pin the server half
+  // so the next format added to the registry cannot surface and then bounce.
+  it("has a server MIME for every surfaced attachment format", () => {
+    const serverTs = read("../server/src/blobs/formats.ts");
+    const body = serverTs.match(/export const EXT_MIME[^=]*=\s*\{([\s\S]*?)\n\};/)?.[1];
+    if (body === undefined) throw new Error("could not find EXT_MIME");
+    const serverMime = new Map(
+      Array.from(body.replace(/\/\/[^\n]*/g, "").matchAll(/"?([\w]+)"?:\s*"([^"]+)"/g), (m) => [m[1], m[2]]),
+    );
+    // ALLOWED_MIME = EXT_MIME's values + a few accepted spellings
+    // (`image/vnd.microsoft.icon` is what the desktop sends for .ico).
+    const allowed = new Set([
+      ...serverMime.values(),
+      ...literals(serverTs, /export const ALLOWED_MIME[^=]*=\s*new Set<string>\(\[([\s\S]*?)\]\);/),
+    ]);
+    for (const format of FORMATS) {
+      if (!format.surface || format.syncAs !== "attachment") continue;
+      for (const ext of format.exts) {
+        expect(serverMime.has(ext), ext).toBe(true);
+        expect(allowed.has(format.mimes[0]), `${ext} uploads as ${format.mimes[0]}`).toBe(true);
+      }
+    }
+  });
+
   // #265: what Rust's walk and watcher hide as an app's lock file, the sync
   // layer refuses to pull down and the server refuses to register.
   it("agrees with Rust and the server on transient lock-file prefixes", () => {

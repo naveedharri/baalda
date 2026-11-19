@@ -740,18 +740,28 @@ export const FORMATS: readonly FormatDef[] = [
   },
 
   // --- archives -------------------------------------------------------------
-  {
-    exts: ["zip"],
-    mimes: ["application/zip"],
-    category: "archive",
-    viewer: "card",
-    embed: "chip",
-    surface: true,
-    openable: true,
-    syncAs: "attachment",
-    maxBytes: MAX_ATTACHMENT_BYTES,
-    textExtract: "none",
-  },
+  // All opaque: a card with name, size and "Open externally", never unpacked.
+  // `foo.tar.gz` is a "gz" file (the extension is after the LAST dot), so
+  // every gzip surfaces, not only tarballs (#407).
+  ...([
+    [["zip"], "application/zip"],
+    [["tar"], "application/x-tar"],
+    [["gz", "tgz"], "application/gzip"],
+    [["7z"], "application/x-7z-compressed"],
+  ] as const).map(
+    ([exts, mime]): FormatDef => ({
+      exts: [...exts],
+      mimes: [mime],
+      category: "archive",
+      viewer: "card",
+      embed: "chip",
+      surface: true,
+      openable: true,
+      syncAs: "attachment",
+      maxBytes: MAX_ATTACHMENT_BYTES,
+      textExtract: "none",
+    }),
+  ),
 ];
 
 // ---- Lookups ---------------------------------------------------------------

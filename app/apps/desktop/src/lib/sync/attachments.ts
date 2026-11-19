@@ -1152,6 +1152,9 @@ export class AttachmentSync {
    * than path so a rename does not resurrect the attempt.
    */
   private readonly permanentSkips = new Set<string>();
+  /** One plain notice per session for a 415: an older server that does not
+   *  know a file type the app now syncs (#407: .tar/.gz/.7z). */
+  private unsupportedTypeNotified = false;
   /** {@link permanentSkips} and the text refusals, beyond this instance. */
   private readonly refusals: RefusalStore;
   /**
@@ -1270,6 +1273,17 @@ export class AttachmentSync {
   private skipPermanently(sha256: string): void {
     this.permanentSkips.add(sha256);
     if (sha256) this.refusals.add(bytesRefusalKey(sha256));
+  }
+
+  /** Say once, in plain words, why a file of a refused type stays local. The
+   *  skip itself is already permanent (see {@link skipPermanently}). */
+  private noteUnsupportedType(a: LocalAttachment): void {
+    if (this.unsupportedTypeNotified) return;
+    this.unsupportedTypeNotified = true;
+    this.deps.notify?.(
+      `${baseName(a.relPath)} stays on this device: this server does not accept this file type. Ask whoever runs the server to update it.`,
+      "error",
+    );
   }
 
   private forgiveSkip(sha256: string): void {
@@ -1775,6 +1789,7 @@ export class AttachmentSync {
             // these bytes on every pass, so the same permanent skip.
             this.skipPermanently(a.sha256);
             this.setFileState(a.relPath, "error");
+            if (failed === 415) this.noteUnsupportedType(a);
             console.warn(
               `[attachments] ${a.relPath} refused permanently (${failed} ${errCode(e) ?? "?"}) — skipping`,
             );
@@ -2188,6 +2203,7 @@ export class AttachmentSync {
         // stays a session-only skip.
         if (status === 403) this.permanentSkips.add(a.sha256);
         else this.skipPermanently(a.sha256);
+        if (status === 415) this.noteUnsupportedType(a);
         console.warn(
           `[attachments] ${a.relPath} refused permanently (${status} ${errCode(e) ?? "?"}) — skipping`,
         );

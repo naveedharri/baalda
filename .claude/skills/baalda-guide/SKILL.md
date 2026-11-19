@@ -73,10 +73,10 @@ Answer:
 >
 > - **Images and PDFs** (PNG, JPG, GIF, SVG, PDF) show in the sidebar, preview in the app, and
 >   sync to your team when you paste or drag them into a note.
-> - **Office and other files** (DOCX, XLSX, CSV, ZIP) can be dragged onto a note; they sync as a
->   download link, but Baalda cannot open or edit them. Convert to Markdown to get the content in.
-> - **Code files** (PY, JS) are ignored on purpose so a project folder does not flood your vault.
->   Paste code into a note as a code block instead.
+> - **Office and other files** (DOCX, XLSX, CSV, PY, ZIP, TAR, GZ, 7Z) sync as files; DOCX, XLSX,
+>   CSV and PY open in a read-only preview, PPTX and archives as a card. Baalda does not edit them.
+> - **Most code files** (JS, TS, CSS) are ignored on purpose so a project folder does not flood
+>   your vault. Paste code into a note as a code block instead.
 >
 > Only text notes get live co-editing, search and AI access. Attachments cap at 25 MB each.
 

@@ -152,6 +152,10 @@ pub fn extractor_for(ext: &str) -> Extractor {
         "xlsx" | "xlsm" => Extractor::Xlsx,
         "pptx" => Extractor::Pptx,
         "zip" => Extractor::Zip,
+        // Other archives are never opened: listing a tar means decompressing
+        // the whole gzip stream first, and a 7z needs a codec we do not ship.
+        // The file name is what search gets (#407).
+        "tar" | "tgz" | "gz" | "7z" => Extractor::NameOnly,
         "pdf" => Extractor::Unsupported,
         // Images, audio, video — and anything new that reaches here before this
         // table learns about it. Name-only is the safe default: it indexes
@@ -174,7 +178,7 @@ pub fn kind_for(ext: &str) -> &'static str {
         "pptx" => "presentation",
         "mp4" | "m4v" | "mov" | "webm" => "video",
         "mp3" | "wav" | "m4a" | "ogg" | "aac" | "flac" => "audio",
-        "zip" => "archive",
+        "zip" | "tar" | "tgz" | "gz" | "7z" => "archive",
         _ => "data",
     }
 }
@@ -704,6 +708,11 @@ mod tests {
         assert_eq!(extractor_for("pdf"), Extractor::Unsupported);
         assert_eq!(kind_for("mp3"), "audio");
         assert_eq!(kind_for("zip"), "archive");
+        for ext in ["tar", "tgz", "gz", "7z"] {
+            assert_eq!(kind_for(ext), "archive", "{ext}");
+            assert_eq!(extractor_for(ext), Extractor::NameOnly, "{ext}");
+            assert_eq!(max_input_bytes(extractor_for(ext)), 0, "{ext} is never read");
+        }
         assert_eq!(kind_for("py"), "data");
     }
 }

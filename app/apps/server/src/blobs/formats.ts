@@ -118,8 +118,13 @@ export const EXT_MIME: Readonly<Record<string, string>> = {
   mov: "video/quicktime",
   m4v: "video/mp4",
   webm: "video/webm",
-  // archives
+  // archives (#407). `foo.tar.gz` reaches here as "gz": the desktop takes the
+  // extension after the last dot.
   zip: "application/zip",
+  tar: "application/x-tar",
+  tgz: "application/gzip",
+  gz: "application/gzip",
+  "7z": "application/x-7z-compressed",
 };
 
 /** MIME → category, for the size ceiling. */
@@ -130,6 +135,11 @@ const MIME_CATEGORY: Readonly<Record<string, FormatCategory>> = {
   "application/vnd.ms-excel.sheet.macroEnabled.12": "document",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation": "document",
   "application/zip": "archive",
+  "application/x-zip-compressed": "archive",
+  "application/x-tar": "archive",
+  "application/gzip": "archive",
+  "application/x-gzip": "archive",
+  "application/x-7z-compressed": "archive",
   "application/json": "text",
   "application/yaml": "text",
   "application/toml": "text",
@@ -155,6 +165,7 @@ export const ALLOWED_MIME: ReadonlySet<string> = new Set<string>([
   // spelling.
   "image/vnd.microsoft.icon",
   "application/x-zip-compressed",
+  "application/x-gzip",
 ]);
 
 /**
@@ -262,6 +273,7 @@ const EQUIVALENT_MIME: ReadonlyArray<ReadonlySet<string>> = [
   new Set(["audio/ogg", "video/ogg", "application/ogg"]),
   new Set(["image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"]),
   new Set(["image/x-icon", "image/vnd.microsoft.icon"]),
+  new Set(["application/gzip", "application/x-gzip"]),
   new Set(["audio/wav", "audio/x-wav", "audio/vnd.wave"]),
 ];
 
