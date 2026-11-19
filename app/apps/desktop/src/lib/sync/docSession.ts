@@ -165,6 +165,8 @@ const PRESENCE_REPUSH_MS = 150;
  * enough that a single saved file is on the server within ~a second.
  */
 const LOCAL_CHANGE_DEBOUNCE_MS = 800;
+/** How long an HTTP merge waits for a busy content run before handing over (#406). */
+const MERGE_PUSH_WAIT_MS = 60_000;
 /** Re-check interval while a bulk run holds the uploader slot. */
 const LOCAL_CHANGE_RETRY_MS = 2_000;
 /**
@@ -4576,14 +4578,20 @@ export class SyncManager implements InboundHost {
     const scope = this.scope;
     const store = this.docStore;
     if (!scope?.isCurrent()) return;
-    if (seed.fresh && store && store.suppressedDoc() !== docId) {
+    const openByEditor = !!store && store.suppressedDoc() === docId;
+    if (seed.fresh && store && !openByEditor) {
       const relPath = this.registry.pathForDocId(docId);
       if (relPath) {
-        // The file can change between build and answer; the egest below then
-        // replaces it with the seed (the server's text) and the bridge saves
-        // the newer bytes to `.context/trash`. Report that copy as what it is.
+        // The file can change between build and answer: a script or agent
+        // that creates a file and fills it a moment later (#406). Its watcher
+        // event arrived while the note was still unmapped, so it only asked
+        // for a registry pull, and nothing would ever read the new bytes.
+        // Settling here would mark the note synced while the server holds the
+        // OLD text (often nothing) for every other device. Merge instead.
+        const fileMoved = (await this.fileDiffersFrom(relPath, seed.textSha256, scope)) === true;
+        if (!scope.isCurrent()) return;
         const unclaim = attributeRecoveryCopies(relPath, { kind: "conflictKeptServer", docId });
-        let raced = false;
+        let raced = fileMoved;
         try {
           const bridge = await store.promote(docId, relPath, {
             seedFromFile: false,
@@ -4591,7 +4599,10 @@ export class SyncManager implements InboundHost {
             pin: true,
           });
           try {
-            if (bridge.serialize().length === 0) {
+            if (fileMoved) {
+              // Nothing applied: the merge below starts from the server's
+              // state and folds the file's current bytes in on top of it.
+            } else if (bridge.serialize().length === 0) {
               // The SAME ops the server holds (same client id and clocks): the
               // later merge of the two is a no-op, never a doubled body.
               bridge.applyRemote(seed.state);
@@ -4612,6 +4623,9 @@ export class SyncManager implements InboundHost {
           // bridge is already retired, so nothing can re-persist after the clear.
           store.drop(docId);
           await ipc.clearYjsDoc(docId, scope.vaultEpoch);
+          if (fileMoved) {
+            console.info(`[sync] ${relPath} changed while it was being registered; merging its current text`);
+          }
           this.noteNeedsMerge([docId]);
           return;
         }
@@ -4632,6 +4646,43 @@ export class SyncManager implements InboundHost {
     this.serverBehind.delete(docId);
     this.syncPause.writeAccepted();
     this.progress?.doc(docId, "synced");
+    // A seed built from the local CRDT holds those ops, so a file that moved on
+    // during the request only needs the ingest + push its lost watcher event
+    // would have queued (#406). The open note's editor ingests its own file.
+    if (!seed.fresh && !openByEditor) {
+      const relPath = this.registry.pathForDocId(docId);
+      if (relPath && (await this.fileDiffersFrom(relPath, seed.textSha256, scope)) === true) {
+        if (!scope.isCurrent()) return;
+        this.localChanges.set(docId, relPath);
+        this.note("info", "push-queued", "Changed while it was being registered. Sending the newer text", {
+          docId,
+          path: relPath,
+        });
+        this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+      }
+    }
+  }
+
+  /** Resolve once no content run or bulk phase holds the pusher, or after `maxMs`. */
+  private async waitForContentSlot(scope: VaultScope, maxMs: number): Promise<void> {
+    const until = Date.now() + maxMs;
+    while (scope.isCurrent() && (this.contentRunInFlight() || this.bulkPhase) && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
+  /**
+   * Does the file at `relPath` no longer hash to `sha256`? null when it cannot
+   * be read (missing, epoch switch): no evidence either way, so callers keep
+   * today's behaviour.
+   */
+  private async fileDiffersFrom(relPath: string, sha256: string, scope: VaultScope): Promise<boolean | null> {
+    try {
+      const text = await ipc.readNote(relPath, scope.vaultEpoch);
+      return (await sha256Hex(text)) !== sha256;
+    } catch {
+      return null;
+    }
   }
 
   /** Queue docs whose server copy we have not seen for an HTTP merge. */
@@ -4805,9 +4856,16 @@ export class SyncManager implements InboundHost {
     }
     if (leftovers.length > 0) fallback(leftovers);
     if (work.length === 0 || !scope.isCurrent()) return;
-    // A run already in flight owns the pusher slot; hand it these docs.
+    // A run already in flight owns the pusher slot. Its work list was taken
+    // when it started and a finished run looks for nothing new, so handing
+    // these docs to it left them unsent until the next connect (#406). The
+    // merged text is already persisted: wait for the slot, then push here.
     if (this.contentRunInFlight() || this.bulkPhase) {
-      return fallback(work.map((w) => w.docId));
+      await this.waitForContentSlot(scope, MERGE_PUSH_WAIT_MS);
+      if (!scope.isCurrent()) return;
+      if (this.contentRunInFlight() || this.bulkPhase) {
+        return fallback(work.map((w) => w.docId));
+      }
     }
     const result = await this.runDocBatchPush(scope, vaultId, store, work);
     if (!result) return fallback(work.map((w) => w.docId));

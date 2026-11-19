@@ -222,3 +222,32 @@ describe("HTTP merge and the open note", () => {
     expect(internals.pendingLoserRelease.size).toBe(0);
   });
 });
+
+describe("HTTP merge while a content run holds the pusher (#406)", () => {
+  it("waits for the run to finish and pushes the merged doc itself", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+    try {
+      const sm = manager();
+      fakeRegistry.paths.set("d", REL);
+      const priv = sm as unknown as {
+        contentRunInFlight(): boolean;
+        runDocBatchPush(...args: unknown[]): Promise<unknown>;
+        serverBehind: Set<string>;
+      };
+      let busy = true;
+      vi.spyOn(priv, "contentRunInFlight").mockImplementation(() => busy);
+
+      sm.noteNeedsMerge(["d"]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(priv.runDocBatchPush).not.toHaveBeenCalled(); // still waiting for the slot
+      expect(priv.serverBehind.has("d")).toBe(false); // not handed to the busy run
+
+      busy = false;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(priv.runDocBatchPush).toHaveBeenCalledTimes(1);
+      expect(priv.serverBehind.has("d")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
