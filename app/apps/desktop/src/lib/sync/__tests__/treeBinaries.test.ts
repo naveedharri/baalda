@@ -459,6 +459,22 @@ describe("a `files` row is not its bytes", () => {
     expect(log.confirmed).toEqual(["Team/report.docx"]);
   });
 
+  it("uploads a copy of an existing file placed beside the original", async () => {
+    // Same bytes as Team/report.docx, which is still here at its own path:
+    // the copy is a NEW file, not a rename, and must register.
+    const { sync, log } = makeVault(
+      [
+        { relPath: "Team/report.docx", sha256: "sha-r" },
+        { relPath: "Archive/report copy.docx", sha256: "sha-r" },
+      ],
+      {
+        listServer: async () => [{ id: "blob-1", sha256: "sha-r", relPath: "Team/report.docx" }],
+      },
+    );
+    await sync.reconcile();
+    expect(log.intents.map((i) => i.relPath)).toEqual(["Archive/report copy.docx"]);
+  });
+
   it("says nothing about a hidden `attachments/` drop — it has no `files` row", async () => {
     const { sync, log } = makeVault([{ relPath: "attachments/abc123.png" }], {
       listServer: async () => [

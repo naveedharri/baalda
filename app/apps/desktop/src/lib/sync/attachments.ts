@@ -383,9 +383,24 @@ export function planBinarySync(
   const localShas = new Set(local.map((a) => a.sha256));
   const localPaths = new Set(local.map((a) => pathKey(a.relPath)));
   const serverShas = new Set(server.map((b) => b.sha256));
-  /** Shas some server row holds as a tree file (anything not an `attachments/` drop). */
-  const treeShas = new Set(
-    server.filter((b) => !b.relPath || !isUnderAttachments(b.relPath)).map((b) => b.sha256),
+  /**
+   * Shas some server TREE row holds at a path that is missing on this disk: the
+   * bytes may be that file under a new name (an offline rename the pairing
+   * could not prove), so an unbound local file with them is not uploaded as a
+   * new one. A tree row still present at its own path proves nothing of the
+   * kind: a copy beside the original is a new file and must go up. Counting
+   * every tree row here left any copy of an existing file unsynced forever.
+   */
+  const vacatedTreeShas = new Set(
+    server
+      .filter((b) => !b.relPath || (!isUnderAttachments(b.relPath) && !localPaths.has(pathKey(b.relPath))))
+      .map((b) => b.sha256),
+  );
+  /** "sha|path" of every server tree row: the same bytes at the same path is this very file. */
+  const treeAtPath = new Set(
+    server
+      .filter((b) => b.relPath && !isUnderAttachments(b.relPath))
+      .map((b) => `${b.sha256}|${pathKey(b.relPath as string)}`),
   );
 
   const toUpload: PlannedUpload[] = [];
@@ -495,14 +510,16 @@ export function planBinarySync(
     // them ONLY as `attachments/` drops, a tree file with no `files` id is a
     // file the server does not know yet: an attachment copied into a folder
     // (#343) used to be skipped here forever. It still goes up, so it
-    // registers; the intent dedupes it, and no bytes move. A sha any tree row
-    // holds (this file seen fresh, or its pre-rename path) stays skipped and
-    // confirms from the listing, and a true `attachments/` duplicate too.
+    // registers; the intent dedupes it, and no bytes move. So does a copy of
+    // another tree file whose original is still here. Only a sha a VACATED
+    // tree row holds (maybe this file's pre-rename path) stays skipped, and a
+    // true `attachments/` duplicate too.
     if (
       ctx &&
       !isUnderAttachments(a.relPath) &&
       !ctx.docIdFor(a.relPath) &&
-      !treeShas.has(a.sha256)
+      !vacatedTreeShas.has(a.sha256) &&
+      !treeAtPath.has(`${a.sha256}|${pathKey(a.relPath)}`)
     ) {
       toUpload.push(a);
     }
