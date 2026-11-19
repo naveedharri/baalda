@@ -66,8 +66,17 @@ export async function deletedNotesAmong(
   db: Queryable = defaultPool,
 ): Promise<Set<string>> {
   if (docIds.length === 0) return new Set();
+  // Notes, and the tree files (`files` ids, which ride `hello.files`) the
+  // server deleted: a deleted file is a DELETE too, never an access change.
+  // Named as revoked, the desktop asked the access-check about an id with no
+  // row, got no answer, and kept the file with a "resolver still grants
+  // access" failure that never cleared (#411).
   const { rows } = await db.query<{ id: string }>(
-    "SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NOT NULL AND id = ANY($2::text[])",
+    `SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NOT NULL AND id = ANY($2::text[])
+     UNION
+     SELECT ft.id FROM file_tombstones ft
+      WHERE ft.vault_id = $1 AND ft.id = ANY($2::text[])
+        AND NOT EXISTS (SELECT 1 FROM files f WHERE f.id = ft.id)`,
     [vaultId, docIds],
   );
   return new Set(rows.map((r) => r.id));

@@ -15,6 +15,7 @@ import {
   seedVaultGrant,
 } from "./helpers/seed.js";
 import { testAppDeps } from "./helpers/app.js";
+import { deletedNotesAmong } from "../src/trash/access.js";
 
 /**
  * `DELETE /api/files/:id` — the delete a synced binary never had.
@@ -100,6 +101,13 @@ describe("DELETE /api/files/:id", () => {
     );
     expect(again.status).toBe(201);
     expect(await fileRows(docId)).toBe(1);
+  });
+
+  it("is reported to devices as DELETED, not as an access change (#411)", async () => {
+    const docId = await seedFile(vaultId, folderId, "Team/thumb.png");
+    expect((await deletedNotesAmong(vaultId, [docId])).has(docId)).toBe(false);
+    expect((await del(owner, docId)).status).toBe(204);
+    expect((await deletedNotesAmong(vaultId, [docId])).has(docId)).toBe(true);
   });
 
   it("drops the file from the blob listing, so no device re-downloads it", async () => {

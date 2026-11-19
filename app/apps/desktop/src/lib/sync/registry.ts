@@ -2550,7 +2550,9 @@ export class VaultRegistry {
     // remove the file properly. It stays out of `hello.files` meanwhile
     // (`fileDocIds`), so nothing re-announces it and the ACL-authority clock is
     // not re-stamped on every reconnect.
-    if (!this.filesConfirmed.has(gone.docId)) {
+    // A deletion needs no confirmed bytes: the id match is the proof, and a
+    // deleted file leaves whatever this device held (deleted means deleted).
+    if (gone.reason !== "deleted" && !this.filesConfirmed.has(gone.docId)) {
       this.recordFailure({
         kind: "orphan",
         path: gone.path,

@@ -706,8 +706,17 @@ export function planInbound(input: InboundInput): InboundPlan {
   // A server that names nothing (one that predates `ready.revoked`) therefore
   // removes no binaries at all. That is the safe direction, and the same one the
   // note path takes when `tombstones` is null.
+  // A tree file the server names as DELETED (`ready.tombstones` carries
+  // `files` ids too, #411) leaves like a deleted note: the id match proves it
+  // is that file, and a delete is never a question for the access-check.
+  if (input.tombstones && input.localFiles) {
+    for (const [docId, relPath] of input.localFiles) {
+      if (input.tombstones.has(docId)) pushTrash(plan, docId, relPath, "deleted", true);
+    }
+  }
   if (input.authoritative === true && input.authoritativeRevoked && input.localFiles) {
     for (const [docId, relPath] of input.localFiles) {
+      if (input.tombstones?.has(docId)) continue;
       if (!input.authoritativeRevoked.has(docId)) continue;
       // No `suppress` entry, deliberately: that set is read by the OUTBOUND note
       // half, and a binary re-registers through the blob mirror instead — which

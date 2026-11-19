@@ -348,6 +348,19 @@ describe("planInbound — deletes", () => {
     ]);
   });
 
+  it("removes a tree file the server named as deleted, without an access check (#411)", () => {
+    const p = plan({
+      tombstones: new Set(["f1"]),
+      localFiles: new Map([["f1", "Images/thumb.png"]]),
+      authoritative: true,
+      authoritativeRevoked: new Set(["f1"]),
+    });
+    expect(p.trash).toEqual([
+      { docId: "f1", path: "Images/thumb.png", reason: "deleted", binary: true },
+    ]);
+    expect(p.needsAccessCheck).toEqual([]);
+  });
+
   it("removes the file when a note left the listing (access revoked)", () => {
     // `GET /api/notes` is ACL-filtered, so losing access looks like a delete —
     // hence the tombstone set, which says which of the two it was. Both end in
