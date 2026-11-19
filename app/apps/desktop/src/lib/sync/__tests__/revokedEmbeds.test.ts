@@ -212,3 +212,18 @@ describe("revoked embeds: a note that is itself leaving (#408)", () => {
     expect(h.removed).toEqual([]);
   });
 });
+
+describe("findEmbedReferences spellings", () => {
+  const notes = [{ id: "n1", path: "n.md" }];
+  const find = (text: string, path: string) =>
+    findEmbedReferences([path], notes, async () => text, () => false);
+  it("counts a bare wiki embed", async () => {
+    expect(await find("![[p3b.png]]", "attachments/p3b.png")).toEqual(new Set(["attachments/p3b.png"]));
+  });
+  it("counts a percent-encoded name and a different letter case", async () => {
+    expect((await find("![x](/attachments/My%20Photo.PNG)", "attachments/my photo.png")).size).toBe(1);
+  });
+  it("does not count a note that names something else", async () => {
+    expect((await find("![x](/attachments/other.png)", "attachments/p3b.png")).size).toBe(0);
+  });
+});

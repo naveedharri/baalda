@@ -849,13 +849,19 @@ export async function findEmbedReferences(
   readNote: (path: string) => Promise<string>,
   isLeaving: (note: { id: string; path: string }) => boolean,
 ): Promise<Set<string>> {
-  const wanted = paths.map((p) => ({ p, name: p.slice(p.lastIndexOf("/") + 1) }));
+  // Matched loosely on purpose (keeping too much is the safe direction): any
+  // letter case, and the percent-encoded spelling a markdown link uses for a
+  // name with spaces (`photo%201.png`), as well as the wiki form's plain one.
+  const wanted = paths.map((p) => {
+    const name = p.slice(p.lastIndexOf("/") + 1).toLowerCase();
+    return { p, names: [...new Set([name, encodeURI(name).toLowerCase()])] };
+  });
   const hit = new Set<string>();
   for (const n of notes) {
     if (hit.size === wanted.length) break;
     if (isLeaving(n)) continue;
-    const text = await readNote(n.path);
-    for (const w of wanted) if (!hit.has(w.p) && text.includes(w.name)) hit.add(w.p);
+    const text = (await readNote(n.path)).toLowerCase();
+    for (const w of wanted) if (!hit.has(w.p) && w.names.some((name) => text.includes(name))) hit.add(w.p);
   }
   return hit;
 }

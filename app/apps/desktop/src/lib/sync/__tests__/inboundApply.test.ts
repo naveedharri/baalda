@@ -2974,3 +2974,26 @@ describe("a teammate's folder delete never comes back empty (#409)", () => {
     expect(reg.isInsideDeadFolder("Gone/old.png")).toBe(true);
   });
 });
+
+describe("a note listed again leaves the named-revocation set", () => {
+  it("drops a re-listed id so its embeds are not read as unused", async () => {
+    // Access to a folder was removed (the server named d1) and then given back.
+    // While d1 stayed named, the note counted as leaving, and the images it
+    // embeds were removed on the next access change elsewhere.
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.notes.set("b.md", "d2");
+    const notes = [
+      { id: "d1", rel_path: "a.md" },
+      { id: "d2", rel_path: "b.md" },
+    ];
+    const { refused } = await twoPasses({
+      disk,
+      first: { notes },
+      then: { notes: [notes[0]] },
+      named: new Set(["d1", "d2"]),
+    });
+    expect(refused).toContain("d1");
+    expect(refused).not.toContain("d2");
+  });
+});

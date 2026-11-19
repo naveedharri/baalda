@@ -4175,6 +4175,14 @@ export class VaultRegistry {
     // A note listed again is readable again: its "you lost this" report line
     // (kept locally / deleted by a teammate) no longer holds this session.
     reconcileReport.forgetReadable(new Set(serverNotes.map((n) => noteDocId(n))));
+    // And it leaves the session's named-revocation set: kept there, a note
+    // whose access came back still counted as "leaving", so the images it
+    // embeds read as unused and left this disk on the next access change.
+    const named = this.host?.authoritativeRevoked?.();
+    if (named && named.size > 0) {
+      const again = serverNotes.map((n) => noteDocId(n)).filter((id) => named.has(id));
+      if (again.length > 0) this.host?.revocationRefused?.(again);
+    }
     if (this.revokedKept.size > 0) {
       const listed = new Set(serverNotes.map((n) => noteDocId(n)));
       for (const [key, docId] of this.revokedKept) if (listed.has(docId)) this.revokedKept.delete(key);
