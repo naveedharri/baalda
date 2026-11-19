@@ -39,6 +39,11 @@ RUN pnpm --filter server run build
 # --legacy: neither workspace package depends on the other, so the
 # inject-workspace-packages machinery pnpm 10 otherwise requires is moot.
 RUN pnpm --filter server --prod deploy --legacy /out
+# Report the RELEASE version in `GET /health`: the server's own package.json
+# never moves (0.1.0), while the desktop's carries the number every release
+# bumps. Self-hosters check this after an upgrade (docs/DEPLOY.md), and it is
+# the tag the published image carries (.github/workflows/server-image.yml).
+RUN node -e "const fs=require('fs');const p='/out/package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=require('/repo/app/apps/desktop/package.json').version;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
 
 # ---- runtime: node + the deployed bundle, no package manager ---------------
 FROM node:22-alpine AS runtime
