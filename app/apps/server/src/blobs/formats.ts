@@ -127,8 +127,19 @@ export const EXT_MIME: Readonly<Record<string, string>> = {
   "7z": "application/x-7z-compressed",
 };
 
+/**
+ * Every lookup below is keyed in lowercase, because {@link normalizeMime}
+ * case-folds what it looks up: a mixed-case registered spelling (the xlsm type
+ * is `…sheet.macroEnabled.12`) would otherwise never match and its uploads
+ * were refused with 415.
+ */
+const lowerKeys = <T,>(o: Readonly<Record<string, T>>): Readonly<Record<string, T>> =>
+  Object.fromEntries(Object.entries(o).map(([k, v]) => [k.toLowerCase(), v]));
+const lowerSet = (xs: Iterable<string>): ReadonlySet<string> =>
+  new Set([...xs].map((x) => x.toLowerCase()));
+
 /** MIME → category, for the size ceiling. */
-const MIME_CATEGORY: Readonly<Record<string, FormatCategory>> = {
+const MIME_CATEGORY: Readonly<Record<string, FormatCategory>> = lowerKeys({
   "application/pdf": "pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "document",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "document",
@@ -147,7 +158,7 @@ const MIME_CATEGORY: Readonly<Record<string, FormatCategory>> = {
   "application/sql": "text",
   "application/x-sh": "text",
   "application/octet-stream": "other",
-};
+});
 
 /**
  * Every MIME the server will store. Union of {@link EXT_MIME}'s values (the
@@ -157,7 +168,7 @@ const MIME_CATEGORY: Readonly<Record<string, FormatCategory>> = {
  * (dropped next to a note rather than opened as one); that is separate from
  * whether it syncs as a note.
  */
-export const ALLOWED_MIME: ReadonlySet<string> = new Set<string>([
+export const ALLOWED_MIME: ReadonlySet<string> = lowerSet([
   ...Object.values(EXT_MIME),
   "application/octet-stream",
   // `mimeForPath` emits these two for .ico/.zip-adjacent legacy paths and a few
@@ -259,7 +270,7 @@ const TEXTUAL_MIME: ReadonlySet<string> = new Set<string>([
  * types entry late) legitimately sniffs as `application/zip`.
  */
 const EQUIVALENT_MIME: ReadonlyArray<ReadonlySet<string>> = [
-  new Set([
+  lowerSet([
     "application/zip",
     "application/x-zip-compressed",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
