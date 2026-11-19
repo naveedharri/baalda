@@ -24,7 +24,7 @@ for a call to get started.
 ## Can I leave a vault someone else owns?
 Yes. Open Account Settings → Vaults, click **Leave** next to the vault and confirm. You lose access
 straight away on every device you are signed in on, the vault leaves your switcher, and the folder
-on that device goes to the Trash rather than staying behind as a copy. The owner is emailed that
+on that device goes to your computer's Trash rather than staying behind as a copy. The owner is emailed that
 you left (and you get a receipt) when the server sends email. Nobody else's access changes. If you
 want back in, ask the owner for a new invitation or join code. The owner of a vault cannot leave
 it; they delete it instead. If you only want the vault off one computer but want to stay a member,
@@ -111,20 +111,18 @@ Yes, and it is a supported way to work. Create, edit, delete, rename and move `.
 tool — Finder, a script, an AI agent — and Baalda picks the change up and syncs it, merging an
 outside edit with whatever a teammate is typing rather than overwriting it. A delete on disk takes
 a couple of seconds to reach the team (long enough that an editor's save or a rename is not
-mistaken for one); no extra local copy is kept, but the note goes to the vault's Trash for 30
-days and can be restored from there. The
+mistaken for one). A deleted note is deleted for good: there is no Trash to restore it from. The
+way back is a vault checkpoint (see version history). The
 one folder to leave alone is the hidden `.context` folder inside the vault: that is Baalda's own
 index and sync state.
 
 ## What happens when someone deletes a note I was editing offline?
-Your work is kept. Deleted notes go to the vault's **Trash** for 30 days, and edits you made while
-offline still reach that note when you reconnect, so a teammate who restores it gets your changes
-too. If your copy had changes the server never saw, Baalda also keeps a copy on your computer
-before removing the file, and tells you once in a summary. Anyone who can edit the note (or a vault
-owner or admin) can **Restore** it from Trash; if its name is taken by then, it comes back with
-"(restored <date>)" added. After 30 days the note is removed for good. The same protection applies
-when your access to a note is removed while you have unsent edits: they stay on your computer,
-marked as no longer shared. If two people create a note with the same name while offline, both
+Deleted means deleted. When you reconnect, the note is removed from your computer too, including
+any edits you made to it while offline; no copy is kept, and Baalda tells you once in a summary
+what it removed. There is no Trash. The way back is a vault checkpoint: owners and admins can
+revert the vault to a checkpoint taken before the delete, which brings the note back with the text
+it had then. The same applies when your access to a note is removed: the file leaves your
+computer, unsent edits included. If two people create a note with the same name while offline, both
 are kept and the later one is renamed with "(conflict <date>)".
 
 ## Can I rename, move or delete files and folders outside Baalda?

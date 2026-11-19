@@ -146,8 +146,8 @@ safety net is that *management* is gated separately — `canManage` (`http/route
 for owner/admin and never for effective permission — so an owner can always lift what they set.
 The page reads structure from the server, so the row to lift it from never disappears either.
 
-> **A restriction reaches the disk.** Losing access moves the local `.md` into the vault's trash
-> on every device that had it — a revocation that leaves a full, readable copy behind is cosmetic,
+> **A restriction reaches the disk.** Losing access removes the local `.md` (outright since
+> 2026-11-19, "deleted means deleted"; it used to move into the vault's trash) on every device that had it — a revocation that leaves a full, readable copy behind is cosmetic,
 > since the ex-reader can open it in any editor forever. The server keeps the content, so this is
 > a de-sync, not a delete.
 >
@@ -159,10 +159,11 @@ The page reads structure from the server, so the row to lift it from never disap
 > the only row you could restore it from.
 >
 > Three rails, all in `lib/sync/inbound.ts`: it only fires when the server actually **answered**
-> about deletions (`tombstones !== null` — absence proves nothing otherwise); the file goes to a
-> recoverable **trash** folder rather than being destroyed; and the executor **refuses** any doc
-> whose content this device never confirmed upstream, so a permission change can't take work that
-> exists nowhere else. Revocations are capped separately from deletions, more loosely, because a
+> about deletions (`tombstones !== null` — absence proves nothing otherwise); the server's own
+> access check must agree before a file leaves; and a local file whose identity is unproven (an
+> unrelated note reusing the path) is never touched. Until 2026-11-19 the file went to a recoverable
+> **trash** folder and a doc with unsent local work was kept; since then the file and any unsent
+> edits are removed, with no copy. Revocations are capped separately from deletions, more loosely, because a
 > whole shared folder leaving at once is ordinary while a mass delete rarely is.
 
 **Two overlays, deliberately different.** `locked` is a *cap* — it takes edit down to view and

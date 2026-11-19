@@ -913,11 +913,9 @@ REDIS_URL=redis://localhost:6389 pnpm run dev
 Self-hosters who run a single instance need none of this — leave `REDIS_URL`
 unset and the server behaves exactly as before (Postgres only).
 
-### Self-hosted agent access
+### Self-hosted plan limits
 
-Set `BAALDA_DEPLOYMENT=self-hosted` (as in `.env.example`) to enable the Assistant with
-users’ own model keys, independently of optional billing setup. You can configure
-billing later without changing AI access. The setting defaults to `cloud` when
-omitted: AI requires a paid plan (Pro, or Team under `BILLING_MODEL=team`). Free vaults
-have a 20,000-note sync cap on the per-vault model and the `ABUSE_MAX_NOTES` ceiling on
-the Team model.
+Set `BAALDA_DEPLOYMENT=self-hosted` (as in `.env.example`) so no plan limit applies, even
+if you configure billing later. The setting defaults to `cloud` when omitted: with billing
+on, Free vaults then have a 20,000-note sync cap on the per-vault model and the
+`ABUSE_MAX_NOTES` ceiling on the Team model. MCP (AI access) is included on every plan.

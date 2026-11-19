@@ -334,6 +334,14 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   fails with `file changed during upload` (never completed; the path's cached sha is dropped), and the
   sync pass skips a binary modified within `UPLOAD_QUIET_MS` (3 s), retrying on one shared settle
   timer. Multipart parts check length only.
+  An `attachments/` drop uploads unless the server lists the same sha as an `attachments/` row
+  (`planBinarySync attachmentShas`): a tree file holding the same bytes does not count, since
+  teammates materialize embeds only from `attachments/` rows (a PDF in a folder and the same PDF
+  dropped into a note left the embed missing on every other device).
+  Drops and pastes are size-checked BEFORE the bytes are read: `ipc.readExternalFile(path,
+  preReadLimit(ext))` refuses in Rust from file metadata (`ExternalFileTooLarge`) and the paste path
+  checks `File.size`; formats that transcode (`transcodeTo`) are read first, since their cap
+  applies after conversion. Reading a 600 MB drop whole used to push the app past 700 MB.
   A local binary this device knows by a `files` id the server TOMBSTONED (`GET /vaults/:id/file-tombstones`,
   ids from `file_tombstones` with no live row) is `toTrash`: removed outright, its id
   forgotten — never re-uploaded, which used to undo a teammate's delete (#215). Id match only; a

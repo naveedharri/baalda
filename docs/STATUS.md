@@ -19,12 +19,13 @@ tags: [baalda, status, roadmap]
   port at `/sync` (single-port topology), and the repo ships a Dockerfile, Railway IaC at
   `app/.railway/railway.ts` (Dockerfile build, pre-deploy migrations + healthcheck), and [[DEPLOY]]. The managed backend is live at
   `https://api.baalda.com`; desktop releases ship via `v*` tags → signed installers → Tauri updater.
-- **Billing:** 🟢 Per-vault Pro via Polar, with the full subscription lifecycle (2026-09-09, #109–#111):
+- **Billing:** 🟢 Free + Team (per seat) via Polar is the shipped model (`BILLING_MODEL=team`); the
+  per-vault Pro model below is legacy. Per-vault Pro, with the full subscription lifecycle (2026-09-09, #109–#111):
   deleting a vault cancels at period end before it deletes, subscriptions survive as tombstones, and an
   owner can transfer one between their vaults from Vault Settings → Billing.
   **2026-10-07 (branch `feat/team-seat-billing`):** Free + Team pricing behind `BILLING_MODEL=team`
   (default `vault` until the production flip). Free: 2 people per account, 1 synced vault, MCP
-  included, no Assistant, no standalone file sync. Team: $10 per seat per month or $110 per seat
+  included, no standalone file sync. Team: $10 per seat per month or $110 per seat
   per year, minimum 3 seats, unlimited vaults on one account, managed in Account Settings → Plan &
   Usage. A lapsed account syncs read-only; local files stay editable. Per-vault transfer is retired
   under the Team model (`transfer_retired`); existing subscribers keep their price through a Polar
@@ -32,8 +33,9 @@ tags: [baalda, status, roadmap]
 - **Offline reconciliation:** 🟡 In review (2026-09-26, branch `feat/offline-reconciliation`): inbound
   deletes/revocations gate on a server-acknowledged state vector (unsent edits get a recovery copy
   first), same-path creates become two notes, closed-app renames keep their id, a once-per-session
-  summary banner, and a server-side 30-day per-vault Trash (Restore, pushes into deleted notes
-  accepted, purge keeps a tombstone row).
+  summary banner. The server-side 30-day Trash that shipped with it was retired on 2026-11-19
+  ("deleted means deleted"): a delete purges at once, keeps a content-free tombstone row, and a vault
+  checkpoint revert is the only way back. No device writes `.context/trash` copies any more.
 - **Next action:** Phase 4 polish / launch decisions (WYSIWYG, vector search, OAuth, iOS).
 
 > **Requirement coverage:** Phases 0–3 deliver **10 of the 12** core requirements,
@@ -152,10 +154,11 @@ Six changes that together make a vault something a team can actually govern.
   "who can access" list now resolves through the same branches as the enforcer — the two disagreed
   on a member's own note, and a list that contradicts what it describes is worse than no list.
 - [x] **Losing access de-syncs the file.** A revocation used to leave the `.md` on the ex-reader's
-  disk, which made it cosmetic — they could open the note in any editor forever. It now moves to
-  the vault's trash on every device that had it, alongside the existing tombstone path, with three
+  disk, which made it cosmetic — they could open the note in any editor forever. It now leaves
+  the disk on every device that had it (moved to the vault's trash until 2026-11-19; removed outright
+  since, "deleted means deleted"), alongside the existing tombstone path, with three
   rails: it only fires when the server actually answered about deletions (`tombstones !== null`),
-  it trashes rather than destroys, and it refuses any doc whose content this device never confirmed
+  it confirms the revocation with the server's access check, and it refuses any doc whose content this device never confirmed
   upstream, so a permission change can't take work that exists nowhere else. Revocations are capped
   separately from deletions and more loosely — a whole shared folder leaving at once is ordinary,
   a mass delete rarely is. An ACL change now also triggers the registry re-pull that carries this
@@ -252,7 +255,8 @@ Six changes that together make a vault something a team can actually govern.
 - [ ] Structural rich-text CRDT (y-prosemirror / `Y.XmlFragment`) for full WYSIWYG.
 - [ ] Vector / hybrid search (Orama) for semantic + AI retrieval.
 - [ ] AI-as-CRDT-peer for live collaborative sessions.
-- [ ] libSQL at-rest encryption; OAuth / social login (Tauri PKCE deep-link).
+- [ ] Local (on-device) index encryption; OAuth / social login (Tauri PKCE deep-link). Server-side
+  encryption at rest with client-held vault keys shipped (see [[VAULT_KEYS]]; not end-to-end).
 - [ ] **iOS app** (Tauri 2, same Rust core) as a dedicated milestone.
 
 ---
