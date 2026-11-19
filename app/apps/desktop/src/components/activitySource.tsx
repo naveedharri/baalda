@@ -37,8 +37,6 @@ import {
 } from "./activityUnread";
 import { planSkipAll, reviewItems, reviewState } from "./reviewModel";
 
-/** Last Trash listing per server vault id, this app session. Never authorises. */
-const lastTrash = new Map<string, { listing: TrashListing; at: number }>();
 
 export function trashErrorMessage(e: unknown): string {
   if (e instanceof ApiError) {
@@ -118,50 +116,14 @@ function useSlow(busy: boolean): boolean {
   return slow;
 }
 
-/** The server Trash for the open synced vault, or null (local vault / never fetched).
- *  Fetches on `nonce` only; the parent bumps it when the vault comes online. */
-function useTrash(nonce: number) {
-  const syncEnabled = useStore((s) => s.syncEnabled);
+/** Whether the open synced vault's server is reachable. There is no server
+ *  Trash any more (decided 2026-11-19: a deleted note is deleted), so nothing
+ *  is fetched and the feed never shows Restore rows. */
+function useTrash(_nonce: number) {
   const hasSession = useStore((s) => s.session != null);
   const syncStatus = useStore((s) => s.vaultSyncStatus);
-  const vaultId = syncManager.registry.vaultId;
   const online = hasSession && syncStatus === "synced";
-  const onlineRef = useRef(online);
-  onlineRef.current = online;
-  const cached = vaultId ? lastTrash.get(vaultId) : undefined;
-  const [listing, setListing] = useState<TrashListing | null>(cached?.listing ?? null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    setListing(vaultId ? (lastTrash.get(vaultId)?.listing ?? null) : null);
-  }, [vaultId]);
-
-  useEffect(() => {
-    if (!syncEnabled || !vaultId || !onlineRef.current) return;
-    let cancelled = false;
-    setBusy(true);
-    sharedInFlight(`trash:${vaultId}`, () => authManager.api.listTrash(vaultId)).then(
-      (l) => {
-        if (cancelled) return;
-        lastTrash.set(vaultId, { listing: l, at: Date.now() });
-        setListing(l);
-        setError(null);
-        setBusy(false);
-      },
-      (e) => {
-        if (cancelled) return;
-        setError(trashErrorMessage(e));
-        setBusy(false);
-      },
-    );
-    return () => {
-      cancelled = true;
-      setBusy(false);
-    };
-  }, [syncEnabled, vaultId, nonce]);
-
-  return { listing: syncEnabled && vaultId ? listing : null, error, online, busy };
+  return { listing: null as TrashListing | null, error: null as string | null, online, busy: false };
 }
 
 function useCopies(nonce: number) {

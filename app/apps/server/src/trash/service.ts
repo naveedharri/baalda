@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Per-vault note Trash: list, restore, purge (offline reconciliation, Phase 2).
+// Deleted notes: purge, plus the legacy Trash list/restore routes.
 //
-// A soft-deleted note keeps its row, doc_id and CRDT for TRASH_RETENTION_DAYS.
-// During that window pushes into it are accepted (`trash/access.ts`), any member
-// with edit on it can restore it, and after it `purgeExpiredTrash` removes it.
+// A deleted note is deleted (decided 2026-11-19): its content is purged right
+// after the delete (`purgeDeletedSoon`, the hourly sweep as a backstop) and
+// only a content-free tombstone row stays, so an offline device still hears
+// "deleted". The Trash listing and restore stay answerable for older desktops
+// and simply find nothing once the purge has run. Checkpoints keep the text
+// they captured before a delete (`note_texts`, untouched by the purge).
 import { randomUUID } from "node:crypto";
 import { pool as defaultPool } from "../db/pool.js";
 import { orgRole, vaultOrg } from "../permissions/lookup.js";
@@ -306,34 +309,37 @@ export async function restoreNote(
  * path. Idempotent; returns the ids purged by this call.
  */
 export async function purgeExpiredTrash(
-  now: Date = new Date(),
+  /** Cut-off; default the DATABASE clock, so app/DB clock skew never delays a purge. */
+  now?: Date,
   db: Queryable = defaultPool,
+  /** Only these notes (a delete that just committed); default: every one due. */
+  onlyIds?: readonly string[],
 ): Promise<string[]> {
-  // Stamp FIRST, re-checking the window in the same statement: a restore that
-  // ran concurrently cleared purge_after and must win with its CRDT intact.
+  if (onlyIds && onlyIds.length === 0) return [];
+  // A deleted note is deleted (decided 2026-11-19): a delete now sets
+  // `purge_after = now()`, so it is due at once. Notes deleted under the old
+  // 30-day rule keep the date they were given.
   const { rows } = await db.query<{ id: string; vault_id: string }>(
     `WITH due AS (
        SELECT id FROM notes
         WHERE deleted_at IS NOT NULL AND purged_at IS NULL
-          AND purge_after IS NOT NULL AND purge_after <= $1
+          AND purge_after IS NOT NULL AND purge_after <= COALESCE($2::timestamptz, now())
+          AND ($1::text[] IS NULL OR id = ANY($1::text[]))
         ORDER BY purge_after ASC
         LIMIT 5000
      )
      UPDATE notes n SET purged_at = now()
        FROM due
       WHERE n.id = due.id AND n.deleted_at IS NOT NULL AND n.purged_at IS NULL
-        AND n.purge_after IS NOT NULL AND n.purge_after <= $1
+        AND n.purge_after IS NOT NULL AND n.purge_after <= COALESCE($2::timestamptz, now())
      RETURNING n.id, n.vault_id`,
-    [now],
+    [onlyIds ? [...onlyIds] : null, now ?? null],
   );
   const ids = rows.map((r) => r.id);
   if (ids.length === 0) return [];
   // Open Activity feeds in these vaults drop the purged rows (#260).
   for (const vaultId of new Set(rows.map((r) => r.vault_id))) trashChanged(vaultId);
-  await purgeNoteIndex(ids, db);
-  await db.query("DELETE FROM doc_updates WHERE doc_id = ANY($1::text[])", [ids]);
-  await db.query("DELETE FROM doc_snapshots WHERE doc_id = ANY($1::text[])", [ids]);
-  await db.query("DELETE FROM doc_state_vectors WHERE doc_id = ANY($1::text[])", [ids]);
+  await dropContent(ids, db);
   await db.query("DELETE FROM note_versions WHERE doc_id = ANY($1::text[])", [ids]);
   // Per-note share rows use resource_type 'file' (a note id IS a doc id). Only
   // when no live `files` row shares the id.
@@ -344,4 +350,66 @@ export async function purgeExpiredTrash(
     [ids],
   );
   return ids;
+}
+
+/** The CRDT and derived rows of these notes. */
+async function dropContent(ids: string[], db: Queryable): Promise<void> {
+  await purgeNoteIndex(ids, db);
+  await db.query("DELETE FROM doc_updates WHERE doc_id = ANY($1::text[])", [ids]);
+  await db.query("DELETE FROM doc_snapshots WHERE doc_id = ANY($1::text[])", [ids]);
+  await db.query("DELETE FROM doc_state_vectors WHERE doc_id = ANY($1::text[])", [ids]);
+}
+
+/**
+ * Remove content that reached a note AFTER its purge: an editor whose socket
+ * was still closing, or a store that was already in flight when the delete
+ * committed. Every new write path refuses a deleted note, so this only mops up
+ * that race. Given ids: just those; otherwise notes purged in the last 2 hours
+ * (the hourly sweep). Returns how many notes were scrubbed.
+ */
+export async function scrubPurgedContent(
+  onlyIds?: readonly string[],
+  db: Queryable = defaultPool,
+): Promise<number> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT n.id FROM notes n
+      WHERE n.purged_at IS NOT NULL AND n.deleted_at IS NOT NULL
+        AND ($1::text[] IS NULL OR n.id = ANY($1::text[]))
+        AND ($1::text[] IS NOT NULL OR n.purged_at > now() - interval '2 hours')
+        AND (EXISTS (SELECT 1 FROM doc_updates u WHERE u.doc_id = n.id)
+          OR EXISTS (SELECT 1 FROM doc_snapshots s WHERE s.doc_id = n.id))`,
+    [onlyIds ? [...onlyIds] : null],
+  );
+  const ids = rows.map((r) => r.id);
+  if (ids.length > 0) await dropContent(ids, db);
+  return ids.length;
+}
+
+/** When the just-deleted notes are checked once more for late writes. */
+export const SCRUB_AFTER_DELETE_MS = 60_000;
+
+/** Delay before a just-deleted note is purged: long enough for the delete's own
+ *  socket evictions to run, so no live editor writes into a purged doc. */
+export const PURGE_AFTER_DELETE_MS = 2_000;
+
+/**
+ * Purge notes a delete just removed. Off the response path; the hourly sweep
+ * (`scheduler.ts`) catches anything this misses (a crash, a transaction that
+ * committed after the timer). Deleted means deleted: no Trash, no restore.
+ */
+export function purgeDeletedSoon(ids: readonly string[]): void {
+  if (ids.length === 0) return;
+  const batch = [...ids];
+  const t = setTimeout(() => {
+    void purgeExpiredTrash(undefined, defaultPool, batch).catch((err) =>
+      console.error("[trash] purging just-deleted notes failed:", err),
+    );
+  }, PURGE_AFTER_DELETE_MS);
+  if (typeof t.unref === "function") t.unref();
+  const late = setTimeout(() => {
+    void scrubPurgedContent(batch).catch((err) =>
+      console.error("[trash] scrubbing late writes failed:", err),
+    );
+  }, SCRUB_AFTER_DELETE_MS);
+  if (typeof late.unref === "function") late.unref();
 }

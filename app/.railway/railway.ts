@@ -143,8 +143,6 @@ const SERVER_ENV = [
   // Desktop URL scheme the server's pages bounce into; `baalda-staging` on the
   // staging project so its links open the Staging app, not the released one.
   "DEEP_LINK_SCHEME",
-  // Note Trash retention.
-  "TRASH_RETENTION_DAYS",
   // Content-write safety (#251, #252): the oldest desktop build allowed to push
   // note content, what a build that reports no version gets, and the burst
   // brake on emptied notes.

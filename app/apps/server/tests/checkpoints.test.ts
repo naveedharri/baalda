@@ -9,6 +9,7 @@ import {
   withVaultCheckpointLock,
 } from "../src/versions/checkpoints.js";
 import { sha256Hex } from "../src/versions/capture.js";
+import { purgeExpiredTrash } from "../src/trash/service.js";
 import { recordingAppDeps, type RecordingAppDeps } from "./helpers/app.js";
 import { signUp, type TestUser } from "./helpers/auth.js";
 import { resetDb } from "./helpers/db.js";
@@ -407,6 +408,41 @@ describe("vault checkpoints", () => {
       foldersCreated: 0,
     });
     expect(rec.docWriter.store.get(kept)).toBe("original body");
+  });
+
+  it("brings back a note that was deleted and purged (checkpoint text outlives the purge)", async () => {
+    const owner = await signUp("rv-purged@t.com");
+    const org = await seedOrg("Acme", "acme-purged");
+    await seedMember(org, owner.userId, "owner");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    const doc = await seedNote(vault, null, "gone.md", owner.userId);
+    rec.docWriter.store.set(doc, "words worth keeping");
+    const create = await api(owner, `/api/vaults/${vault}/checkpoints`, {
+      method: "POST",
+      body: JSON.stringify({ label: "before the delete" }),
+    });
+    const checkpoint = (await create.json()) as { id: string };
+
+    // Deleted, then purged at once: its CRDT is gone.
+    const del = await api(owner, `/api/notes/${doc}`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+    expect(await purgeExpiredTrash(undefined, pool, [doc])).toEqual([doc]);
+    rec.docWriter.store.delete(doc);
+    const { rows: texts } = await pool.query("SELECT 1 FROM note_texts WHERE doc_id = $1", [doc]);
+    expect(texts.length).toBe(1);
+
+    const res = await api(owner, `/api/vaults/${vault}/checkpoints/${checkpoint.id}/revert`, {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, docsRestored: 1 });
+    expect(rec.docWriter.store.get(doc)).toBe("words worth keeping");
+    const { rows } = await pool.query(
+      "SELECT deleted_at, purged_at, purge_after FROM notes WHERE id = $1",
+      [doc],
+    );
+    expect(rows[0]).toEqual({ deleted_at: null, purged_at: null, purge_after: null });
   });
 
   it("captures structure-only for notes whose content never reached the server", async () => {

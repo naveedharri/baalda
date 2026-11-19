@@ -12,6 +12,7 @@ import {
   type CheckpointStructure,
 } from "./checkpoints.js";
 import { softDeleteSet } from "../trash/retention.js";
+import { purgeDeletedSoon } from "../trash/service.js";
 
 /**
  * Revert a whole vault to a checkpoint.
@@ -275,7 +276,8 @@ export async function revertVaultToCheckpoint(
             // Yjs history and every share row pointing at it.
             await db.query(
               `UPDATE notes
-                  SET deleted_at = NULL, deleted_by = NULL, purge_after = NULL, rel_path = $2, title = $3, folder_id = $4,
+                  SET deleted_at = NULL, deleted_by = NULL, purge_after = NULL, purged_at = NULL,
+                      rel_path = $2, title = $3, folder_id = $4,
                       updated_at = now()
                 WHERE id = $1`,
               [note.id, note.rel_path, note.title, folderId],
@@ -341,6 +343,8 @@ export async function revertVaultToCheckpoint(
           removed.map((r) => r.id),
           db,
         );
+        // The revert's own undo checkpoint already holds their text.
+        purgeDeletedSoon(removed.map((r) => r.id));
       }
 
       return {

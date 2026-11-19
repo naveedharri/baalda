@@ -50,6 +50,7 @@ import {
 } from "../permissions/access-management.js";
 import { buildAccessContext, resolveAccessForUser } from "../permissions/resolver.js";
 import { softDeleteSet } from "../trash/retention.js";
+import { purgeDeletedSoon } from "../trash/service.js";
 import { deleteRegisteredFile } from "../http/routes/registry.js";
 import { registerCtx, registerFile } from "../registry/batch-ops.js";
 import { vaultKeysEnabled } from "../crypto/config.js";
@@ -556,6 +557,7 @@ export async function deleteFolder(
   // whose editor is still attached to a doc that no longer exists.
   await purgeNoteIndex(deletedNoteIds);
   for (const docId of deletedNoteIds) ctx.disconnectDoc(vaultId, docId);
+  purgeDeletedSoon(deletedNoteIds);
   ctx.onRegistryChanged?.(vaultId);
   return { deleted: folderId, deletedNotes: deletedNoteIds.length };
 }
@@ -1367,6 +1369,7 @@ export async function deleteNote(ctx: McpContext, docId: string) {
   // Drop derived index rows and kick any live editors off the now-gone doc.
   await purgeNoteIndex([docId]);
   ctx.disconnectDoc(note.vault_id, docId);
+  purgeDeletedSoon([docId]);
   // `disconnectDoc` only kicks editors off the doc itself; without this the
   // note stays listed in every open sidebar.
   ctx.onRegistryChanged?.(note.vault_id);

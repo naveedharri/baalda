@@ -53,6 +53,7 @@ import { vaultKeysEnabled } from "../../crypto/config.js";
 import type { DocCrypto } from "../../crypto/doc-crypto.js";
 import { softDeleteSet } from "../../trash/retention.js";
 import { trashChanged } from "../../trash/activity.js";
+import { purgeDeletedSoon } from "../../trash/service.js";
 import { gainsConflictSuffix, takeForeignRename } from "../../registry/rename-guard.js";
 import {
   CONFIRM_EMPTY_MAX,
@@ -853,6 +854,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const { deletedNoteIds } = await deleteFolderCascade(pool, id, session.userId);
     // Their derived index rows go with them (see the single-note delete below)…
     await purgeNoteIndex(deletedNoteIds);
+    purgeDeletedSoon(deletedNoteIds);
     changed(c, row.vault_id);
     if (deletedNoteIds.length > 0) trashChanged(row.vault_id);
     // …and anyone with one of them open is kicked off the now-gone doc. Without
@@ -1196,6 +1198,8 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json(deleteRefusal(noteGate.code), 403);
     }
     await pool.query(`UPDATE notes SET ${softDeleteSet("$2")} WHERE id = $1`, [id, session.userId]);
+    // Deleted means deleted: its content is purged right after the evictions.
+    purgeDeletedSoon([id]);
     // Drop the DERIVED search/graph rows with the note. They are a rebuildable
     // cache of the canonical Yjs state (migration 005), and note_index keeps a
     // full plain-text copy of the body — leaving it behind grew those tables

@@ -4164,6 +4164,12 @@ export class SyncManager implements InboundHost {
       // #408: the images only this note embedded go next, while the ACL signal
       // that removed it is still fresh. Debounced and coalesced in the mirror.
       this.attachments?.scheduleReconcile();
+    }
+    // A deletion drops the local CRDT exactly like a revocation (decided
+    // 2026-11-19: deleted means deleted). The server purges the note's content
+    // at once, so ops kept here could only ever come back as a doubled copy if
+    // a checkpoint restore later re-creates the note under the same id.
+    {
       // `releaseDoc` only RELEASED this doc, which deliberately keeps its state
       // vector (a rename doesn't change content, so the manifest stays true).
       // A revocation is the other case: the doc is gone for good, and an id left
