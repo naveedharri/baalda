@@ -1098,10 +1098,12 @@ export function createShareRoutes(deps: ShareDeps): Hono {
  * note and drag-in were offered and then refused by the server. Report it the way
  * the client already understands a view-only item — the caller's own `readonly`
  * row — but only where the caller's EFFECTIVE access is view, resolved by the same
- * board the Access tab shows, and only at the top of each view-only subtree: a
- * folder is reported only when its whole subtree is view (a deeper edit from
- * another grant must stay editable, and an item padlock is a cap the client does
- * not lift). Runs only for callers with a group `view` row in this vault.
+ * resolver the Access board uses, and only at the top of each view-only subtree:
+ * a folder is reported when it is not editable itself and nothing the caller can
+ * SEE under it is editable (a deeper edit from another grant must stay editable,
+ * and an item padlock is a cap the client does not lift; a hidden No access note
+ * inside does not count, since the caller never sees it). Runs only for callers
+ * with a group `view` row in this vault.
  */
 async function groupViewLocks(
   vaultId: string,
@@ -1144,7 +1146,31 @@ async function groupViewLocks(
       fileIds: files.rows.map((f) => f.id),
     },
   });
-  const viewFolder = (id: string | null) => id !== null && modes.folders.get(id) === "readonly";
+  // A NOTE's own mode decides the editor; a FOLDER's decides create/rename/drag-in.
+  // Fold each folder's own mode with every VISIBLE descendant: "open" anywhere
+  // keeps it unpadlocked; No access items are skipped (not drawn at all).
+  const editableBelow = new Set<string>();
+  const parentOf = new Map(folders.rows.map((f) => [f.id, f.parent_id]));
+  const markUp = (folderId: string | null) => {
+    for (let cur = folderId, guard = 0; cur !== null && guard < 10_000; cur = parentOf.get(cur) ?? null, guard++) {
+      if (editableBelow.has(cur)) return;
+      editableBelow.add(cur);
+    }
+  };
+  for (const f of folders.rows) if (modes.ownFolders.get(f.id) === "open") markUp(f.id);
+  for (const d of [...notes.rows, ...files.rows]) if (modes.docs.get(d.id) === "open") markUp(d.folder_id);
+  // Only folders the caller can see (readable itself, or a path to something
+  // readable): never hand out the ids of folders hidden from them.
+  const visible = new Set<string>();
+  const markVisible = (folderId: string | null) => {
+    for (let cur = folderId, guard = 0; cur !== null && guard < 10_000; cur = parentOf.get(cur) ?? null, guard++) {
+      if (visible.has(cur)) return;
+      visible.add(cur);
+    }
+  };
+  for (const f of folders.rows) if (modes.ownFolders.get(f.id) !== "private") markVisible(f.id);
+  for (const d of [...notes.rows, ...files.rows]) if (modes.docs.get(d.id) !== "private") markVisible(d.folder_id);
+  const viewFolder = (id: string | null) => id !== null && visible.has(id) && !editableBelow.has(id);
   const lock = (resourceType: "folder" | "file", resourceId: string) => ({
     id: `group-view:${resourceId}`,
     resource_type: resourceType,

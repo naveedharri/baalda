@@ -48,6 +48,8 @@ export interface BoardModesResult {
   folders: Map<string, SummaryMode>;
   /** note or file id → its own mode. */
   docs: Map<string, Own>;
+  /** folder id → the folder's OWN mode, before folding its subtree in. */
+  ownFolders: Map<string, Own>;
 }
 
 export async function boardModes(input: {
@@ -159,7 +161,9 @@ export async function boardModes(input: {
   }
   const docs = new Map<string, Own>();
   for (const id of docIds) docs.set(id, ownDoc.get(id) ?? (await emptyScope()));
-  return { folders, docs };
+  const ownFolders = new Map<string, Own>();
+  for (const id of folderIds) ownFolders.set(id, ownFolder.get(id) ?? (await emptyScope()));
+  return { folders, docs, ownFolders };
 }
 
 /** Align modes to the listing order: folders, then notes, then files. */

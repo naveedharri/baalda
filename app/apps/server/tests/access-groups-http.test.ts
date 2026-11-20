@@ -154,6 +154,32 @@ describe("access groups: lock list ≡ resolver", () => {
     }
   }
 
+  it("a group view-only folder is padlocked even when it holds a note the person cannot see", async () => {
+    await sealVault(org);
+    await grant("folder", folders.other, "view");
+    const hidden = await seedNote(vault, folders.other, "Other/hidden.md", owner.userId);
+    await pool.query(
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES ($1, $2, 'file', $3, 'user', $4, 'denied')`,
+      [randomUUID(), org, hidden, ana.userId],
+    );
+    const res = await call(ana, "GET", `/api/vaults/${vault}/locks`);
+    const { locks } = (await res.json()) as { locks: any[] };
+    const mine = locks.filter((l) => l.reason === "group_view");
+    // The folder itself, not its visible note one by one; Open (edit) and its
+    // subfolder untouched. (Frozen, capped by its team lock, is view-only too.)
+    const ids = mine.map((l) => l.resource_id);
+    expect(ids).toContain(folders.other);
+    expect(ids).not.toContain(notes.other);
+    expect(ids).not.toContain(folders.open);
+    expect(ids).not.toContain(folders.sub);
+    // With Frozen's group row gone Ana cannot see Frozen at all, so it is not named.
+    await pool.query("DELETE FROM shares WHERE principal_type = 'group' AND resource_id = $1", [folders.frozen]);
+    const again = ((await (await call(ana, "GET", `/api/vaults/${vault}/locks`)).json()) as { locks: any[] }).locks;
+    expect(again.filter((l) => l.reason === "group_view").map((l) => l.resource_id)).toEqual([folders.other]);
+    expect(await canCreateIn(ana.userId, vault, folders.other)).toBe(false);
+  });
+
   it("concrete: Read-only vault, group edit on a folder", async () => {
     await seedVaultGrant(org, "view");
     expect(await resolverEditable(ana)).toEqual({ root: false, open: true, sub: true, frozen: false, other: false });
