@@ -43,7 +43,7 @@ import { pinModified, sortTree, TREE_SORTS } from "../lib/tree/sort";
 import { isHomeNavigation, pinKey } from "../lib/pins";
 import { requestNewDashboard } from "../lib/homeEvents";
 import { isBlankTreeTarget } from "../lib/tree/blankTarget";
-import { LOCK_TITLES, effectiveLockForPath, lockBlocksCaller, lockScopesByPath, type LockScope } from "../lib/locks";
+import { LOCK_TITLES, effectiveLockForPath, isRemovableLock, lockBlocksCaller, lockScopesByPath, type LockScope } from "../lib/locks";
 import { ROOT_FROZEN_MESSAGE, createBlockReason } from "../lib/createGate";
 import { renameBlockReason, renameRefusedMessage } from "../lib/renameGate";
 import { ancestorPaths } from "../lib/accessTree";
@@ -750,7 +750,7 @@ export function FileTree() {
   const bulkUnlockUseful = [...selected].some((p) => {
     const n = nodeByPath.get(p);
     const target = n ? shareTargetForPath(p, n.isDir, n.name) : null;
-    return !!target && locks.some((l) => shareResourceId(l) === target.resourceId);
+    return !!target && locks.some((l) => isRemovableLock(l) && shareResourceId(l) === target.resourceId);
   });
 
   async function bulkUnlock() {
@@ -760,7 +760,7 @@ export function FileTree() {
       if (!n) continue;
       const target = shareTargetForPath(p, n.isDir, n.name);
       if (!target) continue;
-      const lock = locks.find((l) => shareResourceId(l) === target.resourceId);
+      const lock = locks.find((l) => isRemovableLock(l) && shareResourceId(l) === target.resourceId);
       if (!lock) continue;
       try {
         await store.removeLock(lock.id);
@@ -1792,7 +1792,7 @@ export function FileTree() {
   // per-item team locks are retired from the UI.
   const menuTarget = menu?.node ? shareTargetFor(menu.node) : null;
   const menuLock = menuTarget
-    ? (locks.find((l) => shareResourceId(l) === menuTarget.resourceId) ?? null)
+    ? (locks.find((l) => isRemovableLock(l) && shareResourceId(l) === menuTarget.resourceId) ?? null)
     : null;
   // The padlock on this row comes from the vault posture and nothing else.
   const menuVaultLockedOnly = !!menu?.node && vaultLockedOnly(menu.node.data.path);
