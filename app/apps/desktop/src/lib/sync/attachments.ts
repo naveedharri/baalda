@@ -328,6 +328,13 @@ export interface BinaryPlan {
    * {@link planBinarySync}; anything less keeps today's behaviour.
    */
   toMove: Array<{ docId: string; from: string; to: string; sha256: string }>;
+  /**
+   * The other direction: a teammate renamed or moved a file this device holds
+   * by id, with the same bytes. The LOCAL file follows (`from` → `to`). Before
+   * this it counted as agreed at its old path, so the rename never reached this
+   * disk (and an old folder left holding it came back as a new folder).
+   */
+  toFollow: Array<{ docId: string; from: string; to: string; sha256: string }>;
 }
 
 /** What the three-way needs to know about this device's history. */
@@ -414,6 +421,7 @@ export function planBinarySync(
   const agreed: BinaryPlan["agreed"] = [];
   const toTrash: BinaryPlan["toTrash"] = [];
   const toMove: BinaryPlan["toMove"] = [];
+  const toFollow: BinaryPlan["toFollow"] = [];
   /** Server rows the three-way consumed: never also a plain download. */
   const consumed = new Set<string>();
   /** Local paths the three-way decided: never also a plain upload. */
@@ -455,6 +463,15 @@ export function planBinarySync(
       for (const r of rows) consumed.add(r.id);
       const same = rows.find((r) => r.sha256 === a.sha256);
       if (same) {
+        const serverPath = same.relPath as string;
+        if (
+          knownId &&
+          pathKey(serverPath) !== pathKey(a.relPath) &&
+          !localPaths.has(pathKey(serverPath))
+        ) {
+          toFollow.push({ docId: same.docId as string, from: a.relPath, to: serverPath, sha256: a.sha256 });
+          continue;
+        }
         agreed.push({ relPath: a.relPath, docId: same.docId as string, sha256: a.sha256 });
         continue;
       }
@@ -566,7 +583,7 @@ export function planBinarySync(
       (isUnderAttachments(b.relPath) || !unboundShas.has(b.sha256)) &&
       !localPaths.has(pathKey(b.relPath)),
   );
-  return { toUpload, toDownload, toReplace, agreed, toTrash, toMove };
+  return { toUpload, toDownload, toReplace, agreed, toTrash, toMove, toFollow };
 }
 
 /**
@@ -1143,6 +1160,9 @@ export interface AttachmentSyncDeps {
    *  of an adoption, so `.context/config.json` never names two ids for one
    *  file (`registry.forgetFileId`). */
   forgetFileId?: (relPath: string) => void;
+  /** Move a known tree binary on disk to where a teammate moved it, keeping
+   *  its id (`registry.followFileMove`). True when it moved. */
+  followFileMove?: (from: string, to: string) => Promise<boolean>;
   /** `DELETE /api/files/:id` — used for exactly one thing here: dropping a row
    *  THIS device created for bytes the server already knows under another id.
    *  It deletes only blobs carrying that id, and a forked row carries none. */
@@ -1771,6 +1791,15 @@ export class AttachmentSync {
     const hiddenEmbeds = await this.settleHiddenEmbeds(local, server);
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
     if (!this.attachmentSyncBlocked) await this.moveRenamedOffline(plan.toMove);
+    for (const f of plan.toFollow) {
+      if (!this.current()) break;
+      // A live window owns these paths; the delete queue pairs them itself.
+      if (this.deps.isDeletePending?.(f.from) || this.deps.isDeletePending?.(f.to)) continue;
+      if (!(await this.deps.followFileMove?.(f.from, f.to))) continue;
+      this.fileIds.delete(f.from);
+      this.fileIds.set(f.to, f.docId);
+      this.setBase(f.docId, f.sha256);
+    }
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
     const { toDownload } = plan;
     // A 0-byte file has nothing to upload: the server refuses an empty blob

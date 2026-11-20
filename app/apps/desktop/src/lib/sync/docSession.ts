@@ -43,6 +43,7 @@ import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
 import { statusToWire, type ActivityStatus } from "../prefs";
 import { toast } from "../toast";
+import { renameRefusedMessage } from "../renameGate";
 import { AttachmentSync, findEmbedReferences, routesToAttachmentSync } from "./attachments";
 import { applySkippingUnsafe } from "./windowsPaths";
 import { EmbedArrivalFetcher } from "./embedArrival";
@@ -3140,7 +3141,24 @@ export class SyncManager implements InboundHost {
   ): Promise<void> {
     console.info(`[sync] ${from} → ${to} (renamed on disk; keeping doc ${docId})`);
     try {
-      await this.registry.renamePath(from, to);
+      const res = await this.registry.moveOnServer(from, to);
+      if (!res.ok && res.refused) {
+        // The server will not take this rename (the person can only view the
+        // note, a lock, …). Put the old name back rather than leave a renamed
+        // copy the server never heard of beside the note the next pull restores.
+        if (scope.isCurrent() && (await this.registry.revertRefusedMove(from, to))) {
+          // The index met the file at `to` and may have minted it a fresh
+          // id; give the old path its kept id back.
+          try {
+            await ipc.rebindNoteId(from, docId, scope.vaultEpoch);
+          } catch (e) {
+            if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't rebind ${from} to ${docId}`, e);
+          }
+          toast(renameRefusedMessage(from, false, res.code, res.status), "error");
+          this.note("warn", "rename-refused", `${to} was renamed back to ${from}: the server refused the rename`, { docId, path: from });
+        }
+        return;
+      }
     } catch (e) {
       console.warn(`[sync] couldn't move the mapping ${from} → ${to}`, e);
       return;
@@ -3371,7 +3389,7 @@ export class SyncManager implements InboundHost {
     matched: ReadonlySet<string>,
     notesOnDisk: ReadonlySet<string>,
     scope: VaultScope,
-  ): Promise<boolean> {
+  ): Promise<boolean | "reverted"> {
     console.info(
       `[sync] ${from} → ${to} (folder moved on disk; ${matched.size}/${under.length} notes matched, keeping every doc id)`,
     );
@@ -3385,7 +3403,29 @@ export class SyncManager implements InboundHost {
     if (!scope.isCurrent()) return false;
     let moved = false;
     try {
-      moved = (await this.registry.renamePath(from, to)) !== false;
+      const res = await this.registry.moveOnServer(from, to);
+      moved = res.ok;
+      if (!res.ok && res.refused && scope.isCurrent()) {
+        // Refused (view-only folder, a lock, …): move it back on disk and call
+        // the move handled, so nothing after this pairs, deletes or registers it.
+        if (await this.registry.revertRefusedMove(from, to)) {
+          // Re-index the notes back under their KEPT ids at the old paths.
+          const back = under.filter((n) => notesOnDisk.has(to + n.relPath.slice(from.length)));
+          if (back.length > 0) {
+            try {
+              await ipc.materializeNotesBatch(
+                back.map((n) => ({ relPath: n.relPath, docId: n.docId })),
+                scope.vaultEpoch,
+              );
+            } catch (e) {
+              if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't re-index ${from}`, e);
+            }
+          }
+          toast(renameRefusedMessage(from, true, res.code, res.status), "error");
+          this.note("warn", "rename-refused", `${to} was renamed back to ${from}: the server refused the move`, { path: from });
+          return "reverted";
+        }
+      }
     } catch (e) {
       console.warn(`[sync] couldn't move the folder ${from} → ${to}`, e);
       return false;
@@ -7458,6 +7498,7 @@ export class SyncManager implements InboundHost {
         this.attachments?.forgetFile(relPath);
       },
       moveFileId: (from, to) => registry.moveFileId(from, to),
+      revertMove: (from, to) => registry.revertRefusedMove(from, to),
       deleteFile: (id) => api.deleteFile(id),
       // Never forced: a 409 means a note still embeds those bytes, and that
       // refusal is the whole reason the flag exists.
@@ -7639,6 +7680,7 @@ export class SyncManager implements InboundHost {
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
       forgetFileId: (relPath) => registry.forgetFileId(relPath),
+      followFileMove: (from, to) => registry.followFileMove(from, to),
       // Only ever used to drop a row THIS device minted for bytes the server
       // already holds under another id (`reconcileDedupedRow`).
       deleteFile: (id) => api.deleteFile(id),

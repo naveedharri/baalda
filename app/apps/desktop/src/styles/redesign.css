@@ -1849,7 +1849,13 @@ html:not(.rd-off) .right-panel-tab { border-radius: 9px; }
 html:not(.rd-off) .activity-clear { font-size: 12px; color: var(--text-tertiary); }
 html:not(.rd-off) .activity-list { padding: 0 8px; }
 html:not(.rd-off) .activity-row { border: 0 !important; border-radius: 12px; padding: 10px 10px; }
-html:not(.rd-off) .activity-row:hover { background: rgba(var(--rd-ink), 0.03); }
+html:not(.rd-off) .activity-row:not([data-open]):hover { background: var(--bg-hover); }
+/* One hover only: the whole row lights up, never a second box around the head. */
+html:not(.rd-off) .activity-row-head:hover { background: transparent; }
+/* Open: no grey wash over the expanded card, and the detail starts at the
+   row's left edge rather than under the message column. */
+html:not(.rd-off) .activity-row[data-open] .activity-row-detail { grid-column: 1 / -1; }
+html:not(.rd-off) .activity-row[data-open] .activity-row-detail:hover { background: var(--bg-app); }
 html:not(.rd-off) .activity-row-head { align-items: flex-start; gap: 10px; }
 
 /* Kind as a soft coloured pill instead of a bold black word. */
@@ -2546,13 +2552,43 @@ html:not(.rd-off) .mcp-copy-btn.is-copied { background: var(--rdc-e4f3e8, #e4f3e
    no yellow. */
 html:not(.rd-off) .banner-slot > .banner {
   margin: 8px 16px 0; padding: 10px 10px 10px 12px; gap: 12px; justify-content: flex-start;
-  background: var(--rd-surface) !important; border: 0 !important; border-radius: 16px;
-  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 14px 30px -18px rgba(var(--rd-ink), 0.35) !important;
-  font-size: 13.5px; line-height: 1.45; color: var(--text-secondary);
+  /* A tinted card in the brand's colours (2026-11-20): white over a white note
+     page was easy to miss now that banners float. Violet by default, red for
+     something removed or stopped, green for good news. */
+  --banner-bg: var(--rdc-ece6ff, #ece6ff);
+  --banner-edge: rgba(91, 63, 214, 0.28);
+  --banner-ink: var(--rdc-3d2a99, #3d2a99);
+  background: var(--banner-bg) !important; border: 0 !important; border-radius: 16px;
+  box-shadow: 0 0 0 1px var(--banner-edge), 0 14px 30px -14px rgba(91, 63, 214, 0.45) !important;
+  font-size: 13.5px; line-height: 1.45; color: var(--banner-ink);
 }
+html:not(.rd-off) .banner-slot > .banner.tone-danger {
+  --banner-bg: var(--rdc-fde4e0, #fde4e0);
+  --banner-edge: rgba(179, 57, 47, 0.28);
+  --banner-ink: var(--rdc-8a2a22, #8a2a22);
+}
+html:not(.rd-off) .banner-slot > .banner.tone-good {
+  --banner-bg: var(--rdc-dcf2e3, #dcf2e3);
+  --banner-edge: rgba(47, 122, 70, 0.28);
+  --banner-ink: var(--rdc-245f37, #245f37);
+}
+html:not(.rd-off)[data-theme="dark"] .banner-slot > .banner {
+  --banner-bg: #2b2546; --banner-edge: rgba(167, 146, 255, 0.35); --banner-ink: #e3dcff;
+}
+html:not(.rd-off)[data-theme="dark"] .banner-slot > .banner.tone-danger {
+  --banner-bg: #3a2220; --banner-edge: rgba(240, 139, 128, 0.35); --banner-ink: #ffd9d3;
+}
+html:not(.rd-off)[data-theme="dark"] .banner-slot > .banner.tone-good {
+  --banner-bg: #1f3427; --banner-edge: rgba(120, 200, 145, 0.35); --banner-ink: #d3f2dd;
+}
+/* The icon tile sits on the tint now, so it goes white (tone colour stays). */
+html:not(.rd-off) .banner-slot > .banner .banner-icon { background: rgba(255, 255, 255, 0.85); color: var(--rdc-5b3fd6, #5b3fd6); }
+html:not(.rd-off) .banner-slot > .banner.tone-danger .banner-icon { color: var(--rdc-b3392f, #b3392f); }
+html:not(.rd-off) .banner-slot > .banner.tone-good .banner-icon { color: var(--rdc-2f7a46, #2f7a46); }
+html:not(.rd-off)[data-theme="dark"] .banner-slot > .banner .banner-icon { background: rgba(255, 255, 255, 0.1); }
 html:not(.rd-off) .banner-slot > .banner > :not(.banner-icon):not(.banner-actions) { flex: 1; min-width: 0; }
 html:not(.rd-off) .banner-slot > .banner strong,
-html:not(.rd-off) .banner-slot > .banner b { color: var(--text-primary) !important; font-weight: 600; }
+html:not(.rd-off) .banner-slot > .banner b { color: var(--banner-ink, var(--text-primary)) !important; font-weight: 600; }
 html:not(.rd-off) .banner-icon {
   flex: none; width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center;
   background: var(--rdc-f1efeb, #f1efeb); color: var(--text-tertiary);
@@ -2563,7 +2599,10 @@ html:not(.rd-off) .banner.tone-good .banner-icon { background: var(--rdc-e4f3e8,
 html:not(.rd-off)[data-theme="dark"] .banner-icon { background: rgba(255, 250, 240, 0.08); }
 html:not(.rd-off) .banner-slot > .banner .banner-actions { margin-left: auto; }
 html:not(.rd-off) .banner-slot > .banner .banner-actions button:not(.primary):not(.link-btn) {
-  border: 0; background: rgba(var(--rd-ink), 0.05); border-radius: 10px;
+  border: 0; background: rgba(255, 255, 255, 0.75); color: var(--banner-ink); border-radius: 10px;
+}
+html:not(.rd-off)[data-theme="dark"] .banner-slot > .banner .banner-actions button:not(.primary):not(.link-btn) {
+  background: rgba(255, 255, 255, 0.1);
 }
 html:not(.rd-off) .banner-slot > .banner .banner-actions button.primary { border-radius: 10px; }
 

@@ -63,9 +63,11 @@ export function Banner({
       {show && (
         <motion.div
           className="banner-slot"
-          initial={reduceMotion ? { opacity: 0 } : { height: 0, opacity: 0 }}
-          animate={reduceMotion ? { opacity: 1 } : { height: "auto", opacity: 1 }}
-          exit={reduceMotion ? { opacity: 0 } : { height: 0, opacity: 0 }}
+          // Slides in over the page (`.notice-overlay`): it takes no room, so
+          // nothing below it moves.
+          initial={reduceMotion ? { opacity: 0 } : { y: -10, opacity: 0 }}
+          animate={reduceMotion ? { opacity: 1 } : { y: 0, opacity: 1 }}
+          exit={reduceMotion ? { opacity: 0 } : { y: -10, opacity: 0 }}
           transition={
             reduceMotion
               ? { duration: 0.12 }

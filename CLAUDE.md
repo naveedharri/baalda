@@ -328,7 +328,14 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   server==base ⇒ upload with `baseSha` (server 409 `stale_base` if it moved on), no base or both
   changed ⇒ server canonical, the local bytes replaced with no copy kept (2026-11-19) — never a flip.
   `isSafeTreeBinaryRelPath` must reject everything Rust's `ensure_tree_binary_rel` refuses (including
-  `DENIED_DIRS`). A download that fails permanently (sha mismatch or path refusal) is remembered per
+  `DENIED_DIRS`). A teammate's rename/move of a tree binary is FOLLOWED here (`planBinarySync
+  toFollow` → `registry.followFileMove`, an own move keeping the id) when this device holds it by id
+  with the same bytes and the server path is free locally; a folder a teammate moved carries the
+  binaries this device knows under it (`InboundPlan.movedFolders`) before the emptied directory is
+  removed. `GET /vaults/:id/blobs` lists a doc-bound blob at its `files` row's CURRENT path (the
+  blob's own `rel_path` is only where it was uploaded): before, a rename never reached other
+  devices, a new device downloaded under the old name, and an old folder kept alive by a stray
+  binary was registered again as a twin. A download that fails permanently (sha mismatch or path refusal) is remembered per
   blob id+sha (`undownloadable`) and not retried until the server's sha changes. Uploads verify what
   they stream: Rust's `VerifyingReader` hashes and counts the PUT body against the intent's sha/size and
   fails with `file changed during upload` (never completed; the path's cached sha is dropped), and the
@@ -473,7 +480,9 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 
 ### Desktop — React (`src/`)
 The top banners above the editor share ONE notice slot (`lib/noticeSlot.ts`, hook
-`components/useNoticeSlot.ts`): each claims it and only the highest-priority claim shows, in the
+`components/useNoticeSlot.ts`). They FLOAT over the page (`.notice-overlay`, a zero-height anchor
+under the header; `Banner` slides in, no height animation and no `overflow: hidden`), so a notice
+never pushes the note down: each claims it and only the highest-priority claim shows, in the
 order held bulk delete > reconcile summary > open note deleted/access removed > vault made local
 only > membership ended (folder deleted) > vault folder missing > vault folder restored > Team subscription lapsed (read-only sync) > closed-app changes > not syncing > sync paused > note limit > create
 refusal > open note's file gone on disk > attachments local only. Informational notices fade after
@@ -797,6 +806,17 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   where exactly one is recorded, and a file restored by checkpoint revert stays without a creator) → 403 `delete_not_creator`,
   and a member's folder delete is refused whole with 403 `folder_has_others_items` when anything in
   its subtree was created by someone else; checkpoint revert, restore and trash purge are exempt.
+  **Rename/move follows the same authorship rule** (`canRenameItem`, decided 2026-11-20): note and
+  folder PATCH, a file re-registered at a new path (`registerFile`'s move branch) and MCP
+  `move_*` refuse a plain member's move of anything they did not create (a folder: anything in its
+  subtree) with 403 `rename_not_creator`, ON TOP of edit access; a retitle alone is not a move.
+  The desktop mirrors it (`lib/renameGate.ts renameBlockReason`: view-only padlock, the creator
+  rule via `registry.isAuthoredByMe`, a destination the caller can't add to) and disables Rename,
+  double-click rename and drag-moves up front. A refusal that still arrives (Finder, an AI agent,
+  the inline title, an access change mid-flight) is PUT BACK on disk
+  (`registry.moveOnServer` → `revertRefusedMove`, marked an own move; the Finder paths re-bind the
+  kept ids) with a toast, never left as a renamed copy: the next pull restored the old name AND
+  registered the renamed one as a new item, a duplicate for everyone.
   **A per-user row on the vault resource is that person's ABSOLUTE level**
   (`personalVaultLevel`, "person wins either way"): for them alone it replaces the org posture, the
   join snapshot, the owner/admin shortcut and authorship — `edit` = edit everywhere, `view` = view

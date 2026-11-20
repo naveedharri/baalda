@@ -898,6 +898,31 @@ function isManagerRole(role: string | null | undefined): boolean {
  * Checkpoint revert and trash purge are server-internal and never ask.
  * `orgRole` may be passed when the caller already knows it; otherwise it is read.
  */
+/**
+ * Rename/move follows the SAME authorship rule as delete (decided 2026-11-20):
+ * owners and admins rename or move anything; a plain member only what they
+ * created (a folder: the folder and everything in it). Edit access is still
+ * required on top, by the caller's own gate. Codes: `rename_not_creator`, or
+ * `account_read_only` when the billing account lapsed.
+ */
+export async function canRenameItem(
+  db: Queryable,
+  input: {
+    orgId: string;
+    userId: string;
+    orgRole?: string | null;
+    kind: "note" | "file" | "folder";
+    id: string;
+  },
+): Promise<{ ok: true } | { ok: false; code: "rename_not_creator" | "account_read_only" }> {
+  const gate = await canDeleteItem(db, input);
+  if (gate.ok) return gate;
+  return { ok: false, code: gate.code === "account_read_only" ? "account_read_only" : "rename_not_creator" };
+}
+
+export const RENAME_NOT_CREATOR_MESSAGE =
+  "Only the person who created this, or an owner or admin, can rename or move it.";
+
 export async function canDeleteItem(
   db: Queryable,
   input: {

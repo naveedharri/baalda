@@ -45,6 +45,7 @@ import { requestNewDashboard } from "../lib/homeEvents";
 import { isBlankTreeTarget } from "../lib/tree/blankTarget";
 import { LOCK_TITLES, effectiveLockForPath, lockBlocksCaller, lockScopesByPath, type LockScope } from "../lib/locks";
 import { ROOT_FROZEN_MESSAGE, createBlockReason } from "../lib/createGate";
+import { renameBlockReason, renameRefusedMessage } from "../lib/renameGate";
 import { ancestorPaths } from "../lib/accessTree";
 import { nodeAt } from "../lib/tree/lazyTree";
 import { displayName } from "../lib/notePath";
@@ -1151,6 +1152,11 @@ export function FileTree() {
     }
     const newPath = dir ? `${dir}/${newName}` : newName;
     if (newPath === oldPath) return;
+    const blocked = renameBlockedReason(oldPath, node.data.isDir);
+    if (blocked) {
+      toast(blocked, "error");
+      return;
+    }
     try {
       // Epoch-pinned like the bulk move below: this runs across awaits, so a vault
       // switch mid-rename must be refused by Rust rather than applied over there.
@@ -1158,7 +1164,18 @@ export function FileTree() {
       // Propagate the rename/move to the server (folder subtree or single note;
       // doc_ids are preserved) so teammates see it live.
       try {
-        await syncManager.registry.renamePath(oldPath, newPath);
+        const res = syncEnabled
+          ? await syncManager.registry.moveOnServer(oldPath, newPath)
+          : { ok: true as const };
+        if (!res.ok && res.refused) {
+          // The server said no (access changed since the padlocks were read):
+          // put the old name back, never leave a copy it doesn't know about.
+          if (await syncManager.registry.revertRefusedMove(oldPath, newPath)) {
+            toast(renameRefusedMessage(oldPath, node.data.isDir, res.code, res.status), "error");
+            await refreshAll();
+            return;
+          }
+        }
       } catch (e) {
         console.warn("[sync] renamePath failed", oldPath, e);
       }
@@ -1201,6 +1218,17 @@ export function FileTree() {
       const dest = destDir ? `${destDir}/${basename(p)}` : basename(p);
       return dest;
     });
+    // A move the server would refuse (an item this person can only view or
+    // didn't create, or a folder they can't add to) is stopped with the reason
+    // before anything changes, the arrangement included.
+    for (let i = 0; i < from.length; i++) {
+      if (from[i] === to[i]) continue;
+      const blocked = renameBlockedReason(from[i], !!nodeByPath.get(from[i])?.isDir, destDir);
+      if (blocked) {
+        toast(blocked, "error");
+        return;
+      }
+    }
 
     // 1) Persist the arrangement first so a same-folder reorder feels instant
     //    (no disk change, no round-trip). Cross-folder drops snap into place
@@ -1241,7 +1269,17 @@ export function FileTree() {
       try {
         await ipc.renamePath(from[i], to[i], moveEpoch);
         try {
-          await syncManager.registry.renamePath(from[i], to[i]);
+          const res = syncEnabled
+            ? await syncManager.registry.moveOnServer(from[i], to[i])
+            : { ok: true as const };
+          if (!res.ok && res.refused && (await syncManager.registry.revertRefusedMove(from[i], to[i]))) {
+            toast(
+              renameRefusedMessage(from[i], !!nodeByPath.get(from[i])?.isDir, res.code, res.status),
+              "error",
+            );
+            movedOnDisk = true;
+            continue;
+          }
         } catch (e) {
           console.warn("[sync] move propagate failed", from[i], e);
         }
@@ -1596,6 +1634,30 @@ export function FileTree() {
    * latch, or a folder this person can only view (the same padlock the row
    * shows; `lib/createGate.ts`). Unknown access allows.
    */
+  /** Why renaming/moving `path` (into `destDir`) would be refused, or null. */
+  function renameBlockedReason(path: string, isDir: boolean, destDir?: string): string | null {
+    return renameBlockReason({
+      path,
+      isDir,
+      destDir,
+      syncEnabled,
+      rootFrozen,
+      canCreateRoot,
+      lockedForCaller: (p) => lockBlocksCaller(lockByPath, p),
+      role: myRole,
+      authoredByMe: () => syncManager.registry.isAuthoredByMe(path, isDir),
+    });
+  }
+
+  // Stable for the rows' shared context (a new identity per render would
+  // re-render every row); always calls the latest closure.
+  const renameBlockedRef = useRef(renameBlockedReason);
+  renameBlockedRef.current = renameBlockedReason;
+  const renameBlocked = useCallback(
+    (path: string, isDir: boolean) => renameBlockedRef.current(path, isDir),
+    [],
+  );
+
   function createBlockedReason(dir: string): string | null {
     return createBlockReason({
       dir,
@@ -1769,6 +1831,7 @@ export function FileTree() {
       onDragProbe: beginProbe,
       dragPath,
       dropInto,
+      renameBlocked,
     }),
     [
       selectedPath,
@@ -1784,6 +1847,7 @@ export function FileTree() {
       beginProbe,
       dragPath,
       dropInto,
+      renameBlocked,
     ],
   );
 
@@ -2128,7 +2192,18 @@ export function FileTree() {
               {ipc.revealLabel()}
             </li>
           )}
-          {menu.node && <li onClick={() => menu.node!.edit()}>Rename</li>}
+          {menu.node && (() => {
+            const why = renameBlockedReason(menu.node!.data.path, menu.node!.data.isDir);
+            return (
+              <li
+                className={why ? "disabled" : undefined}
+                title={why ?? undefined}
+                onClick={() => (why ? toast(why, "error") : menu.node!.edit())}
+              >
+                Rename
+              </li>
+            );
+          })()}
           {/* At the vault root this is the vault-wide sort (the same setting
               as the header button). Inside a folder it is THAT folder's sort:
               it replaces the vault-wide one for the folder and everything under
@@ -2416,6 +2491,8 @@ interface RowShared {
   dragPath: string | null;
   /** The folder a drop would land inside, if the pointer is over one. */
   dropInto: string | null;
+  /** Why this row can't be renamed (view-only, not the creator), or null. */
+  renameBlocked: (path: string, isDir: boolean) => string | null;
 }
 
 const RowSharedContext = createContext<RowShared | null>(null);
@@ -2442,11 +2519,13 @@ function TreeRow(props: NodeRendererProps<TreeNode>) {
       onDragProbe={shared.onDragProbe}
       dragging={shared.dragPath === path}
       dropInto={shared.dropInto}
+      renameBlocked={shared.renameBlocked}
     />
   );
 }
 
 interface NodeExtra {
+  renameBlocked: (path: string, isDir: boolean) => string | null;
   selectedPath: string | null;
   lock: LockScope | null;
   /** Whole-vault sync roll-up; null when sync is off (no indicators at all). */
@@ -2764,6 +2843,7 @@ function Node({
   onDragProbe,
   dragging,
   dropInto,
+  renameBlocked,
 }: NodeRendererProps<TreeNode> & NodeExtra) {
   const isDir = node.data.isDir;
   // Only a folder we have actually listed can be called empty. An unexpanded one
@@ -2847,7 +2927,11 @@ function Node({
           now - prev.at < RENAME_DOUBLE_CLICK_MS
         ) {
           lastRowClick = null;
-          node.edit();
+          // A row this person can only view is not renamable: say so instead
+          // of opening a box whose result the server would refuse.
+          const why = renameBlocked(node.data.path, node.data.isDir);
+          if (why) toast(why, "error");
+          else node.edit();
         }
       }}
     >

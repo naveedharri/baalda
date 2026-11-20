@@ -34,6 +34,12 @@ const sync = vi.hoisted(() => ({
           patch.release = (ok) => (ok ? resolve() : reject(new Error("boom")));
         }),
     ),
+    // The store calls the answer-keeping twin; it delegates to the held PATCH.
+    moveOnServer: vi.fn(async (from: string, to: string) => {
+      await (sync.registry.renamePath as unknown as (a: string, b: string) => Promise<void>)(from, to);
+      return { ok: true as const };
+    }),
+    revertRefusedMove: vi.fn(async () => true),
   },
   isSyncable: vi.fn(() => false),
   disable: vi.fn(),

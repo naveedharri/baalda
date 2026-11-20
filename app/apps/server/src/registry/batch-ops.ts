@@ -2,7 +2,7 @@ import { withNoteQuota, noteLimitMessage } from "../billing/note-quota.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
-import { canCreateIn, canEditDoc } from "../permissions/http-gates.js";
+import { canCreateIn, canEditDoc, canRenameItem, RENAME_NOT_CREATOR_MESSAGE } from "../permissions/http-gates.js";
 import { createResolverCache, type ResolverCache } from "../permissions/resolver.js";
 import {
   listPrivateHiddenDocsInVault,
@@ -105,7 +105,9 @@ export type RegisterCode =
   | "root_frozen"
   | "not_readable"
   | "doc_id_conflict"
-  | "note_deleted";
+  | "note_deleted"
+  | "rename_not_creator"
+  | "account_read_only";
 
 export interface FolderRow {
   id: string;
@@ -1113,6 +1115,23 @@ export async function registerFile(
         code: "no_write_access",
         message: "You do not have permission to create a file here.",
       };
+    }
+    // Creator-only, like delete: a plain member moves only a file they added.
+    {
+      const { rows: org } = await ctx.db.query<{ organization_id: string }>(
+        "SELECT organization_id FROM vaults WHERE id = $1",
+        [ctx.vaultId],
+      );
+      const gate = org[0]
+        ? await canRenameItem(ctx.db, { orgId: org[0].organization_id, userId: ctx.userId, kind: "file", id })
+        : ({ ok: false, code: "rename_not_creator" } as const);
+      if (!gate.ok) {
+        return {
+          status: "error",
+          code: gate.code,
+          message: gate.code === "account_read_only" ? "Sync is read-only for this vault." : RENAME_NOT_CREATOR_MESSAGE,
+        };
+      }
     }
     try {
       await ctx.db.query("UPDATE files SET folder_id = $2, path = $3 WHERE id = $1", [

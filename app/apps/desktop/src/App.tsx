@@ -1876,7 +1876,6 @@ export default function App() {
             path={homeAgentPath} showLaunchers={homeAgentPath !== null}
             expectedEpoch={vault.epoch} launchTarget={dashboardHeaderActionsHost}
             rightPanelOpen={rightPanelOpen} onOpen={useStore.getState().closeRightPanel} />
-          <MemberJoinedBanner />
           <WhatsNewModal />
           <MessagePopup />
           {/* Sits flush against the top of the window now that there's no system
@@ -1965,6 +1964,12 @@ export default function App() {
               only the highest-priority claim shows — held delete, then the
               reconcile summary, then the open note's removal, then the rest in
               this order. Informational ones fade after 20 s. */}
+          {/* Floats OVER the page below the header (zero-height anchor), so a
+              notice never pushes the note down when it appears or pulls it up
+              when it fades. */}
+          <div className="notice-overlay">
+          <div className="notice-overlay-stack">
+          <MemberJoinedBanner />
           <HeldDeleteNotice />
           <SilentBoundary label="Reconcile banner">
             <ReconcileBanner />
@@ -1984,6 +1989,8 @@ export default function App() {
           <CreateRefusalBanner />
           <RemovedBanner />
           {attachmentLocalOnly && <AttachmentSyncNotice />}
+          </div>
+          </div>
           <div className="editor-wrap">
             {!activeVirtual && <NoteBreadcrumb />}
             {activeVirtual && <VirtualTabHost tab={activeVirtual} />}

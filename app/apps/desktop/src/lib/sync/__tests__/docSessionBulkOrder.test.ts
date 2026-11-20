@@ -87,6 +87,18 @@ const fakeRegistry = vi.hoisted(() => {
         })),
     ),
     renamePath: vi.fn(async (_from: string, _to: string): Promise<boolean> => true),
+    /** The production entry point the drain calls; delegates to the
+     *  `renamePath` mock so tests keep asserting on it. Refusal shape opt-in
+     *  via `refuseMove`. */
+    refuseMove: null as null | { code: string | null },
+    moveOnServer: vi.fn(async (from: string, to: string) => {
+      const ok = await reg.renamePath(from, to);
+      if (ok) return { ok: true as const };
+      return reg.refuseMove
+        ? { ok: false as const, refused: true, code: reg.refuseMove.code }
+        : { ok: false as const, refused: false, code: null };
+    }),
+    revertRefusedMove: vi.fn(async (_from: string, _to: string) => true),
     recordFailure: vi.fn((_f: unknown) => {}),
     // ---- #221: folders and the closed-app drift report ----
     /** Registered folder ids by path. */
@@ -1944,6 +1956,29 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     // No notes to re-index under the new folder.
     expect(fakeDisk.materialized).toEqual([]);
     expect(fakeRegistry.pull).toHaveBeenCalled();
+  });
+
+  it("puts a folder rename the server refuses back on disk, never a delete or a second folder", async () => {
+    const sm = new SyncManager();
+    mapNotes(others, ["Old", "Old/sub", "Keep"]);
+    mapBinaries(pdfs);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub", "Keep"]);
+    moveBinaries(pdfs);
+    // View-only folder: PATCH /folders/:id answers 403.
+    fakeRegistry.renamePath.mockResolvedValueOnce(false);
+    fakeRegistry.refuseMove = { code: "no_write_access" };
+    try {
+      folderMoved(sm);
+      await drain();
+    } finally {
+      fakeRegistry.refuseMove = null;
+    }
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Archive"]]);
+    expect(fakeRegistry.revertRefusedMove.mock.calls).toEqual([["Old", "Archive"]]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
   });
 
   it("counts binaries beside notes: a mixed folder pairs on their combined evidence (#266)", async () => {

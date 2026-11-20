@@ -1983,9 +1983,20 @@ blobRoutes.get("/vaults/:vaultId/blobs", async (c) => {
   // `status = 'ready'` only: a pending row is an upload in flight (or an
   // abandoned one), and listing it would tell the desktop's attachment diff a
   // file it cannot download already exists.
+  // A doc-bound blob is listed at its `files` row's CURRENT path: the blob's
+  // own `rel_path` is where it was uploaded, and a rename or a folder move
+  // only moves the `files` row. Listing the upload path told every other
+  // device the file still had its old name (so a rename never reached them,
+  // and a new device downloaded it under the old name).
   const { rows } = await pool.query<BlobRow & { rel_path: string | null }>(
-    `SELECT ${BLOB_ROW_COLUMNS}
-       FROM blobs WHERE vault_id = $1 AND status = 'ready' ORDER BY rel_path`,
+    `SELECT b.id, b.sha256, b.size, b.mime,
+            COALESCE(f.path, b.rel_path) AS rel_path,
+            COALESCE(regexp_replace(f.path, '^.*/', ''), b.filename) AS filename,
+            b.doc_id
+       FROM blobs b
+       LEFT JOIN files f ON f.id = b.doc_id AND f.vault_id = b.vault_id
+      WHERE b.vault_id = $1 AND b.status = 'ready'
+      ORDER BY 5`,
     [vaultId],
   );
   // Private-by-default: a scoped member only sees blobs referenced by notes

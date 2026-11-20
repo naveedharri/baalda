@@ -148,6 +148,7 @@ import {
 } from "./lib/vault/missingFolder";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { dismissToast, toast } from "./lib/toast";
+import { renameRefusedMessage } from "./lib/renameGate";
 import { classifyLimitError, limitFromError, vaultLimitReason } from "./lib/billing";
 import { isEditorNote } from "./lib/notePath";
 import { isNoteExt } from "./lib/formats";
@@ -3142,7 +3143,16 @@ export const useStore = create<AppStore>((set, get) => ({
     // The registry rename is what keeps `doc_id` stable across the move.
     // Skipping it forks the note into a second server-side note at the new path.
     try {
-      await syncManager.registry.renamePath(oldPath, newPath);
+      const res = await syncManager.registry.moveOnServer(oldPath, newPath);
+      if (!res.ok && res.refused && (await syncManager.registry.revertRefusedMove(oldPath, newPath))) {
+        // Refused (not the creator, view-only, …): the old name is back on
+        // disk, so the open note, tabs and order follow it back too.
+        get().setItemOrder(renameInOrder(get().itemOrder, newPath, oldPath));
+        get().followNoteRename(newPath, oldPath);
+        toast(renameRefusedMessage(oldPath, false, res.code, res.status), "error");
+        await get().refreshTree();
+        return false;
+      }
     } catch (e) {
       console.warn("[sync] renamePath failed", oldPath, e);
     }
