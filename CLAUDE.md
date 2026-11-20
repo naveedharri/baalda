@@ -574,7 +574,7 @@ which ignores groups; per-user deny/readonly caps and locks still cap them); a g
 is Private or a sealed vault. Membership cascades with `member`; `auto_join` groups take new members (trigger,
 owner excluded); removing someone disconnects only the docs that group reached. Written through
 `POST access/bulk` with `audience: {type:"group"}` (`private` = no row; an Everyone write never clears group
-rows), read through `access-board?groupId=`; `GET /locks` returns the caller's group `edit` rows as lifts.
+rows), read through `access-board?groupId=`; `GET /locks` returns the caller's group `edit` rows as lifts, and a group's Can view as the caller's own `readonly` row (`reason: "group_view"`, id `group-view:<id>`, never removable by Unlock — `lib/locks.ts isRemovableLock`) on the topmost visible view-only folder or item, resolving only the subtrees a group can view.
 Skills: `skill_group_access` (required/optional), inherited level = max(Everyone, groups). Invites carry
 `groupIds` (with an access level too ⇒ 400 `access_or_groups`). Management follows `canManageMemberAccess`.
 UI: a People | Groups toggle with one search under the Everyone/New members rows, a Groups column of chips,
