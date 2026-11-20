@@ -1321,13 +1321,13 @@ export interface SkillTargetInfo { target: SkillTarget; root: string; rootExists
 export interface InstalledSkill { name: string; status: "managed" | "edited" | "unmanaged";
   marker: SkillMarker | null; editedFiles: string[] }
 export interface SkillInstallOutcome { status: "installed" | "unchanged" | "conflict" | "edited" | "adopted";
-  backupPath: string | null; detail: string | null }
-export interface SkillRemoveOutcome { status: "removed" | "released" | "notFound" | "conflict"; backupPath: string | null }
+  detail: string | null }
+export interface SkillRemoveOutcome { status: "removed" | "released" | "notFound" | "conflict" }
 export interface SkillBundle { suggestedName: string; files: SkillFilePayload[]; skipped: string[] }
 
 export const skillsTargets = () => invoke<SkillTargetInfo[]>("skills_targets");
 export const skillsScan = (target: SkillTarget) => invoke<InstalledSkill[]>("skills_scan", { target });
-/** `replaceUnmanaged`: back up and replace a folder that carries no marker
+/** `replaceUnmanaged`: replace (no copy kept) a folder that carries no marker
  *  (never another owner's copy, never a symlink). An identical unmanaged
  *  folder is `adopted` (marker written, files untouched) without it. */
 export const skillsInstall = (target: SkillTarget, name: string, marker: SkillMarker,
@@ -1339,7 +1339,6 @@ export const skillsReadFolder = (path: string) => invoke<SkillBundle>("skills_re
 export const skillsReadZip = (path: string) => invoke<SkillBundle>("skills_read_zip", { path });
 export const skillsExportZip = (dest: string, name: string, files: SkillFilePayload[]) =>
   invoke<void>("skills_export_zip", { dest, name, files });
-export const skillsBackupsDir = () => invoke<string>("skills_backups_dir");
 
 /** Read-only inventory of every skill the AI tools on this machine can see. */
 export type SkillLocation = "claudePersonal" | "claudeSynced" | "agentsPersonal" | "codexPersonal"

@@ -414,10 +414,10 @@ pub enum InstalledStatus { Managed, Edited, Unmanaged }   // serde lowercase
 pub struct InstalledSkill { name: String, status: InstalledStatus,
   marker: Option<SkillMarker>, edited_files: Vec<String> }   // edited_files: changed/added/missing relPaths
 pub enum InstallStatus { Installed, Unchanged, Conflict, Edited }
-pub struct InstallOutcome { status: InstallStatus, backup_path: Option<String>, detail: Option<String> }
+pub struct InstallOutcome { status: InstallStatus, detail: Option<String> }
 pub enum RemoveMode { Delete, Release }                 // serde lowercase; missing = Delete
 pub enum RemoveStatus { Removed, Released, NotFound, Conflict }
-pub struct RemoveOutcome { status: RemoveStatus, backup_path: Option<String> }
+pub struct RemoveOutcome { status: RemoveStatus }
 pub struct SkillBundle { suggested_name: String, files: Vec<SkillFilePayload>, skipped: Vec<String> }
 ```
 
@@ -428,11 +428,10 @@ pub struct SkillBundle { suggested_name: String, files: Vec<SkillFilePayload>, s
 | `skills_targets` | — | `Vec<TargetInfo>` | Filesystem checks only (never runs a binary). Called each launch. |
 | `skills_scan` | `target` | `Vec<InstalledSkill>` | Lists child dirs of the root (skips names starting with `.` and non-dirs; a symlinked child is reported `unmanaged`). For dirs with a valid marker: hash every regular file except the marker (walkdir, no symlink follow; a symlink inside ⇒ `edited` with that path) and compare to `marker.files`. Also deletes leftover `.baalda-staging-*` / `.baalda-old-*` dirs older than 1 h. Missing root ⇒ `[]`. |
 | `skills_install` | `target, name, marker: SkillMarker, files: Vec<SkillFilePayload>, force: bool` | `InstallOutcome` | §4.4 |
-| `skills_remove` | `app, target, name, owner: SkillOwner, mode?: RemoveMode` | `RemoveOutcome` | Dir missing ⇒ `NotFound`. No marker, a marker naming another folder, or another owner ⇒ `Conflict` (untouched). `delete` (default): drifted ⇒ backup first, then remove the dir ⇒ `Removed`. `release`: delete ONLY `.baalda-managed.json`, no backup ⇒ `Released` (`backupPath: null`); the folder stays as the user's own and scans as `unmanaged` from then on. |
+| `skills_remove` | `target, name, owner: SkillOwner, mode?: RemoveMode` | `RemoveOutcome` | Dir missing ⇒ `NotFound`. No marker, a marker naming another folder, or another owner ⇒ `Conflict` (untouched). `delete` (default): clean ⇒ remove the dir ⇒ `Removed`; drifted ⇒ treated as `release` (no backups exist, so an edited copy is never deleted). `release`: delete ONLY `.baalda-managed.json` ⇒ `Released`; the folder stays as the user's own and scans as `unmanaged` from then on. |
 | `skills_read_folder` | `path` | `SkillBundle` | "Add to team" from On this device (reads that skill's folder). §4.5 |
 | `skills_read_zip` | `path` | `SkillBundle` | §4.5; if all entries share one top-level dir, strip it and use it as `suggested_name`, else the zip stem. Refuse entries with `..`/absolute paths and symlink entries (unix mode `0o120000`). Exec bit from unix mode `0o111`. |
 | `skills_export_zip` | `dest, name, files: Vec<SkillFilePayload>` | `()` | `dest` comes from the save dialog (`.zip`). Entries `"<name>/<path>"`, deflate, unix mode 0o755 if executable else 0o644. Verify each sha first. Atomic: write `<dest>.tmp` then rename. |
-| `skills_backups_dir` | `app` | `String` | `app_local_data_dir()/skill-backups` (created). For "Reveal". |
 
 `name` validated by §1.1 (`invalid skill name`), every `path` by §1.2 (`invalid skill path: …`) —
 Rust re-implements both; never trust the webview.
@@ -451,7 +450,7 @@ Rust re-implements both; never trust the webview.
    - marker matches and current files hash exactly to `marker.files` (old marker) and
      `old.bundle_sha256 == marker.bundle_sha256` ⇒ `Unchanged`;
    - drifted (hash ≠ old marker) and `!force` ⇒ `Edited` (untouched);
-   - drifted and `force` ⇒ copy `dir` to `backups/<name>-<YYYYMMDD-HHMMSS>/` first, `backup_path` set.
+   - drifted and `force` ⇒ replaced, no copy kept (skill backups removed 2026-11-20).
 3. Stage in `root/.baalda-staging-<uuid>/`: create dirs, write each file (`write_atomic_fsync`),
    set unix mode 0o755/0o644, write the marker JSON (pretty, `installed_at` now) last. Re-hash the
    staged files against `marker.files`; any mismatch ⇒ delete staging, error.
@@ -459,8 +458,7 @@ Rust re-implements both; never trust the webview.
    the old dir (failure to remove old is logged, not fatal). If the second rename fails, rename the
    old dir back. Return `Installed`.
 
-Backups: `app_local_data_dir()/skill-backups/<name>-<timestamp>/` (copy, never move; symlinks
-skipped). Same shape for `skills_remove`.
+No backups are written (removed 2026-11-20).
 
 ### 4.5 Reading an upload (`skills_read_folder` / `skills_read_zip`)
 
@@ -489,8 +487,8 @@ export interface SkillTargetInfo { target: SkillTarget; root: string; rootExists
 export interface InstalledSkill { name: string; status: "managed" | "edited" | "unmanaged";
   marker: SkillMarker | null; editedFiles: string[] }
 export interface SkillInstallOutcome { status: "installed" | "unchanged" | "conflict" | "edited";
-  backupPath: string | null; detail: string | null }
-export interface SkillRemoveOutcome { status: "removed" | "released" | "notFound" | "conflict"; backupPath: string | null }
+  detail: string | null }
+export interface SkillRemoveOutcome { status: "removed" | "released" | "notFound" | "conflict" }
 export interface SkillBundle { suggestedName: string; files: SkillFilePayload[]; skipped: string[] }
 
 export const skillsTargets = () => invoke<SkillTargetInfo[]>("skills_targets");
@@ -504,7 +502,6 @@ export const skillsReadFolder = (path: string) => invoke<SkillBundle>("skills_re
 export const skillsReadZip = (path: string) => invoke<SkillBundle>("skills_read_zip", { path });
 export const skillsExportZip = (dest: string, name: string, files: SkillFilePayload[]) =>
   invoke<void>("skills_export_zip", { dest, name, files });
-export const skillsBackupsDir = () => invoke<string>("skills_backups_dir");
 ```
 Rust enum serde: `InstalledStatus`/`InstallStatus` lowercase; `RemoveStatus` camelCase (`notFound`).
 
@@ -659,8 +656,7 @@ Cursor, Gemini CLI, Copilot, OpenCode`), resolved root path, "Installed"/"Not in
 `toolInstalled`/`detectedTools`, an on/off switch (prefs `targets`). Below, every skill this device
 handles across vaults: name, vault, version, per-target status (`Up to date`, `Updating`, `Edited
 here` with **Keep mine** / **Use team version**, `Name taken by another skill` for conflict, `Kept
-yours`), Optional opt-in switch, "Check now", "Open backups folder" (`skillsBackupsDir` + existing
-opener).
+yours`), Optional opt-in switch, "Check now".
 
 Shipped layout (2026-10-26 redesign): the Skills tab groups skills ("Shared with your team" first, then
 one collapsible group per import source, `lib/skills/grouping.ts`) and shows them as a grid of cards
@@ -788,8 +784,8 @@ Done 2026-10-26: `CLAUDE.md` (Desktop Rust core, sync, settings tabs, server bul
 > the vault channel's `skills-changed` frame (PS 0x0f) and a 2-min poll (plus a check when the app comes back to the front) trigger a desktop run.
 > Rust `skills_sync.rs` writes only `<claude config dir>/skills/<name>` and `~/.agents/skills/<name>`
 > (never `~/.codex/skills`), only folders carrying `.baalda-managed.json`, stages then swaps
-> atomically, never overwrites local edits without "Use team version" (backup first, app data
-> `skill-backups/`), and removes only after a successful manifest. MCP: `list_skills`, `get_skill`,
+> atomically, never overwrites local edits without "Use team version" (which replaces them, no copy
+> kept), and removes only after a successful manifest. MCP: `list_skills`, `get_skill`,
 > `read_skill_file`. `/health` feature `skills`. Free on every plan.
 
 Also: add the five tables to the "Postgres tables" list, `skills` to the `/health` features list,
@@ -847,8 +843,6 @@ Command names, argument names and every wire shape in §4.2/§4.6 are unchanged.
 - Review follow-up (2026-10-26, now in the main text): `SkillMarker.userId` / `SkillOwner.userId`
   and `skills_remove`'s optional `mode` (`delete` | `release`, status `released`).
 
-- `skills_install` also takes `app: tauri::AppHandle` (injected by Tauri; the JS call is unchanged)
-  because a forced install writes its backup under app data.
 - `Unchanged` requires a clean folder AND the same `bundleSha256`, `version` and `files` map as the
   new marker. A clean folder whose marker names another version is reinstalled (cheap), so a marker
   never stays on an old version number when two versions share a bundle hash.
@@ -1170,8 +1164,8 @@ UTF-8 ⇒ `binary: true, text: null`). A file whose name fails §1.2 is listed b
 For an existing folder that is not a symlink and carries no marker of ours (no marker, or one naming
 another folder): if its files, read with `skills_read_folder`'s skip rules, equal `marker.files`
 exactly (relPath + sha256), only `.baalda-managed.json` is written and the result is `adopted` (no
-flag needed, no other file touched). Otherwise `replaceUnmanaged: true` backs the folder up to
-`skill-backups/` and installs over it (`installed` + `backupPath`); without the flag it stays
+flag needed, no other file touched). Otherwise `replaceUnmanaged: true` installs over it, no copy
+kept (`installed`); without the flag it stays
 `conflict`/`unmanaged`. Any marker naming another owner (skill, vault, server or user), even under
 another folder name, is `conflict`/`other_owner`; a symlinked folder is `conflict`/`unmanaged` — the
 flag never applies to either. Drift detection (scan, install, remove) now ignores `.DS_Store`,

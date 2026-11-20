@@ -239,7 +239,6 @@ pub fn run() {
             skills_sync::skills_read_folder,
             skills_sync::skills_read_zip,
             skills_sync::skills_export_zip,
-            skills_sync::skills_backups_dir,
             skills_sync::skills_scan_device,
             skills_sync::skills_read_device_skill_md,
             skills_sync::skills_list_device_skill_files,

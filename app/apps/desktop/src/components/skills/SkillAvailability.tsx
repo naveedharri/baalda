@@ -138,17 +138,17 @@ export function InstallControl({
     const actions = here.edited
       ? [
           { key: "keep", label: "Keep mine", hint: "Leave your edited copy as it is", onSelect: () => keepMySkill(orgId, skill.id, here.edited!) },
-          { key: "team", label: "Use team version", hint: "Your copy is backed up first", onSelect: () => applyTeamSkillVersion(orgId, skill.id, here.edited!) },
+          { key: "team", label: "Use team version", hint: "Replaces your edited copy", onSelect: () => applyTeamSkillVersion(orgId, skill.id, here.edited!) },
         ]
       : here.conflict
         ? [
-            // The folder holding the name is backed up and replaced: the
+            // The folder holding the name is replaced: the
             // person's own, or another vault's, server's or account's copy.
             // Never a symlink (Rust refuses one either way).
             ...(here.conflictKind !== "unmanaged"
-              ? [{ key: "team", label: "Use team version", hint: "The other copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.id, here.conflict!) }]
+              ? [{ key: "team", label: "Use team version", hint: "Replaces the other copy", onSelect: () => replaceNameTakenSkill(orgId, skill.id, here.conflict!) }]
               : !isLinkedFolder(scan, here.conflict, skill.name)
-                ? [{ key: "team", label: "Use team version", hint: "Your copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.id, here.conflict!) }]
+                ? [{ key: "team", label: "Use team version", hint: "Replaces your folder", onSelect: () => replaceNameTakenSkill(orgId, skill.id, here.conflict!) }]
                 : []),
             ...(here.conflictKind === "unmanaged"
               ? [{ key: "keep", label: "Keep my own", hint: "Leave your folder as it is on this computer", onSelect: () => keepMySkill(orgId, skill.id, here.conflict!) }]

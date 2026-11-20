@@ -233,11 +233,11 @@ function deps(over: Partial<Record<"install" | "remove" | "fetch", any>> = {}) {
     }),
     install: over.install ?? (async (target: string, name: string, m: any, files: any[], force: boolean) => {
       calls.install.push({ target, name, marker: m, files, force });
-      return { status: "installed", backupPath: null, detail: null };
+      return { status: "installed", detail: null };
     }),
     remove: over.remove ?? (async (target: string, name: string, _owner: unknown, mode: string) => {
       calls.remove.push({ target, name, mode });
-      return { status: "removed", backupPath: "/bk" };
+      return { status: "removed" };
     }),
   } as never;
   return { d, calls };
@@ -289,7 +289,7 @@ describe("runSkillsPlan", () => {
     const { d } = deps({
       install: async () => {
         if (n++ === 0) throw new Error("boom");
-        return { status: "installed", backupPath: null, detail: null };
+        return { status: "installed", detail: null };
       },
     });
     const r = await runSkillsPlan([installAction("claude", skill("s1", "a")), installAction("claude", skill("s2", "b"))], d);
@@ -299,13 +299,13 @@ describe("runSkillsPlan", () => {
   });
 
   it("remove notFound is not listed in removed", async () => {
-    const { d } = deps({ remove: async () => ({ status: "notFound", backupPath: null }) });
+    const { d } = deps({ remove: async () => ({ status: "notFound" }) });
     const owner = { skillId: "s", orgId: "o", serverUrl: SERVER, userId: ME };
     const r = await runSkillsPlan([{ kind: "remove", target: "claude", name: "a", owner, reason: "deleted", mode: "delete" }], d);
     expect(r.removed).toEqual([]);
     const ok = deps();
     const r2 = await runSkillsPlan([{ kind: "remove", target: "claude", name: "a", owner, reason: "deleted", mode: "delete" }], ok.d);
-    expect(r2.removed).toEqual([{ target: "claude", name: "a", reason: "deleted", mode: "delete", backupPath: "/bk" }]);
+    expect(r2.removed).toEqual([{ target: "claude", name: "a", reason: "deleted", mode: "delete" }]);
   });
 });
 
@@ -321,26 +321,25 @@ describe("forceInstallSkill and pendingStates", () => {
     const { d } = deps({
       install: async (...args: unknown[]) => {
         seen.push(args);
-        return { status: "installed", backupPath: "/bk", detail: null };
+        return { status: "installed", detail: null };
       },
     });
-    const r = await replaceUnmanagedSkill(d, "claude", "o", skill("s", "a"));
+    await replaceUnmanagedSkill(d, "claude", "o", skill("s", "a"));
     expect(seen[0][4]).toBe(false);
     expect(seen[0][5]).toBe(true);
-    expect(r.backupPath).toBe("/bk");
   });
 
   it("a refused install carries Rust's conflict kind", async () => {
-    const own = deps({ install: async () => ({ status: "conflict", backupPath: null, detail: "unmanaged" }) });
+    const own = deps({ install: async () => ({ status: "conflict", detail: "unmanaged" }) });
     expect((await runSkillsPlan([installAction("claude", skill("s", "a"))], own.d)).results)
       .toMatchObject([{ state: "conflict", conflict: "unmanaged" }]);
-    const other = deps({ install: async () => ({ status: "conflict", backupPath: null, detail: "other_owner" }) });
+    const other = deps({ install: async () => ({ status: "conflict", detail: "other_owner" }) });
     expect((await runSkillsPlan([installAction("claude", skill("s", "a"))], other.d)).results)
       .toMatchObject([{ state: "conflict", conflict: "other_owner" }]);
   });
 
   it("an adopted folder is up to date with no toast", async () => {
-    const { d } = deps({ install: async () => ({ status: "adopted", backupPath: null, detail: null }) });
+    const { d } = deps({ install: async () => ({ status: "adopted", detail: null }) });
     const r = await runSkillsPlan([installAction("claude", skill("s", "a"))], d);
     expect(r.results).toMatchObject([{ state: "upToDate" }]);
     expect(runToasts(r)).toEqual([]);
@@ -452,12 +451,12 @@ describe("runSkillsPlan: release and stop", () => {
     const { d, calls } = deps({
       remove: async (target: string, name: string, _o: unknown, mode: string) => {
         calls.remove.push({ target, name, mode });
-        return { status: "released", backupPath: null };
+        return { status: "released" };
       },
     });
     const r = await runSkillsPlan([{ kind: "remove", target: "claude", name: "a", owner, reason: "optedOut", mode: "release" }], d);
     expect(calls.remove).toEqual([{ target: "claude", name: "a", mode: "release" }]);
-    expect(r.removed).toEqual([{ target: "claude", name: "a", reason: "optedOut", mode: "release", backupPath: null }]);
+    expect(r.removed).toEqual([{ target: "claude", name: "a", reason: "optedOut", mode: "release" }]);
   });
 
   it("stops between actions once shouldStop says so", async () => {

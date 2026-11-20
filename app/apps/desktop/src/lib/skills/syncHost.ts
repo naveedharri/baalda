@@ -445,7 +445,7 @@ export function keepMySkill(orgId: string, skillId: string, target: SkillTarget)
   });
 }
 
-/** Replace this device's edited copy with the team version (backed up first). */
+/** Replace this device's edited copy with the team version (no copy is kept). */
 export async function applyTeamSkillVersion(orgId: string, skillId: string, target: SkillTarget): Promise<void> {
   const h = host;
   const skill = manifestSkill(orgId, skillId);
@@ -458,11 +458,11 @@ export async function applyTeamSkillVersion(orgId: string, skillId: string, targ
     setState({
       results: state.results.map((r) =>
         r.orgId === orgId && r.skillId === skillId && r.target === target
-          ? { ...r, state: "upToDate", version: skill.version, backupPath: outcome.backupPath }
+          ? { ...r, state: "upToDate", version: skill.version }
           : r,
       ),
     });
-    toast(outcome.backupPath ? `Using the team version of ${skillDisplayName(skill.name)}. Your copy was backed up.` : `Using the team version of ${skillDisplayName(skill.name)}.`);
+    toast(`Using the team version of ${skillDisplayName(skill.name)}.`);
   } else if (outcome.status === "conflict") {
     toast(`Couldn't replace ${skillDisplayName(skill.name)}: another skill uses that folder.`, "error");
   }
@@ -470,8 +470,8 @@ export async function applyTeamSkillVersion(orgId: string, skillId: string, targ
 
 /**
  * "Use team version" on a name taken by another folder: the person's own (no
- * marker) or another vault's, server's or account's copy. Rust backs that
- * folder up, then installs the team version in its place. Only this click
+ * marker) or another vault's, server's or account's copy. Rust replaces that
+ * folder with the team version (no copy is kept). Only this click
  * replaces another owner's copy; a sync run never does.
  */
 export async function replaceNameTakenSkill(orgId: string, skillId: string, target: SkillTarget): Promise<void> {
@@ -509,15 +509,11 @@ export async function replaceNameTakenSkill(orgId: string, skillId: string, targ
   setState({
     results: state.results.map((r) =>
       r.orgId === orgId && r.skillId === skillId && r.target === target
-        ? { ...r, state: "upToDate", version: skill.version, backupPath: outcome.backupPath, conflict: undefined }
+        ? { ...r, state: "upToDate", version: skill.version, conflict: undefined }
         : r,
     ),
   });
-  toast(
-    outcome.backupPath
-      ? `Using the team version of ${name}. Your copy was saved to the skill backups folder (AI tools → Open backups folder).`
-      : `Using the team version of ${name}.`,
-  );
+  toast(`Using the team version of ${name}.`);
 }
 
 /** Optional skill switch ("Use on this device"). Runs at once. */

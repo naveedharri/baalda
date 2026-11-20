@@ -178,13 +178,13 @@ Errors: single `AppError(String)` (`error.rs`).
   with no `userId` is legacy and matches any user); a marker naming another folder counts as none.
   Anything else (unmanaged, another server/vault/user) is never written or removed by a sync run:
   install `conflict` (`unmanaged`/`other_owner`), remove `conflict`. Only the person's explicit
-  "Use team version" (`replaceUnmanaged`) backs such a folder up to `skill-backups/` and replaces it,
+  "Use team version" (`replaceUnmanaged`) replaces such a folder (no copy kept),
   another owner's copy included (2026-10-28); a symlinked folder is never replaced. Install = validate shas → stage in
   `.baalda-staging-<uuid>` → write the marker last → re-verify staged hashes → rename the old dir
   aside, rename staging in, roll back on failure (never rename over a dir). A drifted (edited) copy
-  is `edited` unless `force` ("Use team version"), which copies it to app data `skill-backups/`
-  first. Remove `delete` backs up a drifted copy then removes the dir; `release` deletes only the
-  marker (no backup) so the folder stays as the user's own skill. Install/remove share one
+  is `edited` unless `force` ("Use team version"), which replaces it with no copy kept (there are
+  no skill backups since 2026-11-20). Remove `delete` removes a clean copy and RELEASES a drifted one;
+  `release` deletes only the marker so the folder stays as the user's own skill. Install/remove share one
   process-wide lock; `skills_scan` sweeps stale staging/old dirs after 1 h.
 
 Tauri events to the UI: **`vault-opened`** and **`files-changed`** (the only two).

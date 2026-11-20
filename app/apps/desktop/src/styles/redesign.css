@@ -2915,7 +2915,13 @@ html:not(.rd-off) .account-popover > .rd-status {
 html:not(.rd-off) .ai-tools-lede { margin: 0; color: var(--text-secondary); font-size: var(--fs-md); }
 html:not(.rd-off) .ai-tools-rows .profile-row { grid-template-columns: minmax(200px, 260px) 1fr; }
 html:not(.rd-off) .ai-tools-list { display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0; }
-html:not(.rd-off) .ai-tools-actions { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
+/* Each AI tools row stacks: a head (title + one-line hint, actions on the
+   right) over a full-width list, so the hint never wraps in a narrow column
+   and Check now + ⋯ sit level with the title. */
+html:not(.rd-off) .ai-tools-rows .profile-row.ai-tools-stack { display: flex; flex-direction: column; align-items: stretch; gap: 14px; }
+html:not(.rd-off) .ai-tools-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; }
+html:not(.rd-off) .ai-tools-head .profile-row-label { width: auto; flex: 1; min-width: 0; }
+html:not(.rd-off) .ai-tools-actions { display: flex; gap: 6px; align-items: center; flex: none; }
 html:not(.rd-off) .ai-tool,
 html:not(.rd-off) .ai-skill { display: flex; align-items: center; gap: 14px; padding: 10px 14px; border-radius: 12px; min-width: 0; }
 html:not(.rd-off) .ai-tool:nth-child(odd),

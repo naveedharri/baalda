@@ -3,7 +3,7 @@
 //! target roots itself — `<claude config dir>/skills` and `~/.agents/skills` —
 //! and only ever writes folders that carry our `.baalda-managed.json` marker.
 //! A folder without one belongs to the user and is never touched; a managed
-//! folder the user edited is left alone until "Use team version" (backup first).
+//! folder the user edited is left alone until "Use team version" replaces it.
 //! Installs stage in a sibling folder, verify every hash, then swap by rename.
 
 use crate::agent_runner::trusted_window;
@@ -20,7 +20,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{Manager, Webview};
+use tauri::Webview;
 use walkdir::WalkDir;
 
 const MARKER: &str = ".baalda-managed.json";
@@ -157,7 +157,6 @@ pub enum InstallStatus {
 #[serde(rename_all = "camelCase")]
 pub struct InstallOutcome {
     pub status: InstallStatus,
-    pub backup_path: Option<String>,
     pub detail: Option<String>,
 }
 
@@ -174,7 +173,6 @@ pub enum RemoveStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RemoveOutcome {
     pub status: RemoveStatus,
-    pub backup_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -582,35 +580,6 @@ fn rfc3339(at: SystemTime) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
-fn backup_stamp(at: SystemTime) -> String {
-    let (y, mo, d, h, mi, s) = utc_parts(at);
-    format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}")
-}
-
-/// Copy (never move) `src` into `backups/<name>-<stamp>/`, skipping symlinks.
-fn backup_dir(src: &Path, backups: &Path, name: &str, at: SystemTime) -> AppResult<PathBuf> {
-    fs::create_dir_all(backups)?;
-    let stamp = backup_stamp(at);
-    let mut dest = backups.join(format!("{name}-{stamp}"));
-    let mut n = 2;
-    while fs::symlink_metadata(&dest).is_ok() {
-        dest = backups.join(format!("{name}-{stamp}-{n}"));
-        n += 1;
-    }
-    fs::create_dir(&dest)?;
-    for entry in WalkDir::new(src).follow_links(false).min_depth(1) {
-        let entry = entry.map_err(|e| AppError::new(format!("Couldn't back up {name}: {e}")))?;
-        let ft = entry.file_type();
-        let to = dest.join(entry.path().strip_prefix(src).unwrap_or(entry.path()));
-        if ft.is_dir() {
-            fs::create_dir_all(&to)?;
-        } else if ft.is_file() {
-            fs::copy(entry.path(), &to)?;
-        }
-    }
-    Ok(dest)
-}
-
 fn unique_sibling(root: &Path, prefix: &str) -> PathBuf {
     root.join(format!("{prefix}{}", uuid::Uuid::new_v4().simple()))
 }
@@ -705,7 +674,6 @@ fn same_owner(marker: &SkillMarker, owner: &SkillOwner) -> bool {
 fn install_outcome(status: InstallStatus, detail: Option<&str>) -> InstallOutcome {
     InstallOutcome {
         status,
-        backup_path: None,
         detail: detail.map(str::to_owned),
     }
 }
@@ -804,27 +772,25 @@ fn folder_as_read(dir: &Path) -> Option<BTreeMap<String, String>> {
 #[cfg(test)]
 fn install_into(
     root: &Path,
-    backups: &Path,
     name: &str,
     marker: SkillMarker,
     files: &[SkillFilePayload],
     force: bool,
     now: SystemTime,
 ) -> AppResult<InstallOutcome> {
-    install_skill(root, backups, name, marker, files, force, false, now)
+    install_skill(root, name, marker, files, force, false, now)
 }
 
 /// §4.4, plus two answers for a folder that is not ours: one that already
 /// holds exactly these files is ADOPTED (only the marker is written), and with
 /// `replace_unmanaged` (the person's own "Use team version") any other one is
-/// backed up and replaced, a copy marked for another owner included (another
+/// replaced with no copy kept, a copy marked for another owner included (another
 /// vault, server or account). Only that explicit click replaces another
 /// owner's copy, never a sync run, so two owners cannot keep swapping it.
 /// A symlink is never adopted or replaced.
 #[allow(clippy::too_many_arguments)]
 fn install_skill(
     root: &Path,
-    backups: &Path,
     name: &str,
     mut marker: SkillMarker,
     files: &[SkillFilePayload],
@@ -863,7 +829,6 @@ fn install_skill(
 
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let dir = root.join(name);
-    let mut backup_path = None;
     let exists = match fs::symlink_metadata(&dir) {
         Ok(meta) => {
             if meta.file_type().is_symlink() || !meta.is_dir() {
@@ -878,9 +843,7 @@ fn install_skill(
                         Some("other_owner"),
                     ));
                 }
-                let saved = backup_dir(&dir, backups, name, now)?;
-                backup_path = Some(saved.display().to_string());
-                return finish_install(root, &dir, &decoded, marker, now, true, backup_path);
+                return finish_install(root, &dir, &decoded, marker, now, true);
             }
             let Some(old) = raw.filter(|m| m.name == name) else {
                 if folder_as_read(&dir).as_ref() == Some(&marker.files) {
@@ -891,9 +854,7 @@ fn install_skill(
                 if !replace_unmanaged {
                     return Ok(install_outcome(InstallStatus::Conflict, Some("unmanaged")));
                 }
-                let saved = backup_dir(&dir, backups, name, now)?;
-                backup_path = Some(saved.display().to_string());
-                return finish_install(root, &dir, &decoded, marker, now, true, backup_path);
+                return finish_install(root, &dir, &decoded, marker, now, true);
             };
             let drift = drifted_files(&dir, &old.files);
             if drift.is_empty() {
@@ -905,10 +866,8 @@ fn install_skill(
                 }
             } else if !force {
                 return Ok(install_outcome(InstallStatus::Edited, None));
-            } else {
-                let saved = backup_dir(&dir, backups, name, now)?;
-                backup_path = Some(saved.display().to_string());
             }
+            // Forced ("Use team version"): the edited copy is replaced, no copy kept.
             true
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -918,7 +877,7 @@ fn install_skill(
         Err(e) => return Err(e.into()),
     };
 
-    finish_install(root, &dir, &decoded, marker, now, exists, backup_path)
+    finish_install(root, &dir, &decoded, marker, now, exists)
 }
 
 /// Stage, verify and swap (§4.4 steps 3–4).
@@ -929,7 +888,6 @@ fn finish_install(
     mut marker: SkillMarker,
     now: SystemTime,
     exists: bool,
-    backup_path: Option<String>,
 ) -> AppResult<InstallOutcome> {
     marker.installed_at = rfc3339(now);
     let staging = unique_sibling(root, STAGING_PREFIX);
@@ -938,28 +896,22 @@ fn finish_install(
         return Err(e);
     }
     swap_in(root, &staging, dir, exists)?;
-    Ok(InstallOutcome {
-        status: InstallStatus::Installed,
-        backup_path,
-        detail: None,
-    })
+    Ok(install_outcome(InstallStatus::Installed, None))
 }
 
+/// `delete` removes a clean copy. A copy the person edited is RELEASED instead
+/// (only the marker goes, the folder stays theirs): no backup is kept anywhere,
+/// so deleting it would lose their work.
 fn remove_from(
     root: &Path,
-    backups: &Path,
     name: &str,
     owner: &SkillOwner,
     mode: RemoveMode,
-    now: SystemTime,
 ) -> AppResult<RemoveOutcome> {
     validate_name(name)?;
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let dir = root.join(name);
-    let outcome = |status| RemoveOutcome {
-        status,
-        backup_path: None,
-    };
+    let outcome = |status| RemoveOutcome { status };
     match fs::symlink_metadata(&dir) {
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
             return Ok(outcome(RemoveStatus::Conflict))
@@ -976,16 +928,11 @@ fn remove_from(
     if !same_owner(&marker, owner) {
         return Ok(outcome(RemoveStatus::Conflict));
     }
-    if mode == RemoveMode::Release {
+    if mode == RemoveMode::Release || !drifted_files(&dir, &marker.files).is_empty() {
         // `managed_marker` only reads a regular file, so this never unlinks a symlink target.
         fs::remove_file(dir.join(MARKER))?;
         return Ok(outcome(RemoveStatus::Released));
     }
-    let backup_path = if drifted_files(&dir, &marker.files).is_empty() {
-        None
-    } else {
-        Some(backup_dir(&dir, backups, name, now)?.display().to_string())
-    };
     // Rename aside first so tools never see a half-deleted skill; a leftover
     // `.baalda-old-*` is swept by the next scan.
     let old = unique_sibling(root, OLD_PREFIX);
@@ -993,10 +940,7 @@ fn remove_from(
     if let Err(e) = fs::remove_dir_all(&old) {
         log::warn!("[skills] couldn't remove {}: {e}", old.display());
     }
-    Ok(RemoveOutcome {
-        status: RemoveStatus::Removed,
-        backup_path,
-    })
+    Ok(outcome(RemoveStatus::Removed))
 }
 
 // ---- Upload reading (§4.5) ------------------------------------------------------
@@ -1297,16 +1241,6 @@ fn export_zip(dest: &Path, name: &str, files: &[SkillFilePayload]) -> AppResult<
         return Err(e);
     }
     Ok(())
-}
-
-fn backups_root(app: &tauri::AppHandle) -> AppResult<PathBuf> {
-    let dir = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| AppError::new(format!("Couldn't locate the local app-data folder: {e}")))?
-        .join("skill-backups");
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
 }
 
 /// File work runs off the main thread; hashing a 25 MiB skill is not free.
@@ -2025,12 +1959,9 @@ pub async fn skills_scan(window: Webview, target: SkillTarget) -> AppResult<Vec<
     blocking(move || scan_root(&resolve_root(target)?, SystemTime::now())).await
 }
 
-/// Takes `app` beyond the spec's argument list (Tauri injects it; the JS call
-/// is unchanged) because a forced install writes its backup into app data.
 #[tauri::command]
 pub async fn skills_install(
     window: Webview,
-    app: tauri::AppHandle,
     target: SkillTarget,
     name: String,
     marker: SkillMarker,
@@ -2043,7 +1974,6 @@ pub async fn skills_install(
         let root = resolve_root(target)?;
         install_skill(
             &root,
-            &backups_root(&app)?,
             &name,
             marker,
             &files,
@@ -2058,7 +1988,6 @@ pub async fn skills_install(
 #[tauri::command]
 pub async fn skills_remove(
     window: Webview,
-    app: tauri::AppHandle,
     target: SkillTarget,
     name: String,
     owner: SkillOwner,
@@ -2067,14 +1996,7 @@ pub async fn skills_remove(
     trusted_window(&window)?;
     blocking(move || {
         let root = resolve_root(target)?;
-        remove_from(
-            &root,
-            &backups_root(&app)?,
-            &name,
-            &owner,
-            mode.unwrap_or_default(),
-            SystemTime::now(),
-        )
+        remove_from(&root, &name, &owner, mode.unwrap_or_default())
     })
     .await
 }
@@ -2100,12 +2022,6 @@ pub async fn skills_export_zip(
 ) -> AppResult<()> {
     trusted_window(&window)?;
     blocking(move || export_zip(Path::new(&dest), &name, &files)).await
-}
-
-#[tauri::command]
-pub async fn skills_backups_dir(window: Webview, app: tauri::AppHandle) -> AppResult<String> {
-    trusted_window(&window)?;
-    blocking(move || Ok(backups_root(&app)?.display().to_string())).await
 }
 
 /// Read-only inventory of every skill the AI tools on this machine can see.
@@ -2203,18 +2119,12 @@ mod tests {
     struct Env {
         _tmp: tempfile::TempDir,
         root: PathBuf,
-        backups: PathBuf,
     }
 
     fn env() -> Env {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("home/.claude/skills");
-        let backups = tmp.path().join("app-data/skill-backups");
-        Env {
-            _tmp: tmp,
-            root,
-            backups,
-        }
+        Env { _tmp: tmp, root }
     }
 
     fn install(
@@ -2225,7 +2135,6 @@ mod tests {
     ) -> AppResult<InstallOutcome> {
         install_into(
             &e.root,
-            &e.backups,
             "demo",
             marker_for(files, version),
             files,
@@ -2241,10 +2150,6 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with(".baalda-"))
             .collect()
-    }
-
-    fn backup_count(e: &Env) -> usize {
-        fs::read_dir(&e.backups).map(|d| d.count()).unwrap_or(0)
     }
 
     #[cfg(unix)]
@@ -2475,7 +2380,6 @@ mod tests {
         )];
         let out = install(&e, &v2, 2, false).unwrap();
         assert_eq!(out.status, InstallStatus::Installed);
-        assert!(out.backup_path.is_none());
         let dir = e.root.join("demo");
         assert!(
             !dir.join("scripts").exists(),
@@ -2483,7 +2387,6 @@ mod tests {
         );
         assert_eq!(read_marker(&dir).unwrap().version, 2);
         assert!(leftovers(&e.root).is_empty());
-        assert_eq!(backup_count(&e), 0);
     }
 
     #[test]
@@ -2509,11 +2412,9 @@ mod tests {
         assert_eq!(
             remove_from(
                 &e.root,
-                &e.backups,
                 "demo",
                 &owner(),
                 RemoveMode::Delete,
-                SystemTime::now()
             )
             .unwrap()
             .status,
@@ -2531,7 +2432,6 @@ mod tests {
         m.server_url = "https://other.test".into();
         let out = install_into(
             &e.root,
-            &e.backups,
             "demo",
             m,
             &files,
@@ -2545,7 +2445,7 @@ mod tests {
     }
 
     #[test]
-    fn drift_is_edited_until_forced_then_backed_up() {
+    fn drift_is_edited_until_forced_then_replaced() {
         let e = env();
         install(&e, &skill_files("v1"), 1, false).unwrap();
         let dir = e.root.join("demo");
@@ -2570,16 +2470,7 @@ mod tests {
 
         let out = install(&e, &skill_files("v2"), 2, true).unwrap();
         assert_eq!(out.status, InstallStatus::Installed);
-        let backup = PathBuf::from(out.backup_path.unwrap());
-        assert!(backup.starts_with(&e.backups));
-        assert_eq!(
-            fs::read_to_string(backup.join("SKILL.md")).unwrap(),
-            "my local change"
-        );
-        assert_eq!(
-            fs::read_to_string(backup.join("notes.txt")).unwrap(),
-            "added"
-        );
+        assert_ne!(fs::read_to_string(dir.join("SKILL.md")).unwrap(), "my local change");
         assert!(!dir.join("notes.txt").exists());
         assert_eq!(read_marker(&dir).unwrap().version, 2);
         assert!(leftovers(&e.root).is_empty());
@@ -2593,7 +2484,6 @@ mod tests {
         files[1].content_base64 = STANDARD.encode(b"tampered");
         let err = install_into(
             &e.root,
-            &e.backups,
             "demo",
             marker,
             &files,
@@ -2613,7 +2503,6 @@ mod tests {
         m.files.insert("extra.md".into(), "0".repeat(64));
         assert!(install_into(
             &e.root,
-            &e.backups,
             "demo",
             m,
             &files,
@@ -2625,7 +2514,6 @@ mod tests {
         m.name = "other".into();
         assert!(install_into(
             &e.root,
-            &e.backups,
             "demo",
             m,
             &files,
@@ -2635,7 +2523,6 @@ mod tests {
         .is_err());
         assert!(install_into(
             &e.root,
-            &e.backups,
             "../x",
             marker_for(&files, 1),
             &files,
@@ -2661,8 +2548,8 @@ mod tests {
         assert_eq!(scan[0].edited_files, ["link.txt"]);
 
         let out = install(&e, &skill_files("v2"), 2, true).unwrap();
-        let backup = PathBuf::from(out.backup_path.unwrap());
-        assert!(!backup.join("link.txt").exists(), "backups skip symlinks");
+        assert_eq!(out.status, InstallStatus::Installed);
+        assert!(!dir.join("link.txt").exists());
         assert_eq!(fs::read_to_string(&outside).unwrap(), "secret");
     }
 
@@ -2684,7 +2571,6 @@ mod tests {
     ) -> InstallOutcome {
         install_skill(
             &e.root,
-            &e.backups,
             "demo",
             marker,
             files,
@@ -2706,7 +2592,6 @@ mod tests {
             .unwrap();
         let out = install(&e, &files, 1, false).unwrap();
         assert_eq!(out.status, InstallStatus::Adopted);
-        assert!(out.backup_path.is_none());
         assert_eq!(
             fs::metadata(dir.join("SKILL.md"))
                 .unwrap()
@@ -2758,7 +2643,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_unmanaged_backs_up_then_installs() {
+    fn replace_unmanaged_replaces_without_a_copy() {
         let e = env();
         let dir = e.root.join("demo");
         write(&dir, "SKILL.md", b"my own skill");
@@ -2766,30 +2651,19 @@ mod tests {
         let files = skill_files("v1");
         let out = install_replacing(&e, &files, marker_for(&files, 1));
         assert_eq!(out.status, InstallStatus::Installed);
-        let backup = PathBuf::from(out.backup_path.unwrap());
-        assert!(backup.starts_with(&e.backups));
-        assert_eq!(
-            fs::read_to_string(backup.join("SKILL.md")).unwrap(),
-            "my own skill"
-        );
-        assert_eq!(
-            fs::read_to_string(backup.join("notes/keep.md")).unwrap(),
-            "keep me"
-        );
         assert!(!dir.join("notes").exists());
         assert_eq!(read_marker(&dir).unwrap().version, 1);
         assert!(leftovers(&e.root).is_empty());
     }
 
     #[test]
-    fn replace_unmanaged_backs_up_another_owners_copy_then_installs() {
+    fn replace_unmanaged_replaces_another_owners_copy() {
         let e = env();
         let files = skill_files("v1");
         let mut theirs = marker_for(&files, 1);
         theirs.user_id = Some("u2".into());
         install_into(
             &e.root,
-            &e.backups,
             "demo",
             theirs.clone(),
             &files,
@@ -2800,7 +2674,6 @@ mod tests {
         // A sync run (no replace flag) still leaves another owner's copy alone.
         let out = install_into(
             &e.root,
-            &e.backups,
             "demo",
             marker_for(&skill_files("v2"), 2),
             &skill_files("v2"),
@@ -2812,13 +2685,10 @@ mod tests {
             (out.status, out.detail.as_deref()),
             (InstallStatus::Conflict, Some("other_owner"))
         );
-        assert_eq!(backup_count(&e), 0);
 
-        // "Use team version": theirs is backed up, then ours takes the folder.
+        // "Use team version": ours takes the folder.
         let out = install_replacing(&e, &skill_files("v2"), marker_for(&skill_files("v2"), 2));
         assert_eq!(out.status, InstallStatus::Installed);
-        assert!(out.backup_path.is_some());
-        assert_eq!(backup_count(&e), 1);
         let dir = e.root.join("demo");
         assert_eq!(read_marker(&dir).unwrap().user_id, marker_for(&files, 1).user_id);
         assert_eq!(read_marker(&dir).unwrap().version, 2);
@@ -2829,7 +2699,6 @@ mod tests {
         fs::write(dir.join(MARKER), serde_json::to_vec(&m).unwrap()).unwrap();
         let out = install_replacing(&e, &files, marker_for(&files, 1));
         assert_eq!(out.status, InstallStatus::Installed);
-        assert_eq!(backup_count(&e), 2);
     }
 
     #[cfg(unix)]
@@ -2847,7 +2716,6 @@ mod tests {
         for replace in [false, true] {
             let out = install_skill(
                 &e.root,
-                &e.backups,
                 "demo",
                 marker_for(&files, 1),
                 &files,
@@ -2863,7 +2731,6 @@ mod tests {
         }
         assert!(!real.join(MARKER).exists());
         assert!(is_symlink(&e.root.join("demo")));
-        assert_eq!(backup_count(&e), 0);
     }
 
     #[cfg(unix)]
@@ -2906,11 +2773,9 @@ mod tests {
         assert_eq!(
             remove_from(
                 &e.root,
-                &e.backups,
                 "demo",
                 &owner(),
                 RemoveMode::Delete,
-                SystemTime::now()
             )
             .unwrap()
             .status,
@@ -2922,11 +2787,9 @@ mod tests {
         assert_eq!(
             remove_from(
                 &e.root,
-                &e.backups,
                 "demo",
                 &stranger,
                 RemoveMode::Delete,
-                SystemTime::now()
             )
             .unwrap()
             .status,
@@ -2935,40 +2798,28 @@ mod tests {
         assert!(e.root.join("demo").exists());
         let out = remove_from(
             &e.root,
-            &e.backups,
             "demo",
             &owner(),
             RemoveMode::Delete,
-            SystemTime::now(),
         )
         .unwrap();
         assert_eq!(out.status, RemoveStatus::Removed);
-        assert!(out.backup_path.is_none());
         assert!(!e.root.join("demo").exists());
         assert!(leftovers(&e.root).is_empty());
     }
 
     #[test]
-    fn drifted_remove_backs_up_first() {
+    fn drifted_delete_releases_instead_of_deleting() {
         let e = env();
         install(&e, &skill_files("v1"), 1, false).unwrap();
         fs::write(e.root.join("demo/SKILL.md"), "edited").unwrap();
-        let out = remove_from(
-            &e.root,
-            &e.backups,
-            "demo",
-            &owner(),
-            RemoveMode::Delete,
-            SystemTime::now(),
-        )
-        .unwrap();
-        assert_eq!(out.status, RemoveStatus::Removed);
-        let backup = PathBuf::from(out.backup_path.unwrap());
+        let out = remove_from(&e.root, "demo", &owner(), RemoveMode::Delete).unwrap();
+        assert_eq!(out.status, RemoveStatus::Released);
         assert_eq!(
-            fs::read_to_string(backup.join("SKILL.md")).unwrap(),
+            fs::read_to_string(e.root.join("demo/SKILL.md")).unwrap(),
             "edited"
         );
-        assert!(!e.root.join("demo").exists());
+        assert!(!rel_marker(&e).exists());
     }
 
     // ---- uploads
@@ -3199,7 +3050,6 @@ mod tests {
         theirs.user_id = Some("u2".into());
         install_into(
             &e.root,
-            &e.backups,
             "demo",
             theirs,
             &files,
@@ -3214,11 +3064,9 @@ mod tests {
         for mode in [RemoveMode::Delete, RemoveMode::Release] {
             let out = remove_from(
                 &e.root,
-                &e.backups,
                 "demo",
                 &owner(),
                 mode,
-                SystemTime::now(),
             )
             .unwrap();
             assert_eq!(out.status, RemoveStatus::Conflict);
@@ -3260,7 +3108,6 @@ mod tests {
             m.user_id = user;
             let err = install_into(
                 &e.root,
-                &e.backups,
                 "demo",
                 m,
                 &files,
@@ -3279,11 +3126,9 @@ mod tests {
         assert_eq!(
             remove_from(
                 &e.root,
-                &e.backups,
                 "demo",
                 &owner(),
                 RemoveMode::Release,
-                SystemTime::now()
             )
             .unwrap()
             .status,
@@ -3297,11 +3142,9 @@ mod tests {
         stranger.skill_id = "s2".into();
         let out = remove_from(
             &e.root,
-            &e.backups,
             "demo",
             &stranger,
             RemoveMode::Release,
-            SystemTime::now(),
         )
         .unwrap();
         assert_eq!(out.status, RemoveStatus::Conflict);
@@ -3309,22 +3152,18 @@ mod tests {
 
         let out = remove_from(
             &e.root,
-            &e.backups,
             "demo",
             &owner(),
             RemoveMode::Release,
-            SystemTime::now(),
         )
         .unwrap();
         assert_eq!(out.status, RemoveStatus::Released);
-        assert!(out.backup_path.is_none());
         assert!(!rel_marker(&e).exists());
         assert_eq!(
             fs::read_to_string(dir.join("SKILL.md")).unwrap(),
             "kept local edit"
         );
         assert!(dir.join("scripts/run.sh").exists());
-        assert_eq!(backup_count(&e), 0);
 
         let scan = scan_root(&e.root, SystemTime::now()).unwrap();
         assert_eq!(scan[0].status, InstalledStatus::Unmanaged);
@@ -3336,11 +3175,9 @@ mod tests {
         assert_eq!(
             remove_from(
                 &e.root,
-                &e.backups,
                 "demo",
                 &owner(),
                 RemoveMode::Delete,
-                SystemTime::now()
             )
             .unwrap()
             .status,
@@ -3395,7 +3232,6 @@ mod tests {
         marker.name = "demo".into();
         install_into(
             &agents,
-            &home.join("backups"),
             "demo",
             marker,
             &files,
@@ -3824,7 +3660,6 @@ mod tests {
     fn timestamps_format_in_utc() {
         let at = UNIX_EPOCH + Duration::from_secs(1_793_016_245); // 2026-10-26T12:04:05Z
         assert_eq!(rfc3339(at), "2026-10-26T12:04:05Z");
-        assert_eq!(backup_stamp(at), "20261026-120405");
         assert_eq!(
             rfc3339(UNIX_EPOCH + Duration::from_secs(951_782_400)),
             "2000-02-29T00:00:00Z"
