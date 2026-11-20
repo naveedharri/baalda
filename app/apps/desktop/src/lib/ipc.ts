@@ -1094,8 +1094,23 @@ export const rebuildIndex = (expectedEpoch?: VaultEpoch) =>
   invoke<void>("rebuild_index", { expectedEpoch: expectedEpoch ?? null });
 
 /** Read a dropped/picked host file by absolute path (not vault-scoped). */
-export const readExternalFile = (path: string) =>
-  invoke<ArrayBuffer>("read_external_file", { path }).then((b) => new Uint8Array(b));
+/** Thrown by {@link readExternalFile} when the file is over `maxBytes`; it was
+ *  refused from its size alone, never read. */
+export class ExternalFileTooLarge extends Error {
+  constructor(readonly bytes: number) {
+    super(`file too large: ${bytes}`);
+    this.name = "ExternalFileTooLarge";
+  }
+}
+
+export const readExternalFile = (path: string, maxBytes?: number) =>
+  invoke<ArrayBuffer>("read_external_file", { path, maxBytes: maxBytes ?? null }).then(
+    (b) => new Uint8Array(b),
+    (e: unknown) => {
+      const m = /^file too large: (\d+)$/.exec(String(e));
+      throw m ? new ExternalFileTooLarge(Number(m[1])) : e;
+    },
+  );
 
 // ---- OS keychain (Phase 2 auth, spec 04 §7) -------------------------------
 // Session tokens live in the OS keychain, never in localStorage/plaintext.

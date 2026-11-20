@@ -89,6 +89,11 @@ close button; closing the panel restores the caption controls. macOS keeps its o
 and Linux its native titlebar. Tauri drag regions retain drag and double-click
 maximize behavior.
 
+The main window sets `backgroundThrottling: "disabled"` (`tauri.conf.json`, pinned by
+`src/__tests__/backgroundThrottling.test.ts`): WKWebView otherwise suspends a background page after a
+few minutes, and since sync runs in that page, remote edits stopped reaching disk until focus (#405).
+macOS 14+ only; Windows/Linux ignore it.
+
 ## Build & run
 
 Prereqs: Node ≥ 22, Rust/cargo, Docker (for Postgres). Run `pnpm install` once from `app/`.
@@ -126,7 +131,7 @@ Commands registered in `lib.rs`; `AppState` (`state.rs`) is one `Mutex` over `{ 
 Errors: single `AppError(String)` (`error.rs`).
 - `vault.rs` — path safety (`resolve_in_vault` rejects `..`/absolute/escape); ignores `.context/`, `.git`, dotfiles.
 - `tree.rs` — recursive walk to nested `TreeNode`; surfaces exactly `vault.rs ALLOWED_EXTS` (notes,
-  images, pdf, office docs, audio/video, csv/json/code, zip) and hides the root `attachments/` folder.
+  images, pdf, office docs, audio/video, csv/json/code, archives zip/tar/tgz/gz/7z) and hides the root `attachments/` folder.
   **`ALLOWED_EXTS` and `NOTE_EXTS` are ONE contract with the desktop's format registry**
   (`src/lib/formats.ts` — `SURFACED_EXTS`/`NOTE_EXTS`, the single authority for what a file is: how it
   surfaces, opens, embeds, uploads and syncs) and with the `NOTE_EXTS` literals in `sync/registry.ts` /
@@ -261,7 +266,13 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   re-materializes them. With the root gone it is still refused silently, because an unmounted volume
   looks exactly like a bulk delete. A mapped FOLDER that vanishes while an unmapped folder appears is
   paired first (`drainFolderMoves`: ≥80% of its notes present at the same sub-path with matching content
-  ⇒ ONE server folder move, every id kept; below that, per-note pairing then the drain). A vanished vault
+  ⇒ ONE server folder move, every id kept; below that, per-note pairing then the drain). A mapped folder
+  that vanished and was NOT a move is deleted on the server after its notes and files
+  (`propagateGoneFolders` → `registry.deleteVanishedFolder` → `DELETE /api/folders/:id?ifEmpty=1`,
+  server feature `folder-delete-if-empty`; 409 `folder_not_empty` or a creator refusal keeps it),
+  deepest first, under the same cap (before this, a folder deleted on disk came back empty on every
+  device). A refused delete of a teammate's tree binary is put back like a note
+  (`BinaryDeleteQueue.onNotCreator` → `restoredFromServer` with `NOT_CREATOR_DETAIL`). A vanished vault
   root pauses every materialize/register/delete step, closes the tabs and offers Restore here (recreate
   it at the old path and sync down — the Set-up prompt's empty-folder path) or Locate folder… (its
   open-folder path) from the banner, Settings → Vaults and the launch prompt (#228). A folder that lived INSIDE the vaults root is not asked about
@@ -315,7 +326,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   Doc-bound tree binaries sync three-way (`attachments.ts planBinarySync`) against a per-`files`-id
   base sha persisted as `config.json fileBases`: local==base ⇒ download the teammate's version,
   server==base ⇒ upload with `baseSha` (server 409 `stale_base` if it moved on), no base or both
-  changed ⇒ server canonical, local copy to `.context/trash` (`copy_to_trash`) first — never a flip.
+  changed ⇒ server canonical, the local bytes replaced with no copy kept (2026-11-19) — never a flip.
   `isSafeTreeBinaryRelPath` must reject everything Rust's `ensure_tree_binary_rel` refuses (including
   `DENIED_DIRS`). A download that fails permanently (sha mismatch or path refusal) is remembered per
   blob id+sha (`undownloadable`) and not retried until the server's sha changes. Uploads verify what
@@ -323,8 +334,16 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   fails with `file changed during upload` (never completed; the path's cached sha is dropped), and the
   sync pass skips a binary modified within `UPLOAD_QUIET_MS` (3 s), retrying on one shared settle
   timer. Multipart parts check length only.
+  An `attachments/` drop uploads unless the server lists the same sha as an `attachments/` row
+  (`planBinarySync attachmentShas`): a tree file holding the same bytes does not count, since
+  teammates materialize embeds only from `attachments/` rows (a PDF in a folder and the same PDF
+  dropped into a note left the embed missing on every other device).
+  Drops and pastes are size-checked BEFORE the bytes are read: `ipc.readExternalFile(path,
+  preReadLimit(ext))` refuses in Rust from file metadata (`ExternalFileTooLarge`) and the paste path
+  checks `File.size`; formats that transcode (`transcodeTo`) are read first, since their cap
+  applies after conversion. Reading a 600 MB drop whole used to push the app past 700 MB.
   A local binary this device knows by a `files` id the server TOMBSTONED (`GET /vaults/:id/file-tombstones`,
-  ids from `file_tombstones` with no live row) is `toTrash`: copied to `.context/trash`, removed, its id
+  ids from `file_tombstones` with no live row) is `toTrash`: removed outright, its id
   forgotten — never re-uploaded, which used to undo a teammate's delete (#215). Id match only; a
   failed listing means no suppression that pass.
   Clients advertising `bulk-regrant` receive `bootstrap` for live grants of 25 or more
@@ -341,9 +360,14 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   (`rel_path_is_ignored` FIRST, so
   `.context` AND `.context/config.json` are refused, then a directory refusal; `deletePath` stays the
   sidebar's recursive one), regardless of authorship. A revoked removal also `docStore.drop`s +
-  `ipc.clearYjsDoc`s, so `ready` stops re-naming it. The deletion cap is never lifted. Separate
-  read-only reconciliation preserves a divergent local edit in `.context/trash` before replacing it
-  with the server's canonical content; deletion and revocation never create those recovery copies.
+  `ipc.clearYjsDoc`s, so `ready` stops re-naming it; a DELETION drops the local CRDT the same way
+  (`noteRemoved`, 2026-11-19), so a checkpoint restore of a purged note can never merge stale ops into
+  it. The deletion cap is never lifted. **Nothing is ever written to `.context/trash` any more
+  (decided 2026-11-19, "deleted means deleted"):** deletes, revocations, read-only reconciliation,
+  refused read-only edits, unsendable edits, binary three-way conflicts and server-wins merges all
+  replace or remove the local bytes without a copy, and say so in the reconcile summary / Activity.
+  The Rust `trash_note`/`write_trash_copy`/`copy_to_trash` commands remain only so older copies stay
+  listable.
 - **Offline reconciliation** (`sync/ackedSv.ts`, `registry.ts`, `reconcileReport.ts`): the gate for an
   inbound delete / revocation is UNSEEN WORK, not `pushed` (a badge). `ackedSv` is the per-doc Yjs state
   vector the server is known to cover — recorded on Hocuspocus `synced`, a batch-push ack, the per-doc uploader's flushed editable
@@ -351,11 +375,15 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   `ready.covered` (NOT on a backfill/bootstrap apply: a server diff proves nothing about local ops),
   merged by max, persisted as `config.json ackedSv` — and
   `registry.unseenWorkVerdict` answers `none` (stale device: accept outright), `unseen` (local ops or a
-  file hash ≠ `diskBase` the server never saw: recovery copy under `.context/trash` FIRST, then apply)
-  or `unknown` (no content baseline). For an explicit deletion, a matching local index `doc_id`
-  and path establish identity even without a per-document reconciliation baseline: preserve a
-  recovery copy first, then remove the active file. An unprovable identity still stays on disk;
-  a tombstone must never remove an unrelated file reusing its path. A same-path create from two devices stays
+  file hash ≠ `diskBase` the server never saw)
+  or `unknown` (no content baseline). Since 2026-11-19 the verdict no longer keeps
+  anything: an inbound delete or revocation removes the file outright, no copy, and unsent edits
+  are NOT pushed into the deleted note either. For an explicit deletion, a matching local index
+  `doc_id` and path establish identity even without a per-document reconciliation baseline. An unprovable identity still stays on disk;
+  a tombstone must never remove an unrelated file reusing its path. A REVOCATION
+  (`registry.revokedVerdict`) likewise removes the note outright, unsent work included; an
+  unrelated local id at the path still stays. `store.openNoteByPath` refuses a path the server answered
+  `not_readable` for (`registry.isHiddenPath`) instead of opening its local bytes. A same-path create from two devices stays
   two notes: the later one by `created_at` is renamed `<stem> (conflict YYYY-MM-DD).<ext>`
   (`conflictPath`) and registered as its own note — never adopted onto the other's id. A rename made
   while the app was closed is paired back by content hash at startup (`pairClosedAppRenames`) so the
@@ -390,8 +418,8 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   the server's state, fold the file in with the uploader's post-pull routine, push the result
   through docs/batch WITHOUT `expectEmpty`, then ack; without `bootstrap-only` or on a failed pull
   it falls back to the per-doc uploader. **Decided 2026-10-04:** on `adopted`/`conflict` with
-  differing text the SERVER text wins, the local text is saved to `.context/trash` (the fresh
-  bridge's `unagreedFile` → `saveAside`) and reported once as `conflictKeptServer` in the reconcile
+  differing text the SERVER text wins, the local text is replaced with no copy (2026-11-19; the
+  fresh bridge's `unagreedFile` → `saveAside` now only reports) and reported once as `conflictKeptServer` in the reconcile
   banner and the Activity review; a clean adopt (empty or identical local text) reports nothing. This is not the
   `conflictPath` rule: `resolveSamePathConflicts` runs on the pull BEFORE registration and only for
   an unmapped non-empty local file at the path of a server note this device has never agreed on, in
@@ -794,8 +822,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   revert (which needs vault-wide read, 403 `no_vault_wide_access`). `edit > view > none`; no grant → no sync access (403 at token mint). A blob that carries a
   `doc_id` is judged by this same resolver (`canReadAttachment` / `canWriteBlob` in
   `permissions/http-gates.ts`), so a folder share reaches the FILES in it and not only the notes;
-  a hash-named `attachments/` blob has no doc to resolve and keeps the older heuristic — vault-wide
-  readers see all, a scoped member only what a readable note references (matched on each note's
+  a hash-named `attachments/` blob has no doc to resolve and keeps the older heuristic — readers of
+  EVERY item see all (`vault-docs.ts readsWholeVault`: a vault-wide grant AND no per-user or team
+  `denied` row on a folder/file in the vault AND no Private join snapshot hiding anything; also gates
+  attachment search and whole-vault checkpoint revert), everyone else only what a readable note references (matched on each note's
   reference excerpt `note_index.ref_text` when its `ref_heads` cover the anchors, else its full text;
   `blobs/ref-windows.ts`, migration 063, #343). **New
   vaults are shared with their team by default** — `POST /api/vaults` creates the org-wide `edit`
@@ -856,22 +886,22 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   hard-deleted folder's ancestry from `folder_tombstones` (`d.deleted_at >= n.created_at`, so a dead
   tombstone cannot claim a note created later) — without it a folder delete reaches a share-only
   member as a REVOCATION (no tombstone) instead of a deletion.
-- `trash/` — per-vault note Trash (migration 035). Every soft delete (`softDeleteSet` in
-  `trash/retention.ts`: single, batch, folder cascade, MCP, checkpoint revert) stamps `deleted_by` and
-  `purge_after = now() + TRASH_RETENTION_DAYS` (30). Inside that window pushes into the deleted doc are
-  ACCEPTED — token mint, `onAuthenticate` and the batch push resolve through `trash/access.ts
-  syncPermission` (live resolver first, then `effectivePermission(..., { includeDeleted: true })`; a
-  hard-deleted folder's shares no longer reach it) — and the note stays deleted. `DELETE /notes/:id`
-  now evicts live sockets like MCP. `GET /vaults/:id/trash` (member; `listDeletedReadableDocsInVault`;
-  `hasUnsyncedContributions` = a `doc_updates` row after `deleted_at`; cap 2000) and
-  `POST /notes/:id/restore` (edit on the tombstoned doc or owner/admin; taken path ⇒
-  `<stem> (restored YYYY-MM-DD).<ext>`; recreates a hard-deleted parent chain under its
-  `folder_tombstones` ids; 410 `purged` once purged; still allowed past `purge_after` until the job runs)
-  live in `trash/service.ts`. Version list/read work on a deleted note; revert is 409 `note_deleted`.
-  `purgeExpiredTrash` (hourly, `trash/scheduler.ts`, started only from `index.ts`) stamps `purged_at` and
-  drops CRDT, versions, index/links/blob_refs and per-note shares but KEEPS the `notes` row as a permanent
-  tombstone, so a device offline past the window still hears "deleted" rather than an absent id (which
-  would land on the revocation path). The vault channel's `ready` names `tombstones` (held ids that are
+- `trash/` — deleted notes (migration 035). **No Trash window since 2026-11-19: a deleted note is
+  deleted.** Every soft delete (`softDeleteSet` in `trash/retention.ts`: single, batch, folder cascade,
+  MCP, checkpoint revert) stamps `deleted_by` and `purge_after = now()`, and `purgeDeletedSoon`
+  (`trash/service.ts`) runs `purgeExpiredTrash` for those ids 2 s later (after the socket
+  evictions), then `scrubPurgedContent` once more at 60 s for a late socket write; the hourly sweep
+  (`trash/scheduler.ts`, started only from `index.ts`) is the backstop for both. Notes deleted under
+  the old 30-day rule keep their date. The purge compares against the DATABASE clock. Pushes into a
+  deleted doc are refused at once (`trash/access.ts syncPermission` finds no window). The purge stamps
+  `purged_at` and drops CRDT, versions, index/links/blob_refs and per-note shares but KEEPS the
+  `notes` row as a permanent content-free tombstone, so an offline device still hears "deleted"
+  rather than an absent id (which
+  would land on the revocation path). Checkpoints keep the text they captured (`note_texts`, still
+  referenced by `vault_checkpoint_docs`), so a whole-vault revert brings a purged note back; revert
+  clears `purged_at`. `GET /vaults/:id/trash`, `trash-content` and `POST /notes/:id/restore` stay for
+  older desktops and find nothing once purged (410 `purged`); the desktop no longer lists or restores
+  server Trash (`activitySource.tsx useTrash` fetches nothing). The vault channel's `ready` names `tombstones` (held ids that are
   soft-deleted, purged included; never also in `revoked`) and `covered` (manifest docs whose state vector
   the server covers; omitted in live-only), and `refreshAcl` keeps deleted docs out of live
   `revoked`/`drop`. A read-only socket's dropped edit is reported to its user as a `rejected` frame
@@ -1014,7 +1044,7 @@ plaintext token per note; revoke = DELETE), `vault_checkpoint_blobs` + `checkpoi
 ## Server env vars (`app/apps/server/.env`)
 `DATABASE_URL` (Docker host port **5439**→5432) · `JWT_SECRET` (Better Auth crypto **and** sync JWTs —
 change in prod) · `BETTER_AUTH_URL` · `PORT` (3010) · `HOCUSPOCUS_PORT` (3011) · `SYNC_TOKEN_TTL_SECONDS`
-(600) · `COMPACTION_THRESHOLD` (50) · `TRASH_RETENTION_DAYS` (30) · `CORS_ORIGINS` (optional) · `OPENAI_API_KEY` (optional) ·
+(600) · `COMPACTION_THRESHOLD` (50) · `CORS_ORIGINS` (optional) · `OPENAI_API_KEY` (optional) ·
 `EMAIL_FROM` + `SMTP_URL` | `RESEND_API_KEY` (optional; turns on password reset, sign-up verification
 and invitation emails — `src/email/mailer.ts`; unset ⇒ none offered, like Google OAuth) · `BAALDA_ADMIN_TOKEN` (optional, ≥32 chars; turns on the messages admin routes, `docs/MESSAGES.md`) · `BUG_REPORT_EMAIL` (optional; with email on, the desktop's sidebar bug icon emails reports
 there, Reply-To = reporter — `http/routes/bug-reports.ts`; unset ⇒ the icon is hidden) ·
@@ -1255,12 +1285,10 @@ Tree-file authorship uses `files.created_by` consistently in direct, prefetched 
 permission resolution and readable-set listings. Explicit denies and vault postures still apply.
 Migration 057 records the owner as creator of null-creator files, notes and folders only in a sole-owner legacy vault with no ACL rows;
 it writes no share or audit row and never changes an explicit rule. Revoked confirmed attachments are
-DELETED from the ex-reader's disk (`registry.ts removeRevokedBinary`, 2026-11-03: a recovery copy left
-them readable in `.context/trash` for good), but only while the file still hashes to its agreed
-`fileBases` sha; a file edited here since (or with no base, or an unreadable hash) and a file this
-user created move atomically to `.context/trash` instead, like a revoked note's unseen work. A failed removal leaves the
-file and identity intact. Activity reports kept copies and reveals binaries in the file manager;
-binary recovery must never use the Markdown comparison or text-restore pipeline.
+DELETED from the ex-reader's disk outright (`registry.ts removeRevokedBinary`; since 2026-11-19 an
+edited copy too, no `.context/trash` copy). `attachments/` drops only now-hidden notes embed leave
+the same way (#408, `settleHiddenEmbeds`); a drop any local note still names is kept. A failed
+removal leaves the file and identity intact.
 
 Account Settings → Connection remembers up to eight normalized server addresses locally,
 with tokens kept only in the per-server OS keychain. One server is active at a time.

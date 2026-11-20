@@ -603,7 +603,9 @@ fn broken_links(index: &Index, census: &Census, scans: &[NoteScan]) -> AppResult
                     parse::parse_note(text, "")
                         .links
                         .into_iter()
-                        .map(|link| link.raw)
+                        // The raw text (wikilinks) and the stored target
+                        // (markdown links store their resolved path).
+                        .flat_map(|link| [parse::stored_target(&scan.rel, &link), link.raw])
                         .collect(),
                 )
             })

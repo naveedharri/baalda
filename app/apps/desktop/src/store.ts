@@ -2794,6 +2794,12 @@ export const useStore = create<AppStore>((set, get) => ({
         }
         if (!stillOpening()) return;
       }
+      // The server refused this path as one this user cannot read. Opening the
+      // local bytes would show exactly what the refusal withholds, so don't.
+      if (get().syncEnabled && syncManager.registry.isHiddenPath?.(path)) {
+        toast(`You don't have access to "${title}".`, "error");
+        return;
+      }
       set((s) => ({
         openNote: { path, id: meta?.id ?? null, title },
         noteRemoved: false,

@@ -334,8 +334,9 @@ describe("a note created empty", () => {
     Object.assign(b, { path: REL, serialize: () => remote });
     await sm.openDoc(b, REL);
     await flush();
+    // No copy either way (decided 2026-11-19); a real edit is still reported.
+    expect(ipc.writeTrashCopy).not.toHaveBeenCalled();
     if (kind === "local-edit") {
-      expect(ipc.writeTrashCopy).toHaveBeenCalledWith(REL, expect.any(String), local, 1);
       expect(fakeRegistry.recordFailure).toHaveBeenCalledWith(expect.objectContaining({ docId: DOC }));
     } else {
       expect(ipc.writeTrashCopy).not.toHaveBeenCalled();

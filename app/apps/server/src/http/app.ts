@@ -4,6 +4,7 @@ import { accessAuditRoutes } from "./routes/access-audit.js";
 import { Hono } from "hono";
 import { readFileSync } from "node:fs";
 import { NOTES_WITH_STATE_FEATURE } from "../registry/seed-on-register.js";
+import { FOLDER_DELETE_IF_EMPTY_FEATURE } from "../registry/tree-ops.js";
 import { BOOTSTRAP_ONLY_FEATURE } from "./routes/bootstrap.js";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
@@ -26,10 +27,12 @@ import { createFontRoutes } from "./fonts.js";
 import { createSkillRoutes } from "./routes/skills.js";
 import { SKILL_ACCESS_FEATURE, SKILLS_FEATURE } from "../skills/feature.js";
 import { passwordResetRoutes } from "./routes/password-reset.js";
-import { openLinkRoutes } from "./routes/open-link.js";
+import { openLinkRoutes, publicBaseUrl } from "./routes/open-link.js";
+import { esc } from "./pages.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
 import { ACCESS_BOARD_FEATURE } from "../permissions/access-board.js";
 import { blobRoutes, FILES_WITH_BYTES_FEATURE, setBlobRegistryNotifier } from "./routes/blobs.js";
+import { setAttachmentCleanupNotifier } from "../blobs/attachment-cleanup.js";
 import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
 import { createBulkRoutes } from "./routes/bulk.js";
 import { bootstrapRoutes } from "./routes/bootstrap.js";
@@ -54,6 +57,8 @@ import { createTrashRoutes } from "./routes/trash.js";
 import { createShrinkBrakeRoutes } from "./routes/shrink-brake.js";
 import { createBillingRoutes } from "./routes/billing.js";
 import { PolarBillingProvider } from "../billing/polar.js";
+import { planEnforced } from "../billing/plan.js";
+import { BRAND_NAME } from "../brand.js";
 import type { BillingProvider } from "../billing/provider.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
 import { pool } from "../db/pool.js";
@@ -172,6 +177,71 @@ export function securityTxt(contact: string | undefined, now: Date = new Date())
   ].join("\n");
 }
 
+/**
+ * The page a browser sees at `/`. The managed service points people at
+ * baalda.com. Any other server is someone's own, and sending its visitors to
+ * baalda.com walks them into signing up on the managed service by mistake, so
+ * it says how to use THIS server instead: install the app, choose "Your own
+ * server", or follow the `/open/connect` link that points the app here.
+ * `selfHostedUrl` is this server's public base URL, or null on the managed
+ * service.
+ */
+export function landingPage(selfHostedUrl: string | null): string {
+  const brand = esc(BRAND_NAME);
+  const main = selfHostedUrl
+    ? `<h1>This is a self-hosted ${brand} server</h1>
+  <p>There is no web app here. Notes are written in the ${brand} desktop app, which syncs through this server.</p>
+  <a class="button" href="${esc(selfHostedUrl)}/open/connect">Connect ${brand} to this server</a>
+  <p>Or connect by hand: install ${brand}, choose <strong>Your own server</strong> when it opens
+     (or later in <strong>Account Settings → Connection</strong>), and enter <code>${esc(selfHostedUrl)}</code>.</p>
+  <p><a class="plain" href="https://baalda.com" rel="noopener">Get ${brand}</a></p>`
+    : `<p>This is the ${brand} sync and MCP server. The app lives at <a href="https://baalda.com">baalda.com</a>.</p>`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${brand}</title>
+<link rel="icon" type="image/png" sizes="256x256" href="/icon.png" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         display: grid; place-items: center; min-height: 100vh; margin: 0;
+         background: #f6f5f2; color: #2a2a28; }
+  main { text-align: center; padding: 2rem; }
+  h1 { font-size: 1.2rem; font-weight: 600; }
+  p { color: #6b6b66; max-width: 34rem; margin-left: auto; margin-right: auto; }
+  code { background: #eceae4; border-radius: 6px; padding: 0.1rem 0.35rem; }
+  a.button { display: inline-block; margin: 0.5rem 0 1rem; padding: 0.6rem 1.4rem;
+             border-radius: 999px; background: #2a2a28; color: #fff;
+             text-decoration: none; font-weight: 600; }
+  a.plain { color: #6b6b66; }
+</style>
+</head>
+<body>
+<main>
+  <p><img src="/icon.png" alt="${brand}" width="64" height="64" /></p>
+  ${main}
+</main>
+</body>
+</html>`;
+}
+
+/**
+ * Is this the managed service? Only it runs with plan limits on (Cloud with
+ * billing configured). Keyed on that, not on `BAALDA_DEPLOYMENT` alone: a
+ * self-hoster who runs the image without our compose files never sets that
+ * variable, and must still not be sent to baalda.com.
+ */
+function isManagedService(): boolean {
+  try {
+    return planEnforced();
+  } catch {
+    // An unreadable BAALDA_DEPLOYMENT breaks billing, not the landing page.
+    return false;
+  }
+}
+
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
 
@@ -274,6 +344,8 @@ export function createApp(deps: AppDeps): Hono {
         SKILL_ACCESS_FEATURE,
         // In-app messages (`/api/messages`, docs/MESSAGES.md).
         MESSAGES_FEATURE,
+        // `DELETE /api/folders/:id?ifEmpty=1` (registry/tree-ops.ts).
+        FOLDER_DELETE_IF_EMPTY_FEATURE,
         // Client-held vault keys (W3), only while BAALDA_VAULT_KEYS is on.
         ...(vaultKeysEnabled() ? [VAULT_KEYS_FEATURE] : []),
       ],
@@ -293,22 +365,13 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/favicon.ico", (c) => c.body(siteIcon, 200, iconHeaders));
   app.get("/icon.png", (c) => c.body(siteIcon, 200, iconHeaders));
   app.get("/apple-touch-icon.png", (c) => c.body(siteIcon, 200, iconHeaders));
-  app.get("/", (c) =>
-    c.html(`<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Baalda</title>
-<link rel="icon" type="image/png" sizes="256x256" href="/icon.png" />
-<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-</head>
-<body style="font-family: system-ui, sans-serif; margin: 3rem;">
-<p><img src="/icon.png" alt="Baalda" width="64" height="64" /></p>
-<p>This is the Baalda sync and MCP server. The app lives at <a href="https://baalda.com">baalda.com</a>.</p>
-</body>
-</html>`),
-  );
+  app.get("/", (c) => {
+    if (isManagedService()) return c.html(landingPage(null));
+    // Names this server from the request's Host: a shared cache must never
+    // keep one visitor's answer for the next.
+    c.header("Cache-Control", "no-store");
+    return c.html(landingPage(publicBaseUrl(c)));
+  });
 
   // RFC 9116 security.txt, read per request from SECURITY_CONTACT (e.g.
   // `mailto:security@example.com`). Unset ⇒ 404, so a self-hosted server never
@@ -481,6 +544,9 @@ export function createApp(deps: AppDeps): Hono {
   // A one-step file upload (`files-with-bytes`) creates its `files` row at
   // `complete`; it owes the same registry broadcast `POST /api/files` makes.
   setBlobRegistryNotifier(deps.onRegistryChanged);
+  setAttachmentCleanupNotifier(
+    deps.onRegistryChanged ? (vaultId) => deps.onRegistryChanged?.(vaultId, null) : null,
+  );
   app.route("/api", blobRoutes);
   app.route(
     "/api",

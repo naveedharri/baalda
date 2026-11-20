@@ -378,6 +378,22 @@ beforeEach(() => {
   connects.serverContent = new Map();
 });
 
+describe("revoked embeds (#408): an attachments pass follows a revocation removal", () => {
+  it("schedules the blob mirror when a note leaves for a revocation, not for a delete", async () => {
+    const sm = new SyncManager();
+    await liveVault(sm);
+    const scheduleReconcile = vi.fn();
+    const real = (sm as unknown as { attachments: Record<string, unknown> | null }).attachments;
+    expect(real).not.toBeNull();
+    // Spy on the real mirror's scheduler (no timer loop, no network).
+    (real as { scheduleReconcile: () => void }).scheduleReconcile = scheduleReconcile;
+    sm.noteRemoved("gone-1", "gone-1.md", null, "deleted");
+    expect(scheduleReconcile).not.toHaveBeenCalled();
+    sm.noteRemoved("gone-2", "gone-2.md", null, "revoked");
+    expect(scheduleReconcile).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("a live import — the steady-state content run", () => {
   it("settles a clean Private→Read-only re-download without inventing failures", async () => {
     const sm = new SyncManager();
@@ -445,9 +461,8 @@ describe("a live import — the steady-state content run", () => {
     await sm.whenBulkSyncSettled();
     await flush();
 
-    expect(fakeDisk.trashCopies).toEqual([
-      { path: "restored7.md", content: "a local edit made while private" },
-    ]);
+    // Reported, but no copy is kept (decided 2026-11-19).
+    expect(fakeDisk.trashCopies).toEqual([]);
     expect(sm.syncFailures().content).toEqual([
       expect.objectContaining({
         docId: "restored7",

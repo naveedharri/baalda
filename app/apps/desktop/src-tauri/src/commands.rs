@@ -3200,15 +3200,47 @@ pub async fn rebuild_index(
 /// Unlike `read_binary_file` this is NOT vault-scoped — the bytes are on their
 /// way into an attachment; the path came from a user drag-drop, not the tree.
 #[tauri::command]
-pub async fn read_external_file(path: String) -> AppResult<tauri::ipc::Response> {
-    let bytes = std::fs::read(&path)
-        .map_err(|e| AppError::new(format!("read external file failed: {e}")))?;
-    Ok(tauri::ipc::Response::new(bytes))
+pub async fn read_external_file(
+    path: String,
+    max_bytes: Option<u64>,
+) -> AppResult<tauri::ipc::Response> {
+    Ok(tauri::ipc::Response::new(read_external_capped(&path, max_bytes)?))
+}
+
+/// The prefix of the refusal `read_external_file` gives a file over its limit;
+/// `ipc.ts readExternalFile` parses the size back out of it.
+pub const EXTERNAL_TOO_LARGE: &str = "file too large:";
+
+/// Read a dropped file, refusing one over `max_bytes` from its metadata BEFORE
+/// reading it. Reading first and checking after put a multi-gigabyte video
+/// whole into this process and then into the webview, only to refuse it.
+fn read_external_capped(path: &str, max_bytes: Option<u64>) -> AppResult<Vec<u8>> {
+    if let Some(max) = max_bytes {
+        let len = std::fs::metadata(path)
+            .map_err(|e| AppError::new(format!("read external file failed: {e}")))?
+            .len();
+        if len > max {
+            return Err(AppError::new(format!("{EXTERNAL_TOO_LARGE} {len}")));
+        }
+    }
+    std::fs::read(path).map_err(|e| AppError::new(format!("read external file failed: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_external_file_over_its_limit_is_refused_before_it_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.mp4");
+        std::fs::write(&path, vec![7u8; 2048]).unwrap();
+        let p = path.to_str().unwrap();
+        let err = read_external_capped(p, Some(1024)).unwrap_err();
+        assert_eq!(err.0, format!("{EXTERNAL_TOO_LARGE} 2048"));
+        assert_eq!(read_external_capped(p, Some(2048)).unwrap().len(), 2048);
+        assert_eq!(read_external_capped(p, None).unwrap().len(), 2048);
+    }
 
     #[test]
     fn trash_retry_succeeds_on_a_later_attempt_without_the_fallback() {

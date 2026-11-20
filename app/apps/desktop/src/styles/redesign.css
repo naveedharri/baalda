@@ -3152,3 +3152,149 @@ html:not(.rd-off) .save-key-desc { margin: 4px 0 0; font-size: var(--fs-sm); col
 html:not(.rd-off) .save-key-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-left: 40px; }
 html:not(.rd-off) .save-key-panel { display: flex; flex-direction: column; gap: 8px; padding-left: 40px; max-width: 560px; }
 html:not(.rd-off) .save-key-panel > button { align-self: flex-start; }
+
+
+/* ---- Account menu: the vault menu's look, as a separate drop-up ----
+   Same family as the vault switcher at the top (label, compact rows, icon
+   squares), opening ABOVE the account row with a gap instead of growing out
+   of it and covering it. Overrides "Account menu grows out of the account row". */
+html:not(.rd-off) .account-popover {
+  bottom: calc(100% + 6px) !important; top: auto !important;
+  left: 0; right: auto;
+  width: calc(var(--sidebar-layout-w, 264px) - 16px) !important;
+  min-width: 248px;
+  gap: 1px;
+  padding: 6px;
+  border-radius: var(--radius-lg);
+}
+html:not(.rd-off) .account-popover::before {
+  content: "Your account";
+  order: -1;
+  padding: 4px 6px 4px;
+  font: 500 10.5px var(--font-mono);
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: rgba(var(--rd-ink), 0.60);
+}
+html:not(.rd-off) .account-popover > .rd-prof {
+  order: 0; min-height: 38px; margin: 0; padding: 6px; gap: 8px;
+  border-radius: 8px; background: rgba(var(--rd-ink), 0.06);
+}
+html:not(.rd-off) .account-popover > .rd-status { order: 0; margin-top: 4px; padding: 0 0 4px; border-top: 0; }
+html:not(.rd-off) :is(.account-popover > .menu-item, .account-popover > .invites-tab > .menu-item) {
+  min-height: 30px; padding: 3px 6px; gap: 8px; font-size: var(--fs-sm); border-radius: 8px;
+}
+html:not(.rd-off) :is(.account-popover > .menu-item, .account-popover > .invites-tab > .menu-item) .menu-icon {
+  box-sizing: content-box; flex: none;
+  width: 12px !important; height: 12px !important; padding: 4px !important; margin: 0;
+  border-radius: 6px; background: var(--bg-subtle) !important; color: var(--text-secondary) !important;
+}
+html:not(.rd-off) .account-popover > .menu-item.danger .menu-icon {
+  background: var(--rdc-f4c5c066, #f4c5c066) !important; color: var(--rdc-bb433a, #bb433a) !important;
+}
+html:not(.rd-off) .account-popover .menu-hint { font-size: 11px; }
+html:not(.rd-off) .account-popover .menu-sep { margin: 4px 6px; }
+
+/* Agent Skills: the hairline sits BELOW the row, between it and the account. */
+html:not(.rd-off) .skills-shortcut { margin-top: 4px; padding-top: 0; padding-bottom: 8px; margin-bottom: 4px; }
+html:not(.rd-off) .skills-shortcut::before { top: auto; bottom: 0; }
+
+/* The account row below already shows the name and email: no repeat here. */
+html:not(.rd-off) .account-popover > .rd-prof { display: none !important; }
+html:not(.rd-off) .account-popover > .rd-status { margin-top: 0; }
+
+/* Vault menu and account menu: one width, one left edge, 6px in from each side
+   of the sidebar (measured anchors: the vault menu's sits 16px in, the
+   account menu's 8px). */
+html:not(.rd-off) .vault-switcher {
+  left: -10px !important; right: auto !important;
+  width: calc(var(--sidebar-layout-w, 302px) - 12px) !important;
+}
+html:not(.rd-off) .account-popover {
+  left: -2px !important; right: auto !important;
+  width: calc(var(--sidebar-layout-w, 302px) - 12px) !important;
+}
+
+/* The row's ⋯ ends where the sync dots end: its right edge on the dots' right
+   edge, nothing past the column (was 16px past it at -12.5px). */
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more { transform: translateX(-28.5px); }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more:active { transform: translateX(-28.5px) scale(0.9); }
+
+/* Sync dot ⇄ ⋯ on row hover: one quiet crossfade in place. Nothing slides:
+   both keep their resting position (no transform transition), the dot fades
+   and shrinks where it is while the ⋯ fades in over the same column. */
+html:not(.rd-off) .sidebar .filetree-scroll .tree-sync {
+  transition: opacity 140ms var(--ease), scale 140ms var(--ease);
+}
+html:not(.rd-off) .sidebar .filetree-scroll .tree-row:hover .tree-sync { opacity: 0; scale: 0.4; }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more {
+  transition: opacity 140ms var(--ease), background 140ms var(--ease), color 140ms var(--ease);
+}
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more:active { transform: translateX(-28.5px); }
+
+/* The ⋯'s middle dot sits exactly on the sync dot's centre, so on hover the
+   ⋯ reads as the dot turning into three, not something appearing beside it.
+   (Measured: the middle dot was 8.5px left of the sync dot at -28.5px.) */
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more,
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more:active { transform: translateX(-20px); }
+
+/* The ⋯ glyph is drawn 1:1 (22px viewBox in a 22px button): three small hollow
+   rings, the middle one on the sync dot. */
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more svg { width: 22px; height: 22px; flex-shrink: 0; }
+
+/* The ⋯ has no hover colour of its own: no tinted square behind it. The
+   glyph still darkens a little under the pointer, so it reads as clickable. */
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more:hover { background: none; }
+
+/* The ⋯ in ink, not grey: the text colour, a touch softer at rest. */
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more { color: var(--text-primary); }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-row:hover .tree-more,
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more:focus-visible { opacity: 0.85; }
+html:not(.rd-off) .sidebar .filetree-scroll .tree-more:hover { color: var(--text-primary); opacity: 1; }
+
+/* Account menu one step larger: rows, icons, text and hints (rows 30 → 36px,
+   icons 12 → 14px in a 24px tile, labels at the medium text size). */
+html:not(.rd-off) .account-popover { padding: 8px; gap: 2px; }
+html:not(.rd-off) .account-popover::before { padding: 4px 8px 6px; font-size: 11.5px; }
+html:not(.rd-off) :is(.account-popover > .menu-item, .account-popover > .invites-tab > .menu-item) {
+  min-height: 36px; padding: 5px 8px; gap: 10px; font-size: var(--fs-md);
+}
+html:not(.rd-off) :is(.account-popover > .menu-item, .account-popover > .invites-tab > .menu-item) .menu-icon {
+  width: 14px !important; height: 14px !important; padding: 5px !important; border-radius: 7px;
+}
+html:not(.rd-off) .account-popover .menu-hint { font-size: 12px; }
+html:not(.rd-off) .account-popover .menu-sep { margin: 5px 8px; }
+html:not(.rd-off) .account-popover > .rd-status { font-size: var(--fs-md); }
+
+/* Vault menu one step larger, matching the account menu: rows 30 → 36px,
+   icons 14px in a 24px tile, vault cards 38 → 44px with 28px tiles. */
+html:not(.rd-off) .vault-switcher { padding: 8px; gap: 2px; }
+html:not(.rd-off) .vault-switcher::before { padding: 4px 8px 6px; font-size: 11.5px; }
+html:not(.rd-off) .vault-switcher .vault-card { min-height: 44px; padding: 0 8px; gap: 10px; }
+html:not(.rd-off) .vault-switcher .vault-card .vault-tile { width: 28px !important; height: 28px !important; border-radius: 7px !important; }
+html:not(.rd-off) .vault-switcher .vault-card-name { font-size: var(--fs-md); }
+html:not(.rd-off) .vault-switcher .vault-card-sub { font-size: 12px; }
+html:not(.rd-off) .vault-switcher .vault-card-kbd { font-size: 11.5px; }
+html:not(.rd-off) .vault-switcher .menu-sep { margin: 5px 8px; }
+html:not(.rd-off) .vault-switcher .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item {
+  min-height: 36px; padding: 5px 8px !important; gap: 10px; font-size: var(--fs-md) !important;
+}
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: var(--fs-md); }
+html:not(.rd-off) .vault-switcher .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon {
+  width: 14px !important; height: 14px !important; padding: 5px !important; border-radius: 7px !important;
+}
+html:not(.rd-off) .vault-switcher .menu-hint { font-size: 12px; }
+
+/* Both menus a little wider than the sidebar itself (they may overhang its
+   right edge): 36px more than before, same left edge. */
+html:not(.rd-off) .vault-switcher,
+html:not(.rd-off) .account-popover {
+  width: calc(var(--sidebar-layout-w, 302px) + 24px) !important;
+  max-width: calc(100vw - 16px);
+}

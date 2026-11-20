@@ -12,6 +12,7 @@ import {
   type CheckpointStructure,
 } from "./checkpoints.js";
 import { softDeleteSet } from "../trash/retention.js";
+import { purgeDeletedSoon } from "../trash/service.js";
 
 /**
  * Revert a whole vault to a checkpoint.
@@ -214,6 +215,8 @@ export async function revertVaultToCheckpoint(
       // ── notes ──────────────────────────────────────────────────────────────
       let docsRestored = 0;
       let docsKeptOverEmpty = 0;
+      /** Live ids that purged notes came back under (kept by the step below). */
+      const reissued: string[] = [];
       for (const note of structure.notes) {
         const folderId = note.folder_id
           ? (folderIdMap.get(note.folder_id) ?? note.folder_id)
@@ -224,11 +227,15 @@ export async function revertVaultToCheckpoint(
           title: string | null;
           folder_id: string | null;
           deleted_at: Date | null;
+          purged_at: Date | null;
         }>(
-          "SELECT rel_path, title, folder_id, deleted_at FROM notes WHERE id = $1 AND vault_id = $2",
+          "SELECT rel_path, title, folder_id, deleted_at, purged_at FROM notes WHERE id = $1 AND vault_id = $2",
           [note.id, vaultId],
         );
         const row = existing[0];
+        // The doc the checkpoint's text is written into: the note's own id,
+        // except for a PURGED note, which comes back under a NEW id (below).
+        let targetId = note.id;
         if (!row) {
           // Hard-gone (or never existed on this server): re-create with the
           // original doc_id so its CRDT history and backlinks reattach.
@@ -263,6 +270,48 @@ export async function revertVaultToCheckpoint(
             );
             continue;
           }
+        } else if (row.purged_at) {
+          // A purged note's CRDT is gone from the server, but a device that was
+          // offline through the delete may still hold its old ops. Reviving the
+          // SAME id would let those merge into the restored text and double it.
+          // So it comes back as a new note (new id, same path, author and
+          // per-note access); the old id stays a tombstone, which tells that
+          // device to drop its copy. A live note already at the path (an earlier
+          // run of this revert, or one made since) takes the text instead.
+          const { rows: atPath } = await db.query<{ id: string }>(
+            "SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL AND lower(rel_path) = lower($2) LIMIT 1",
+            [vaultId, note.rel_path],
+          );
+          if (atPath[0]) {
+            targetId = atPath[0].id;
+          } else {
+            targetId = randomUUID();
+            await db.query("SAVEPOINT revert_note");
+            try {
+              await db.query(
+                `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id, created_by)
+                 SELECT $1, $2, $3, $4, $5, $1, created_by FROM notes WHERE id = $6`,
+                [targetId, vaultId, folderId, note.title, note.rel_path, note.id],
+              );
+              await db.query(
+                `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type,
+                                     principal_id, permission, created_by, access_revision)
+                 SELECT gen_random_uuid()::text, org_id, resource_type, $1, principal_type,
+                        principal_id, permission, created_by, access_revision
+                   FROM shares WHERE resource_type = 'file' AND resource_id = $2`,
+                [targetId, note.id],
+              );
+              await db.query("RELEASE SAVEPOINT revert_note");
+            } catch (err) {
+              await db.query("ROLLBACK TO SAVEPOINT revert_note");
+              await db.query("RELEASE SAVEPOINT revert_note");
+              if ((err as { code?: string })?.code !== "23505") throw err;
+              console.warn(`[revert] skipping ${note.id}: another live note already occupies its path`);
+              continue;
+            }
+            docsRestored++;
+          }
+          reissued.push(targetId);
         } else {
           const moved =
             row.rel_path !== note.rel_path ||
@@ -275,7 +324,8 @@ export async function revertVaultToCheckpoint(
             // Yjs history and every share row pointing at it.
             await db.query(
               `UPDATE notes
-                  SET deleted_at = NULL, deleted_by = NULL, purge_after = NULL, rel_path = $2, title = $3, folder_id = $4,
+                  SET deleted_at = NULL, deleted_by = NULL, purge_after = NULL, purged_at = NULL,
+                      rel_path = $2, title = $3, folder_id = $4,
                       updated_at = now()
                 WHERE id = $1`,
               [note.id, note.rel_path, note.title, folderId],
@@ -285,7 +335,7 @@ export async function revertVaultToCheckpoint(
 
         const snapshot = contentByDoc.get(note.id);
         if (!snapshot) continue; // structure-only (doc skipped at capture time)
-        const current = (await docWriter.peekContent(vaultId, note.id, crypto)) ?? "";
+        const current = (await docWriter.peekContent(vaultId, targetId, crypto)) ?? "";
         if (sha256Hex(current) === snapshot.sha256) continue;
         // The data-loss firewall (same philosophy as the bridge's everHadContent
         // guard): a revert may rewrite text, but it must never bulldoze a note
@@ -300,7 +350,7 @@ export async function revertVaultToCheckpoint(
           docsKeptOverEmpty++;
           continue;
         }
-        pendingWrites.push({ docId: note.id, content: snapshot.content });
+        pendingWrites.push({ docId: targetId, content: snapshot.content });
       }
 
       // ── files and attachments the checkpoint pinned (migration 047) ────────
@@ -309,7 +359,7 @@ export async function revertVaultToCheckpoint(
       // ── notes created after the checkpoint ─────────────────────────────────
       // Soft-deleted, exactly as a user delete would: the row and the CRDT doc
       // survive, so a later revert to a newer checkpoint brings them back.
-      const keepIds = structure.notes.map((n) => n.id);
+      const keepIds = [...structure.notes.map((n) => n.id), ...reissued];
       // COUNT FIRST, refuse over the cap. An empty or truncated
       // `structure.notes` makes every live note in the vault a candidate, and
       // "delete everything" is indistinguishable here from a legitimate revert
@@ -341,6 +391,8 @@ export async function revertVaultToCheckpoint(
           removed.map((r) => r.id),
           db,
         );
+        // The revert's own undo checkpoint already holds their text.
+        purgeDeletedSoon(removed.map((r) => r.id));
       }
 
       return {

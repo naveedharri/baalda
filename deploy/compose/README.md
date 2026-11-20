@@ -13,6 +13,17 @@ docker compose up -d
 
 Attachments use PostgreSQL by default. No MinIO credentials are required.
 
+The server comes as a published image, `ghcr.io/naveedharri/baalda-server`
+(amd64 and arm64), so tools that deploy a pasted compose file without building
+(Portainer stacks, Hostinger's Docker Manager, CasaOS, Synology Container
+Manager) work as is: paste `docker-compose.yml` and set the three values from
+`.env.example`. Set `BAALDA_VERSION` (e.g. `0.1.112`) to pin a release;
+unset follows the latest one. To build from this checkout or a fork instead:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
 Then in the desktop app: **account menu → Server settings →** your
 `BETTER_AUTH_URL` → **Save**. Create an account and you're synced.
 
@@ -62,7 +73,7 @@ load balancer, a Tailscale/WireGuard network, another host's proxy).
 ```bash
 docker compose logs -f server        # follow
 docker compose ps                    # health
-docker compose pull && docker compose up -d --build   # upgrade
+docker compose pull && docker compose up -d   # upgrade (a pinned BAALDA_VERSION: raise it first)
 ```
 
 **Back up the volume.** `baalda_pgdata` holds every note's CRDT history — the

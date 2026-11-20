@@ -20,6 +20,24 @@ export class AttachmentTooLargeError extends Error {
   }
 }
 
+/**
+ * Toast and throw when `size` bytes is over the limit for `.ext`. Called on the
+ * SIZE before any bytes are read where that is known (a dropped path, a pasted
+ * File), so an oversized video is refused without first loading it into memory.
+ */
+export function refuseOversizeAttachment(ext: string, size: number): void {
+  const limit = maxBytesFor(ext);
+  if (size <= limit) return;
+  toast(`That file is ${humanBytes(size)}. Attachments up to ${humanBytes(limit)} sync.`, "error");
+  throw new AttachmentTooLargeError(ext, size, limit);
+}
+
+/** The limit to check BEFORE reading a file of this extension, or undefined
+ *  for formats stored transcoded (a 30 MB HEIC may become a 6 MB PNG). */
+export function preReadLimit(ext: string): number | undefined {
+  return formatFor(`x.${ext}`)?.transcodeTo ? undefined : maxBytesFor(ext);
+}
+
 /** "41 MB", "980 KB" — the sizes a person recognises from Finder. */
 function humanBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -88,14 +106,7 @@ export async function saveAttachment(bytes: Uint8Array, ext: string, epoch?: ipc
   }
   // After the transcode: a 30 MB HEIC that becomes a 6 MB PNG is fine, and the
   // limit that matters is the one on what we actually store.
-  const limit = maxBytesFor(ext);
-  if (bytes.byteLength > limit) {
-    toast(
-      `That file is ${humanBytes(bytes.byteLength)}. Attachments up to ${humanBytes(limit)} sync.`,
-      "error",
-    );
-    throw new AttachmentTooLargeError(ext, bytes.byteLength, limit);
-  }
+  refuseOversizeAttachment(ext, bytes.byteLength);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const hash = Array.from(new Uint8Array(digest))
     .slice(0, 8)
@@ -117,7 +128,13 @@ export async function embedDroppedFile(path: string): Promise<string> {
   const name = path.split(/[\\/]/).pop() ?? "file";
   const dot = name.lastIndexOf(".");
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "bin";
-  const bytes = await ipc.readExternalFile(path);
+  let bytes: Uint8Array;
+  try {
+    bytes = await ipc.readExternalFile(path, preReadLimit(ext));
+  } catch (e) {
+    if (e instanceof ipc.ExternalFileTooLarge) refuseOversizeAttachment(ext, e.bytes);
+    throw e;
+  }
   const src = await saveAttachment(bytes, ext);
   return embedMarkdown(name, src);
 }

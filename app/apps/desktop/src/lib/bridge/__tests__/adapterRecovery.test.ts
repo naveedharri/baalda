@@ -1,5 +1,6 @@
-// The production recovery-copy hook: a copy that lands is reported once as
-// `externalEditSaved`; a failed copy reports nothing.
+// The production recovery hook: a server win over another app's bytes is
+// reported once as `externalEditSaved`, and no copy is written (decided
+// 2026-11-19: nothing goes to .context/trash).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../ipc", () => ({ writeTrashCopy: vi.fn() }));
@@ -11,18 +12,12 @@ import { reconcileReport } from "../../sync/reconcileReport";
 describe("adapter saveRecoveryCopy", () => {
   beforeEach(() => reconcileReport.clear());
 
-  it("records externalEditSaved with the trash path", async () => {
-    vi.mocked(ipc.writeTrashCopy).mockResolvedValue(".context/trash/s/note.md" as never);
+  it("records externalEditSaved and writes no copy", async () => {
     const dest = await createTauriBridgeIO().saveRecoveryCopy!("note.md", "text");
-    expect(dest).toBe(".context/trash/s/note.md");
+    expect(dest).toBeNull();
+    expect(ipc.writeTrashCopy).not.toHaveBeenCalled();
     expect(reconcileReport.items()).toEqual([
-      expect.objectContaining({ kind: "externalEditSaved", path: "note.md", detail: dest }),
+      expect.objectContaining({ kind: "externalEditSaved", path: "note.md" }),
     ]);
-  });
-
-  it("records nothing when the copy fails", async () => {
-    vi.mocked(ipc.writeTrashCopy).mockRejectedValue(new Error("disk full") as never);
-    await expect(createTauriBridgeIO().saveRecoveryCopy!("note.md", "text")).rejects.toThrow();
-    expect(reconcileReport.items()).toEqual([]);
   });
 });

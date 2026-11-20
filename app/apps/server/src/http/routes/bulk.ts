@@ -41,6 +41,7 @@ import type {
 } from "./bulk-types.js";
 import { softDeleteSet } from "../../trash/retention.js";
 import { trashChanged } from "../../trash/activity.js";
+import { purgeDeletedSoon } from "../../trash/service.js";
 import { syncPermission } from "../../trash/access.js";
 import {
   parseState,
@@ -924,6 +925,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       );
       await purgeNoteIndex(slice);
     }
+    purgeDeletedSoon(unique);
 
     // ONE broadcast for the batch — the whole reason this route exists beside
     // the per-item one.

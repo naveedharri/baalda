@@ -44,6 +44,14 @@ const IMAGE_RE = /!\[[^\]\n]*\]\(([^)\s]+)(?:\s+[^)]*)?\)/g;
  *  extractor that only read images would call every one of them an orphan. */
 const LINK_RE = /\[[^\]\n]+\]\(([^)\s]+)(?:\s+[^)]*)?\)/g;
 
+/** `![[target]]` / `[[target|alias]]` — the wiki form Obsidian vaults (and
+ *  notes written by AI tools) use. Missing it left every such note referencing
+ *  nothing, so its attachments read as unused. */
+const WIKI_RE = /\[\[([^\]\n|#^]+)(?:[|#^][^\]\n]*)?\]\]/g;
+
+/** `<img src="…">` and friends in inline HTML. */
+const SRC_RE = /\b(?:src|href)\s*=\s*["']([^"'\s>]+)["']/gi;
+
 /**
  * The attachment paths a note's markdown references, lowercased and deduped.
  *
@@ -61,7 +69,10 @@ const LINK_RE = /\[[^\]\n]+\]\(([^)\s]+)(?:\s+[^)]*)?\)/g;
 export function assetRefsFromMarkdown(markdown: string): string[] {
   const out = new Set<string>();
   const take = (raw: string) => {
-    const rel = relAssetPath(raw);
+    // `../attachments/x.png` from a note in a folder: attachments live at the
+    // root, so leading parent steps are dropped (a superset, which is the safe
+    // direction for a reference).
+    const rel = relAssetPath(raw.trim().replace(/^(?:\.\.\/)+/, ""));
     if (rel === null) return;
     const segments = rel.split("/");
     if (segments.length < 2 || segments[0].toLowerCase() !== ATTACHMENT_DIR) return;
@@ -78,6 +89,19 @@ export function assetRefsFromMarkdown(markdown: string): string[] {
   // but both funnel into the same set, so an overlap costs nothing.
   for (const m of markdown.matchAll(IMAGE_RE)) take(m[1]);
   for (const m of markdown.matchAll(LINK_RE)) take(m[1]);
+  for (const m of markdown.matchAll(SRC_RE)) take(m[1]);
+  for (const m of markdown.matchAll(WIKI_RE)) {
+    const target = m[1].trim();
+    if (target.includes("/")) {
+      take(target);
+      continue;
+    }
+    // A bare name resolves by file name, and drops live in `attachments/`.
+    // Only names with a file extension: `[[Some Note]]` links a note.
+    if (/\.[a-z0-9]{1,8}$/i.test(target) && !/\.(md|markdown|mdx|txt|canvas)$/i.test(target)) {
+      take(`${ATTACHMENT_DIR}/${target}`);
+    }
+  }
   return [...out];
 }
 

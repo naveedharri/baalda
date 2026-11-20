@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { pool } from "../db/pool.js";
 import { orgRole, resolveResource } from "../permissions/lookup.js";
 import { createResolverCache, effectivePermission, type Permission } from "../permissions/resolver.js";
-import { listReadableDocsInVault, listVisibleFolders, vaultAccess } from "../permissions/vault-docs.js";
+import { listReadableDocsInVault, listVisibleFolders, readsWholeVault } from "../permissions/vault-docs.js";
 import {
   canEditFolder,
   canReadAttachment,
@@ -50,6 +50,7 @@ import {
 } from "../permissions/access-management.js";
 import { buildAccessContext, resolveAccessForUser } from "../permissions/resolver.js";
 import { softDeleteSet } from "../trash/retention.js";
+import { purgeDeletedSoon } from "../trash/service.js";
 import { deleteRegisteredFile } from "../http/routes/registry.js";
 import { registerCtx, registerFile } from "../registry/batch-ops.js";
 import { vaultKeysEnabled } from "../crypto/config.js";
@@ -556,6 +557,7 @@ export async function deleteFolder(
   // whose editor is still attached to a doc that no longer exists.
   await purgeNoteIndex(deletedNoteIds);
   for (const docId of deletedNoteIds) ctx.disconnectDoc(vaultId, docId);
+  purgeDeletedSoon(deletedNoteIds);
   ctx.onRegistryChanged?.(vaultId);
   return { deleted: folderId, deletedNotes: deletedNoteIds.length };
 }
@@ -1367,6 +1369,7 @@ export async function deleteNote(ctx: McpContext, docId: string) {
   // Drop derived index rows and kick any live editors off the now-gone doc.
   await purgeNoteIndex([docId]);
   ctx.disconnectDoc(note.vault_id, docId);
+  purgeDeletedSoon([docId]);
   // `disconnectDoc` only kicks editors off the doc itself; without this the
   // note stays listed in every open sidebar.
   ctx.onRegistryChanged?.(note.vault_id);
@@ -1450,7 +1453,7 @@ export async function searchNotes(
   // W3: a keyed vault's sealed rows are scored with this call's own key.
   const crypto = await vaultCrypto(ctx.auth, vaultId);
   const readable = await listReadableDocsInVault(ctx.auth.userId, vaultId);
-  const access = await vaultAccess(pool, ctx.auth.userId, vaultId);
+  const wholeVault = await readsWholeVault(pool, ctx.auth.userId, vaultId);
   return writeOrToolError(() =>
     searchNoteIndex({
       vaultId,
@@ -1458,7 +1461,7 @@ export async function searchNotes(
       k: limit,
       readableDocIds: readable,
       includeFiles,
-      vaultWideReader: access?.vaultWide === true,
+      vaultWideReader: wholeVault,
       crypto,
     }),
   );

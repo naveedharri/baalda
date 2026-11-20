@@ -36,8 +36,10 @@ pub const ALLOWED_EXTS: &[&str] = &[
     "mp4", "m4v", "mov", "webm", "mp3", "wav", "m4a", "ogg", "aac", "flac",
     // tabular / structured data
     "csv", "tsv", "json", "yaml", "yml", "toml", "xml", "py", "rs", "go", "sh", "sql",
-    // archives
-    "zip",
+    // archives. Extensions are taken after the LAST dot, so `foo.tar.gz` is a
+    // "gz" file: allowing "gz" admits every gzip (`log.gz` too), which is as
+    // opaque a binary as a .zip and syncs the same way (#407).
+    "zip", "tar", "tgz", "gz", "7z",
 ];
 
 /// The CRDT note family: the only extensions that become server `notes` and ride
@@ -406,7 +408,7 @@ mod tests {
             "clip.mp4", "cut.mov", "talk.mp3", "take.m4a",
             "data.csv", "tab.tsv", "map.json", "notes.yaml", "conf.toml", "feed.xml",
             "run.py", "lib.rs", "main.go", "setup.sh", "q.sql",
-            "bundle.zip",
+            "bundle.zip", "backup.tar", "site.tgz", "site.tar.gz", "dump.gz", "photos.7z",
         ] {
             assert!(is_allowed_file(ok), "{ok} should be allowed");
         }

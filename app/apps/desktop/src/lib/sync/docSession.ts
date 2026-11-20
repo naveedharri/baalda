@@ -13,7 +13,7 @@
 import { markAccessTreeStale } from "../accessTreeStale";
 import { isAttachmentWanted, onAttachmentWanted } from "../attachmentArrivals";
 import type { VaultAppearanceSettings } from "../appearanceSettings";
-import { NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
+import { NOT_CREATOR_DETAIL, NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
@@ -43,7 +43,7 @@ import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
 import { statusToWire, type ActivityStatus } from "../prefs";
 import { toast } from "../toast";
-import { AttachmentSync, routesToAttachmentSync } from "./attachments";
+import { AttachmentSync, findEmbedReferences, routesToAttachmentSync } from "./attachments";
 import { applySkippingUnsafe } from "./windowsPaths";
 import { EmbedArrivalFetcher } from "./embedArrival";
 import { BinaryDeleteQueue } from "./binaryDeletes";
@@ -59,6 +59,7 @@ import { SEED_BATCH_MAX_ITEMS } from "./seedRegister";
 import {
   BOOTSTRAP_ONLY,
   FILES_WITH_BYTES,
+  FOLDER_DELETE_IF_EMPTY,
   serverFeatures as cachedServerFeatures,
 } from "../serverFeatures";
 import { collectCrdtGarbage } from "./crdtGc";
@@ -165,6 +166,8 @@ const PRESENCE_REPUSH_MS = 150;
  * enough that a single saved file is on the server within ~a second.
  */
 const LOCAL_CHANGE_DEBOUNCE_MS = 800;
+/** How long an HTTP merge waits for a busy content run before handing over (#406). */
+const MERGE_PUSH_WAIT_MS = 60_000;
 /** Re-check interval while a bulk run holds the uploader slot. */
 const LOCAL_CHANGE_RETRY_MS = 2_000;
 /**
@@ -226,10 +229,6 @@ export interface StructureNotice {
   pendingDelete: { count: number } | null;
   /** Renames, moves or deletes were made while the app was closed. */
   closedAppChanges: boolean;
-}
-/** Timestamped folder name for a genuine unsendable-edit recovery copy. */
-function trashStamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, "-");
 }
 /**
  * How long the download phase may wait for the vault channel's `ready` before
@@ -599,6 +598,13 @@ export class SyncManager implements InboundHost {
   /** A frame-driven pull asked for while one was running: armed (with the
    *  gap) the moment the running pull ends. */
   private registryPullTrailing = false;
+  /** A teammate's `registry` frame landed since the last completed pull. Such
+   *  a frame also announces a blob that became ready (an embedded image under
+   *  `attachments/`, a file's new bytes), which changes NO registry row, so
+   *  the pull after it must run the blob mirror even when it changed nothing. */
+  private attachmentsOwedByFrame = false;
+  /** Refused file deletes already reported this session (`onNotCreator`). */
+  private readonly refusedFileDeleteNoticed = new Set<string>();
   /** Consecutive completed pulls that changed nothing (the idle-pull brake). */
   private registryPullIdleStreak = 0;
   private registryPullBrakeLogged = false;
@@ -1653,6 +1659,7 @@ export class SyncManager implements InboundHost {
     // "the server told us the structure moved" from "the server told us to
     // re-mint a token, and we pulled anyway" in #93.
     console.info(`[sync] registry pull requested (${reason})`);
+    if (reason === "registry-frame") this.attachmentsOwedByFrame = true;
     this.armRegistryPull(reason, opts?.fileChange === true);
   }
 
@@ -1769,6 +1776,12 @@ export class SyncManager implements InboundHost {
           // can see. A refresh replaces the tree's row objects, which reads as
           // a flicker under the pointer — needless on the common "nothing new"
           // pull (e.g. the catch-up pull every reconnect now makes).
+          // Read before the branch: a pull that changed nothing still owes the
+          // blob mirror a pass when a teammate's frame asked for it (a ready
+          // `attachments/` blob has no registry row to change).
+          const framed = this.attachmentsOwedByFrame;
+          this.attachmentsOwedByFrame = false;
+          if (!changed && framed) this.attachments?.scheduleReconcile();
           if (changed) {
             this.onRegistryChanged?.();
             // The structure moved, so the set of BINARIES this device should
@@ -1991,6 +2004,13 @@ export class SyncManager implements InboundHost {
   /** {@link InboundHost.mayRemoveRefusedEmptyFolders}: live, root present. */
   mayRemoveRefusedEmptyFolders(): boolean {
     return this.isLive() && !this.structurePaused();
+  }
+
+  /** Is this local note on its way out of the readable set (#408)? */
+  private noteIsLeaving(indexId: string, path: string): boolean {
+    const mapped = this.registry.getMapping(path)?.docId ?? null;
+    if (this.serverRevoked.has(indexId) || (mapped !== null && this.serverRevoked.has(mapped))) return true;
+    return this.registry.isHiddenNotePath(path);
   }
 
   revocationAuthority(): boolean {
@@ -2553,6 +2573,11 @@ export class SyncManager implements InboundHost {
     this.renameCandidates.clear();
     const goneFolders = [...this.goneFolders.keys()];
     this.goneFolders.clear();
+    /** Vanished registered folders this drain may remove from the server once
+     *  their contents are gone (see {@link propagateGoneFolders}): not the ones
+     *  paired as moves, and none at all for a refused or held window. */
+    let foldersToRemove: string[] = goneFolders;
+    let folderStep = false;
     const folderCandidates = this.takeFolderCandidates();
     /** sha256 of files this drain already read itself (folder candidates that
      *  the index has not seen yet), for the per-note pairing below. */
@@ -2563,6 +2588,7 @@ export class SyncManager implements InboundHost {
       //    every path below read as deleted; nothing here may act on that.
       if (!(await this.checkVaultRoot(scope))) return;
       if (!scope.isCurrent()) return;
+      folderStep = true;
 
       // 0b. Folder moves (#221), BEFORE anything per-note: a registered folder
       //     that vanished paired with an unregistered one that appeared.
@@ -2575,6 +2601,7 @@ export class SyncManager implements InboundHost {
           this.pairingFolders = false;
         }
         if (!scope.isCurrent() || this.rootMissing) return;
+        foldersToRemove = foldersToRemove.filter((g) => !out.movedFrom.some((f) => isUnder(g, f)));
         pending = pending.filter((p) => !out.movedFrom.some((f) => isUnder(p.relPath, f)));
         candidates = candidates.filter((c) => !out.movedTo.some((t) => isUnder(c, t)));
         const pendingIds = new Set(pending.map((p) => p.docId));
@@ -2638,6 +2665,7 @@ export class SyncManager implements InboundHost {
       const cap = diskDeleteCap(this.registry.mappedNotes().length);
       const unpaired = new Set(candidates);
       if (unpaired.size === 0 && gone.length > cap) {
+        folderStep = false;
         await this.holdBulkDiskDelete(gone, cap, scope);
         return;
       }
@@ -2671,12 +2699,18 @@ export class SyncManager implements InboundHost {
         const emptyGone = texts.filter((t) => t === "").length;
         for (const [i, item] of gone.entries()) {
           const text = texts[i];
-          const renamedTo =
-            text == null
+          // The index followed the file itself (`note_file_identity`: same
+          // filesystem identity, now at a new path): that is a move whatever
+          // the text became, e.g. a script that moves a note and rewrites it in
+          // the same breath (#410). Text matching alone deleted those notes on
+          // the server and then removed the moved files with them.
+          const byIdentity = [...unpaired].find((c) => metas.get(c)?.id === item.docId) ?? null;
+          const renamedTo = byIdentity ??
+            (text == null
               ? null
               : ((text === ""
                   ? pickUniqueEmptyRename(item.relPath, emptyGone, unpaired, (p) => metas.get(p)?.sha256)
-                  : null) ?? (await this.matchRename(text, item.relPath, unpaired, metas, scope)));
+                  : null) ?? (await this.matchRename(text, item.relPath, unpaired, metas, scope))));
           if (!scope.isCurrent()) return;
           if (renamedTo) {
             unpaired.delete(renamedTo);
@@ -2692,6 +2726,7 @@ export class SyncManager implements InboundHost {
       // …and the same cap again on what the pairing actually left, which is the
       // check this has always made.
       if (deletes.length > cap) {
+        folderStep = false;
         await this.holdBulkDiskDelete(deletes, cap, scope);
         return;
       }
@@ -2700,6 +2735,13 @@ export class SyncManager implements InboundHost {
       //    choice without manufacturing another retained copy.
       await this.propagateAndForget(deletes, scope);
     } finally {
+      if (folderStep && foldersToRemove.length > 0 && scope.isCurrent() && !this.rootMissing) {
+        try {
+          await this.propagateGoneFolders(foldersToRemove, scope);
+        } catch (e) {
+          console.warn("[sync] removing deleted folders from the server failed", e);
+        }
+      }
       this.diskDeleteDrainsInFlight = Math.max(0, this.diskDeleteDrainsInFlight - 1);
       // Whatever happened above, a batch that asked for a pull gets one now —
       // unless the vault root is gone, when no pull may run at all.
@@ -2707,6 +2749,78 @@ export class SyncManager implements InboundHost {
         this.pullAfterDiskDeletes = false;
         this.handleRegistryChanged("disk-delete-drain");
       }
+    }
+  }
+
+  /** Retries per vanished folder whose contents were still settling. */
+  private readonly goneFolderAttempts = new Map<string, number>();
+
+  /**
+   * The last step of a disk-delete window: a registered folder that vanished
+   * from disk (and was not paired as a move) leaves the server too, deepest
+   * first, once everything it held is gone. Without this the folder row
+   * outlived its notes and files, and every app, the deleting one included,
+   * re-created it empty on the next pull.
+   *
+   * Same rails as the notes: a live session, a folder still missing when the
+   * window closes, the blast-radius cap, and a server that removes only an
+   * EMPTY folder (`?ifEmpty=1`), so nothing this device did not delete (or
+   * cannot see) is ever cascaded away. A folder whose files are still being
+   * deleted is asked again a few windows later; a refused one simply stays,
+   * and the pull puts it back with whatever kept it.
+   */
+  private async propagateGoneFolders(tops: readonly string[], scope: VaultScope): Promise<void> {
+    if (!this.isLive()) return;
+    if (!(await this.serverFeatures()).has(FOLDER_DELETE_IF_EMPTY)) return;
+    if (!scope.isCurrent()) return;
+    const stillGone: string[] = [];
+    for (const top of tops) {
+      let exists = true;
+      try {
+        exists = await ipc.folderExists(`${scope.vaultPath.replace(/[\\/]+$/, "")}/${top}`);
+      } catch {
+        exists = true; // couldn't ask ⇒ never assume a delete
+      }
+      if (!exists) stillGone.push(top);
+    }
+    if (!scope.isCurrent() || stillGone.length === 0) return;
+    const all = [...new Set(stillGone.flatMap((t) => this.registry.mappedFoldersUnder(t)))].sort(
+      (a, b) => b.split("/").length - a.split("/").length || b.localeCompare(a),
+    );
+    if (all.length === 0) return;
+    const cap = diskDeleteCap(this.registry.healthInventory().folderPaths.length);
+    if (all.length > cap) {
+      console.info(`[sync] ${all.length} folders vanished at once; not removing them from the server`);
+      return;
+    }
+    const stayed: string[] = [];
+    const busyTops = new Set<string>();
+    for (const path of all) {
+      if (!scope.isCurrent()) return;
+      // A parent of a folder that stayed is not empty on the server either.
+      if (stayed.some((s) => isUnder(s, path))) continue;
+      const result = await this.registry.deleteVanishedFolder(path);
+      if (result === "deleted") {
+        this.note("info", "disk-delete", `${path} was deleted on this device and removed from the server`, { path });
+        continue;
+      }
+      if (result === "skipped") continue;
+      stayed.push(path);
+      if (result === "busy") for (const t of stillGone) if (isUnder(path, t)) busyTops.add(t);
+    }
+    for (const top of stillGone) {
+      if (!busyTops.has(top)) {
+        this.goneFolderAttempts.delete(top);
+        continue;
+      }
+      const n = (this.goneFolderAttempts.get(top) ?? 0) + 1;
+      if (n > 4) {
+        this.goneFolderAttempts.delete(top);
+        continue;
+      }
+      this.goneFolderAttempts.set(top, n);
+      this.goneFolders.set(top, Date.now());
+      this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
     }
   }
 
@@ -3817,8 +3931,6 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
-        writeTrashCopy: (relPath, stamp, content) =>
-          ipc.writeTrashCopy(relPath, stamp, content, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       markAcked: (docId, sv) => this.registry.recordAck?.(docId, sv),
@@ -4049,6 +4161,15 @@ export class SyncManager implements InboundHost {
     this.progress?.forgetDoc(docId);
 
     if (reason === "revoked") {
+      // #408: the images only this note embedded go next, while the ACL signal
+      // that removed it is still fresh. Debounced and coalesced in the mirror.
+      this.attachments?.scheduleReconcile();
+    }
+    // A deletion drops the local CRDT exactly like a revocation (decided
+    // 2026-11-19: deleted means deleted). The server purges the note's content
+    // at once, so ops kept here could only ever come back as a doubled copy if
+    // a checkpoint restore later re-creates the note under the same id.
+    {
       // `releaseDoc` only RELEASED this doc, which deliberately keeps its state
       // vector (a rename doesn't change content, so the manifest stays true).
       // A revocation is the other case: the doc is gone for good, and an id left
@@ -4576,14 +4697,20 @@ export class SyncManager implements InboundHost {
     const scope = this.scope;
     const store = this.docStore;
     if (!scope?.isCurrent()) return;
-    if (seed.fresh && store && store.suppressedDoc() !== docId) {
+    const openByEditor = !!store && store.suppressedDoc() === docId;
+    if (seed.fresh && store && !openByEditor) {
       const relPath = this.registry.pathForDocId(docId);
       if (relPath) {
-        // The file can change between build and answer; the egest below then
-        // replaces it with the seed (the server's text) and the bridge saves
-        // the newer bytes to `.context/trash`. Report that copy as what it is.
+        // The file can change between build and answer: a script or agent
+        // that creates a file and fills it a moment later (#406). Its watcher
+        // event arrived while the note was still unmapped, so it only asked
+        // for a registry pull, and nothing would ever read the new bytes.
+        // Settling here would mark the note synced while the server holds the
+        // OLD text (often nothing) for every other device. Merge instead.
+        const fileMoved = (await this.fileDiffersFrom(relPath, seed.textSha256, scope)) === true;
+        if (!scope.isCurrent()) return;
         const unclaim = attributeRecoveryCopies(relPath, { kind: "conflictKeptServer", docId });
-        let raced = false;
+        let raced = fileMoved;
         try {
           const bridge = await store.promote(docId, relPath, {
             seedFromFile: false,
@@ -4591,7 +4718,10 @@ export class SyncManager implements InboundHost {
             pin: true,
           });
           try {
-            if (bridge.serialize().length === 0) {
+            if (fileMoved) {
+              // Nothing applied: the merge below starts from the server's
+              // state and folds the file's current bytes in on top of it.
+            } else if (bridge.serialize().length === 0) {
               // The SAME ops the server holds (same client id and clocks): the
               // later merge of the two is a no-op, never a doubled body.
               bridge.applyRemote(seed.state);
@@ -4612,6 +4742,9 @@ export class SyncManager implements InboundHost {
           // bridge is already retired, so nothing can re-persist after the clear.
           store.drop(docId);
           await ipc.clearYjsDoc(docId, scope.vaultEpoch);
+          if (fileMoved) {
+            console.info(`[sync] ${relPath} changed while it was being registered; merging its current text`);
+          }
           this.noteNeedsMerge([docId]);
           return;
         }
@@ -4632,6 +4765,43 @@ export class SyncManager implements InboundHost {
     this.serverBehind.delete(docId);
     this.syncPause.writeAccepted();
     this.progress?.doc(docId, "synced");
+    // A seed built from the local CRDT holds those ops, so a file that moved on
+    // during the request only needs the ingest + push its lost watcher event
+    // would have queued (#406). The open note's editor ingests its own file.
+    if (!seed.fresh && !openByEditor) {
+      const relPath = this.registry.pathForDocId(docId);
+      if (relPath && (await this.fileDiffersFrom(relPath, seed.textSha256, scope)) === true) {
+        if (!scope.isCurrent()) return;
+        this.localChanges.set(docId, relPath);
+        this.note("info", "push-queued", "Changed while it was being registered. Sending the newer text", {
+          docId,
+          path: relPath,
+        });
+        this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+      }
+    }
+  }
+
+  /** Resolve once no content run or bulk phase holds the pusher, or after `maxMs`. */
+  private async waitForContentSlot(scope: VaultScope, maxMs: number): Promise<void> {
+    const until = Date.now() + maxMs;
+    while (scope.isCurrent() && (this.contentRunInFlight() || this.bulkPhase) && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
+  /**
+   * Does the file at `relPath` no longer hash to `sha256`? null when it cannot
+   * be read (missing, epoch switch): no evidence either way, so callers keep
+   * today's behaviour.
+   */
+  private async fileDiffersFrom(relPath: string, sha256: string, scope: VaultScope): Promise<boolean | null> {
+    try {
+      const text = await ipc.readNote(relPath, scope.vaultEpoch);
+      return (await sha256Hex(text)) !== sha256;
+    } catch {
+      return null;
+    }
   }
 
   /** Queue docs whose server copy we have not seen for an HTTP merge. */
@@ -4805,9 +4975,16 @@ export class SyncManager implements InboundHost {
     }
     if (leftovers.length > 0) fallback(leftovers);
     if (work.length === 0 || !scope.isCurrent()) return;
-    // A run already in flight owns the pusher slot; hand it these docs.
+    // A run already in flight owns the pusher slot. Its work list was taken
+    // when it started and a finished run looks for nothing new, so handing
+    // these docs to it left them unsent until the next connect (#406). The
+    // merged text is already persisted: wait for the slot, then push here.
     if (this.contentRunInFlight() || this.bulkPhase) {
-      return fallback(work.map((w) => w.docId));
+      await this.waitForContentSlot(scope, MERGE_PUSH_WAIT_MS);
+      if (!scope.isCurrent()) return;
+      if (this.contentRunInFlight() || this.bulkPhase) {
+        return fallback(work.map((w) => w.docId));
+      }
     }
     const result = await this.runDocBatchPush(scope, vaultId, store, work);
     if (!result) return fallback(work.map((w) => w.docId));
@@ -5931,8 +6108,6 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
-        writeTrashCopy: (relPath, stamp, content) =>
-          ipc.writeTrashCopy(relPath, stamp, content, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       // Everything here is work by construction — the batch already decided it
@@ -6104,8 +6279,6 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
-        writeTrashCopy: (relPath, stamp, content) =>
-          ipc.writeTrashCopy(relPath, stamp, content, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       // The server's word beats our checkpoint: a doc it holds no content for is
@@ -6981,8 +7154,6 @@ export class SyncManager implements InboundHost {
     const readOnlyRejections = new ReadOnlyRejections({
       pathOf: (docId) => this.registry.pathForDocId(docId),
       localText: (docId) => this.localText(docId),
-      writeTrashCopy: (path, stamp, content) =>
-        ipc.writeTrashCopy(path, stamp, content, scope.vaultEpoch),
       readFile: (path) => ipc.readNote(path, scope.vaultEpoch),
       serverState: (docId) => this.pullServerState(docId, scope),
       replaceLocal: (docId, path, update, text) =>
@@ -6991,16 +7162,13 @@ export class SyncManager implements InboundHost {
         this.currentDocId === docId || this.docStore?.suppressedDoc() === docId,
     });
     this.readOnlyRejections = readOnlyRejections;
-    // A read-only doc's file never enters its CRDT; a differing file is kept
-    // as a quiet recovery copy (once per doc per session) before the doc's
-    // text is written back over it.
+    // A read-only doc's file never enters its CRDT; the doc's text is written
+    // back over a differing file, with no copy kept (decided 2026-11-19).
     setReadOnlyCopyKeeper(async (docId, path, text) => {
       if (!scope.isCurrent()) return false;
       if (this.readOnlyCopied.has(docId) || text.trim().length === 0) return true;
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const dest = await ipc.writeTrashCopy(path, stamp, text, scope.vaultEpoch);
       this.readOnlyCopied.add(docId);
-      console.info(`[sync] ${path} is read-only for you; the file's differing text is at ${dest}`);
+      console.info(`[sync] ${path} is read-only for you; the file's differing text is replaced`);
       return true;
     });
     this.vaultEngine = new VaultSyncEngine({
@@ -7304,6 +7472,18 @@ export class SyncManager implements InboundHost {
         this.attachments?.scheduleReconcile();
         this.embedArrivals?.nudge();
       },
+      // Reported like a refused note delete: once per file per session.
+      onNotCreator: (relPath, fileId) => {
+        const key = `not-creator-file:${fileId ?? relPath}`;
+        if (this.refusedFileDeleteNoticed.has(key)) return;
+        this.refusedFileDeleteNoticed.add(key);
+        reconcileReport.record({
+          kind: "restoredFromServer",
+          docId: fileId ?? undefined,
+          path: relPath,
+          detail: NOT_CREATOR_DETAIL,
+        });
+      },
     });
     this.stopEmbedArrivals();
     const embeds = new EmbedArrivalFetcher({
@@ -7434,12 +7614,28 @@ export class SyncManager implements InboundHost {
       fileBase: (docId) => registry.getFileBase(docId),
       setFileBase: (docId, sha) => registry.setFileBase(docId, sha),
       // The recovery copy a server version replaces a divergent local one after.
-      keepLocalCopy: (relPath) =>
-        ipc.copyToTrash(relPath, trashStamp(), epoch),
       // A teammate deleted the file: a stale local copy goes to the trash
       // instead of being uploaded back (#215).
       listFileTombstones: () => api.listFileTombstones(vaultId),
       removeLocal: (relPath) => ipc.deleteFile(relPath, epoch).then(() => undefined),
+      // #408: `attachments/` drops only now-hidden notes embed leave this disk,
+      // under the same live + fresh-ACL-signal authority as a revoked note.
+      attachmentBase: (relPath) => registry.getAttachmentBase(relPath),
+      setAttachmentBase: (relPath, sha, origin) => registry.setAttachmentBase(relPath, sha, origin),
+      forgetAttachmentBase: (relPath) => registry.forgetAttachmentBase(relPath),
+      revocationAuthority: () => this.revocationAuthority(),
+      suppressDelete: (relPath) => this.suppressBinaryDelete(relPath),
+      // Every local note's text, scanned for the file's name (hash-named, so a
+      // name match is the embed). Any read failure answers "cannot tell".
+      // A note that is itself leaving (named revoked, hidden) never keeps its
+      // images, even while its file is still on disk at check time.
+      referencedAttachments: async (paths) =>
+        findEmbedReferences(
+          paths,
+          await ipc.listNoteTitles(epoch),
+          (path) => ipc.readNote(path, epoch),
+          (n) => this.noteIsLeaving(n.id, n.path),
+        ),
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
       forgetFileId: (relPath) => registry.forgetFileId(relPath),
@@ -7708,23 +7904,15 @@ export class SyncManager implements InboundHost {
     if (fileText.length === 0) return true; // a download placeholder has no edit to lose
     if (fileText === bridge.serialize()) return true; // converged — nothing to keep
     this.unsendableReported.add(docId);
-    let dest: string | null = null;
-    try {
-      dest = await ipc.writeTrashCopy(relPath, trashStamp(), fileText, scope?.vaultEpoch);
-    } catch (e) {
-      if (ipc.isVaultMismatch(e)) return false;
-      console.warn(`[sync] couldn't keep a copy of ${relPath}`, e);
-    }
+    // No copy is kept (decided 2026-11-19): the edit is reported, then replaced.
     this.registry.recordFailure({
       kind: "note",
       path: relPath,
       docId,
-      reason:
-        "edit could not be sent: no write access" +
-        (dest ? `; copy saved to ${dest}` : "; the local copy could not be saved either"),
+      reason: "edit could not be sent: no write access",
       code: null,
     });
-    return dest != null;
+    return true;
   }
 
   currentSync(): DocSync | null {

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
-import { listReadableDocsInVault, vaultAccess } from "../../permissions/vault-docs.js";
+import { listReadableDocsInVault, readsWholeVault } from "../../permissions/vault-docs.js";
 import { getSession } from "../session.js";
 import { searchNoteIndex } from "../../index/indexer.js";
 import { docCryptoOf, requireVaultKey } from "../../crypto/transport.js";
@@ -140,7 +140,7 @@ graphRoutes.get("/vaults/:vaultId/search", async (c) => {
   // Vault-wide read is what decides whether the hash-named `attachments/`
   // blobs (which have no doc of their own) are searchable for this caller —
   // the same answer `canReadAttachment` gives when one is downloaded.
-  const access = await vaultAccess(pool, session.userId, vaultId);
+  const wholeVault = await readsWholeVault(pool, session.userId, vaultId);
 
   // Scoring lives in index/indexer.ts, which walks the vault in keyset batches
   // and keeps only {docId, score} per note — note bodies and embedding vectors
@@ -151,7 +151,7 @@ graphRoutes.get("/vaults/:vaultId/search", async (c) => {
     query: q,
     k,
     readableDocIds: readable,
-    vaultWideReader: access?.vaultWide === true,
+    vaultWideReader: wholeVault,
     crypto: docCryptoOf(vaultId, vkr),
   });
 

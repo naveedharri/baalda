@@ -102,6 +102,9 @@ export const FILES_WITH_BYTES = "files-with-bytes";
 /** Client-held vault keys (W3): `/api/vaults/:id/keys/*`, `/api/me/keys`,
  *  `X-Baalda-VK`. Absent ⇒ every vault-key step is a no-op. */
 export const VAULT_KEYS = "vault-keys";
+/** `DELETE /api/folders/:id?ifEmpty=1`: a folder deleted on disk can reach the
+ *  server without cascading over anything this device did not delete. */
+export const FOLDER_DELETE_IF_EMPTY = "folder-delete-if-empty";
 
 const featureCache = new Map<string, Promise<ServerHealth | null>>();
 

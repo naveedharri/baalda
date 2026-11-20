@@ -12,8 +12,7 @@ import { recordingAppDeps } from "./helpers/app.js";
 import { seedFolder, seedMember, seedNote, seedVault, seedVaultGrant } from "./helpers/seed.js";
 import { appendUpdate, loadDocState } from "../src/yjs/persistence.js";
 import { recordVersion } from "../src/versions/capture.js";
-import { purgeExpiredTrash, restoredPath } from "../src/trash/service.js";
-import { TRASH_RETENTION_DAYS } from "../src/trash/retention.js";
+import { purgeExpiredTrash, restoredPath, scrubPurgedContent } from "../src/trash/service.js";
 import { VaultChannel } from "../src/sync/vault-channel.js";
 import { InMemoryPubSub } from "../src/sync/pubsub.js";
 import { mintVaultToken } from "../src/tokens/vault-token.js";
@@ -89,7 +88,7 @@ describe("note trash", () => {
     await seedVaultGrant(org, "edit");
   });
 
-  it("DELETE records deleted_by + purge_after and evicts live sockets", async () => {
+  it("DELETE records deleted_by, is due for purge at once and evicts live sockets", async () => {
     // The member's own note: members delete only what they created.
     const doc = await seedNote(vault, null, "a.md", member.userId);
     await softDelete(member, doc);
@@ -98,7 +97,8 @@ describe("note trash", () => {
       [doc],
     );
     expect(rows[0].deleted_by).toBe(member.userId);
-    expect(rows[0].window.days).toBe(TRASH_RETENTION_DAYS);
+    expect(rows[0].window.days ?? 0).toBe(0);
+    expect(rows[0].window.hours ?? 0).toBe(0);
     expect(rec.evicted).toContainEqual({ vaultId: vault, docId: doc });
   });
 
@@ -119,37 +119,25 @@ describe("note trash", () => {
     ]);
   });
 
-  it("sync-token mints for a deleted doc inside its window, refuses after", async () => {
+  it("sync-token refuses a deleted doc at once (no Trash window)", async () => {
     const doc = await seedNote(vault, null, "a.md", owner.userId);
     await softDelete(owner, doc);
-    const ok = await req(member, "POST", "/api/sync-token", { docId: doc });
-    expect(ok.status).toBe(200);
-    expect(((await ok.json()) as { readOnly: boolean }).readOnly).toBe(false);
-    // An outsider still gets nothing.
-    expect((await req(outsider, "POST", "/api/sync-token", { docId: doc })).status).toBe(403);
-    await expire(doc);
     expect((await req(member, "POST", "/api/sync-token", { docId: doc })).status).toBe(404);
+    expect((await req(owner, "POST", "/api/sync-token", { docId: doc })).status).toBe(404);
+    expect((await req(outsider, "POST", "/api/sync-token", { docId: doc })).status).toBe(404);
   });
 
-  it("batch push into a deleted doc is accepted before purge_after, refused after; note stays deleted", async () => {
+  it("batch push into a deleted doc is refused at once; note stays deleted and empty", async () => {
     const doc = await seedNote(vault, null, "a.md", owner.userId);
     await softDelete(owner, doc);
-    const push = async () => {
-      const res = await req(member, "POST", `/api/vaults/${vault}/docs/batch`, {
-        items: [{ docId: doc, update: Buffer.from(updateFor("offline edit")).toString("base64") }],
-      });
-      return ((await res.json()) as { results: DocPushResult[] }).results[0];
-    };
-    const first = await push();
-    expect(first.status).not.toBe("denied");
-    expect(first.status).not.toBe("error");
-    expect(await textOf(doc)).toBe("offline edit");
+    const res = await req(member, "POST", `/api/vaults/${vault}/docs/batch`, {
+      items: [{ docId: doc, update: Buffer.from(updateFor("offline edit")).toString("base64") }],
+    });
+    const result = ((await res.json()) as { results: DocPushResult[] }).results[0];
+    expect(result.status).toBe("denied");
+    expect(await textOf(doc)).toBe("");
     const { rows } = await pool.query("SELECT deleted_at FROM notes WHERE id = $1", [doc]);
     expect(rows[0].deleted_at).not.toBeNull();
-
-    await expire(doc);
-    const second = await push();
-    expect(second.status).toBe("denied");
   });
 
   it("re-registering a deleted id still returns note_deleted", async () => {
@@ -162,44 +150,17 @@ describe("note trash", () => {
     expect(body.results[0].code).toBe("note_deleted");
   });
 
-  it("lists trash filtered by readability, newest first, with unsynced contributions", async () => {
+  it("the Trash listing stays empty: a deleted note is not kept", async () => {
     const a = await seedNote(vault, null, "a.md", owner.userId);
-    const b = await seedNote(vault, null, "b.md", member.userId);
     await appendUpdate(a, updateFor("before delete"));
     await softDelete(owner, a);
-    await pool.query("UPDATE notes SET deleted_at = deleted_at - interval '1 hour' WHERE id = $1", [a]);
-    await pool.query("UPDATE doc_updates SET created_at = created_at - interval '2 hours' WHERE doc_id = $1", [a]);
-    await softDelete(member, b);
-    // A push after the delete counts as an unsynced contribution.
-    await appendUpdate(b, updateFor("after delete"));
-
     const res = await req(member, "GET", `/api/vaults/${vault}/trash`);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      items: Array<{
-        docId: string;
-        relPath: string;
-        deletedBy: { id: string; name: string } | null;
-        sizeBytes: number;
-        hasUnsyncedContributions: boolean;
-        purgeAfter: string;
-      }>;
-      truncated: boolean;
-    };
+    const body = (await res.json()) as { items: unknown[]; truncated: boolean };
+    expect(body.items).toEqual([]);
     expect(body.truncated).toBe(false);
-    expect(body.items.map((i) => i.docId)).toEqual([b, a]);
-    expect(body.items[0].deletedBy?.id).toBe(member.userId);
-    expect(body.items[0].hasUnsyncedContributions).toBe(true);
-    expect(body.items[1].hasUnsyncedContributions).toBe(false);
-    expect(body.items[1].sizeBytes).toBeGreaterThan(0);
-
-    // Non-members are refused; an expired note drops out.
+    // Non-members are still refused.
     expect((await req(outsider, "GET", `/api/vaults/${vault}/trash`)).status).toBe(403);
-    await expire(a);
-    const after = (await (await req(member, "GET", `/api/vaults/${vault}/trash`)).json()) as {
-      items: Array<{ docId: string }>;
-    };
-    expect(after.items.map((i) => i.docId)).toEqual([b]);
   });
 
   it("hides trashed notes the caller could not read", async () => {
@@ -372,19 +333,16 @@ describe("note trash", () => {
     expect(((await revert.json()) as { code: string }).code).toBe("note_deleted");
   });
 
-  it("purge removes CRDT, versions and the row for expired notes only, idempotently", async () => {
+  it("purge removes CRDT and versions of deleted notes only, keeps a tombstone, idempotently", async () => {
     const gone = await seedNote(vault, null, "gone.md", owner.userId);
-    const kept = await seedNote(vault, null, "kept.md", owner.userId);
     const live = await seedNote(vault, null, "live.md", owner.userId);
-    for (const d of [gone, kept, live]) {
+    for (const d of [gone, live]) {
       await appendUpdate(d, updateFor(`text ${d}`));
       await recordVersion({ vaultId: vault, docId: d, content: "v", cause: "idle", authorId: null });
     }
     await softDelete(owner, gone);
-    await softDelete(owner, kept);
-    await expire(gone);
-
-    expect(await purgeExpiredTrash()).toEqual([gone]);
+    // A delete is due for purge at once: no window to wait out.
+    expect(await purgeExpiredTrash(undefined, pool, [gone])).toEqual([gone]);
     const count = async (table: string, d: string) =>
       (await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE doc_id = $1`, [d])).rows[0].n;
     expect(await count("doc_updates", gone)).toBe(0);
@@ -398,20 +356,37 @@ describe("note trash", () => {
       [gone],
     );
     expect(tomb).toEqual([{ deleted: true, purged: true }]);
-    // Not listed, not restorable (410), and a new note can take its path.
-    const listed = (await (await req(owner, "GET", `/api/vaults/${vault}/trash`)).json()) as {
-      items: Array<{ docId: string }>;
-    };
-    expect(listed.items.map((i) => i.docId)).toEqual([kept]);
+    // Not restorable (410), and a new note can take its path.
     const restore = await req(owner, "POST", `/api/notes/${gone}/restore`);
     expect(restore.status).toBe(410);
     expect(((await restore.json()) as { code: string }).code).toBe("purged");
     await seedNote(vault, null, "gone.md", owner.userId);
-    for (const d of [kept, live]) {
-      expect(await count("doc_updates", d)).toBeGreaterThan(0);
-      expect(await count("note_versions", d)).toBe(1);
-    }
+    expect(await count("doc_updates", live)).toBeGreaterThan(0);
+    expect(await count("note_versions", live)).toBe(1);
     expect(await purgeExpiredTrash()).toEqual([]);
+  });
+
+  it("a note deleted under the old 30-day rule keeps its date", async () => {
+    const old = await seedNote(vault, null, "old.md", owner.userId);
+    await appendUpdate(old, updateFor("old text"));
+    await pool.query(
+      "UPDATE notes SET deleted_at = now(), purge_after = now() + interval '20 days' WHERE id = $1",
+      [old],
+    );
+    expect(await purgeExpiredTrash()).toEqual([]);
+    expect(await purgeExpiredTrash(undefined, pool, [old])).toEqual([]);
+    expect(await textOf(old)).toBe("old text");
+  });
+
+  it("content written after the purge (a late socket write) is scrubbed", async () => {
+    const doc = await seedNote(vault, null, "late.md", owner.userId);
+    await appendUpdate(doc, updateFor("before"));
+    await softDelete(owner, doc);
+    expect(await purgeExpiredTrash(undefined, pool, [doc])).toEqual([doc]);
+    await appendUpdate(doc, updateFor("late write"));
+    expect(await scrubPurgedContent([doc])).toBe(1);
+    expect(await textOf(doc)).toBe("");
+    expect(await scrubPurgedContent([doc])).toBe(0);
   });
 
   describe("ready.tombstones", () => {

@@ -56,6 +56,10 @@ const BATCH_LOG_MIN: usize = 50;
 /// too big to upload is a note too big to fully index. See `index_one`.
 const MAX_INDEX_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Bumped when link extraction changes, so `rebuild` re-derives every note's
+/// links once (`PRAGMA user_version`). 1 = markdown note links (#402).
+const LINK_RULES_VERSION: i64 = 1;
+
 /// Which links a resolution pass has to reconsider.
 pub enum LinkScope<'a> {
     /// Every link in the vault. Correct but O(all links): only for `rebuild`,
@@ -638,6 +642,9 @@ impl Index {
         let mut skipped = 0usize;
         let mut touched = 0usize;
         let tx = self.conn.unchecked_transaction()?;
+        // Before the walk: notes the walk re-indexes get the new rules anyway,
+        // and a brand-new vault has no rows yet, so nothing is read twice.
+        let links_rederived = self.reparse_links_if_stale(&tx, vault)?;
 
         // Snapshot what's already indexed: path -> (id, mtime, rowid).
         let mut indexed: HashMap<String, (String, i64, i64)> = HashMap::new();
@@ -714,7 +721,7 @@ impl Index {
         // pass (91,702 rows on the measured vault) to a reopen that changed no
         // note at all. If link resolution ever grows a folder-aware rule, this
         // split is what would have to go with it.
-        let mut notes_changed = false;
+        let mut notes_changed = links_rederived;
         let mut folders_changed = false;
         let mut folders_written = 0usize;
         let mut stale = 0usize;
@@ -1589,13 +1596,7 @@ impl Index {
 
         // Links (dst resolved later in resolve_links).
         tx.execute("DELETE FROM links WHERE src_note_id = ?1", params![id])?;
-        for link in &parsed.links {
-            tx.execute(
-                "INSERT INTO links (src_note_id, dst_note_id, dst_path_raw, link_text, position)
-                 VALUES (?1, NULL, ?2, ?3, ?4)",
-                params![id, link.target, link.raw, link.position],
-            )?;
-        }
+        Self::insert_links(tx, &id, &rel, &parsed.links)?;
 
         Self::remember_file_identity(tx, &id, &rel, abs)?;
         Ok(IndexedNote::Indexed(id))
@@ -1680,6 +1681,9 @@ impl Index {
         // Build lookup maps from all notes.
         let mut by_basename: HashMap<String, String> = HashMap::new();
         let mut by_title: HashMap<String, String> = HashMap::new();
+        // Exact vault paths, so `[x](a/persona.md)` and `[[a/persona]]` pick
+        // the right one of two notes that share a name (#402).
+        let mut by_path: HashMap<String, String> = HashMap::new();
         {
             let mut stmt = tx.prepare("SELECT id, path, title FROM notes")?;
             let rows = stmt.query_map([], |r| {
@@ -1698,6 +1702,7 @@ impl Index {
                         .trim_end_matches(".md"),
                 );
                 by_basename.entry(base).or_insert_with(|| id.clone());
+                by_path.insert(link_key(&path), id.clone());
                 if let Some(t) = title {
                     by_title.entry(link_key(&t)).or_insert(id);
                 }
@@ -1781,10 +1786,64 @@ impl Index {
                 .unwrap_or(&target)
                 .trim_end_matches(".md")
                 .to_string();
-            let dst = by_basename.get(&base).or_else(|| by_title.get(&target));
+            let dst = by_path
+                .get(&target)
+                .or_else(|| by_path.get(&format!("{target}.md")))
+                .or_else(|| by_basename.get(&base))
+                .or_else(|| by_title.get(&target));
             update.execute(params![dst, link_id])?;
         }
         Ok(())
+    }
+
+    /// A note's link rows (`dst_note_id` is filled in by `resolve_links`).
+    /// Markdown links store their vault-relative path (`parse::stored_target`).
+    fn insert_links(tx: &Connection, id: &str, rel: &str, links: &[crate::parse::ParsedLink]) -> AppResult<()> {
+        let mut ins = tx.prepare(
+            "INSERT INTO links (src_note_id, dst_note_id, dst_path_raw, link_text, position)
+             VALUES (?1, NULL, ?2, ?3, ?4)",
+        )?;
+        for link in links {
+            ins.execute(params![id, crate::parse::stored_target(rel, link), link.raw, link.position])?;
+        }
+        Ok(())
+    }
+
+    /// One-time re-derivation of every note's links after the link rules
+    /// change (#402: markdown links). `rebuild` skips a note whose mtime did
+    /// not move, so without this an existing vault would only gain the new
+    /// edges note by note as each one happened to be edited. Reads each
+    /// markdown note once; tags, titles and FTS are left alone.
+    fn reparse_links_if_stale(&self, tx: &Connection, vault: &Path) -> AppResult<bool> {
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version >= LINK_RULES_VERSION {
+            return Ok(false);
+        }
+        let notes: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT id, path FROM notes")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let mut redone = 0usize;
+        for (id, rel) in notes {
+            let lower = rel.to_lowercase();
+            if !(lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".mdx")) {
+                continue;
+            }
+            let abs = vault.join(&rel);
+            if std::fs::metadata(&abs).map(|m| m.len() > MAX_INDEX_BYTES).unwrap_or(true) {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&abs) else { continue };
+            let stem = abs.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let parsed = parse_note(&content, stem);
+            tx.execute("DELETE FROM links WHERE src_note_id = ?1", params![id])?;
+            Self::insert_links(tx, &id, &rel, &parsed.links)?;
+            redone += 1;
+        }
+        tx.execute_batch(&format!("PRAGMA user_version = {LINK_RULES_VERSION}"))?;
+        log::info!("[index] link rules v{LINK_RULES_VERSION}: re-derived links of {redone} notes");
+        Ok(true)
     }
 
     fn id_for_path(&self, tx: &Connection, rel: &str) -> AppResult<Option<String>> {
@@ -5230,5 +5289,55 @@ mod tests {
             before.bytes,
             after.bytes
         );
+    }
+
+    // ---- #402: markdown links in the graph and backlinks -----------------
+
+    #[test]
+    fn markdown_links_make_edges_and_backlinks_by_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        std::fs::create_dir_all(v.join("team")).unwrap();
+        std::fs::write(v.join("Company.md"), "# Company\n\nSee [Persona](persona.md) and [[persona]].\n").unwrap();
+        std::fs::write(v.join("persona.md"), "# Persona\n").unwrap();
+        // Same name in a folder: a relative link from beside it picks this one.
+        std::fs::write(v.join("team/persona.md"), "# Team persona\n").unwrap();
+        std::fs::write(v.join("team/Plan.md"), "[who](persona.md) [up](../Company.md) [web](https://x.com/a.md)\n").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        let id = |p: &str| idx.get_note_meta(p).unwrap().unwrap().id;
+        let (company, persona, team_persona, plan) =
+            (id("Company.md"), id("persona.md"), id("team/persona.md"), id("team/Plan.md"));
+        let edges: HashSet<(String, String)> =
+            idx.graph_edges().unwrap().into_iter().map(|e| (e.source, e.target)).collect();
+        // Both syntaxes between one pair are ONE edge.
+        assert_eq!(
+            edges,
+            HashSet::from([
+                (company.clone(), persona.clone()),
+                (plan.clone(), team_persona.clone()),
+                (plan.clone(), company.clone()),
+            ])
+        );
+        let back: Vec<String> = idx.get_backlinks(&team_persona).unwrap().into_iter().map(|b| b.id).collect();
+        assert_eq!(back, vec![plan]);
+    }
+
+    #[test]
+    fn an_existing_index_rederives_links_once_after_the_rules_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        std::fs::write(v.join("A.md"), "[b](B.md)\n").unwrap();
+        std::fs::write(v.join("B.md"), "# B\n").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        // What an index built by an older app looks like: no markdown link rows,
+        // an older rules version, and files whose mtime has not moved.
+        idx.conn.execute_batch("DELETE FROM links; PRAGMA user_version = 0;").unwrap();
+        idx.rebuild(&v).unwrap();
+        assert_eq!(idx.graph_edges().unwrap().len(), 1);
+        let version: i64 = idx.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, LINK_RULES_VERSION);
     }
 }

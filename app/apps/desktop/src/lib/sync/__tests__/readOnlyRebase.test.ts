@@ -61,10 +61,6 @@ function world(opts: { file?: string; stray?: string; edited?: boolean; open?: (
     pathOf: (d) => (d === DOC ? PATH : null),
     localText: async () => local.getText("content").toString(),
     readFile: async () => file,
-    writeTrashCopy: async (_p, stamp, content) => {
-      copies.push(content);
-      return `.context/trash/${stamp}/${PATH}`;
-    },
     userEdited: () => opts.edited ?? false,
     notify,
     serverState,
@@ -100,8 +96,8 @@ describe("read-only rebase onto the server", () => {
     expect(w.replaceLocal).toHaveBeenCalledTimes(1);
     expect(w.file()).toBe("server text\n");
     expect(w.local().getText("content").toString()).toBe("server text\n");
-    // The file differed from the server: exactly one quiet copy, no entry, no toast.
-    expect(w.copies).toEqual(["stale ingest server text\n"]);
+    // The file differed from the server: replaced, no copy, no entry, no toast.
+    expect(w.copies).toEqual([]);
     expect(reconcileReport.items()).toEqual([]);
     expect(w.notify).not.toHaveBeenCalled();
     expect(wasRebased(DOC)).toBe(true);
@@ -112,7 +108,6 @@ describe("read-only rebase onto the server", () => {
     expect(await w.h.handle(DOC)).toBe(false);
     expect(w.replaceLocal).toHaveBeenCalledTimes(1);
     expect(w.serverState).toHaveBeenCalledTimes(1);
-    expect(w.copies).toHaveLength(1);
   });
 
   it("does not replace populated local content with an empty server state after an access change", async () => {
@@ -129,7 +124,7 @@ describe("read-only rebase onto the server", () => {
     w.server.getText("content").insert(0, "Restored finance records");
     await w.h.handle(DOC);
     expect(w.file()).toBe("Restored finance records");
-    expect(w.copies).toEqual(["Finance records"]);
+    expect(w.copies).toEqual([]);
     expect(wasRebased(DOC)).toBe(true);
   });
 
@@ -142,52 +137,34 @@ describe("read-only rebase onto the server", () => {
     expect(wouldSend(w.local(), w.server)).toBe(false);
   });
 
-  it("a real typed edit: one toast, one Activity entry, one copy, then the rebase", async () => {
+  it("a real typed edit: one toast, one Activity entry, no copy, then the rebase", async () => {
     markLocalEdit(DOC);
     const w = world({ stray: "my edit ", edited: true });
     expect(await w.h.handle(DOC)).toBe(true);
-    expect(w.copies).toEqual(["my edit server text\n"]);
+    expect(w.copies).toEqual([]);
     expect(w.notify).toHaveBeenCalledExactlyOnceWith(READ_ONLY_TOAST);
     expect(reconcileReport.items()).toEqual([
       expect.objectContaining({ kind: "keptLocally", docId: DOC, detail: READ_ONLY_DETAIL }),
     ]);
     expect(w.file()).toBe("server text\n");
     await w.h.handle(DOC);
-    expect(w.copies).toHaveLength(1);
     expect(w.notify).toHaveBeenCalledTimes(1);
   });
 
-  it("the open note: copy at the frame, rebase only when it closes, never a second copy", async () => {
+  it("the open note: reported at the frame, rebase only when it closes", async () => {
     let open = true;
     const w = world({ stray: "typed ", edited: true, open: () => open });
     expect(await w.h.handle(DOC)).toBe(true);
-    expect(w.copies).toHaveLength(1);
+    expect(w.copies).toEqual([]);
     expect(w.replaceLocal).not.toHaveBeenCalled();
     open = false;
     await w.h.closed(DOC);
     expect(w.replaceLocal).toHaveBeenCalledTimes(1);
-    expect(w.copies).toHaveLength(1);
+    expect(w.copies).toEqual([]);
     expect(w.file()).toBe("server text\n");
     expect(w.notify).toHaveBeenCalledTimes(1);
   });
 
-  it("a failed copy leaves the file and the CRDT alone", async () => {
-    const w = world({ stray: "x " });
-    const h = new ReadOnlyRejections({
-      pathOf: () => PATH,
-      localText: async () => "x server text\n",
-      readFile: async () => "x server text\n",
-      writeTrashCopy: async () => {
-        throw new Error("disk full");
-      },
-      userEdited: () => false,
-      serverState: w.serverState,
-      replaceLocal: w.replaceLocal,
-    });
-    expect(await h.handle(DOC)).toBe(false);
-    expect(w.replaceLocal).not.toHaveBeenCalled();
-    expect(wasRebased(DOC)).toBe(false);
-  });
 });
 
 describe("the bridge never ingests a read-only doc's file", () => {

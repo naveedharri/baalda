@@ -383,9 +383,30 @@ export function planBinarySync(
   const localShas = new Set(local.map((a) => a.sha256));
   const localPaths = new Set(local.map((a) => pathKey(a.relPath)));
   const serverShas = new Set(server.map((b) => b.sha256));
-  /** Shas some server row holds as a tree file (anything not an `attachments/` drop). */
-  const treeShas = new Set(
-    server.filter((b) => !b.relPath || !isUnderAttachments(b.relPath)).map((b) => b.sha256),
+  /** Shas the server holds as an `attachments/` drop (no `files` row). */
+  const attachmentShas = new Set(
+    server
+      .filter((b) => !b.docId && (b.relPath == null || isUnderAttachments(b.relPath)))
+      .map((b) => b.sha256),
+  );
+  /**
+   * Shas some server TREE row holds at a path that is missing on this disk: the
+   * bytes may be that file under a new name (an offline rename the pairing
+   * could not prove), so an unbound local file with them is not uploaded as a
+   * new one. A tree row still present at its own path proves nothing of the
+   * kind: a copy beside the original is a new file and must go up. Counting
+   * every tree row here left any copy of an existing file unsynced forever.
+   */
+  const vacatedTreeShas = new Set(
+    server
+      .filter((b) => !b.relPath || (!isUnderAttachments(b.relPath) && !localPaths.has(pathKey(b.relPath))))
+      .map((b) => b.sha256),
+  );
+  /** "sha|path" of every server tree row: the same bytes at the same path is this very file. */
+  const treeAtPath = new Set(
+    server
+      .filter((b) => b.relPath && !isUnderAttachments(b.relPath))
+      .map((b) => `${b.sha256}|${pathKey(b.relPath as string)}`),
   );
 
   const toUpload: PlannedUpload[] = [];
@@ -487,6 +508,17 @@ export function planBinarySync(
 
   for (const a of local) {
     if (decided.has(a.relPath)) continue;
+    // An `attachments/` drop is on the server only as an `attachments/` row:
+    // a teammate gets embeds from those rows, never from a tree file's. The
+    // same bytes held only by a standalone file elsewhere (a PDF in a folder,
+    // and the same PDF dropped into a note) used to count as uploaded, so the
+    // embed never reached anyone. The server dedupes an attachment intent onto
+    // unclaimed rows only, so this registers the drop without a second copy
+    // being claimed by the file.
+    if (isUnderAttachments(a.relPath)) {
+      if (!attachmentShas.has(a.sha256)) toUpload.push(a);
+      continue;
+    }
     if (!serverShas.has(a.sha256)) {
       toUpload.push(a);
       continue;
@@ -495,18 +527,34 @@ export function planBinarySync(
     // them ONLY as `attachments/` drops, a tree file with no `files` id is a
     // file the server does not know yet: an attachment copied into a folder
     // (#343) used to be skipped here forever. It still goes up, so it
-    // registers; the intent dedupes it, and no bytes move. A sha any tree row
-    // holds (this file seen fresh, or its pre-rename path) stays skipped and
-    // confirms from the listing, and a true `attachments/` duplicate too.
+    // registers; the intent dedupes it, and no bytes move. So does a copy of
+    // another tree file whose original is still here. Only a sha a VACATED
+    // tree row holds (maybe this file's pre-rename path) stays skipped, and a
+    // true `attachments/` duplicate too.
     if (
       ctx &&
       !isUnderAttachments(a.relPath) &&
       !ctx.docIdFor(a.relPath) &&
-      !treeShas.has(a.sha256)
+      !vacatedTreeShas.has(a.sha256) &&
+      !treeAtPath.has(`${a.sha256}|${pathKey(a.relPath)}`)
     ) {
       toUpload.push(a);
     }
   }
+  // Local bytes that may be a server file under a new name: a tree file with
+  // no server row of its own (an offline rename the pairing above could not
+  // prove). Such a sha holds back a download, or the old path would come back
+  // beside the renamed copy. A local file already bound to its OWN server row
+  // is a separate file and holds nothing back: a teammate's identical copy in
+  // another folder (the same logo or CSV in two projects) must still arrive.
+  // Without `ctx` nothing is bound, so every local sha holds back, as before.
+  const unboundShas = ctx
+    ? new Set(
+        local
+          .filter((a) => !decided.has(a.relPath) && !isUnderAttachments(a.relPath))
+          .map((a) => a.sha256),
+      )
+    : localShas;
   const toDownload = server.filter(
     (b) =>
       !consumed.has(b.id) &&
@@ -515,7 +563,7 @@ export function planBinarySync(
       isSafeBlobRelPath(b.relPath) &&
       // An embedded image must exist at the path the note references, even
       // when another local file happens to contain identical bytes.
-      (isUnderAttachments(b.relPath) || !localShas.has(b.sha256)) &&
+      (isUnderAttachments(b.relPath) || !unboundShas.has(b.sha256)) &&
       !localPaths.has(pathKey(b.relPath)),
   );
   return { toUpload, toDownload, toReplace, agreed, toTrash, toMove };
@@ -803,6 +851,38 @@ function baseName(relPath: string): string {
   return parts[parts.length - 1] ?? relPath;
 }
 
+/**
+ * Which of these `attachments/` paths does a local note still embed (#408)?
+ *
+ * Notes that are themselves leaving (`isLeaving`: named revoked by the server,
+ * or at a path it answered `not_readable` for, still on disk only because
+ * their removal has not run yet) are skipped, so a note on its way out never
+ * keeps its images. Hash-named files, so a name match in the note text is the
+ * embed. A read failure throws, which the caller reads as "cannot tell".
+ */
+export async function findEmbedReferences(
+  paths: readonly string[],
+  notes: ReadonlyArray<{ id: string; path: string }>,
+  readNote: (path: string) => Promise<string>,
+  isLeaving: (note: { id: string; path: string }) => boolean,
+): Promise<Set<string>> {
+  // Matched loosely on purpose (keeping too much is the safe direction): any
+  // letter case, and the percent-encoded spelling a markdown link uses for a
+  // name with spaces (`photo%201.png`), as well as the wiki form's plain one.
+  const wanted = paths.map((p) => {
+    const name = p.slice(p.lastIndexOf("/") + 1).toLowerCase();
+    return { p, names: [...new Set([name, encodeURI(name).toLowerCase()])] };
+  });
+  const hit = new Set<string>();
+  for (const n of notes) {
+    if (hit.size === wanted.length) break;
+    if (isLeaving(n)) continue;
+    const text = (await readNote(n.path)).toLowerCase();
+    for (const w of wanted) if (!hit.has(w.p) && w.names.some((name) => text.includes(name))) hit.add(w.p);
+  }
+  return hit;
+}
+
 /** Injected I/O so the sync loop is testable without Tauri or a live server. */
 export interface AttachmentSyncDeps {
   /**
@@ -843,8 +923,7 @@ export interface AttachmentSyncDeps {
   /** Ids of tree files the server deleted (`GET /vaults/:id/file-tombstones`).
    *  Absent or failing: no suppression this pass (the older behaviour). */
   listFileTombstones?: () => Promise<string[]>;
-  /** Remove a local tree binary outright (`ipc.deleteFile`) — used only after
-   *  {@link keepLocalCopy} put its bytes in `.context/trash`. */
+  /** Remove a local tree binary outright (`ipc.deleteFile`). */
   removeLocal?: (relPath: string) => Promise<void>;
   /** LEGACY upload: POST the whole body in one shot. The fallback for a server
    *  with no intent route, and the reason that route stays forever. `docId` is
@@ -936,6 +1015,22 @@ export interface AttachmentSyncDeps {
    * the unit tests that assert a presign is fetched clean.
    */
   authHeaders?: () => Record<string, string>;
+  // ---- Revoked embeds (#408): `attachments/` drops only hidden notes embed ----
+  /** The sha + origin this device last agreed with the server on for an
+   *  `attachments/` path (`registry.getAttachmentBase`). */
+  attachmentBase?: (relPath: string) => { sha: string; origin: "up" | "down" } | null;
+  /** Record that agreement: `down` = downloaded/listed, `up` = uploaded here. */
+  setAttachmentBase?: (relPath: string, sha256: string, origin: "up" | "down") => void;
+  /** The file left this disk: forget its base. */
+  forgetAttachmentBase?: (relPath: string) => void;
+  /** Is a fresh ACL signal (ready.revoked / revoked frame / reauth ≤60 s) in
+   *  hand on a live session (`docSession.revocationAuthority`)? Absent ⇒ never. */
+  revocationAuthority?: () => boolean;
+  /** Of these `attachments/` paths, which does a local note still embed?
+   *  null = cannot tell, so nothing is removed. Absent ⇒ nothing is removed. */
+  referencedAttachments?: (paths: string[]) => Promise<Set<string> | null>;
+  /** Tell the binary delete queue this removal was ours, not the user's. */
+  suppressDelete?: (relPath: string) => void;
   /** Tell the user something terminal happened (a full vault). */
   notify?: (text: string, tone?: "error" | "neutral" | "success") => void;
   /**
@@ -1044,12 +1139,6 @@ export interface AttachmentSyncDeps {
    */
   fileBase?: (docId: string) => string | null;
   setFileBase?: (docId: string, sha256: string) => void;
-  /**
-   * Copy a local binary into `.context/trash` before a server version replaces
-   * it (`ipc.copyToTrash`). Absent: a replacement that needs a recovery copy is
-   * not made — the local file is never overwritten without one.
-   */
-  keepLocalCopy?: (relPath: string) => Promise<string>;
   /** Forget a mapping whose path is not this file's any more — the other half
    *  of an adoption, so `.context/config.json` never names two ids for one
    *  file (`registry.forgetFileId`). */
@@ -1152,6 +1241,9 @@ export class AttachmentSync {
    * than path so a rename does not resurrect the attempt.
    */
   private readonly permanentSkips = new Set<string>();
+  /** One plain notice per session for a 415: an older server that does not
+   *  know a file type the app now syncs (#407: .tar/.gz/.7z). */
+  private unsupportedTypeNotified = false;
   /** {@link permanentSkips} and the text refusals, beyond this instance. */
   private readonly refusals: RefusalStore;
   /**
@@ -1270,6 +1362,17 @@ export class AttachmentSync {
   private skipPermanently(sha256: string): void {
     this.permanentSkips.add(sha256);
     if (sha256) this.refusals.add(bytesRefusalKey(sha256));
+  }
+
+  /** Say once, in plain words, why a file of a refused type stays local. The
+   *  skip itself is already permanent (see {@link skipPermanently}). */
+  private noteUnsupportedType(a: LocalAttachment): void {
+    if (this.unsupportedTypeNotified) return;
+    this.unsupportedTypeNotified = true;
+    this.deps.notify?.(
+      `${baseName(a.relPath)} stays on this device: this server does not accept this file type. Ask whoever runs the server to update it.`,
+      "error",
+    );
   }
 
   private forgiveSkip(sha256: string): void {
@@ -1499,6 +1602,94 @@ export class AttachmentSync {
     }, EMBED_REFUSAL_RETRY_MS);
   }
 
+  /**
+   * `attachments/` drops the server's listing no longer names for this user
+   * (#408): the notes embedding them were hidden from them. Returns the paths
+   * the upload phase must skip — this device already agreed with the server on
+   * those exact bytes, so an unlisted copy is hidden, not missing, and putting
+   * it back up would only re-announce what access removal took away.
+   *
+   * Also the drops of DELETED notes, which the server removes once no live note
+   * uses them. Removal:
+   *  - only on this pass's complete listing (a failed one never reaches here);
+   *  - only bytes this device agreed on with the server (a recorded base equal
+   *    to the file); anything never synced, or changed since, stays;
+   *  - never a path a local note still embeds (`referencedAttachments`;
+   *    unanswered ⇒ nothing is removed);
+   *  - capped at max(20, half the known drops) per pass, like revocations;
+   *  - removed outright, edited or not: access removal keeps no local copy.
+   */
+  private async settleHiddenEmbeds(
+    local: LocalAttachment[],
+    server: ServerBlob[],
+  ): Promise<Set<string>> {
+    const hidden = new Set<string>();
+    const baseOf = this.deps.attachmentBase;
+    if (!baseOf) return hidden;
+    const listed = new Set(server.flatMap((b) => (b.relPath ? [pathKey(b.relPath)] : [])));
+    const candidates: Array<{ a: LocalAttachment; base: { sha: string; origin: "up" | "down" } }> = [];
+    let known = 0;
+    for (const a of local) {
+      if (!isUnderAttachments(a.relPath)) continue;
+      const base = baseOf(a.relPath);
+      if (listed.has(pathKey(a.relPath))) {
+        // Listed with the same bytes: that is agreement (repairs older installs).
+        if (server.some((b) => b.relPath && pathKey(b.relPath) === pathKey(a.relPath) && b.sha256 === a.sha256)) {
+          this.deps.setAttachmentBase?.(a.relPath, a.sha256, "down");
+        }
+        if (base) known++;
+        continue;
+      }
+      if (!base) continue;
+      known++;
+      // A copy changed here since the agreement leaves only on an access
+      // change (removed outright, edited or not); a deletion takes only the
+      // agreed bytes.
+      if (base.sha !== a.sha256) {
+        if (this.deps.revocationAuthority?.()) candidates.push({ a, base });
+        continue;
+      }
+      hidden.add(a.relPath);
+      // Unlisted, and exactly the bytes this device agreed on with the server.
+      // Either access to every note embedding it was removed, or the notes were
+      // deleted and the server removed it (blobs/attachment-cleanup.ts). Both
+      // mean it leaves this disk too, unless a note here still embeds it
+      // (checked below). Before, only a fresh access change removed one, and
+      // only a downloaded one, so a deleted note's images stayed forever.
+      candidates.push({ a, base });
+    }
+    if (candidates.length === 0) return hidden;
+    if (!this.deps.referencedAttachments || !this.deps.removeLocal) return hidden;
+    const cap = Math.max(20, Math.ceil(known * 0.5));
+    if (candidates.length > cap) {
+      console.warn(
+        `[attachments] ${candidates.length} embedded files are no longer listed (cap ${cap}) — none removed`,
+      );
+      return hidden;
+    }
+    let referenced: Set<string> | null;
+    try {
+      referenced = await this.deps.referencedAttachments(candidates.map((c) => c.a.relPath));
+    } catch {
+      referenced = null;
+    }
+    if (!referenced || !this.current()) return hidden;
+    for (const { a } of candidates) {
+      if (!this.current()) break;
+      if (referenced.has(a.relPath)) continue;
+      this.deps.suppressDelete?.(a.relPath);
+      try {
+        await this.deps.removeLocal(a.relPath);
+        this.deps.forgetAttachmentBase?.(a.relPath);
+        this.localPathKeys.delete(pathKey(a.relPath));
+        hidden.add(a.relPath);
+      } catch (e) {
+        console.warn(`[attachments] ${a.relPath} could not be removed after access ended — kept`, e);
+      }
+    }
+    return hidden;
+  }
+
   /** Ask again once the quiet period has passed (see {@link settleTimer}). */
   private retryAfterSettle(): void {
     if (this.settleTimer) return;
@@ -1576,6 +1767,9 @@ export class AttachmentSync {
       isTombstoned: tombstoned ? (docId) => tombstoned.has(docId) : undefined,
     });
     await this.trashTombstoned(plan.toTrash);
+    // #408: `attachments/` drops this listing no longer names for us.
+    const hiddenEmbeds = await this.settleHiddenEmbeds(local, server);
+    if (!this.current()) return { uploaded: 0, downloaded: 0 };
     if (!this.attachmentSyncBlocked) await this.moveRenamedOffline(plan.toMove);
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
     const { toDownload } = plan;
@@ -1587,7 +1781,9 @@ export class AttachmentSync {
     // push, so it is settled, never registered and never queued.
     // An Office lock file never uploads (#265). Rust's listing already leaves
     // them out; this is the same rule held on the side that talks to the server.
-    const toUpload = plan.toUpload.filter((a) => a.size !== 0 && !isTransientPath(a.relPath));
+    const toUpload = plan.toUpload.filter(
+      (a) => a.size !== 0 && !isTransientPath(a.relPath) && !hiddenEmbeds.has(a.relPath),
+    );
     // Replacements grow during the upload phase: a 409 `stale_base` is one more.
     const replacements: BinaryReplace[] = [...plan.toReplace];
     for (const g of plan.agreed) {
@@ -1726,6 +1922,7 @@ export class AttachmentSync {
             uploaded++;
             // The bytes are THERE now — the one position an upload may say so.
             this.deps.confirmFileBytes?.(a.relPath);
+            if (isUnderAttachments(a.relPath)) this.deps.setAttachmentBase?.(a.relPath, a.sha256, "up");
             this.setFileState(a.relPath, "synced");
           } else {
             // The only `false` is a permanent refusal (413 too large, 415 wrong
@@ -1775,6 +1972,7 @@ export class AttachmentSync {
             // these bytes on every pass, so the same permanent skip.
             this.skipPermanently(a.sha256);
             this.setFileState(a.relPath, "error");
+            if (failed === 415) this.noteUnsupportedType(a);
             console.warn(
               `[attachments] ${a.relPath} refused permanently (${failed} ${errCode(e) ?? "?"}) — skipping`,
             );
@@ -1812,12 +2010,6 @@ export class AttachmentSync {
     const replaces = replacements.filter((r) => {
       if (this.attachmentSyncBlocked) return false;
       if (this.deps.isDeletePending?.(r.local.relPath)) return false;
-      if (r.keepCopy && !this.deps.keepLocalCopy) {
-        console.warn(
-          `[attachments] ${r.local.relPath} differs from the server's version and no recovery copy can be kept — leaving it alone`,
-        );
-        return false;
-      }
       return true;
     });
     const total = downloads.length + replaces.length;
@@ -1912,8 +2104,8 @@ export class AttachmentSync {
     if (kept.length > 0 && this.current()) {
       this.deps.notify?.(
         kept.length === 1
-          ? `A newer version of ${baseName(kept[0])} was synced from your team. Your local copy is saved in the vault's recovery folder.`
-          : `Newer versions of ${kept.length} files were synced from your team. Your local copies are saved in the vault's recovery folder.`,
+          ? `A newer version of ${baseName(kept[0])} was synced from your team and replaced your local changes.`
+          : `Newer versions of ${kept.length} files were synced from your team and replaced your local changes.`,
         "neutral",
       );
     }
@@ -1929,24 +2121,23 @@ export class AttachmentSync {
    * {@link BinaryReplace}). The recovery copy comes FIRST, and a failed copy
    * stops the replacement: the local bytes are never overwritten without one.
    */
+  /** A file a teammate deleted leaves this disk outright: a delete keeps no
+   *  local copy. */
   private async trashTombstoned(items: BinaryPlan["toTrash"]): Promise<void> {
-    const keep = this.deps.keepLocalCopy;
     const remove = this.deps.removeLocal;
     for (const { local, docId } of items) {
-      if (!keep || !remove || !this.current()) {
+      if (!remove || !this.current()) {
         console.info(`[attachments] ${local.relPath} was deleted on the server — not uploading it back`);
         continue;
       }
       try {
-        const dest = await keep(local.relPath);
+        this.deps.suppressDelete?.(local.relPath);
         await remove(local.relPath);
         this.fileIds.delete(local.relPath);
         this.deps.forgetFileId?.(local.relPath);
-        console.info(
-          `[attachments] ${local.relPath} (file ${docId}) was deleted by a teammate — local copy moved to ${dest}`,
-        );
+        console.info(`[attachments] ${local.relPath} (file ${docId}) was deleted by a teammate — removed here`);
       } catch (e) {
-        console.warn(`[attachments] couldn't set aside deleted file ${local.relPath}; leaving it`, e);
+        console.warn(`[attachments] couldn't remove deleted file ${local.relPath}; leaving it`, e);
       }
     }
   }
@@ -1990,13 +2181,10 @@ export class AttachmentSync {
 
   private async replaceOne(r: BinaryReplace, kept: string[]): Promise<void> {
     const relPath = r.local.relPath;
+    // Both sides changed (or no shared base): the server's version wins and
+    // no local copy is kept (decided 2026-11-19: nothing goes to .context/trash).
     if (r.keepCopy) {
-      const keep = this.deps.keepLocalCopy;
-      if (!keep) throw new Error(`no recovery copy transport for ${relPath}`);
-      const dest = await keep(relPath);
-      console.info(
-        `[attachments] ${relPath} (${r.reason}) — local copy kept at ${dest}; downloading the server's version`,
-      );
+      console.info(`[attachments] ${relPath} (${r.reason}) — replaced by the server's version`);
       kept.push(relPath);
     } else {
       console.info(`[attachments] ${relPath} changed on the server — downloading the newer version`);
@@ -2188,6 +2376,7 @@ export class AttachmentSync {
         // stays a session-only skip.
         if (status === 403) this.permanentSkips.add(a.sha256);
         else this.skipPermanently(a.sha256);
+        if (status === 415) this.noteUnsupportedType(a);
         console.warn(
           `[attachments] ${a.relPath} refused permanently (${status} ${errCode(e) ?? "?"}) — skipping`,
         );
@@ -2479,6 +2668,9 @@ export class AttachmentSync {
   /** Download one blob, then tell any embed waiting on it (`attachmentArrivals`). */
   private async downloadOne(b: ServerBlob, opts: { overwrite?: boolean } = {}): Promise<void> {
     await this.downloadOneInner(b, opts);
+    if (b.relPath && b.sha256 && isUnderAttachments(b.relPath)) {
+      this.deps.setAttachmentBase?.(b.relPath, b.sha256, "down");
+    }
     announceAttachmentArrived(b.relPath as string);
   }
 

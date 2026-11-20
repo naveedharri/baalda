@@ -118,18 +118,39 @@ export const EXT_MIME: Readonly<Record<string, string>> = {
   mov: "video/quicktime",
   m4v: "video/mp4",
   webm: "video/webm",
-  // archives
+  // archives (#407). `foo.tar.gz` reaches here as "gz": the desktop takes the
+  // extension after the last dot.
   zip: "application/zip",
+  tar: "application/x-tar",
+  tgz: "application/gzip",
+  gz: "application/gzip",
+  "7z": "application/x-7z-compressed",
 };
 
+/**
+ * Every lookup below is keyed in lowercase, because {@link normalizeMime}
+ * case-folds what it looks up: a mixed-case registered spelling (the xlsm type
+ * is `…sheet.macroEnabled.12`) would otherwise never match and its uploads
+ * were refused with 415.
+ */
+const lowerKeys = <T,>(o: Readonly<Record<string, T>>): Readonly<Record<string, T>> =>
+  Object.fromEntries(Object.entries(o).map(([k, v]) => [k.toLowerCase(), v]));
+const lowerSet = (xs: Iterable<string>): ReadonlySet<string> =>
+  new Set([...xs].map((x) => x.toLowerCase()));
+
 /** MIME → category, for the size ceiling. */
-const MIME_CATEGORY: Readonly<Record<string, FormatCategory>> = {
+const MIME_CATEGORY: Readonly<Record<string, FormatCategory>> = lowerKeys({
   "application/pdf": "pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "document",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "document",
   "application/vnd.ms-excel.sheet.macroEnabled.12": "document",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation": "document",
   "application/zip": "archive",
+  "application/x-zip-compressed": "archive",
+  "application/x-tar": "archive",
+  "application/gzip": "archive",
+  "application/x-gzip": "archive",
+  "application/x-7z-compressed": "archive",
   "application/json": "text",
   "application/yaml": "text",
   "application/toml": "text",
@@ -137,7 +158,7 @@ const MIME_CATEGORY: Readonly<Record<string, FormatCategory>> = {
   "application/sql": "text",
   "application/x-sh": "text",
   "application/octet-stream": "other",
-};
+});
 
 /**
  * Every MIME the server will store. Union of {@link EXT_MIME}'s values (the
@@ -147,7 +168,7 @@ const MIME_CATEGORY: Readonly<Record<string, FormatCategory>> = {
  * (dropped next to a note rather than opened as one); that is separate from
  * whether it syncs as a note.
  */
-export const ALLOWED_MIME: ReadonlySet<string> = new Set<string>([
+export const ALLOWED_MIME: ReadonlySet<string> = lowerSet([
   ...Object.values(EXT_MIME),
   "application/octet-stream",
   // `mimeForPath` emits these two for .ico/.zip-adjacent legacy paths and a few
@@ -155,6 +176,7 @@ export const ALLOWED_MIME: ReadonlySet<string> = new Set<string>([
   // spelling.
   "image/vnd.microsoft.icon",
   "application/x-zip-compressed",
+  "application/x-gzip",
 ]);
 
 /**
@@ -248,7 +270,7 @@ const TEXTUAL_MIME: ReadonlySet<string> = new Set<string>([
  * types entry late) legitimately sniffs as `application/zip`.
  */
 const EQUIVALENT_MIME: ReadonlyArray<ReadonlySet<string>> = [
-  new Set([
+  lowerSet([
     "application/zip",
     "application/x-zip-compressed",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -262,6 +284,7 @@ const EQUIVALENT_MIME: ReadonlyArray<ReadonlySet<string>> = [
   new Set(["audio/ogg", "video/ogg", "application/ogg"]),
   new Set(["image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"]),
   new Set(["image/x-icon", "image/vnd.microsoft.icon"]),
+  new Set(["application/gzip", "application/x-gzip"]),
   new Set(["audio/wav", "audio/x-wav", "audio/vnd.wave"]),
 ];
 

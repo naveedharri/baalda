@@ -279,7 +279,9 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   ".cm-md-pdf": {
     display: "block",
     margin: "var(--sp-3) 0",
-    height: "480px",
+    // A page shown whole: as tall as the window allows (less the app's top
+    // bar and some air), never shorter than the old fixed 480px.
+    height: "max(480px, calc(100vh - 160px))",
     maxWidth: "100%",
     borderRadius: "var(--radius-sm)",
     border: "1px solid var(--border)",

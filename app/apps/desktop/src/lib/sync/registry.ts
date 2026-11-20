@@ -68,10 +68,6 @@ function retiredScope(scope: VaultScope): VaultScope {
   };
 }
 
-/** Timestamped `.context/trash` folder for an inbound-removal recovery copy. */
-function recoveryStamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, "-");
-}
 
 /** The server's creation timestamp for a listed note, when it says. */
 function noteCreatedAtOf(n: RegisteredNote): string | null {
@@ -118,6 +114,7 @@ import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { isSymlinkRefusal, SYMLINK_REFUSAL_REASON } from "./linkRefusals";
 import { toast } from "../toast";
 import { isHeldCreateCode } from "./createRefusals";
+import { isSafeTreeBinaryRelPath } from "./attachments";
 import { NOT_CREATOR_DETAIL, NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { vaultScopes, type VaultScope, type VaultScopeSource } from "./vaultScope";
 
@@ -199,6 +196,14 @@ interface VaultSyncConfig {
    * means "no base", and a doc with no base never overwrites the server.
    */
   fileBases?: Record<string, string>;
+  /**
+   * `attachments/` drops (hash-named, no `files` id) → the sha this device
+   * and the server last agreed on, and how it got here: `down` = downloaded
+   * from (or matched by) the server's listing, `up` = this device uploaded it.
+   * The identity a revoked embed's removal needs (#408): only a `down` file
+   * still hashing to its sha is removed; an `up` one is never touched.
+   */
+  attachmentBases?: Record<string, { sha: string; origin: "up" | "down" }>;
   /**
    * Folders awaiting removal (revoked, or a deleted folder whose disk removal
    * failed), path → last server id (`VaultRegistry.revokedFolders`). The empty-only
@@ -706,6 +711,17 @@ function isNoteFile(path: string): boolean {
 }
 
 /** Flatten a tree into folder paths and note paths (both vault-relative). */
+/** Tree binaries (non-note files the attachment sync uploads) in a local tree. */
+function treeBinaryPaths(root: TreeNode): string[] {
+  const out: string[] = [];
+  const walk = (n: TreeNode) => {
+    if (n.isDir) for (const c of n.children ?? []) walk(c);
+    else if (!isNoteFile(n.path) && isSafeTreeBinaryRelPath(n.path)) out.push(n.path);
+  };
+  walk(root);
+  return out;
+}
+
 export function flattenTree(root: TreeNode): { folders: TreeNode[]; notes: TreeNode[] } {
   const folders: TreeNode[] = [];
   const notes: TreeNode[] = [];
@@ -844,6 +860,8 @@ export class VaultRegistry {
   private filesConfirmed = new Set<string>();
   /** `files` id → last agreed sha256 (see `VaultSyncConfig.fileBases`). */
   private fileBases = new Map<string, string>();
+  /** `attachments/` path → agreed sha + origin (see `VaultSyncConfig.attachmentBases`). */
+  private attachmentBases = new Map<string, { sha: string; origin: "up" | "down" }>();
   /** docIds whose content this device has confirmed on the server. See
    *  `VaultSyncConfig.pushed` for why this is an optimization, not a guarantee. */
   private pushed = new Set<string>();
@@ -1048,6 +1066,14 @@ export class VaultRegistry {
    * came back) or the path leaves the disk; wholesale on `reset`.
    */
   private hiddenPaths = new Set<string>();
+  /**
+   * Lower-cased path → doc_id of notes whose access was REVOKED but which could
+   * not leave the disk this pass (a recovery copy failed, or the path's
+   * identity could not be proven). Opening one would show refused content, so
+   * {@link isHiddenPath} answers true for them too. An entry leaves when the
+   * server lists that doc again (access came back) or the file is removed.
+   */
+  private revokedKept = new Map<string, string>();
   /**
    * Lower-cased local note paths, and the doc_ids they carried, that the server
    * refused with `note_deleted`: the id names a note a teammate DELETED, and
@@ -1392,6 +1418,7 @@ export class VaultRegistry {
     // Paths, so they belong to the vault we are leaving.
     this.aliasPaths.clear();
     this.hiddenPaths.clear();
+    this.revokedKept.clear();
     this.deletedPaths.clear();
     this.deletedDocIds.clear();
     this.heldRefused.clear();
@@ -1402,6 +1429,7 @@ export class VaultRegistry {
     this.fileByPath.clear();
     this.filesConfirmed.clear();
     this.fileBases.clear();
+    this.attachmentBases.clear();
     this.pushed.clear();
     this.ackedSvs.clear();
     this.serverTombstones.clear();
@@ -1480,6 +1508,12 @@ export class VaultRegistry {
   }
 
   /** Server doc mapping for a note's vault-relative path, if registered. */
+  /** Did the server answer `not_readable` for this path? A note there is
+   *  hidden from this user, whatever is still on disk (#408). */
+  isHiddenNotePath(relPath: string): boolean {
+    return this.isHiddenPath(relPath);
+  }
+
   getMapping(relPath: string): DocMapping | null {
     return this.byPath.get(relPath) ?? null;
   }
@@ -1731,6 +1765,28 @@ export class VaultRegistry {
     return this.fileBases.get(docId) ?? null;
   }
 
+  /** The agreed sha + origin of an `attachments/` drop (#408), or null. */
+  getAttachmentBase(relPath: string): { sha: string; origin: "up" | "down" } | null {
+    return this.attachmentBases.get(relPath) ?? null;
+  }
+
+  /** Record what this device and the server agree an `attachments/` drop holds.
+   *  An `up` origin is sticky for the same bytes: a later listing match never
+   *  downgrades this device's own upload into a removable download. */
+  setAttachmentBase(relPath: string, sha256: string, origin: "up" | "down"): void {
+    if (this.stale() || !relPath || !sha256) return;
+    const cur = this.attachmentBases.get(relPath);
+    if (cur && cur.sha === sha256 && (cur.origin === origin || cur.origin === "up")) return;
+    this.attachmentBases.set(relPath, { sha: sha256, origin });
+    this.persist();
+  }
+
+  /** Forget an `attachments/` drop's base (the file left this disk). */
+  forgetAttachmentBase(relPath: string): void {
+    if (this.stale() || !this.attachmentBases.delete(relPath)) return;
+    this.persist();
+  }
+
   /** Record that this device and the server agree on these bytes for `docId`. */
   setFileBase(docId: string, sha256: string): void {
     if (this.stale()) return;
@@ -1830,6 +1886,15 @@ export class VaultRegistry {
     for (const id of confirmed) if (typeof id === "string" && id) this.filesConfirmed.add(id);
     for (const [id, sha] of Object.entries(bases)) {
       if (id && typeof sha === "string" && sha) this.fileBases.set(id, sha);
+    }
+  }
+
+  private adoptAttachmentBases(rec: VaultSyncConfig["attachmentBases"]): void {
+    if (!rec || typeof rec !== "object") return;
+    for (const [rp, v] of Object.entries(rec)) {
+      if (!rp || !v || typeof v.sha !== "string" || !v.sha) continue;
+      if (v.origin !== "up" && v.origin !== "down") continue;
+      this.attachmentBases.set(rp, { sha: v.sha, origin: v.origin });
     }
   }
 
@@ -1985,6 +2050,49 @@ export class VaultRegistry {
    *    index identity verification and a recovery copy. Otherwise leave it
    *    untouched: a re-import under a fresh local id also lands here.
    */
+  /**
+   * A revocation takes content away, so a copy kept "just in case" is the very
+   * thing it exists to remove. Decided 2026-11-19: a revoked note is removed
+   * outright unless this device can PROVE it holds edits the server never saw.
+   * Proof is local ops beyond a recorded server acknowledgement, or file bytes
+   * that differ from both the recorded disk base and the local CRDT text.
+   *
+   * What is NOT proof:
+   *   - no disk base and no CRDT ("unknown"): the base is cleared with the CRDT,
+   *     so a note this device only ever received ends up here;
+   *   - a CRDT the server never acknowledged: a view-only doc never records an
+   *     acknowledgement, so everything it received reads as unseen.
+   * Identity still has to be proven (the local index ties this path to this
+   * doc id), so an unrelated file reusing the path is never touched.
+   */
+  private async revokedVerdict(
+    gone: { docId: string; path: string },
+    verdict: "unseen" | "unknown",
+    titles: () => Promise<Array<{ path: string; id: string }>>,
+  ): Promise<"none" | "unseen" | "unknown"> {
+    if (verdict === "unseen") {
+      // Ops beyond a real acknowledgement are this device's own work.
+      if (this.ackedSvOf(gone.docId) !== null) return "unseen";
+      const crdt = (await this.host?.localText?.(gone.docId)) ?? null;
+      // Without a CRDT the verdict came from file bytes that differ from the
+      // recorded disk base: edits made on disk. Keep them.
+      if (crdt === null) return "unseen";
+      let file: string | null;
+      try {
+        file = await ipc.readNote(gone.path, this.epoch());
+      } catch (e) {
+        if (ipc.isVaultMismatch(e) || this.stale()) throw e;
+        file = null;
+      }
+      // A file that differs from the CRDT holds bytes nothing else has.
+      if (file !== null && file.trim().length > 0 && file !== crdt) return "unseen";
+    }
+    const indexed = await titles();
+    return indexed.some((note) => note.id === gone.docId && samePath(note.path, gone.path))
+      ? "none"
+      : verdict;
+  }
+
   async unseenWorkVerdict(
     docId: string,
     relPath: string | null,
@@ -2274,6 +2382,9 @@ export class VaultRegistry {
       // bytes it always did and the identical-config memo keeps working.
       ...(this.filesConfirmed.size > 0 ? { filesConfirmed: [...this.filesConfirmed] } : {}),
       ...(this.fileBases.size > 0 ? { fileBases: Object.fromEntries(this.fileBases) } : {}),
+      ...(this.attachmentBases.size > 0
+        ? { attachmentBases: Object.fromEntries(this.attachmentBases) }
+        : {}),
       ...(this.revokedFolders.size > 0
         ? { revokedFolders: Object.fromEntries(this.revokedFolders) }
         : {}),
@@ -2432,14 +2543,16 @@ export class VaultRegistry {
    */
   private async removeRevokedBinary(
     gone: InboundTrash,
-    localSha: (relPath: string) => Promise<string | null>,
+    _localSha: (relPath: string) => Promise<string | null>,
   ): Promise<boolean> {
     // The one refusal, and the same shape the note rail's `isPushed` makes: the
     // mapping is LEFT in place, so a pass that later confirms these bytes can
     // remove the file properly. It stays out of `hello.files` meanwhile
     // (`fileDocIds`), so nothing re-announces it and the ACL-authority clock is
     // not re-stamped on every reconnect.
-    if (!this.filesConfirmed.has(gone.docId)) {
+    // A deletion needs no confirmed bytes: the id match is the proof, and a
+    // deleted file leaves whatever this device held (deleted means deleted).
+    if (gone.reason !== "deleted" && !this.filesConfirmed.has(gone.docId)) {
       this.recordFailure({
         kind: "orphan",
         path: gone.path,
@@ -2453,22 +2566,16 @@ export class VaultRegistry {
     // BEFORE the removal, so the claim beats the watcher to the queue.
     this.host?.suppressBinaryDelete?.(gone.path);
     try {
-      let trashedTo: string | null;
+      // Access removal deletes outright: no local copy, whoever made the file
+      // and whatever was edited here (decided 2026-11-19).
+      const trashedTo: string | null = null;
       try {
-        const base = this.fileBases.get(gone.docId) ?? null;
-        const clean = base !== null && (await localSha(gone.path)) === base;
-        if (this.authoredDocs.has(gone.docId) || !clean) {
-          trashedTo = await ipc.trashNote(gone.path, recoveryStamp(), this.epoch());
-        } else {
-          await ipc.deleteFile(gone.path, this.epoch());
-          trashedTo = null;
-        }
+        await ipc.deleteFile(gone.path, this.epoch());
       } catch (e) {
         if (ipc.isVaultMismatch(e) || this.stale()) return false;
         // A confirmed absence is idempotent. Any other failure keeps the file
         // and its identity for retry; never fall back to hard deletion.
         if (await ipc.binaryExists(gone.path, this.epoch())) throw e;
-        trashedTo = null;
       }
       // The row is gone for us, so the mapping goes with it — otherwise the next
       // `hello` re-announces an id whose file is not here, the server names it
@@ -2759,7 +2866,6 @@ export class VaultRegistry {
     if (removalTotal > 0) this.sink.phase("removing", removalTotal);
     const bulkRemoval = useBulkPath(plan.trash.length);
     /** path → `.context/trash` copy made for unseen work before removal. */
-    const recovered = new Map<string, string>();
     // The disk's binary hashes, listed once per pass and only if a revoked
     // binary needs them. A failed listing answers null: kept, never deleted.
     let binaryShas: Promise<Map<string, string> | null> | null = null;
@@ -2788,11 +2894,32 @@ export class VaultRegistry {
           // a recovery copy under `.context/trash` first (offline
           // reconciliation D1/D7). Measured BEFORE the release, while a resident
           // bridge still answers for ops not yet in SQLite.
+          // This device deleted the note at its OLD path, and the file now sits
+          // somewhere else: a move (an outside script moving and rewriting a
+          // note, #410) that the disk-delete drain read as a delete. The user
+          // never deleted these words, so the file stays and comes back as a
+          // new note; the old id stays dead on the server.
+          if (
+            gone.reason === "deleted" && gone.deletedFrom &&
+            this.isOwnDelete(gone.deletedFrom) && !this.isOwnDelete(gone.path)
+          ) {
+            await this.host?.releaseDoc(gone.docId);
+            await ipc.rebindNoteId(gone.path, crypto.randomUUID(), this.epoch());
+            this.baselineDocs.delete(gone.docId);
+            plan.suppress.delete(gone.path);
+            changedDisk = true;
+            console.info(`[sync] ${gone.path} was moved, not deleted: keeping it as a new note`);
+            this.sink.item("ok");
+            return;
+          }
           // A note this device deleted in-app moments ago is the user's own
           // decision: no recovery copy, no report, whatever it held unpushed.
           let verdict = gone.reason !== "revoked" && this.isOwnDelete(gone.path)
             ? "none"
             : await this.unseenWorkVerdict(gone.docId, gone.path);
+          if (gone.reason === "revoked" && verdict !== "none") {
+            verdict = await this.revokedVerdict(gone, verdict, args.titles);
+          }
           if (verdict === "unknown" && gone.reason === "deleted") {
             // No content baseline is not the same as no identity. Newly created
             // or never-opened files can lack CRDT/disk-base state, while the
@@ -2823,46 +2950,9 @@ export class VaultRegistry {
             return;
           }
           await this.host?.releaseDoc(gone.docId);
-          if (verdict === "unseen") {
-            let dest: string | null = null;
-            try {
-              // An empty file (a placeholder never egested into) says nothing
-              // about the ops in the CRDT, and a revocation clears that CRDT:
-              // preserve its TEXT instead of an empty copy.
-              const crdtText = (await this.isEmptyOnDisk(gone.path))
-                ? ((await this.host?.localText?.(gone.docId)) ?? "")
-                : "";
-              dest = crdtText.trim().length > 0
-                ? await ipc.writeTrashCopy(gone.path, recoveryStamp(), crdtText, this.epoch())
-                : await ipc.copyToTrash(gone.path, recoveryStamp(), this.epoch());
-            } catch (e) {
-              if (ipc.isVaultMismatch(e)) throw e;
-              dest = null;
-            }
-            if (dest === null) {
-              // No copy, no removal: this file may be the only home of that work.
-              this.recordFailure({
-                kind: "orphan", path: gone.path, docId: gone.docId, code: null,
-                reason: gone.reason === "revoked"
-                  ? "access was removed while this device held unsent edits, and they could not be preserved, so it was left on disk"
-                  : "deleted on the server while this device held unsent edits, and they could not be preserved, so it was left on disk",
-              });
-              // See the tombstone note on `baselineDocs` below: releasing the
-              // claim keeps a re-imported NEW note at this path registrable.
-              if (gone.reason !== "revoked") this.baselineDocs.delete(gone.docId);
-              this.sink.item("failed");
-              return;
-            }
-            recovered.set(gone.path, dest);
-            // D1 + D6: offer the unseen ops to the server's trash copy of the
-            // doc. Never awaited — the local copy above is the guarantee.
-            if (gone.reason !== "revoked") {
-              this.recoverPending.add(gone.docId);
-              void Promise.resolve(this.host?.recoverDeletedDoc?.(gone.docId, gone.path))
-                .catch(() => {})
-                .finally(() => this.recoverPending.delete(gone.docId));
-            }
-          }
+          // A delete or an access removal leaves this disk outright (decided
+          // 2026-11-19): no local copy, and unsent edits are not pushed into
+          // the deleted note either. Deleted means deleted.
           if (!this.stopRun()) ready.push(gone);
         } catch (e) {
           if (ipc.isVaultMismatch(e) || this.stale()) {
@@ -2902,25 +2992,16 @@ export class VaultRegistry {
       for (const gone of ready) {
         const out = byPath.get(gone.path);
         if (!out || out.error) {
+          if (gone.reason === "revoked") this.revokedKept.set(pathKey(gone.path), gone.docId);
           this.sink.item(this.recordFailure({ kind: "inbound", path: gone.path, docId: gone.docId,
             reason: out?.error ?? "local cleanup did not return a result", code: null }));
           continue;
         }
+        this.revokedKept.delete(pathKey(gone.path));
         changedDisk = true;
         this.baselineDocs.delete(gone.docId);
         this.authoredDocs.delete(gone.docId);
-        const trashedTo = recovered.get(gone.path) ?? null;
-        this.host?.noteRemoved(gone.docId, gone.path, trashedTo, gone.reason, bulkRemoval);
-        if (trashedTo !== null) {
-          reconcileReport.record({
-            kind: gone.reason !== "revoked"
-              ? "deletedByTeammate"
-              : this.isSelfRevocation(gone.docId, gone.path) ? "selfRevoked" : "keptLocally",
-            docId: gone.docId,
-            path: gone.path,
-            detail: trashedTo,
-          });
-        }
+        this.host?.noteRemoved(gone.docId, gone.path, null, gone.reason, bulkRemoval);
         this.sink.item("ok");
       }
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -3003,18 +3084,10 @@ export class VaultRegistry {
     // dropped below — re-registers under a fresh id, because content must live
     // somewhere. Either way the stale id leaves the map, so nothing can later
     // rename/color/re-register against a deleted server row.
-    // Folders a teammate DELETED (tombstoned ids), as opposed to moved or made
-    // private: one that survives the empty-only removal below still holds work
-    // of this device's — new notes the deleter never saw — and is kept (D8).
-    const tombstonedFolders = new Set<string>();
-    if (args.folderTombstones) {
-      const dead = new Set(args.folderTombstones);
-      for (const [rp, id] of new Map([...this.revokedFolders, ...this.folderByPath])) {
-        if (dead.has(id)) tombstonedFolders.add(rp);
-      }
-    }
+    // Folders a teammate DELETED that survive the empty-only removal stay
+    // pending; whether one is kept for this device's new notes (D8) is judged
+    // in the outbound half, which can tell new work from leftovers.
     const listedFolderIds = new Set(args.serverFolders.map((f) => f.id));
-    const deadFolderIds = new Set(args.folderTombstones ?? []);
     for (const path of plan.removeFolders) {
       if (this.stopRun()) break;
       const folderId = this.folderByPath.get(path) ?? this.revokedFolders.get(path);
@@ -3030,10 +3103,14 @@ export class VaultRegistry {
         // A failed child removal also keeps its parents pending. Their being
         // non-empty is not evidence of NEW local work and must not resurrect
         // an otherwise deleted subtree.
-        const pendingChild = [...this.revokedFolders].some(([child, id]) =>
-          deadFolderIds.has(id) && pathKey(child).startsWith(pathKey(path) + "/"));
-        const pending = !removed && folderId !== undefined &&
-          !listedFolderIds.has(folderId) && (!deadFolderIds.has(folderId) || pendingChild);
+        // A tombstoned folder that is not empty stays pending too (#409). Its
+        // leftovers are usually the deleted notes this pass could not remove
+        // YET (not live, a cap, an unanswered check): reading "not empty" as
+        // new local work dropped the dead id, so the outbound half registered
+        // the folder as brand-new and it came back, empty, for everyone. The
+        // outbound prune judges real new work (`newLocalWork`: an unmapped
+        // note no deletion accounts for) and only then lets it re-register.
+        const pending = !removed && folderId !== undefined && !listedFolderIds.has(folderId);
         if (pending) {
           if (this.revokedFolders.get(path) !== folderId) {
             this.revokedFolders.set(path, folderId);
@@ -3046,12 +3123,6 @@ export class VaultRegistry {
         if (removed) {
           changedDisk = true;
           this.markMaterialized(path); // our removal; one watcher echo to swallow
-        } else if (tombstonedFolders.has(path) && !own && !pending) {
-          reconcileReport.record({
-            kind: "folderKept",
-            path,
-            detail: "deleted by a teammate, kept because it still holds notes created here",
-          });
         }
       } catch (e) {
         if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
@@ -3654,6 +3725,7 @@ export class VaultRegistry {
     }
     this.adoptRevokedFolders(cfg.revokedFolders);
     this.adoptConfigFiles(cfg.files ?? {}, cfg.filesConfirmed ?? [], cfg.fileBases ?? {});
+    this.adoptAttachmentBases(cfg.attachmentBases);
     this.pushed = new Set(cfg.pushed ?? []);
     this.ackedSvs = adoptAcked(cfg.ackedSv, null);
     this.unhydratedPlaceholders = new Set(cfg.unhydratedPlaceholders ?? []);
@@ -3838,6 +3910,7 @@ export class VaultRegistry {
     if (cfg.serverVaultId === vaultId && cfg.files) {
       this.adoptConfigFiles(cfg.files, cfg.filesConfirmed ?? [], cfg.fileBases ?? {});
     }
+    if (cfg.serverVaultId === vaultId) this.adoptAttachmentBases(cfg.attachmentBases);
     this.adoptBootstrap(cfg, vaultId);
 
     // 1b. First-run seeding. A vault the user JUST created (`seedIfEmpty`) —
@@ -4030,6 +4103,7 @@ export class VaultRegistry {
     const serverFolders = folderRegistry.folders;
     let serverNotes = noteRegistry.notes;
     let { folders, notes } = flattenTree(workingTree);
+    let binaries = treeBinaryPaths(workingTree);
     // The paths this device already knew BEFORE this pass (#221 drift report).
     // A previous pull may have mapped a new remote note but deferred its
     // first disk write. Its absence is still an arrival, not evidence of a
@@ -4101,6 +4175,18 @@ export class VaultRegistry {
     // A note listed again is readable again: its "you lost this" report line
     // (kept locally / deleted by a teammate) no longer holds this session.
     reconcileReport.forgetReadable(new Set(serverNotes.map((n) => noteDocId(n))));
+    // And it leaves the session's named-revocation set: kept there, a note
+    // whose access came back still counted as "leaving", so the images it
+    // embeds read as unused and left this disk on the next access change.
+    const named = this.host?.authoritativeRevoked?.();
+    if (named && named.size > 0) {
+      const again = serverNotes.map((n) => noteDocId(n)).filter((id) => named.has(id));
+      if (again.length > 0) this.host?.revocationRefused?.(again);
+    }
+    if (this.revokedKept.size > 0) {
+      const listed = new Set(serverNotes.map((n) => noteDocId(n)));
+      for (const [key, docId] of this.revokedKept) if (listed.has(docId)) this.revokedKept.delete(key);
+    }
 
     // 1. Inbound: apply the server's structural changes to disk. Runs first so the
     //    outbound steps below see a tree that already agrees about paths.
@@ -4129,6 +4215,7 @@ export class VaultRegistry {
         const reread = await this.readFullTree();
         if (this.stale()) return false;
         ({ folders, notes } = flattenTree(reread));
+        binaries = treeBinaryPaths(reread);
         // The paths moved under us, so any memoized read describes the old tree.
         titlesCache = null;
         // Re-read the server's notes too: `move_note` bumps rows we may have just
@@ -4218,15 +4305,22 @@ export class VaultRegistry {
     // this the server refused every note in it ("No folder at …") forever.
     // Only judged after an inbound pass, which is what fills
     // `inboundSuppressed` with the deleted notes still on disk.
+    // A tree binary counts too when this device holds no `files` id for it:
+    // a file the server deleted with the folder is still mapped until the
+    // attachment pass trashes it, so only a NEW drop reads as new work.
+    // Without this a fresh file in a deleted folder waited forever, its
+    // upload held by `isInsideDeadFolder`.
     const newLocalWork = (rp: string): boolean => {
       const prefix = pathKey(rp) + "/";
-      return notes.some(
-        (n) =>
-          pathKey(n.path).startsWith(prefix) &&
-          !this.byPath.has(n.path) &&
-          !this.inboundSuppressed.has(n.path) &&
-          !this.deletedPaths.has(pathKey(n.path)) &&
-          !this.isOwnDelete(n.path),
+      const fresh = (p: string) =>
+        pathKey(p).startsWith(prefix) &&
+        !this.deletedPaths.has(pathKey(p)) &&
+        !this.isOwnDelete(p);
+      return (
+        notes.some(
+          (n) => fresh(n.path) && !this.byPath.has(n.path) && !this.inboundSuppressed.has(n.path),
+        ) ||
+        binaries.some((p) => fresh(p) && !this.fileByPath.has(p))
       );
     };
     for (const [rp, id] of [...this.revokedFolders]) {
@@ -5405,6 +5499,16 @@ export class VaultRegistry {
    * checkpointer. It used to read config.json, merge one key and rewrite the
    * whole file per note — O(N) bytes each, O(N²) for a vault being filled in.
    */
+  /**
+   * Did the server say this user cannot see what sits at `relPath`
+   * (`not_readable`)? The UI must not open such a file from its local copy:
+   * whatever is on disk there is content this user was refused.
+   */
+  isHiddenPath(relPath: string): boolean {
+    const key = pathKey(relPath);
+    return this.hiddenPaths.has(key) || this.revokedKept.has(key);
+  }
+
   registerNote(
     relPath: string,
     title: string | null,
@@ -5523,6 +5627,17 @@ export class VaultRegistry {
     return this.trackRegistration(this.registerFolderNow(relPath, name));
   }
 
+  /** Registers every folder of `dir` the server does not know yet, top-down. */
+  private async ensureFolderChain(dir: string): Promise<void> {
+    if (!dir) return;
+    const parts = dir.split("/");
+    for (let i = 1; i <= parts.length; i++) {
+      const path = parts.slice(0, i).join("/");
+      if (this.canonicalFolderPath(path)) continue;
+      if (!(await this.registerFolderNow(path, parts[i - 1]))) return;
+    }
+  }
+
   private async registerFolderNow(relPath: string, name: string): Promise<string | null> {
     if (this.stale()) return null;
     const vaultId = this.serverVaultId;
@@ -5604,7 +5719,16 @@ export class VaultRegistry {
     }
     const mapping = this.byPath.get(oldPath);
     if (mapping) {
-      const newFolderId = this.folderByPath.get(parentDir(newPath)) ?? null;
+      // A move into a folder made in the same breath (`mkdir done && mv …`):
+      // the watcher's folder registration may not have landed yet, and the
+      // server refuses a path whose folder it does not know. Register the
+      // missing folders first, top-down; before this, every such move was
+      // refused, the notes went back to their old paths and the moved files
+      // were left unsynced (#410).
+      await this.ensureFolderChain(parentDir(newPath));
+      if (this.stale() || this.serverVaultId !== vaultId) return false;
+      const newFolderId =
+        this.folderByPath.get(this.canonicalFolderPath(parentDir(newPath)) ?? parentDir(newPath)) ?? null;
       try {
         await this.api.updateNote(mapping.docId, { relPath: newPath, folderId: newFolderId });
       } catch (e) {
@@ -5737,6 +5861,64 @@ export class VaultRegistry {
       this.unmarkOwnDelete(path);
       throw e;
     }
+  }
+
+  /** Registered folder paths at or under `path`, deepest first. */
+  mappedFoldersUnder(path: string): string[] {
+    const root = pathKey(path);
+    return [...this.folderByPath.keys()]
+      .filter((p) => {
+        const k = pathKey(p);
+        return k === root || k.startsWith(root + "/");
+      })
+      .sort((a, b) => b.split("/").length - a.split("/").length || b.localeCompare(a));
+  }
+
+  /**
+   * Remove the server row of a registered folder that vanished from disk.
+   *
+   * A folder deleted outside the app reaches the server item by item: its notes
+   * through the disk-delete drain, its files through the binary queue. The
+   * folder row itself had no path at all, so every app (the deleting one too)
+   * re-created it empty on the next pull. This is that last step, and it is
+   * deliberately narrow: only once nothing beneath it is still mapped here
+   * (`busy` otherwise: a file delete still settling, or a refused delete that
+   * is being put back), and only with `?ifEmpty=1`, so the server never
+   * cascades over an item this device did not delete or cannot see (`kept`).
+   */
+  async deleteVanishedFolder(path: string): Promise<"deleted" | "busy" | "kept" | "skipped"> {
+    if (this.stale()) return "skipped";
+    const vaultId = this.serverVaultId;
+    const folderId = this.folderByPath.get(path);
+    if (!vaultId || !folderId) return "skipped";
+    const root = pathKey(path);
+    const beneath = (p: string) => {
+      const k = pathKey(p);
+      return k === root || k.startsWith(root + "/");
+    };
+    if (
+      [...this.byPath.keys(), ...this.fileByPath.keys()].some(beneath) ||
+      [...this.folderByPath.keys()].some((p) => p !== path && beneath(p))
+    ) {
+      return "busy";
+    }
+    this.markOwnDeletes([path]);
+    try {
+      await this.api.deleteFolder(folderId, { ifEmpty: true });
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 404)) {
+        this.unmarkOwnDelete(path);
+        if (e instanceof ApiError && (e.status === 409 || notCreatorCodeOf(e) || e.status === 403)) {
+          return "kept";
+        }
+        throw e;
+      }
+    }
+    if (this.stale() || this.serverVaultId !== vaultId) return "skipped";
+    this.folderByPath.delete(path);
+    this.persist();
+    this.notifyMapChanged();
+    return "deleted";
   }
 
   private async deletePathOnServer(path: string, vaultId: string): Promise<void> {

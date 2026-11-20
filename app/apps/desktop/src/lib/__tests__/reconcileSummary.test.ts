@@ -63,20 +63,19 @@ describe("summarizeReconcile", () => {
 });
 
 describe("keptLocally, read-only", () => {
-  it("counts revoked attachments and points to recovery copies", () => {
+  it("counts revoked attachments removed from this device", () => {
     const [line] = summarizeReconcile([
       item({ kind: "keptLocally", path: "report.pdf", detail: ".context/trash/s/report.pdf" }),
       item({ kind: "keptLocally", path: "image.png", detail: ".context/trash/s/image.png" }),
     ]);
     expect(line.count).toBe(2);
-    expect(line.text).toContain("2 files were moved to .context/trash");
-    expect(line.text).toContain("Activity");
+    expect(line.text).toBe("2 files were removed from this device because access was removed.");
   });
-  const RO = "read-only: your edit was not accepted; a copy is in .context/trash";
+  const RO = "read-only: your edit was not accepted";
   it("does not claim lost access for a read-only rejection", () => {
     const [line] = summarizeReconcile([item({ kind: "keptLocally", path: "a.md", docId: "1", detail: RO })]);
     expect(line.text).toBe(
-      "1 note is read-only for you, so your edit was not accepted. A copy is in .context/trash.",
+      "1 note is read-only for you, so your edit was not accepted.",
     );
   });
   it("keeps the access wording when nothing was read-only, and blends a mixed group", () => {
@@ -87,7 +86,7 @@ describe("keptLocally, read-only", () => {
       item({ kind: "keptLocally", path: "b.md", docId: "2", detail: RO }),
     ]);
     expect(mixed.text).toBe(
-      "2 notes are kept on this device only: you no longer have access, or can only read them. Copies are in .context/trash.",
+      "2 notes are kept on this device only: you no longer have access, or can only read them.",
     );
   });
   it("describes notes and binaries separately when one group mixes them", () => {
@@ -97,26 +96,26 @@ describe("keptLocally, read-only", () => {
     ]);
     expect(line.count).toBe(2);
     expect(line.text).toBe(
-      "1 note is read-only for you, so your edit was not accepted. A copy is in .context/trash. " +
-        "1 file was moved to .context/trash because access was removed. You can find the recovery copies in Activity.",
+      "1 note is read-only for you, so your edit was not accepted. " +
+        "1 file was removed from this device because access was removed.",
     );
   });
 });
 
 describe("externalEditSaved", () => {
-  it("says the other app's version was saved to trash", () => {
+  it("says the synced version replaced the other app's", () => {
     const one = summarizeReconcile([
       item({ kind: "externalEditSaved", path: "a.md", detail: ".context/trash/x/a.md" }),
     ]);
     expect(one.map((l) => l.text)).toEqual([
-      "1 note changed by another app while you were offline could not be merged. Your version was saved to .context/trash.",
+      "1 note changed by another app while you were offline could not be merged. The synced version replaced it.",
     ]);
     const two = summarizeReconcile([
       item({ kind: "externalEditSaved", path: "a.md" }),
       item({ kind: "externalEditSaved", path: "b.md" }),
     ]);
     expect(two[0].text).toBe(
-      "2 notes changed by another app while you were offline could not be merged. Your versions were saved to .context/trash.",
+      "2 notes changed by another app while you were offline could not be merged. The synced versions replaced them.",
     );
   });
 

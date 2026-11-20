@@ -774,8 +774,8 @@ does not offer yet, it shows a persistent notice at the bottom of the sidebar sa
 behind. Sync keeps working on the older path where one exists, but some features stay off.
 
 To clear it, update the server: redeploy your Railway project from the latest release, or pull the
-latest code and rebuild the Docker image (with the Compose bundle, `git pull && docker compose up -d
---build`). Migrations run before the server starts. The notice disappears on the app's next check (within ten minutes, or at once after
+latest image (with the Compose bundle, `docker compose pull && docker compose up -d`; when you
+build from source, `git pull` and add `-f docker-compose.build.yml ... --build`). Migrations run before the server starts. The notice disappears on the app's next check (within ten minutes, or at once after
 a restart or reconnect).
 
 The app decides from `GET /health`, which lists what the server supports:
@@ -855,7 +855,7 @@ separate from the backups. A restored database is useless without the `JWT_SECRE
 2. Take a fresh backup (see above) right before upgrading.
 3. Deploy. Migrations run before the new server starts, and a failing migration stops the start.
    On a platform with a pre-deploy step (Railway) the old server keeps serving meanwhile; with
-   plain Docker, keep the previous image tag at hand.
+   plain Docker, keep the previous image tag at hand (the Compose bundle's `BAALDA_VERSION`).
 4. Check `GET /health` reports the new `version`, then open a vault on a desktop and make an edit.
 
 Migrations only move forward; there are no down migrations. To roll back the code, redeploy the
@@ -913,11 +913,9 @@ REDIS_URL=redis://localhost:6389 pnpm run dev
 Self-hosters who run a single instance need none of this — leave `REDIS_URL`
 unset and the server behaves exactly as before (Postgres only).
 
-### Self-hosted agent access
+### Self-hosted plan limits
 
-Set `BAALDA_DEPLOYMENT=self-hosted` (as in `.env.example`) to enable the Assistant with
-users’ own model keys, independently of optional billing setup. You can configure
-billing later without changing AI access. The setting defaults to `cloud` when
-omitted: AI requires a paid plan (Pro, or Team under `BILLING_MODEL=team`). Free vaults
-have a 20,000-note sync cap on the per-vault model and the `ABUSE_MAX_NOTES` ceiling on
-the Team model.
+Set `BAALDA_DEPLOYMENT=self-hosted` (as in `.env.example`) so no plan limit applies, even
+if you configure billing later. The setting defaults to `cloud` when omitted: with billing
+on, Free vaults then have a 20,000-note sync cap on the per-vault model and the
+`ABUSE_MAX_NOTES` ceiling on the Team model. MCP (AI access) is included on every plan.

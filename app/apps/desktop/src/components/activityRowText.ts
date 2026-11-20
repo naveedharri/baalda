@@ -37,6 +37,14 @@ function formatDate(iso: string): string {
 
 const capitalize = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
+/** "400: No folder at \"X\"" → "No folder at \"X\"." — the server's words,
+ *  without the status code a person cannot act on. */
+export function plainFailureReason(raw: string): string {
+  const text = raw.trim().replace(/^\d{3}:\s*/, "").trim();
+  if (!text) return "";
+  return capitalize(/[.!?]$/.test(text) ? text : `${text}.`);
+}
+
 /** "In Projects/Q3" for a note the message already names; nothing at the root. */
 function folderFact(path: string): string[] {
   const { dir } = splitPath(path);
@@ -124,8 +132,14 @@ export function activityRowText(row: ActivityRow, now: number): ActivityRowText 
       }
       return sentence(capitalize(row.text), ACTIVITY_HINT.access, []);
     }
-    case "failed":
-      return sentence(capitalize(row.text), ACTIVITY_HINT.failed, []);
+    case "failed": {
+      // The head names the note; the reason, which used to be squeezed into
+      // the head and cut off, is the body, in full and without the HTTP code.
+      const reason = plainFailureReason(row.text);
+      const retry = row.failure.retryable ? ["Baalda tries again on the next sync."] : [];
+      if (!row.path) return sentence(reason || ACTIVITY_HINT.failed, ACTIVITY_HINT.failed, retry);
+      return named(`${name} didn't sync`, reason || ACTIVITY_HINT.failed, retry);
+    }
     case "invitation": {
       const by = row.invitation.inviterName ? [`Sent by ${row.invitation.inviterName}`] : [];
       return sentence(capitalize(row.text), ACTIVITY_HINT.invitation, by);

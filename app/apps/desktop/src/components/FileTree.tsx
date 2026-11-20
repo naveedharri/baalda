@@ -2900,11 +2900,13 @@ function Node({
                 onMenu(r.left, r.bottom + 4, node, r.top - 4);
               }}
             >
-              <TreeSvg>
-                <circle cx="5" cy="12" r="2.1" />
-                <circle cx="12" cy="12" r="2.1" />
-                <circle cx="19" cy="12" r="2.1" />
-              </TreeSvg>
+              {/* Three small hollow rings (3.6px across), the middle one on the
+                  button's centre, which sits on the sync dot's. */}
+              <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" strokeWidth="1" aria-hidden="true">
+                <circle cx="5" cy="11" r="1.3" />
+                <circle cx="11" cy="11" r="1.3" />
+                <circle cx="17" cy="11" r="1.3" />
+              </svg>
             </button>
           )}
         </>

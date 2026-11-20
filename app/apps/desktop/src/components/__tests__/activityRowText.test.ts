@@ -156,4 +156,20 @@ describe("clockDate", () => {
   it("formats an invalid time as a dash", () => {
     expect(clockDate(Number.NaN)).toBe("—");
   });
+
+  it("names the failed note in the head and gives the reason, in full, in the body", () => {
+    const row: ActivityRow = {
+      type: "failed",
+      key: "fr:register:60 Big/C.md",
+      at: AT,
+      label: "Failed",
+      path: "60 Big/C.md",
+      failure: { key: "k", docId: "d", path: "60 Big/C.md", reason: "x", retryable: true },
+      text: '400: No folder at "60 Big". Create the folder first',
+    };
+    const t = activityRowText(row, NOW);
+    expect(t.message).toBe("C didn't sync");
+    expect(t.detail).toBe('No folder at "60 Big". Create the folder first.');
+    expect(t.facts).toEqual(["In 60 Big", "Baalda tries again on the next sync."]);
+  });
 });

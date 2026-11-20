@@ -183,6 +183,13 @@ export interface InboundTrash {
    * whole reason binaries ride this plan instead of a parallel one.
    */
   binary?: boolean;
+  /**
+   * A `deleted` note whose file is no longer where the server last knew it:
+   * the path it was deleted at (its baseline). When THIS device made that
+   * delete, the file at {@link path} is a move the disk-delete drain failed to
+   * pair (#410), so the executor keeps it as a new note instead of removing it.
+   */
+  deletedFrom?: string;
 }
 
 export interface InboundRejection {
@@ -650,7 +657,7 @@ export function planInbound(input: InboundInput): InboundPlan {
       // Belt as well as braces: if the removal is skipped or fails, this still
       // stops the note being re-registered as a ghost.
       plan.suppress.add(loc);
-      pushTrash(plan, docId, loc, "deleted");
+      pushTrash(plan, docId, loc, "deleted", false, samePath(loc, prev) ? undefined : prev);
       continue;
     }
 
@@ -699,8 +706,17 @@ export function planInbound(input: InboundInput): InboundPlan {
   // A server that names nothing (one that predates `ready.revoked`) therefore
   // removes no binaries at all. That is the safe direction, and the same one the
   // note path takes when `tombstones` is null.
+  // A tree file the server names as DELETED (`ready.tombstones` carries
+  // `files` ids too, #411) leaves like a deleted note: the id match proves it
+  // is that file, and a delete is never a question for the access-check.
+  if (input.tombstones && input.localFiles) {
+    for (const [docId, relPath] of input.localFiles) {
+      if (input.tombstones.has(docId)) pushTrash(plan, docId, relPath, "deleted", true);
+    }
+  }
   if (input.authoritative === true && input.authoritativeRevoked && input.localFiles) {
     for (const [docId, relPath] of input.localFiles) {
+      if (input.tombstones?.has(docId)) continue;
       if (!input.authoritativeRevoked.has(docId)) continue;
       // No `suppress` entry, deliberately: that set is read by the OUTBOUND note
       // half, and a binary re-registers through the blob mirror instead — which
@@ -767,12 +783,15 @@ function pushTrash(
   path: string,
   reason: InboundTrash["reason"],
   binary = false,
+  deletedFrom?: string,
 ): void {
   if (!(binary ? isSafeTreeBinaryPath(path) : isSafeNotePath(path))) {
     plan.rejected.push({ kind: "trash", path, docId, reason: "unsafe local path" });
     return;
   }
-  plan.trash.push({ docId, path, reason, ...(binary ? { binary: true } : {}) });
+  plan.trash.push({
+    docId, path, reason, ...(binary ? { binary: true } : {}), ...(deletedFrom ? { deletedFrom } : {}),
+  });
 }
 
 function applyBreakers(

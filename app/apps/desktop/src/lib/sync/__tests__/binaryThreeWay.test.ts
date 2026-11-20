@@ -251,11 +251,6 @@ function device(name: string, server: FakeServer, seed: Record<string, string>, 
     rememberFileId: (p, id) => void d.ids.set(p, id),
     fileBase: (docId) => d.bases.get(docId) ?? null,
     setFileBase: (docId, sha) => void d.bases.set(docId, sha),
-    keepLocalCopy: async (p) => {
-      if (d.failTrash) throw new Error("disk full");
-      d.trash.push({ relPath: p, content: dec(d.files.get(p)!) });
-      return `.context/trash/x/${p}`;
-    },
     notify: (text) => void d.notices.push(text),
   });
   d.sync = new AttachmentSync(deps());
@@ -286,8 +281,8 @@ describe("AttachmentSync three-way, two devices on one server", () => {
     expect(server.current("D")).toBe("V2");
     expect(read(a)).toBe("V2");
     expect(read(b)).toBe("V2");
-    // A's divergent copy is recoverable, once, and A was told.
-    expect(a.trash).toEqual([{ relPath: P, content: "V1" }]);
+    // A's divergent bytes are replaced with no copy kept, and A was told.
+    expect(a.trash).toEqual([]);
     expect(a.notices).toHaveLength(1);
     expect(b.trash).toEqual([]);
     expect(a.bases.get("D")).toBe("sha:V2");
@@ -350,24 +345,13 @@ describe("AttachmentSync three-way, two devices on one server", () => {
     await b.sync.reconcile();
     expect(server.current("D")).toBe("V3");
     expect(read(b)).toBe("V3");
-    expect(b.trash).toEqual([{ relPath: P, content: "V4" }]);
+    expect(b.trash).toEqual([]);
     expect(b.bases.get("D")).toBe("sha:V3");
     // Settled: another round moves nothing.
     const before = server.uploads.length;
     await a.sync.reconcile();
     await b.sync.reconcile();
     expect(server.uploads.length).toBe(before);
-  });
-
-  it("never overwrites a divergent local file when the recovery copy fails", async () => {
-    const server = new FakeServer();
-    server.seed("D", P, "V2");
-    const a = device("A", server, { [P]: "V1" }, { [P]: "D" });
-    a.failTrash = true;
-    await a.sync.reconcile();
-    expect(read(a)).toBe("V1");
-    expect(server.current("D")).toBe("V2");
-    expect(server.uploads).toEqual([]);
   });
 
   it("a genuine local edit still uploads, carrying its base", async () => {
@@ -382,3 +366,26 @@ describe("AttachmentSync three-way, two devices on one server", () => {
     expect(a.bases.get("D")).toBe("sha:V5");
   });
 });
+
+describe("identical bytes in two folders", () => {
+  it("downloads a teammate's file whose bytes equal a separate file this device already holds", () => {
+    // mix1/data.json is bound to its own server row; mix2/data.json is a
+    // different file with the same content. It must still land.
+    const plan = planBinarySync(
+      [L("mix1/data.json", "same")],
+      [S("b1", "mix1/data.json", "same", "D1"), S("b2", "mix2/data.json", "same", "D2")],
+      ctx({ "mix1/data.json": "D1" }, { D1: "same" }),
+    );
+    expect(plan.toDownload.map((b) => b.relPath)).toEqual(["mix2/data.json"]);
+  });
+
+  it("still holds back a download whose bytes sit in an unbound local file (a possible rename)", () => {
+    const plan = planBinarySync(
+      [L("renamed/data.json", "same")],
+      [S("b2", "old/data.json", "same", "D2")],
+      ctx({}, {}),
+    );
+    expect(plan.toDownload).toEqual([]);
+  });
+});
+

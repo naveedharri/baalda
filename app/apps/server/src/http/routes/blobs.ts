@@ -639,6 +639,8 @@ blobRoutes.post(
         // After COMMIT: this row is the file's current content, so any older
         // ready row still claiming the same doc is a stale duplicate listing.
         await retireSupersededDocBlobs(docId, id);
+        // A new ready blob: tell members' blob mirrors (see `complete`).
+        registryChanged(c, vaultId);
         return c.json({ ...toMeta(inserted.rows[0]), deduped: false }, 201);
       } catch (e) {
         await client.query("ROLLBACK").catch(() => {});
@@ -1752,6 +1754,12 @@ blobRoutes.post("/blobs/:id/complete", async (c) => {
       [row.id, head.size],
     );
     await retireSupersededDocBlobs(rows[0]?.doc_id ?? row.doc_id, row.id);
+    // Any vault blob that just became ready is new content for every member's
+    // blob mirror, including a hash-named `attachments/` embed with no `files`
+    // row: nothing else tells them (the note that embeds it registered before
+    // its bytes landed). The frame makes their desktops pull and re-run the
+    // attachments pass; the uploader's own origin is skipped.
+    if (row.vault_id) registryChanged(c, row.vault_id);
     return c.json(toMeta(rows[0]), 200);
   } catch (e) {
     return storeError(c, e);

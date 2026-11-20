@@ -85,6 +85,22 @@ export function selectionTouches(state: EditorState): (from: number, to: number)
 }
 
 /**
+ * "Is a selection range INSIDE `[from, to]`?" — the embed scope.
+ *
+ * Stricter than {@link selectionTouches}: a caret parked immediately before or
+ * after an embed does not count, only one strictly within its text (or a
+ * selection overlapping it). A note that opens with the caret at its start, on
+ * a line holding nothing but `![file](…)`, keeps showing the file instead of
+ * its markdown; arrowing or clicking into the source still reveals it.
+ */
+export function selectionInside(state: EditorState): (from: number, to: number) => boolean {
+  if (!isFocused(state)) return () => false;
+  const ranges = editingRanges(state);
+  return (from, to) =>
+    ranges.some((r) => (r.empty ? from < r.from && r.from < to : r.from < to && from < r.to));
+}
+
+/**
  * Does `[from, to]` share a line with any selection range? The LINE scope with
  * the focus rule left off — livePreview's block memoisation has to ask this
  * about a state whose focus flag has just flipped.

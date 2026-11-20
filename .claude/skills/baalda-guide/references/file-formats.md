@@ -7,8 +7,9 @@ four different things in Baalda and people usually mean one of them:
 |---|---|---|
 | **Note** | Opens in the editor, edited live with teammates and AI, searchable, backlinks, version history, synced to the server | `.md` `.markdown` `.mdx` `.txt` `.html` `.htm` `.canvas` |
 | **Viewable file** | Shows in the sidebar, opens in a built-in viewer, cannot be edited inside Baalda | Images: `.png` `.jpg` `.jpeg` `.gif` `.webp` `.svg` `.avif` · Documents: `.pdf` |
+| **File** | Shows in the sidebar and syncs as a file (opened in a viewer, or as a card with "Open externally") | Images, PDF, Office files, audio/video, `.csv`/`.json` style data, and archives: `.zip` `.tar` `.tar.gz` `.tgz` `.gz` `.7z` (full list: `ALLOWED_EXTS`) |
 | **Attachment** | Any file dragged onto an open note. Copied into the vault's hidden `attachments/` folder, linked from the note, synced to teammates | Anything: `.docx` `.xlsx` `.pptx` `.csv` `.zip` `.mp4`, code files, and so on |
-| **Ignored** | Not shown, not indexed, not synced | Everything else, plus `node_modules`, `dist`, `build`, `target`, `vendor`, `venv`, `__pycache__`, and any dot-folder like `.git` |
+| **Ignored** | Not shown, not indexed, not synced, and nothing tells you so | Everything else (for example `.rar`, `.dmg`, `.exe`, `.js`), plus `node_modules`, `dist`, `build`, `target`, `vendor`, `venv`, `__pycache__`, and any dot-folder like `.git` |
 
 Source: `app/apps/desktop/src-tauri/src/vault.rs` (`ALLOWED_EXTS`, `DENIED_DIRS`),
 `app/apps/desktop/src/lib/sync/registry.ts` (`NOTE_EXTS`), `app/apps/desktop/src/lib/preview.ts`,
@@ -35,36 +36,44 @@ file dropped twice is stored once), and inserts the embed for you. HEIC and TIFF
 converted to PNG on import so they display on every platform. That `attachments/` folder is
 hidden from the sidebar on purpose; it is the sync store for binary files.
 
-**Only the `attachments/` folder syncs binary files.** An image or PDF you put elsewhere in the
-vault (say `Projects/diagram.png`) shows up in your sidebar and previews locally, but it is not
-sent to the server or to teammates. The registry only registers text notes; binary sync only
-mirrors `attachments/`. If someone asks "why don't my teammates see my image", this is why:
-drop it onto a note instead of copying it into a folder.
+**Files in folders sync on Team, embeds sync everywhere.** A file of a supported type put
+anywhere in the vault (say `Projects/diagram.png` or `Backups/site.tar.gz`) shows in the
+sidebar and, on the Team plan or a self-hosted server without billing, syncs to teammates as a
+file. On the Free plan only files embedded in a note (the `attachments/` folder) sync. A file
+of an unsupported type (see "Ignored" above) never shows and never syncs.
 
-**Office files (DOCX, XLSX, PPTX) are attachments, not notes.** Baalda does not open, convert,
-render, or edit them. You can attach one to a note and it will sync to the team as a download
-link, but that is all. To open the file itself, use "Reveal in Finder/Explorer" and open it
-from the `attachments/` folder with Word or Excel; clicking the link inside the note does not
-launch an external app. To get the *content* into Baalda, convert it to Markdown first (Pandoc,
-"Save as Markdown", or ask your AI to convert it) or export a PDF and attach that.
+**Office files are previewed, not edited.** `.docx` and `.xlsx`/`.xlsm` open in a read-only
+preview inside Baalda; `.pptx` shows a card with "Open externally". None of them can be edited
+in Baalda, and their text is searchable but they are not notes. To work on the content as a
+note, convert it to Markdown first (Pandoc, "Save as Markdown", or ask your AI).
 
-**Spreadsheets have no special treatment.** A `.csv` is an attachment. Tables inside notes are
-ordinary Markdown tables.
+**Spreadsheet data opens as a table.** `.csv` and `.tsv` open in a read-only table view. Tables
+inside notes are ordinary Markdown tables.
 
-**Code files (`.py`, `.js`, `.ts`, `.rs`, etc.) are deliberately ignored.** Baalda is a notes
-app, not a code editor. The exclusion exists so you can point Baalda at a real project folder
-(or even a whole drive) and see only your notes, never source files or dependency folders.
-If you want code in your second brain, paste it into a note inside a fenced code block, or
-attach the file to a note. Do not expect syntax highlighting of a standalone `.py` file.
+**Some code files show, most are ignored.** `.py`, `.rs`, `.go`, `.sh`, `.sql` and data files
+(`.json`, `.yaml`, `.toml`, `.xml`) show in the sidebar, open read-only with syntax colouring and
+sync as files. `.js`, `.ts`, `.css`, `.java`, `.c`/`.cpp` and similar are ignored on purpose, so
+pointing Baalda at a project folder does not flood the sidebar. To keep such code in your second
+brain, paste it into a note as a code block or attach the file to a note.
+
+**Archives are stored, never opened.** `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.gz` and `.7z` show
+in the sidebar and sync as files; clicking one shows a card with "Open externally". Search
+finds an archive by its name (and a `.zip` by the names of the files inside it); Baalda never
+unpacks one. Any `.gz` counts, not only compressed tarballs. `.rar` and other archive types are
+not supported and are ignored.
 
 **Size limits (managed and self-hosted servers).**
 
 | Thing | Limit | Where set |
 |---|---|---|
 | One note's text | 10 MB | `MAX_NOTE_MB` on the server |
-| One attachment | 25 MB | `MAX_BLOB_BYTES` on the server |
+| A file dropped onto a note | 25 MB | the app refuses larger drops |
+| A file in the vault, on a server that keeps files in its database | 25 MB | `MAX_BLOB_BYTES` on the server |
+| A file in the vault, on a server with S3-compatible file storage | images 25 MB, documents 50 MB, PDF 100 MB, text/data 10 MB, audio and archives 200 MB, video 500 MB | per type on the server, at most `MAX_BLOB_BYTES_DIRECT` (500 MB) |
 
-Local-only vaults have no such limits; these apply when syncing.
+Local-only vaults have no such limits; these apply when syncing. Files in folders (outside
+`attachments/`) sync on the Team plan and on self-hosted servers without billing; the Free plan
+syncs only files embedded in notes.
 
 **Attachments are never AI-edited.** An AI connected over MCP can list files and read the
 text Baalda extracted from them (PDF, DOCX and similar) with `list_attachments` and
@@ -76,12 +85,10 @@ receives or writes a file's raw bytes.
 
 Q: *Can it hold and sync DOCX, XLSX, PNG, PY and JS files?*
 
-> Partly. PNG (and other common images plus PDF) show in the sidebar and preview in the app.
-> Anything you drag onto a note, including DOCX and XLSX, is stored as an attachment and syncs
-> to your team as a link, but Baalda cannot open or edit Office files; convert them to Markdown
-> if you want the content inside a note. PY and JS files are ignored on purpose so a project
-> folder does not flood your vault with code; paste code into a note instead. Only Markdown and
-> other text notes get the live editing, search and AI features.
+> Mostly. PNG, DOCX, XLSX and PY files show in the sidebar, open in a read-only preview and sync
+> as files; Baalda does not edit them. JS files are ignored on purpose so a project folder does
+> not flood your vault; paste that code into a note or attach the file. Only Markdown and other
+> text notes get live co-editing and the AI editing tools.
 
 Q: *Can I use my existing Obsidian vault?*
 

@@ -141,6 +141,24 @@ describe("viewerFor", () => {
     expect(viewerFor("a.pptx")).toBe("card");
     expect(viewerFor("a.zip")).toBe("card");
   });
+
+  // #407: tarballs, gzip and 7z surface and sync as opaque archives. The
+  // extension is after the LAST dot, so `site.tar.gz` is a gzip.
+  it("treats tar, gz, tgz and 7z as archives with their own upload type", () => {
+    for (const [path, mime] of [
+      ["backup.tar", "application/x-tar"],
+      ["site.tar.gz", "application/gzip"],
+      ["site.tgz", "application/gzip"],
+      ["photos.7z", "application/x-7z-compressed"],
+    ] as const) {
+      expect(formatFor(path)?.category, path).toBe("archive");
+      expect(viewerFor(path), path).toBe("card");
+      expect(formatFor(path)?.textExtract, path).toBe("none");
+      expect(mimeForPath(path), path).toBe(mime);
+    }
+    expect(extForMime("application/gzip")).toBe("gz");
+    for (const ext of ["tar", "gz", "tgz", "7z"]) expect(SURFACED_EXTS).toContain(ext);
+  });
 });
 
 describe("embedMarkdown", () => {

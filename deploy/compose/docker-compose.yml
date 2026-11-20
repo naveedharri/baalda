@@ -15,10 +15,14 @@ name: baalda
 
 # The server and the migration job are the same image with the same environment;
 # only the command differs. Anchors keep them from drifting apart.
+#
+# The published image, so hosts that only pull (Portainer, Hostinger's Docker
+# Manager, CasaOS, Synology) work as is. Pin a release with BAALDA_VERSION in
+# .env (e.g. 0.1.112); unset follows the latest release. To build from your own
+# checkout or a fork instead:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 x-server-image: &server-image
-  build:
-    context: ../..
-    dockerfile: app/apps/server/Dockerfile
+  image: ghcr.io/naveedharri/baalda-server:${BAALDA_VERSION:-latest}
 
 x-server-env: &server-env
   NODE_ENV: production

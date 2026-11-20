@@ -30,6 +30,7 @@ const sync = vi.hoisted(() => ({
     vaultId: null as string | null,
     getMapping: () => null,
     registerNote: vi.fn(async () => null),
+    isHiddenPath: vi.fn((_path: string) => false),
   },
   isSyncable: vi.fn(() => false),
   disable: vi.fn(), // `adoptOpenedVault` → `leaveVaultSync`
@@ -101,6 +102,19 @@ beforeEach(() => {
     session: null,
     vault: null,
     tree: null,
+  });
+});
+
+describe("a note the server refused as unreadable", () => {
+  it("does not open from its local copy", async () => {
+    sync.registry.isHiddenPath.mockImplementation((p: string) => p === "HR/pay.md");
+    useStore.setState({ syncEnabled: true });
+    await open("HR/pay.md");
+    expect(useStore.getState().openNote).toBeNull();
+    expect(useStore.getState().openTabs).toEqual([]);
+    await open("notes.md");
+    expect(useStore.getState().openNote?.path).toBe("notes.md");
+    sync.registry.isHiddenPath.mockImplementation(() => false);
   });
 });
 

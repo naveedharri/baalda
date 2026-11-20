@@ -19,6 +19,7 @@ import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { loadDocState } from "../yjs/persistence.js";
 import { purgeBlobRefs, replaceBlobRefs } from "../blobs/refs.js";
+import { queueAttachmentCleanup } from "../blobs/attachment-cleanup.js";
 import { cachedRefHeads, refText } from "../blobs/ref-windows.js";
 import { cosineSimilarity, EMBED_DIM, embed, tokenize } from "./embedder.js";
 import { loadPages, pageMatchCount, pageMatchCountWithPath, vocabMasks } from "./search-pages.js";
@@ -434,6 +435,9 @@ export async function purgeNoteIndex(
   if (docIds.length === 0) return;
   await db.query("DELETE FROM note_index WHERE doc_id = ANY($1::text[])", [docIds]);
   await db.query("DELETE FROM note_links WHERE from_doc = ANY($1::text[])", [docIds]);
+  // What it embedded, recorded before the references go: the drops no live
+  // note still uses are removed once the note is purged (attachment-cleanup).
+  await queueAttachmentCleanup(docIds, db);
   // A deleted note references nothing. Leaving its rows would keep every
   // attachment it ever embedded permanently uncollectable — the exact shape of
   // leak `blob_refs` exists to close.

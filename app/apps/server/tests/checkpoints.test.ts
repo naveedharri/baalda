@@ -9,6 +9,7 @@ import {
   withVaultCheckpointLock,
 } from "../src/versions/checkpoints.js";
 import { sha256Hex } from "../src/versions/capture.js";
+import { purgeExpiredTrash } from "../src/trash/service.js";
 import { recordingAppDeps, type RecordingAppDeps } from "./helpers/app.js";
 import { signUp, type TestUser } from "./helpers/auth.js";
 import { resetDb } from "./helpers/db.js";
@@ -407,6 +408,75 @@ describe("vault checkpoints", () => {
       foldersCreated: 0,
     });
     expect(rec.docWriter.store.get(kept)).toBe("original body");
+  });
+
+  it("brings back a note that was deleted and purged (checkpoint text outlives the purge)", async () => {
+    const owner = await signUp("rv-purged@t.com");
+    const org = await seedOrg("Acme", "acme-purged");
+    await seedMember(org, owner.userId, "owner");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    const doc = await seedNote(vault, null, "gone.md", owner.userId);
+    rec.docWriter.store.set(doc, "words worth keeping");
+    // One teammate is kept out of this note.
+    const denied = await signUp("rv-denied@t.com");
+    await seedMember(org, denied.userId, "member");
+    await pool.query(
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES (gen_random_uuid()::text, $1, 'file', $2, 'user', $3, 'denied')`,
+      [org, doc, denied.userId],
+    );
+    const create = await api(owner, `/api/vaults/${vault}/checkpoints`, {
+      method: "POST",
+      body: JSON.stringify({ label: "before the delete" }),
+    });
+    const checkpoint = (await create.json()) as { id: string };
+
+    // Deleted, then purged at once: its CRDT is gone.
+    const del = await api(owner, `/api/notes/${doc}`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+    expect(await purgeExpiredTrash(undefined, pool, [doc])).toEqual([doc]);
+    rec.docWriter.store.delete(doc);
+    const { rows: texts } = await pool.query("SELECT 1 FROM note_texts WHERE doc_id = $1", [doc]);
+    expect(texts.length).toBe(1);
+
+    const res = await api(owner, `/api/vaults/${vault}/checkpoints/${checkpoint.id}/revert`, {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, docsRestored: 1 });
+    // It comes back under a NEW id: a device offline through the delete may
+    // still hold the old id's ops, which must never merge into the restore.
+    const { rows: live } = await pool.query<{ id: string; created_by: string | null }>(
+      "SELECT id, created_by FROM notes WHERE vault_id = $1 AND rel_path = 'gone.md' AND deleted_at IS NULL",
+      [vault],
+    );
+    expect(live).toHaveLength(1);
+    expect(live[0].id).not.toBe(doc);
+    expect(live[0].created_by).toBe(owner.userId);
+    expect(rec.docWriter.store.get(live[0].id)).toBe("words worth keeping");
+    expect(rec.docWriter.store.has(doc)).toBe(false);
+    const { rows: old } = await pool.query(
+      "SELECT deleted_at IS NOT NULL AS deleted, purged_at IS NOT NULL AS purged FROM notes WHERE id = $1",
+      [doc],
+    );
+    expect(old[0]).toEqual({ deleted: true, purged: true });
+    // Its per-note access rows came with it.
+    const { rows: shares } = await pool.query(
+      "SELECT principal_id, permission FROM shares WHERE resource_type = 'file' AND resource_id = $1",
+      [live[0].id],
+    );
+    expect(shares).toEqual([{ principal_id: denied.userId, permission: "denied" }]);
+    // Running it again changes nothing: the restored note is already there.
+    const again = await api(owner, `/api/vaults/${vault}/checkpoints/${checkpoint.id}/revert`, {
+      method: "POST",
+    });
+    expect(again.status).toBe(200);
+    const { rows: liveAgain } = await pool.query(
+      "SELECT id FROM notes WHERE vault_id = $1 AND rel_path = 'gone.md' AND deleted_at IS NULL",
+      [vault],
+    );
+    expect(liveAgain.map((r) => r.id)).toEqual([live[0].id]);
   });
 
   it("captures structure-only for notes whose content never reached the server", async () => {

@@ -136,6 +136,13 @@ export interface BinaryDeleteDeps {
    * second, partial emission from here.
    */
   onServerChanged?: () => void;
+  /**
+   * The server refused to delete a file because this person did not create it
+   * (403 `delete_not_creator`, the creator-only rule). The server copy stays,
+   * so the next mirror pass downloads it back here; this reports that it was
+   * put back.
+   */
+  onNotCreator?: (relPath: string, fileId: string | null) => void;
   setTimeoutImpl?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   clearTimeoutImpl?: (t: ReturnType<typeof setTimeout>) => void;
 }
@@ -152,6 +159,19 @@ function errStatus(e: unknown): number | null {
   if (!e || typeof e !== "object") return null;
   const s = (e as { status?: unknown }).status;
   return typeof s === "number" ? s : null;
+}
+
+/** The creator-only refusal (403 `delete_not_creator`), from an `ApiError`'s
+ *  body or a bare `code`. Mirrors `deletePolicy.notCreatorCodeOf` without
+ *  importing the API client into this dependency-free queue. */
+function isNotCreatorRefusal(e: unknown): boolean {
+  if (errStatus(e) !== 403 || !e || typeof e !== "object") return false;
+  const body = (e as { body?: unknown }).body;
+  const code =
+    body && typeof body === "object" && "code" in body
+      ? (body as { code?: unknown }).code
+      : (e as { code?: unknown }).code;
+  return code === "delete_not_creator" || code === "folder_has_others_items";
 }
 
 /** Paths compare case-insensitively everywhere here, exactly as they do in the
@@ -473,6 +493,10 @@ export class BinaryDeleteQueue {
       //    removal (the grace window, the rename pairing, the cap in step 3) has
       //    already run, so all that is left is N independent requests.
       let changed = false;
+      // A refusal leaves the server copy in place, so the mirror must run to
+      // bring it back down: nothing else would trigger that pass, and the file
+      // stayed missing on this device until some unrelated change.
+      let keptOnServer = false;
       await runPool(
         deletes,
         async (d) => {
@@ -488,6 +512,17 @@ export class BinaryDeleteQueue {
               console.info(
                 `[attachments] ${d.relPath} is still embedded in a note — keeping the server copy`,
               );
+              keptOnServer = true;
+              return;
+            }
+            if (isNotCreatorRefusal(e)) {
+              // Someone else created it: the delete is not this person's to
+              // make. Put it back, exactly as a refused note delete is.
+              console.info(
+                `[attachments] ${d.relPath} was created by someone else — putting it back`,
+              );
+              keptOnServer = true;
+              this.deps.onNotCreator?.(d.relPath, id);
               return;
             }
             console.warn(`[attachments] couldn't remove ${d.relPath} from the server`, e);
@@ -501,7 +536,7 @@ export class BinaryDeleteQueue {
         },
         { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => !this.deps.isCurrent() },
       );
-      if (changed) this.deps.onServerChanged?.();
+      if (changed || keptOnServer) this.deps.onServerChanged?.();
     } finally {
       this.draining = false;
       // Whatever happened, this window is spent: everything in the batch has

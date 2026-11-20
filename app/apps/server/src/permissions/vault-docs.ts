@@ -83,6 +83,59 @@ export async function vaultAccess(
 }
 
 /**
+ * True only when `userId` can read EVERY note and file in the vault, which is
+ * what the shortcuts for path-only data assume: hash-named `attachments/`
+ * blobs, their extracted text in search, and a whole-vault checkpoint revert.
+ *
+ * `vaultWide` alone is not that. It says a vault-level grant reaches the
+ * person, but a per-user or team `denied` row on a folder or file still takes
+ * items away (the readable set subtracts them last), and a Private join
+ * snapshot hides what existed before they joined. In either case the caller
+ * must judge each item instead, so this answers false and the attachment gates
+ * fall back to "referenced by a note you can read".
+ */
+export async function readsWholeVault(
+  db: Queryable,
+  userId: string,
+  vaultId: string,
+  access?: Awaited<ReturnType<typeof vaultAccess>>,
+): Promise<boolean> {
+  const a = access === undefined ? await vaultAccess(db, userId, vaultId) : access;
+  if (!a?.vaultWide) return false;
+  const { rowCount } = await db.query(
+    `SELECT 1 FROM shares s
+      WHERE s.org_id = $1
+        AND s.permission = 'denied'
+        AND s.resource_type IN ('folder', 'file')
+        AND ((s.principal_type = 'user' AND s.principal_id = $2) OR s.principal_type = 'org')
+        AND (
+          EXISTS (SELECT 1 FROM folders f WHERE f.id = s.resource_id AND f.vault_id = $3)
+          OR EXISTS (SELECT 1 FROM notes n WHERE n.id = s.resource_id AND n.vault_id = $3)
+          OR EXISTS (SELECT 1 FROM files fl WHERE fl.id = s.resource_id AND fl.vault_id = $3)
+        )
+      LIMIT 1`,
+    [a.organizationId, userId, vaultId],
+  );
+  if ((rowCount ?? 0) > 0) return false;
+  if (a.personal === null) {
+    const snapshot = await memberAccessSnapshot(db, a.organizationId, userId);
+    if (snapshot?.mode === "private") {
+      // A Private snapshot hides only what existed at the join, so most such
+      // members still read everything. Ask exactly: the readable set is a
+      // subset of the live docs, so equal sizes mean equal sets.
+      const readable = await listReadableDocsInVault(userId, vaultId, db);
+      const { rows } = await db.query<{ n: string }>(
+        `SELECT (SELECT count(*) FROM notes WHERE vault_id = $1 AND deleted_at IS NULL)
+              + (SELECT count(*) FROM files WHERE vault_id = $1) AS n`,
+        [vaultId],
+      );
+      return readable.size === Number(rows[0]?.n ?? -1);
+    }
+  }
+  return true;
+}
+
+/**
  * doc_ids in this vault covered by a `denied` row for `principalId`, folded
  * down through folder inheritance.
  *

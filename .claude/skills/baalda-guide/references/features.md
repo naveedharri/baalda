@@ -39,7 +39,7 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   the top level once the structure is settled.
 - **Deleting a vault** is the owner's call and it is permanent on the server: the notes, the
   history and everyone's access go. Your own `.md` files stay on your disk unless you also
-  choose to move the folder to the Trash. Deleting a vault never ends a Team subscription: the
+  choose to move the folder to your computer's Trash. Deleting a vault never ends a Team subscription: the
   plan belongs to the owner's account, not to one vault.
 
 ## Writing
@@ -56,6 +56,8 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   behind them. The file on disk stays ordinary Markdown — an edit rewrites only the cell you
   changed, so the spacing and alignment of every other cell are left exactly as you typed them.
 - `[[Wikilinks]]` between notes, with a backlinks panel. Links survive renames and moves.
+  Standard Markdown links to another note (`[text](Other%20note.md)`) count too: they show in
+  backlinks and the graph like wikilinks.
 - `#tags` inline or in frontmatter. Typing `#` suggests the tags the vault already uses, the
   ones you use most first, so a tag stays one tag instead of drifting into three spellings.
 - **Folding.** Hover the left edge of a heading, a list item, a callout or a code block and a
@@ -116,7 +118,7 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   works offline-capable with a built-in lightweight embedder; a self-hoster can plug in OpenAI
   embeddings for better results. A stronger vector search is planned.
 - **Backlinks** panel per note.
-- **Graph view** of how notes link to each other.
+- **Graph view** of how notes link to each other (wikilinks and Markdown note links).
 
 ## Sync (your own devices)
 
@@ -126,11 +128,10 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   already up to date before you click them.
 - What travels: binary change records, never whole files. Each device rebuilds its own `.md`.
 - Deleting a note's file on disk (in Finder, with `rm`, or by asking an AI to tidy the vault) while
-  Baalda is open does remove it for the team, a couple of seconds later. No extra local copy is
-  kept; the note goes to the vault's Trash for 30 days, where anyone who can edit it can Restore it.
-- Deleted notes stay in the vault's Trash for 30 days. Edits a teammate made offline still reach a
-  deleted note when they reconnect, so nothing typed offline is lost, and a restored note carries
-  them. After 30 days the note is removed for good.
+  Baalda is open does remove it for the team, a couple of seconds later.
+- Deleted means deleted: there is no Trash and no local copy. A deleted note leaves every device,
+  including edits a teammate made to it offline. The way back is a vault checkpoint, which owners
+  and admins can revert to; it brings deleted notes back with the text they had then.
   A delete of a note this device had not finished uploading is never propagated. Removing a lot at
   once (more than a fifth of the vault) makes Baalda ask first: "Delete them for everyone, or
   restore them?" If the whole vault folder disappeared (an unmounted drive), nothing is deleted and
@@ -144,8 +145,7 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   are merged, but old names come back and new names appear as new notes. Baalda shows a notice
   when it sees this. Keep Baalda open when reorganising. The same applies to other files
   (PDFs, images, office documents). When a teammate deletes a file, a stale copy on another
-  device is moved into that vault's local trash (`.context/trash`) instead of being uploaded
-  again.
+  device is removed instead of being uploaded again.
 - Multiple vaults per account. Switch between them from the account menu.
 
 ## Team collaboration
@@ -161,7 +161,7 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - **Roles**: owner, admin, member.
 - **Leaving a vault** (members and admins): Account Settings → Vaults → **Leave** on the vault, then
   confirm. Access ends on all your devices at once, the vault disappears from your switcher and
-  recents, and its folder on that device moves to the Trash (it is not kept as a local copy). The
+  recents, and its folder on that device moves to your computer's Trash (it is not kept as a local copy). The
   owner gets an email that you left and you get a receipt, on servers that send email. To come
   back you need a new invitation or join code. The **owner cannot leave** — their way out is to
   delete the vault. "Remove from device" is the gentler option: it only detaches the folder on

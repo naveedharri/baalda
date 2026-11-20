@@ -576,6 +576,13 @@ export async function moveNote(
  * "empty" — so the AI deleted a folder full of binaries without being asked to
  * recurse.
  */
+/**
+ * `DELETE /api/folders/:id?ifEmpty=1` refuses (409 `folder_not_empty`) unless
+ * the folder holds nothing live. A desktop uses it to propagate a folder
+ * deleted on disk without cascading over anything it cannot see.
+ */
+export const FOLDER_DELETE_IF_EMPTY_FEATURE = "folder-delete-if-empty";
+
 export async function folderIsEmpty(db: Queryable, folderId: string): Promise<boolean> {
   const { rows } = await db.query<{ n: string }>(
     `SELECT (
