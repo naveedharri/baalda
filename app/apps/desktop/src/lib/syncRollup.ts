@@ -410,7 +410,7 @@ export function folderSyncTitle(
 
 /** Tooltip on a row the server refused to create (see {@link TreeSyncIndex.localOnly}). */
 export const LOCAL_ONLY_TITLE =
-  "Only on this computer. It can't be added here, so it isn't syncing.";
+  "Local only: not syncing. The server didn't accept it here. Open it to see how to sync it.";
 
 /** A row's state as the sidebar draws it: live only while a run is moving, and
  *  never `error` (per-note failures are the Health page's job). */

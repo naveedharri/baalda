@@ -4,6 +4,7 @@ import {
   VIEW_ONLY_FOLDER_MESSAGE,
   VIEW_ONLY_ROOT_MESSAGE,
   createBlockReason,
+  localOnlyNotice,
 } from "../createGate";
 
 const base = {
@@ -53,5 +54,17 @@ describe("createBlockReason (#414)", () => {
       }),
     ).toBeNull();
     expect(createBlockReason({ ...base, dir: "", syncEnabled: false, canCreateRoot: false })).toBeNull();
+  });
+});
+
+describe("localOnlyNotice (#414)", () => {
+  it("names the folder and says how to make the note sync", () => {
+    const n = localOnlyNotice("no_write_access", "Projects/Kitchen/Draft.md");
+    expect(n.why).toContain("You can view Kitchen but can't add to it");
+    expect(n.fix).toBe("To sync it, ask an owner for edit access, or move it to a folder you can edit.");
+  });
+  it("speaks about the top level and the frozen root", () => {
+    expect(localOnlyNotice("no_write_access", "Draft.md").why).toContain("top of this vault");
+    expect(localOnlyNotice("root_frozen", "Draft.md").fix).toBe("To sync it, move it into a folder.");
   });
 });

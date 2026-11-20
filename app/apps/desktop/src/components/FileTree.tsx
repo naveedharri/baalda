@@ -51,6 +51,7 @@ import { displayName } from "../lib/notePath";
 import {
   buildTreeSyncIndex,
   FolderWaveTracker,
+  LOCAL_ONLY_TITLE,
   rowSyncMark,
   sidebarMarksVisible,
   type TreeSyncIndex,
@@ -2772,6 +2773,7 @@ function Node({
     isDir &&
     node.data.childrenLoaded === true &&
     (node.data.children?.length ?? 0) === 0;
+  const localOnly = syncIndex?.localOnly?.has(node.data.path.toLowerCase()) === true;
   const isSelected = !isDir && node.data.path === selectedPath;
   // Subscribed as a boolean rather than by pulling the path and comparing, so a
   // note opening elsewhere in the tree doesn't re-render every other row — this
@@ -2915,8 +2917,15 @@ function Node({
               vault padlocks EVERY row, and suppressing the hint everywhere
               would cost the whole vault a signal to spare a collision that is
               no longer rare. An item's own lock still wins the space. */}
-          {isEmpty && (!lock || lock === "vault") && (
+          {isEmpty && (!lock || lock === "vault") && !localOnly && (
             <span className="tree-hint">empty</span>
+          )}
+          {/* On this computer only: the server refused to add it (#414). A
+              word, not just the hollow ring, so it reads at a glance. */}
+          {localOnly && (
+            <span className="tree-local" title={LOCAL_ONLY_TITLE}>
+              Local
+            </span>
           )}
           {lock && (
             <span

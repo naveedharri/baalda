@@ -3298,3 +3298,37 @@ html:not(.rd-off) .account-popover {
   width: calc(var(--sidebar-layout-w, 302px) + 24px) !important;
   max-width: calc(100vw - 16px);
 }
+
+/* Local only (#414): the server refused to add this note, so it lives on this
+   computer alone. Neutral grey, not view-only amber, and it wraps to say how to
+   make it sync. */
+.rd-viewonly.rd-localonly {
+  background: var(--bg-subtle) !important; color: var(--text-primary) !important;
+  box-shadow: 0 0 0 1px var(--border), 0 12px 28px -14px rgba(11, 10, 16, 0.3) !important;
+  align-items: flex-start; white-space: normal; max-width: min(760px, calc(100% - 48px));
+  border-radius: 14px; padding: 10px 16px 10px 14px !important;
+}
+.rd-viewonly.rd-localonly svg { color: var(--text-tertiary) !important; margin-top: 1px; }
+.rd-localonly-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rd-localonly-why { color: var(--text-secondary); }
+.rd-localonly-fix { color: var(--text-tertiary); font-size: 12.5px; }
+/* Two lines where the view-only chip is one, so it sits in the page flow above
+   the note instead of floating over its title. */
+.rd-viewonly.rd-localonly {
+  position: relative !important; top: auto !important; bottom: auto !important;
+  margin: 14px auto 4px !important;
+}
+
+/* Sidebar "Local" tag: always visible on a row that isn't syncing, because the
+   hollow ring alone is easy to miss and the ⋯ button covers it on hover. */
+.tree-local {
+  flex-shrink: 0;
+  font: 600 10px/1 var(--font-body);
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  background: var(--bg-subtle);
+  box-shadow: inset 0 0 0 1px var(--border);
+  border-radius: var(--radius-pill);
+  padding: 3px 6px;
+  margin-right: 2px;
+}

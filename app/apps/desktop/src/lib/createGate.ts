@@ -22,6 +22,26 @@ export const VIEW_ONLY_FOLDER_MESSAGE =
 export const VIEW_ONLY_ROOT_MESSAGE =
   "You can't add to the top of this vault. Ask an owner for edit access.";
 
+/** What the open note's "Local only" notice says: why the server did not take
+ *  it, and the one thing that would make it sync. `code` is the refusal's
+ *  server code (`registry.heldRefusals()`). */
+export function localOnlyNotice(code: string | null, notePath: string): { why: string; fix: string } {
+  if (code === "root_frozen") {
+    return {
+      why: "The top of this vault is frozen, so your team can't see this note.",
+      fix: "To sync it, move it into a folder.",
+    };
+  }
+  const slash = notePath.lastIndexOf("/");
+  const folder = slash === -1 ? null : notePath.slice(0, slash).split("/").pop()!;
+  return {
+    why: folder
+      ? `You can view ${folder} but can't add to it, so your team can't see this note.`
+      : "You can't add to the top of this vault, so your team can't see this note.",
+    fix: "To sync it, ask an owner for edit access, or move it to a folder you can edit.",
+  };
+}
+
 export interface CreateGateInput {
   /** Vault-relative folder the new item would go in; "" is the top level. */
   dir: string;
