@@ -946,7 +946,7 @@ export function AccountVaultsTab() {
                                 disabled={busy}
                                 onClick={() => switchTo(o.id)}
                               >
-                                Open
+                                Switch
                               </AsyncButton>
                             )
                           )}
@@ -1057,7 +1057,7 @@ export function AccountVaultsTab() {
                                 disabled={busy}
                                 onClick={() => switchToLocal(r.path)}
                               >
-                                Open
+                                Switch
                               </AsyncButton>
                             )
                           )}
