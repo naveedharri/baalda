@@ -121,13 +121,24 @@ async function resolverEditable(user: TestUser): Promise<Record<string, boolean>
 }
 
 describe("access groups: lock list ≡ resolver", () => {
+  // `view`: a group Can view (a pure grant, never a cap) — on a folder, on the
+  // vault, and on a folder whose subfolder the group can edit. Before /locks
+  // reported these, a view-only folder looked editable in a sealed vault.
   for (const posture of ["shared", "read-only", "sealed"] as const) {
-    for (const groupVault of [false, true]) {
-      it(`${posture}${groupVault ? " + group vault edit" : ""}`, async () => {
+    for (const groupVault of [false, true, "view-folder", "view-vault", "view-over-edit"] as const) {
+      it(`${posture}${groupVault === true ? " + group vault edit" : groupVault ? ` + group ${groupVault}` : ""}`, async () => {
         if (posture === "shared") await seedVaultGrant(org, "edit");
         if (posture === "read-only") await seedVaultGrant(org, "view");
         if (posture === "sealed") await sealVault(org);
-        if (groupVault) await grant("vault", org, "edit");
+        if (groupVault === true) await grant("vault", org, "edit");
+        if (groupVault === "view-folder") await grant("folder", folders.other, "view");
+        if (groupVault === "view-vault") await grant("vault", org, "view");
+        if (groupVault === "view-over-edit") {
+          // The group's own edit on Open/Sub stays editable under its view of Open.
+          await pool.query("DELETE FROM shares WHERE principal_type = 'group' AND resource_id = $1", [folders.open]);
+          await grant("folder", folders.open, "view");
+          await grant("folder", folders.sub, "edit");
+        }
         for (const u of [ana, ben, cat]) {
           const resolver = await resolverEditable(u);
           // Only notes the person can READ are drawn at all.

@@ -24,6 +24,7 @@ import {
   summarizeAccess,
   type SummaryResource,
 } from "../../permissions/access-summary.js";
+import { boardModes } from "../../permissions/access-board.js";
 import { getSession } from "../session.js";
 import {
   AccessManagementError,
@@ -810,6 +811,9 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       [vaultId, org, session.userId, postureLocked, groupIds],
     );
     rows.push(...lifts);
+    if (!postureLocked && groupIds.length > 0) {
+      rows.push(...(await groupViewLocks(vaultId, org, session.userId, role, groupIds)));
+    }
     return c.json({ locks: rows });
   });
 
@@ -1085,4 +1089,77 @@ export function createShareRoutes(deps: ShareDeps): Hono {
   });
 
   return app;
+}
+
+/**
+ * A group's Can view is a pure grant (`view`, never a cap), so `/locks` used to
+ * say nothing about it and a member who could only VIEW a folder through a group
+ * (in a vault whose Everyone level gives them less) saw it unlocked: rename, new
+ * note and drag-in were offered and then refused by the server. Report it the way
+ * the client already understands a view-only item — the caller's own `readonly`
+ * row — but only where the caller's EFFECTIVE access is view, resolved by the same
+ * board the Access tab shows, and only at the top of each view-only subtree: a
+ * folder is reported only when its whole subtree is view (a deeper edit from
+ * another grant must stay editable, and an item padlock is a cap the client does
+ * not lift). Runs only for callers with a group `view` row in this vault.
+ */
+async function groupViewLocks(
+  vaultId: string,
+  org: string,
+  userId: string,
+  role: string,
+  groupIds: string[],
+): Promise<Array<Record<string, unknown>>> {
+  const { rowCount } = await pool.query(
+    `SELECT 1 FROM shares s
+      WHERE s.principal_type = 'group' AND s.principal_id = ANY($3::text[]) AND s.permission = 'view'
+        AND ((s.resource_type = 'vault' AND s.resource_id = $2)
+          OR (s.resource_type = 'folder' AND s.resource_id IN (SELECT id FROM folders WHERE vault_id = $1))
+          OR (s.resource_type = 'file' AND s.resource_id IN
+               (SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL
+                UNION SELECT id FROM files WHERE vault_id = $1)))
+      LIMIT 1`,
+    [vaultId, org, groupIds],
+  );
+  if (!rowCount) return [];
+  const [index, folders, notes, files] = await Promise.all([
+    loadAccessIndex(pool, org),
+    pool.query<{ id: string; parent_id: string | null }>("SELECT id, parent_id FROM folders WHERE vault_id = $1", [vaultId]),
+    pool.query<{ id: string; folder_id: string | null }>(
+      "SELECT id, folder_id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL",
+      [vaultId],
+    ),
+    pool.query<{ id: string; folder_id: string | null }>("SELECT id, folder_id FROM files WHERE vault_id = $1", [vaultId]),
+  ]);
+  const modes = await boardModes({
+    db: pool,
+    index,
+    cache: createResolverCache(),
+    vaultId,
+    userId,
+    role,
+    items: {
+      folderIds: folders.rows.map((f) => f.id),
+      noteIds: notes.rows.map((n) => n.id),
+      fileIds: files.rows.map((f) => f.id),
+    },
+  });
+  const viewFolder = (id: string | null) => id !== null && modes.folders.get(id) === "readonly";
+  const lock = (resourceType: "folder" | "file", resourceId: string) => ({
+    id: `group-view:${resourceId}`,
+    resource_type: resourceType,
+    resource_id: resourceId,
+    principal_type: "user",
+    principal_id: userId,
+    permission: "readonly",
+    reason: "group_view",
+    created_by: null,
+    created_at: null,
+  });
+  const out: Array<Record<string, unknown>> = [];
+  for (const f of folders.rows) if (viewFolder(f.id) && !viewFolder(f.parent_id)) out.push(lock("folder", f.id));
+  for (const d of [...notes.rows, ...files.rows]) {
+    if (modes.docs.get(d.id) === "readonly" && !viewFolder(d.folder_id)) out.push(lock("file", d.id));
+  }
+  return out;
 }
