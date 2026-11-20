@@ -12,6 +12,7 @@ import {
 } from "../../permissions/lookup.js";
 import {
   buildAccessContext,
+  buildAccessContextFromIndex,
   createResolverCache,
   loadAccessIndex,
   resolveAccessForUser,
@@ -21,10 +22,10 @@ import {
 } from "../../permissions/resolver.js";
 import {
   indexHoldsResource,
+  permissionMode,
   summarizeAccess,
   type SummaryResource,
 } from "../../permissions/access-summary.js";
-import { boardModes } from "../../permissions/access-board.js";
 import { getSession } from "../session.js";
 import {
   AccessManagementError,
@@ -1112,40 +1113,64 @@ async function groupViewLocks(
   role: string,
   groupIds: string[],
 ): Promise<Array<Record<string, unknown>>> {
-  const { rowCount } = await pool.query(
-    `SELECT 1 FROM shares s
+  const { rows: viewRows } = await pool.query<{ resource_type: string; resource_id: string }>(
+    `SELECT s.resource_type, s.resource_id FROM shares s
       WHERE s.principal_type = 'group' AND s.principal_id = ANY($3::text[]) AND s.permission = 'view'
         AND ((s.resource_type = 'vault' AND s.resource_id = $2)
           OR (s.resource_type = 'folder' AND s.resource_id IN (SELECT id FROM folders WHERE vault_id = $1))
           OR (s.resource_type = 'file' AND s.resource_id IN
                (SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL
-                UNION SELECT id FROM files WHERE vault_id = $1)))
-      LIMIT 1`,
+                UNION SELECT id FROM files WHERE vault_id = $1)))`,
     [vaultId, org, groupIds],
   );
-  if (!rowCount) return [];
-  const [index, folders, notes, files] = await Promise.all([
-    loadAccessIndex(pool, org),
-    pool.query<{ id: string; parent_id: string | null }>("SELECT id, parent_id FROM folders WHERE vault_id = $1", [vaultId]),
-    pool.query<{ id: string; folder_id: string | null }>(
-      "SELECT id, folder_id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL",
-      [vaultId],
-    ),
-    pool.query<{ id: string; folder_id: string | null }>("SELECT id, folder_id FROM files WHERE vault_id = $1", [vaultId]),
-  ]);
-  const modes = await boardModes({
-    db: pool,
-    index,
-    cache: createResolverCache(),
-    vaultId,
-    userId,
-    role,
-    items: {
-      folderIds: folders.rows.map((f) => f.id),
-      noteIds: notes.rows.map((n) => n.id),
-      fileIds: files.rows.map((f) => f.id),
-    },
+  if (viewRows.length === 0) return [];
+  // The access index already holds this collection's folders and live notes/files.
+  const index = await loadAccessIndex(pool, org);
+  const pick = (m: Map<string, { vaultId: string; folderId: string | null }>) => ({
+    rows: [...m].filter(([, d]) => d.vaultId === vaultId).map(([id, d]) => ({ id, folder_id: d.folderId })),
   });
+  const allFolders = {
+    rows: [...index.folders].filter(([, f]) => f.vaultId === vaultId).map(([id, f]) => ({ id, parent_id: f.parentId })),
+  };
+  const allNotes = pick(index.notes);
+  const allFiles = pick(index.files);
+  // Only what lies under a group's Can view can be view-only BECAUSE of a group,
+  // so only those subtrees are resolved (a whole-vault Can view takes them all).
+  const wholeVault = viewRows.some((r) => r.resource_type === "vault");
+  const inScope = new Set<string>();
+  if (!wholeVault) {
+    const children = new Map<string, string[]>();
+    for (const f of allFolders.rows) {
+      if (f.parent_id === null) continue;
+      const list = children.get(f.parent_id) ?? [];
+      list.push(f.id);
+      children.set(f.parent_id, list);
+    }
+    const stack = viewRows.filter((r) => r.resource_type === "folder").map((r) => r.resource_id);
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (inScope.has(id)) continue;
+      inScope.add(id);
+      stack.push(...(children.get(id) ?? []));
+    }
+  }
+  const viewDocs = new Set(viewRows.filter((r) => r.resource_type === "file").map((r) => r.resource_id));
+  const docInScope = (d: { id: string; folder_id: string | null }) =>
+    wholeVault || viewDocs.has(d.id) || (d.folder_id !== null && inScope.has(d.folder_id));
+  const folders = { rows: wholeVault ? allFolders.rows : allFolders.rows.filter((f) => inScope.has(f.id)) };
+  const notes = { rows: allNotes.rows.filter(docInScope) };
+  const files = { rows: allFiles.rows.filter(docInScope) };
+  // The same resolution the Access board makes for one item (`boardModes`), for
+  // just these items: that board folds the whole vault, which on a large one is
+  // most of the cost and buys nothing here.
+  const cache = createResolverCache();
+  const own = async (type: "folder" | "file", id: string) => {
+    const ctx = await buildAccessContextFromIndex(index, type, id, pool, cache);
+    return ctx ? permissionMode((await resolveAccessForUser(ctx, userId, role, pool, cache, index)).permission) : "private";
+  };
+  const modes = { ownFolders: new Map<string, string>(), docs: new Map<string, string>() };
+  for (const f of folders.rows) modes.ownFolders.set(f.id, await own("folder", f.id));
+  for (const d of [...notes.rows, ...files.rows]) modes.docs.set(d.id, await own("file", d.id));
   // A NOTE's own mode decides the editor; a FOLDER's decides create/rename/drag-in.
   // Fold each folder's own mode with every VISIBLE descendant: "open" anywhere
   // keeps it unpadlocked; No access items are skipped (not drawn at all).
