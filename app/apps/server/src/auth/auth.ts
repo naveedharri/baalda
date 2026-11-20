@@ -21,6 +21,7 @@ import { isValidProfileImage } from "./profile-image.js";
 import { hasExpiryNotice } from "../invitations/expiries.js";
 import { invitationActivityChanged } from "../invitations/sweep.js";
 import { applyInvitationAccess } from "../members/invitation-access.js";
+import { applyInvitationGroups } from "../groups/service.js";
 import { applyInvitationKeys } from "../members/invitation-keys.js";
 import { announceInvitation, announceInvitationGone } from "../sync/user-events.js";
 
@@ -415,6 +416,12 @@ export const auth = betterAuth({
           // Apply the access the inviter chose (invitation_access, m046). The
           // member row exists by now; best-effort, never fails the accept.
           await applyInvitationAccess({
+            invitationIds: [data.invitation.id],
+            organizationId: data.organization.id,
+            userId: data.user.id,
+          });
+          // Groups picked on the invite (migration 097).
+          await applyInvitationGroups({
             invitationIds: [data.invitation.id],
             organizationId: data.organization.id,
             userId: data.user.id,

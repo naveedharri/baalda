@@ -16,6 +16,7 @@ import {
   loadAccessIndex,
   resolveAccessForUser,
   type AccessIndex,
+  memberGroupIds,
   personalVaultLevel,
 } from "../../permissions/resolver.js";
 import {
@@ -329,7 +330,8 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           !resource.resourceId,
       ) ||
       (audience.type !== "org" &&
-        (audience.type !== "users" || !Array.isArray(audience.userIds)))
+        (audience.type !== "users" || !Array.isArray(audience.userIds)) &&
+        (audience.type !== "group" || typeof audience.groupId !== "string" || !audience.groupId))
     ) {
       return c.json({ error: "invalid_request", message: "Invalid resources or audience" }, 400);
     }
@@ -740,7 +742,23 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     // Read-only one (reported as a lift below), and a personal `denied` needs
     // nothing here — their readable set is already empty.
     const personal = await personalVaultLevel(pool, org, session.userId);
-    const postureLocked = posture?.permission === "view" || personal === "view";
+    // The caller's access groups lift like their own grants do (resolver
+    // `rowsGroupGrant`), unless they have a vault level of their own, which
+    // ignores groups. A group's whole-vault `edit` lifts the Read-only seed
+    // entirely, so no vault padlock is reported for them.
+    const groupIds = personal === null ? await memberGroupIds(pool, org, session.userId) : [];
+    const groupVaultEdit =
+      groupIds.length > 0 &&
+      ((
+        await pool.query(
+          `SELECT 1 FROM shares
+            WHERE resource_type = 'vault' AND resource_id = $1 AND permission = 'edit'
+              AND principal_type = 'group' AND principal_id = ANY($2::text[])
+            LIMIT 1`,
+          [org, groupIds],
+        )
+      ).rowCount ?? 0) > 0;
+    const postureLocked = (posture?.permission === "view" && !groupVaultEdit) || personal === "view";
     if (postureLocked) {
       rows.push({
         // NOT `posture.id` (nor the caller's personal row id). That is the live vault GRANT row, and
@@ -774,6 +792,9 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           AND (
             ($4::boolean AND s.principal_type = 'org' AND s.principal_id = $2)
             OR (s.principal_type = 'user' AND s.principal_id = $3)
+            -- The caller's group edit rows lift only the posture seed: a
+            -- person's own Can view / No access is never lifted by a group.
+            OR ($4::boolean AND s.principal_type = 'group' AND s.principal_id = ANY($5::text[]))
           )
           AND (
             (s.resource_type = 'folder' AND s.resource_id IN
@@ -786,7 +807,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
             OR ($4::boolean AND s.resource_type = 'vault' AND s.resource_id = $2
                 AND s.principal_type = 'user' AND s.principal_id = $3)
           )`,
-      [vaultId, org, session.userId, postureLocked],
+      [vaultId, org, session.userId, postureLocked, groupIds],
     );
     rows.push(...lifts);
     return c.json({ locks: rows });
@@ -975,10 +996,14 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const gate = await canManage(session.userId, resourceType, resourceId);
     if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
 
+    // Group rows (migration 097) only with `includeGroups=1`: an older desktop
+    // reads every row here as a person or the team.
+    const includeGroups = c.req.query("includeGroups") === "1";
     const { rows } = await pool.query(
       `SELECT id, resource_type, resource_id, principal_type, principal_id, permission, created_by, created_at
-         FROM shares WHERE resource_type = $1 AND resource_id = $2`,
-      [resourceType, resourceId],
+         FROM shares WHERE resource_type = $1 AND resource_id = $2
+          AND ($3::boolean OR principal_type <> 'group')`,
+      [resourceType, resourceId, includeGroups],
     );
     return c.json({ shares: rows });
   });

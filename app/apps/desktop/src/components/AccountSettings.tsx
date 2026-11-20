@@ -48,6 +48,7 @@ import {
   type AppearanceSettings,
 } from "../lib/appearanceSettings";
 import type { EditorMeasure } from "../lib/prefs";
+import { CheckIcon } from "./CheckIcon";
 
 /**
  * Account settings — a centered modal over the app (sibling to Vault settings,
@@ -406,7 +407,7 @@ function ProfileTab() {
                   disabled={resendBusy}
                   onClick={() => void resendConfirmation()}
                 >
-                  {resendBusy ? "Sending…" : resendState === "sent" ? "Sent ✓" : "Resend it"}
+                  {resendBusy ? "Sending…" : resendState === "sent" ? <>Sent <CheckIcon size={12} className="check-inline" /></> : "Resend it"}
                 </button>
                 {resendState && resendState !== "sent" && (
                   <span className="update-status error"> {resendState}</span>

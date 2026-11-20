@@ -37,6 +37,7 @@ import { FaceSvg } from "./Avatar";
 import { agoFromIso, lastEditedTooltip } from "./versionFormat";
 import { noteContentReady, shouldShowNoteSkeleton } from "../lib/editor/noteLoading";
 import { registerLiveView } from "./liveEditorViews";
+import { CheckIcon } from "./CheckIcon";
 
 interface Peer {
   id: string;
@@ -279,7 +280,7 @@ function PeerRow({
             setPinged(true);
           }}
         >
-          {pinged ? "✓" : "Ping"}
+          {pinged ? <CheckIcon size={12} /> : "Ping"}
         </button>
       )}
     </div>

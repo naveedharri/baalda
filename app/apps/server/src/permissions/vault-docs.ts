@@ -1,6 +1,12 @@
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
-import { memberAccessSnapshot, personalVaultLevel, type PersonalVaultLevel, vaultBaseline } from "./resolver.js";
+import {
+  memberAccessSnapshot,
+  memberGroupIds,
+  personalVaultLevel,
+  type PersonalVaultLevel,
+  vaultBaseline,
+} from "./resolver.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -56,6 +62,12 @@ export async function vaultAccess(
   role: string | null;
   vaultWide: boolean;
   personal: PersonalVaultLevel;
+  /** The access groups whose grants apply to this person: their groups while
+   *  they are a member with no vault level of their own, else none ([[resolver]]
+   *  `rowsGroupGrant` — a person's own level ignores groups). */
+  groupIds: string[];
+  /** One of `groupIds` holds a grant on the whole vault. */
+  groupVault: boolean;
 } | null> {
   const org = await db.query<{ organization_id: string; role: string | null }>(
     `SELECT v.organization_id, m.role
@@ -69,7 +81,20 @@ export async function vaultAccess(
   if (!row) return null;
   const personal = await personalVaultLevel(db, row.organization_id, userId);
   const base = { organizationId: row.organization_id, role: row.role, personal };
-  if (personal !== null) return { ...base, vaultWide: personal !== "denied" };
+  if (personal !== null) return { ...base, vaultWide: personal !== "denied", groupIds: [], groupVault: false };
+  const groupIds = row.role !== null ? await memberGroupIds(db, row.organization_id, userId) : [];
+  const groupVault =
+    groupIds.length > 0 &&
+    ((
+      await db.query(
+        `SELECT 1 FROM shares
+          WHERE resource_type = 'vault' AND resource_id = $1
+            AND principal_type = 'group' AND principal_id = ANY($2::text[])
+            AND permission IN ('view', 'edit')
+          LIMIT 1`,
+        [row.organization_id, groupIds],
+      )
+    ).rowCount ?? 0) > 0;
   const orgClause = row.role !== null ? "principal_type = 'org' OR" : "";
   const grant = await db.query(
     `SELECT 1 FROM shares
@@ -79,7 +104,7 @@ export async function vaultAccess(
       LIMIT 1`,
     [row.organization_id, userId],
   );
-  return { ...base, vaultWide: (grant.rowCount ?? 0) > 0 };
+  return { ...base, vaultWide: groupVault || (grant.rowCount ?? 0) > 0, groupIds, groupVault };
 }
 
 /**
@@ -352,7 +377,7 @@ async function listDocsInVault(
 ): Promise<Set<string>> {
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return new Set(); // unknown vault
-  const { organizationId, role, vaultWide, personal } = access;
+  const { organizationId, role, vaultWide, personal, groupIds } = access;
 
   // The ONLY difference between the two sets. `files` has no `deleted_at`
   // column, so a tombstone can never be a file — the UNIONs below drop out.
@@ -455,6 +480,7 @@ async function listDocsInVault(
              AND (
                (principal_type = 'user' AND principal_id = $1)
                OR ($4 AND $5 AND principal_type = 'org' AND principal_id = $3)
+               OR (principal_type = 'group' AND principal_id = ANY($7::text[]))
              )
        ),
        subtree AS (
@@ -468,6 +494,7 @@ async function listDocsInVault(
              AND (
                (principal_type = 'user' AND principal_id = $1)
                OR ($4 AND $5 AND principal_type = 'org' AND principal_id = $3)
+               OR (principal_type = 'group' AND principal_id = ANY($7::text[]))
              )
        ),
        -- A per-USER grant on the VAULT resource, which reaches every doc in it.
@@ -479,11 +506,16 @@ async function listDocsInVault(
        --
        -- Deliberately per-user only: the ORG-principal vault grant is the vault
        -- posture, which vaultAccess has already answered as vaultWide.
+       --
+       -- A group's vault grant reaches every doc the same way (groups are a
+       -- named set of people: they rescue from item-Private like a per-user
+       -- grant does). $7 is empty when groups do not apply to this person.
        user_vault_grant AS (
           SELECT 1 FROM shares
            WHERE resource_type = 'vault' AND resource_id = $3
              AND permission IN ('view', 'edit', 'readonly')
-             AND principal_type = 'user' AND principal_id = $1
+             AND ((principal_type = 'user' AND principal_id = $1)
+               OR (principal_type = 'group' AND principal_id = ANY($7::text[])))
        )${deadFolderCte}
        SELECT n.id FROM notes n
          WHERE n.vault_id = $2 AND n.${livePredicate}
@@ -495,7 +527,7 @@ async function listDocsInVault(
              ${deadFolderPredicate}
            )
        ${filesUnion}`,
-      [userId, vaultId, organizationId, isMember, orgGrants, creatorCounts],
+      [userId, vaultId, organizationId, isMember, orgGrants, creatorCounts, groupIds],
     );
     return new Set(rows.map((r) => r.id));
   };
@@ -569,12 +601,14 @@ async function listDocsInVault(
 
       // Personal grants always survive the initial snapshot. Team grants only
       // survive when their ACL revision is newer than the one captured at join.
+      // Group grants survive it too: a group is a named set of people.
       const allowed = await db.query<{ id: string }>(
         `WITH RECURSIVE allowed_folders AS (
            SELECT resource_id AS id FROM shares
             WHERE resource_type = 'folder'
               AND permission IN ('view', 'edit', 'readonly')
               AND ((principal_type = 'user' AND principal_id = $1)
+                OR (principal_type = 'group' AND principal_id = ANY($6::text[]))
                 OR (principal_type = 'org' AND principal_id = $3
                     AND access_revision > $4))
          ), subtree AS (
@@ -586,6 +620,7 @@ async function listDocsInVault(
             WHERE resource_type = 'file'
               AND permission IN ('view', 'edit', 'readonly')
               AND ((principal_type = 'user' AND principal_id = $1)
+                OR (principal_type = 'group' AND principal_id = ANY($6::text[]))
                 OR (principal_type = 'org' AND principal_id = $3
                     AND access_revision > $4))
          ), vault_grant AS (
@@ -593,6 +628,7 @@ async function listDocsInVault(
             WHERE resource_type = 'vault' AND resource_id = $3
               AND permission IN ('view', 'edit', 'readonly')
               AND ((principal_type = 'user' AND principal_id = $1)
+                OR (principal_type = 'group' AND principal_id = ANY($6::text[]))
                 OR (principal_type = 'org' AND principal_id = $3
                     AND access_revision > $4))
          )
@@ -611,7 +647,7 @@ async function listDocsInVault(
                      OR f.id IN (SELECT id FROM allowed_files)
                      OR EXISTS (SELECT 1 FROM vault_grant))`
          }`,
-        [userId, vaultId, organizationId, snapshot.accessRevision, snapshot.snapshotAt],
+        [userId, vaultId, organizationId, snapshot.accessRevision, snapshot.snapshotAt, groupIds],
       );
       for (const row of allowed.rows) reachable.add(row.id);
     } else {
@@ -721,19 +757,22 @@ export async function listVisibleFolders(
   // reach their subtree, exactly as they do for notes. Empty folders have no
   // readable note to bring them into the tree, so this must be folder-based.
   if (orgDenied.size > 0) {
-    if (access.personal === "edit" || access.personal === "view") {
+    // A group's whole-vault grant rescues like a personal one ([[resolver]]
+    // `rowsGroupGrant` applies on an item set Private).
+    if (access.personal === "edit" || access.personal === "view" || access.groupVault) {
       orgDenied.clear();
     } else {
       const { rows: personalFolders } = await db.query<{ id: string }>(
         `WITH RECURSIVE granted AS (
            SELECT f.id FROM folders f JOIN shares s ON s.resource_id = f.id
             WHERE f.vault_id = $2 AND s.resource_type = 'folder'
-              AND s.principal_type = 'user' AND s.principal_id = $1
+              AND ((s.principal_type = 'user' AND s.principal_id = $1)
+                OR (s.principal_type = 'group' AND s.principal_id = ANY($3::text[])))
               AND s.permission IN ('view', 'edit', 'readonly')
            UNION
            SELECT f.id FROM folders f JOIN granted g ON f.parent_id = g.id AND f.vault_id = $2
          ) SELECT id FROM granted`,
-        [userId, vaultId],
+        [userId, vaultId, access.groupIds],
       );
       for (const row of personalFolders) orgDenied.delete(row.id);
     }
@@ -802,6 +841,7 @@ export async function listVisibleFolders(
            AND (
              (principal_type = 'user' AND principal_id = $1)
              OR ($4 AND principal_type = 'org' AND principal_id = $3)
+             OR (principal_type = 'group' AND principal_id = ANY($7::text[]))
            )
      ),
      down AS (
@@ -822,7 +862,7 @@ export async function listVisibleFolders(
         SELECT f.id, f.parent_id FROM folders f JOIN up u ON f.id = u.parent_id AND f.vault_id = $2
      )
      SELECT DISTINCT id FROM up`,
-    [userId, vaultId, access.organizationId, isMember, [...readable], authorSeeds],
+    [userId, vaultId, access.organizationId, isMember, [...readable], authorSeeds, access.groupIds],
   );
   const visible = new Set(visibleIds.map((r) => r.id));
   if (snapshot?.mode === "private") {
@@ -832,6 +872,7 @@ export async function listVisibleFolders(
           WHERE resource_type = 'folder'
             AND permission IN ('view', 'edit', 'readonly')
             AND ((principal_type = 'user' AND principal_id = $1)
+              OR (principal_type = 'group' AND principal_id = ANY($6::text[]))
               OR (principal_type = 'org' AND principal_id = $3
                   AND access_revision > $4))
        ), down AS (
@@ -854,7 +895,7 @@ export async function listVisibleFolders(
          SELECT f.id, f.parent_id FROM folders f JOIN up u ON f.id = u.parent_id AND f.vault_id = $2
        )
        SELECT id FROM up`,
-      [userId, vaultId, access.organizationId, snapshot.accessRevision, [...readable]],
+      [userId, vaultId, access.organizationId, snapshot.accessRevision, [...readable], access.groupIds],
     );
     const admitted = new Set(snapshotVisible.map((row) => row.id));
     for (const folder of all.rows) {

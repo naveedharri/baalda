@@ -301,7 +301,7 @@ export function withoutInvitation(ov: MembersOverview, invitationId: string): Me
 export function withNewInvitations(
   ov: MembersOverview,
   results: readonly InviteManyResult[],
-  sent: { role: string; access: TeamAccessMode | null },
+  sent: { role: string; access: TeamAccessMode | null; groupIds?: string[] },
   nowIso: string,
 ): MembersOverview {
   const added: InvitationOverview[] = results
@@ -314,6 +314,7 @@ export function withNewInvitations(
       createdAt: nowIso,
       expiresAt: null,
       access: sent.access,
+      ...(sent.groupIds?.length ? { groupIds: sent.groupIds } : {}),
     }));
   if (!added.length) return ov;
   const emails = new Set(added.map((i) => i.email.toLowerCase()));
@@ -386,4 +387,68 @@ export function withViewerRole(
     return next;
   }
   return [...members, { id: memberId ?? `${orgId}:${userId}`, organizationId: orgId, userId, role }];
+}
+
+// ── Selecting people for a bulk action ─────────────────────────────────────
+
+/** The header checkbox: nothing, some or all of the shown selectable rows. */
+export function headerCheckState(shownSelectable: readonly string[], selected: ReadonlySet<string>): "none" | "some" | "all" {
+  const on = shownSelectable.filter((id) => selected.has(id)).length;
+  if (on === 0) return "none";
+  return on === shownSelectable.length ? "all" : "some";
+}
+
+/** Header click: all shown selectable rows on, or (when all are on) off; rows not shown keep their tick. */
+export function toggleShown(shownSelectable: readonly string[], selected: ReadonlySet<string>): Set<string> {
+  const next = new Set(selected);
+  const all = headerCheckState(shownSelectable, selected) === "all";
+  for (const id of shownSelectable) {
+    if (all) next.delete(id);
+    else next.add(id);
+  }
+  return next;
+}
+
+/** Drop ticks for people who are no longer in the roster (removed, left). Same set back when nothing changed. */
+export function pruneSelection(selected: ReadonlySet<string>, present: Iterable<string>): ReadonlySet<string> {
+  const keep = new Set(present);
+  for (const id of selected) if (!keep.has(id)) {
+    return new Set([...selected].filter((x) => keep.has(x)));
+  }
+  return selected;
+}
+
+/**
+ * Split a selection for one action: who it applies to, who already has it
+ * (nothing to do) and who this person may not change.
+ */
+export function splitBulkTargets<T>(
+  selected: readonly T[],
+  allowed: (t: T) => boolean,
+  alreadyDone: (t: T) => boolean = () => false,
+): { apply: T[]; unchanged: T[]; notAllowed: T[] } {
+  const out = { apply: [] as T[], unchanged: [] as T[], notAllowed: [] as T[] };
+  for (const t of selected) {
+    if (!allowed(t)) out.notAllowed.push(t);
+    else if (alreadyDone(t)) out.unchanged.push(t);
+    else out.apply.push(t);
+  }
+  return out;
+}
+
+export const peopleCount = (n: number) => (n === 1 ? "1 person" : `${n} people`);
+
+/** The toast after a bulk action: "3 people can now view everything. 1 skipped: you can't change the owner." */
+export function bulkResultLine(done: string, split: { apply: unknown[]; unchanged: unknown[]; notAllowed: unknown[] }): string {
+  const parts = [done];
+  if (split.unchanged.length) parts.push(`${peopleCount(split.unchanged.length)} already had it.`);
+  if (split.notAllowed.length) parts.push(`${peopleCount(split.notAllowed.length)} skipped: you can't change ${split.notAllowed.length === 1 ? "them" : "those people"}.`);
+  return parts.join(" ");
+}
+
+/** Run requests in slices of at most `size` ids (the server's per-call caps). */
+export function chunkIds<T>(ids: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
 }

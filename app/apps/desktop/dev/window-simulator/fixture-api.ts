@@ -246,12 +246,47 @@ const access = new Map<string, string>();
 const allResources = () => [...folders, ...notes, ...files];
 function modeFor(userId: string, id: string): string {
   if (access.has(userId + ":" + id)) return access.get(userId + ":" + id)!;
+  if (userId.startsWith("group:")) {
+    const g = groups.find((x) => "group:" + x.id === userId);
+    const folder = folders.find((f) => f.id === id);
+    const path = folder?.path ?? notes.find((n) => n.id === id)?.relPath ?? files.find((f) => f.id === id)?.path ?? "";
+    let best = "private";
+    for (const gr of g?.grants ?? []) {
+      const fpath = folders.find((f) => f.id === gr.resourceId)?.path;
+      const covers = gr.resourceType === "vault" || gr.resourceId === id || (fpath && (path === fpath || path.startsWith(fpath + "/")));
+      if (covers && (gr.permission === "edit" || best === "private")) best = gr.permission === "edit" ? "open" : "readonly";
+    }
+    return best;
+  }
   if (userId === users[0].id || userId === users[1].id) return "open";
   if (userId === users[2].id) return id === notes[1].id ? "private" : "open";
   if (userId === users[3].id)
     return id === notes[1].id ? "private" : "readonly";
   return teamMode;
 }
+// Access groups (server migration 097), synthetic.
+export const groups: any[] = [
+  { id: "preview-group-design", name: "Design", color: "violet", autoJoin: true, createdAt: ago(200),
+    memberIds: [users[1].id, users[3].id], invited: [{ invitationId: "preview-invite-1", email: "sam@example.com" }],
+    grants: [{ resourceType: "folder", resourceId: "preview-folder-2", permission: "edit", path: "Specs" }], skillCount: 1 },
+  { id: "preview-group-sales", name: "Sales", color: "orange", autoJoin: false, createdAt: ago(100),
+    memberIds: [users[2].id], invited: [],
+    grants: [{ resourceType: "vault", resourceId: "preview-org", permission: "view", path: null }], skillCount: 0 },
+  { id: "preview-group-contractors", name: "Contractors", color: "teal", autoJoin: false, createdAt: ago(50),
+    memberIds: [], invited: [], grants: [], skillCount: 0 },
+];
+export const skills: any[] = [
+  { id: "preview-skill-1", name: "brand-voice", description: "Write in the team's voice", latestVersion: 3, groupLevels: { "preview-group-design": "required" } },
+  { id: "preview-skill-2", name: "meeting-notes", description: "Turn a transcript into notes", latestVersion: 1, groupLevels: {} },
+  { id: "preview-skill-3", name: "pricing-review", description: "", latestVersion: null, groupLevels: {} },
+];
+const groupActivity = (g: any) => [
+  { kind: "accessGranted", at: ago(2), by: { userId: users[0].id, name: users[0].name }, permission: "edit", resourceType: "folder", path: "Specs" },
+  { kind: "memberAdded", at: ago(30), by: { userId: users[0].id, name: users[0].name }, person: ref(users[3]) },
+  { kind: "memberRemoved", at: ago(40), by: { userId: users[0].id, name: users[0].name }, person: ref(users[2]) },
+  { kind: "updated", at: ago(60), by: { userId: users[0].id, name: users[0].name }, name: g.name },
+  { kind: "created", at: ago(200), by: { userId: users[0].id, name: users[0].name }, name: g.name },
+];
 const letter = (mode: string) =>
   ({ open: "e", readonly: "v", private: "n", mixed: "m" })[mode] ?? "e";
 const ref = (u = users[0]) => ({ userId: u.id, name: u.name, email: u.email });
@@ -289,6 +324,9 @@ export async function previewFetch(
         "bootstrap-only",
         "files-with-bytes",
         "access-board",
+        "access-groups",
+        "skills",
+        "skill-access",
       ],
     });
   if (p === "/api/auth-methods")
@@ -339,9 +377,13 @@ export async function previewFetch(
         joinedAt: m.createdAt,
         lastActiveAt: ago(i * 0.5),
         invitedBy: i ? ref() : null,
-        access: { level: i < 2 ? "edit" : i === 2 ? "custom" : "view" },
+        access: { level: i < 2 ? "edit" : i === 2 ? "custom" : "view", own: i === 3 },
+        groupIds: groups.filter((g) => g.memberIds.includes(m.userId)).map((g) => g.id),
       })),
-      invitations,
+      invitations: invitations.map((inv) => ({
+        ...inv,
+        groupIds: groups.filter((g) => g.invited.some((x: any) => x.invitationId === inv.id)).map((g) => g.id),
+      })),
     });
   if (/\/members\/[^/]+\/activity$/.test(p))
     return ok({
@@ -434,6 +476,39 @@ export async function previewFetch(
     if (method !== "GET") joinMode = body.mode;
     return ok({ mode: joinMode });
   }
+  {
+    const gm = p.match(/^\/api\/orgs\/[^/]+\/groups(?:\/([^/]+))?(?:\/(members|activity|skills))?(?:\/([^/]+))?$/);
+    if (gm) {
+      const [, gid, sub, uid] = gm;
+      const g = gid ? groups.find((x) => x.id === gid) : null;
+      if (gid && !g) return response({ error: "group_not_found", message: "That group no longer exists" }, 404);
+      if (!gid && method === "GET") return ok({ groups, canManage: true });
+      if (!gid && method === "POST") {
+        const id = "preview-group-" + Math.random().toString(36).slice(2, 8);
+        groups.push({ id, name: body.name, color: body.color ?? null, autoJoin: !!body.autoJoin, createdAt: ago(0),
+          memberIds: body.memberIds ?? [], invited: [], grants: [], skillCount: 0 });
+        return response({ id }, 201);
+      }
+      if (!sub && method === "PATCH") { Object.assign(g, body); return ok({ ok: true }); }
+      if (!sub && method === "DELETE") { groups.splice(groups.indexOf(g), 1); return ok({ ok: true, disconnectedDocs: 0 }); }
+      if (sub === "members" && method === "POST") {
+        const add = (body.userIds ?? []).filter((u: string) => !g.memberIds.includes(u));
+        g.memberIds.push(...add);
+        return ok({ added: add.length });
+      }
+      if (sub === "members" && method === "DELETE") { g.memberIds = g.memberIds.filter((u: string) => u !== uid); return ok({ removed: true, disconnectedDocs: 0 }); }
+      if (sub === "activity") return ok({ events: groupActivity(g) });
+      if (sub === "skills") return ok({ skills: skills.map((s) => ({ skillId: s.id, name: s.name, description: s.description, latestVersion: s.latestVersion, level: s.groupLevels[g.id] ?? null })) });
+    }
+  }
+  {
+    const mm = p.match(/^\/api\/orgs\/[^/]+\/members\/([^/]+)(?:\/role)?$/);
+    if (mm && (method === "PATCH" || method === "DELETE")) {
+      const u = users.find((x) => x.id === mm[1]);
+      if (u && method === "PATCH") (u as any).role = body.role;
+      return ok(method === "PATCH" ? { updated: true } : { removed: true });
+    }
+  }
   if (p.endsWith("/access/bulk")) {
     for (const r of body.resources ?? []) {
       const folder = folders.find((f) => r.resourceType === "folder" && f.id === r.resourceId);
@@ -441,7 +516,15 @@ export async function previewFetch(
         const path = "relPath" in item ? item.relPath : item.path;
         return path === folder.path || path.startsWith(folder.path + "/");
       }) : [{ id: r.resourceId }];
-      for (const uid of body.audience?.userIds ?? users.map((u) => u.id))
+      if (body.audience?.type === "group") {
+        const g = groups.find((x) => x.id === body.audience.groupId);
+        if (g) {
+          g.grants = g.grants.filter((x: any) => x.resourceId !== r.resourceId);
+          if (body.mode !== "private") g.grants.push({ resourceType: r.resourceType, resourceId: r.resourceId,
+            permission: body.mode === "open" ? "edit" : "view", path: folder?.path ?? (r.resourceType === "vault" ? null : notes.find((n) => n.id === r.resourceId)?.relPath ?? null) });
+        }
+      }
+      for (const uid of body.audience?.type === "group" ? ["group:" + body.audience.groupId] : body.audience?.userIds ?? users.map((u) => u.id))
         for (const target of targets) access.set(uid + ":" + target.id, body.mode);
     }
     return ok({
@@ -473,7 +556,7 @@ export async function previewFetch(
     };
     const modes = allResources()
       .map((r) =>
-        letter(modeFor(url.searchParams.get("userId") ?? users[0].id, r.id)),
+        letter(modeFor(url.searchParams.get("groupId") ? "group:" + url.searchParams.get("groupId") : url.searchParams.get("userId") ?? users[0].id, r.id)),
       )
       .join("");
     return ok({

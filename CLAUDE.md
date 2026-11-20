@@ -566,6 +566,29 @@ Board drag uses **pointer events**, never native HTML5 drag-and-drop: Tauri's `d
 swallows HTML5 drag events inside the webview, so they never fire. A press becomes a drag after
 4px, the drop target is the whole column band under the pointer, and moves animate (lift, column
 highlight, landing).
+**Access groups** (migration 097, `/health` feature `access-groups`; server `groups/`,
+`http/routes/groups.ts`, MCP `list_groups`/`manage_group`; desktop `components/GroupsPanel.tsx`,
+`lib/groups.ts`): a group's grants are `shares` rows with `principal_type='group'`, `view`/`edit` only. Groups
+only ADD (max with everything else, after every resolver branch except the person's own vault-level row,
+which ignores groups; per-user deny/readonly caps and locks still cap them); a group can open an item that
+is Private or a sealed vault. Membership cascades with `member`; `auto_join` groups take new members (trigger,
+owner excluded); removing someone disconnects only the docs that group reached. Written through
+`POST access/bulk` with `audience: {type:"group"}` (`private` = no row; an Everyone write never clears group
+rows), read through `access-board?groupId=`; `GET /locks` returns the caller's group `edit` rows as lifts.
+Skills: `skill_group_access` (required/optional), inherited level = max(Everyone, groups). Invites carry
+`groupIds` (with an access level too ⇒ 400 `access_or_groups`). Management follows `canManageMemberAccess`.
+UI: a People | Groups toggle with one search under the Everyone/New members rows, a Groups column of chips,
+a group page (Members / Access board / Skills / Activity), the person page's Groups row, and groups listed in
+the Everyone menu (opens the group), the New members menu (toggles auto-join) and the invite Access menu
+(join groups instead of a level). `MenuSelect` options take `section` and `checked` for those lists.
+**Ticking people** (owners/admins): the People table leads with checkboxes (a row is tickable when
+`canSetMemberAccess` or `canActOnMember` allows it; invitations never). Ticking cross-fades the toolbar into
+`MemberSelectionBar` in the same 38px slot (nothing below moves): Add to access group, Change access
+(one `access/bulk` call per 100 people), Change role and Remove (sequential, "N of M" on failure). Each
+action filters to the people it may change and its toast names who was skipped
+(`lib/membersAccess.ts splitBulkTargets`/`bulkResultLine`); only No access and Remove confirm.
+Checkboxes app-wide are drawn (`App.css`, not the platform's) and ticks use `components/CheckIcon.tsx`,
+never the "✓" text glyph.
 Personal info shows Name, Email, Role, Joined ("…, invited by X"), Last active and Status
 (Online/Away from vault presence); Activity renders `GET …/members/:userId/activity`. Vault Settings
 no longer has an Updates tab (version + Check for updates live in Account Settings → About), and

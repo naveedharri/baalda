@@ -82,6 +82,7 @@ import { Face } from "./Face";
 import { NothingShared } from "./EditorPlaceholders";
 import { useEmptyVaultView } from "./useEmptyVaultView";
 import type { ShareTarget } from "./ShareDialog";
+import { CheckIcon } from "./CheckIcon";
 
 /* Lazy: the sharing sheet is a context-menu action, and keeping it out of the
    eager graph is also what lets it static-import the avatar chunk. */
@@ -1968,7 +1969,7 @@ export function FileTree() {
                     }}
                   >
                     <span className="menu-tick" aria-hidden="true">
-                      {treeSort === s.id ? "✓" : ""}
+                      {treeSort === s.id ? <CheckIcon /> : null}
                     </span>
                     {s.label}
                   </li>
@@ -2350,7 +2351,7 @@ export function FileTree() {
               tabIndex={0}
               onClick={() => { action.run(); setMenu(null); }}>
               <span>{action.label}</span>
-              {action.checked && <span className="menu-tick" aria-hidden="true">✓</span>}
+              {action.checked && <span className="menu-tick" aria-hidden="true"><CheckIcon /></span>}
             </li>)
           ) : sub.kind === "sort" ? (
             <>
@@ -2366,7 +2367,7 @@ export function FileTree() {
                   }}
                 >
                   <span className="menu-tick" aria-hidden="true">
-                    {!folderSorts[menuDir] ? "✓" : ""}
+                    {!folderSorts[menuDir] ? <CheckIcon /> : null}
                   </span>
                   Vault default
                 </li>
@@ -2387,7 +2388,7 @@ export function FileTree() {
                     }}
                   >
                     <span className="menu-tick" aria-hidden="true">
-                      {on ? "✓" : ""}
+                      {on ? <CheckIcon /> : null}
                     </span>
                     {t.label}
                   </li>

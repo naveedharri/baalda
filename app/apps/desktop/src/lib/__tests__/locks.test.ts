@@ -410,3 +410,26 @@ describe("billing-lapsed vault lock", () => {
     expect(hasBillingLapsedLock([])).toBe(false);
   });
 });
+
+describe("access group lifts (migration 097)", () => {
+  it("a group's edit on a folder lifts the Read-only posture for that subtree only, and is never a personal lift", () => {
+    const groupLift = share({
+      id: "lift-group", resourceType: "folder", resourceId: "f-projects",
+      principalType: "group", principalId: "g-design", permission: "edit",
+    });
+    const map = lockScopesByPath(tree, [vaultLock()], "u1", [groupLift]);
+    expect(lockBlocksCaller(map, "Projects")).toBe(false);
+    expect(lockBlocksCaller(map, "Projects/Deep/buried.md")).toBe(false);
+    expect(lockBlocksCaller(map, "loose.md")).toBe(true);
+    // A per-user readonly caps the group (resolver): a group row never acts as the caller's own lift.
+    expect(map.personalLifts).toBeUndefined();
+    const capped = lockScopesByPath(
+      tree,
+      [vaultLock(), share({ id: "mine", resourceType: "file", resourceId: "n-alpha", principalType: "user", principalId: "u1", permission: "readonly" })],
+      "u1",
+      [groupLift],
+    );
+    expect(lockBlocksCaller(capped, "Projects/alpha.md")).toBe(true);
+    expect(lockBlocksCaller(capped, "Projects/Deep/buried.md")).toBe(false);
+  });
+});

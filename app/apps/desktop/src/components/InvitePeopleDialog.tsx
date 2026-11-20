@@ -1,6 +1,7 @@
 import { createPortal } from "react-dom";
 import { useEffect, useState } from "react";
-import type { InviteManyResult, TeamAccessMode } from "../lib/api";
+import type { AccessGroup, InviteManyResult, TeamAccessMode } from "../lib/api";
+import { GROUP_OPTION, groupOptionId, isGroupOption } from "../lib/groups";
 import { authManager } from "../lib/auth/authManager";
 import { inviteWithVaultKeys, vaultKeysJoinCode } from "../lib/vaultKeys/runtime";
 import { classifyLimitError, freeLimitOf, invitePrewarning, limitFromError, peopleLimitReason, type LimitKind } from "../lib/billing";
@@ -14,13 +15,27 @@ import { MenuSelect } from "./MenuSelect";
 import { UpgradeDialog } from "./UpgradeDialog";
 
 type InviteAccess = TeamAccessMode | "default";
+/** The Access menu's values: a level, or a group to join (`group:<id>`, toggles). */
+type AccessChoice = InviteAccess | `group:${string}` | "groups";
 
-const ACCESS_OPTIONS: ReadonlyArray<{ value: InviteAccess; label: string; hint?: string }> = [
+const ACCESS_LEVELS: ReadonlyArray<{ value: TeamAccessMode; label: string }> = [
   { value: "open", label: "Can edit" },
   { value: "readonly", label: "Can view" },
   { value: "private", label: "No access" },
-  { value: "default", label: "Vault default", hint: "Whatever the New members setting says" },
 ];
+
+/**
+ * The Access menu's levels. The level the New members setting already gives is
+ * tagged Default and stands for "no level of their own" (`default`), so picking
+ * it keeps the person on the vault's setting rather than pinning that level.
+ * Only while that setting is unknown is a separate "Vault default" row shown.
+ */
+export function inviteAccessOptions(newMembersAccess: TeamAccessMode | null): Array<{ value: InviteAccess; label: string; hint?: string; tag?: string }> {
+  if (!newMembersAccess) {
+    return [...ACCESS_LEVELS, { value: "default", label: "Vault default", hint: "Whatever the New members setting says" }];
+  }
+  return ACCESS_LEVELS.map((o) => (o.value === newMembersAccess ? { value: "default" as const, label: o.label, tag: "Default" } : o));
+}
 
 /** Add typed or pasted text to the chip list, de-duplicated case-insensitively. */
 export function addChips(chips: readonly string[], text: string): string[] {
@@ -40,7 +55,7 @@ export function addChips(chips: readonly string[], text: string): string[] {
  * messages the old Members tab showed (emailed / no email server / email
  * failed, with the link to share).
  */
-export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembersAccess = null, onNewMembersAccess, canManageBilling = false, seatAccount = null, ownerName = null, onClose, onInvited }: {
+export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembersAccess = null, onNewMembersAccess, canManageBilling = false, seatAccount = null, ownerName = null, groups = [], onClose, onInvited }: {
   orgId: string;
   /** For the join-code sentence. */
   vaultName?: string;
@@ -54,15 +69,49 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
   seatAccount?: Parameters<typeof invitePrewarning>[0] | null;
   /** The vault owner's name, so an admin knows whom to ask. */
   ownerName?: string | null;
+  /** Access groups the invitees can join instead of getting a level (empty: none offered). */
+  groups?: readonly AccessGroup[];
   onClose: () => void;
   /** Called with the per-address results so the roster can add rows at once. */
-  onInvited: (results: InviteManyResult[], sent: { role: string; access: TeamAccessMode | null }) => void;
+  onInvited: (results: InviteManyResult[], sent: { role: string; access: TeamAccessMode | null; groupIds?: string[] }) => void;
 }) {
   const serverUrl = useStore((s) => s.serverUrl);
   const [chips, setChips] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
   const [role, setRole] = useState<"member" | "admin">("member");
   const [access, setAccess] = useState<InviteAccess>("default");
+  // Groups to join on acceptance. Picking any means no personal level: a
+  // personal vault-wide level would make the groups do nothing (the server
+  // refuses both together).
+  const [joinGroups, setJoinGroups] = useState<string[]>([]);
+  const groupIds = role === "admin" ? [] : joinGroups.filter((id) => groups.some((g) => g.id === id));
+  const accessValue: AccessChoice = groupIds.length ? "groups" : access;
+  const accessOptions: ReadonlyArray<{ value: AccessChoice; label: string; hint?: string; section?: string; checked?: boolean }> = [
+    ...inviteAccessOptions(newMembersAccess),
+    ...groups.map((g, i) => ({
+      value: `${GROUP_OPTION}${g.id}` as const,
+      label: g.name,
+      hint: i === 0 ? "Joins the group and gets what it can open" : undefined,
+      section: i === 0 ? "Or add to access groups" : undefined,
+      checked: groupIds.includes(g.id),
+    })),
+  ];
+  const chooseAccess = (v: AccessChoice) => {
+    if (v === "groups") return;
+    if (isGroupOption(v)) {
+      const id = groupOptionId(v);
+      setJoinGroups((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+      return;
+    }
+    setAccess(v as InviteAccess);
+    setJoinGroups([]);
+  };
+  const groupsLabel = groupIds.length
+    ? (() => {
+        const first = groups.find((g) => g.id === groupIds[0])?.name ?? "Group";
+        return groupIds.length === 1 ? first : `${first} + ${groupIds.length - 1}`;
+      })()
+    : null;
   const [code, setCode] = useState<string | null>(null);
   const shortCode = code ? code.split("-")[0]! : "";
   const [results, setResults] = useState<InviteManyResult[] | null>(null);
@@ -107,14 +156,16 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
     setChips(all);
     setDraft("");
     try {
+      const sentAccess = groupIds.length || access === "default" ? null : access;
       const out = await inviteWithVaultKeys(orgId, {
         emails: all,
         role,
-        access: access === "default" ? null : access,
+        access: sentAccess,
+        ...(groupIds.length ? { groupIds } : {}),
       });
       setResults(out);
       setChips(out.filter((r) => r.error).map((r) => r.email));
-      onInvited(out, { role, access: access === "default" ? null : access });
+      onInvited(out, { role, access: sentAccess, ...(groupIds.length ? { groupIds } : {}) });
       void useStore.getState().refreshVault();
     } catch (e) {
       const kind = classifyLimitError(e);
@@ -184,14 +235,14 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
               {newMembersAccess && onNewMembersAccess ? (
                 <MenuSelect<TeamAccessMode>
                   value={newMembersAccess}
-                  options={ACCESS_OPTIONS.filter((o): o is { value: TeamAccessMode; label: string } => o.value !== "default")}
+                  options={ACCESS_LEVELS}
                   onSelect={onNewMembersAccess}
                   ariaLabel="People who join get"
                   triggerClassName="invite-field-trigger"
                   menuClassName="access-menu"
                 />
               ) : (
-                <span className="muted">{ACCESS_OPTIONS.find((o) => o.value === newMembersAccess)?.label ?? "The New members setting"}</span>
+                <span className="muted">{ACCESS_LEVELS.find((o) => o.value === newMembersAccess)?.label ?? "The New members setting"}</span>
               )}
             </div>
             <div className="invite-foot">
@@ -250,15 +301,16 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
           </label>
           <label className="invite-field">
             <span className="invite-field-label">Access</span>
-            <MenuSelect
-              value={access}
-              options={ACCESS_OPTIONS}
-              onSelect={setAccess}
+            <MenuSelect<AccessChoice>
+              value={accessValue}
+              options={accessOptions}
+              onSelect={chooseAccess}
               ariaLabel="Access"
               triggerClassName="invite-field-trigger"
               menuClassName="access-menu"
               anchorClosest=".invite-field"
               disabled={role === "admin"}
+              triggerContent={groupsLabel ? <span className="role-trigger-label">{groupsLabel}</span> : undefined}
             />
           </label>
         </div>

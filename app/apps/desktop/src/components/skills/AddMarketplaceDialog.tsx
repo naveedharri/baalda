@@ -8,6 +8,7 @@ import { createPortal } from "react-dom";
 import { parseRepoInput, peekMarketplace, formatLabel, type GitHubReader, type MarketplacePeek } from "../../lib/skills/marketplace";
 import { Spinner } from "../Spinner";
 import { BusyButton, GitHubGlyph } from "./parts";
+import { CheckIcon } from "../CheckIcon";
 
 const CHECK_DELAY_MS = 400;
 
@@ -187,7 +188,7 @@ export function AddMarketplaceDialog({
             </div>
           ) : check.status === "ok" ? (
             <div className="skills-preview-card is-ok">
-              <span className="skills-preview-mark" aria-hidden="true">✓</span>
+              <span className="skills-preview-mark" aria-hidden="true"><CheckIcon size={12} /></span>
               <span className="skills-preview-text">
                 <span className="skills-preview-title">
                   {check.repo}

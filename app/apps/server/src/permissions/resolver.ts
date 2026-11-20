@@ -49,6 +49,15 @@ import { pool as defaultPool } from "../db/pool.js";
  * item deny is still absolute; an item set Private still drops org grants; and
  * locks/readonly still cap below `edit`. See {@link personalVaultLevel}.
  *
+ * GROUPS (migration 097) only ADD. A group grant is a `shares` row with
+ * principal_type 'group' and permission view/edit; a member of that group gets
+ * it on top of whatever the branches below give (highest wins), including on an
+ * item set Private and in a sealed or Read-only vault — a group is a named set
+ * of people, like a per-user grant. Two exceptions, both "person wins": a
+ * per-user item deny or readonly cap still applies (denies run first, caps
+ * after), and a person with their OWN vault level ignores groups entirely.
+ * See {@link rowsGroupGrant}.
+ *
  * Locks (permission = 'locked') are a cap overlay resolved AFTER the rules
  * above: when a lock matches the doc or any ancestor folder — for this user
  * (principal_type 'user') or the whole vault (principal_type 'org') — the
@@ -102,6 +111,8 @@ export interface ResolverCache {
   /** The person's own vault level ({@link personalVaultLevel}), a fact about
    *  the (vault, user) like the three above — read at most once per request. */
   personal(db: Queryable, organizationId: string, userId: string): Promise<PersonalVaultLevel>;
+  /** The access groups this person belongs to in the vault ({@link memberGroupIds}). */
+  groups(db: Queryable, organizationId: string, userId: string): Promise<string[]>;
   /** The billing plan of the account this vault is attached to
    *  (`billing/plan.ts resolveAccountPlan`), read at most once per request. */
   planFor(db: Queryable, organizationId: string): Promise<AccountPlan>;
@@ -165,6 +176,8 @@ export interface MembershipFacts {
   role: string | null;
   snapshot: MemberAccessSnapshot | null;
   baseline: VaultPosture;
+  /** The person's access groups in this org (migration 097). */
+  groups: string[];
 }
 
 /** A doc's location and its full share-row set, as {@link ResolverCache.prefetch}
@@ -186,6 +199,7 @@ export function createResolverCache(): ResolverCache {
   const baselines = new Map<string, Promise<VaultPosture>>();
   const snapshots = new Map<string, Promise<MemberAccessSnapshot | null>>();
   const personals = new Map<string, Promise<PersonalVaultLevel>>();
+  const groupMemberships = new Map<string, Promise<string[]>>();
   const plans = new Map<string, Promise<AccountPlan>>();
   const chains = new Map<string, Promise<string[]>>();
   const memberships = new Map<string, Promise<MembershipFacts>>();
@@ -217,6 +231,10 @@ export function createResolverCache(): ResolverCache {
       memo(personals, `${organizationId}\u0000${userId}`, () =>
         personalVaultLevel(db, organizationId, userId),
       ),
+    groups: (db, organizationId, userId) =>
+      memo(groupMemberships, `${organizationId}\u0000${userId}`, () =>
+        memberGroupIds(db, organizationId, userId),
+      ),
     planFor: (db, organizationId) =>
       memo(plans, organizationId, () => resolveAccountPlan(db, { orgId: organizationId })),
     billingReadOnly: async (db, organizationId) =>
@@ -237,10 +255,12 @@ export function createResolverCache(): ResolverCache {
         if (!roles.has(key)) roles.set(key, Promise.resolve(facts.role));
         if (!snapshots.has(key)) snapshots.set(key, Promise.resolve(facts.snapshot));
         if (!baselines.has(organizationId)) baselines.set(organizationId, Promise.resolve(facts.baseline));
+        if (!groupMemberships.has(key)) groupMemberships.set(key, Promise.resolve(facts.groups));
         return {
           role: await roles.get(key)!,
           snapshot: await snapshots.get(key)!,
           baseline: await baselines.get(organizationId)!,
+          groups: await groupMemberships.get(key)!,
         };
       });
     },
@@ -366,12 +386,15 @@ export interface AccessIndex {
   /** Live notes (deleted ones are absent, as `locateDoc` never sees them). */
   notes: Map<string, { vaultId: string; folderId: string | null; createdBy: string | null; createdAt: Date }>;
   files: Map<string, { vaultId: string; folderId: string | null; createdBy: string | null; createdAt: Date }>;
+  /** user id → the access groups they belong to. Absent on a partial index
+   *  (`preloadFolders`): the caller then reads memberships itself. */
+  memberGroups?: Map<string, string[]>;
 }
 
 const shareKey = (type: string, id: string) => `${type}\u0000${id}`;
 
 export async function loadAccessIndex(db: Queryable, organizationId: string): Promise<AccessIndex> {
-  const [folders, notes, files, shares] = await Promise.all([
+  const [folders, notes, files, shares, groupMembers] = await Promise.all([
     db.query<{ id: string; parent_id: string | null; vault_id: string; created_at: Date }>(
       `SELECT f.id, f.parent_id, f.vault_id, f.created_at
          FROM folders f JOIN vaults v ON v.id = f.vault_id
@@ -408,6 +431,10 @@ export async function loadAccessIndex(db: Queryable, organizationId: string): Pr
                   WHERE v.organization_id = $1))`,
       [organizationId],
     ),
+    db.query<{ user_id: string; group_id: string }>(
+      `SELECT user_id, group_id FROM access_group_members WHERE organization_id = $1`,
+      [organizationId],
+    ),
   ]);
   const index: AccessIndex = {
     organizationId,
@@ -415,7 +442,13 @@ export async function loadAccessIndex(db: Queryable, organizationId: string): Pr
     folders: new Map(folders.rows.map((r) => [r.id, { parentId: r.parent_id, vaultId: r.vault_id, createdAt: r.created_at }])),
     notes: new Map(notes.rows.map((r) => [r.id, { vaultId: r.vault_id, folderId: r.folder_id, createdBy: r.created_by, createdAt: r.created_at }])),
     files: new Map(files.rows.map((r) => [r.id, { vaultId: r.vault_id, folderId: r.folder_id, createdBy: r.created_by, createdAt: r.created_at }])),
+    memberGroups: new Map(),
   };
+  for (const r of groupMembers.rows) {
+    const list = index.memberGroups!.get(r.user_id);
+    if (list) list.push(r.group_id);
+    else index.memberGroups!.set(r.user_id, [r.group_id]);
+  }
   for (const row of shares.rows) {
     const key = shareKey(row.resource_type, row.resource_id);
     const list = index.shares.get(key);
@@ -440,6 +473,11 @@ export function indexedAncestors(index: AccessIndex, folderId: string | null): s
     id = folder.parentId;
   }
   return chain;
+}
+
+/** {@link indexedRows} plus the vault resource's rows (for group grants). */
+export function indexedRowsFor(index: AccessIndex, docId: string | null, folderIds: string[]): ShareRow[] {
+  return indexedRows(index, docId, folderIds, index.organizationId);
 }
 
 /** Share rows on a doc (as a file resource) and on each folder in the chain. */
@@ -595,6 +633,68 @@ function rowsPersonalVault(rows: readonly ShareRow[], userId: string, organizati
   return personalLevelOf(row?.permission);
 }
 
+/**
+ * The highest grant a person's GROUPS give on a doc/folder: group rows on the
+ * doc (as a file), on any folder in its chain, or on the vault resource, for
+ * any group in `groupIds`. Groups only add: a group row is view or edit (the
+ * table's CHECK), never a deny or a cap, and two groups combine highest-wins.
+ * In-memory twin of {@link groupSharePermission}'s SELECT.
+ */
+export function rowsGroupGrant(
+  rows: readonly ShareRow[],
+  groupIds: readonly string[],
+  docId: string | null,
+  folderIds: readonly string[],
+  organizationId: string,
+): Permission {
+  if (groupIds.length === 0) return "none";
+  let best: Permission = "none";
+  for (const r of rows) {
+    if (r.principal_type !== "group" || !groupIds.includes(r.principal_id)) continue;
+    const onTarget =
+      (docId !== null && r.resource_type === "file" && r.resource_id === docId) ||
+      (r.resource_type === "folder" && folderIds.includes(r.resource_id)) ||
+      (r.resource_type === "vault" && r.resource_id === organizationId);
+    if (!onTarget) continue;
+    if (r.permission === "edit") return "edit";
+    if (r.permission === "view") best = "view";
+  }
+  return best;
+}
+
+/** The access groups `userId` belongs to in this vault. */
+export async function memberGroupIds(db: Queryable, organizationId: string, userId: string): Promise<string[]> {
+  const { rows } = await db.query<{ group_id: string }>(
+    `SELECT group_id FROM access_group_members WHERE organization_id = $1 AND user_id = $2`,
+    [organizationId, userId],
+  );
+  return rows.map((r) => r.group_id);
+}
+
+/** {@link rowsGroupGrant} straight from the database (the uncached path). */
+export async function groupSharePermission(
+  db: Queryable,
+  groupIds: readonly string[],
+  docId: string | null,
+  folderIds: string[],
+  organizationId: string,
+): Promise<Permission> {
+  if (groupIds.length === 0) return "none";
+  const { rows } = await db.query<ShareRow>(
+    `SELECT resource_type, resource_id, principal_type, principal_id, permission, access_revision
+       FROM shares
+      WHERE principal_type = 'group' AND principal_id = ANY($1::text[])
+        AND permission IN ('view', 'edit')
+        AND (
+          ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
+          OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
+          OR (resource_type = 'vault' AND resource_id = $4)
+        )`,
+    [[...groupIds], docId, folderIds, organizationId],
+  );
+  return rowsGroupGrant(rows, groupIds, docId, folderIds, organizationId);
+}
+
 /** In-memory {@link personalVaultLevel} from an {@link AccessIndex}. */
 function indexedPersonalVault(index: AccessIndex, userId: string): PersonalVaultLevel {
   return rowsPersonalVault(index.shares.get(shareKey("vault", index.organizationId)) ?? [], userId, index.organizationId);
@@ -632,6 +732,8 @@ async function docShareRows(
   docId: string,
   folderIds: string[],
   organizationId: string,
+  /** The person's access groups: their group rows are read in the same pass. */
+  groupIds: readonly string[] = [],
 ): Promise<ShareRow[]> {
   const { rows } = await db.query<ShareRow>(
     `SELECT resource_type, resource_id, principal_type, principal_id, permission, access_revision
@@ -639,8 +741,9 @@ async function docShareRows(
       WHERE ((resource_type = 'file' AND resource_id = $1)
           OR (resource_type = 'folder' AND resource_id = ANY($2::text[]))
           OR (resource_type = 'vault' AND resource_id = $3))
-        AND (principal_type = 'org' OR (principal_type = 'user' AND principal_id = $4))`,
-    [docId, folderIds, organizationId, userId],
+        AND (principal_type = 'org' OR (principal_type = 'user' AND principal_id = $4)
+             OR (principal_type = 'group' AND principal_id = ANY($5::text[])))`,
+    [docId, folderIds, organizationId, userId, [...groupIds]],
   );
   return rows;
 }
@@ -1165,10 +1268,13 @@ async function membershipFacts(
     mode: MemberAccessSnapshot["mode"] | null;
     access_revision: string | number | null;
     snapshot_at: Date | null;
+    groups: string[] | null;
   }>(
     `SELECT
         (SELECT role FROM member
           WHERE "organizationId" = $1 AND "userId" = $2 LIMIT 1) AS role,
+        (SELECT array_agg(group_id ORDER BY group_id) FROM access_group_members
+          WHERE organization_id = $1 AND user_id = $2) AS groups,
         (SELECT permission FROM shares
           WHERE resource_type = 'vault' AND resource_id = $1
             AND principal_type = 'org' AND permission IN ('view', 'edit', 'denied')
@@ -1182,6 +1288,7 @@ async function membershipFacts(
   const row = rows[0];
   return {
     role: row?.role ?? null,
+    groups: row?.groups ?? [],
     baseline: postureOf(row?.baseline),
     snapshot:
       row && row.mode !== null && row.snapshot_at !== null
@@ -1293,7 +1400,18 @@ async function effectivePermissionInner(
   // its vault, filtered by the same predicates the SQL spells out. Without one,
   // each asks the database itself — the reference path the drift tests compare
   // against.
-  const rows = pre ? pre.rows : cache ? await docShareRows(db, userId, docId, folderIds, loc.organizationId) : null;
+  // The person's groups are read before the cached row pass so it can include
+  // their group rows; the uncached path asks for them only when it needs them.
+  // Read through `membership` (one round trip for role, snapshot, posture and
+  // groups), which seeds the groups memo.
+  const cachedGroups = cache
+    ? (await cache.membership(db, loc.organizationId, userId), await cache.groups(db, loc.organizationId, userId))
+    : null;
+  const rows = pre
+    ? pre.rows
+    : cache
+      ? await docShareRows(db, userId, docId, folderIds, loc.organizationId, cachedGroups ?? [])
+      : null;
   const denied = async (principalType: "user" | "org", principalId: string) =>
     rows
       ? rowsDenied(rows, principalType, principalId, docId, folderIds)
@@ -1327,6 +1445,17 @@ async function effectivePermissionInner(
 
   const facts = cache ? await cache.membership(db, loc.organizationId, userId) : null;
   const role = facts ? facts.role : await memberRole(db, loc.organizationId, userId);
+  // What the person's access groups give here (members only). Applied on top
+  // of every branch below except the person's own vault level, then capped by
+  // locks like any grant. See {@link rowsGroupGrant}.
+  const groupGrant = async (): Promise<Permission> => {
+    if (role === null) return "none";
+    const ids = cachedGroups ?? (await memberGroupIds(db, loc.organizationId, userId));
+    if (ids.length === 0) return "none";
+    return rows
+      ? rowsGroupGrant(rows, ids, docId, folderIds, loc.organizationId)
+      : groupSharePermission(db, ids, docId, folderIds, loc.organizationId);
+  };
 
   // The person's own vault level replaces the whole vault-wide baseline (org
   // posture, join snapshot, role shortcut, authorship) — see
@@ -1361,6 +1490,7 @@ async function effectivePermissionInner(
           ? "view"
           : "none";
     snapped = maxPermission(snapped, direct);
+    if (snapped !== "edit") snapped = maxPermission(snapped, await groupGrant());
     if (snapped !== "none" && (await locked())) return "view";
     return snapped;
   }
@@ -1416,6 +1546,7 @@ async function effectivePermissionInner(
   } else {
     granted = await grant(role !== null, true); // isMember — gates the org-wide grant
   }
+  if (granted !== "edit") granted = maxPermission(granted, await groupGrant());
 
   // Cap overlay: a matching lock caps at view; it never grants.
   if (granted !== "none" && (await locked())) {
@@ -1573,6 +1704,21 @@ async function resolveAccessForUserInner(
     return { permission: "none", capped: false, denied: true };
   }
   const itemPrivate = await denied("org", ctx.organizationId);
+  // The person's access groups — mirrors `effectivePermission` exactly.
+  const groupGrant = async (): Promise<Permission> => {
+    if (role === null) return "none";
+    const ids =
+      index?.memberGroups?.get(userId) ??
+      (index?.memberGroups
+        ? []
+        : cache
+          ? await cache.groups(db, ctx.organizationId, userId)
+          : await memberGroupIds(db, ctx.organizationId, userId));
+    if (ids.length === 0) return "none";
+    return index
+      ? rowsGroupGrant(indexedRows(index, ctx.docId, ctx.folderIds, ctx.organizationId), ids, ctx.docId, ctx.folderIds, ctx.organizationId)
+      : groupSharePermission(db, ids, ctx.docId, ctx.folderIds, ctx.organizationId);
+  };
   // The person's own vault level — mirrors `effectivePermission` exactly.
   const personal = index
     ? indexedPersonalVault(index, userId)
@@ -1624,6 +1770,7 @@ async function resolveAccessForUserInner(
           ? "view"
           : "none";
     permission = maxPermission(permission, direct);
+    if (permission !== "edit") permission = maxPermission(permission, await groupGrant());
     if (permission === "none") return { permission, capped: false, denied: itemPrivate };
     const locked = await lockedFor();
     if (locked && permission === "edit") return { permission: "view", capped: true };
@@ -1640,7 +1787,7 @@ async function resolveAccessForUserInner(
   const sealedVault = baseline === "sealed";
   const ungrantedVault = baseline === null;
   const isCreator = role !== null && !!ctx.createdBy && ctx.createdBy === userId;
-  const granted: Permission = itemPrivate
+  let granted: Permission = itemPrivate
     ? // Private: only explicit per-user grants survive — authorship included.
       await sharePermission(db, userId, ctx.docId, ctx.folderIds, ctx.organizationId, false, false, undefined, undefined, index)
     : readOnlyVault || sealedVault
@@ -1674,6 +1821,7 @@ async function resolveAccessForUserInner(
               undefined,
               index,
             );
+  if (granted !== "edit") granted = maxPermission(granted, await groupGrant());
 
   if (granted === "none") return { permission: "none", capped: false, denied: itemPrivate };
 

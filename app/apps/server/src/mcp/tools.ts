@@ -1,5 +1,6 @@
 import { listAccessAudit } from "../audit/access.js";
 import { getSkillTool, listSkillsTool, readSkillFileTool } from "./skills.js";
+import { listGroupsTool, manageGroupTool } from "./groups.js";
 import {
   McpToolError,
   appendNote,
@@ -174,6 +175,7 @@ function accessAudience(raw: unknown): AccessAudience {
   const row = raw as Args;
   const type = reqStr(row, "type");
   if (type === "org") return { type };
+  if (type === "group") return { type, groupId: reqStr(row, "groupId") };
   if (type !== "users" || !Array.isArray(row.userIds)) {
     throw new McpToolError("audience must be org or users with userIds", "invalid_argument");
   }
@@ -298,7 +300,7 @@ export const TOOLS: McpTool[] = [
     name: "manage_access",
     annotations: { title: "Change access", ...ACCESS },
     description:
-      "Replace access on one or more selected folders/files, or the whole vault. Modes: open (Can edit) / readonly (Can view) / private (No access). Everyone clears all custom member overrides in selected subtrees; selected users changes only those users. A users-audience mode on the vault resource is that person's absolute vault level (Can edit everything / Can view everything / No access): it replaces Everyone access, the owner/admin shortcut and authorship for them, and only their own folder/file grants lift a No access. Owner/admin only.",
+      "Replace access on one or more selected folders/files, or the whole vault. Modes: open (Can edit) / readonly (Can view) / private (No access). Everyone clears all custom member overrides in selected subtrees; selected users changes only those users; a group changes only that group's grants (groups only add access: open/readonly grant Can edit/Can view to its members, private removes what the group gave there). A users-audience mode on the vault resource is that person's absolute vault level (Can edit everything / Can view everything / No access): it replaces Everyone access, the owner/admin shortcut and authorship for them, and only their own folder/file grants lift a No access. Owner/admin only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -319,8 +321,9 @@ export const TOOLS: McpTool[] = [
         audience: {
           type: "object",
           properties: {
-            type: { type: "string", enum: ["org", "users"] },
+            type: { type: "string", enum: ["org", "users", "group"] },
             userIds: { type: "array", items: { type: "string" } },
+            groupId: S("Group id (audience type group), from list_groups"),
           },
           required: ["type"],
           additionalProperties: false,
@@ -337,6 +340,33 @@ export const TOOLS: McpTool[] = [
         accessAudience(args.audience),
         accessMode(args),
       ),
+  },
+  {
+    name: "list_groups",
+    annotations: { title: "List access groups", ...READ },
+    description:
+      "List the vault's access groups with their members (user ids) and, for owners/admins, the folders/files each group can view or edit. Groups only add access: a member gets the higher of their own access and any group's.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: (ctx) => listGroupsTool(ctx),
+  },
+  {
+    name: "manage_group",
+    annotations: { title: "Manage an access group", ...ACCESS },
+    description:
+      "Create, rename or delete an access group, or add/remove members. action: create {name, userIds?} | rename {groupId, name} | delete {groupId} | add_members {groupId, userIds} | remove_member {groupId, userId}. Set a group's access with manage_access (audience type group). Owner/admin only; an admin cannot change the owner's groups.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["create", "rename", "delete", "add_members", "remove_member"] },
+        groupId: S("Group id, from list_groups"),
+        name: S("Group name (1-60 characters)"),
+        userIds: { type: "array", items: { type: "string" } },
+        userId: S("One member's user id"),
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    handler: (ctx, args) => manageGroupTool(ctx, args),
   },
   {
     name: "list_folders",

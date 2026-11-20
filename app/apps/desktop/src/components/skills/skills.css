@@ -565,9 +565,11 @@ button.primary.skills-btn-sm {
   border-radius: 50%;
   background: var(--accent);
 }
+/* Hover reveals switch opacity instantly: an opacity FADE gets its own GPU layer in WebKit for the
+   length of the fade, and inside the settings card (a fractional offset) that re-rounded the whole
+   scroller by 1px each time, so the page jiggled as the pointer moved. */
 .skills-tree-row .row-more {
   opacity: 0;
-  transition: opacity var(--t-fast) var(--ease);
 }
 .skills-tree-row:hover .row-more,
 .skills-tree-row:focus-within .row-more {
@@ -1021,7 +1023,6 @@ code.skills-target-path {
 .skills-card-more {
   display: flex;
   opacity: 0;
-  transition: opacity var(--t-fast) var(--ease);
 }
 .skills-card:hover .skills-card-more,
 .skills-card:focus-within .skills-card-more,
@@ -1278,7 +1279,6 @@ code.skills-target-path {
   display: inline-flex;
   flex: none;
   opacity: 0.85;
-  transition: opacity var(--t-fast) var(--ease), filter var(--t-fast) var(--ease);
 }
 .skills-tool img {
   display: block;
@@ -2473,7 +2473,7 @@ button.secondary.skills-hdr-btn.skills-shared-btn:hover:not(:disabled) {
   font-size: var(--fs-xs);
   cursor: pointer;
   opacity: 0.85;
-  transition: border-color 120ms ease, color 120ms ease, background 120ms ease, opacity 120ms ease;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
 }
 .skills-drop-strip-icon {
   display: inline-flex;

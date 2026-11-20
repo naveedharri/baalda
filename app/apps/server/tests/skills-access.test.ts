@@ -172,4 +172,47 @@ describe("skill access", () => {
     expect((await call("list_skills")).structuredContent.skills).toEqual([]);
     expect((await call("get_skill", { name: "mcp-hidden" })).isError).toBe(true);
   });
+
+  it("access groups add a skill level for their members; a person's own row still wins", async () => {
+    const id = await publishedSkill("group-skill");
+    const made = await json(req(admin, "POST", `/orgs/${orgId}/groups`, { name: "Sales", memberIds: [sara.userId] }));
+    expect(made.status).toBe(201);
+    const groupId = made.body.id as string;
+    await setAccess(id, { everyone: "none" });
+    expect((await manifestFor(sara)).map((s) => s.skillId)).toEqual([]);
+
+    const out = await setAccess(id, { groups: [{ groupId, level: "optional" }] });
+    expect(out.status).toBe(200);
+    expect(out.body.groups).toEqual([{ groupId, name: "Sales", color: null, level: "optional" }]);
+    expect(out.body.people.find((p: any) => p.userId === sara.userId).level).toBe("optional");
+    expect(out.body.people.find((p: any) => p.userId === ali.userId).level).toBe("none");
+    expect(await manifestFor(sara)).toMatchObject([{ skillId: id, delivery: "optional" }]);
+    expect(await manifestFor(ali)).toEqual([]);
+    const card = (await listFor(sara)).find((s) => s.id === id);
+    expect(card.myAccess).toBe("optional");
+    const owners = (await listFor(admin)).find((s) => s.id === id);
+    expect(owners.sharedWith).toMatchObject({ count: 1, total: 4 });
+
+    // Higher of Everyone and the group.
+    await setAccess(id, { everyone: "optional", groups: [{ groupId, level: "required" }] });
+    expect(await manifestFor(sara)).toMatchObject([{ skillId: id, delivery: "required" }]);
+    expect(await manifestFor(ali)).toMatchObject([{ skillId: id, delivery: "optional" }]);
+
+    // A person's own row beats the group either way.
+    await setAccess(id, { people: [{ userId: sara.userId, level: "none" }] });
+    expect(await manifestFor(sara)).toEqual([]);
+    await setAccess(id, { people: [{ userId: sara.userId, level: null }] });
+
+    // Leaving the group takes it away and tells desktops.
+    await setAccess(id, { everyone: "none" });
+    const before = published;
+    const removed = await json(req(admin, "DELETE", `/orgs/${orgId}/groups/${groupId}/members/${sara.userId}`));
+    expect(removed.body.removed).toBe(true);
+    expect(published).toBeGreaterThan(before);
+    expect(await manifestFor(sara)).toEqual([]);
+
+    // Plain members cannot manage groups.
+    const refused = await json(req(sara, "POST", `/orgs/${orgId}/groups`, { name: "Mine" }));
+    expect(refused.status).toBe(403);
+  });
 });

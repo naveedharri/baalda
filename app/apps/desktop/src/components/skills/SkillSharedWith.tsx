@@ -21,6 +21,7 @@ import { useStore } from "../../store";
 import { Avatar } from "../Avatar";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { MenuSelect } from "../MenuSelect";
+import { GroupDot } from "../GroupsPanel";
 import { LoadError } from "./parts";
 
 const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member" };
@@ -37,7 +38,16 @@ function PeopleIcon() {
 
 type Pending =
   | { kind: "everyone"; level: SkillAccessLevel }
-  | { kind: "person"; userId: string; name: string; level: SkillAccessLevel | null };
+  | { kind: "person"; userId: string; name: string; level: SkillAccessLevel | null }
+  | { kind: "group"; groupId: string; name: string; level: "required" | "optional" | null };
+
+type GroupChoice = "required" | "optional" | "nothing";
+const GROUP_OPTIONS: ReadonlyArray<{ value: GroupChoice; label: string; hint?: string }> = [
+  { value: "required", label: "Required", hint: "Installs for everyone in the group" },
+  { value: "optional", label: "Optional", hint: "They can turn it on" },
+  { value: "nothing", label: "Adds nothing", hint: "Each person keeps their own setting" },
+];
+const GROUP_CLASS: Record<GroupChoice, string> = { required: "is-edit", optional: "is-view", nothing: "is-none" };
 
 export function SkillSharedWith({
   orgId,
@@ -76,12 +86,19 @@ export function SkillSharedWith({
       const next = await authManager.api.putSkillAccess(
         orgId,
         skillId,
-        p.kind === "everyone" ? { everyone: p.level } : { people: [{ userId: p.userId, level: p.level }] },
+        p.kind === "everyone"
+          ? { everyone: p.level }
+          : p.kind === "group"
+            ? { groups: [{ groupId: p.groupId, level: p.level }] }
+            : { people: [{ userId: p.userId, level: p.level }] },
       );
       setList(next);
       onChanged();
       // This computer follows at once; everyone else's on the skills-changed frame.
       checkSkillsNow();
+      if (p.kind === "group") {
+        toast(p.level === null ? `${p.name} no longer adds ${name}.` : `${p.name} now gets ${name} as ${p.level}.`);
+      }
       if (p.kind === "person") {
         const level = next.people.find((x) => x.userId === p.userId)?.level ?? "none";
         toast(
@@ -98,7 +115,7 @@ export function SkillSharedWith({
   };
   /** Narrowing to No access confirms; anything else applies at once. */
   const choose = (p: Pending) => {
-    if (p.level === "none") setConfirm(p);
+    if (p.kind !== "group" && p.level === "none") setConfirm(p);
     else void apply(p);
   };
 
@@ -130,6 +147,37 @@ export function SkillSharedWith({
           />
         </div>
       </div>
+
+      {list.groups && list.groups.length > 0 && (
+        <>
+          <div className="members-access-list-heading">
+            <h3>Access groups</h3>
+            <span className="members-access-count muted">A group only adds: its members get the higher level</span>
+          </div>
+          <ul className="skills-access-people">
+            {list.groups.map((g) => {
+              const value: GroupChoice = g.level ?? "nothing";
+              return (
+                <li key={g.groupId} className="skills-access-person">
+                  <span className="members-table-person">
+                    <GroupDot group={{ id: g.groupId, color: g.color }} />
+                    <span className="members-table-name">{g.name}</span>
+                  </span>
+                  <MenuSelect<GroupChoice>
+                    value={value}
+                    options={GROUP_OPTIONS}
+                    onSelect={(c) => choose({ kind: "group", groupId: g.groupId, name: g.name, level: c === "nothing" ? null : c })}
+                    disabled={busy}
+                    ariaLabel={`${name} for ${g.name}`}
+                    triggerClassName={`members-access-trigger is-level ${GROUP_CLASS[value]}`}
+                    menuClassName="access-menu"
+                  />
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
 
       <div className="members-access-list-heading">
         <h3>People</h3>

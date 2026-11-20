@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 // The `.skel-line` shimmer lives with the editor skeleton (as ContentWidthPreview does).
 import "./editor.css";
 import type {
+  AccessGroup,
   AccessDefault,
   InvitationOverview,
   MemberOverview,
@@ -54,6 +55,12 @@ import { canActOnMember, canSetMemberAccess } from "./memberRoles";
 import { MenuSelect } from "./MenuSelect";
 import { RowActionsMenu, type RowAction } from "./RowActionsMenu";
 import { markSelfAccessChange } from "../lib/sync/selfAccessChanges";
+import { MemberSelectionBar } from "./MemberSelectionBar";
+import { bulkResultLine, chunkIds, headerCheckState, peopleCount, pruneSelection, splitBulkTargets, toggleShown } from "../lib/membersAccess";
+import { serverFeatures } from "../lib/serverFeatures";
+import { SKILL_ACCESS_FEATURE } from "../lib/skills/access";
+import { ACCESS_GROUPS_FEATURE, GROUP_OPTION, groupAccessSummary, groupOptionId, isGroupOption } from "../lib/groups";
+import { GroupChip, GroupDialog, GroupPage, GroupsList, useAccessGroups, type GroupTab } from "./GroupsPanel";
 
 
 /** How long a burst of per-item ticks settles before the shared side effects run. */
@@ -138,9 +145,25 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   const [limitCause, setLimitCause] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  // People ticked in the table for a bulk action (user ids; members only).
+  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   const [inviteOpen, setInviteOpen] = useState(false);
   const [profile, setProfile] = useState<{ userId: string; tab: ProfileTab } | null>(null);
   const loadGen = useRef(0);
+
+  // Access groups (server migration 097): shown only when the server has them.
+  const [features, setFeatures] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    let live = true;
+    void serverFeatures(serverUrl, () => authManager.api.getHealth(serverUrl)).then((f) => { if (live) setFeatures(f); });
+    return () => { live = false; };
+  }, [serverUrl]);
+  const groupsOn = features.has(ACCESS_GROUPS_FEATURE);
+  const groupsState = useAccessGroups(orgId, groupsOn);
+  const groups: AccessGroup[] = groupsState.list?.groups ?? [];
+  const [listView, setListView] = useState<"people" | "groups">("people");
+  const [groupPage, setGroupPage] = useState<{ id: string; tab: GroupTab } | null>(null);
+  const [groupDialog, setGroupDialog] = useState<{ rename?: AccessGroup } | null>(null);
 
   // `canManage` comes from the store's member list, read when the vault
   // opened; the overview is re-read on every open, so once it has answered
@@ -185,6 +208,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     setError(null);
     setConfirm(null);
     setProfile(null);
+    setGroupPage(null);
     void reload();
     return () => { loadGen.current++; };
   }, [orgId, canManage, reload]);
@@ -208,6 +232,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   useEffect(() => {
     if (resetToken === 0) return;
     setProfile(null);
+    setGroupPage(null);
     setQuery("");
   }, [resetToken]);
 
@@ -215,8 +240,52 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   const afterAccessWrite = async () => {
     cancelSideEffects();
     syncManager.retryHeldRegistrations();
-    await Promise.all([useStore.getState().refreshLocks(), reload()]);
+    await Promise.all([useStore.getState().refreshLocks(), reload(), groupsState.reload()]);
   };
+
+  // ── Groups ──────────────────────────────────────────────────────────────
+  const openGroup = (id: string, tab: GroupTab = "members") => {
+    setProfile(null);
+    setGroupPage({ id, tab });
+  };
+  const joinGroup = async (userId: string, groupId: string) => {
+    if (!orgId) return;
+    if (userId === myUserId) markSelfAccessChange([orgId]);
+    await authManager.api.addGroupMembers(orgId, groupId, [userId]);
+    toast(`Added to ${groups.find((g) => g.id === groupId)?.name ?? "the group"}.`);
+    await afterAccessWrite();
+  };
+  const leaveGroup = async (userId: string, groupId: string) => {
+    if (!orgId) return;
+    if (userId === myUserId) markSelfAccessChange([orgId]);
+    await authManager.api.removeGroupMember(orgId, groupId, userId);
+    toast(`Removed from ${groups.find((g) => g.id === groupId)?.name ?? "the group"}.`);
+    await afterAccessWrite();
+  };
+  const askDeleteGroup = (g: AccessGroup) => setConfirm({
+    title: `Delete ${g.name}?`,
+    label: "Delete access group",
+    tone: "danger",
+    apply: () => run(async () => {
+      if (!orgId) return;
+      if (myUserId && g.memberIds.includes(myUserId)) markSelfAccessChange([orgId]);
+      await authManager.api.deleteGroup(orgId, g.id);
+      toast(`Deleted ${g.name}.`);
+      await afterAccessWrite();
+    }),
+    body: (
+      <p className="confirm-note">
+        Its members lose only what {g.name} gave; their own access and other groups stay. This can't be undone.
+      </p>
+    ),
+  });
+  /** New members menu: a group toggles whether new members join it. */
+  const toggleAutoJoin = (g: AccessGroup) => run(async () => {
+    if (!orgId) return;
+    await authManager.api.updateGroup(orgId, g.id, { autoJoin: !g.autoJoin });
+    toast(!g.autoJoin ? `New members now join ${g.name}.` : `New members no longer join ${g.name}.`);
+    await groupsState.reload();
+  });
 
   /**
    * Patch the roster on screen (and its session cache) right after a write,
@@ -399,6 +468,119 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     body: <p>They lose access on all their devices right away. You can invite them again later.</p>,
   });
 
+  // ── Bulk actions on the ticked people ──────────────────────────────────
+  const pickedMembers = () => members.filter((m) => selected.has(m.userId));
+  const clearSelection = () => setSelected(new Set());
+  const namesLine = (list: MemberOverview[]) => {
+    const names = list.map(displayName);
+    return names.length <= 4 ? names.join(", ") : `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`;
+  };
+  const refreshAfterBulk = async () => {
+    await useStore.getState().refreshVault().catch(() => {});
+    await reload();
+  };
+
+  const bulkAccess = (mode: TeamAccessMode) => {
+    const want = mode === "open" ? "edit" : mode === "readonly" ? "view" : "none";
+    const split = splitBulkTargets(pickedMembers(), canSetAccess, (m) => m.access?.level === want);
+    if (split.apply.length === 0) { toast(bulkResultLine("Nothing to change.", split)); return; }
+    const apply = () => run(async () => {
+      if (!orgId) return;
+      const ids = split.apply.map((m) => m.userId);
+      if (myUserId && ids.includes(myUserId)) markSelfAccessChange([orgId]);
+      try {
+        for (const chunk of chunkIds(ids, 100)) {
+          await authManager.api.setBulkAccess(orgId, {
+            resources: [{ resourceType: "vault", resourceId: orgId }],
+            audience: { type: "users", userIds: chunk },
+            mode,
+          });
+        }
+      } finally {
+        await reload();
+        refreshBehind();
+      }
+      clearSelection();
+      toast(bulkResultLine(`${peopleCount(ids.length)}: ${PERSON_LEVEL_LABEL[want]}.`, split));
+    });
+    if (mode !== "private") { void apply(); return; }
+    setConfirm({
+      title: `No access for ${peopleCount(split.apply.length)}?`,
+      label: "Set to No access",
+      tone: "danger",
+      apply,
+      subtitle: <>This applies across {vaultName}, over the default for everyone.</>,
+      cancelLabel: "Keep as is",
+      body: <p className="confirm-note">{namesLine(split.apply)} will not open anything in {vaultName} until someone gives them access again.</p>,
+    });
+  };
+
+  const bulkRole = (role: "member" | "admin") => {
+    const split = splitBulkTargets(pickedMembers(), canAct, (m) => m.role === role);
+    if (split.apply.length === 0) { toast(bulkResultLine("Nothing to change.", split)); return; }
+    void run(async () => {
+      if (!orgId) return;
+      let done = 0;
+      try {
+        for (const m of split.apply) {
+          await authManager.api.updateMemberRole(orgId, m.userId, role);
+          done += 1;
+        }
+      } catch (cause) {
+        throw new Error(`Changed ${done} of ${split.apply.length}: ${cause instanceof Error ? cause.message : String(cause)}`);
+      } finally {
+        await refreshAfterBulk();
+      }
+      clearSelection();
+      toast(bulkResultLine(`${peopleCount(done)} now ${role === "admin" ? "admins" : "members"}.`, split));
+    });
+  };
+
+  const bulkRemove = () => {
+    const split = splitBulkTargets(pickedMembers(), canAct);
+    if (split.apply.length === 0) { toast(bulkResultLine("Nobody to remove.", split)); return; }
+    setConfirm({
+      title: `Remove ${peopleCount(split.apply.length)} from ${vaultName}?`,
+      label: "Remove",
+      tone: "danger",
+      apply: () => run(async () => {
+        if (!orgId) return;
+        let done = 0;
+        try {
+          for (const m of split.apply) {
+            await authManager.api.removeMember(orgId, m.userId);
+            done += 1;
+          }
+        } catch (cause) {
+          throw new Error(`Removed ${done} of ${split.apply.length}: ${cause instanceof Error ? cause.message : String(cause)}`);
+        } finally {
+          await refreshAfterBulk();
+        }
+        clearSelection();
+        toast(bulkResultLine(`Removed ${peopleCount(done)}.`, split));
+      }),
+      body: <p>{namesLine(split.apply)} lose access on all their devices right away. You can invite them again later.</p>,
+    });
+  };
+
+  const bulkAddToGroup = (groupId: string) => {
+    const split = splitBulkTargets(pickedMembers(), canSetAccess, (m) => (m.groupIds ?? []).includes(groupId));
+    const name = groups.find((g) => g.id === groupId)?.name ?? "the group";
+    if (split.apply.length === 0) { toast(bulkResultLine(`Nobody new to add to ${name}.`, split)); return; }
+    void run(async () => {
+      if (!orgId) return;
+      const ids = split.apply.map((m) => m.userId);
+      if (myUserId && ids.includes(myUserId)) markSelfAccessChange([orgId]);
+      try {
+        for (const chunk of chunkIds(ids, 500)) await authManager.api.addGroupMembers(orgId, groupId, chunk);
+      } finally {
+        await afterAccessWrite();
+      }
+      clearSelection();
+      toast(bulkResultLine(`Added ${peopleCount(ids.length)} to ${name}.`, split));
+    });
+  };
+
   // ── Invitations ─────────────────────────────────────────────────────────
   const copyLink = async (inv: InvitationOverview) => {
     const link = buildInviteLink(serverUrl, inv.id);
@@ -414,7 +596,8 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     const [result] = await inviteWithVaultKeys(orgId, {
       emails: [inv.email],
       role: inv.role === "admin" ? "admin" : "member",
-      access: inv.access,
+      access: inv.groupIds?.length ? null : inv.access,
+      ...(inv.groupIds?.length ? { groupIds: inv.groupIds } : {}),
     });
     await reload();
     const limit = result?.error ? inviteLimitError(result.error) : null;
@@ -441,6 +624,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   const invitations = (overview?.invitations ?? []).filter((i) => i.status === "pending");
   const shown = useMemo(() => filterPeople(query, members, invitations), [query, members, invitations]);
   const myRole = members.find((m) => m.userId === myUserId)?.role;
+  useEffect(() => {
+    setSelected((s) => pruneSelection(s, members.map((m) => m.userId)));
+  }, [members]);
   const presentIds = useMemo(() => presentUserIds(presence, myUserId, vaultStatus), [presence, myUserId, vaultStatus]);
   const now = Date.now();
   const profileMember = profile ? members.find((m) => m.userId === profile.userId) ?? null : null;
@@ -457,6 +643,42 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   // A profile asked for before the roster has arrived: hold its layout.
   if (profile && orgId && !overview) {
     return <div className="members-access"><ProfileSkeleton /></div>;
+  }
+
+  const selectable = (m: MemberOverview) => canSetAccess(m) || canAct(m);
+  const shownSelectable = shown.members.filter(selectable).map((m) => m.userId);
+  const selectedMembers = pickedMembers();
+  const selecting = manage && listView === "people" && selected.size > 0;
+
+  const groupNow = groupPage ? groups.find((g) => g.id === groupPage.id) ?? null : null;
+  if (groupPage && orgId && groupsOn && !groupsState.list) {
+    return <div className="members-access"><ProfileSkeleton /></div>;
+  }
+  if (groupPage && groupNow && orgId) {
+    return (
+      <div className="members-access">
+        <GroupPage
+          key={groupNow.id}
+          orgId={orgId}
+          vaultName={vaultName}
+          group={groupNow}
+          groups={groups}
+          members={members}
+          myUserId={myUserId}
+          myRole={myRole}
+          manage={manage}
+          skillsEnabled={features.has(SKILL_ACCESS_FEATURE)}
+          teamAccess={teamAccess}
+          initialTab={groupPage.tab}
+          onBack={() => { setGroupPage(null); setListView("groups"); void afterAccessWrite(); }}
+          onChanged={afterAccessWrite}
+          onItemWritten={scheduleSideEffects}
+          onGrantsChanged={groupsState.reload}
+          onOpenPerson={(userId) => { setGroupPage(null); setProfile({ userId, tab: "info" }); }}
+          onDeleted={() => { setGroupPage(null); setListView("groups"); void afterAccessWrite(); }}
+        />
+      </div>
+    );
   }
 
   if (profile && profileMember && orgId) {
@@ -478,6 +700,10 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
           onItemWritten={scheduleSideEffects}
           onRoleChange={(role) => changeRole(profileMember, role)}
           onRemove={() => { setProfile(null); askRemove(profileMember); }}
+          groups={groupsOn ? groups : null}
+          onJoinGroup={(groupId) => joinGroup(profileMember.userId, groupId)}
+          onLeaveGroup={(groupId) => leaveGroup(profileMember.userId, groupId)}
+          onOpenGroup={manage ? (groupId) => openGroup(groupId) : undefined}
           onOpenNote={onCloseSettings ? (path) => {
             onCloseSettings();
             void useStore.getState().openNoteByPath(path);
@@ -509,7 +735,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       <div className="members-access-header">
         <h2 className="settings-section-title">Members and access</h2>
         {manage && (
-          <button className="primary" onClick={() => setInviteOpen(true)}>Invite people</button>
+          <button className="primary members-invite-btn" onClick={() => setInviteOpen(true)}>Invite people</button>
         )}
       </div>
       <p className="members-access-intro">Owners and admins can always manage access.</p>
@@ -527,10 +753,21 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
               <span className="muted">{everyone?.sub ?? "Default for every member"}</span>
             </span>
             {teamAccess ? (
-              <MenuSelect
-                value={teamAccess.posture === "none" ? ("none" as TeamAccessMode) : teamAccess.mode}
-                options={EVERYONE_OPTIONS}
-                onSelect={chooseEveryone}
+              <MenuSelect<string>
+                value={teamAccess.posture === "none" ? "none" : teamAccess.mode}
+                options={[
+                  ...EVERYONE_OPTIONS,
+                  ...(groupsOn ? groups.map((g, i) => ({
+                    value: `${GROUP_OPTION}${g.id}`,
+                    label: g.name,
+                    hint: groupAccessSummary(g.grants) ?? undefined,
+                    section: i === 0 ? "Access groups add to this" : undefined,
+                  })) : []),
+                ]}
+                onSelect={(v) => {
+                  if (isGroupOption(v)) openGroup(groupOptionId(v), "access");
+                  else chooseEveryone(v as TeamAccessMode);
+                }}
                 disabled={busy}
                 ariaLabel={`Access for everyone in ${vaultName}`}
                 triggerClassName={`members-access-trigger is-level ${levelClass(teamAccess.posture === "none" ? "private" : teamAccess.mode)}`}
@@ -550,10 +787,29 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
               <span className="muted">For notes made before they joined</span>
             </span>
             {accessDefault ? (
-              <MenuSelect
+              <MenuSelect<string>
                 value={accessDefault.mode}
-                options={NEW_MEMBER_OPTIONS}
-                onSelect={(m) => void chooseDefault(m)}
+                options={[
+                  ...NEW_MEMBER_OPTIONS,
+                  ...(groupsOn ? groups.map((g, i) => ({
+                    value: `${GROUP_OPTION}${g.id}`,
+                    label: g.name,
+                    hint: i === 0 ? "New members join the ticked groups" : undefined,
+                    section: i === 0 ? "Also join access groups" : undefined,
+                    checked: g.autoJoin,
+                  })) : []),
+                ]}
+                triggerContent={(() => {
+                  const label = NEW_MEMBER_OPTIONS.find((o) => o.value === accessDefault.mode)?.label ?? accessDefault.mode;
+                  const joined = groupsOn ? groups.filter((g) => g.autoJoin).length : 0;
+                  return <span className="role-trigger-label">{joined ? `${label} + ${joined} ${joined === 1 ? "group" : "groups"}` : label}</span>;
+                })()}
+                onSelect={(v) => {
+                  if (isGroupOption(v)) {
+                    const g = groups.find((x) => x.id === groupOptionId(v));
+                    if (g) void toggleAutoJoin(g);
+                  } else void chooseDefault(v as TeamAccessMode);
+                }}
                 disabled={busy}
                 ariaLabel="Access for new members"
                 triggerClassName={`members-access-trigger is-level ${levelClass(accessDefault.mode)}`}
@@ -566,33 +822,113 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
         </div>
       )}
 
-      <div className="members-access-list-heading">
-        <h3>People</h3>
-        <span className="members-access-count muted">
-          {overview ? countLine(query, shown.members.length, shown.invitations.length) : <span className="skel-line members-skel-count" aria-hidden="true" />}
-        </span>
+      <div className={`members-access-slot${selecting ? " is-selecting" : ""}`}>
+      {groupsOn ? (
+        <div className="members-access-toolbar">
+          <div className="members-access-switch" role="tablist" aria-label="Show">
+            {(["people", "groups"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                role="tab"
+                aria-selected={listView === v}
+                className={`members-access-switch-btn${listView === v ? " is-active" : ""}`}
+                onClick={() => { setListView(v); setQuery(""); setSelected(new Set()); }}
+              >
+                {v === "people" ? "People" : "Access groups"}
+                <span className="members-access-switch-count">
+                  {v === "people" ? (overview ? members.length + invitations.length : "") : (groupsState.list ? groups.length : "")}
+                </span>
+              </button>
+            ))}
+          </div>
+          <span className="members-access-search">
+            <SearchIcon />
+            <input
+              type="search"
+              aria-label={listView === "groups" ? "Search access groups" : "Search people"}
+              placeholder={listView === "groups" ? "Find access groups" : "Find people"}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </span>
+          {listView === "groups" && manage && (
+            <button type="button" className="ghost-pill members-access-toolbar-btn" disabled={busy} onClick={() => setGroupDialog({})}>
+              + New access group
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="members-access-legacy-head">
+          <div className="members-access-list-heading">
+            <h3>People</h3>
+            <span className="members-access-count muted">
+              {overview ? countLine(query, shown.members.length, shown.invitations.length) : <span className="skel-line members-skel-count" aria-hidden="true" />}
+            </span>
+          </div>
+          <label className="members-access-search-field">
+            <span className="members-access-search-label">Search this list</span>
+            <span className="members-access-search">
+              <SearchIcon />
+              <input
+                type="search"
+                placeholder="Name or email"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </span>
+          </label>
+        </div>
+      )}
+      {manage && listView === "people" && (
+        <MemberSelectionBar
+          shown={selecting}
+          count={selectedMembers.length}
+          groups={groupsOn ? groups : []}
+          busy={busy}
+          canAccess={selectedMembers.some(canSetAccess)}
+          canRole={selectedMembers.some(canAct)}
+          onAddToGroup={bulkAddToGroup}
+          onAccess={bulkAccess}
+          onRole={bulkRole}
+          onRemove={bulkRemove}
+          onClear={clearSelection}
+        />
+      )}
       </div>
-      <label className="members-access-search-field">
-        <span className="members-access-search-label">Search this list</span>
-        <span className="members-access-search">
-          <SearchIcon />
-          <input
-            type="search"
-            placeholder="Name or email"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </span>
-      </label>
 
-      {!overview && <TableSkeleton manage={manage} />}
+      {groupsOn && listView === "groups" ? (
+        <GroupsList
+          list={groupsState.list}
+          failed={groupsState.failed}
+          members={members}
+          manage={manage}
+          busy={busy}
+          query={query}
+          onOpen={(g) => openGroup(g.id)}
+          onRename={(g) => setGroupDialog({ rename: g })}
+          onDelete={askDeleteGroup}
+          onRetry={() => void groupsState.reload()}
+        />
+      ) : (<>
+      {!overview && <TableSkeleton manage={manage} groups={groupsOn} />}
 
       {overview && (
-        <table className="members-table">
+        <table className={`members-table${manage ? " has-select" : ""}`}>
           <thead>
             <tr>
+              {manage && (
+                <th className="members-select-cell">
+                  <HeaderCheck
+                    state={headerCheckState(shownSelectable, selected)}
+                    disabled={shownSelectable.length === 0}
+                    onToggle={() => setSelected(toggleShown(shownSelectable, selected))}
+                  />
+                </th>
+              )}
               <th>Name</th>
               <th>Role</th>
+              {groupsOn && <th>Access groups</th>}
               {manage && <th>Access</th>}
               <th>Last active</th>
               {manage && <th aria-label="Actions" />}
@@ -617,7 +953,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
               return (
                 <tr
                   key={m.userId}
-                  className="is-clickable"
+                  className={`is-clickable${selected.has(m.userId) ? " is-selected" : ""}`}
                   tabIndex={0}
                   role="button"
                   aria-label={`Open profile of ${name}`}
@@ -628,6 +964,23 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
                     setProfile({ userId: m.userId, tab: "info" });
                   }}
                 >
+                  {manage && (
+                    <td className="members-select-cell">
+                      <input
+                        type="checkbox"
+                        className="members-check"
+                        checked={selected.has(m.userId)}
+                        disabled={!selectable(m)}
+                        title={selectable(m) ? undefined : "You can't change this person"}
+                        aria-label={`Select ${name}`}
+                        onChange={() => setSelected((s) => {
+                          const next = new Set(s);
+                          if (next.has(m.userId)) next.delete(m.userId); else next.add(m.userId);
+                          return next;
+                        })}
+                      />
+                    </td>
+                  )}
                   <td>
                     <span className="members-table-person">
                       <Avatar label={name} image={m.image} userId={m.userId} />
@@ -638,6 +991,11 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
                     </span>
                   </td>
                   <td>{ROLE_LABEL[m.role] ?? m.role}</td>
+                  {groupsOn && (
+                    <td>
+                      <GroupChips ids={m.groupIds ?? []} groups={groups} onOpen={manage ? (id) => openGroup(id) : undefined} />
+                    </td>
+                  )}
                   {manage && (
                     <td>
                       {m.access && canSetAccess(m) ? (
@@ -676,6 +1034,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
               const expired = isInvitationExpired(inv.expiresAt ?? undefined);
               return (
                 <tr key={inv.id} className="is-invited">
+                  {manage && <td className="members-select-cell" />}
                   <td>
                     <span className="members-table-person">
                       <Avatar label={inv.email} image={null} />
@@ -688,7 +1047,12 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
                     </span>
                   </td>
                   <td>Invited</td>
-                  {manage && <td>{invitationAccessLabel(inv.access)}</td>}
+                  {groupsOn && (
+                    <td>
+                      <GroupChips ids={inv.groupIds ?? []} groups={groups} onOpen={manage ? (id) => openGroup(id) : undefined} />
+                    </td>
+                  )}
+                  {manage && <td>{inv.groupIds?.length ? "Their groups" : invitationAccessLabel(inv.access)}</td>}
                   <td>Not joined yet</td>
                   {manage && (
                     <td className="members-table-actions">
@@ -708,6 +1072,24 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
             })}
           </tbody>
         </table>
+      )}
+      </>)}
+
+      {groupDialog && orgId && (
+        <GroupDialog
+          orgId={orgId}
+          groups={groups}
+          group={groupDialog.rename}
+          candidates={members.filter((m) => canSetAccess(m))}
+          myUserId={myUserId}
+          onClose={() => setGroupDialog(null)}
+          onSaved={(id) => {
+            const made = !groupDialog.rename;
+            setGroupDialog(null);
+            void afterAccessWrite();
+            if (made) openGroup(id, "access");
+          }}
+        />
       )}
 
       {/* Only people who can manage access, and only on a synced vault — this
@@ -748,6 +1130,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
           canManageBilling={myRole === "owner"}
           seatAccount={seatAccount}
           ownerName={ownerName(members)}
+          groups={groupsOn ? groups : []}
           onClose={() => setInviteOpen(false)}
           onInvited={(results, sent) => {
             const limit = results.map((r) => (r.error ? inviteLimitError(r.error) : null)).find((x) => x != null);
@@ -800,6 +1183,19 @@ function useSeatAccount(orgId: string | null, enabled: boolean): MyBillingAccoun
   return account;
 }
 
+/** A person's (or invitation's) groups as small chips; "—" when none. */
+function GroupChips({ ids, groups, onOpen }: { ids: readonly string[]; groups: readonly AccessGroup[]; onOpen?: (id: string) => void }) {
+  const mine = groups.filter((g) => ids.includes(g.id));
+  if (mine.length === 0) return <span className="muted">None</span>;
+  const shown = mine.slice(0, 2);
+  return (
+    <span className="group-chips">
+      {shown.map((g) => <GroupChip key={g.id} group={g} onOpen={onOpen ? () => onOpen(g.id) : undefined} />)}
+      {mine.length > shown.length && <span className="muted group-chips-more" title={mine.slice(2).map((g) => g.name).join(", ")}>+{mine.length - shown.length}</span>}
+    </span>
+  );
+}
+
 /** The vault owner's display name for the seat line, or null. */
 function ownerName(members: MemberOverview[]): string | null {
   const owner = members.find((m) => m.role === "owner");
@@ -845,13 +1241,32 @@ function PillSkeleton({ label }: { label: string }) {
   return <span className="skel-line members-skel-pill" role="status" aria-busy="true" aria-label={label} />;
 }
 
-function TableSkeleton({ manage }: { manage: boolean }) {
+/** The table's select-all box; `indeterminate` is a property, never an attribute. */
+function HeaderCheck({ state, disabled, onToggle }: { state: "none" | "some" | "all"; disabled: boolean; onToggle: () => void }) {
+  const ref = useRef<HTMLInputElement | null>(null);
+  useEffect(() => { if (ref.current) ref.current.indeterminate = state === "some"; }, [state]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      className="members-check"
+      checked={state === "all"}
+      disabled={disabled}
+      aria-label={state === "all" ? "Clear selection" : "Select everyone shown"}
+      onChange={onToggle}
+    />
+  );
+}
+
+function TableSkeleton({ manage, groups = false }: { manage: boolean; groups?: boolean }) {
   return (
     <table className="members-table members-table-skeleton" aria-busy="true" aria-label="Loading people">
       <thead>
         <tr>
+          {manage && <th className="members-select-cell" />}
           <th>Name</th>
           <th>Role</th>
+          {groups && <th>Access groups</th>}
           {manage && <th>Access</th>}
           <th>Last active</th>
           {manage && <th aria-label="Actions" />}
@@ -860,6 +1275,7 @@ function TableSkeleton({ manage }: { manage: boolean }) {
       <tbody aria-hidden="true">
         {[0, 1, 2].map((i) => (
           <tr key={i}>
+            {manage && <td className="members-select-cell" />}
             <td>
               <span className="members-table-person">
                 <span className="skel-line members-skel-avatar" />
@@ -870,6 +1286,7 @@ function TableSkeleton({ manage }: { manage: boolean }) {
               </span>
             </td>
             <td><span className="skel-line members-skel-role" /></td>
+            {groups && <td><span className="skel-line members-skel-role" /></td>}
             {manage && <td><span className="skel-line members-skel-access" /></td>}
             <td><span className="skel-line members-skel-time" /></td>
             {manage && <td />}

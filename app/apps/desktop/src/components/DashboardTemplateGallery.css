@@ -10,8 +10,11 @@
 .dashboard-gallery-picture{position:absolute;inset:0;background:var(--bg-subtle)}
 .dashboard-template-thumbnail{display:block;width:100%;height:100%;object-fit:cover;object-position:top;pointer-events:none}
 .dashboard-gallery-card-name{position:absolute;bottom:12px;left:12px;max-width:calc(100% - 24px);box-sizing:border-box;display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:0;padding:6px 10px;border-radius:9px;background:var(--bg-surface);color:var(--text-primary);box-shadow:0 1px 5px rgb(0 0 0 / 12%);font-size:12px;line-height:1.4;pointer-events:none}
-.dashboard-gallery-card-actions{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;align-content:center;gap:8px;padding:16px;background:rgb(20 20 35 / 22%);opacity:0;transition:opacity 160ms;pointer-events:none}
-.dashboard-gallery-card:hover .dashboard-gallery-card-actions,.dashboard-gallery-card:focus-within .dashboard-gallery-card-actions{opacity:1;pointer-events:auto}
+.dashboard-gallery-card-actions{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;align-content:center;gap:8px;padding:16px;background:rgb(20 20 35 / 0%);opacity:0;transition:background-color 160ms;pointer-events:none}
+/* No opacity animation here: in WebKit an animating opacity gets its own GPU layer for the length
+   of the fade, and on a card grid at a fractional offset that re-rounds every card by 1px, so the
+   grid jiggled while the pointer crossed cards. Only the tint fades (a plain repaint). */
+.dashboard-gallery-card:hover .dashboard-gallery-card-actions,.dashboard-gallery-card:focus-within .dashboard-gallery-card-actions{opacity:1;background:rgb(20 20 35 / 22%);pointer-events:auto}
 .dashboard-gallery-card-actions button{font-size:12px;padding:9px 13px;cursor:pointer;border:1px solid transparent;border-radius:var(--radius-md);box-shadow:0 2px 8px rgb(0 0 0 / 15%)}
 .dashboard-gallery-card-actions .secondary{background:var(--bg-surface);color:var(--text-primary);border:1px solid var(--border)}
 .dashboard-gallery-card-actions button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}

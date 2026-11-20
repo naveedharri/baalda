@@ -25,6 +25,7 @@ import {
 import { isUpdateBusy, updateCheckToast } from "../lib/updateMenuRow";
 import { showsSidebarUpdateLine, updateView } from "../lib/updateView";
 import { toast } from "../lib/toast";
+import { CheckIcon } from "./CheckIcon";
 
 /* The settings surface is a whole second app (nine tabs, billing, MCP tokens,
    access) and nothing in it is on the first screen, so all three dialogs load
@@ -645,7 +646,7 @@ function UpdateMenuRow({ onClose }: { onClose: () => void }) {
         ) : view.tone === "busy" ? (
           <span className="btn-spinner" aria-hidden="true" />
         ) : (
-          `${version ?? "…"}${view.tone === "ok" ? " ✓" : ""}`
+          <>{version ?? "…"}{view.tone === "ok" && <CheckIcon size={12} className="check-inline" />}</>
         )}
       </span>
     </button>

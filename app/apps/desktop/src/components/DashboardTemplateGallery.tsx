@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { DASHBOARD_TEMPLATES, type DashboardTemplate } from "../lib/dashboard/templates";
 import "./DashboardTemplateGallery.css";
 import { VaultDashboardPreview } from "./VaultDashboardPreview";
+import { CheckIcon } from "./CheckIcon";
 
 export async function templateHtml(template: DashboardTemplate): Promise<string> {
   return template.html ?? await template.loadHtml!();
@@ -80,7 +81,7 @@ export function DashboardTemplateGallery({ selectedId, onUse, disabled = false, 
         <h3 className="dashboard-gallery-card-name">{template.name}{currentId === template.id && <span className="dashboard-current-badge">Current Home</span>}</h3>
         <div className="dashboard-gallery-card-actions">
           <button type="button" className="secondary" aria-label={`Show preview of ${template.name}`} onClick={() => setPreview(template)}>Show preview</button>
-          {currentId !== template.id && <button type="button" className="primary" disabled={disabled} aria-pressed={selectedId === template.id} aria-label={`Use ${template.name}`} onClick={() => onUse(template)}>{selectedId === template.id ? "Selected ✓" : "Use template"}</button>}
+          {currentId !== template.id && <button type="button" className="primary" disabled={disabled} aria-pressed={selectedId === template.id} aria-label={`Use ${template.name}`} onClick={() => onUse(template)}>{selectedId === template.id ? <>Selected <CheckIcon size={12} className="check-inline" /></> : "Use template"}</button>}
         </div>
       </article>)}
       {templates.length === 0 && <p className="dashboard-gallery-empty">No templates match. Try another style or search.</p>}

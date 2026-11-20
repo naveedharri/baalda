@@ -10,7 +10,13 @@ export type AccessResource = {
   resourceType: "folder" | "file" | "vault";
   resourceId: string;
 };
-export type AccessAudience = { type: "org" } | { type: "users"; userIds: string[] };
+export type AccessAudience =
+  | { type: "org" }
+  | { type: "users"; userIds: string[] }
+  /** One access group (migration 097). Groups only add: `open` writes an
+   *  `edit` row, `readonly` a `view` row and `private` writes nothing, so
+   *  "No access" for a group just removes what the group gave there. */
+  | { type: "group"; groupId: string };
 
 type Queryable = Pick<pg.Pool | pg.PoolClient, "query">;
 
@@ -164,6 +170,14 @@ async function validateAudience(
   actorUserId: string,
 ): Promise<string[]> {
   if (audience.type === "org") return [];
+  if (audience.type === "group") {
+    const { rowCount } = await db.query(
+      "SELECT 1 FROM access_groups WHERE id = $1 AND organization_id = $2",
+      [audience.groupId, organizationId],
+    );
+    if (!rowCount) throw new AccessManagementError("Unknown group", 404, "group_not_found");
+    return [];
+  }
   const ids = [...new Set(audience.userIds.filter(Boolean))];
   if (ids.length === 0 || ids.length > 500) {
     throw new AccessManagementError(
@@ -202,11 +216,19 @@ async function clearResourceOverrides(
   organizationId: string,
   resource: AccessResource,
   userIds: string[],
+  /** Clear only this group's rows (a group audience). */
+  groupId: string | null = null,
 ): Promise<number> {
   // The vault branch has no `$2` (the resource IS the org), so its audience is
   // `$2`; a gap in the numbering leaves Postgres unable to type the unused slot.
+  // The Everyone (org) audience never clears a GROUP's rows: those belong to the
+  // group's own Access tab.
+  if (groupId !== null) userIds = [groupId];
+  const principal = groupId !== null ? "group" : "user";
   const audienceAt = (n: number) =>
-    userIds.length ? `AND principal_type = 'user' AND principal_id = ANY($${n}::text[])` : "";
+    userIds.length
+      ? `AND principal_type = '${principal}' AND principal_id = ANY($${n}::text[])`
+      : "AND principal_type <> 'group'";
   const audience = audienceAt(3);
   if (resource.resourceType === "file") {
     const result = await db.query(
@@ -304,11 +326,12 @@ export async function applyBulkAccess(
         input.organizationId,
         resource,
         selectedUsers,
+        input.audience.type === "group" ? input.audience.groupId : null,
       );
     }
 
     const wholeVault = resources[0].resourceType === "vault";
-    if (wholeVault) {
+    if (wholeVault && input.audience.type !== "group") {
       if (input.audience.type === "org") {
         await client.query(
           "DELETE FROM member_access_snapshots WHERE organization_id = $1",
@@ -324,15 +347,25 @@ export async function applyBulkAccess(
     }
 
     const principalIds =
-      input.audience.type === "org" ? [input.organizationId] : selectedUsers;
-    const principalType = input.audience.type === "org" ? "org" : "user";
+      input.audience.type === "org"
+        ? [input.organizationId]
+        : input.audience.type === "group"
+          ? input.mode === "private"
+            ? [] // a group's No access is the absence of a row
+            : [input.audience.groupId]
+          : selectedUsers;
+    const principalType =
+      input.audience.type === "org" ? "org" : input.audience.type === "group" ? "group" : "user";
     for (const resource of resources) {
       // The vault's existing `view` posture already has grant+cap semantics in
       // `vaultBaseline`; item rows need the combined `readonly` permission.
+      // A group row is a pure grant: `view` or `edit`, never a cap.
       const permission =
-        resource.resourceType === "vault" && input.mode === "readonly"
-          ? "view"
-          : storedPermission(input.mode);
+        input.audience.type === "group"
+          ? input.mode === "open" ? "edit" : "view"
+          : resource.resourceType === "vault" && input.mode === "readonly"
+            ? "view"
+            : storedPermission(input.mode);
       for (const principalId of principalIds) {
         await client.query(
           `INSERT INTO shares
@@ -389,7 +422,13 @@ export async function applyBulkAccess(
     resourcesChanged: resources.length,
     overridesCleared: cleared,
     membersAffected:
-      input.audience.type === "org" ? currentMembers.rows.length : selectedUsers.length,
+      input.audience.type === "org"
+        ? currentMembers.rows.length
+        : input.audience.type === "group"
+          ? (
+              await db.query("SELECT 1 FROM access_group_members WHERE group_id = $1", [input.audience.groupId])
+            ).rowCount ?? 0
+          : selectedUsers.length,
     disconnectedDocs,
   };
 }

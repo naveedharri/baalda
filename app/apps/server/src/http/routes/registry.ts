@@ -410,17 +410,27 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const vaultId = c.req.param("vaultId");
-    const userId = c.req.query("userId");
-    if (!userId) return c.json({ error: "invalid_request", message: "userId is required" }, 400);
+    const userId = c.req.query("userId") ?? "";
+    // `groupId` instead of `userId`: a group's own board (what its rows give).
+    const groupId = c.req.query("groupId") ?? "";
+    if (!userId && !groupId) {
+      return c.json({ error: "invalid_request", message: "userId or groupId is required" }, 400);
+    }
     const org = await vaultOrg(vaultId);
     if (!org) return c.json({ error: "Unknown vault" }, 404);
     const role = await orgRole(org, session.userId);
     if (role !== "owner" && role !== "admin") {
       return c.json({ error: "Only a vault owner or admin can manage access" }, 403);
     }
-    const targetRole = await orgRole(org, userId);
-    if (!targetRole) {
-      return c.json({ error: "not_member", message: "That person is not a member of this vault" }, 404);
+    let targetRole: string | null = null;
+    if (groupId) {
+      const g = await pool.query("SELECT 1 FROM access_groups WHERE id = $1 AND organization_id = $2", [groupId, org]);
+      if (!g.rowCount) return c.json({ error: "group_not_found", message: "That group does not exist" }, 404);
+    } else {
+      targetRole = await orgRole(org, userId);
+      if (!targetRole) {
+        return c.json({ error: "not_member", message: "That person is not a member of this vault" }, 404);
+      }
     }
     const [index, tree] = await Promise.all([loadAccessIndex(pool, org), loadAccessTreeRows(vaultId)]);
     const items = {
@@ -435,6 +445,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       vaultId,
       userId,
       role: targetRole,
+      ...(groupId ? { groupId } : {}),
       items,
     });
     const modes = encodeBoardModes(result, items);
