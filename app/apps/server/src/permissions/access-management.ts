@@ -218,6 +218,8 @@ async function clearResourceOverrides(
   userIds: string[],
   /** Clear only this group's rows (a group audience). */
   groupId: string | null = null,
+  /** Receives the permission of every row removed (lets a group write tell a narrowing apart). */
+  removed?: string[],
 ): Promise<number> {
   // The vault branch has no `$2` (the resource IS the org), so its audience is
   // `$2`; a gap in the numbering leaves Postgres unable to type the unused slot.
@@ -233,9 +235,11 @@ async function clearResourceOverrides(
   if (resource.resourceType === "file") {
     const result = await db.query(
       `DELETE FROM shares
-        WHERE org_id = $1 AND resource_type = 'file' AND resource_id = $2 ${audience}`,
+        WHERE org_id = $1 AND resource_type = 'file' AND resource_id = $2 ${audience}
+       RETURNING permission`,
       userIds.length ? [organizationId, resource.resourceId, userIds] : [organizationId, resource.resourceId],
     );
+    for (const row of result.rows as Array<{ permission: string }>) removed?.push(row.permission);
     return result.rowCount ?? 0;
   }
   if (resource.resourceType === "folder") {
@@ -252,9 +256,11 @@ async function clearResourceOverrides(
         WHERE org_id = $1
           AND ((resource_type = 'folder' AND resource_id IN (SELECT id FROM subtree))
             OR (resource_type = 'file' AND resource_id IN (SELECT id FROM target_files)))
-          ${audience}`,
+          ${audience}
+       RETURNING permission`,
       userIds.length ? [organizationId, resource.resourceId, userIds] : [organizationId, resource.resourceId],
     );
+    for (const row of result.rows as Array<{ permission: string }>) removed?.push(row.permission);
     return result.rowCount ?? 0;
   }
 
@@ -271,9 +277,11 @@ async function clearResourceOverrides(
                 SELECT id, vault_id FROM notes UNION ALL SELECT id, vault_id FROM files
               ) d JOIN vaults v ON v.id = d.vault_id
                WHERE d.id = s.resource_id AND v.organization_id = $1))
-        ) ${audienceAt(2)}`,
+        ) ${audienceAt(2)}
+     RETURNING s.permission`,
     userIds.length ? [organizationId, userIds] : [organizationId],
   );
+  for (const row of result.rows as Array<{ permission: string }>) removed?.push(row.permission);
   return result.rowCount ?? 0;
 }
 
@@ -316,6 +324,7 @@ export async function applyBulkAccess(
 
   const client = await db.connect();
   let cleared = 0;
+  const removedPermissions: string[] = [];
   try {
     await client.query("BEGIN");
     await setAuditActor(client, input.actorUserId);
@@ -327,6 +336,7 @@ export async function applyBulkAccess(
         resource,
         selectedUsers,
         input.audience.type === "group" ? input.audience.groupId : null,
+        removedPermissions,
       );
     }
 
@@ -407,7 +417,16 @@ export async function applyBulkAccess(
   let disconnectedDocs = 0;
   // Every mode can narrow somebody after replacement, so re-auth all affected
   // editors. A transport failure must not roll back the committed ACL.
-  for (const doc of docs) {
+  // A group row only ADDS, so a group write narrows nobody unless it removed a
+  // row that gave more than the new level (edit → view, anything → No access).
+  // Widening arrives by itself on the next token mint, like team-access.
+  const groupRank = (permission: string) => (permission === "edit" ? 2 : permission === "view" ? 1 : 0);
+  const narrowed =
+    input.audience.type !== "group" ||
+    removedPermissions.some(
+      (permission) => groupRank(permission) > (input.mode === "open" ? 2 : input.mode === "readonly" ? 1 : 0),
+    );
+  for (const doc of narrowed ? docs : []) {
     try {
       deps.disconnectDoc?.(doc.vaultId, doc.docId);
       disconnectedDocs += deps.disconnectDoc ? 1 : 0;

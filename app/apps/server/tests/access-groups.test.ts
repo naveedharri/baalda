@@ -377,6 +377,33 @@ describe("group access through bulk access", () => {
     expect(rows).toEqual([{ permission: "view" }]);
   });
 
+  it("a group write kicks open docs only when it narrows what the group gave", async () => {
+    const f = await buildFixture("kick", "never-shared", false);
+    const sales = (await createGroup(f.org, f.users.owner, { name: "Sales", memberIds: [f.users.member] })).id;
+    const audience = { type: "group" as const, groupId: sales };
+    const res = [{ resourceType: "folder" as const, resourceId: f.folders.team }];
+    const run = async (mode: "open" | "readonly" | "private") => {
+      const kicked: string[] = [];
+      const acl: string[] = [];
+      const out = await applyBulkAccess(
+        { organizationId: f.org, actorUserId: f.users.owner, resources: res, audience, mode },
+        { disconnectDoc: (_v, d) => void kicked.push(d), onAclChanged: (v) => void acl.push(v) },
+      );
+      return { kicked: kicked.length, reported: out.disconnectedDocs, acl: acl.length };
+    };
+    // Adding or raising never takes anything away: nobody reconnects, clients still hear about it.
+    expect(await run("readonly")).toMatchObject({ kicked: 0, reported: 0, acl: 1 });
+    expect(await run("open")).toMatchObject({ kicked: 0, reported: 0, acl: 1 });
+    expect(await run("open")).toMatchObject({ kicked: 0, reported: 0 });
+    // Edit → view and view → No access narrow: the folder's open docs re-authenticate.
+    const down = await run("readonly");
+    expect(down.kicked).toBeGreaterThan(0);
+    expect(down.reported).toBe(down.kicked);
+    expect((await run("private")).kicked).toBeGreaterThan(0);
+    // No access when the group gave nothing there already: nothing to take away.
+    expect((await run("private")).kicked).toBe(0);
+  });
+
   it("a group's board is what its own rows give", async () => {
     const f = await buildFixture("board", "shared", false);
     const index = await loadAccessIndex(pool, f.org);
