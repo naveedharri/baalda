@@ -50,6 +50,7 @@ export class SimClient {
     width: number,
     height: number,
     intro: boolean,
+    positions?: Float32Array,
   ): number {
     this.generation += 1;
     this.worker.postMessage({
@@ -61,6 +62,7 @@ export class SimClient {
       width,
       height,
       intro,
+      positions,
     });
     return this.generation;
   }

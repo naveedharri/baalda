@@ -34,7 +34,8 @@ html:not(.rd-off) {
 /* ---- Dark: "night paper". Warm charcoal, never pure black; the canvas sits a
    step below the page the way cream sits under white; off-white text with
    warmth; a calmer violet so nothing glows. ---- */
-html[data-theme="dark"]:not(.rd-off) {
+html[data-theme="dark"]:not(.rd-off),
+html:not(.rd-off) .graph-view {
   --rd-surface: #1f1e1c;
   --rd-cream: #181715;
   --rd-fill: #2a2825;
@@ -74,7 +75,8 @@ html[data-theme="dark"]:not(.rd-off) {
 
 /* Dark values for the redesign's named colours: inks lift to soft light
    tones, pastel fills become low-alpha washes of the same hue. */
-html[data-theme="dark"]:not(.rd-off) {
+html[data-theme="dark"]:not(.rd-off),
+html:not(.rd-off) .graph-view {
   --rdc-26252d: #ddd8cf;
   --rdc-2e2d36: #ddd8cf;
   --rdc-55545e: #aaa59b;
@@ -2353,8 +2355,7 @@ html[data-theme="dark"] .modal.auth-dialog {
 
 /* ---- Graph: calm, clean, on the app's own canvas ---- */
 .graph-diag { display: none !important; }
-html:not(.rd-off) .graph-canvas-wrap { background: #fdfbf7; }
-html[data-theme="dark"]:not(.rd-off) .graph-canvas-wrap { background: #1b1a18; }
+html:not(.rd-off) .graph-canvas-wrap { background: #1b1a18; }
 html:not(.rd-off) .graph-canvas-wrap::after { display: none; }
 html:not(.rd-off) .graph-floating-controls {
   background: rgba(var(--rd-ink), 0.04); border: 0; padding: 3px; border-radius: 12px;
@@ -2368,7 +2369,7 @@ html:not(.rd-off) .graph-controls {
   background: var(--rd-surface);
   box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 24px 48px -20px rgba(var(--rd-ink), 0.3);
 }
-html[data-theme="dark"]:not(.rd-off) .graph-controls { background: #262421; box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.08), 0 24px 48px -18px rgba(0, 0, 0, 0.7); }
+html:not(.rd-off) .graph-controls { background: #262421; box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.08), 0 24px 48px -18px rgba(0, 0, 0, 0.7); }
 html:not(.rd-off) .graph-control-group-title {
   font: 500 10.5px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary);
 }
@@ -2381,7 +2382,7 @@ html:not(.rd-off) .graph-control-search {
 html:not(.rd-off) .graph-seg { background: var(--rd-fill); border: 0; padding: 3px; border-radius: 9px; }
 html:not(.rd-off) .graph-seg-btn { border-radius: 7px; font-size: 12px; color: var(--text-secondary); }
 html:not(.rd-off) .graph-seg-btn.is-active { background: var(--rd-surface); color: var(--text-primary); box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.12); }
-html[data-theme="dark"]:not(.rd-off) .graph-seg-btn.is-active { background: #34312d; }
+html:not(.rd-off) .graph-seg-btn.is-active { background: #34312d; }
 /* The panel stays clear of the window's traffic lights and scrolls instead of
    growing up under them. */
 html:not(.rd-off) .graph-controls { max-height: calc(100% - 72px); overflow-y: auto; overscroll-behavior: contain; }

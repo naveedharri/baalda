@@ -12,6 +12,7 @@ import {
   createSimulation,
   configureForces,
   DRAG_ALPHA,
+  IDLE_ALPHA,
   REARRANGE_ALPHA,
   type SimNode,
   type SimLink,
@@ -37,6 +38,8 @@ interface InitMsg {
   width: number;
   height: number;
   intro: boolean;
+  /** A finished layout to hold at rest, instead of settling from a seed. */
+  positions?: Float32Array;
 }
 type InMsg =
   | InitMsg
@@ -153,6 +156,16 @@ onmessage = (e: MessageEvent<InMsg>) => {
           nodes[i].vx += Math.cos(a) * m;
           nodes[i].vy += Math.sin(a) * m;
         }
+      }
+      if (msg.positions) {
+        for (let i = 0; i < nodes.length; i++) {
+          nodes[i].x = msg.positions[i * 2];
+          nodes[i].y = msg.positions[i * 2 + 1];
+          nodes[i].vx = nodes[i].vy = 0;
+        }
+        sim.alpha(IDLE_ALPHA).alphaTarget(0);
+        running = false;
+        break;
       }
       sim.alpha(1).alphaTarget(0);
       start();
