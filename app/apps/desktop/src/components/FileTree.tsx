@@ -2941,12 +2941,13 @@ function Node({
                 onMenu(r.left, r.bottom + 4, node, r.top - 4);
               }}
             >
-              {/* Three small hollow rings (3.6px across), the middle one on the
-                  button's centre, which sits on the sync dot's. */}
-              <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" strokeWidth="1" aria-hidden="true">
-                <circle cx="5" cy="11" r="1.3" />
-                <circle cx="11" cy="11" r="1.3" />
-                <circle cx="17" cy="11" r="1.3" />
+              {/* Three small solid dots drawn 1:1 (a scaled sub-pixel ring stroke
+                  rendered jagged), the middle one on the button's centre, which
+                  sits on the sync dot's. */}
+              <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <circle cx="3" cy="8" r="1.25" />
+                <circle cx="8" cy="8" r="1.25" />
+                <circle cx="13" cy="8" r="1.25" />
               </svg>
             </button>
           )}

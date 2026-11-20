@@ -1935,8 +1935,8 @@ body:has(.sidebar-resizer.dragging) {
     color var(--t-fast) var(--ease);
 }
 .tree-more svg {
-  width: 17px;
-  height: 17px;
+  width: 16px;
+  height: 16px;
 }
 .tree-row:hover .tree-more,
 .tree-more:focus-visible {
