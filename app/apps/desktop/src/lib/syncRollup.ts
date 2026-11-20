@@ -101,6 +101,12 @@ export interface TreeSyncIndex {
    *  that syncs. */
   vault: FolderSyncSummary | null;
   /**
+   * Lower-cased paths of new notes and folders the server REFUSED to create for
+   * access (`registry.heldRefusals()`): they exist only on this computer.
+   * Absent ⇒ none. See {@link rowSyncMark}.
+   */
+  localOnly?: ReadonlySet<string>;
+  /**
    * A sync run is moving right now (the pill's "Syncing N/M" condition). Not
    * derived here — the sidebar stamps it after building, so rows read it off
    * the index they already receive. Absent ⇒ false. See {@link rowSyncMark}.
@@ -132,6 +138,12 @@ export interface TreeSyncInput {
    * this map is one sync has never seen rather than one it lost.
    */
   fileSyncState?: Record<string, DocSyncState>;
+  /**
+   * Paths of new notes and folders the server refused to create for access
+   * (`registry.heldRefusals()`). Drawn as not on the server whatever else is
+   * known about them (#414).
+   */
+  localOnly?: Iterable<string>;
   /**
    * The server has answered this session (the vault channel's first `ready`
    * landed — `store.vaultReadySeen`). From then on a mapped note with no
@@ -269,7 +281,9 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
     if (dir === "") vault = summary;
     else folders.set(dir, summary);
   }
-  return { notes, files, folders, vault };
+  const localOnly = new Set<string>();
+  for (const p of input.localOnly ?? []) localOnly.add(p.toLowerCase());
+  return { notes, files, folders, vault, ...(localOnly.size > 0 ? { localOnly } : {}) };
 }
 
 /** Notes and files a run still has to move: neither synced, failed (nothing is
@@ -394,6 +408,10 @@ export function folderSyncTitle(
   return `All ${plural(s.total, "file")} synced`;
 }
 
+/** Tooltip on a row the server refused to create (see {@link TreeSyncIndex.localOnly}). */
+export const LOCAL_ONLY_TITLE =
+  "Only on this computer. It can't be added here, so it isn't syncing.";
+
 /** A row's state as the sidebar draws it: live only while a run is moving, and
  *  never `error` (per-note failures are the Health page's job). */
 function sidebarState(state: DocSyncState, runActive: boolean): DocSyncState {
@@ -422,6 +440,12 @@ export function rowSyncMark(
   index: TreeSyncIndex,
   runActive = index.runActive === true,
 ): RowSyncMark | null {
+  // The server said no to creating it, so it is not "synced and quiet": it is
+  // on this computer only. The hollow "not on the server" ring, never an error
+  // tone, and it stays after the refusal banner fades (#414).
+  if (index.localOnly?.has(row.path.toLowerCase())) {
+    return { state: "unsynced", progress: null, title: LOCAL_ONLY_TITLE };
+  }
   if (row.isDir) {
     const summary = row.path === "" ? index.vault : (index.folders.get(row.path) ?? null);
     if (!summary) return null;

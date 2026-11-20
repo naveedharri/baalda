@@ -1095,9 +1095,19 @@ function SyncIndicator({
   // The folder is gone (#228) or the shrink brake holds our writes (#252):
   // SyncBadge renders both itself (`syncBadgeHold`), and they outrank the
   // attachment notice and the idle-vault hide below.
+  // The open note is one the server refused to create (no access to add it
+  // there): it is on this computer only, whatever its socket says (#414).
+  const openNoteLocalOnly = useStore((s) => {
+    const path = s.openNote?.path;
+    if (!s.syncEnabled || !path) return false;
+    const key = path.toLowerCase();
+    return syncManager.registry
+      .heldRefusals()
+      .some((f) => f.kind === "note" && f.path.toLowerCase() === key);
+  });
   const held =
     syncBadgeHold({ rootMissing, enabled: syncEnabled, pause: syncPause, now: Date.now() }) != null;
-  if (!held && attachmentLocalOnly) {
+  if (!held && (attachmentLocalOnly || (noteOpen && openNoteLocalOnly))) {
     return <SyncBadge status="offline" enabled={false} noteOpen />;
   }
   // "idle" is the reporter's pre-start value — nothing to report yet.

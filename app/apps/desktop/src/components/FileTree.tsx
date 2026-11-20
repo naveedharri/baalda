@@ -43,7 +43,8 @@ import { pinModified, sortTree, TREE_SORTS } from "../lib/tree/sort";
 import { isHomeNavigation, pinKey } from "../lib/pins";
 import { requestNewDashboard } from "../lib/homeEvents";
 import { isBlankTreeTarget } from "../lib/tree/blankTarget";
-import { LOCK_TITLES, effectiveLockForPath, lockScopesByPath, type LockScope } from "../lib/locks";
+import { LOCK_TITLES, effectiveLockForPath, lockBlocksCaller, lockScopesByPath, type LockScope } from "../lib/locks";
+import { ROOT_FROZEN_MESSAGE, createBlockReason } from "../lib/createGate";
 import { ancestorPaths } from "../lib/accessTree";
 import { nodeAt } from "../lib/tree/lazyTree";
 import { displayName } from "../lib/notePath";
@@ -65,7 +66,7 @@ import {
   activeNoteEditable,
   insertIntoActiveNote,
 } from "../lib/editor/activeView";
-import { useStore } from "../store";
+import { createBlockReasonFor, useStore } from "../store";
 import { shareResourceId } from "../lib/api";
 import { syncManager } from "../lib/sync/docSession";
 import { isBulkPhase } from "../lib/sync/vaultScope";
@@ -272,6 +273,7 @@ export function FileTree() {
   const automaticItemColors = useStore((s) => s.automaticItemColors);
   const vault = useStore((s) => s.vault);
   const rootFrozen = useStore((s) => s.rootFrozen);
+  const canCreateRoot = useStore((s) => s.vaultVisibility?.canCreateRoot ?? null);
   const itemOrder = useStore((s) => s.itemOrder);
   const treeSort = useStore((s) => s.treeSort);
   const folderSorts = useStore((s) => s.folderSorts);
@@ -435,6 +437,15 @@ export function FileTree() {
   // counters while a run is moving — the same condition under which the corner
   // pill reads "Syncing N/M" — and a column of green dots otherwise.
   const runActive = useStore((s) => isBulkPhase(s.syncProgress?.phase));
+  // New notes and folders the server refused to create for access: on this
+  // computer only (#414). Read in the selector, as one string, so any store
+  // change that follows a registry pass (every refusal is recorded by one)
+  // picks a new list up without re-rendering the tree when nothing moved.
+  const localOnlyKey = useStore((s) =>
+    s.syncEnabled
+      ? syncManager.registry.heldRefusals().map((f) => f.path).join("\u0000")
+      : "",
+  );
   const syncIndex = useMemo<TreeSyncIndex | null>(() => {
     const waveKey = syncEnabled ? vaultPath : null;
     if (lastWaveKeyRef.current !== waveKey) {
@@ -463,6 +474,9 @@ export function FileTree() {
       serverSettled: true,
       // Failures are the Health page's; the sidebar never shows an error.
       failuresAsSynced: true,
+      // …but a note the server refused to create is not synced, and must not
+      // wear the green dot (#414).
+      localOnly: localOnlyKey ? localOnlyKey.split("\u0000") : [],
     });
     // A wave belongs to one run. With none moving there is no counter to draw,
     // and forgetting it here is what stops a finished run's leftovers from
@@ -481,6 +495,7 @@ export function FileTree() {
     fileSyncState,
     localNotePaths,
     vaultPath,
+    localOnlyKey,
   ]);
 
   // ---- Row-order stability while something is syncing ------------------
@@ -952,6 +967,13 @@ export function FileTree() {
           // sidebar drop) or the vault root (dropped on the main area with no
           // note open). Same import the menu uses — files or whole folders.
           const dest = pt ? dirAtClientPoint(pt.x, pt.y) : "";
+          // Read fresh: this listener is registered once, so the render's own
+          // view of locks and the root latch would be the first frame's.
+          const refused = createBlockReasonFor(useStore.getState(), dest);
+          if (refused) {
+            toast(refused, "error");
+            return;
+          }
           try {
             const summary = await ipc.importPaths(
               dest,
@@ -1569,18 +1591,30 @@ export function FileTree() {
   }, [revealRequest]);
 
   /**
-   * Refuse a create/import at the vault root when the root is frozen.
+   * Why a create/import into `dir` would be refused, or null: the root freeze
+   * latch, or a folder this person can only view (the same padlock the row
+   * shows; `lib/createGate.ts`). Unknown access allows.
+   */
+  function createBlockedReason(dir: string): string | null {
+    return createBlockReason({
+      dir,
+      rootFrozen,
+      syncEnabled,
+      canCreateRoot,
+      lockedForCaller: (path) => lockBlocksCaller(lockByPath, path),
+    });
+  }
+
+  /**
+   * Refuse a create/import the server would refuse, with the reason in a toast.
    *
-   * Client-side first, purely so the user gets a sentence instead of a failed
-   * write — the server enforces the same latch and is the authority. Only the
-   * root is affected; anything nested is untouched.
+   * Client-side first, purely so the user gets a sentence instead of a file
+   * that never syncs. The server enforces the same rules and is the authority.
    */
   function rootBlocked(dir: string): boolean {
-    if (dir !== "" || !rootFrozen) return false;
-    toast(
-      "This vault's root is frozen. Create this inside a folder instead.",
-      "error",
-    );
+    const reason = createBlockedReason(dir);
+    if (!reason) return false;
+    toast(reason, "error");
     return true;
   }
 
@@ -1646,8 +1680,15 @@ export function FileTree() {
       ? menu.node.data.path
       : parentDir(menu.node.data.path)
     : "";
-  // Create/import from this menu would land at a frozen root.
-  const menuCreateBlocked = menuDir === "" && rootFrozen;
+  // Create/import from this menu would be refused: a frozen root, or a folder
+  // this person can only view.
+  const menuBlockReason = menu ? createBlockedReason(menuDir) : null;
+  const menuCreateBlocked = menuBlockReason != null;
+  const menuCreateHint =
+    menuBlockReason === ROOT_FROZEN_MESSAGE ? ROOT_FROZEN_HINT : (menuBlockReason ?? undefined);
+  // The header's New note / New folder create at the top level.
+  const rootBlockReason = createBlockedReason("");
+  const rootCreateHint = rootBlockReason === ROOT_FROZEN_MESSAGE ? ROOT_FROZEN_HINT : rootBlockReason;
   const navigationGroups: ("dashboard" | "pin" | "home")[] = ["dashboard"];
   if (menu?.node && (menu.node.data.isDir || isNoteExt(menu.node.data.path))) {
     navigationGroups.push("pin");
@@ -1780,19 +1821,19 @@ export function FileTree() {
               that needs a patient hover. The click routes through
               `rootBlocked("")`, which toasts the reason immediately. */}
           <button
-            className={`tree-tool${rootFrozen ? " blocked" : ""}`}
-            title={rootFrozen ? ROOT_FROZEN_HINT : "New note"}
+            className={`tree-tool${rootBlockReason ? " blocked" : ""}`}
+            title={rootCreateHint ?? "New note"}
             aria-label="New note"
-            aria-disabled={rootFrozen}
+            aria-disabled={rootBlockReason != null}
             onClick={() => void useStore.getState().createNoteIn("")}
           >
             {ICON_NEW_NOTE}
           </button>
           <button
-            className={`tree-tool${rootFrozen ? " blocked" : ""}`}
-            title={rootFrozen ? ROOT_FROZEN_HINT : "New folder"}
+            className={`tree-tool${rootBlockReason ? " blocked" : ""}`}
+            title={rootCreateHint ?? "New folder"}
             aria-label="New folder"
-            aria-disabled={rootFrozen}
+            aria-disabled={rootBlockReason != null}
             onClick={() => createUniqueFolder("")}
           >
             {ICON_NEW_FOLDER}
@@ -2032,14 +2073,14 @@ export function FileTree() {
               the refusal toast can say why, but they read as unavailable. */}
           <li
             className={menuCreateBlocked ? "disabled" : undefined}
-            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            title={menuCreateHint}
             onClick={() => void useStore.getState().createNoteIn(menuDir)}
           >
             New note
           </li>
           <li
             className={menuCreateBlocked ? "disabled" : undefined}
-            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            title={menuCreateHint}
             onClick={() => createUniqueFolder(menuDir)}
           >
             New folder
@@ -2059,14 +2100,14 @@ export function FileTree() {
             className={
               menuCreateBlocked ? "menu-sep-item disabled" : "menu-sep-item"
             }
-            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            title={menuCreateHint}
             onClick={() => void importFilesInto(menuDir)}
           >
             Import files…
           </li>
           <li
             className={menuCreateBlocked ? "disabled" : undefined}
-            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            title={menuCreateHint}
             onClick={() => void importFolderInto(menuDir)}
           >
             Import folder…

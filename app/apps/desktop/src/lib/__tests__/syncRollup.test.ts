@@ -3,6 +3,7 @@ import {
   buildTreeSyncIndex,
   FolderWaveTracker,
   folderSyncTitle,
+  LOCAL_ONLY_TITLE,
   rowSyncMark,
   sidebarMarksVisible,
   type TreeSyncIndex,
@@ -354,6 +355,31 @@ describe("rowSyncMark", () => {
     expect(rowSyncMark(dir("A"), index)!.progress).toBeNull();
     index.runActive = true;
     expect(rowSyncMark(dir("A"), index)!.progress).toEqual({ done: 0, total: 1 });
+  });
+
+  it("marks a note or folder the server refused to create as on this computer only (#414)", () => {
+    const index = buildTreeSyncIndex({
+      docIdByPath: { "Kitchen/Team note.md": "d1" },
+      docSyncState: { d1: "synced" },
+      localNotePaths: ["Kitchen/Team note.md", "Kitchen/Untitled.md", "Kitchen/New/a.md"],
+      serverSettled: true,
+      failuresAsSynced: true,
+      localOnly: ["kitchen/untitled.md", "Kitchen/New"],
+    });
+    for (const runActive of [true, false]) {
+      // Case-insensitive, like every path comparison in the registry.
+      expect(rowSyncMark(file("Kitchen/Untitled.md"), index, runActive)).toEqual({
+        state: "unsynced",
+        progress: null,
+        title: LOCAL_ONLY_TITLE,
+      });
+      expect(rowSyncMark(dir("Kitchen/New"), index, runActive)!.state).toBe("unsynced");
+      // Its neighbours keep their own state: only the refused rows change.
+      expect(rowSyncMark(file("Kitchen/Team note.md"), index, runActive)!.state).toBe("synced");
+    }
+    // Before: with no run moving, every row with an indicator was the green dot.
+    const before = indexOf({ "Kitchen/Team note.md": "synced" }, ["Kitchen/Untitled.md"]);
+    expect(rowSyncMark(file("Kitchen/Untitled.md"), before, false)!.state).toBe("synced");
   });
 
   it("never draws an error tone anywhere in the sidebar", () => {
