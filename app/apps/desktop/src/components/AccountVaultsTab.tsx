@@ -29,6 +29,7 @@ import {
   matchesVaultQuery,
   orderSyncedVaults,
   RECENT_VAULT_CARDS,
+  isDefaultVaultsRoot,
   shortFolderPath,
   syncedCardMeta,
   vaultSlugLabel,
@@ -397,10 +398,17 @@ export function AccountVaultsTab() {
     setActionError(null);
     setLimitNudge(null);
     try {
-      await useStore.getState().createOrganization(orgName.trim());
+      // A new vault starts LOCAL (owner decision 2026-11-20), exactly like the
+      // vault switcher's New vault: a folder under the vaults root, opened and
+      // switched to, with the first-run notes. Syncing it is a separate,
+      // explicit step (Turn on sync), never a side effect of creating it.
+      const parent = await ipc.getVaultsRoot();
+      const v = await ipc.createVault(parent, orgName.trim());
+      await useStore.getState().adoptOpenedVault(v, { seed: true });
       setOrgName("");
       setCreating(false);
       setBound(readOrgVaults());
+      setLocalsNonce((n) => n + 1);
     } catch (e) {
       // A 402 vault-cap rejection becomes an upgrade nudge; anything else is
       // a real error (previously swallowed silently — that was the create bug).
@@ -728,14 +736,14 @@ export function AccountVaultsTab() {
                 </svg>
                 <span>Join with code</span>
               </button>
-              <button type="button" className="primary vault-hdr-btn" onClick={() => setCreating(true)}>
-                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
-                <span>New vault</span>
-              </button>
             </>
           )}
+            <button type="button" className="primary vault-hdr-btn" onClick={() => setCreating(true)}>
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              <span>New vault</span>
+            </button>
         </>
       )}
       {/* The form opens where its buttons were, so nothing else moves. */}
@@ -1000,7 +1008,7 @@ export function AccountVaultsTab() {
                     const missing = isCurrent && rootMissing;
                     const labels = localCardLabels(r);
                     const parts: CardMetaPart[] = [
-                      ...(isCurrent ? [{ text: "Open now", tone: "open" as const }] : []),
+                      ...(isCurrent ? [{ text: "Current", tone: "open" as const }] : []),
                       missing
                         ? { text: CARD_FOLDER_MISSING, tone: "danger" as const }
                         : { text: shortFolderPath(r.path) },
@@ -1072,28 +1080,29 @@ export function AccountVaultsTab() {
 
           {session && (
             <div className="vaults-root">
-              <div className="vaults-root-text">
-                <b>Where new vaults are created</b>
-                <span className="vaults-root-path" title={root ?? rootError ?? ""}>
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
-                  </svg>
-                  {root ? shortFolderPath(root) : rootError ? "Not available" : "…"}
-                </span>
-                <span className="muted">
-                  Baalda also keeps a shortcut named “current” here that always points to the open
-                  vault, so an AI app can use one fixed path.
-                </span>
-                {rootError && <span className="error">{rootError}</span>}
-              </div>
-              <span className="vaults-root-actions">
-                <button className="link-btn" onClick={() => void changeRoot()}>
-                  Change folder
-                </button>
+              <span className="vaults-root-label">New vaults are created in</span>
+              <span
+                className="vaults-root-path"
+                title={
+                  root
+                    ? `${root}\n\nBaalda also keeps a shortcut named “current” here that always points to the open vault, so an AI app can use one fixed path.`
+                    : (rootError ?? "")
+                }
+              >
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+                </svg>
+                {root ? shortFolderPath(root) : rootError ? "Not available" : "…"}
+              </span>
+              <button className="link-btn" onClick={() => void changeRoot()}>
+                Change
+              </button>
+              {root && !isDefaultVaultsRoot(root) && (
                 <button className="link-btn vaults-root-reset" onClick={() => void resetRoot()}>
                   Reset to default
                 </button>
-              </span>
+              )}
+              {rootError && <span className="error">{rootError}</span>}
             </div>
           )}
         </div>

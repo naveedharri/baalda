@@ -154,7 +154,7 @@ const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", mem
 /**
  * A synced vault card's second line, as parts joined by " · ". Every part is
  * something we actually know; an unknown one is left out, never guessed:
- * "Open now" for the open vault; the caller's role when the server told us
+ * "Current" for the open vault; the caller's role when the server told us
  * (the open vault's member list, or the billing listing); then ONE detail:
  * the folder is missing, it has never been opened here, its people/notes
  * counts (vaults on this account), or whose vault it is.
@@ -168,7 +168,7 @@ export function syncedCardMeta(input: {
   ownerName: string | null;
 }): CardMetaPart[] {
   const parts: CardMetaPart[] = [];
-  if (input.isOpen) parts.push({ text: "Open now", tone: "open" });
+  if (input.isOpen) parts.push({ text: "Current", tone: "open" });
   const role = input.role ? ROLE_LABEL[input.role] ?? null : null;
   if (role) parts.push({ text: role });
   if (input.folderMissing) parts.push({ text: CARD_FOLDER_MISSING, tone: "danger" });
@@ -181,6 +181,12 @@ export function syncedCardMeta(input: {
     parts.push({ text: `${input.ownerName}’s vault` });
   }
   return parts;
+}
+
+/** The folder Rust resets to (`default_vaults_root`: ~/Documents/Baalda Vaults);
+ *  "Reset to default" is offered only when the folder is somewhere else. */
+export function isDefaultVaultsRoot(path: string): boolean {
+  return /[\\/]Documents[\\/]Baalda Vaults[\\/]*$/.test(path);
 }
 
 /** "…/Documents/Baalda Vaults" → "Documents › Baalda Vaults": the last two

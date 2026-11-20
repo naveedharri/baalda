@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ACCOUNT_VAULTS_VIEW_KEY,
   folderMissingCardActions,
+  isDefaultVaultsRoot,
   matchesVaultQuery,
   orderSyncedVaults,
   RECENT_VAULT_CARDS,
@@ -162,7 +163,7 @@ describe("vault cards (2026-11-20)", () => {
     const base = { isOpen: false, role: null, onDevice: true, folderMissing: false, usage: null, ownerName: null };
     expect(syncedCardMeta(base)).toEqual([]);
     expect(syncedCardMeta({ ...base, isOpen: true, role: "owner", usage: { people: 4, notes: 1 } })).toEqual([
-      { text: "Open now", tone: "open" },
+      { text: "Current", tone: "open" },
       { text: "Owner" },
       { text: "4 people · 1 note" },
     ]);
@@ -177,9 +178,15 @@ describe("vault cards (2026-11-20)", () => {
     // An owner's own vault never reads "<their name>'s vault".
     expect(syncedCardMeta({ ...base, role: "owner", ownerName: "Me" })).toEqual([{ text: "Owner" }]);
     expect(syncedCardMeta({ ...base, isOpen: true, folderMissing: true })).toEqual([
-      { text: "Open now", tone: "open" },
+      { text: "Current", tone: "open" },
       { text: "Folder missing", tone: "danger" },
     ]);
+  });
+
+  it("knows the default vaults folder", () => {
+    expect(isDefaultVaultsRoot("/Users/me/Documents/Baalda Vaults")).toBe(true);
+    expect(isDefaultVaultsRoot("C:\\Users\\me\\Documents\\Baalda Vaults")).toBe(true);
+    expect(isDefaultVaultsRoot("/Users/me/Dropbox/Baalda Vaults")).toBe(false);
   });
 
   it("shortens a folder path to its last two segments", () => {

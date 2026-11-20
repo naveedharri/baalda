@@ -3358,6 +3358,15 @@ html[data-theme="dark"]:not(.rd-off) .vaults-page-head .account-vaults-head-acti
   background: var(--text-primary); color: var(--bg-surface); border: 0; box-shadow: none;
 }
 html:not(.rd-off) .vaults-page-head .vault-hdr-btn.primary:hover:not(:disabled) { opacity: 0.88; }
+/* The inline New vault / Join form: its submit is the same near-black. */
+html:not(.rd-off) .vaults-page-head .vault-tab-form button.primary,
+html[data-theme="dark"]:not(.rd-off) .vaults-page-head .vault-tab-form button.primary {
+  background: var(--text-primary) !important; color: var(--bg-surface) !important; border: 0; box-shadow: none;
+}
+html:not(.rd-off) .vaults-page-head .vault-tab-form button.primary:disabled { opacity: 0.35; }
+html:not(.rd-off) .vaults-page-head .vault-tab-form button.primary:hover:not(:disabled) { opacity: 0.88; }
+html:not(.rd-off) .vaults-page-head .vault-tab-form input,
+html:not(.rd-off) .vaults-page-head .vault-tab-form button { height: 38px; border-radius: 10px; }
 
 html:not(.rd-off) .vaults-page-filters { display: flex; align-items: center; gap: 12px; }
 html:not(.rd-off) .vaults-search-box {
@@ -3439,16 +3448,17 @@ html:not(.rd-off) .vaults-show-all {
 }
 html:not(.rd-off) .vaults-show-all svg.is-up { transform: rotate(180deg); }
 
+/* One quiet line: where new vaults go, and a way to change it. */
 html:not(.rd-off) .vaults-root {
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
-  padding-top: 20px; border-top: 1px solid rgba(var(--rd-ink), 0.08);
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px;
+  padding-top: 18px; border-top: 1px solid rgba(var(--rd-ink), 0.08);
+  font: 400 14px var(--font-body); color: var(--text-secondary);
 }
-html:not(.rd-off) .vaults-root-text { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-html:not(.rd-off) .vaults-root-text b { font: 600 15.5px var(--font-body); color: var(--text-primary); }
-html:not(.rd-off) .vaults-root-path { display: inline-flex; align-items: center; gap: 8px; font-size: 14.5px; color: var(--text-primary); }
-html:not(.rd-off) .vaults-root-path svg { color: var(--text-secondary); flex: none; }
-html:not(.rd-off) .vaults-root-text .muted { font-size: 13.5px; color: var(--text-secondary); max-width: 640px; line-height: 1.45; }
-html:not(.rd-off) .vaults-root-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: none; }
-html:not(.rd-off) .vaults-root-actions .link-btn { font: 500 14.5px var(--font-body); color: var(--accent); }
-html:not(.rd-off) .vaults-root-actions .vaults-root-reset { font: 400 12.5px var(--font-body); color: var(--text-tertiary); }
+html:not(.rd-off) .vaults-root-path {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  color: var(--text-primary); font-weight: 500; cursor: default;
+}
+html:not(.rd-off) .vaults-root-path svg { color: var(--text-tertiary); flex: none; }
+html:not(.rd-off) .vaults-root .link-btn { font: 500 14px var(--font-body); color: var(--accent); padding: 0; }
+html:not(.rd-off) .vaults-root .vaults-root-reset { color: var(--text-tertiary); font-weight: 400; }
 @container (max-width: 640px) { html:not(.rd-off) .vaults-page-filters { flex-direction: column; align-items: stretch; } }
