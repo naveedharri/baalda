@@ -441,7 +441,7 @@ html[data-platform="windows"] .graph-floating-controls {
    it sits in holds still. */
 .graph-intro .graph-canvas {
   animation: graph-heartbeat 1.15s var(--ease) both;
-  transform-origin: 50% 46%; /* matches the backdrop's optical centre */
+  transform-origin: 50% 50%; /* the graph's centre */
   will-change: transform, opacity;
 }
 /* A real lub-dub: one strong beat, a recoil under rest, then a smaller second
@@ -497,7 +497,8 @@ html[data-platform="windows"] .graph-floating-controls {
    deliberately do not paint it mid-flight, so hide the canvases until it cools.
    `visibility` rather than `display: none` — the canvases must keep their real
    size, or the renderer re-measures to 0×0 and has to rebuild on reveal. */
-.graph-canvas-wrap.is-settling .graph-canvas {
+.graph-canvas-wrap.is-settling .graph-canvas,
+.graph-canvas-wrap.is-settling .graph-hub-layer {
   visibility: hidden;
 }
 /* Scoped to the settling card only. The base `.graph-state-card` is a COLUMN

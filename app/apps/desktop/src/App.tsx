@@ -2048,7 +2048,7 @@ export default function App() {
           >
             {/* `.graph-view` is the full-window overlay itself, so the screen
                 dims the instant the graph is asked for, then fills in. */}
-            <Suspense fallback={<div className="graph-view" aria-busy="true" />}>
+            <Suspense fallback={<div className="graph-view" data-theme="dark" aria-busy="true" />}>
               <GraphView onClose={() => setGraphOpen(false)} />
             </Suspense>
           </ErrorBoundary>
