@@ -206,7 +206,8 @@ export function AccountSettings({
         </nav>
 
         <section key={tab} className="settings-content rd-tab-in" aria-label={activeTab.label}>
-          <h2 className="settings-section-title">{activeTab.label}</h2>
+          {/* The Vaults tab draws its own title row (title, subtitle, actions). */}
+          {tab !== "vaults" && <h2 className="settings-section-title">{activeTab.label}</h2>}
           {tab === "profile" ? (
             <ProfileTab />
           ) : tab === "status" ? (

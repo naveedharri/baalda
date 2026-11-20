@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ACCOUNT_VAULTS_VIEW_KEY,
   folderMissingCardActions,
+  matchesVaultQuery,
+  orderSyncedVaults,
+  RECENT_VAULT_CARDS,
+  shortFolderPath,
+  syncedCardMeta,
+  visibleSyncedVaults,
   localCardLabels,
   readAccountVaultsView,
   vaultCardLabels,
@@ -127,5 +133,58 @@ describe("folder-missing card", () => {
   it("shows one chip and moves Locate folder… into the menu for a synced vault", () => {
     expect(folderMissingCardActions(true)).toEqual({ chip: "restore", menu: ["locate"] });
     expect(folderMissingCardActions(false)).toEqual({ chip: "locate", menu: [] });
+  });
+});
+
+describe("vault cards (2026-11-20)", () => {
+  const org = (id: string, name = id) => ({ id, name });
+
+  it("orders the open vault first, then by last opened here, then by name", () => {
+    const out = orderSyncedVaults([org("a", "Zed"), org("b", "Alpha"), org("c", "Mid"), org("d", "Beta")], {
+      openOrgId: "c",
+      openedAtByOrg: { a: 50, d: 90 },
+    });
+    expect(out.map((o) => o.id)).toEqual(["c", "d", "a", "b"]);
+  });
+
+  it("shows the last eight, all on Show all, and every match while searching", () => {
+    const many = Array.from({ length: 11 }, (_, i) => org(`o${i}`, `Vault ${i}`));
+    expect(visibleSyncedVaults(many, { query: "", showAll: false })).toMatchObject({ hidden: 11 - RECENT_VAULT_CARDS });
+    expect(visibleSyncedVaults(many, { query: "", showAll: false }).shown).toHaveLength(RECENT_VAULT_CARDS);
+    expect(visibleSyncedVaults(many, { query: "", showAll: true })).toMatchObject({ hidden: 0 });
+    expect(visibleSyncedVaults(many, { query: "", showAll: true }).shown).toHaveLength(11);
+    expect(visibleSyncedVaults(many, { query: "vault", showAll: false }).shown).toHaveLength(11);
+    expect(visibleSyncedVaults(many, { query: " VAULT 7 ", showAll: false }).shown.map((o) => o.id)).toEqual(["o7"]);
+    expect(matchesVaultQuery("Product team", "")).toBe(true);
+  });
+
+  it("builds the second line only from what is known", () => {
+    const base = { isOpen: false, role: null, onDevice: true, folderMissing: false, usage: null, ownerName: null };
+    expect(syncedCardMeta(base)).toEqual([]);
+    expect(syncedCardMeta({ ...base, isOpen: true, role: "owner", usage: { people: 4, notes: 1 } })).toEqual([
+      { text: "Open now", tone: "open" },
+      { text: "Owner" },
+      { text: "4 people · 1 note" },
+    ]);
+    expect(syncedCardMeta({ ...base, role: "member", onDevice: false })).toEqual([
+      { text: "Member" },
+      { text: "Not on this device", tone: "cloud" },
+    ]);
+    expect(syncedCardMeta({ ...base, role: "admin", ownerName: "Sara" })).toEqual([
+      { text: "Admin" },
+      { text: "Sara’s vault" },
+    ]);
+    // An owner's own vault never reads "<their name>'s vault".
+    expect(syncedCardMeta({ ...base, role: "owner", ownerName: "Me" })).toEqual([{ text: "Owner" }]);
+    expect(syncedCardMeta({ ...base, isOpen: true, folderMissing: true })).toEqual([
+      { text: "Open now", tone: "open" },
+      { text: "Folder missing", tone: "danger" },
+    ]);
+  });
+
+  it("shortens a folder path to its last two segments", () => {
+    expect(shortFolderPath("/Users/me/Documents/Baalda Vaults")).toBe("Documents › Baalda Vaults");
+    expect(shortFolderPath("C:\\Users\\me\\Desktop\\Reading list\\")).toBe("Desktop › Reading list");
+    expect(shortFolderPath("/Notes")).toBe("Notes");
   });
 });
