@@ -161,6 +161,9 @@ export function MemberProfilePage({
             {member.email && <span className="muted">{member.email}</span>}
           </span>
         </header>
+        {/* One tab is no choice: a plain member on someone else's profile sees
+            Personal info alone, so it renders without a tab strip above it. */}
+        {tabs.length > 1 && (
         <div className="member-profile-tabs" role="tablist" aria-label="Profile">
           {tabs.map((t) => (
             <button
@@ -177,6 +180,7 @@ export function MemberProfilePage({
             </button>
           ))}
         </div>
+        )}
         {tab === "info" ? (
           <>
             <dl className="member-profile-about">
