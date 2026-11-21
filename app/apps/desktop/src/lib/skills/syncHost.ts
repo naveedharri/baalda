@@ -446,69 +446,94 @@ export function keepMySkill(orgId: string, skillId: string, target: SkillTarget)
 }
 
 /** Replace this device's edited copy with the team version (no copy is kept). */
-export async function applyTeamSkillVersion(orgId: string, skillId: string, target: SkillTarget): Promise<void> {
+export async function applyTeamSkillVersion(
+  orgId: string,
+  skillId: string,
+  targets: SkillTarget | readonly SkillTarget[],
+): Promise<void> {
   const h = host;
   const skill = manifestSkill(orgId, skillId);
   if (!h || !skill) return;
-  const outcome = await forceInstallSkill(h.deps, target, orgId, skill);
-  if (outcome.status === "installed" || outcome.status === "unchanged") {
-    updateSkillsPrefs((p) => {
-      delete p.keepMine[keepMineKey(h.serverUrl, orgId, skillId, target)];
-    });
-    setState({
-      results: state.results.map((r) =>
-        r.orgId === orgId && r.skillId === skillId && r.target === target
-          ? { ...r, state: "upToDate", version: skill.version }
-          : r,
-      ),
-    });
-    toast(`Using the team version of ${skillDisplayName(skill.name)}.`);
-  } else if (outcome.status === "conflict") {
-    toast(`Couldn't replace ${skillDisplayName(skill.name)}: another skill uses that folder.`, "error");
+  const name = skillDisplayName(skill.name);
+  // Every target at once: the skill page's one click covers Claude AND the
+  // other tools' folder (one per click used to leave the second one stuck).
+  const done: SkillTarget[] = [];
+  for (const target of typeof targets === "string" ? [targets] : targets) {
+    let outcome: ipc.SkillInstallOutcome;
+    try {
+      outcome = await forceInstallSkill(h.deps, target, orgId, skill);
+    } catch (e) {
+      toast(`Couldn't use the team version of ${name}: ${message(e)}`, "error");
+      continue;
+    }
+    if (outcome.status === "installed" || outcome.status === "unchanged") done.push(target);
+    else if (outcome.status === "conflict") toast(`Couldn't replace ${name}: another skill uses that folder.`, "error");
   }
+  if (done.length === 0) return;
+  updateSkillsPrefs((p) => {
+    for (const t of done) delete p.keepMine[keepMineKey(h.serverUrl, orgId, skillId, t)];
+  });
+  setState({
+    results: state.results.map((r) =>
+      r.orgId === orgId && r.skillId === skillId && done.includes(r.target)
+        ? { ...r, state: "upToDate", version: skill.version }
+        : r,
+    ),
+  });
+  toast(`Using the team version of ${name}.`);
 }
 
 /**
  * "Use team version" on a name taken by another folder: the person's own (no
  * marker) or another vault's, server's or account's copy. Rust replaces that
  * folder with the team version (no copy is kept). Only this click
- * replaces another owner's copy; a sync run never does.
+ * replaces another owner's copy; a sync run never does. Every target given is
+ * replaced in the one click.
  */
-export async function replaceNameTakenSkill(orgId: string, skillId: string, target: SkillTarget): Promise<void> {
+export async function replaceNameTakenSkill(
+  orgId: string,
+  skillId: string,
+  targets: SkillTarget | readonly SkillTarget[],
+): Promise<void> {
   const h = host;
   const skill = manifestSkill(orgId, skillId);
   if (!h || !skill) return;
   const name = skillDisplayName(skill.name);
-  let outcome: ipc.SkillInstallOutcome;
-  try {
-    outcome = await replaceUnmanagedSkill(h.deps, target, orgId, skill);
-  } catch (e) {
-    toast(`Couldn't use the team version of ${name}: ${message(e)}`, "error");
-    return;
+  const done: SkillTarget[] = [];
+  for (const target of typeof targets === "string" ? [targets] : targets) {
+    let outcome: ipc.SkillInstallOutcome;
+    try {
+      outcome = await replaceUnmanagedSkill(h.deps, target, orgId, skill);
+    } catch (e) {
+      toast(`Couldn't use the team version of ${name}: ${message(e)}`, "error");
+      continue;
+    }
+    if (outcome.status === "conflict") {
+      const kind = conflictKindOf(outcome.detail);
+      setState({
+        results: state.results.map((r) =>
+          r.orgId === orgId && r.skillId === skillId && r.target === target ? { ...r, conflict: kind } : r,
+        ),
+      });
+      // With the flag, Rust still refuses a symlinked folder ("unmanaged"),
+      // which is left untouched.
+      toast(
+        kind === "unmanaged"
+          ? `Couldn't replace ${name}: that folder is a link to another place, so it was left as it is.`
+          : `Couldn't replace ${name}: another skill uses that folder.`,
+        "error",
+      );
+      continue;
+    }
+    done.push(target);
   }
-  if (outcome.status === "conflict") {
-    const kind = conflictKindOf(outcome.detail);
-    setState({
-      results: state.results.map((r) =>
-        r.orgId === orgId && r.skillId === skillId && r.target === target ? { ...r, conflict: kind } : r,
-      ),
-    });
-    // With the flag, Rust still refuses a symlinked folder ("unmanaged"),
-    // which is left untouched.
-    toast(
-      kind === "unmanaged"
-        ? `Couldn't replace ${name}: that folder is a link to another place, so it was left as it is.`
-        : `Couldn't replace ${name}: another skill uses that folder.`,
-      "error",
-    );
-    return;
-  }
+  if (done.length === 0) return;
   updateSkillsPrefs((p) => {
-    delete p.keepMine[keepMineKey(h.serverUrl, orgId, skillId, target)];
+    for (const t of done) delete p.keepMine[keepMineKey(h.serverUrl, orgId, skillId, t)];
   });
   setState({
     results: state.results.map((r) =>
-      r.orgId === orgId && r.skillId === skillId && r.target === target
+      r.orgId === orgId && r.skillId === skillId && done.includes(r.target)
         ? { ...r, state: "upToDate", version: skill.version, conflict: undefined }
         : r,
     ),
