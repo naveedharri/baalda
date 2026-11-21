@@ -522,13 +522,16 @@ export function GroupPage({
           </span>
         )}
       </header>
-      <div className="member-profile-tabs" role="tablist" aria-label="Group">
-        {tabs.map((t) => (
-          <button key={t} type="button" role="tab" aria-selected={t === tab} className={`member-profile-tab${t === tab ? " active" : ""}`} onClick={() => setTab(t)}>
-            {TAB_LABEL[t]}
-          </button>
-        ))}
-      </div>
+      {/* One tab is no choice: a plain member sees Members alone, so no strip. */}
+      {tabs.length > 1 && (
+        <div className="member-profile-tabs" role="tablist" aria-label="Group">
+          {tabs.map((t) => (
+            <button key={t} type="button" role="tab" aria-selected={t === tab} className={`member-profile-tab${t === tab ? " active" : ""}`} onClick={() => setTab(t)}>
+              {TAB_LABEL[t]}
+            </button>
+          ))}
+        </div>
+      )}
 
       {tab === "members" ? (
         <div className="group-members">
