@@ -710,6 +710,22 @@ button.primary.hero:hover:not(:disabled) {
   color: var(--danger);
   background: var(--danger-soft);
 }
+/* The opening card's spinner sits centred on the whole card's height, on the
+   tags' right edge, rather than riding the name line. */
+.recent-card .spinner.recent-badge {
+  position: absolute;
+  top: 50%;
+  right: calc(var(--sp-3) + 6px);
+  translate: 0 -50%;
+  margin: 0;
+}
+/* Long folder paths fade out from the middle of the card instead of running
+   to an ellipsis at the edge, so they stay a quiet hint. */
+.recent-path {
+  text-overflow: clip;
+  -webkit-mask-image: linear-gradient(to right, #000 45%, transparent 92%);
+  mask-image: linear-gradient(to right, #000 45%, transparent 92%);
+}
 .recent-remove:focus-visible {
   opacity: 1;
 }
@@ -819,6 +835,11 @@ button.primary.hero:hover:not(:disabled) {
 }
 html[data-platform="macos"] .titlebar-tools {
   left: 84px;
+}
+/* Full screen hides the traffic lights: the tools move to the leading edge,
+   their glyphs lined up with the vault tile below. */
+html[data-platform="macos"][data-fullscreen] .titlebar-tools {
+  left: 12px;
 }
 
 /* Windows owns one blended chrome row, with navigation over the sidebar and
@@ -2767,6 +2788,9 @@ html[data-platform="macos"] .main-header {
 html[data-platform="macos"] .sidebar-hidden .main-header {
   /* Traffic lights + sidebar and search stay clear of the first tab. */
   padding-left: 154px;
+}
+html[data-platform="macos"][data-fullscreen] .sidebar-hidden .main-header {
+  padding-left: 82px;
 }
 
 @media (prefers-reduced-motion: reduce) {

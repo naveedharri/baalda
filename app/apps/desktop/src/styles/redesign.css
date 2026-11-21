@@ -3510,41 +3510,6 @@ html:not(.rd-off) .vaults-root .vaults-root-reset { color: var(--text-tertiary);
 @container (max-width: 640px) { html:not(.rd-off) .vaults-page-filters { flex-direction: column; align-items: stretch; } }
 
 
-/* ============================================================
-   Filled action buttons are near-black ink app-wide (the Members and access
-   look: "Invite people", the access-group dialogs), never violet. Red
-   (danger) buttons stay red. Violet stays for links, focus rings, ticks,
-   switches, selection and badges. Last in the cascade on purpose: it replaces
-   every earlier accent fill for these buttons, the dark theme's included.
-   ============================================================ */
-html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child),
-html[data-theme="dark"]:not(.rd-off) :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child) {
-  background: var(--text-primary) !important;
-  color: var(--bg-surface) !important;
-  border-color: transparent !important;
-  box-shadow: none !important;
-  filter: none !important;
-}
-html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):hover:not(:disabled),
-html[data-theme="dark"]:not(.rd-off) :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):hover:not(:disabled) {
-  background: var(--text-primary) !important;
-  opacity: 0.88;
-}
-html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):disabled,
-html[data-theme="dark"]:not(.rd-off) :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):disabled {
-  background: var(--text-primary) !important;
-  color: var(--bg-surface) !important;
-  opacity: 0.35 !important;
-}
-html:not(.rd-off) .confirm-actions button.primary:not(.danger):disabled * {
-  color: var(--bg-surface) !important;
-}
-html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child) :is(.btn-spinner, .spinner-on-accent) {
-  border-color: color-mix(in srgb, var(--bg-surface) 35%, transparent);
-  border-top-color: var(--bg-surface);
-}
-
-
 /* The vault menu and the account menu open nudged a little to the right of
    their trigger, so they read as a layer lifted over the sidebar rather than
    part of it. `translate` composes with the open animation's `transform`. */
@@ -3585,3 +3550,31 @@ html:not(.rd-off) :is(.vault-switcher, .account-popover) .menu-hint { font-size:
 html:not(.rd-off) :is(.vault-switcher, .account-popover) .menu-sep { margin: 3px 8px !important; }
 html:not(.rd-off) .vault-switcher .menu-create-org input { font-size: 12.5px !important; }
 html:not(.rd-off) .account-popover > .rd-status { font-size: 13px !important; }
+
+/* ============================================================
+   No black buttons anywhere: every filled action button is the accent blue
+   (the plain button.primary look), in light and dark. Last on purpose, so it
+   wins over each earlier near-black ("ink") rule. Red danger buttons stay red.
+   ============================================================ */
+html :is(.ghost-pill.members-access-toolbar-btn, .modal.group-dialog .confirm-actions button.primary:not(.danger), button.primary.members-invite-btn, .invite-btn.accept, .plan-ink-btn, .encryption-ink-btn, .vaults-split-open, .message-btn-primary, .vault-icon-settings .vault-icon-head-actions button.secondary, .checkpoint-ink-btn, .update-card-btn.is-ink, .update-row-btn.is-ink, .sidebar-update.is-ready, .vault-switch-chip, .mcp-new-token, .conn-foot button.primary:not(.danger), .vaults-page-head .vault-hdr-btn.primary, .vaults-page-head .vault-tab-form button.primary, .menu-create-org button.primary.sm),
+html[data-theme="dark"]:not(.rd-off) :is(.ghost-pill.members-access-toolbar-btn, .modal.group-dialog .confirm-actions button.primary:not(.danger), button.primary.members-invite-btn, .invite-btn.accept, .plan-ink-btn, .encryption-ink-btn, .vaults-split-open, .message-btn-primary, .vault-icon-settings .vault-icon-head-actions button.secondary, .checkpoint-ink-btn, .update-card-btn.is-ink, .update-row-btn.is-ink, .sidebar-update.is-ready, .vault-switch-chip, .mcp-new-token, .conn-foot button.primary:not(.danger), .vaults-page-head .vault-hdr-btn.primary, .vaults-page-head .vault-tab-form button.primary, .menu-create-org button.primary.sm) {
+  background: var(--accent) !important;
+  color: var(--text-on-accent) !important;
+  border-color: transparent !important;
+  opacity: 1;
+}
+html :is(.ghost-pill.members-access-toolbar-btn, .modal.group-dialog .confirm-actions button.primary:not(.danger), button.primary.members-invite-btn, .invite-btn.accept, .plan-ink-btn, .encryption-ink-btn, .vaults-split-open, .message-btn-primary, .vault-icon-settings .vault-icon-head-actions button.secondary, .checkpoint-ink-btn, .update-card-btn.is-ink, .update-row-btn.is-ink, .sidebar-update.is-ready, .vault-switch-chip, .mcp-new-token, .conn-foot button.primary:not(.danger), .vaults-page-head .vault-hdr-btn.primary, .vaults-page-head .vault-tab-form button.primary, .menu-create-org button.primary.sm):hover:not(:disabled),
+html[data-theme="dark"]:not(.rd-off) :is(.ghost-pill.members-access-toolbar-btn, .modal.group-dialog .confirm-actions button.primary:not(.danger), button.primary.members-invite-btn, .invite-btn.accept, .plan-ink-btn, .encryption-ink-btn, .vaults-split-open, .message-btn-primary, .vault-icon-settings .vault-icon-head-actions button.secondary, .checkpoint-ink-btn, .update-card-btn.is-ink, .update-row-btn.is-ink, .sidebar-update.is-ready, .vault-switch-chip, .mcp-new-token, .conn-foot button.primary:not(.danger), .vaults-page-head .vault-hdr-btn.primary, .vaults-page-head .vault-tab-form button.primary, .menu-create-org button.primary.sm):hover:not(:disabled) {
+  background: var(--accent-hover) !important;
+  opacity: 1 !important;
+}
+html :is(.ghost-pill.members-access-toolbar-btn, .modal.group-dialog .confirm-actions button.primary:not(.danger), button.primary.members-invite-btn, .invite-btn.accept, .plan-ink-btn, .encryption-ink-btn, .vaults-split-open, .message-btn-primary, .vault-icon-settings .vault-icon-head-actions button.secondary, .checkpoint-ink-btn, .update-card-btn.is-ink, .update-row-btn.is-ink, .sidebar-update.is-ready, .vault-switch-chip, .mcp-new-token, .conn-foot button.primary:not(.danger), .vaults-page-head .vault-hdr-btn.primary, .vaults-page-head .vault-tab-form button.primary, .menu-create-org button.primary.sm):disabled,
+html[data-theme="dark"]:not(.rd-off) :is(.ghost-pill.members-access-toolbar-btn, .modal.group-dialog .confirm-actions button.primary:not(.danger), button.primary.members-invite-btn, .invite-btn.accept, .plan-ink-btn, .encryption-ink-btn, .vaults-split-open, .message-btn-primary, .vault-icon-settings .vault-icon-head-actions button.secondary, .checkpoint-ink-btn, .update-card-btn.is-ink, .update-row-btn.is-ink, .sidebar-update.is-ready, .vault-switch-chip, .mcp-new-token, .conn-foot button.primary:not(.danger), .vaults-page-head .vault-hdr-btn.primary, .vaults-page-head .vault-tab-form button.primary, .menu-create-org button.primary.sm):disabled {
+  background: var(--accent) !important;
+  color: var(--text-on-accent) !important;
+  opacity: 0.45 !important;
+}
+html :is(.ghost-pill.members-access-toolbar-btn, .modal.group-dialog .confirm-actions button.primary:not(.danger), button.primary.members-invite-btn, .invite-btn.accept, .plan-ink-btn, .encryption-ink-btn, .vaults-split-open, .message-btn-primary, .vault-icon-settings .vault-icon-head-actions button.secondary, .checkpoint-ink-btn, .update-card-btn.is-ink, .update-row-btn.is-ink, .sidebar-update.is-ready, .vault-switch-chip, .mcp-new-token, .conn-foot button.primary:not(.danger), .vaults-page-head .vault-hdr-btn.primary, .vaults-page-head .vault-tab-form button.primary, .menu-create-org button.primary.sm) :is(.btn-spinner, .spinner-on-accent) {
+  border-color: color-mix(in srgb, var(--text-on-accent) 35%, transparent);
+  border-top-color: var(--text-on-accent);
+}

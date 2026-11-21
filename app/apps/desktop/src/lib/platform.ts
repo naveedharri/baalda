@@ -27,4 +27,26 @@ export function platformClass(): "macos" | "windows" | "linux" | "other" {
 
 export function initPlatform(): void {
   document.documentElement.dataset.platform = platformClass();
+  if (platformClass() === "macos") void watchFullscreen();
+}
+
+/**
+ * macOS hides the traffic lights in full screen, so the sidebar and search
+ * tools that sit after them move to the leading edge. `data-fullscreen` on
+ * <html> drives that (App.css). Outside Tauri (tests, a browser) it stays off.
+ */
+async function watchFullscreen(): Promise<void> {
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const win = getCurrentWindow();
+    const apply = async () => {
+      const on = await win.isFullscreen();
+      if (on) document.documentElement.dataset.fullscreen = "";
+      else delete document.documentElement.dataset.fullscreen;
+    };
+    await apply();
+    await win.onResized(() => void apply().catch(() => {}));
+  } catch {
+    // Not running under Tauri.
+  }
 }
