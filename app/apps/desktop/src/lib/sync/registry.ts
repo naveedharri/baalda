@@ -671,6 +671,10 @@ const OWN_MOVE_TTL_MS = 120_000;
 /** How long a path this device deleted in-app stays "ours" (see
  *  `RegistrySync.isOwnDelete`): past the pulls its own delete triggers. */
 export const OWN_DELETE_TTL_MS = 60_000;
+/** How long a path the registry removed from disk ITSELF stays "ours" (see
+ *  `VaultRegistry.isOwnRemoval`): past the watcher's echo, the 2.5 s delete
+ *  window and the slowest removal pass, with room for a long one on Windows. */
+export const OWN_REMOVAL_TTL_MS = 120_000;
 
 /**
  * The longest a sidebar delete of a not-yet-registered path waits for the
@@ -1177,6 +1181,21 @@ export class VaultRegistry {
    * never a teammate's delete to second-guess. See {@link isOwnDelete}.
    */
   private ownDeletes = new Map<string, number>();
+  /**
+   * Paths (`echoKey`) this registry took off the disk ITSELF moments ago: a
+   * revoked or deleted note, a revoked tree binary or embed, a removed folder,
+   * an empty stub. Keyed to when.
+   *
+   * The watcher reports those removals like any other, and to the disk-delete
+   * drain a mapped, pushed note that vanished IS a user delete. The mapping is
+   * only pruned at the END of the pass that removed the file, so whenever the
+   * echo arrived first (a long pass: a thousand revoked notes, a slow disk) the
+   * app's own access-change cleanup went back to the server as soft deletes in
+   * this user's name. Refused while access was off, ACCEPTED the moment it came
+   * back: an owner who set Everyone to No access and then granted folders again
+   * deleted 1,038 notes for the whole team (#419, #420). See {@link isOwnRemoval}.
+   */
+  private ownRemovals = new Map<string, number>();
   private unhydratedPlaceholders = new Set<string>();
   /** Everything that could not be registered in the last run. */
   private failed: RegistryFailure[] = [];
@@ -1466,6 +1485,7 @@ export class VaultRegistry {
     this.materializedByKey.clear();
     this.ownMoves.clear();
     this.ownDeletes.clear();
+    this.ownRemovals.clear();
     this.unhydratedPlaceholders.clear();
     // The identical-config memo (see {@link writeConfig}) is only honest while
     // this registry is the last thing that wrote `.context/config.json`. A
@@ -1600,6 +1620,8 @@ export class VaultRegistry {
     }
     this.materialized.add(relPath);
     this.materializedByKey.set(echoKey(relPath), relPath);
+    // The file is back, written by us: a later removal of it is news again.
+    this.ownRemovals.delete(echoKey(relPath));
     this.clearPendingPath(relPath);
   }
 
@@ -1663,6 +1685,48 @@ export class VaultRegistry {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Did this registry remove `relPath` from disk itself within
+   * {@link OWN_REMOVAL_TTL_MS} (see {@link ownRemovals})? Such a removal is
+   * never a user delete: not a note delete, not a file delete, not a folder
+   * delete, and never half of a rename. Not consumed (the watcher may report a
+   * path more than once); the entry ends when the file is written back
+   * (`markMaterialized`, {@link forgetOwnRemoval}) or ages out.
+   */
+  isOwnRemoval(relPath: string): boolean {
+    if (this.ownRemovals.size === 0) return false;
+    const k = echoKey(relPath);
+    const at = this.ownRemovals.get(k);
+    if (at === undefined) return false;
+    if (Date.now() - at > OWN_REMOVAL_TTL_MS) {
+      this.ownRemovals.delete(k);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Mark paths this registry (or the blob mirror on its behalf) is ABOUT to
+   * remove from disk. Before the removal, never after: the watcher's debounce
+   * is 150 ms and the mark has to be in place when the echo is read.
+   */
+  markOwnRemovals(paths: readonly string[]): void {
+    if (paths.length === 0) return;
+    const now = Date.now();
+    // Bounded by AGE, never by clearing: a revocation of 30,000 notes must not
+    // wipe the marks of the chunks whose echoes have not arrived yet.
+    if (this.ownRemovals.size > 20_000) {
+      for (const [k, at] of this.ownRemovals) if (now - at > OWN_REMOVAL_TTL_MS) this.ownRemovals.delete(k);
+    }
+    for (const p of paths) this.ownRemovals.set(echoKey(p), now);
+  }
+
+  /** The file is on disk again (a watcher event said so): its removal is over. */
+  forgetOwnRemoval(relPath: string): void {
+    if (this.ownRemovals.size === 0) return;
+    this.ownRemovals.delete(echoKey(relPath));
   }
 
   /** Mark in-app deletes as this device's own (see {@link ownDeletes}). */
@@ -2601,6 +2665,7 @@ export class VaultRegistry {
       return false;
     }
     // BEFORE the removal, so the claim beats the watcher to the queue.
+    this.markOwnRemovals([gone.path]);
     this.host?.suppressBinaryDelete?.(gone.path);
     try {
       // Access removal deletes outright: no local copy, whoever made the file
@@ -3020,6 +3085,10 @@ export class VaultRegistry {
       }, { concurrency: INBOUND_REMOVE_CONCURRENCY, shouldStop: () => cancelled || this.stopRun() });
       if (cancelled || this.stopRun()) return { changedDisk, suppress: plan.suppress };
       let outcomes: Array<{ path: string; error: string | null }>;
+      // BEFORE the removal: the watcher echo of these files must never read as
+      // the user deleting them (#419). The mappings are still in place until
+      // this pass prunes them, so nothing else would tell the two apart.
+      this.markOwnRemovals(ready.map((gone) => gone.path));
       try {
         if (bulkRemoval) {
           outcomes = ready.length === 0 ? [] : await ipc.deleteFilesBatch(ready.map((gone) => ({
@@ -3045,6 +3114,7 @@ export class VaultRegistry {
       for (const gone of ready) {
         const out = byPath.get(gone.path);
         if (!out || out.error) {
+          this.forgetOwnRemoval(gone.path); // still on disk: nothing of ours to echo
           if (gone.reason === "revoked") this.revokedKept.set(pathKey(gone.path), gone.docId);
           this.sink.item(this.recordFailure({ kind: "inbound", path: gone.path, docId: gone.docId,
             reason: out?.error ?? "local cleanup did not return a result", code: null }));
@@ -3116,6 +3186,7 @@ export class VaultRegistry {
       }
       if (this.stale()) return { changedDisk, suppress: plan.suppress };
       try {
+        this.markOwnRemovals([path]);
         await ipc.deleteFile(path, this.epoch());
         changedDisk = true;
         // Nothing is at that path any more, so no baseline entry may keep
@@ -3148,11 +3219,15 @@ export class VaultRegistry {
         // A folder this device deleted in-app is removed whole (the sidebar's
         // own recursive delete), never kept as a teammate's delete would be.
         const own = this.isOwnDelete(path);
+        // A folder this pass removes is not one the user deleted on disk: its
+        // `tree` echo must never reach the server as a folder delete.
+        this.markOwnRemovals([path]);
         let removed = await ipc.deleteFolderIfEmpty(path, this.epoch());
         if (!removed && own) {
           await ipc.deletePath(path, this.epoch());
           removed = true;
         }
+        if (!removed) this.forgetOwnRemoval(path);
         // A failed child removal also keeps its parents pending. Their being
         // non-empty is not evidence of NEW local work and must not resurrect
         // an otherwise deleted subtree.
@@ -4298,8 +4373,7 @@ export class VaultRegistry {
         if (this.stale()) return false;
         serverNotes = fresh.notes;
       }
-      this.inboundSuppressed = applied.suppress;
-    } else {
+      this.inboundSuppressed = applied.suppress;    } else {
       this.inboundSuppressed = new Set();
     }
 

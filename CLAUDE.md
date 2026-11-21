@@ -255,7 +255,14 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   Survivors call `registry.deletePath` — or `registry.deletePaths` → `POST /notes/delete-batch`
   above `BULK_THRESHOLD_DOCS`,
   both pooled — the SAME soft delete the sidebar's Delete makes, never `ipc.deletePath` (the file
-  is already gone). Three refusals: a doc that is not `isPushed` (its only copy may be local), a session
+  is already gone). A path the app removed ITSELF is never a user delete (#419, #420): every inbound
+  removal (revoked or deleted notes, empty stubs, folders, binaries and embeds through
+  `suppressBinaryDelete`) is marked `registry.markOwnRemovals` BEFORE the file goes, and
+  `queueDiskDelete`, the folder hold, the drain (again right before the request), `propagateGoneFolders`
+  and `BinaryDeleteQueue` all skip `isOwnRemoval` paths (120 s, cleared by `markMaterialized`). The
+  mappings are pruned only at the end of the pass, so on a long pass the echo used to queue revoked notes
+  as user deletes, sent once access came back (an Everyone → No access followed by folder grants
+  deleted 1,038 notes). Three refusals: a doc that is not `isPushed` (its only copy may be local), a session
   that is not yet live (`liveSince` = vault channel `synced` + one completed pull, so a missing file at
   startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window — judged
   FIRST, before any server call. Over the cap a disk delete is NEVER propagated: deleting for everyone

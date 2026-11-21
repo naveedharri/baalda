@@ -2068,6 +2068,10 @@ export class SyncManager implements InboundHost {
    * only stopped sharing. See `BinaryDeleteQueue.suppressNext`.
    */
   suppressBinaryDelete(relPath: string): void {
+    // The registry's mark too: the queue's own claim is spent by the FIRST
+    // event for the path, and a second report of the same removal must not
+    // become a server delete either.
+    this.registry.markOwnRemovals?.([relPath]);
     this.binaryDeletes?.suppressNext(relPath);
   }
 
@@ -2343,7 +2347,9 @@ export class SyncManager implements InboundHost {
       // to Trash is a rename). Held for the drain, which pairs it with a folder
       // that appeared (#221); on its own it changes nothing it did not before.
       if (kind === "tree" && gone === true) {
-        if (relPath && this.registry.getFolderId?.(relPath)) {
+        // A folder the registry removed itself (an access change, a teammate's
+        // delete) is not one the user deleted on disk.
+        if (relPath && this.registry.getFolderId?.(relPath) && !this.registry.isOwnRemoval?.(relPath)) {
           this.goneFolders.set(relPath, Date.now());
           this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
           queuedDelete = true;
@@ -2499,6 +2505,9 @@ export class SyncManager implements InboundHost {
    */
   private queueDiskDelete(scope: VaultScope, relPath: string): boolean {
     if (this.liveSince == null) return false;
+    // The registry removed this file itself: a revocation or a teammate's
+    // delete applied here, never this user deleting it (#419, #420).
+    if (this.registry.isOwnRemoval?.(relPath)) return false;
     // The registry moved this file itself (a same-path conflict copy): the path
     // is still the teammate's note and is about to be materialized back. Neither
     // a delete nor half of a rename — pairing it renamed their note on the server.
@@ -2564,15 +2573,17 @@ export class SyncManager implements InboundHost {
    */
   private async drainDiskDeletes(scope: VaultScope): Promise<void> {
     if (!this.enabled || !scope.isCurrent()) return;
-    let pending = [...this.pendingDiskDeletes].map(([docId, e]) => ({
-      docId,
-      relPath: e.relPath,
-    }));
+    // A path the registry removed itself never leaves as a user delete, however
+    // it got here (the second rail behind `queueDiskDelete`, #419).
+    const ownRemoval = (relPath: string) => this.registry.isOwnRemoval?.(relPath) === true;
+    let pending = [...this.pendingDiskDeletes]
+      .map(([docId, e]) => ({ docId, relPath: e.relPath }))
+      .filter((p) => !ownRemoval(p.relPath));
     this.pendingDiskDeletes.clear();
     this.pendingDeleteByPath.clear();
     let candidates = [...this.renameCandidates.keys()];
     this.renameCandidates.clear();
-    const goneFolders = [...this.goneFolders.keys()];
+    const goneFolders = [...this.goneFolders.keys()].filter((f) => !ownRemoval(f));
     this.goneFolders.clear();
     /** Vanished registered folders this drain may remove from the server once
      *  their contents are gone (see {@link propagateGoneFolders}): not the ones
@@ -2733,8 +2744,12 @@ export class SyncManager implements InboundHost {
       }
 
       // 4. The user already removed these files from disk. Propagate that final
-      //    choice without manufacturing another retained copy.
-      await this.propagateAndForget(deletes, scope);
+      //    choice without manufacturing another retained copy. Asked once more
+      //    right before the request: the pairing above awaited, and a removal
+      //    pass may have started meanwhile.
+      const finalDeletes = deletes.filter((d) => !ownRemoval(d.relPath));
+      if (finalDeletes.length === 0) return;
+      await this.propagateAndForget(finalDeletes, scope);
     } finally {
       if (folderStep && foldersToRemove.length > 0 && scope.isCurrent() && !this.rootMissing) {
         try {
@@ -2785,7 +2800,11 @@ export class SyncManager implements InboundHost {
       if (!exists) stillGone.push(top);
     }
     if (!scope.isCurrent() || stillGone.length === 0) return;
-    const all = [...new Set(stillGone.flatMap((t) => this.registry.mappedFoldersUnder(t)))].sort(
+    const all = [...new Set(stillGone.flatMap((t) => this.registry.mappedFoldersUnder(t)))]
+      // A subfolder the registry removed itself (an access change) is not part
+      // of what the user deleted (#419).
+      .filter((p) => !this.registry.isOwnRemoval?.(p))
+      .sort(
       (a, b) => b.split("/").length - a.split("/").length || b.localeCompare(a),
     );
     if (all.length === 0) return;
@@ -7489,6 +7508,7 @@ export class SyncManager implements InboundHost {
       listLocal: () => ipc.listBinaries(epoch),
       listServer: () => api.listVaultBlobs(vaultId),
       fileId: (relPath) => registry.getFileId(relPath),
+      isOwnRemoval: (relPath) => registry.isOwnRemoval(relPath),
       // The mirror caches ids per path too, and consults that cache BEFORE the
       // registry. Forgetting only the registry's copy left the dead id live for
       // the rest of the session: a file that came back uploaded under a row

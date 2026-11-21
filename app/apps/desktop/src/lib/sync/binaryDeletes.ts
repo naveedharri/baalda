@@ -116,6 +116,12 @@ export interface BinaryDeleteDeps {
   listServer(): Promise<RemoteBlob[]>;
   /** The server `files` id this device registered for a path, if any. */
   fileId(relPath: string): string | null;
+  /**
+   * Did the app remove this path from disk ITSELF moments ago (a revocation, a
+   * teammate's delete, a hidden embed; `registry.isOwnRemoval`)? Such a path
+   * is never a user delete, however many watcher events report it.
+   */
+  isOwnRemoval?: (relPath: string) => boolean;
   /** Forget a registration whose file is gone. */
   forgetFileId(relPath: string): void;
   /** Move one to the path its bytes turned up at. */
@@ -252,6 +258,9 @@ export class BinaryDeleteQueue {
     // Our own removal echoing back. Consumed, so the SECOND event for the path
     // (a file the user later re-creates and deletes for real) is ordinary again.
     if (this.suppressed.delete(key(relPath))) return;
+    // A repeat report of the same removal (the claim above is spent by the
+    // first event): still ours, still not a delete.
+    if (this.deps.isOwnRemoval?.(relPath)) return;
     // Not live ⇒ startup: a file that isn't there yet is a disk (or a pull)
     // catching up, not a deletion. Refused HERE rather than at drain time so
     // the window never starts and the path stays downloadable meanwhile.
@@ -373,7 +382,10 @@ export class BinaryDeleteQueue {
       if (switched || !this.deps.isCurrent()) return;
       const gone: Pending[] = [];
       const present: string[] = [];
-      batch.forEach((item, i) => (missing[i] ? gone.push(item) : present.push(item.relPath)));
+      batch.forEach((item, i) => {
+        if (!missing[i]) present.push(item.relPath);
+        else if (!this.deps.isOwnRemoval?.(item.relPath)) gone.push(item);
+      });
       if (gone.length === 0) return;
 
       let local: LocalBinary[];

@@ -100,6 +100,12 @@ const fakeRegistry = vi.hoisted(() => {
     }),
     revertRefusedMove: vi.fn(async (_from: string, _to: string) => true),
     recordFailure: vi.fn((_f: unknown) => {}),
+    // ---- #419: paths the registry removed from disk ITSELF ----
+    ownRemovals: new Set<string>(),
+    isOwnRemoval: vi.fn((relPath: string) => reg.ownRemovals.has(relPath)),
+    markOwnRemovals: vi.fn((paths: readonly string[]) => {
+      for (const p of paths) reg.ownRemovals.add(p);
+    }),
     // ---- #221: folders and the closed-app drift report ----
     /** Registered folder ids by path. */
     folders: new Map<string, string>(),
@@ -425,6 +431,7 @@ beforeEach(() => {
   fakeRegistry.emptyOnDisk = new Set();
   fakeRegistry.isNoteEmptyOnDisk.mockClear();
   fakeRegistry.materialized = new Set();
+  fakeRegistry.ownRemovals = new Set();
   fakeRegistry.consumeMaterialized.mockClear();
   fakeRegistry.deletePath.mockClear().mockResolvedValue(undefined);
   fakeRegistry.deletePaths.mockClear().mockImplementation(async (paths: readonly string[]) =>
@@ -1596,6 +1603,85 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
       notes.slice(0, 30).map((n) => n.relPath),
     );
     expect(fakeDisk.trashed).toEqual([]);
+  });
+
+  // #419 / #420. An access change takes revoked notes off this disk, and the
+  // watcher reports those removals exactly like a user's. The registry only
+  // prunes the mappings at the END of the pass that removed the files, so the
+  // echo found them still mapped and pushed and queued them as user deletes:
+  // refused while access was off, accepted the moment it came back, and an
+  // owner's Everyone → No access followed by folder grants soft-deleted 1,038
+  // notes for the whole team. A path the registry marked as its own removal is
+  // never a user delete, at any of the drain's steps.
+  it("never sends the app's own access-change cleanup to the server as user deletes (#419)", async () => {
+    const sm = new SyncManager();
+    const notes = mapMany(200); // cap 40: unguarded, 30 would be sent as ONE batch
+    await live(sm);
+    const revoked = notes.slice(0, 30);
+    // What `applyInbound` does before `deleteFilesBatch`. The mappings are
+    // still in place, exactly as they are while the pass is running.
+    fakeRegistry.markOwnRemovals(revoked.map((n) => n.relPath));
+
+    sm.handleLocalFilesChanged(revoked.map((n) => ({ path: n.relPath, kind: "removed" as const })));
+    await drain();
+
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(sm.pendingDeleteDecision()).toBeFalsy();
+  });
+
+  it("a revocation larger than the cap is not held as 'you removed N notes' (#420)", async () => {
+    // The fast-machine half of the same bug: one window over the cap was held
+    // for the user's answer, with a banner saying they had removed notes they
+    // never touched.
+    const sm = new SyncManager();
+    const notes = mapMany(200);
+    await live(sm);
+    const revoked = notes.slice(0, 150);
+    fakeRegistry.markOwnRemovals(revoked.map((n) => n.relPath));
+
+    sm.handleLocalFilesChanged(revoked.map((n) => ({ path: n.relPath, kind: "removed" as const })));
+    await drain();
+
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(sm.pendingDeleteDecision()).toBeFalsy();
+    expect(sm.structureNotice().pendingDelete).toBeFalsy();
+  });
+
+  it("a removal the registry claims while the window is still open never leaves either", async () => {
+    // The second rail, at the drain itself: whatever queued the path, the
+    // registry's word that it removed the file wins before any request.
+    const sm = new SyncManager();
+    const notes = mapMany(200);
+    await live(sm);
+    const gone = notes.slice(0, 30);
+
+    sm.handleLocalFilesChanged(gone.map((n) => ({ path: n.relPath, kind: "removed" as const })));
+    fakeRegistry.markOwnRemovals(gone.map((n) => n.relPath));
+    await drain();
+
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+  });
+
+  it("a user's own delete in the same window as a revocation still propagates, alone", async () => {
+    const sm = new SyncManager();
+    const notes = mapMany(200);
+    await live(sm);
+    const revoked = notes.slice(0, 30);
+    const mine = notes.slice(30, 33);
+    fakeRegistry.markOwnRemovals(revoked.map((n) => n.relPath));
+
+    sm.handleLocalFilesChanged(
+      [...revoked, ...mine].map((n) => ({ path: n.relPath, kind: "removed" as const })),
+    );
+    await drain();
+
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath.mock.calls.map((c) => c[0]).sort()).toEqual(
+      mine.map((n) => n.relPath).sort(),
+    );
   });
 
   it("keeps the per-note call below the bulk threshold", async () => {
