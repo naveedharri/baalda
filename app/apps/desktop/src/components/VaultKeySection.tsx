@@ -26,15 +26,7 @@ import { saveVaultKeyToFile } from "../lib/vaultKeys/saveKeyFile";
 import { recordVaultKeySaved } from "../lib/vaultKeys/reportSavedFlag";
 import { AsyncButton } from "./AsyncButton";
 import { CopyField } from "./McpTab";
-
-const RESTORE_MESSAGES: Record<string, string> = {
-  restored: "Vault key restored on this computer.",
-  "invalid-words": "Those are not 24 valid key words. Check each word.",
-  "wrong-key": "That key does not belong to this vault. Nothing was changed.",
-  "cannot-verify": "The server could not confirm the key right now. Try again later.",
-  "security-warning": "Your security key does not match this computer. Keys are paused.",
-  disabled: "This server does not support vault keys yet.",
-};
+import { RestoreVaultKeyDialog } from "./RestoreVaultKeyDialog";
 
 export function VaultKeySection({
   vaultName,
@@ -49,14 +41,12 @@ export function VaultKeySection({
   const session = currentVaultKeySession();
   const [shown, setShown] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
-  const [restoreText, setRestoreText] = useState("");
   const [fullyEncrypted, setFullyEncrypted] = useState<boolean | undefined>(undefined);
   const [, bump] = useState(0);
   // Revealed words belong to ONE vault: a vault switch hides them (they must
   // never be shown under another vault's name).
   useEffect(() => {
     setShown(null);
-    setRestoreText("");
     setRestoring(false);
   }, [vaultId]);
   useEffect(() => {
@@ -121,7 +111,7 @@ export function VaultKeySection({
             </button>
           </>
         )}
-        {!words && !restoring && (
+        {!words && (
           <button type="button" className="encryption-ink-btn" onClick={() => setRestoring(true)}>
             Restore with vault key
           </button>
@@ -146,46 +136,12 @@ export function VaultKeySection({
       )}
 
       {!words && restoring && (
-        <div className="vault-key-panel">
-          <textarea
-            className="vault-key-input"
-            value={restoreText}
-            rows={3}
-            autoFocus
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="Paste the 24 words of this vault's key"
-            aria-label="Vault key"
-            onChange={(e) => setRestoreText(e.target.value)}
-          />
-          <div className="row">
-            <AsyncButton
-              className="primary sm"
-              disabled={!restoreText.trim()}
-              onClick={async () => {
-                const result = await session.restoreWithVaultKey(vaultId, restoreText);
-                toast(RESTORE_MESSAGES[result] ?? result, result === "restored" ? "success" : "error");
-                if (result === "restored") {
-                  setRestoreText("");
-                  setRestoring(false);
-                  bump((n) => n + 1);
-                }
-              }}
-            >
-              Restore
-            </AsyncButton>
-            <button
-              type="button"
-              className="secondary sm"
-              onClick={() => {
-                setRestoring(false);
-                setRestoreText("");
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+        <RestoreVaultKeyDialog
+          vaultId={vaultId}
+          vaultName={vaultName}
+          onClose={() => setRestoring(false)}
+          onRestored={() => bump((n) => n + 1)}
+        />
       )}
     </EncryptionCard>
   );

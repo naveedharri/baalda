@@ -288,6 +288,13 @@ export function wordsToVaultKey(words: string): Uint8Array | null {
   return vk.length === VK_BYTES ? vk : null;
 }
 
+const KEY_WORDS: ReadonlySet<string> = new Set(english);
+
+/** Is `word` (lowercase) one of the 2048 words a vault key is made of? */
+export function isVaultKeyWord(word: string): boolean {
+  return KEY_WORDS.has(word);
+}
+
 /** Text for "Save to file" / "Email it to myself": the 24 words on ONE line, so
  *  the whole key copies cleanly into "Restore with vault key". */
 export function vaultKeyFileText(vaultName: string, vaultId: string, vk: Uint8Array): string {

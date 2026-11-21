@@ -5,8 +5,11 @@
 
 import { useState } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { RestoreVaultKeyDialog } from "./RestoreVaultKeyDialog";
+
+export { RestoreVaultKeyDialog };
 import { toast } from "../lib/toast";
-import { currentVaultKeySession, startFreshAccountKey, vaultKeysNudge } from "../lib/vaultKeys/runtime";
+import { startFreshAccountKey } from "../lib/vaultKeys/runtime";
 import {
   FRESH_KEY_EXPLAINER,
   FRESH_KEY_WAITING_PREFIX,
@@ -15,47 +18,6 @@ import {
   offersRestoreInstead,
   type LostDevicesStep,
 } from "../lib/vaultKeys/recovery";
-
-/** The owner's 24-word restore for one vault. */
-export function RestoreVaultKeyDialog({ vaultId, onClose }: { vaultId: string; onClose: () => void }) {
-  const [words, setWords] = useState("");
-  return (
-    <ConfirmDialog
-      title="Restore with vault key"
-      tone="accent"
-      confirmLabel="Restore"
-      confirmDisabled={!words.trim()}
-      onCancel={onClose}
-      onConfirm={async () => {
-        const result = await currentVaultKeySession()?.restoreWithVaultKey(vaultId, words);
-        if (result === "restored") {
-          toast("Vault key restored on this computer.");
-          setWords("");
-          onClose();
-          vaultKeysNudge();
-        } else {
-          toast(
-            result === "wrong-key"
-              ? "That key does not belong to this vault. Nothing was changed."
-              : result === "invalid-words"
-                ? "Those are not 24 valid key words. Check each word."
-                : "The key could not be checked right now. Try again later.",
-            "error",
-          );
-        }
-      }}
-    >
-      <p>Paste the 24 words of this vault's key.</p>
-      <textarea
-        value={words}
-        rows={3}
-        autoComplete="off"
-        spellCheck={false}
-        onChange={(e) => setWords(e.target.value)}
-      />
-    </ConfirmDialog>
-  );
-}
 
 /** The fresh-key wait: the code teammates must confirm. */
 export function FreshKeyWaitingDialog({ code, onClose }: { code: string; onClose: () => void }) {
