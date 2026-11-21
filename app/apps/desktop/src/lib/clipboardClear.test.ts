@@ -11,10 +11,18 @@ function harness() {
   let board: string | null = null;
   const timers: Array<{ fn: () => void; at: number; live: boolean }> = [];
   let now = 0;
-  const clearIf = vi.fn(async (hash: string) => {
-    if (board === null || (await sha256HexOfText(board)) !== hash) return false;
-    board = null;
-    return true;
+  // The fake clipboard's compare hashes for real (off the main thread), so a
+  // fixed tick is not enough on a busy machine: `advance` awaits every clear
+  // a fired timer started.
+  const inflight: Promise<boolean>[] = [];
+  const clearIf = vi.fn((hash: string) => {
+    const p = (async () => {
+      if (board === null || (await sha256HexOfText(board)) !== hash) return false;
+      board = null;
+      return true;
+    })();
+    inflight.push(p);
+    return p;
   });
   const clearer = createClipboardClearer({
     sha256Hex: sha256HexOfText,
@@ -36,7 +44,7 @@ function harness() {
         t.fn();
       }
     }
-    await new Promise((r) => setTimeout(r, 0));
+    await Promise.all(inflight.splice(0));
   };
   return {
     clearer,
