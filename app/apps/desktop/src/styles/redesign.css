@@ -3508,3 +3508,80 @@ html:not(.rd-off) .vaults-root-path svg { color: var(--text-tertiary); flex: non
 html:not(.rd-off) .vaults-root .link-btn { font: 500 14px var(--font-body); color: var(--accent); padding: 0; }
 html:not(.rd-off) .vaults-root .vaults-root-reset { color: var(--text-tertiary); font-weight: 400; }
 @container (max-width: 640px) { html:not(.rd-off) .vaults-page-filters { flex-direction: column; align-items: stretch; } }
+
+
+/* ============================================================
+   Filled action buttons are near-black ink app-wide (the Members and access
+   look: "Invite people", the access-group dialogs), never violet. Red
+   (danger) buttons stay red. Violet stays for links, focus rings, ticks,
+   switches, selection and badges. Last in the cascade on purpose: it replaces
+   every earlier accent fill for these buttons, the dark theme's included.
+   ============================================================ */
+html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child),
+html[data-theme="dark"]:not(.rd-off) :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child) {
+  background: var(--text-primary) !important;
+  color: var(--bg-surface) !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  filter: none !important;
+}
+html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):hover:not(:disabled),
+html[data-theme="dark"]:not(.rd-off) :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):hover:not(:disabled) {
+  background: var(--text-primary) !important;
+  opacity: 0.88;
+}
+html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):disabled,
+html[data-theme="dark"]:not(.rd-off) :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):disabled {
+  background: var(--text-primary) !important;
+  color: var(--bg-surface) !important;
+  opacity: 0.35 !important;
+}
+html:not(.rd-off) .confirm-actions button.primary:not(.danger):disabled * {
+  color: var(--bg-surface) !important;
+}
+html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child) :is(.btn-spinner, .spinner-on-accent) {
+  border-color: color-mix(in srgb, var(--bg-surface) 35%, transparent);
+  border-top-color: var(--bg-surface);
+}
+
+
+/* The vault menu and the account menu open nudged a little to the right of
+   their trigger, so they read as a layer lifted over the sidebar rather than
+   part of it. `translate` composes with the open animation's `transform`. */
+html:not(.rd-off) :is(.vault-popover, .account-popover) {
+  translate: 10px 0;
+}
+
+
+/* Vault menu and account menu: a little wider than before, with everything
+   inside one step smaller (text, icons, rows, padding). Last on purpose. */
+html:not(.rd-off) :is(.vault-switcher, .account-popover) {
+  width: calc(var(--sidebar-layout-w, 302px) + 20px) !important;
+  padding: 7px !important;
+  gap: 0 !important;
+}
+html:not(.rd-off) :is(.vault-switcher, .account-popover)::before { padding: 3px 8px 5px !important; font-size: 10.5px !important; }
+html:not(.rd-off) .vault-switcher .vault-card { min-height: 38px !important; padding: 0 8px !important; gap: 9px !important; }
+html:not(.rd-off) .vault-switcher .vault-card .vault-tile { width: 25px !important; height: 25px !important; border-radius: 6px !important; }
+html:not(.rd-off) .vault-switcher .vault-card-name { font-size: 13px !important; }
+html:not(.rd-off) .vault-switcher .vault-card-sub { font-size: 11px !important; }
+html:not(.rd-off) .vault-switcher .vault-card-kbd { font-size: 10.5px !important; }
+html:not(.rd-off) .vault-switcher .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item,
+html:not(.rd-off) :is(.account-popover > .menu-item, .account-popover > .invites-tab > .menu-item) {
+  min-height: 30px !important; padding: 3px 8px !important; gap: 9px !important; font-size: 13px !important;
+}
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: 13px !important; }
+html:not(.rd-off) .vault-switcher .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon,
+html:not(.rd-off) :is(.account-popover > .menu-item, .account-popover > .invites-tab > .menu-item) .menu-icon {
+  width: 13px !important; height: 13px !important; padding: 4px !important; border-radius: 6px !important;
+}
+html:not(.rd-off) :is(.vault-switcher, .account-popover) .menu-hint { font-size: 11px !important; }
+html:not(.rd-off) :is(.vault-switcher, .account-popover) .menu-sep { margin: 3px 8px !important; }
+html:not(.rd-off) .vault-switcher .menu-create-org input { font-size: 12.5px !important; }
+html:not(.rd-off) .account-popover > .rd-status { font-size: 13px !important; }

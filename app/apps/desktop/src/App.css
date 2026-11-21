@@ -9163,6 +9163,10 @@ button.secondary:active:not(:disabled),
   color: var(--text-faint);
   cursor: default;
 }
+/* No tab strip (a single tab is hidden): keep the gap it gave below the header. */
+.member-profile-head + :not(.member-profile-tabs) {
+  margin-top: var(--sp-5);
+}
 .member-profile-about {
   display: grid;
   grid-template-columns: minmax(120px, 200px) 1fr;
