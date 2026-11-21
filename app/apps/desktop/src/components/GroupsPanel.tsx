@@ -26,6 +26,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { MemberAccessBoard } from "./MemberAccessBoard";
 import { MenuSelect } from "./MenuSelect";
 import { RowActionsMenu, type RowAction } from "./RowActionsMenu";
+import { Switch } from "./Switch";
 
 /**
  * Access groups (server migration 097) in Vault Settings → Members and access:
@@ -130,7 +131,7 @@ export function GroupsList({ list, failed, members, manage, busy, query, onOpen,
       ) : groups.length === 0 ? (
         <div className="groups-empty">
           <p className="groups-empty-title">No access groups yet</p>
-          <p className="muted">
+          <p className="muted groups-empty-line">
             Put people in a group (Design, Sales, Contractors) and give the group access once, instead of person by person.
             {manage ? " A group only adds access; it never takes any away. Start with + New access group above." : ""}
           </p>
@@ -314,14 +315,15 @@ export function GroupDialog({ orgId, groups, group, candidates, myUserId, onClos
             myUserId={myUserId}
             onToggle={(id) => setPicked((p) => { const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id); return n; })}
           />
-          <label className="group-dialog-check">
-            <input type="checkbox" checked={autoJoin} onChange={(e) => setAutoJoin(e.target.checked)} />
-            <span>
+          {/* A setting, not another person: a switch row, unlike the People checkboxes. */}
+          <label className="group-dialog-setting">
+            <span className="group-dialog-setting-text">
               New members join this group
               <small className="muted">Everyone who joins {"the vault"} later is added automatically.</small>
             </span>
+            <Switch checked={autoJoin} onChange={setAutoJoin} ariaLabel="New members join this group" />
           </label>
-          <p className="field-hint">You choose what the group can open on its Access tab. A group only adds access.</p>
+          <p className="field-hint">Pick what it can open on its Access tab. Groups only add access.</p>
         </>
       )}
       {error && <div className="auth-error">{error}</div>}
@@ -524,28 +526,26 @@ export function GroupPage({
       </header>
       {/* One tab is no choice: a plain member sees Members alone, so no strip. */}
       {tabs.length > 1 && (
-        <div className="member-profile-tabs" role="tablist" aria-label="Group">
-          {tabs.map((t) => (
-            <button key={t} type="button" role="tab" aria-selected={t === tab} className={`member-profile-tab${t === tab ? " active" : ""}`} onClick={() => setTab(t)}>
-              {TAB_LABEL[t]}
+        // The tabs and Members' "+ Add people" share one row, the button as
+        // tall as the tab strip. The header already gives the count.
+        <div className="group-page-tabsrow">
+          <div className="member-profile-tabs" role="tablist" aria-label="Group">
+            {tabs.map((t) => (
+              <button key={t} type="button" role="tab" aria-selected={t === tab} className={`member-profile-tab${t === tab ? " active" : ""}`} onClick={() => setTab(t)}>
+                {TAB_LABEL[t]}
+              </button>
+            ))}
+          </div>
+          {tab === "members" && manage && (
+            <button type="button" className="ghost-pill members-access-toolbar-btn group-page-add" disabled={busy} onClick={() => setAdding(true)}>
+              + Add people
             </button>
-          ))}
+          )}
         </div>
       )}
 
       {tab === "members" ? (
         <div className="group-members">
-          <div className="group-members-head">
-            <span className="muted">
-              {people.length === 1 ? "1 person" : `${people.length} people`}
-              {group.invited.length ? `, ${group.invited.length} invited` : ""}
-            </span>
-            {manage && (
-              <button type="button" className="ghost-pill members-access-toolbar-btn" disabled={busy} onClick={() => setAdding(true)}>
-                + Add people
-              </button>
-            )}
-          </div>
           {people.length === 0 && group.invited.length === 0 ? (
             <p className="member-activity-empty">Nobody is in {group.name} yet.</p>
           ) : (

@@ -9164,7 +9164,7 @@ button.secondary:active:not(:disabled),
   cursor: default;
 }
 /* No tab strip (a single tab is hidden): keep the gap it gave below the header. */
-.member-profile-head + :not(.member-profile-tabs) {
+.member-profile-head + :not(.member-profile-tabs, .group-page-tabsrow) {
   margin-top: var(--sp-5);
 }
 .member-profile-about {
@@ -12522,3 +12522,33 @@ html .modal input[type="checkbox"]:not(.switch-input):focus:not(:focus-visible) 
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+/* A group's page: tabs left, "+ Add people" right, one row, one height. */
+.group-page-tabsrow {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0 var(--sp-5);
+}
+.group-page-tabsrow > .member-profile-tabs { margin: 0 !important; }
+.group-page-tabsrow > .group-page-add { height: auto !important; min-height: 0; align-self: stretch; padding: 0 var(--sp-4); }
+
+/* The empty Access groups card: the text runs the card's full width. */
+.groups-empty-line { max-width: none !important; }
+
+/* New access group: "New members join this group" is a setting row (text left,
+   switch right), set apart from the People checkboxes above it. */
+.group-dialog-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin-top: var(--sp-2);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.group-dialog-setting-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.group-dialog-setting-text small { font-size: var(--fs-xs); }
+/* The dialog's 16px checkbox rule would shrink the switch's invisible hit area. */
+.modal.group-dialog .group-dialog-setting .switch-input { width: 100%; height: 100%; }
