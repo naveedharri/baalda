@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { placeMenu, type Placement } from "../lib/menuPlacement";
+import { CheckIcon } from "./CheckIcon";
 
 /**
  * The app's one popover select.
@@ -37,6 +38,15 @@ export interface MenuSelectOption<T extends string> {
   label: string;
   /** Optional second line, for options whose consequence needs saying. */
   hint?: string;
+  /** A heading drawn above this option, starting a section (e.g. "Groups"). */
+  section?: string;
+  /**
+   * Its own tick, independent of `value`: for options that toggle (a group
+   * new members join) rather than pick. Choosing it always calls onSelect.
+   */
+  checked?: boolean;
+  /** A small pill after the label, e.g. "Default". */
+  tag?: string;
 }
 
 /** Gap between the trigger and the menu, on whichever side it opens. */
@@ -191,26 +201,34 @@ export function MenuSelect<T extends string>({
                 { position: "fixed", left: 0, top: 0, right: "auto", visibility: "hidden" }
           }
         >
-          {options.map((o) => (
+          {options.map((o) => {
+            const on = o.checked ?? value === o.value;
+            return (
+            <Fragment key={o.value}>
+            {o.section && (
+              <li role="presentation" className="menu-section-label">{o.section}</li>
+            )}
             <li
-              key={o.value}
-              role="menuitemradio"
-              aria-checked={value === o.value}
-              className={value === o.value ? "is-on" : undefined}
+              role={o.checked === undefined ? "menuitemradio" : "menuitemcheckbox"}
+              aria-checked={on}
+              className={on ? "is-on" : undefined}
               onClick={() => {
                 setOpen(false);
-                if (o.value !== value) void onSelect(o.value);
+                if (o.checked !== undefined || o.value !== value) void onSelect(o.value);
               }}
             >
               <span className="menu-tick" aria-hidden="true">
-                {value === o.value ? "✓" : ""}
+                {on ? <CheckIcon /> : null}
               </span>
               <span className="role-option-label">
                 {o.label}
+                {o.tag && <span className="menu-option-tag">{o.tag}</span>}
                 {o.hint && <span className="menu-option-hint">{o.hint}</span>}
               </span>
             </li>
-          ))}
+            </Fragment>
+            );
+          })}
         </ul>,
         document.body,
       )}

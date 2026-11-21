@@ -71,6 +71,8 @@ export interface SkillAudience {
 /** A skill's Shared with list (owners/admins). */
 export interface SkillAccessList {
   everyone: SkillAccessLevel;
+  /** Every access group and its row for this skill (absent on servers without groups). */
+  groups?: { groupId: string; name: string; color: string | null; level: "required" | "optional" | null }[];
   people: {
     userId: string;
     name: string;

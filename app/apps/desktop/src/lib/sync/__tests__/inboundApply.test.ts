@@ -31,7 +31,7 @@ vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }
 import { ACCESS_CHECK_MAX, type ApiClient } from "../../api";
 import * as ipc from "../../ipc";
 import type { TreeNode } from "../../ipc";
-import { OWN_DELETE_TTL_MS, VaultRegistry, type InboundHost } from "../registry";
+import { OWN_DELETE_TTL_MS, OWN_REMOVAL_TTL_MS, VaultRegistry, type InboundHost } from "../registry";
 import { sha256Hex } from "../../bridge/adapter";
 import { reconcileReport } from "../reconcileReport";
 
@@ -658,6 +658,72 @@ describe("inbound delete", () => {
     // unsyncable ghost.
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
     expect(r.reg.hasFailures()).toBe(false);
+  });
+
+  it("marks each file it removes as its own BEFORE removing it, while its mapping still stands (#419)", async () => {
+    // The watcher reports this removal like a user's, and the mapping is only
+    // pruned at the end of the pass. The mark is what tells the disk-delete
+    // drain the two apart, so it has to be in place when the file goes.
+    const disk = new FakeDisk();
+    disk.notes.set("shared.md", "d1");
+    install(disk);
+    const reg1 = new VaultRegistry(fakeApi({ notes: [{ id: "d1", rel_path: "shared.md" }] }));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+
+    const reg = new VaultRegistry(fakeApi({ notes: [], tombstones: [] }));
+    reg.setInboundHost(recordingHost().host);
+    const seen: Array<{ path: string; own: boolean; mapped: string | null }> = [];
+    const watch = (path: string) =>
+      seen.push({ path, own: reg.isOwnRemoval(path), mapped: reg.getMapping(path)?.docId ?? null });
+    const single = vi.mocked(ipc.deleteFile).getMockImplementation()!;
+    vi.mocked(ipc.deleteFile).mockImplementation(async (path, epoch) => {
+      watch(path);
+      return single(path, epoch);
+    });
+    const batch = vi.mocked(ipc.deleteFilesBatch).getMockImplementation();
+    if (batch) {
+      vi.mocked(ipc.deleteFilesBatch).mockImplementation(async (items, epoch) => {
+        for (const item of items) watch(item.path);
+        return batch(items, epoch);
+      });
+    }
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(disk.notes.has("shared.md")).toBe(false);
+    expect(seen).toEqual([{ path: "shared.md", own: true, mapped: "d1" }]);
+    // Still ours after the pass, under any spelling the OS reports it by…
+    expect(reg.isOwnRemoval("shared.md")).toBe(true);
+    expect(reg.isOwnRemoval("Shared.md")).toBe(true);
+    expect(reg.isOwnRemoval("other.md")).toBe(false);
+    // …until the app writes it back (access restored), when a later removal
+    // is news again.
+    reg.markMaterialized("shared.md");
+    expect(reg.isOwnRemoval("shared.md")).toBe(false);
+  });
+
+  it("a huge removal keeps every fresh mark (no wholesale clear)", () => {
+    const reg = new VaultRegistry(fakeApi({ notes: [] }));
+    const paths = Array.from({ length: 30_000 }, (_, i) => `n${i}.md`);
+    for (let i = 0; i < paths.length; i += 64) reg.markOwnRemovals(paths.slice(i, i + 64));
+    expect(reg.isOwnRemoval("n0.md")).toBe(true);
+    expect(reg.isOwnRemoval("n29999.md")).toBe(true);
+  });
+
+  it("an own-removal mark ages out", () => {
+    const reg = new VaultRegistry(fakeApi({ notes: [] }));
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      reg.markOwnRemovals(["a.md"]);
+      now.mockReturnValue(1_000_000 + OWN_REMOVAL_TTL_MS - 1);
+      expect(reg.isOwnRemoval("a.md")).toBe(true);
+      now.mockReturnValue(1_000_000 + OWN_REMOVAL_TTL_MS + 1);
+      expect(reg.isOwnRemoval("a.md")).toBe(false);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("brings a revoked note BACK when access is restored", async () => {
@@ -2572,6 +2638,26 @@ describe("offline reconciliation — same-path create (D4)", () => {
     expect(reg.isOwnMove("P.md")).toBe(true);
     expect(reg.isOwnMove(moved)).toBe(true);
     expect(reg.isOwnMove("a.md")).toBe(false);
+    // Only the side the file left is ours to ignore on removal.
+    expect(reg.isOwnMoveSource("P.md")).toBe(true);
+    expect(reg.isOwnMoveSource(moved)).toBe(false);
+  });
+
+  it("a refused rename put back leaves the old name deletable: only the new name is its own removal", async () => {
+    const { disk, reg } = await sameCreate({
+      serverCreatedAt: "2020-01-01T00:00:00Z",
+      localCreated: Date.parse("2026-09-26T00:00:00Z"),
+    });
+    disk.notes.set("New.md", "renamed by the person");
+    expect(await reg.revertRefusedMove("Old.md", "New.md")).toBe(true);
+    expect(disk.notes.has("Old.md")).toBe(true);
+    expect(disk.notes.has("New.md")).toBe(false);
+    // Both stay "ours" for the watcher echo and rename pairing…
+    expect(reg.isOwnMove("Old.md")).toBe(true);
+    expect(reg.isOwnMove("New.md")).toBe(true);
+    // …but deleting the restored old name right after is a real delete.
+    expect(reg.isOwnMoveSource("New.md")).toBe(true);
+    expect(reg.isOwnMoveSource("Old.md")).toBe(false);
   });
 
   it("the local note is later: it is renamed and never bound to the teammate's id", async () => {

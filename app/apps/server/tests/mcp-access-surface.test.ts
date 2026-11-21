@@ -120,6 +120,8 @@ describe("MCP access-management HTTP surface", () => {
       "set_access_default",
       "list_resource_access",
       "manage_access",
+      "list_groups",
+      "manage_group",
       "list_folders",
       "list_notes",
       "read_note",
@@ -148,7 +150,7 @@ describe("MCP access-management HTTP surface", () => {
         resources: {
           items: { properties: { resourceType: { enum: ["folder", "file", "vault"] } } },
         },
-        audience: { properties: { type: { enum: ["org", "users"] } } },
+        audience: { properties: { type: { enum: ["org", "users", "group"] } } },
         mode: { enum: ["private", "readonly", "open"] },
       },
     });
@@ -178,6 +180,7 @@ describe("MCP access-management HTTP surface", () => {
       "get_access_default",
       "list_resource_access",
       "list_access_audit",
+      "list_groups",
       "list_skills",
       "get_skill",
       "read_skill_file",
@@ -188,6 +191,7 @@ describe("MCP access-management HTTP surface", () => {
       "delete_folder",
       "update_note",
       "manage_access",
+      "manage_group",
       "set_access_default",
     ]);
     for (const tool of tools) {

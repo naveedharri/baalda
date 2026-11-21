@@ -31,6 +31,7 @@ import {
   writeItemColors,
 } from "./lib/appearance";
 import { lockBlocksCaller, lockScopesByPath } from "./lib/locks";
+import { createBlockReason } from "./lib/createGate";
 import { readItemOrder, renameInOrder, writeItemOrder, type ItemOrder } from "./lib/ordering";
 import { loadedFolderPaths, mergeChildren, nodeAt, setChildrenAt } from "./lib/tree/lazyTree";
 import { applyTitlePatch } from "./lib/tree/titles";
@@ -147,6 +148,7 @@ import {
 } from "./lib/vault/missingFolder";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { dismissToast, toast } from "./lib/toast";
+import { renameRefusedMessage } from "./lib/renameGate";
 import { classifyLimitError, limitFromError, vaultLimitReason } from "./lib/billing";
 import { isEditorNote } from "./lib/notePath";
 import { isNoteExt } from "./lib/formats";
@@ -1924,13 +1926,31 @@ function sameVault(get: () => AppStore, epoch: number | null | undefined): boole
  * server enforces the same latch and is the authority. (A note written past it
  * would be permanently unsyncable: the server refuses to register it.)
  */
-function rootCreateBlocked(get: () => AppStore, dir: string): boolean {
-  if (dir !== "" || !get().rootFrozen) return false;
-  toast(
-    "This vault's root is frozen. Create this inside a folder instead.",
-    "error",
-  );
+/**
+ * Refuse a create the server would refuse (a frozen root, or a folder this
+ * person can only view; see `lib/createGate.ts`), saying why in a toast.
+ * Unknown access allows: the server stays the authority.
+ */
+function createBlocked(get: () => AppStore, dir: string): boolean {
+  const reason = createBlockReasonFor(get(), dir);
+  if (!reason) return false;
+  toast(reason, "error");
   return true;
+}
+
+/** {@link createBlockReason} from the store's own view of the vault. */
+export function createBlockReasonFor(
+  s: Pick<AppStore, "rootFrozen" | "syncEnabled" | "vaultVisibility" | "tree" | "locks" | "lifts" | "session">,
+  dir: string,
+): string | null {
+  return createBlockReason({
+    dir,
+    rootFrozen: s.rootFrozen,
+    syncEnabled: s.syncEnabled,
+    canCreateRoot: s.vaultVisibility?.canCreateRoot ?? null,
+    lockedForCaller: (path) =>
+      lockBlocksCaller(lockScopesByPath(s.tree, s.locks, s.session?.user.id, s.lifts), path),
+  });
 }
 
 /**
@@ -2827,12 +2847,12 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   createNoteAt: async (dir, name) => {
-    if (rootCreateBlocked(get, dir)) return null;
+    if (createBlocked(get, dir)) return null;
     return finishNoteCreate(get, await ipc.createNote(dir, name));
   },
 
   createNoteIn: async (dir) => {
-    if (rootCreateBlocked(get, dir)) return null;
+    if (createBlocked(get, dir)) return null;
     for (let i = 0; i < 50; i++) {
       const candidate = i === 0 ? "Untitled" : `Untitled ${i}`;
       let path: string;
@@ -3123,7 +3143,16 @@ export const useStore = create<AppStore>((set, get) => ({
     // The registry rename is what keeps `doc_id` stable across the move.
     // Skipping it forks the note into a second server-side note at the new path.
     try {
-      await syncManager.registry.renamePath(oldPath, newPath);
+      const res = await syncManager.registry.moveOnServer(oldPath, newPath);
+      if (!res.ok && res.refused && (await syncManager.registry.revertRefusedMove(oldPath, newPath))) {
+        // Refused (not the creator, view-only, …): the old name is back on
+        // disk, so the open note, tabs and order follow it back too.
+        get().setItemOrder(renameInOrder(get().itemOrder, newPath, oldPath));
+        get().followNoteRename(newPath, oldPath);
+        toast(renameRefusedMessage(oldPath, false, res.code, res.status), "error");
+        await get().refreshTree();
+        return false;
+      }
     } catch (e) {
       console.warn("[sync] renamePath failed", oldPath, e);
     }

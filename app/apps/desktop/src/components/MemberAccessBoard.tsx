@@ -92,6 +92,57 @@ export interface MemberAccessBoardProps {
   hideSetEverything?: boolean;
   /** The Access tab's shared load (tree + modes). Absent: the board loads its own. */
   accessMap?: AccessMap;
+  /**
+   * An access GROUP's board instead of a person's (migration 097). Its rows
+   * are what the group's own grants give (groups only add, so No access means
+   * the group gives nothing there), writes use the group audience, and every
+   * re-read is one reload of the group's map. `member` is then only a label.
+   */
+  group?: { id: string; name: string; grants: readonly GroupGrantLite[]; includesMe: boolean };
+}
+
+/** The part of a group grant the board needs (see `GroupGrant` in lib/api). */
+export interface GroupGrantLite {
+  resourceType: "vault" | "folder" | "file";
+  permission: "edit" | "view";
+  path: string | null;
+}
+
+/** Confirm copy for taking away what a group gives (never anyone's own access). */
+export function groupRemoveCopy(group: string, where: string): { title: string; button: string; outcome: string } {
+  return {
+    title: `Remove what ${group} gives ${where}?`,
+    button: "Remove",
+    outcome: `Members of ${group} keep their own access and what other groups give. Only what ${group} gave ${where} goes.`,
+  };
+}
+
+/** "Design can now edit Specs." / "Design no longer gives access to Specs." */
+export function groupMoveMessage(group: string, what: string, mode: TeamAccessMode): string {
+  if (mode === "open") return `${group} can now edit ${what}.`;
+  if (mode === "readonly") return `${group} can now view ${what}.`;
+  return `${group} no longer gives access to ${what}.`;
+}
+
+const MODE_RANK: Record<TeamAccessMode, number> = { private: 0, readonly: 1, open: 2 };
+
+/**
+ * The lowest level a row can have on a group's board: groups only add, so a
+ * row inside a folder (or vault) the group already reaches keeps at least
+ * that. Returns the floor and the path that sets it (null = the whole vault).
+ */
+export function groupFloor(
+  path: string,
+  grants: readonly GroupGrantLite[],
+): { mode: TeamAccessMode; from: string | null } {
+  let best: { mode: TeamAccessMode; from: string | null } = { mode: "private", from: null };
+  for (const g of grants) {
+    const covers = g.resourceType === "vault" || (g.resourceType === "folder" && g.path !== null && path.startsWith(g.path + "/"));
+    if (!covers) continue;
+    const mode: TeamAccessMode = g.permission === "edit" ? "open" : "readonly";
+    if (MODE_RANK[mode] > MODE_RANK[best.mode]) best = { mode, from: g.resourceType === "vault" ? null : g.path };
+  }
+  return best;
 }
 
 /**
@@ -113,9 +164,14 @@ export function MemberAccessBoard({
   onChanged,
   hideSetEverything = false,
   accessMap,
+  group,
 }: MemberAccessBoardProps) {
+  /** Whose map this is: a person's user id, or `group:<id>`. */
+  const subject = group ? `group:${group.id}` : member.userId;
+  /** A write here changes the signed-in user's own access. */
+  const selfAffected = group ? group.includesMe : isSelf;
   // The Access tab shares one load with the List; standalone, load our own.
-  const ownMap = useAccessMap(vaultId, member.userId, !accessMap);
+  const ownMap = useAccessMap(vaultId, subject, !accessMap);
   const map = accessMap ?? ownMap;
   const serverTree = map.tree;
   const [summaryModes, setSummaryModes] = useState<ReadonlyMap<string, SummaryMode>>(() => new Map());
@@ -134,9 +190,9 @@ export function MemberAccessBoard({
   // revert and re-read, so a revisit never paints a level already moved (#307).
   useEffect(() => {
     if (vaultId && serverTree && summaryModes.size > 0) {
-      patchCachedAccessModes(authManager.getServerUrl(), vaultId, member.userId, summaryModes);
+      patchCachedAccessModes(authManager.getServerUrl(), vaultId, subject, summaryModes);
     }
-  }, [summaryModes, serverTree, vaultId, member.userId]);
+  }, [summaryModes, serverTree, vaultId, subject]);
   const inflight = useRef(new Set<string>());
   const live = useRef(true);
   useEffect(() => {
@@ -170,7 +226,7 @@ export function MemberAccessBoard({
   /** Folders opened on the board, by row key. Everything starts collapsed:
    *  a large vault would otherwise draw every row of every folder. */
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  useEffect(() => { setExpanded(new Set()); }, [member.userId, vaultId]);
+  useEffect(() => { setExpanded(new Set()); }, [subject, vaultId]);
   const toggleExpanded = useCallback((key: string) => setExpanded((prev) => {
     const next = new Set(prev);
     if (!next.delete(key)) next.add(key);
@@ -263,6 +319,10 @@ export function MemberAccessBoard({
   };
 
   const readModes = (targets: readonly AccessRow[]) => {
+    // A group has no per-row summary route and its map is always complete:
+    // writes re-read through `rereadOrReload` (one reload), never from here,
+    // so the rows-without-an-answer effect can never start a reload loop.
+    if (group) return;
     for (const row of targets) {
       if (inflight.current.has(row.key)) continue;
       inflight.current.add(row.key);
@@ -306,12 +366,16 @@ export function MemberAccessBoard({
 
   /** Up to 200 rows: re-read them. More: one reload of the whole map (when the server has it). */
   const rereadOrReload = (targets: readonly AccessRow[]) => {
+    if (group) {
+      if (targets.length > 0) void map.reload();
+      return;
+    }
     if (map.complete && targets.length > ACCESS_MAP_REREAD_MAX) void map.reload();
     else readModes(targets);
   };
 
-  const who = firstName(member);
-  const fullName = member.name || member.email || member.userId;
+  const who = group ? group.name : firstName(member);
+  const fullName = group ? group.name : member.name || member.email || member.userId;
 
   /**
    * One bulk write for this person. `null` explicitly targets the vault;
@@ -341,10 +405,10 @@ export function MemberAccessBoard({
       return next;
     });
     try {
-      if (isSelf) markSelfAccessChange(resources.map((r) => r.resourceId));
+      if (selfAffected) markSelfAccessChange(resources.map((r) => r.resourceId));
       await authManager.api.setBulkAccess(orgId, {
         resources,
-        audience: { type: "users", userIds: [member.userId] },
+        audience: group ? { type: "group", groupId: group.id } : { type: "users", userIds: [member.userId] },
         mode,
       }, { timeoutMs: BULK_WRITE_TIMEOUT_MS });
       if (!live.current) return true;
@@ -368,6 +432,12 @@ export function MemberAccessBoard({
 
   /** Ask before taking access away; widening runs at once. */
   const guarded = (from: TeamAccessMode | "custom" | null, to: TeamAccessMode, scope: ReduceScope, run: () => Promise<void>) => {
+    if (group) {
+      // A group only adds: lowering it takes away only what the group gave.
+      if (to !== "private") return void run();
+      setConfirm({ ...groupRemoveCopy(group.name, "everywhere"), danger: true, apply: run });
+      return;
+    }
     if (to === "open" || !needsAccessConfirm(from, to)) return void run();
     setConfirm({ ...reduceAccessCopy(scope, to), danger: to === "private", apply: run, change: accessChangeFor(scope, from, to) });
   };
@@ -396,6 +466,21 @@ export function MemberAccessBoard({
     if (!canSetAccess || busy) return;
     const fromOwn = own.get(row.key);
     if (!fromOwn || fromOwn === to) return;
+    if (group) {
+      // Groups only add: inside a folder the group reaches, a row cannot go
+      // below that folder's level. Say where it comes from instead.
+      const floor = groupFloor(row.path, group.grants);
+      if (MODE_RANK[to] < MODE_RANK[floor.mode]) {
+        const level = floor.mode === "open" ? "edit" : "view";
+        toast(
+          floor.from === null
+            ? `${group.name} can ${level} the whole vault, so ${row.name} stays at least that. Change the whole vault first.`
+            : `${row.name} is inside ${floor.from}, which ${group.name} can ${level}. Change ${floor.from} instead.`,
+          "neutral",
+        );
+        return;
+      }
+    }
     // A folder move includes its contents. Check their Everyone caps too,
     // including ancestor locks, before claiming a per-person write can lift them.
     const paths = new Map(allRows.map((r) => [`${accessResourceType(r.kind)}:${r.id}`, r.path]));
@@ -425,6 +510,11 @@ export function MemberAccessBoard({
       // Say it worked only once the server agrees: re-read this row directly
       // (not through readModes, whose in-flight dedupe could hand back an
       // answer from before the write) and let the board show the truth.
+      if (group) {
+        // The write's own reload already re-read the group's map.
+        toast(groupMoveMessage(group.name, row.name, to));
+        return;
+      }
       let actual: SummaryMode;
       try {
         actual = await summaries.read(orgId, resourceOf(row), [member.userId], () => !live.current);
@@ -450,6 +540,12 @@ export function MemberAccessBoard({
 
   const setEverything = (choice: EverythingChoice) => {
     if (!canSetAccess || busy) return;
+    if (choice === "reset" && group) {
+      guarded("custom", "private", { kind: "person", name: fullName, self: false }, async () => {
+        await write(null, "private");
+      });
+      return;
+    }
     if (choice === "reset") {
       setConfirm({
         title: isSelf ? "Reset your access to the vault default?" : `Reset ${who}'s access to the vault default?`,
@@ -497,7 +593,9 @@ export function MemberAccessBoard({
     const apply = async () => {
       if (await write(roots, mode)) toast("Updated access to existing items.");
     };
-    if (mode === "private") {
+    if (mode === "private" && group) {
+      setConfirm({ ...groupRemoveCopy(group.name, "on every existing item"), danger: true, apply });
+    } else if (mode === "private") {
       setConfirm({
         title: "Move all existing items to No access?",
         button: "Remove access",
@@ -516,12 +614,14 @@ export function MemberAccessBoard({
     setConfirm({
       title: `Move ${count} ${count === 1 ? "item" : "items"} to No access?`,
       button: "Remove access",
-      outcome: reduceAccessCopy({ kind: "person", name: fullName, self: isSelf }, "private").outcome,
+      outcome: group
+        ? groupRemoveCopy(group.name, count === 1 ? `on ${tops[0].name}` : `on these ${count} items`).outcome
+        : reduceAccessCopy({ kind: "person", name: fullName, self: isSelf }, "private").outcome,
       danger: true,
       apply: async () => {
         if (!(await write(tops, "private"))) return;
         const what = count === 1 ? tops[0].name : `${count} items`;
-        toast(moveMessage(who, isSelf, what, "private"));
+        toast(group ? groupMoveMessage(group.name, what, "private") : moveMessage(who, isSelf, what, "private"));
       },
     });
   };
@@ -744,8 +844,12 @@ export function MemberAccessBoard({
           options={[
             { value: "open", label: "Can edit", hint: "Every folder and note" },
             { value: "readonly", label: "Can view", hint: "Read only" },
-            { value: "private", label: "No access", hint: `Hide everything from ${isSelf ? "you" : who}` },
-            { value: "reset", label: "Reset to vault default", hint: "Back to what every member gets" },
+            ...(group
+              ? [{ value: "reset" as const, label: "Remove all", hint: `${who} gives nothing; each person keeps their own access` }]
+              : [
+                  { value: "private" as const, label: "No access", hint: `Hide everything from ${isSelf ? "you" : who}` },
+                  { value: "reset" as const, label: "Reset to vault default", hint: "Back to what every member gets" },
+                ]),
           ]}
           triggerContent="Set everything to"
           disabled={locked}

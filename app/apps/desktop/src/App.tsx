@@ -1095,9 +1095,19 @@ function SyncIndicator({
   // The folder is gone (#228) or the shrink brake holds our writes (#252):
   // SyncBadge renders both itself (`syncBadgeHold`), and they outrank the
   // attachment notice and the idle-vault hide below.
+  // The open note is one the server refused to create (no access to add it
+  // there): it is on this computer only, whatever its socket says (#414).
+  const openNoteLocalOnly = useStore((s) => {
+    const path = s.openNote?.path;
+    if (!s.syncEnabled || !path) return false;
+    const key = path.toLowerCase();
+    return syncManager.registry
+      .heldRefusals()
+      .some((f) => f.kind === "note" && f.path.toLowerCase() === key);
+  });
   const held =
     syncBadgeHold({ rootMissing, enabled: syncEnabled, pause: syncPause, now: Date.now() }) != null;
-  if (!held && attachmentLocalOnly) {
+  if (!held && (attachmentLocalOnly || (noteOpen && openNoteLocalOnly))) {
     return <SyncBadge status="offline" enabled={false} noteOpen />;
   }
   // "idle" is the reporter's pre-start value — nothing to report yet.
@@ -1866,7 +1876,6 @@ export default function App() {
             path={homeAgentPath} showLaunchers={homeAgentPath !== null}
             expectedEpoch={vault.epoch} launchTarget={dashboardHeaderActionsHost}
             rightPanelOpen={rightPanelOpen} onOpen={useStore.getState().closeRightPanel} />
-          <MemberJoinedBanner />
           <WhatsNewModal />
           <MessagePopup />
           {/* Sits flush against the top of the window now that there's no system
@@ -1955,6 +1964,12 @@ export default function App() {
               only the highest-priority claim shows — held delete, then the
               reconcile summary, then the open note's removal, then the rest in
               this order. Informational ones fade after 20 s. */}
+          {/* Floats OVER the page below the header (zero-height anchor), so a
+              notice never pushes the note down when it appears or pulls it up
+              when it fades. */}
+          <div className="notice-overlay">
+          <div className="notice-overlay-stack">
+          <MemberJoinedBanner />
           <HeldDeleteNotice />
           <SilentBoundary label="Reconcile banner">
             <ReconcileBanner />
@@ -1974,6 +1989,8 @@ export default function App() {
           <CreateRefusalBanner />
           <RemovedBanner />
           {attachmentLocalOnly && <AttachmentSyncNotice />}
+          </div>
+          </div>
           <div className="editor-wrap">
             {!activeVirtual && <NoteBreadcrumb />}
             {activeVirtual && <VirtualTabHost tab={activeVirtual} />}
@@ -2038,7 +2055,7 @@ export default function App() {
           >
             {/* `.graph-view` is the full-window overlay itself, so the screen
                 dims the instant the graph is asked for, then fills in. */}
-            <Suspense fallback={<div className="graph-view" aria-busy="true" />}>
+            <Suspense fallback={<div className="graph-view" data-theme="dark" aria-busy="true" />}>
               <GraphView onClose={() => setGraphOpen(false)} />
             </Suspense>
           </ErrorBoundary>

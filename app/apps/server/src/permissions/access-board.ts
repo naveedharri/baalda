@@ -3,6 +3,8 @@ import type pg from "pg";
 import { permissionMode, syntheticRootContext, type SummaryMode } from "./access-summary.js";
 import {
   buildAccessContextFromIndex,
+  indexedRowsFor,
+  rowsGroupGrant,
   type AccessIndex,
   type ResolverCache,
   resolveAccessForUser,
@@ -46,6 +48,8 @@ export interface BoardModesResult {
   folders: Map<string, SummaryMode>;
   /** note or file id → its own mode. */
   docs: Map<string, Own>;
+  /** folder id → the folder's OWN mode, before folding its subtree in. */
+  ownFolders: Map<string, Own>;
 }
 
 export async function boardModes(input: {
@@ -55,25 +59,42 @@ export async function boardModes(input: {
   vaultId: string;
   userId: string;
   role: string | null;
+  /** A GROUP's board instead of a person's: each item is what that group's own
+   *  rows give there (groups only add, so no row = No access). `userId` and
+   *  `role` are then ignored. */
+  groupId?: string;
   /** Ids the caller lists (the access-tree SELECTs). An id the index lacks
    *  (raced a create) still resolves through the context builder's DB fallback. */
   items: BoardItems;
 }): Promise<BoardModesResult> {
-  const { db, index, cache, vaultId, userId, role, items } = input;
+  const { db, index, cache, vaultId, userId, role, items, groupId } = input;
 
   // `null` = no context (deleted between listing and resolution), skipped by
   // the fold exactly as summarizeAccess skips it.
+  const groupMode = (ctx: { docId: string | null; folderIds: string[]; organizationId: string }): Own =>
+    permissionMode(
+      rowsGroupGrant(
+        indexedRowsFor(index, ctx.docId, ctx.folderIds),
+        [groupId!],
+        ctx.docId,
+        ctx.folderIds,
+        ctx.organizationId,
+      ),
+    );
   const resolve = async (type: "folder" | "file", id: string): Promise<Own | null> => {
     const ctx = await buildAccessContextFromIndex(index, type, id, db, cache);
     if (!ctx) return null;
+    if (groupId) return groupMode(ctx);
     return permissionMode((await resolveAccessForUser(ctx, userId, role, db, cache, index)).permission);
   };
   let synthetic: Own | undefined;
   const emptyScope = async (): Promise<Own> => {
     if (synthetic === undefined) {
-      synthetic = permissionMode(
-        (await resolveAccessForUser(syntheticRootContext(index), userId, role, db, cache, index)).permission,
-      );
+      synthetic = groupId
+        ? groupMode(syntheticRootContext(index))
+        : permissionMode(
+            (await resolveAccessForUser(syntheticRootContext(index), userId, role, db, cache, index)).permission,
+          );
     }
     return synthetic;
   };
@@ -140,7 +161,9 @@ export async function boardModes(input: {
   }
   const docs = new Map<string, Own>();
   for (const id of docIds) docs.set(id, ownDoc.get(id) ?? (await emptyScope()));
-  return { folders, docs };
+  const ownFolders = new Map<string, Own>();
+  for (const id of folderIds) ownFolders.set(id, ownFolder.get(id) ?? (await emptyScope()));
+  return { folders, docs, ownFolders };
 }
 
 /** Align modes to the listing order: folders, then notes, then files. */

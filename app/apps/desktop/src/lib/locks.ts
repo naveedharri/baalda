@@ -77,6 +77,16 @@ export function hasBillingLapsedLock(locks: readonly Share[]): boolean {
   return locks.some((l) => shareResourceType(l) === "vault" && l.reason === "billing_lapsed");
 }
 
+/**
+ * Whether Unlock can remove this row. A group's Can view is reported as the
+ * caller's own `readonly` row (`reason: "group_view"`, id `group-view:<id>`) so
+ * the item shows padlocked, but it is the group's grant, not a lock: there is no
+ * share row with that id, and the way to change it is the group's access.
+ */
+export function isRemovableLock(lock: Share): boolean {
+  return lock.reason !== "group_view";
+}
+
 /** True when the overlay carries the whole-vault Read-only posture. */
 export function hasVaultLock(locks: readonly Share[]): boolean {
   return locks.some((l) => shareResourceType(l) === "vault");

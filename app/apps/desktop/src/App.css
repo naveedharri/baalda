@@ -1935,8 +1935,8 @@ body:has(.sidebar-resizer.dragging) {
     color var(--t-fast) var(--ease);
 }
 .tree-more svg {
-  width: 17px;
-  height: 17px;
+  width: 16px;
+  height: 16px;
 }
 .tree-row:hover .tree-more,
 .tree-more:focus-visible {
@@ -6934,7 +6934,11 @@ button.secondary:disabled {
 }
 /* Selected-state check badge, top-right corner. */
 .upgrade-plan-card.selected::after {
-  content: "✓";
+  content: "";
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.6 8.4l2.9 2.9 5.9-6.4'/%3E%3C/svg%3E");
+  background-size: 13px;
+  background-position: center;
+  background-repeat: no-repeat;
   position: absolute;
   top: var(--sp-3);
   right: var(--sp-3);
@@ -7014,7 +7018,11 @@ button.secondary:disabled {
   color: var(--text-primary);
 }
 .upgrade-features li::before {
-  content: "✓";
+  content: "";
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%237f73ff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.6 8.4l2.9 2.9 5.9-6.4'/%3E%3C/svg%3E");
+  background-size: 13px;
+  background-position: center;
+  background-repeat: no-repeat;
   position: absolute;
   left: 0;
   top: 0;
@@ -7710,12 +7718,28 @@ button.is-done:disabled {
   }
 }
 
-/* ---- Banners: the slot animates its own height ---- */
-/* `overflow: hidden` is what makes the height animation possible — without it
-   the banner's content spills out of the collapsing box mid-transition. */
-.banner-slot {
-  overflow: hidden;
+/* ---- Banners: float over the page, never push it ---- */
+/* A zero-height anchor under the header; the stack hangs from it over the
+   note. Only the banners themselves take clicks. No `overflow: hidden` (it
+   used to clip the card's bottom edge and shadow). */
+.notice-overlay {
+  position: relative;
+  height: 0;
   flex: none;
+  z-index: 40;
+}
+.notice-overlay-stack {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+}
+.banner-slot {
+  flex: none;
+  pointer-events: auto;
 }
 
 /* ---- Toasts ---- */
@@ -8134,7 +8158,7 @@ button.secondary:active:not(:disabled),
 }
 .activity-row-detail {
   display: flex;
-  grid-column: 2;
+  grid-column: 1 / -1;
   flex-direction: column;
   gap: var(--sp-1);
   min-width: 0;
@@ -9138,6 +9162,10 @@ button.secondary:active:not(:disabled),
 .member-profile-tab:disabled {
   color: var(--text-faint);
   cursor: default;
+}
+/* No tab strip (a single tab is hidden): keep the gap it gave below the header. */
+.member-profile-head + :not(.member-profile-tabs, .group-page-tabsrow) {
+  margin-top: var(--sp-5);
 }
 .member-profile-about {
   display: grid;
@@ -11738,3 +11766,789 @@ body.access-board-grabbing * {
     width: 100%;
   }
 }
+
+/* ── Access groups (GroupsPanel.tsx) ──────────────────────────────────────
+   One tint per group colour: a pastel fill and a deeper ink of the same hue,
+   in light and dark. */
+.group-c-violet { --g-bg: #e6e0ff; --g-fg: #5135d8; }
+.group-c-green  { --g-bg: #d5f0e1; --g-fg: #1d6b3e; }
+.group-c-orange { --g-bg: #fde0cc; --g-fg: #a3440f; }
+.group-c-blue   { --g-bg: #d9e9fc; --g-fg: #1f56a3; }
+.group-c-pink   { --g-bg: #fbdcea; --g-fg: #9d2763; }
+.group-c-yellow { --g-bg: #fbeec2; --g-fg: #6e5508; }
+.group-c-teal   { --g-bg: #d2efeb; --g-fg: #135f58; }
+.group-c-red    { --g-bg: #fbdada; --g-fg: #9c2a2a; }
+[data-theme="dark"] .group-c-violet { --g-bg: rgba(127,115,255,.2); --g-fg: #b8afff; }
+[data-theme="dark"] .group-c-green { --g-bg: rgba(48,164,108,.2); --g-fg: #74d39c; }
+[data-theme="dark"] .group-c-orange { --g-bg: rgba(240,140,60,.2); --g-fg: #f4ad74; }
+[data-theme="dark"] .group-c-blue { --g-bg: rgba(70,140,240,.2); --g-fg: #8fbcf6; }
+[data-theme="dark"] .group-c-pink { --g-bg: rgba(230,90,150,.2); --g-fg: #f29ac2; }
+[data-theme="dark"] .group-c-yellow { --g-bg: rgba(240,180,41,.18); --g-fg: #f2c45c; }
+[data-theme="dark"] .group-c-teal { --g-bg: rgba(40,170,160,.2); --g-fg: #6fd3c9; }
+[data-theme="dark"] .group-c-red { --g-bg: rgba(230,80,80,.2); --g-fg: #f29595; }
+
+.group-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--g-fg);
+  flex: none;
+}
+.group-chips { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.group-chips-more { font-size: var(--fs-xs); }
+.group-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 170px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--g-bg);
+  color: var(--g-fg);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 16px;
+}
+.group-chip-icon { flex: none; }
+.group-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+}
+button.group-chip-name { cursor: pointer; }
+button.group-chip-name:hover { text-decoration: underline; }
+.group-chip-x {
+  border: 0;
+  padding: 0 0 0 2px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  opacity: .7;
+  cursor: pointer;
+}
+.group-chip-x:hover { opacity: 1; }
+
+/* People | Groups */
+.members-access-switch {
+  display: inline-flex;
+  gap: 2px;
+  margin: var(--sp-4) 0 var(--sp-2);
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.members-access-switch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: calc(var(--radius-md) - 2px);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.members-access-switch-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
+.members-access-switch-btn.is-active { color: var(--accent); background: var(--accent-soft); font-weight: 500; }
+.members-access-switch-count { font-size: var(--fs-xs); color: var(--text-tertiary); }
+.members-access-switch-btn.is-active .members-access-switch-count { color: inherit; opacity: .75; }
+
+/* The groups list */
+.groups-list-tools {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+.groups-list-tools .members-access-search-field { flex: 1; }
+.groups-new { flex: none; }
+.groups-rows { list-style: none; margin: 0; padding: 0; }
+.groups-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 10px var(--sp-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.groups-row + .groups-row { border-top: 1px solid var(--border-subtle, var(--border)); }
+.groups-row:hover { background: var(--members-row-hover); }
+.groups-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.groups-row-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: var(--radius-sm);
+  background: var(--g-bg);
+  color: var(--g-fg);
+  font-weight: 600;
+}
+.groups-row-badge.is-lg { width: 40px; height: 40px; font-size: 18px; }
+.groups-row-copy { display: flex; flex-direction: column; min-width: 0; flex: 1; font-size: var(--fs-sm); }
+.groups-row-copy > .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); }
+.groups-row-name { display: inline-flex; align-items: center; gap: var(--sp-2); font-weight: 500; color: var(--text-primary); }
+.groups-row-tag {
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 500;
+}
+.groups-row .row-more-btn { opacity: 0; }
+.groups-row:hover .row-more-btn, .groups-row:focus-within .row-more-btn, .groups-row .row-more-btn.open { opacity: 1; }
+.group-avatars { display: inline-flex; align-items: center; flex: none; }
+.group-avatars > * + * { margin-left: -6px; }
+.group-avatars > .avatar, .group-avatars > span:not(.group-avatars-more) { box-shadow: 0 0 0 2px var(--bg-surface); border-radius: 50%; }
+.group-avatars-more { margin-left: 4px; font-size: var(--fs-xs); color: var(--text-tertiary); }
+.groups-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-5) var(--sp-4);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+}
+.groups-empty p { margin: 0; font-size: var(--fs-sm); max-width: 46ch; }
+.groups-empty-title { font-weight: 600; color: var(--text-primary); }
+.groups-skel { display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-2) 0; }
+.groups-skel-row { height: 36px; border-radius: var(--radius-sm); }
+
+/* Dialogs */
+.modal.group-dialog { width: min(480px, calc(100vw - 48px)); display: flex; flex-direction: column; gap: var(--sp-3); }
+.group-dialog-field { display: flex; flex-direction: column; gap: 6px; }
+.group-dialog-field .text-input { width: 100%; }
+.group-dialog-sub { margin-bottom: -6px; }
+.group-dialog-check { display: flex; align-items: flex-start; gap: var(--sp-2); font-size: var(--fs-sm); cursor: pointer; }
+.group-dialog-check small { display: block; font-size: var(--fs-xs); }
+.group-picker { display: flex; flex-direction: column; gap: var(--sp-2); }
+.group-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.group-picker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.group-picker-row:hover { background: var(--bg-hover); }
+.group-picker-none { padding: 8px; font-size: var(--fs-sm); }
+
+/* One group's page */
+.group-page .member-profile-head { position: relative; }
+.group-page-actions { margin-left: auto; }
+.group-member-note { font-size: var(--fs-xs); max-width: 220px; }
+.group-access-note { margin: 0 0 var(--sp-3); }
+.group-activity { list-style: none; margin: var(--sp-2) 0 0; padding: 0; font-size: var(--fs-sm); }
+.group-activity-row { padding: 8px 0; }
+.group-activity-row + .group-activity-row { border-top: 1px solid var(--border-subtle, var(--border)); }
+
+/* The person page's Groups row */
+.profile-groups { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.profile-groups-add { font-size: var(--fs-sm); }
+.profile-groups-note { flex-basis: 100%; font-size: var(--fs-xs); }
+
+/* MenuSelect section headings ("Groups add to this") */
+.context-menu .menu-section-label {
+  padding: 8px 10px 4px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+  cursor: default;
+  pointer-events: none;
+}
+.context-menu .menu-section-label:hover { background: none; }
+.group-name-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--fs-sm);
+}
+.group-name-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* People | Groups, search and New group on one row */
+.members-access-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: var(--sp-5) 0 var(--sp-3);
+}
+.members-access-toolbar .members-access-switch {
+  margin: 0;
+  height: 38px;
+  box-sizing: border-box;
+  align-items: stretch;
+  flex: none;
+}
+.members-access-toolbar .members-access-search { flex: 0 1 260px; margin-left: auto; }
+/* Groups buttons use the app's near-black ink, like Vaults and Versions. */
+.members-access-toolbar-btn,
+.ghost-pill.members-access-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 38px;
+  box-sizing: border-box;
+  padding: 0 var(--sp-4);
+  border: 0;
+  border-radius: var(--radius-md);
+  box-shadow: none;
+  background: var(--text-primary);
+  color: var(--bg-surface);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ghost-pill.members-access-toolbar-btn:hover:not(:disabled) { background: var(--text-primary); color: var(--bg-surface); opacity: .88; }
+html .modal.group-dialog .confirm-actions button.primary,
+html[data-theme="dark"] .modal.group-dialog .confirm-actions button.primary {
+  background: var(--text-primary);
+  color: var(--bg-surface);
+  border: 0;
+  box-shadow: none;
+}
+html .modal.group-dialog .confirm-actions button.primary:hover:not(:disabled) { opacity: .88; background: var(--text-primary); }
+html .modal.group-dialog .confirm-actions button.primary:disabled { opacity: .35; background: var(--text-primary) !important; color: var(--bg-surface) !important; }
+
+/* The dialog's checkboxes and search: undo the modal's full-width text-field well. */
+.modal.group-dialog input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+.modal.group-dialog .group-dialog-check input[type="checkbox"] { margin-top: 2px; }
+.modal.group-dialog .members-access-search input {
+  width: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.group-picker-row .members-table-names { min-width: 0; }
+.group-dialog-check > span { display: flex; flex-direction: column; gap: 2px; }
+
+.group-members-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+  font-size: var(--fs-sm);
+}
+.group-members-note { margin-top: var(--sp-3); }
+
+/* The groups list is a card like the people table: white, bordered, a soft
+   shadow, a line between rows. */
+.groups-rows {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+.groups-row { border-radius: 0; padding: 12px var(--sp-4); }
+.groups-row + .groups-row { border-top: 1px solid var(--border); }
+html:not(.rd-off) .groups-row + .groups-row { border-color: rgba(var(--rd-ink), 0.06); }
+.groups-row:hover { background: var(--bg-app, var(--members-row-hover)); }
+html:not(.rd-off) .groups-rows {
+  background: var(--rd-surface); border: 0; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow);
+}
+html:not(.rd-off) .groups-empty { background: var(--rd-surface); border: 0; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); }
+
+/* Hints under a table or list get real breathing room. */
+.group-members-note, .group-tab-note { margin-top: var(--sp-4) !important; }
+.group-dialog-note { margin: var(--sp-3) 0 0; }
+/* "Adds nothing" is not a warning: a quiet neutral pill. */
+.members-access-trigger.is-level.is-unset {
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+/* Invite people uses the same near-black ink as the groups buttons. */
+html .members-access-header button.primary.members-invite-btn,
+html[data-theme="dark"] .members-access-header button.primary.members-invite-btn {
+  background: var(--text-primary) !important;
+  color: var(--bg-surface) !important;
+  border: 0;
+  box-shadow: none !important;
+}
+button.primary.members-invite-btn:hover:not(:disabled) { background: var(--text-primary); opacity: .88; }
+.group-members-note, .group-tab-note { margin-top: 20px !important; }
+.modal.group-dialog .invite-foot { justify-content: flex-end; }
+html:not(.rd-off) .members-access-header { padding-right: 0 !important; }
+html:not(.rd-off) .group-skills .skills-access-people {
+  background: var(--rd-surface); border: 0; border-radius: var(--radius-xl); box-shadow: var(--rd-card-shadow); overflow: hidden;
+}
+/* Beat the dark theme's accent rule for button.primary. */
+html[data-theme="dark"]:not(.rd-off) .members-access .members-access-header button.primary.members-invite-btn,
+html[data-theme="dark"]:not(.rd-off) .modal.group-dialog .confirm-actions button.primary {
+  background: var(--text-primary) !important;
+  color: var(--bg-surface) !important;
+  box-shadow: none !important;
+}
+.menu-option-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  vertical-align: 1px;
+}
+
+/* ── Ticking people for a bulk action ─────────────────────────────────── */
+.members-table .members-select-cell { width: 40px; padding-right: 0; padding-left: var(--sp-4); }
+.members-table input.members-check {
+  width: 16px;
+  height: 16px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  display: block;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.members-table input.members-check:disabled { cursor: not-allowed; opacity: .35; }
+.members-table tbody tr.is-selected td,
+html:not(.rd-off) .members-table tbody tr.is-selected td { background: var(--accent-soft, rgba(124, 92, 255, .08)); }
+
+.members-select-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 38px;
+  box-sizing: content-box;
+  margin: var(--sp-5) 0 var(--sp-3);
+  padding: 4px 6px 4px var(--sp-4);
+  border-radius: var(--radius-lg);
+  background: var(--accent-soft, rgba(124, 92, 255, .08));
+}
+.members-select-count { margin-right: var(--sp-2); color: var(--accent); font-weight: 600; font-size: var(--fs-sm); white-space: nowrap; }
+.members-select-bar .members-select-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  box-shadow: none;
+  cursor: pointer;
+}
+.members-select-bar .members-select-btn:hover:not(:disabled) { background: var(--bg-hover); }
+.members-select-bar .members-select-btn:disabled { opacity: .45; cursor: not-allowed; }
+.members-select-bar .members-select-btn.is-danger { color: var(--danger, #c03a3a); }
+.members-select-glyph { flex: none; opacity: .8; }
+.members-select-clear {
+  margin-left: auto;
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.members-select-clear:hover { background: var(--bg-hover); color: var(--text-primary); }
+.group-page-faces { margin-left: auto; display: inline-flex; align-items: center; }
+.group-page-faces + .group-page-actions { margin-left: var(--sp-3); }
+.members-table tbody tr.is-selected:hover td,
+html:not(.rd-off) .members-table tbody tr.is-selected:hover td { background: var(--accent-soft, rgba(124, 92, 255, .12)); }
+/* The bar takes the toolbar's exact box (38px, same margins), so ticking a
+   box never moves the table; it fades in instead of popping. */
+.members-select-bar {
+  box-sizing: border-box;
+  height: 38px;
+  padding: 0 4px 0 var(--sp-4);
+  animation: members-select-in 180ms var(--ease, cubic-bezier(.2, .7, .2, 1)) both;
+}
+.members-select-bar .members-select-btn { height: 30px; }
+.members-select-clear { width: 30px; height: 30px; }
+.members-access-toolbar { animation: members-select-fade 160ms ease both; }
+@keyframes members-select-in {
+  from { opacity: 0; transform: translateY(-3px) scale(.995); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes members-select-fade { from { opacity: 0; } to { opacity: 1; } }
+.members-table tbody td { transition: background-color 160ms ease; }
+.members-table input.members-check { transition: transform 120ms ease; }
+.members-table input.members-check:active:not(:disabled) { transform: scale(.9); }
+@media (prefers-reduced-motion: reduce) {
+  .members-select-bar, .members-access-toolbar { animation: none; }
+  .members-table tbody td, .members-table input.members-check { transition: none; }
+}
+/* No tinted band behind the bar: it sits on the page like the toolbar. */
+.members-select-bar { background: transparent; padding-left: 0; }
+
+/* ── Toolbar ⇄ selection bar: one slot, a cross-fade ──────────────────────
+   Both stay mounted in the same grid cell; ticking a box slides the toolbar
+   out and the bar in (its controls arrive in a short stagger). Nothing below
+   the slot moves, because the cell keeps the toolbar's height. */
+.members-access-slot {
+  display: grid;
+  margin: var(--sp-5) 0 var(--sp-3);
+}
+.members-access-slot > * {
+  grid-area: 1 / 1;
+  margin: 0 !important;
+  min-width: 0;
+}
+.members-access-slot > .members-access-toolbar,
+.members-access-slot > .members-access-legacy-head {
+  animation: none;
+  transition: opacity 220ms cubic-bezier(.2, .7, .2, 1), transform 260ms cubic-bezier(.2, .7, .2, 1);
+}
+.members-access-slot.is-selecting > .members-access-toolbar,
+.members-access-slot.is-selecting > .members-access-legacy-head {
+  opacity: 0;
+  transform: translateY(-6px);
+  pointer-events: none;
+}
+.members-access-slot > .members-select-bar {
+  align-self: start;
+  animation: none;
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 220ms cubic-bezier(.2, .7, .2, 1), transform 260ms cubic-bezier(.2, .7, .2, 1);
+}
+.members-access-slot > .members-select-bar.is-shown {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+/* The controls follow one after another. */
+.members-select-bar > * {
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 200ms ease, transform 240ms cubic-bezier(.2, .7, .2, 1);
+}
+.members-select-bar.is-shown > * { opacity: 1; transform: none; }
+.members-select-bar.is-shown > :nth-child(1) { transition-delay: 0ms; }
+.members-select-bar.is-shown > :nth-child(2) { transition-delay: 30ms; }
+.members-select-bar.is-shown > :nth-child(3) { transition-delay: 60ms; }
+.members-select-bar.is-shown > :nth-child(4) { transition-delay: 90ms; }
+.members-select-bar.is-shown > :nth-child(5) { transition-delay: 120ms; }
+.members-select-bar.is-shown > :nth-child(6) { transition-delay: 150ms; }
+/* The number ticks over when it changes. */
+.members-select-num { display: inline-block; animation: members-num-in 200ms cubic-bezier(.2, .7, .2, 1); }
+@keyframes members-num-in { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
+/* Rows and boxes ease their colour instead of snapping. */
+.members-table tbody td { transition: background-color 220ms ease; }
+.members-table input.members-check:checked { animation: members-check-pop 220ms cubic-bezier(.3, 1.5, .5, 1); }
+@keyframes members-check-pop { 0% { transform: scale(.8); } 100% { transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .members-access-slot > *, .members-select-bar > *, .members-select-num, .members-table input.members-check:checked { transition: none; animation: none; transform: none; }
+}
+
+/* ── One checkbox for the whole app ──────────────────────────────────────
+   A drawn box and tick instead of the platform's, so every checkbox matches
+   (the native WebKit tick looked thin and off-centre at 16px). :where() keeps
+   the Switch and editor tasks out; it is specific enough to beat the
+   modal's and settings' text-field wells (which once painted over it). */
+input[type="checkbox"]:not(.switch-input):not(.cm-task-checkbox) {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  border: 1.5px solid color-mix(in srgb, var(--text-primary) 28%, transparent);
+  border-radius: 5px;
+  background-color: var(--bg-surface);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 12px;
+  display: inline-block;
+  vertical-align: middle;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+input[type="checkbox"]:not(.switch-input):not(.cm-task-checkbox):hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+input[type="checkbox"]:not(.switch-input):not(.cm-task-checkbox):checked,
+input[type="checkbox"]:not(.switch-input):not(.cm-task-checkbox):indeterminate {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.6 8.4l2.9 2.9 5.9-6.4'/%3E%3C/svg%3E");
+}
+input[type="checkbox"]:not(.switch-input):not(.cm-task-checkbox):indeterminate { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M4.5 8h7'/%3E%3C/svg%3E"); }
+input[type="checkbox"]:not(.switch-input):not(.cm-task-checkbox):focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+input[type="checkbox"]:not(.switch-input):not(.cm-task-checkbox):disabled { cursor: not-allowed; opacity: .4; }
+/* Rules that set accent-color on a native box: the drawn one takes over. */
+.member-access-row input[type="checkbox"],
+.members-table input.members-check,
+.modal.group-dialog input[type="checkbox"] { accent-color: auto; }
+html[data-theme="dark"] .upgrade-features li::before { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23a69cff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.6 8.4l2.9 2.9 5.9-6.4'/%3E%3C/svg%3E"); }
+.check-icon { display: inline-block; vertical-align: -2px; flex: none; }
+.check-inline { margin-left: 3px; }
+.upgrade-success-mark .check-icon { vertical-align: middle; }
+/* A tick lines up with the option's name, not the middle of a two-line option. */
+.context-menu li .menu-tick {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  height: 1.4em;
+}
+.context-menu li .menu-tick,
+.context-menu li .role-option-label { vertical-align: top; }
+/* The modal's text-field focus rule uses !important; a checkbox keeps its own paint. */
+input[type="checkbox"]:not(.switch-input):not(.cm-task-checkbox):checked,
+input[type="checkbox"]:not(.switch-input):not(.cm-task-checkbox):indeterminate {
+  background-color: var(--accent) !important;
+  border-color: var(--accent) !important;
+}
+input[type="checkbox"]:not(.switch-input):not(.cm-task-checkbox):checked { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.6 8.4l2.9 2.9 5.9-6.4'/%3E%3C/svg%3E") !important; }
+input[type="checkbox"]:not(.switch-input):not(.cm-task-checkbox):indeterminate { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M4.5 8h7'/%3E%3C/svg%3E") !important; }
+html .modal input[type="checkbox"]:not(.switch-input):focus:not(:focus-visible) { box-shadow: none !important; }
+
+/* ---- Restore with vault key (RestoreVaultKeyDialog) ----
+   A key badge, the title, one quiet line naming the vault, a paste field, the
+   24 numbered word slots filling as the words arrive, one status line (with
+   Open key file…), an inline error when the server says no, and two equal
+   buttons. */
+.modal.restore-key-dialog {
+  position: relative;
+  width: 540px;
+  max-width: calc(100vw - 48px);
+  padding: 28px 28px 24px;
+  border-radius: 22px;
+  text-align: left;
+}
+.restore-key-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.restore-key-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.restore-key-badge {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 14px;
+  border-radius: 14px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.modal .restore-key-title,
+.restore-key-title {
+  margin: 0 0 6px;
+  font: 600 19px var(--font-display);
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+.restore-key-subtitle {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.restore-key-subtitle strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.modal textarea.restore-key-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 72px;
+  padding: 12px 14px;
+  resize: none;
+  font: 13.5px/1.55 var(--font-mono);
+  color: var(--text-primary);
+}
+.restore-key-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.restore-key-slot {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 9px;
+  align-items: center;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--border);
+  background: transparent;
+  transition: background var(--t-med) var(--ease), box-shadow var(--t-med) var(--ease);
+}
+.restore-key-slot.filled {
+  background: var(--bg-app);
+  box-shadow: inset 0 0 0 1px transparent;
+}
+.restore-key-slot.bad {
+  background: var(--danger-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 35%, transparent);
+}
+.restore-key-num {
+  flex: none;
+  min-width: 14px;
+  font: 500 10.5px var(--font-body);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+.restore-key-word {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 12.5px var(--font-mono);
+  color: var(--text-primary);
+}
+.restore-key-slot.bad .restore-key-word {
+  color: var(--danger);
+}
+.restore-key-statusrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  min-height: 20px;
+}
+.restore-key-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+}
+.restore-key-status.tone-ok {
+  color: var(--success);
+  font-weight: 500;
+}
+.restore-key-status.tone-error {
+  color: var(--danger);
+}
+.restore-key-open {
+  flex: none;
+  font-size: 13px;
+}
+.restore-key-error {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.restore-key-note {
+  margin: 14px 0 20px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.restore-key-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.restore-key-actions > * {
+  width: 100%;
+  justify-content: center;
+}
+@media (max-width: 560px) {
+  .restore-key-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+/* A group's page: tabs left, "+ Add people" right, one row, one height. */
+.group-page-tabsrow {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0 var(--sp-5);
+}
+.group-page-tabsrow > .member-profile-tabs { margin: 0 !important; }
+.group-page-tabsrow > .group-page-add { height: auto !important; min-height: 0; align-self: stretch; padding: 0 var(--sp-4); }
+
+/* The empty Access groups card: the text runs the card's full width. */
+.groups-empty-line { max-width: none !important; }
+
+/* New access group: "New members join this group" is a setting row (text left,
+   switch right), set apart from the People checkboxes above it. */
+.group-dialog-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin-top: var(--sp-2);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.group-dialog-setting-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.group-dialog-setting-text small { font-size: var(--fs-xs); }
+/* The dialog's 16px checkbox rule would shrink the switch's invisible hit area. */
+.modal.group-dialog .group-dialog-setting .switch-input { width: 100%; height: 100%; }

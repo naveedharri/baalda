@@ -16,6 +16,7 @@ import { toast } from "../lib/toast";
 import { AsyncButton } from "./AsyncButton";
 import { Spinner } from "./Spinner";
 import { Glyph, PathText, type HealthHandlers } from "./HealthShared";
+import { CheckIcon } from "./CheckIcon";
 
 const NO_DISMISSED: ReadonlySet<string> = new Set();
 
@@ -604,7 +605,7 @@ function Remedy({
             window.setTimeout(() => setCopied(false), 1500);
           }}
         >
-          {copied ? "Copied ✓" : "Copy details"}
+          {copied ? <>Copied <CheckIcon size={12} className="check-inline" /></> : "Copy details"}
         </AsyncButton>
       );
     case "reregister":

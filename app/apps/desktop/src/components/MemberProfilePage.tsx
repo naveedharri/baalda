@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "../lib/api";
-import type { BulkAccessResource, MemberActivityEvent, MemberOverview, TeamAccess, TeamAccessMode } from "../lib/api";
+import type { AccessGroup, BulkAccessResource, MemberActivityEvent, MemberOverview, TeamAccess, TeamAccessMode } from "../lib/api";
+import { GroupChip } from "./GroupsPanel";
 import { authManager } from "../lib/auth/authManager";
 import { activityCache } from "../lib/membersAccessCaches";
 import { buildOrgRowsByPath, effectiveTeamMode } from "../lib/accessMode";
@@ -78,7 +79,17 @@ export function MemberProfilePage({
   onRoleChange,
   onRemove,
   onOpenNote,
+  groups = null,
+  onJoinGroup,
+  onLeaveGroup,
+  onOpenGroup,
 }: {
+  /** Every access group of the vault; null when the server has none (feature off). */
+  groups?: readonly AccessGroup[] | null;
+  /** Add/remove this person (owners/admins who may manage them). */
+  onJoinGroup?: (groupId: string) => Promise<void>;
+  onLeaveGroup?: (groupId: string) => Promise<void>;
+  onOpenGroup?: (groupId: string) => void;
   orgId: string;
   vaultName: string;
   member: MemberOverview;
@@ -150,6 +161,9 @@ export function MemberProfilePage({
             {member.email && <span className="muted">{member.email}</span>}
           </span>
         </header>
+        {/* One tab is no choice: a plain member on someone else's profile sees
+            Personal info alone, so it renders without a tab strip above it. */}
+        {tabs.length > 1 && (
         <div className="member-profile-tabs" role="tablist" aria-label="Profile">
           {tabs.map((t) => (
             <button
@@ -166,6 +180,7 @@ export function MemberProfilePage({
             </button>
           ))}
         </div>
+        )}
         {tab === "info" ? (
           <>
             <dl className="member-profile-about">
@@ -181,6 +196,20 @@ export function MemberProfilePage({
                   ROLE_LABEL[member.role] ?? member.role
                 )}
               </dd>
+              {groups && (
+                <>
+                  <dt>Access groups</dt>
+                  <dd>
+                    <ProfileGroups
+                      member={member}
+                      groups={groups}
+                      onJoin={canSetAccess ? onJoinGroup : undefined}
+                      onLeave={canSetAccess ? onLeaveGroup : undefined}
+                      onOpen={onOpenGroup}
+                    />
+                  </dd>
+                </>
+              )}
               <dt>Joined</dt>
               <dd>{joinedLabel(member)}</dd>
               <dt>Last active</dt>
@@ -227,6 +256,53 @@ export function MemberProfilePage({
           <PersonActivity orgId={orgId} member={member} vaultName={vaultName} isSelf={isSelf} onOpenNote={onOpenNote} />
         )}
       </section>
+  );
+}
+
+/** The Groups row: removable chips and "+ Add to group". */
+function ProfileGroups({ member, groups, onJoin, onLeave, onOpen }: {
+  member: MemberOverview;
+  groups: readonly AccessGroup[];
+  onJoin?: (groupId: string) => Promise<void>;
+  onLeave?: (groupId: string) => Promise<void>;
+  onOpen?: (groupId: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const mine = groups.filter((g) => g.memberIds.includes(member.userId));
+  const others = groups.filter((g) => !g.memberIds.includes(member.userId));
+  const act = async (work: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(true);
+    try { await work(); } catch (e) { toast(e instanceof Error ? e.message : String(e), "error"); } finally { setBusy(false); }
+  };
+  return (
+    <span className="profile-groups">
+      {mine.length === 0 && !onJoin && <span className="muted">None</span>}
+      {mine.map((g) => (
+        <GroupChip
+          key={g.id}
+          group={g}
+          onOpen={onOpen ? () => onOpen(g.id) : undefined}
+          onRemove={onLeave && !busy ? () => void act(() => onLeave(g.id)) : undefined}
+        />
+      ))}
+      {onJoin && others.length > 0 && (
+        <MenuSelect<string>
+          value=""
+          options={others.map((g) => ({ value: g.id, label: g.name }))}
+          onSelect={(id) => void act(() => onJoin(id))}
+          disabled={busy}
+          caret={false}
+          ariaLabel="Add to access group"
+          triggerClassName="link-btn profile-groups-add"
+          menuClassName="access-menu"
+          triggerContent="+ Add to access group"
+        />
+      )}
+      {member.access?.own && mine.length > 0 && (
+        <span className="muted profile-groups-note">Access groups change nothing for them: they have their own vault-wide access.</span>
+      )}
+    </span>
   );
 }
 

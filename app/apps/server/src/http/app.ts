@@ -22,6 +22,7 @@ import { oauthConnectRoutes } from "./routes/oauth-connect.js";
 import { accountPageRoutes } from "./routes/account-pages.js";
 import { invitationRoutes } from "./routes/invitations.js";
 import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
+import { ACCESS_GROUPS_FEATURE, createGroupRoutes } from "./routes/groups.js";
 import { createAppearanceRoutes } from "./routes/appearance.js";
 import { createFontRoutes } from "./fonts.js";
 import { createSkillRoutes } from "./routes/skills.js";
@@ -340,6 +341,8 @@ export function createApp(deps: AppDeps): Hono {
         BOOTSTRAP_ONLY_FEATURE,
         FILES_WITH_BYTES_FEATURE,
         ACCESS_BOARD_FEATURE,
+        // Access groups (migration 097, `routes/groups.ts`).
+        ACCESS_GROUPS_FEATURE,
         SKILLS_FEATURE,
         SKILL_ACCESS_FEATURE,
         // In-app messages (`/api/messages`, docs/MESSAGES.md).
@@ -500,6 +503,10 @@ export function createApp(deps: AppDeps): Hono {
   app.route(
     "/api",
     createMemberShareRoutes({ disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged }),
+  );
+  app.route(
+    "/api",
+    createGroupRoutes({ disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged }),
   );
   // Password reset request that reports sent / no account / failed (Better
   // Auth's own endpoint is neutral and swallows send errors).

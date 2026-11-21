@@ -215,6 +215,14 @@ export interface InboundPlan {
    */
   removeFolders: string[];
   renames: InboundRename[];
+  /**
+   * Folders a teammate moved (`from` local path → `to` server path). Their
+   * notes move through `renames`; the registry moves the tree binaries it
+   * knows under `from` the same way, BEFORE the emptied directory is removed.
+   * A binary left behind kept the old folder non-empty, and the next pass
+   * registered it as a brand-new folder: the move "came back" as a twin.
+   */
+  movedFolders: Array<{ from: string; to: string }>;
   trash: InboundTrash[];
   /**
    * Local note paths the OUTBOUND half must not re-register.
@@ -414,6 +422,7 @@ export function planInbound(input: InboundInput): InboundPlan {
     createFolders: [],
     removeFolders: [],
     renames: [],
+    movedFolders: [],
     trash: [],
     suppress: new Set(),
     stubs: [],
@@ -476,6 +485,7 @@ export function planInbound(input: InboundInput): InboundPlan {
       if (serverFoldersCi.has(pathKey(path))) continue; // re-created server-side
       if (!isSafeFolderPath(path)) continue;
       plan.removeFolders.push(path);
+      plan.movedFolders.push({ from: path, to: now });
     }
   }
 

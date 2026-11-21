@@ -32,6 +32,7 @@ export function VaultKeyWaitingNotice() {
   const [lostDevices, setLostDevices] = useState(false);
   const [account, setAccount] = useState(accountKeyStateNow);
   const [freshCode, setFreshCode] = useState(freshAccountKeyCode);
+  const vaultName = useStore((s) => s.vault?.name ?? null);
   const isOwner = useStore((s) => s.members.find((m) => m.userId === s.session?.user.id)?.role === "owner");
   // Re-render on any key event or vault switch; what shows is read for the
   // vault open NOW, so a block of the vault we left never shows on the next.
@@ -85,7 +86,7 @@ export function VaultKeyWaitingNotice() {
           </button>
         </div>
       </Banner>
-      {restoring && vaultId && <RestoreVaultKeyDialog vaultId={vaultId} onClose={() => setRestoring(false)} />}
+      {restoring && vaultId && <RestoreVaultKeyDialog vaultId={vaultId} vaultName={vaultName} onClose={() => setRestoring(false)} />}
       {lostDevices && <LostDevicesFlow isOwner={isOwner} vaultId={vaultId} onClose={() => setLostDevices(false)} />}
     </>
   );

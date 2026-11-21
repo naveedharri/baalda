@@ -13,9 +13,10 @@
 // - Nothing is removed unless the manifest fetch succeeded: a failed fetch
 //   produces no plan at all, so a flaky network cannot uninstall anything.
 // - An edited copy is never overwritten by a run; only "Use team version"
-//   (`forceInstallSkill`) does, and Rust backs the edited copy up first.
+//   (`forceInstallSkill`) does, replacing the edited copy (no copy is kept).
 // - An edited (or kept-mine) copy that is no longer wanted is RELEASED, not
-//   deleted: Rust drops only the marker and the folder stays as the user's own.
+//   deleted: Rust drops only the marker and the folder stays as the user's own
+//   (Rust also releases, never deletes, a copy that drifted since the plan).
 
 import type {
   InstalledSkill,
@@ -38,7 +39,7 @@ export type RemoveReason = "deleted" | "optedOut" | "lostMembership" | "targetOf
 export type PlanStatus = "conflict" | "edited" | "keptMine" | "upToDate";
 /**
  * Why a name is taken: `unmanaged` = a folder of the person's own (no marker
- * of ours; "Use team version" can back it up and replace it, unless it is a
+ * of ours; "Use team version" can replace it, unless it is a
  * symlink), `other_owner` = another skill, vault, server or user holds it.
  */
 export type ConflictKind = "unmanaged" | "other_owner";
@@ -269,7 +270,6 @@ export interface SkillTargetResult {
   /** Set when a run changed the installed version. */
   fromVersion?: number | null;
   version?: number;
-  backupPath?: string | null;
   error?: string;
   /** With `state: "conflict"`: whose folder holds the name. */
   conflict?: ConflictKind;
@@ -277,7 +277,7 @@ export interface SkillTargetResult {
 
 export interface SkillsRunResult {
   results: SkillTargetResult[];
-  removed: { target: SkillTarget; name: string; reason: RemoveReason; mode: RemoveMode; backupPath: string | null }[];
+  removed: { target: SkillTarget; name: string; reason: RemoveReason; mode: RemoveMode }[];
   /** One entry per skill whose installed version changed (not per target). */
   updated: { skillId: string; name: string; from: number; to: number; codex: boolean }[];
   /** Skills installed for the first time on this device. `codex`: it reached
@@ -353,7 +353,7 @@ export async function runSkillsPlan(plan: SkillsPlan, deps: SkillsRunDeps): Prom
       try {
         const r = await deps.remove(a.target, a.name, a.owner, a.mode);
         if (r.status === "removed" || r.status === "released") {
-          out.removed.push({ target: a.target, name: a.name, reason: a.reason, mode: a.mode, backupPath: r.backupPath });
+          out.removed.push({ target: a.target, name: a.name, reason: a.reason, mode: a.mode });
         }
       } catch (e) {
         out.errors.push(`${a.name}: ${message(e)}`);
@@ -366,7 +366,7 @@ export async function runSkillsPlan(plan: SkillsPlan, deps: SkillsRunDeps): Prom
       const v = await fetchOnce(orgId, skill);
       const r = await deps.install(target, skill.name, markerOf(deps, orgId, skill, v), payloadOf(v), false);
       out.results.push({
-        ...base, state: STATE_OF[r.status], fromVersion: a.fromVersion, version: skill.version, backupPath: r.backupPath,
+        ...base, state: STATE_OF[r.status], fromVersion: a.fromVersion, version: skill.version,
         ...(r.status === "conflict" ? { conflict: conflictKindOf(r.detail) } : {}),
       });
       if (r.status !== "installed") continue;
@@ -397,7 +397,7 @@ export function conflictKey(target: SkillTarget, skill: Pick<ManifestSkill, "nam
   return `${target}|${skill.name.toLowerCase()}|${skill.bundleSha256}`;
 }
 
-/** "Use team version" on a name taken by the person's own folder: back it up, then install. */
+/** "Use team version" on a name taken by the person's own folder: replace it. */
 export async function replaceUnmanagedSkill(
   deps: SkillsRunDeps,
   target: SkillTarget,
@@ -408,7 +408,7 @@ export async function replaceUnmanagedSkill(
   return deps.install(target, skill.name, markerOf(deps, orgId, skill, v), payloadOf(v), false, true);
 }
 
-/** "Use team version": overwrite an edited copy (Rust backs it up first). */
+/** "Use team version": overwrite an edited copy (no copy is kept). */
 export async function forceInstallSkill(
   deps: SkillsRunDeps,
   target: SkillTarget,

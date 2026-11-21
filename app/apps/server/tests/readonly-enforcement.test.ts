@@ -721,18 +721,40 @@ describe("MCP write tools refuse a read-only caller", () => {
     expect((await mcpCall(token, "update_note", { docId: f.note, content: "ok" })).isError).toBe(
       false,
     );
+    const created = await mcpCall(token, "create_note", { vaultId: f.vault, relPath: "Docs/New.md" });
+    expect(created.isError).toBe(false);
+    // Rename/move is creator-only for a plain member (like delete): their own
+    // note moves, the owner's note does not.
+    const ownId = (JSON.parse(created.text) as { docId: string }).docId;
     expect(
-      (await mcpCall(token, "create_note", { vaultId: f.vault, relPath: "Docs/New.md" })).isError,
+      (await mcpCall(token, "move_note", { docId: ownId, relPath: "Docs/Renamed.md" })).isError,
     ).toBe(false);
-    expect(
-      (await mcpCall(token, "move_note", { docId: f.note, relPath: "Docs/Renamed.md" })).isError,
-    ).toBe(false);
+    const others = await mcpCall(token, "move_note", { docId: f.note, relPath: "Docs/Theirs.md" });
+    expect(others.isError).toBe(true);
+    expect(others.text).toMatch(/created this/);
   });
 });
 
 // ═══ 4. HTTP structural routes ═══════════════════════════════════════════════
 
 describe("HTTP registry: structural writes require edit, not membership", () => {
+  it("rename/move is creator-only for a plain member, like delete; owners rename anything", async () => {
+    const f = await fixture();
+    await seedVaultGrant(f.orgId, "edit");
+    const theirs = await req(f.member, "PATCH", `/api/notes/${f.note}`, { relPath: "Docs/Theirs.md" });
+    expect(theirs.status).toBe(403);
+    expect(((await theirs.json()) as { code?: string }).code).toBe("rename_not_creator");
+    const folder = await req(f.member, "PATCH", `/api/folders/${f.folder}`, { path: "Docs2", name: "Docs2" });
+    expect(folder.status).toBe(403);
+    expect(((await folder.json()) as { code?: string }).code).toBe("rename_not_creator");
+    // Their own note: allowed.
+    const mine = await req(f.member, "PATCH", `/api/notes/${f.memberNote}`, { relPath: "Docs/Mine2.md" });
+    expect(mine.status).toBe(200);
+    // The owner renames the member's note and the folder.
+    expect((await req(f.owner, "PATCH", `/api/notes/${f.memberNote}`, { relPath: "Docs/Mine3.md" })).status).toBe(200);
+    expect((await req(f.owner, "PATCH", `/api/folders/${f.folder}`, { path: "Docs2", name: "Docs2" })).status).toBe(200);
+  });
+
   it("(1) a team lock refuses every structural mutation, for member and owner", async () => {
     const f = await fixture();
     await withLock(f);

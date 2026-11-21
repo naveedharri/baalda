@@ -58,7 +58,11 @@ export function updateView(state: UpdateState, current: string | null): UpdateVi
   }
 }
 
-/** The sidebar line shows only while something is happening or waiting on you. */
+/**
+ * The sidebar line shows only while something is happening or waiting on you.
+ * Never an error: a failed check or install is said in Account Settings →
+ * About, not in a red card under the sidebar (owner decision 2026-11-20).
+ */
 export function showsSidebarUpdateLine(view: UpdateView): boolean {
-  return view.tone === "busy" || view.tone === "ready" || view.tone === "error" || view.tone === "wait";
+  return view.tone === "busy" || view.tone === "ready" || view.tone === "wait";
 }

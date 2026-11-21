@@ -440,7 +440,7 @@ function JoinVaultItem({ onDone }: { onDone: () => void }) {
             }
           }}
         />
-        <button className="primary sm" disabled={busy} onClick={() => void join()}>
+        <button className="primary sm" disabled={busy || !code.trim()} onClick={() => void join()}>
           Join
         </button>
       </div>

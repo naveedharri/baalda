@@ -22,6 +22,7 @@ import { editorMeasureStyle } from "../lib/editorMeasure";
 import { hasBillingLapsedLock, lockBlocksCaller, lockScopesByPath } from "../lib/locks";
 import { playPingSound } from "../lib/presence/ping";
 import { syncManager } from "../lib/sync/docSession";
+import { localOnlyNotice } from "../lib/createGate";
 import { colorForUser, PRESENCE_OFFLINE, statusTone, ringShowsColor } from "../lib/presence/color";
 import type { ActivityStatus } from "../lib/prefs";
 import { StatusMoment } from "./StatusMoment";
@@ -36,6 +37,7 @@ import { FaceSvg } from "./Avatar";
 import { agoFromIso, lastEditedTooltip } from "./versionFormat";
 import { noteContentReady, shouldShowNoteSkeleton } from "../lib/editor/noteLoading";
 import { registerLiveView } from "./liveEditorViews";
+import { CheckIcon } from "./CheckIcon";
 
 interface Peer {
   id: string;
@@ -278,7 +280,7 @@ function PeerRow({
             setPinged(true);
           }}
         >
-          {pinged ? "✓" : "Ping"}
+          {pinged ? <CheckIcon size={12} /> : "Ping"}
         </button>
       )}
     </div>
@@ -381,6 +383,27 @@ function ViewOnlyChip({
   );
 }
 
+/** The open note exists only on this computer: the server refused to add it
+ *  (#414). Grey, not amber, and it says how to make it sync. */
+function LocalOnlyChip({ code, notePath }: { code: string | null; notePath: string }) {
+  const { why, fix } = localOnlyNotice(code, notePath);
+  return (
+    <div className="rd-viewonly rd-localonly" role="status">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="12" rx="2" />
+        <path d="M8 20h8M12 16v4" />
+      </svg>
+      <span className="rd-localonly-text">
+        <span className="rd-localonly-line">
+          <span className="rd-viewonly-label">Local only · not syncing.</span>{" "}
+          <span className="rd-localonly-why">{why}</span>
+        </span>
+        <span className="rd-localonly-fix">{fix}</span>
+      </span>
+    </div>
+  );
+}
+
 export function Editor() {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -406,6 +429,17 @@ export function Editor() {
   const versionPreview = useStore((s) => s.versionPreview);
   const noteVersions = useStore((s) => s.noteVersions);
   const notePath = openNote?.path ?? null;
+  // The server refused to add this note (no access to add it there, or a
+  // frozen root): it is on this computer only. undefined = not refused.
+  const localOnlyCode = useStore((s) => {
+    if (!s.syncEnabled || !notePath) return undefined;
+    const key = notePath.toLowerCase();
+    const hit = syncManager.registry
+      .heldRefusals()
+      .find((f) => f.kind === "note" && f.path.toLowerCase() === key);
+    return hit ? hit.code : undefined;
+  });
+  const localOnly = localOnlyCode !== undefined;
 
   const [peers, setPeers] = useState<Peer[]>([]);
   const [readOnly, setReadOnly] = useState(false);
@@ -986,9 +1020,11 @@ export function Editor() {
 
   return (
     <div className="editor-column" style={editorMeasureStyle(editorMeasure)}>
-      {(readOnly || showToolbar) && (
+      {(readOnly || showToolbar || localOnly) && (
         <div className="editor-topbar">
-          {readOnly && (
+          {localOnly && notePath ? (
+            <LocalOnlyChip code={localOnlyCode ?? null} notePath={notePath} />
+          ) : readOnly && (
             <ViewOnlyChip
               reason={syncStatus === "no-access" ? "removed" : billingLapsed ? "lapsed" : "view"}
               peers={peers}

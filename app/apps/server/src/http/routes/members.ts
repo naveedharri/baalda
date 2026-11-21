@@ -20,6 +20,7 @@ import { redactKeyFragments, requireVaultKey } from "../../crypto/transport.js";
 import { vaultKeysEnabled } from "../../crypto/config.js";
 import { vaultOrg } from "../../permissions/lookup.js";
 import { parseInviteVaultKeys, storeInvitationWrap } from "../../members/invitation-keys.js";
+import { GroupError, groupsByUser, rememberInvitationGroups, validGroupIds } from "../../groups/service.js";
 
 /**
  * The Members & access page.
@@ -127,10 +128,25 @@ memberRoutes.get("/orgs/:orgId/members/overview", async (c) => {
     ),
   ]);
 
-  const inviters = await invitersByUser(
-    orgId,
-    members.rows.map((m) => m.user_id),
-  );
+  const [inviters, memberGroups, inviteGroups, ownVault] = await Promise.all([
+    invitersByUser(orgId, members.rows.map((m) => m.user_id)),
+    groupsByUser(pool, orgId),
+    pool.query<{ invitation_id: string; group_id: string }>(
+      `SELECT ig.invitation_id, ig.group_id FROM invitation_groups ig
+         JOIN invitation i ON i.id = ig.invitation_id WHERE i."organizationId" = $1`,
+      [orgId],
+    ),
+    // Who has their OWN vault-wide level: for them groups change nothing
+    // (resolver: a personal vault row is absolute), which the UI says.
+    canManage
+      ? pool.query<{ principal_id: string }>(
+          `SELECT principal_id FROM shares
+            WHERE org_id = $1 AND resource_type = 'vault' AND resource_id = $1 AND principal_type = 'user'`,
+          [orgId],
+        )
+      : Promise.resolve({ rows: [] as { principal_id: string }[] }),
+  ]);
+  const ownVaultIds = new Set(ownVault.rows.map((r) => r.principal_id));
 
   let levels: Map<string, AccessLevel> | null = null;
   if (canManage && members.rows.length) {
@@ -174,7 +190,8 @@ memberRoutes.get("/orgs/:orgId/members/overview", async (c) => {
       joinedAt: new Date(m.joined_at).toISOString(),
       lastActiveAt: m.last_seen_at ? new Date(m.last_seen_at).toISOString() : null,
       invitedBy: inviters.get(m.user_id) ?? null,
-      ...(levels ? { access: { level: levels.get(m.user_id) ?? "none" } } : {}),
+      groupIds: memberGroups.get(m.user_id) ?? [],
+      ...(levels ? { access: { level: levels.get(m.user_id) ?? "none", own: ownVaultIds.has(m.user_id) } } : {}),
     })),
     invitations: invitations.rows.map((i) => ({
       id: i.id,
@@ -184,6 +201,7 @@ memberRoutes.get("/orgs/:orgId/members/overview", async (c) => {
       createdAt: new Date(i.created_at).toISOString(),
       expiresAt: i.expires_at ? new Date(i.expires_at).toISOString() : null,
       access: i.access && ACCESS_MODES.has(i.access) ? i.access : null,
+      groupIds: inviteGroups.rows.filter((g) => g.invitation_id === i.id).map((g) => g.group_id),
     })),
     canManage,
   });
@@ -460,6 +478,22 @@ memberRoutes.post("/orgs/:orgId/invitations", async (c) => {
   if (access !== null && (typeof access !== "string" || !ACCESS_MODES.has(access))) {
     return c.json({ error: "invalid_access", message: "access must be open, readonly, private or null" }, 400);
   }
+  // Groups the invitee joins on acceptance (migration 097). An `access` level
+  // is a personal vault-wide level, which ignores groups, so the two together
+  // would leave the groups doing nothing: refused rather than silently inert.
+  let groupIds: string[] = [];
+  try {
+    groupIds = await validGroupIds(pool, orgId, body.groupIds);
+  } catch (e) {
+    if (e instanceof GroupError) return c.json({ error: e.code, message: e.message }, e.status);
+    throw e;
+  }
+  if (groupIds.length > 0 && access !== null) {
+    return c.json(
+      { error: "access_or_groups", message: "Choose an access level or groups for an invite, not both" },
+      400,
+    );
+  }
 
   // Seamless keys (B1): VK wrapped per invitee under an invite secret, by a
   // device that proves HERE that it holds VK. A failed proof creates NO
@@ -504,6 +538,7 @@ memberRoutes.post("/orgs/:orgId/invitations", async (c) => {
           [inv.id, access],
         );
       }
+      await rememberInvitationGroups(pool, orgId, inv.id, groupIds);
       const keyItem = keyItems?.get(email);
       let secret: string | undefined;
       if (keyItem && vaultKeys) {

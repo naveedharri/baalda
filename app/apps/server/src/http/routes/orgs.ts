@@ -15,6 +15,7 @@ import {
 import { announceMemberJoined, announceMemberRemoved } from "../../sync/member-events.js";
 import { announceInvitationGone } from "../../sync/user-events.js";
 import { applyInvitationAccess } from "../../members/invitation-access.js";
+import { applyInvitationGroups } from "../../groups/service.js";
 import { applyInvitationKeys } from "../../members/invitation-keys.js";
 import { billingEnabled } from "../../config.js";
 import { dispatchMail, emailEnabled } from "../../email/mailer.js";
@@ -626,6 +627,10 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     // (and its m032 snapshot) exists.
     if (liveInvite) {
       await applyInvitationAccess(
+        { invitationIds: [liveInvite.id], organizationId, userId: session.userId },
+        { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
+      );
+      await applyInvitationGroups(
         { invitationIds: [liveInvite.id], organizationId, userId: session.userId },
         { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
       );

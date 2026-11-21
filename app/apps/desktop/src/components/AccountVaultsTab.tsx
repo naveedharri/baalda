@@ -6,7 +6,7 @@
    the account's billing usage when the server bills per seat. Rows carry no
    plan pill (the plan is the account's, said in Plan & Billing); only a
    lapsed account's vaults get a "Read-only" pill, since that changes the row. */
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { ApiError, type BillingUsage, type MyBillingAccount, type OrgBilling } from "../lib/api";
 import { toast } from "../lib/toast";
 import { folderErrorText } from "../lib/vault/folderErrors";
@@ -17,18 +17,28 @@ import { readOrgVaults, useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
 import { InvitationRows, useFreshInvitations } from "./InvitationRows";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
+import { LOCATE_FOLDER, RESTORE_HERE, VaultFolderMissingRowActions } from "./VaultFolderMissing";
 import { useResetLocalCopy } from "./useResetLocalCopy";
 import { type RowAction, RowActionsMenu } from "./RowActionsMenu";
 import { VaultTile } from "./VaultSwitcher";
 import {
+  CARD_FOLDER_MISSING,
+  type CardMetaPart,
+  folderMissingCardActions,
   localCardLabels,
-  vaultCardLabels,
+  matchesVaultQuery,
+  orderSyncedVaults,
+  RECENT_VAULT_CARDS,
+  isDefaultVaultsRoot,
+  shortFolderPath,
+  syncedCardMeta,
   vaultSlugLabel,
+  visibleSyncedVaults,
+  type VaultsScope,
 } from "../lib/accountVaultsView";
 import { LimitNudge } from "./LimitNudge";
 import { UpgradeDialog } from "./UpgradeDialog";
-import { useLocalFolderClasses, useLocalVaults } from "./useVaultLists";
+import { useLocalFolderClasses, useLocalVaults, useRecentVaults } from "./useVaultLists";
 import { hiddenForeignFootnote, visibleFolders } from "../lib/vault/vaultList";
 import { formatDate, UnsyncConfirmDialog } from "./VaultSettingsDialog";
 import { AccountVaultPage } from "./AccountVaultPage";
@@ -38,9 +48,6 @@ import {
   vaultPageRole,
   vaultSettingsAction,
 } from "../lib/accountVaultPage";
-
-const CURRENT_LINK_TIP =
-  'The active vault is also linked at "current", so tools like Claude Desktop can point at one fixed path.';
 
 function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
@@ -71,6 +78,13 @@ export function AccountVaultsTab() {
   // Bumped after a local remove/delete so the recents list re-fetches.
   const [localsNonce, setLocalsNonce] = useState(0);
   const locals = useLocalVaults(localsNonce);
+  // The full recents list, for "the 6 you opened last" (by each vault's folder).
+  const recents = useRecentVaults(localsNonce);
+  // Role and owner per vault, from the billing listing (null with billing off).
+  const myBilling = useStore((s) => s.myBilling);
+  useEffect(() => {
+    if (session) void useStore.getState().refreshMyBilling();
+  }, [session]);
   const { classes: folderClasses, resolved: foldersResolved } = useLocalFolderClasses(
     locals,
     session ? organizations.map((o) => o.id) : [],
@@ -113,12 +127,11 @@ export function AccountVaultsTab() {
   const [actionError, setActionError] = useState<string | null>(null);
   // The vault whose page is open (a card was clicked); null = the list.
   const [pageOrgId, setPageOrgId] = useState<string | null>(null);
-  // Split view (list on the left, the selected vault's page on the right).
-  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
   const [vaultQuery, setVaultQuery] = useState("");
-  // Synced vaults and local folders get equal billing: one switch picks which
-  // list fills the page.
-  const [scope, setScope] = useState<"synced" | "local">(session ? "synced" : "local");
+  // All / Synced / Local: which sections the page shows.
+  const [scope, setScope] = useState<VaultsScope>("all");
+  // Synced cards past the six opened last are folded behind "Show all".
+  const [showAll, setShowAll] = useState(false);
   // Free-plan vault-cap hit while creating — shows an upgrade nudge instead.
   const [limitNudge, setLimitNudge] = useState<{ kind: LimitKind; limit: number | null } | null>(
     null,
@@ -385,10 +398,17 @@ export function AccountVaultsTab() {
     setActionError(null);
     setLimitNudge(null);
     try {
-      await useStore.getState().createOrganization(orgName.trim());
+      // A new vault starts LOCAL (owner decision 2026-11-20), exactly like the
+      // vault switcher's New vault: a folder under the vaults root, opened and
+      // switched to, with the first-run notes. Syncing it is a separate,
+      // explicit step (Turn on sync), never a side effect of creating it.
+      const parent = await ipc.getVaultsRoot();
+      const v = await ipc.createVault(parent, orgName.trim());
+      await useStore.getState().adoptOpenedVault(v, { seed: true });
       setOrgName("");
       setCreating(false);
       setBound(readOrgVaults());
+      setLocalsNonce((n) => n + 1);
     } catch (e) {
       // A 402 vault-cap rejection becomes an upgrade nudge; anything else is
       // a real error (previously swallowed silently — that was the create bug).
@@ -538,12 +558,6 @@ export function AccountVaultsTab() {
   // banner would only repeat it behind the dialog.
   const errorInDialog = !!(confirmDelete || confirmDeleteLocal || confirmLeave || subDelete);
 
-  // Active vault pinned to the top.
-  const ordered = [
-    ...organizations.filter((o) => o.id === activeOrgId),
-    ...organizations.filter((o) => o.id !== activeOrgId),
-  ];
-
   // Owner rule 2026-10-07: this list shows only folders never synced to
   // Baalda (`visibleFolders`). A folder stamped for a vault this account is a
   // member of is that vault's synced row already; one stamped for any other
@@ -561,32 +575,90 @@ export function AccountVaultsTab() {
     ...localsShown.filter((r) => !(!syncEnabled && vault?.path === r.path)),
   ];
 
+  // Recency per synced vault: when this device last opened its bound folder.
+  const openedAtByOrg: Record<string, number> = {};
+  for (const o of organizations) {
+    const p = bound[o.id];
+    const r = p ? recents.find((x) => x.path === p) : undefined;
+    if (r) openedAtByOrg[o.id] = r.openedAt;
+  }
+  const openOrgId = organizations.find((o) => isOpenOrg(o.id))?.id ?? null;
+  const syncedOrdered = orderSyncedVaults(organizations, { openOrgId, openedAtByOrg });
+  // Choosing Synced asks for the synced list, so it shows whole; only All
+  // folds it to the ones opened last.
+  const listAll = showAll || scope === "synced";
+  const { shown: syncedShown, hidden: syncedHidden } = visibleSyncedVaults(syncedOrdered, {
+    query: vaultQuery,
+    showAll: listAll,
+  });
+  const localsMatching = localsOrdered.filter((r) => matchesVaultQuery(r.name ?? r.path, vaultQuery));
+  const totalVaults = (session ? organizations.length : 0) + localsOrdered.length;
+  const showSynced = !!session && scope !== "local";
+  const showLocal = !session || scope !== "synced";
+
+  // What the server told us about each vault: the caller's role and its owner.
+  // The open vault's member list wins; otherwise the billing listing (absent
+  // with billing off, so those cards simply show no role).
+  const myRoleIn = (orgId: string): string | null => {
+    if (orgId === activeOrgId) {
+      const mine = members.find((m) => m.userId === session?.user.id)?.role;
+      if (mine) return mine;
+    }
+    return myBilling?.vaults.find((v) => v.orgId === orgId)?.role ?? null;
+  };
+  const ownerNameOf = (orgId: string): string | null => {
+    if (orgId === activeOrgId) {
+      const owner = members.find((m) => m.role === "owner");
+      if (owner) return owner.user?.name || null;
+    }
+    return myBilling?.vaults.find((v) => v.orgId === orgId)?.billingOwner?.name ?? null;
+  };
+
   const scopeSwitch = (
     <span className="vaults-scope" role="tablist" aria-label="Which vaults">
-      <button
-        type="button"
-        role="tab"
-        aria-selected={scope === "synced"}
-        className={scope === "synced" ? "is-on" : undefined}
-        onClick={() => setScope("synced")}
-      >
-        Synced <b>{organizations.length}</b>
-      </button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={scope === "local"}
-        className={scope === "local" ? "is-on" : undefined}
-        onClick={() => setScope("local")}
-      >
-        Local <b>{localsOrdered.length}</b>
-      </button>
+      {(
+        [
+          ["all", "All", totalVaults],
+          ["synced", "Synced", organizations.length],
+          ["local", "Local", localsOrdered.length],
+        ] as const
+      ).map(([id, label, n]) => (
+        <button
+          key={id}
+          type="button"
+          role="tab"
+          aria-selected={scope === id}
+          className={scope === id ? "is-on" : undefined}
+          onClick={() => setScope(id)}
+        >
+          {label} <b>{n}</b>
+        </button>
+      ))}
+    </span>
+  );
+
+  const metaLine = (parts: CardMetaPart[]) => (
+    <span className="vaults-card-meta">
+      {parts.map((p, i) => (
+        <Fragment key={i}>
+          {i > 0 && <span className="vaults-card-sep" aria-hidden="true">·</span>}
+        <span className={`vaults-card-part${p.tone ? ` is-${p.tone}` : ""}`}>
+          {p.tone === "open" && <span className="vaults-card-dot" aria-hidden="true" />}
+          {p.tone === "cloud" && (
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+            </svg>
+          )}
+          {p.text}
+        </span>
+        </Fragment>
+      ))}
     </span>
   );
 
   // The open vault page, when a card was clicked and the vault still exists.
   const pageOrg = session && pageOrgId ? organizations.find((o) => o.id === pageOrgId) ?? null : null;
-  const renderPage = (o: (typeof organizations)[number], withBack = true) => {
+  const renderPage = (o: (typeof organizations)[number]) => {
     const isActive = isOpenOrg(o.id);
     const usage = usageFor(o.id);
     const onMyAccount = !!usage;
@@ -641,312 +713,399 @@ export function AccountVaultsTab() {
           }
           useStore.getState().requestSettings("members");
         }}
-        onBack={withBack ? () => setPageOrgId(null) : undefined}
+        onBack={() => setPageOrgId(null)}
       />
     );
   };
 
-  return (
-    <>
-      {pageOrg ? (
+  const headerActions = (
+    <span className="account-vaults-head-actions">
+      {!creating && !joining && (
         <>
-          {renderPage(pageOrg)}
-          {actionError && !errorInDialog && <div className="auth-error">{actionError}</div>}
-        </>
-      ) : (
-        <>
-      {session && userInvitations.length > 0 && (
-        <>
-          <div className="subhead">Invitations ({userInvitations.length})</div>
-          <div className="account-vaults-invites">
-            <InvitationRows invitations={userInvitations} freshIds={freshInviteIds} />
-          </div>
-          <div className="menu-sep" />
-        </>
-      )}
-      {session && scope === "synced" && (
-        <>
-      <div className="subhead account-vaults-head">
-        {scopeSwitch}
-        <span className="account-vaults-head-actions">
-          {!creating && !joining && (
-          <>
-            <button
-              type="button"
-              className="primary vault-hdr-btn"
-              onClick={() => setCreating(true)}
-            >
+          <AsyncButton className="secondary vault-hdr-btn" disabled={busy} onClick={openExisting}>
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+            </svg>
+            <span>Open folder</span>
+          </AsyncButton>
+          {session && (
+            <>
+              <button type="button" className="secondary vault-hdr-btn" onClick={() => setJoining(true)}>
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" />
+                </svg>
+                <span>Join with code</span>
+              </button>
+            </>
+          )}
+            <button type="button" className="primary vault-hdr-btn" onClick={() => setCreating(true)}>
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M12 5v14M5 12h14" />
               </svg>
               <span>New vault</span>
             </button>
-            <button
-              type="button"
-              className="secondary vault-hdr-btn"
-              onClick={() => setJoining(true)}
-            >
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" />
-              </svg>
-              <span>Join with code</span>
-            </button>
-          </>
-          )}
-          {/* The form opens where its button was, so nothing else moves. */}
-        {(creating || joining) && (
-          <div className="vault-tab-actions">
-            {creating ? (
-              <form
-                className="vault-tab-form"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void createOrg();
-                }}
-              >
-                <input
-                  autoFocus
-                  placeholder="Vault name"
-                  value={orgName}
-                  onChange={(e) => setOrgName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") setCreating(false);
-                  }}
-                />
-                <button
-                  type="submit"
-                  className="primary"
-                  disabled={busy || !orgName.trim()}
-                >
-                  Create
-                </button>
-                <button
-                  type="button"
-                  className="ghost-pill"
-                  disabled={busy}
-                  onClick={() => setCreating(false)}
-                >
-                  Cancel
-                </button>
-              </form>
-            ) : joining ? (
-              <form
-                className="vault-tab-form"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void joinByCode();
-                }}
-              >
-                <input
-                  autoFocus
-                  className="vault-tab-code"
-                  placeholder="Join code, e.g. K7MPX2RA"
-                  value={joinCode}
-                  spellCheck={false}
-                  autoCapitalize="characters"
-                  onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") setJoining(false);
-                  }}
-                />
-                <button
-                  type="submit"
-                  className="primary"
-                  disabled={busy || !joinCode.trim()}
-                >
-                  Join
-                </button>
-                <button
-                  type="button"
-                  className="ghost-pill"
-                  disabled={busy}
-                  onClick={() => setJoining(false)}
-                >
-                  Cancel
-                </button>
-              </form>
-            ) : null}
-          </div>
-        )}
-        </span>
-      </div>
-      {/* Split view: the vault list on the left, the selected vault's page on
-          the right (its role, plan, folder, usage and actions). Opens on the
-          vault you are in. */}
-      <div className="vaults-split">
-        <div className="vaults-split-list">
-          <input
-            className="vaults-search"
-            type="search"
-            placeholder="Search vaults"
-            aria-label="Search vaults"
-            value={vaultQuery}
-            onChange={(e) => setVaultQuery(e.target.value)}
-          />
-          <ul className="vaults-split-items" role="listbox" aria-label="Synced vaults">
-            {ordered
-              .filter((o) => !vaultQuery.trim() || o.name.toLowerCase().includes(vaultQuery.trim().toLowerCase()))
-              .map((o) => {
-                const isActive = isOpenOrg(o.id);
-                const labels = vaultCardLabels(o, usageFor(o.id), {
-                  folderMissing: isActive && rootMissing,
-                });
-                const selected = (selectedOrgId ?? ordered[0]?.id) === o.id;
-                return (
-                  <li
-                    key={o.id}
-                    role="option"
-                    aria-selected={selected}
-                    tabIndex={0}
-                    className={`vaults-split-item${selected ? " selected" : ""}`}
-                    onClick={() => setSelectedOrgId(o.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        setSelectedOrgId(o.id);
-                      }
-                    }}
-                  >
-                    <VaultTile identity={`org:${o.id}`} name={o.name} />
-                    <span className="vaults-split-text">
-                      <span className="vaults-split-name" title={labels.name}>{labels.name}</span>
-                      <span className={`vaults-split-meta${labels.metaDanger ? " is-danger" : ""}`}>
-                        {labels.meta ?? ""}
-                      </span>
-                    </span>
-                    {isActive && <span className="vaults-split-open">Open now</span>}
-                  </li>
-                );
-              })}
-          </ul>
-        </div>
-        <div className="vaults-split-detail">
-          {(() => {
-            const sel = ordered.find((o) => o.id === (selectedOrgId ?? ordered[0]?.id));
-            return sel ? renderPage(sel, false) : <p className="muted">No synced vaults yet.</p>;
-          })()}
-        </div>
-      </div>
-      {freeVaultLimit != null && (
-        <p className="muted">
-          Free includes {plural(freeVaultLimit, "synced vault", "synced vaults")} on this account
-          {baseFreeVaults != null && freeVaultLimit > baseFreeVaults
-            ? " (includes vaults you had before)"
-            : ""}
-          .
-        </p>
-      )}
-      {joinError && <div className="auth-error">{joinError}</div>}
-      {actionError && !errorInDialog && <div className="auth-error">{actionError}</div>}
-      {limitNudge && (
-        <LimitNudge
-          kind={limitNudge.kind}
-          limit={limitNudge.limit}
-          onUpgrade={() => setUpgradeOpen(true)}
-        />
-      )}
         </>
       )}
-
-      {(localsOrdered.length > 0 || session) && (!session || scope === "local") && (
-        <>
-          <div className="subhead account-vaults-head">
-            {session ? scopeSwitch : <span>Local folders on this computer ({localsOrdered.length})</span>}
-            {session && (
-              <span className="account-vaults-head-actions">
-                <AsyncButton
-                  className="secondary vault-hdr-btn"
-                  disabled={busy}
-                  onClick={openExisting}
-                >
-                  <span>Open existing</span>
-                </AsyncButton>
-              </span>
-            )}
-          </div>
-          {localsOrdered.length === 0 ? (
-            <div className="vaults-local-empty">
-              <b>No local folders yet</b>
-              <span>Folders you open on this computer without syncing show up here.</span>
-            </div>
+      {/* The form opens where its buttons were, so nothing else moves. */}
+      {(creating || joining) && (
+        <div className="vault-tab-actions">
+          {creating ? (
+            <form
+              className="vault-tab-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void createOrg();
+              }}
+            >
+              <input
+                autoFocus
+                placeholder="Vault name"
+                value={orgName}
+                onChange={(e) => setOrgName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setCreating(false);
+                }}
+              />
+              <button type="submit" className="primary" disabled={busy || !orgName.trim()}>
+                Create
+              </button>
+              <button type="button" className="ghost-pill" disabled={busy} onClick={() => setCreating(false)}>
+                Cancel
+              </button>
+            </form>
           ) : (
-            <ul className="vaults-split-items vaults-local-list" aria-label="Local folders on this computer">
-              {localsOrdered.map((r) => {
-                const isCurrent = !syncEnabled && vault?.path === r.path;
-                const labels = localCardLabels(r);
-                return (
-                  <li key={r.path} className={`vaults-split-item${isCurrent ? " selected" : ""}`} title={r.path}>
-                    <span className="menu-swatch vault-grid-letter" aria-hidden="true">
-                      {labels.letter}
-                    </span>
-                    <span className="vaults-split-text">
-                      <span className="vaults-split-name">{labels.name}</span>
-                      <span className="vaults-split-meta">{r.path}</span>
-                    </span>
-                    {isCurrent && rootMissing ? (
-                      <VaultFolderMissingRowActions
-                        synced={false}
-                        busy={busy}
-                        onRestore={() => undefined}
-                        onLocate={recover(() => useStore.getState().locateVaultFolder())}
-                      />
-                    ) : isCurrent ? (
-                      <span className="vaults-split-open">Open now</span>
-                    ) : (
-                      <AsyncButton
-                        className="vault-switch-chip"
-                        disabled={busy}
-                        onClick={() => switchToLocal(r.path)}
-                      >
-                        Open here
-                      </AsyncButton>
-                    )}
-                    <RowActionsMenu
-                      ariaLabel={`More actions for ${r.name ?? r.path}`}
-                      disabled={busy}
-                      actions={localActions(r.path, r.name ?? r.path)}
-                    />
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-          {foreignFootnote && <p className="muted account-vaults-footnote">{foreignFootnote}</p>}
-        </>
-      )}
-
-      {session && (
-        <>
-          <div className="menu-sep" />
-          <div className="subhead">Vault folder location</div>
-          <div className="join-code-row">
-            <code className="vault-root-path" title={root ?? rootError ?? ""}>
-              {root ?? (rootError ? "Not available" : "…")}
-            </code>
-            <span
-              className="account-vaults-info"
-              role="img"
-              aria-label={CURRENT_LINK_TIP}
-              title={CURRENT_LINK_TIP}
+            <form
+              className="vault-tab-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void joinByCode();
+              }}
             >
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="10" />
-                <path d="M12 16v-4M12 8h.01" />
-              </svg>
-            </span>
-            <button className="link-btn" onClick={() => void changeRoot()}>
-              Change…
-            </button>
-            <button className="link-btn" onClick={() => void resetRoot()}>
-              Reset to default
-            </button>
-          </div>
-          <div className="muted">New vaults are created inside this folder.</div>
-          {rootError && <p className="error">{rootError}</p>}
-        </>
+              <input
+                autoFocus
+                className="vault-tab-code"
+                placeholder="Join code, e.g. K7MPX2RA"
+                value={joinCode}
+                spellCheck={false}
+                autoCapitalize="characters"
+                onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setJoining(false);
+                }}
+              />
+              <button type="submit" className="primary" disabled={busy || !joinCode.trim()}>
+                Join
+              </button>
+              <button type="button" className="ghost-pill" disabled={busy} onClick={() => setJoining(false)}>
+                Cancel
+              </button>
+            </form>
+          )}
+        </div>
       )}
+    </span>
+  );
 
+  return (
+    <>
+      {pageOrg ? (
+        <>
+          <h2 className="settings-section-title">Vaults</h2>
+          {renderPage(pageOrg)}
+          {actionError && !errorInDialog && <div className="auth-error">{actionError}</div>}
         </>
+      ) : (
+        <div className="vaults-page">
+          <div className="vaults-page-head">
+            <div className="vaults-page-title">
+              <h2 className="settings-section-title">Vaults</h2>
+              <p className="vaults-page-sub">
+                {session
+                  ? "Every vault on your account and on this device."
+                  : "Vaults on this device. Sign in to see your synced vaults."}
+              </p>
+            </div>
+            {headerActions}
+          </div>
+          {joinError && <div className="auth-error">{joinError}</div>}
+
+          {session && userInvitations.length > 0 && (
+            <>
+              <div className="vaults-section-head">
+                <span>
+                  Invitations <b>{userInvitations.length}</b>
+                </span>
+              </div>
+              <div className="account-vaults-invites">
+                <InvitationRows invitations={userInvitations} freshIds={freshInviteIds} />
+              </div>
+            </>
+          )}
+
+          <div className="vaults-page-filters">
+            <label className="vaults-search-box">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3.5-3.5" />
+              </svg>
+              <input
+                type="search"
+                placeholder={`Search ${plural(totalVaults, "vault", "vaults")}`}
+                aria-label="Search vaults"
+                value={vaultQuery}
+                onChange={(e) => setVaultQuery(e.target.value)}
+              />
+            </label>
+            {session && scopeSwitch}
+          </div>
+
+          {showSynced && (
+            <section className="vaults-section" aria-label="Synced vaults">
+              <div className="vaults-section-head">
+                <span>
+                  Synced vaults <b>{organizations.length}</b>
+                </span>
+                {syncedHidden > 0 && (
+                  <span className="vaults-section-note">
+                    Showing the {RECENT_VAULT_CARDS} you opened last
+                  </span>
+                )}
+              </div>
+              {syncedShown.length === 0 ? (
+                <p className="vaults-empty-line">
+                  {vaultQuery.trim()
+                    ? "No synced vaults match."
+                    : "No synced vaults yet. Create one with New vault, or join a team with a code."}
+                </p>
+              ) : (
+                <div className="vaults-cards">
+                  {syncedShown.map((o) => {
+                    const isOpen = isOpenOrg(o.id);
+                    const missing = isOpen && rootMissing;
+                    const usage = usageFor(o.id);
+                    const parts = syncedCardMeta({
+                      isOpen,
+                      role: myRoleIn(o.id),
+                      onDevice: !!bound[o.id],
+                      folderMissing: missing,
+                      usage: usage ? { people: usage.people, notes: usage.notes } : null,
+                      ownerName: ownerNameOf(o.id),
+                    });
+                    if (usage && accountLapsed) parts.push({ text: "Read-only", tone: "danger" });
+                    const menu = syncedActions(o, isOpen);
+                    const missingChip = missing ? folderMissingCardActions(syncEnabled) : null;
+                    if (missingChip?.menu.includes("locate")) {
+                      menu.unshift({
+                        key: "locate",
+                        label: LOCATE_FOLDER,
+                        onSelect: recover(() => useStore.getState().locateVaultFolder()),
+                      });
+                    }
+                    return (
+                      <div
+                        key={o.id}
+                        role="button"
+                        tabIndex={0}
+                        className={`vaults-card${isOpen ? " is-open" : ""}`}
+                        title={o.name}
+                        onClick={() => setPageOrgId(o.id)}
+                        onKeyDown={(e) => {
+                          if (e.target !== e.currentTarget) return;
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setPageOrgId(o.id);
+                          }
+                        }}
+                      >
+                        <VaultTile identity={`org:${o.id}`} name={o.name} />
+                        <span className="vaults-card-text">
+                          <span className="vaults-card-name">{o.name}</span>
+                          {metaLine(parts)}
+                        </span>
+                        <span
+                          className={`vaults-card-actions${missingChip ? " is-pinned" : ""}`}
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => e.stopPropagation()}
+                        >
+                          {missingChip ? (
+                            <AsyncButton
+                              className="vaults-card-open"
+                              disabled={busy}
+                              onClick={
+                                missingChip.chip === "restore"
+                                  ? recover(() => useStore.getState().restoreVaultFolder())
+                                  : recover(() => useStore.getState().locateVaultFolder())
+                              }
+                            >
+                              {missingChip.chip === "restore" ? RESTORE_HERE : LOCATE_FOLDER}
+                            </AsyncButton>
+                          ) : (
+                            !isOpen && (
+                              <AsyncButton
+                                className="vaults-card-open"
+                                disabled={busy}
+                                onClick={() => switchTo(o.id)}
+                              >
+                                Switch
+                              </AsyncButton>
+                            )
+                          )}
+                          <RowActionsMenu
+                            ariaLabel={`More actions for ${o.name}`}
+                            disabled={busy}
+                            actions={menu}
+                          />
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {(syncedHidden > 0 || (showAll && scope === "all" && !vaultQuery.trim() && organizations.length > RECENT_VAULT_CARDS)) && (
+                <button type="button" className="link-btn vaults-show-all" onClick={() => setShowAll((v) => !v)}>
+                  {showAll ? "Show fewer" : `Show all ${organizations.length} synced vaults`}
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className={showAll ? "is-up" : undefined}>
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
+                </button>
+              )}
+              {freeVaultLimit != null && (
+                <p className="muted">
+                  Free includes {plural(freeVaultLimit, "synced vault", "synced vaults")} on this account
+                  {baseFreeVaults != null && freeVaultLimit > baseFreeVaults
+                    ? " (includes vaults you had before)"
+                    : ""}
+                  .
+                </p>
+              )}
+              {limitNudge && (
+                <LimitNudge
+                  kind={limitNudge.kind}
+                  limit={limitNudge.limit}
+                  onUpgrade={() => setUpgradeOpen(true)}
+                />
+              )}
+            </section>
+          )}
+
+          {showLocal && (
+            <section className="vaults-section" aria-label="Local vaults">
+              <div className="vaults-section-head">
+                <span>
+                  Local vaults <b>{localsOrdered.length}</b>
+                </span>
+              </div>
+              {localsMatching.length === 0 ? (
+                <p className="vaults-empty-line">
+                  {vaultQuery.trim() && localsOrdered.length > 0
+                    ? "No local vaults match."
+                    : "No local vaults yet. Folders you open on this computer without syncing show up here."}
+                </p>
+              ) : (
+                <div className="vaults-cards">
+                  {localsMatching.map((r) => {
+                    const isCurrent = !syncEnabled && vault?.path === r.path;
+                    const missing = isCurrent && rootMissing;
+                    const labels = localCardLabels(r);
+                    const parts: CardMetaPart[] = [
+                      ...(isCurrent ? [{ text: "Current", tone: "open" as const }] : []),
+                      missing
+                        ? { text: CARD_FOLDER_MISSING, tone: "danger" as const }
+                        : { text: shortFolderPath(r.path) },
+                    ];
+                    const open = () => (isCurrent ? undefined : switchToLocal(r.path));
+                    return (
+                      <div
+                        key={r.path}
+                        role="button"
+                        tabIndex={0}
+                        className={`vaults-card${isCurrent ? " is-open" : ""}`}
+                        title={r.path}
+                        onClick={() => void open()}
+                        onKeyDown={(e) => {
+                          if (e.target !== e.currentTarget) return;
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            void open();
+                          }
+                        }}
+                      >
+                        <span className="menu-swatch vault-grid-letter" aria-hidden="true">
+                          {labels.letter}
+                        </span>
+                        <span className="vaults-card-text">
+                          <span className="vaults-card-name">{labels.name}</span>
+                          {metaLine(parts)}
+                        </span>
+                        <span
+                          className={`vaults-card-actions${missing ? " is-pinned" : ""}`}
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => e.stopPropagation()}
+                        >
+                          {missing ? (
+                            <AsyncButton
+                              className="vaults-card-open"
+                              disabled={busy}
+                              onClick={recover(() => useStore.getState().locateVaultFolder())}
+                            >
+                              {LOCATE_FOLDER}
+                            </AsyncButton>
+                          ) : (
+                            !isCurrent && (
+                              <AsyncButton
+                                className="vaults-card-open"
+                                disabled={busy}
+                                onClick={() => switchToLocal(r.path)}
+                              >
+                                Switch
+                              </AsyncButton>
+                            )
+                          )}
+                          <RowActionsMenu
+                            ariaLabel={`More actions for ${r.name ?? r.path}`}
+                            disabled={busy}
+                            actions={localActions(r.path, r.name ?? r.path)}
+                          />
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {foreignFootnote && <p className="muted account-vaults-footnote">{foreignFootnote}</p>}
+            </section>
+          )}
+
+          {actionError && !errorInDialog && <div className="auth-error">{actionError}</div>}
+
+          {session && (
+            <div className="vaults-root">
+              <span className="vaults-root-label">New vaults are created in</span>
+              <span
+                className="vaults-root-path"
+                title={
+                  root
+                    ? `${root}\n\nBaalda also keeps a shortcut named “current” here that always points to the open vault, so an AI app can use one fixed path.`
+                    : (rootError ?? "")
+                }
+              >
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+                </svg>
+                {root ? shortFolderPath(root) : rootError ? "Not available" : "…"}
+              </span>
+              <button className="link-btn" onClick={() => void changeRoot()}>
+                Change
+              </button>
+              {root && !isDefaultVaultsRoot(root) && (
+                <button className="link-btn vaults-root-reset" onClick={() => void resetRoot()}>
+                  Reset to default
+                </button>
+              )}
+              {rootError && <span className="error">{rootError}</span>}
+            </div>
+          )}
+        </div>
       )}
       {reset.dialog}
 

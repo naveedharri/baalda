@@ -34,7 +34,8 @@ html:not(.rd-off) {
 /* ---- Dark: "night paper". Warm charcoal, never pure black; the canvas sits a
    step below the page the way cream sits under white; off-white text with
    warmth; a calmer violet so nothing glows. ---- */
-html[data-theme="dark"]:not(.rd-off) {
+html[data-theme="dark"]:not(.rd-off),
+html:not(.rd-off) .graph-view {
   --rd-surface: #1f1e1c;
   --rd-cream: #181715;
   --rd-fill: #2a2825;
@@ -74,7 +75,8 @@ html[data-theme="dark"]:not(.rd-off) {
 
 /* Dark values for the redesign's named colours: inks lift to soft light
    tones, pastel fills become low-alpha washes of the same hue. */
-html[data-theme="dark"]:not(.rd-off) {
+html[data-theme="dark"]:not(.rd-off),
+html:not(.rd-off) .graph-view {
   --rdc-26252d: #ddd8cf;
   --rdc-2e2d36: #ddd8cf;
   --rdc-55545e: #aaa59b;
@@ -1847,7 +1849,13 @@ html:not(.rd-off) .right-panel-tab { border-radius: 9px; }
 html:not(.rd-off) .activity-clear { font-size: 12px; color: var(--text-tertiary); }
 html:not(.rd-off) .activity-list { padding: 0 8px; }
 html:not(.rd-off) .activity-row { border: 0 !important; border-radius: 12px; padding: 10px 10px; }
-html:not(.rd-off) .activity-row:hover { background: rgba(var(--rd-ink), 0.03); }
+html:not(.rd-off) .activity-row:not([data-open]):hover { background: var(--bg-hover); }
+/* One hover only: the whole row lights up, never a second box around the head. */
+html:not(.rd-off) .activity-row-head:hover { background: transparent; }
+/* Open: no grey wash over the expanded card, and the detail starts at the
+   row's left edge rather than under the message column. */
+html:not(.rd-off) .activity-row[data-open] .activity-row-detail { grid-column: 1 / -1; }
+html:not(.rd-off) .activity-row[data-open] .activity-row-detail:hover { background: var(--bg-app); }
 html:not(.rd-off) .activity-row-head { align-items: flex-start; gap: 10px; }
 
 /* Kind as a soft coloured pill instead of a bold black word. */
@@ -2353,8 +2361,7 @@ html[data-theme="dark"] .modal.auth-dialog {
 
 /* ---- Graph: calm, clean, on the app's own canvas ---- */
 .graph-diag { display: none !important; }
-html:not(.rd-off) .graph-canvas-wrap { background: #fdfbf7; }
-html[data-theme="dark"]:not(.rd-off) .graph-canvas-wrap { background: #1b1a18; }
+html:not(.rd-off) .graph-canvas-wrap { background: #1b1a18; }
 html:not(.rd-off) .graph-canvas-wrap::after { display: none; }
 html:not(.rd-off) .graph-floating-controls {
   background: rgba(var(--rd-ink), 0.04); border: 0; padding: 3px; border-radius: 12px;
@@ -2368,7 +2375,7 @@ html:not(.rd-off) .graph-controls {
   background: var(--rd-surface);
   box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 24px 48px -20px rgba(var(--rd-ink), 0.3);
 }
-html[data-theme="dark"]:not(.rd-off) .graph-controls { background: #262421; box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.08), 0 24px 48px -18px rgba(0, 0, 0, 0.7); }
+html:not(.rd-off) .graph-controls { background: #262421; box-shadow: 0 0 0 1px rgba(255, 248, 236, 0.08), 0 24px 48px -18px rgba(0, 0, 0, 0.7); }
 html:not(.rd-off) .graph-control-group-title {
   font: 500 10.5px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary);
 }
@@ -2381,7 +2388,7 @@ html:not(.rd-off) .graph-control-search {
 html:not(.rd-off) .graph-seg { background: var(--rd-fill); border: 0; padding: 3px; border-radius: 9px; }
 html:not(.rd-off) .graph-seg-btn { border-radius: 7px; font-size: 12px; color: var(--text-secondary); }
 html:not(.rd-off) .graph-seg-btn.is-active { background: var(--rd-surface); color: var(--text-primary); box-shadow: 0 1px 3px rgba(var(--rd-ink), 0.12); }
-html[data-theme="dark"]:not(.rd-off) .graph-seg-btn.is-active { background: #34312d; }
+html:not(.rd-off) .graph-seg-btn.is-active { background: #34312d; }
 /* The panel stays clear of the window's traffic lights and scrolls instead of
    growing up under them. */
 html:not(.rd-off) .graph-controls { max-height: calc(100% - 72px); overflow-y: auto; overscroll-behavior: contain; }
@@ -2545,13 +2552,43 @@ html:not(.rd-off) .mcp-copy-btn.is-copied { background: var(--rdc-e4f3e8, #e4f3e
    no yellow. */
 html:not(.rd-off) .banner-slot > .banner {
   margin: 8px 16px 0; padding: 10px 10px 10px 12px; gap: 12px; justify-content: flex-start;
-  background: var(--rd-surface) !important; border: 0 !important; border-radius: 16px;
-  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.07), 0 14px 30px -18px rgba(var(--rd-ink), 0.35) !important;
-  font-size: 13.5px; line-height: 1.45; color: var(--text-secondary);
+  /* A tinted card in the brand's colours (2026-11-20): white over a white note
+     page was easy to miss now that banners float. Violet by default, red for
+     something removed or stopped, green for good news. */
+  --banner-bg: var(--rdc-ece6ff, #ece6ff);
+  --banner-edge: rgba(91, 63, 214, 0.28);
+  --banner-ink: var(--rdc-3d2a99, #3d2a99);
+  background: var(--banner-bg) !important; border: 0 !important; border-radius: 16px;
+  box-shadow: 0 0 0 1px var(--banner-edge), 0 14px 30px -14px rgba(91, 63, 214, 0.45) !important;
+  font-size: 13.5px; line-height: 1.45; color: var(--banner-ink);
 }
+html:not(.rd-off) .banner-slot > .banner.tone-danger {
+  --banner-bg: var(--rdc-fde4e0, #fde4e0);
+  --banner-edge: rgba(179, 57, 47, 0.28);
+  --banner-ink: var(--rdc-8a2a22, #8a2a22);
+}
+html:not(.rd-off) .banner-slot > .banner.tone-good {
+  --banner-bg: var(--rdc-dcf2e3, #dcf2e3);
+  --banner-edge: rgba(47, 122, 70, 0.28);
+  --banner-ink: var(--rdc-245f37, #245f37);
+}
+html:not(.rd-off)[data-theme="dark"] .banner-slot > .banner {
+  --banner-bg: #2b2546; --banner-edge: rgba(167, 146, 255, 0.35); --banner-ink: #e3dcff;
+}
+html:not(.rd-off)[data-theme="dark"] .banner-slot > .banner.tone-danger {
+  --banner-bg: #3a2220; --banner-edge: rgba(240, 139, 128, 0.35); --banner-ink: #ffd9d3;
+}
+html:not(.rd-off)[data-theme="dark"] .banner-slot > .banner.tone-good {
+  --banner-bg: #1f3427; --banner-edge: rgba(120, 200, 145, 0.35); --banner-ink: #d3f2dd;
+}
+/* The icon tile sits on the tint now, so it goes white (tone colour stays). */
+html:not(.rd-off) .banner-slot > .banner .banner-icon { background: rgba(255, 255, 255, 0.85); color: var(--rdc-5b3fd6, #5b3fd6); }
+html:not(.rd-off) .banner-slot > .banner.tone-danger .banner-icon { color: var(--rdc-b3392f, #b3392f); }
+html:not(.rd-off) .banner-slot > .banner.tone-good .banner-icon { color: var(--rdc-2f7a46, #2f7a46); }
+html:not(.rd-off)[data-theme="dark"] .banner-slot > .banner .banner-icon { background: rgba(255, 255, 255, 0.1); }
 html:not(.rd-off) .banner-slot > .banner > :not(.banner-icon):not(.banner-actions) { flex: 1; min-width: 0; }
 html:not(.rd-off) .banner-slot > .banner strong,
-html:not(.rd-off) .banner-slot > .banner b { color: var(--text-primary) !important; font-weight: 600; }
+html:not(.rd-off) .banner-slot > .banner b { color: var(--banner-ink, var(--text-primary)) !important; font-weight: 600; }
 html:not(.rd-off) .banner-icon {
   flex: none; width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center;
   background: var(--rdc-f1efeb, #f1efeb); color: var(--text-tertiary);
@@ -2562,7 +2599,10 @@ html:not(.rd-off) .banner.tone-good .banner-icon { background: var(--rdc-e4f3e8,
 html:not(.rd-off)[data-theme="dark"] .banner-icon { background: rgba(255, 250, 240, 0.08); }
 html:not(.rd-off) .banner-slot > .banner .banner-actions { margin-left: auto; }
 html:not(.rd-off) .banner-slot > .banner .banner-actions button:not(.primary):not(.link-btn) {
-  border: 0; background: rgba(var(--rd-ink), 0.05); border-radius: 10px;
+  border: 0; background: rgba(255, 255, 255, 0.75); color: var(--banner-ink); border-radius: 10px;
+}
+html:not(.rd-off)[data-theme="dark"] .banner-slot > .banner .banner-actions button:not(.primary):not(.link-btn) {
+  background: rgba(255, 255, 255, 0.1);
 }
 html:not(.rd-off) .banner-slot > .banner .banner-actions button.primary { border-radius: 10px; }
 
@@ -2915,7 +2955,13 @@ html:not(.rd-off) .account-popover > .rd-status {
 html:not(.rd-off) .ai-tools-lede { margin: 0; color: var(--text-secondary); font-size: var(--fs-md); }
 html:not(.rd-off) .ai-tools-rows .profile-row { grid-template-columns: minmax(200px, 260px) 1fr; }
 html:not(.rd-off) .ai-tools-list { display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0; }
-html:not(.rd-off) .ai-tools-actions { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
+/* Each AI tools row stacks: a head (title + one-line hint, actions on the
+   right) over a full-width list, so the hint never wraps in a narrow column
+   and Check now + ⋯ sit level with the title. */
+html:not(.rd-off) .ai-tools-rows .profile-row.ai-tools-stack { display: flex; flex-direction: column; align-items: stretch; gap: 14px; }
+html:not(.rd-off) .ai-tools-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; }
+html:not(.rd-off) .ai-tools-head .profile-row-label { width: auto; flex: 1; min-width: 0; }
+html:not(.rd-off) .ai-tools-actions { display: flex; gap: 6px; align-items: center; flex: none; }
 html:not(.rd-off) .ai-tool,
 html:not(.rd-off) .ai-skill { display: flex; align-items: center; gap: 14px; padding: 10px 14px; border-radius: 12px; min-width: 0; }
 html:not(.rd-off) .ai-tool:nth-child(odd),
@@ -3298,3 +3344,244 @@ html:not(.rd-off) .account-popover {
   width: calc(var(--sidebar-layout-w, 302px) + 24px) !important;
   max-width: calc(100vw - 16px);
 }
+
+/* Local only (#414): the server refused to add this note, so it lives on this
+   computer alone. Neutral grey, not view-only amber, and it wraps to say how to
+   make it sync. */
+.rd-viewonly.rd-localonly {
+  background: var(--bg-subtle) !important; color: var(--text-primary) !important;
+  box-shadow: 0 0 0 1px var(--border), 0 12px 28px -14px rgba(11, 10, 16, 0.3) !important;
+  align-items: flex-start; white-space: normal; max-width: min(760px, calc(100% - 48px));
+  border-radius: 14px; padding: 10px 16px 10px 14px !important;
+}
+.rd-viewonly.rd-localonly svg { color: var(--text-tertiary) !important; margin-top: 1px; }
+.rd-localonly-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rd-localonly-why { color: var(--text-secondary); }
+.rd-localonly-fix { color: var(--text-tertiary); font-size: 12.5px; }
+/* Two lines where the view-only chip is one, so it sits in the page flow above
+   the note instead of floating over its title. */
+.rd-viewonly.rd-localonly {
+  position: relative !important; top: auto !important; bottom: auto !important;
+  margin: 14px auto 4px !important;
+}
+
+/* Sidebar "Local" tag: always visible on a row that isn't syncing, because the
+   hollow ring alone is easy to miss and the ⋯ button covers it on hover. */
+.tree-local {
+  flex-shrink: 0;
+  font: 600 10px/1 var(--font-body);
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  background: var(--bg-subtle);
+  box-shadow: inset 0 0 0 1px var(--border);
+  border-radius: var(--radius-pill);
+  padding: 3px 6px;
+  margin-right: 2px;
+}
+
+/* ---- Account Settings → Vaults as cards (2026-11-20) ----
+   Title row with the actions on the right, search beside All / Synced / Local,
+   then four cards across per section. A card is a row: tile, name and one
+   meta line; Open and ⋯ appear on hover (always, while a choice is pending). */
+html:not(.rd-off) .vaults-page { display: flex; flex-direction: column; gap: 22px; container-type: inline-size; }
+html:not(.rd-off) .vaults-page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+html:not(.rd-off) .vaults-page-title .settings-section-title { margin: 0; }
+html:not(.rd-off) .vaults-page-sub { margin: 4px 0 0; color: var(--text-secondary); font-size: 14.5px; }
+html:not(.rd-off) .vaults-page-head .account-vaults-head-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+html:not(.rd-off) .vaults-page-head .vault-hdr-btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 38px; padding: 0 15px; border-radius: 10px; font: 600 14px var(--font-body);
+}
+html:not(.rd-off) .vaults-page-head .vault-hdr-btn .async-btn-label { display: inline-flex; align-items: center; gap: 7px; }
+html:not(.rd-off) .vaults-page-head .vault-hdr-btn.secondary {
+  background: var(--rd-surface); color: var(--text-primary); border: 0;
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.12);
+}
+html:not(.rd-off) .vaults-page-head .vault-hdr-btn.secondary:hover:not(:disabled) { background: var(--bg-hover); }
+/* The main action is the near-black of the mock, in light and dark alike. */
+html:not(.rd-off) .vaults-page-head .vault-hdr-btn.primary,
+html[data-theme="dark"]:not(.rd-off) .vaults-page-head .account-vaults-head-actions button.primary.vault-hdr-btn {
+  background: var(--text-primary); color: var(--bg-surface); border: 0; box-shadow: none;
+}
+html:not(.rd-off) .vaults-page-head .vault-hdr-btn.primary:hover:not(:disabled) { opacity: 0.88; }
+/* The inline New vault / Join form: its submit is the same near-black. */
+html:not(.rd-off) .vaults-page-head .vault-tab-form button.primary,
+html[data-theme="dark"]:not(.rd-off) .vaults-page-head .vault-tab-form button.primary {
+  background: var(--text-primary) !important; color: var(--bg-surface) !important; border: 0; box-shadow: none;
+}
+html:not(.rd-off) .vaults-page-head .vault-tab-form button.primary:disabled { opacity: 0.35; }
+html:not(.rd-off) .vaults-page-head .vault-tab-form button.primary:hover:not(:disabled) { opacity: 0.88; }
+html:not(.rd-off) .vaults-page-head .vault-tab-form input,
+html:not(.rd-off) .vaults-page-head .vault-tab-form button { height: 38px; border-radius: 10px; }
+
+html:not(.rd-off) .vaults-page-filters { display: flex; align-items: center; gap: 12px; }
+html:not(.rd-off) .vaults-search-box {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px;
+  height: 42px; padding: 0 14px; border-radius: 11px;
+  background: var(--rd-surface); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.12);
+  color: var(--text-tertiary); cursor: text;
+}
+html:not(.rd-off) .vaults-search-box:focus-within { box-shadow: inset 0 0 0 1.5px var(--accent); }
+html:not(.rd-off) .vaults-search-box input {
+  flex: 1; min-width: 0; height: 100%; padding: 0 !important; border: 0 !important; outline: 0;
+  background: transparent !important; box-shadow: none !important;
+  font: 400 15px var(--font-body); color: var(--text-primary);
+}
+html:not(.rd-off) .vaults-page-filters .vaults-scope { flex: none; height: 42px; box-sizing: border-box; padding: 4px; border-radius: 11px; }
+html:not(.rd-off) .vaults-page-filters .vaults-scope button { height: 34px; padding: 0 14px; gap: 7px; font: 600 14px var(--font-body); border-radius: 8px; }
+/* Counts are plain figures here, not pills. */
+html:not(.rd-off) .vaults-page-filters .vaults-scope button b,
+html:not(.rd-off) .vaults-page-filters .vaults-scope button.is-on b {
+  min-width: 0; height: auto; padding: 0; background: none; color: var(--text-tertiary); font-weight: 500; font-size: 14px;
+}
+
+html:not(.rd-off) .vaults-section { display: flex; flex-direction: column; gap: 12px; }
+html:not(.rd-off) .vaults-section-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  font: 600 15.5px var(--font-body); color: var(--text-primary); text-transform: none; letter-spacing: 0;
+}
+html:not(.rd-off) .vaults-section-head b { font-weight: 400; color: var(--text-tertiary); margin-left: 6px; }
+html:not(.rd-off) .vaults-section-note { font: 400 13.5px var(--font-body); color: var(--text-tertiary); }
+html:not(.rd-off) .vaults-empty-line { margin: 0; font-size: 14px; color: var(--text-tertiary); }
+
+html:not(.rd-off) .vaults-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@container (max-width: 900px) { html:not(.rd-off) .vaults-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@container (max-width: 640px) { html:not(.rd-off) .vaults-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+html:not(.rd-off) .vaults-card {
+  position: relative; display: flex; align-items: center; gap: 14px; min-width: 0; min-height: 76px;
+  box-sizing: border-box; padding: 14px 14px 14px 16px; border-radius: 14px; cursor: pointer; text-align: left;
+  background: var(--rd-surface); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.1);
+  transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+html:not(.rd-off) .vaults-card:hover { background: rgba(var(--rd-ink), 0.035); }
+html:not(.rd-off) .vaults-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+html:not(.rd-off) .vaults-card.is-open { box-shadow: inset 0 0 0 2px var(--accent); }
+html:not(.rd-off) .vaults-card .vault-tile,
+html:not(.rd-off) .vaults-card .vault-grid-letter {
+  width: 42px !important; height: 42px !important; border-radius: 11px !important; flex: none;
+}
+html:not(.rd-off) .vaults-card .vault-tile { display: grid !important; place-items: center !important; }
+html:not(.rd-off) .vaults-card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+html:not(.rd-off) .vaults-card-name {
+  font: 600 15.5px/1.25 var(--font-body); color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+html:not(.rd-off) .vaults-card-meta {
+  display: flex; align-items: center; min-width: 0; overflow: hidden; white-space: nowrap;
+  font: 400 13.5px/1.3 var(--font-body); color: var(--text-secondary);
+}
+html:not(.rd-off) .vaults-card-part { display: inline-flex; align-items: center; gap: 5px; min-width: 0; flex: none; }
+html:not(.rd-off) .vaults-card-part:last-child { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; display: block; }
+html:not(.rd-off) .vaults-card-part:last-child > svg,
+html:not(.rd-off) .vaults-card-part:last-child > .vaults-card-dot { display: inline-block; vertical-align: -1px; margin-right: 5px; }
+html:not(.rd-off) .vaults-card-sep { flex: none; margin: 0 6px; color: var(--text-tertiary); }
+html:not(.rd-off) .vaults-card-part.is-open { color: var(--accent); font-weight: 500; }
+html:not(.rd-off) .vaults-card-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+html:not(.rd-off) .vaults-card-part.is-danger { color: var(--danger); }
+html:not(.rd-off) .vaults-card-actions { display: none; align-items: center; gap: 2px; flex: none; }
+html:not(.rd-off) .vaults-card:hover .vaults-card-actions,
+html:not(.rd-off) .vaults-card:focus-within .vaults-card-actions,
+html:not(.rd-off) .vaults-card-actions.is-pinned { display: flex; }
+html:not(.rd-off) .vaults-card-open {
+  height: 32px; padding: 0 13px; border: 0; border-radius: 9px; cursor: pointer;
+  font: 600 13.5px var(--font-body); background: var(--rd-surface); color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.12);
+}
+html:not(.rd-off) .vaults-card-open:hover:not(:disabled) { background: var(--bg-hover); }
+html:not(.rd-off) .vaults-show-all {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 5px;
+  font: 500 14.5px var(--font-body); color: var(--accent); padding: 0;
+}
+html:not(.rd-off) .vaults-show-all svg.is-up { transform: rotate(180deg); }
+
+/* One quiet line: where new vaults go, and a way to change it. */
+html:not(.rd-off) .vaults-root {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px;
+  padding-top: 18px; border-top: 1px solid rgba(var(--rd-ink), 0.08);
+  font: 400 14px var(--font-body); color: var(--text-secondary);
+}
+html:not(.rd-off) .vaults-root-path {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  color: var(--text-primary); font-weight: 500; cursor: default;
+}
+html:not(.rd-off) .vaults-root-path svg { color: var(--text-tertiary); flex: none; }
+html:not(.rd-off) .vaults-root .link-btn { font: 500 14px var(--font-body); color: var(--accent); padding: 0; }
+html:not(.rd-off) .vaults-root .vaults-root-reset { color: var(--text-tertiary); font-weight: 400; }
+@container (max-width: 640px) { html:not(.rd-off) .vaults-page-filters { flex-direction: column; align-items: stretch; } }
+
+
+/* ============================================================
+   Filled action buttons are near-black ink app-wide (the Members and access
+   look: "Invite people", the access-group dialogs), never violet. Red
+   (danger) buttons stay red. Violet stays for links, focus rings, ticks,
+   switches, selection and badges. Last in the cascade on purpose: it replaces
+   every earlier accent fill for these buttons, the dark theme's included.
+   ============================================================ */
+html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child),
+html[data-theme="dark"]:not(.rd-off) :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child) {
+  background: var(--text-primary) !important;
+  color: var(--bg-surface) !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  filter: none !important;
+}
+html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):hover:not(:disabled),
+html[data-theme="dark"]:not(.rd-off) :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):hover:not(:disabled) {
+  background: var(--text-primary) !important;
+  opacity: 0.88;
+}
+html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):disabled,
+html[data-theme="dark"]:not(.rd-off) :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child):disabled {
+  background: var(--text-primary) !important;
+  color: var(--bg-surface) !important;
+  opacity: 0.35 !important;
+}
+html:not(.rd-off) .confirm-actions button.primary:not(.danger):disabled * {
+  color: var(--bg-surface) !important;
+}
+html :is(button.primary:not(.danger), .mcp-new-token, .wf-btn-primary, .upgrade-cta, .upgrade-tier-cta.primary, .local-sync-btn, .activity-row-actions button:last-child) :is(.btn-spinner, .spinner-on-accent) {
+  border-color: color-mix(in srgb, var(--bg-surface) 35%, transparent);
+  border-top-color: var(--bg-surface);
+}
+
+
+/* The vault menu and the account menu open nudged a little to the right of
+   their trigger, so they read as a layer lifted over the sidebar rather than
+   part of it. `translate` composes with the open animation's `transform`. */
+html:not(.rd-off) :is(.vault-popover, .account-popover) {
+  translate: 10px 0;
+}
+
+
+/* Vault menu and account menu: a little wider than before, with everything
+   inside one step smaller (text, icons, rows, padding). Last on purpose. */
+html:not(.rd-off) :is(.vault-switcher, .account-popover) {
+  width: calc(var(--sidebar-layout-w, 302px) + 20px) !important;
+  padding: 7px !important;
+  gap: 0 !important;
+}
+html:not(.rd-off) :is(.vault-switcher, .account-popover)::before { padding: 3px 8px 5px !important; font-size: 10.5px !important; }
+html:not(.rd-off) .vault-switcher .vault-card { min-height: 38px !important; padding: 0 8px !important; gap: 9px !important; }
+html:not(.rd-off) .vault-switcher .vault-card .vault-tile { width: 25px !important; height: 25px !important; border-radius: 6px !important; }
+html:not(.rd-off) .vault-switcher .vault-card-name { font-size: 13px !important; }
+html:not(.rd-off) .vault-switcher .vault-card-sub { font-size: 11px !important; }
+html:not(.rd-off) .vault-switcher .vault-card-kbd { font-size: 10.5px !important; }
+html:not(.rd-off) .vault-switcher .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item,
+html:not(.rd-off) :is(.account-popover > .menu-item, .account-popover > .invites-tab > .menu-item) {
+  min-height: 30px !important; padding: 3px 8px !important; gap: 9px !important; font-size: 13px !important;
+}
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-item-label { font-size: 13px !important; }
+html:not(.rd-off) .vault-switcher .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item .menu-icon,
+html:not(.rd-off) .vault-switcher > .vault-card + .menu-sep + .menu-item + .menu-item + .menu-item .menu-icon,
+html:not(.rd-off) :is(.account-popover > .menu-item, .account-popover > .invites-tab > .menu-item) .menu-icon {
+  width: 13px !important; height: 13px !important; padding: 4px !important; border-radius: 6px !important;
+}
+html:not(.rd-off) :is(.vault-switcher, .account-popover) .menu-hint { font-size: 11px !important; }
+html:not(.rd-off) :is(.vault-switcher, .account-popover) .menu-sep { margin: 3px 8px !important; }
+html:not(.rd-off) .vault-switcher .menu-create-org input { font-size: 12.5px !important; }
+html:not(.rd-off) .account-popover > .rd-status { font-size: 13px !important; }

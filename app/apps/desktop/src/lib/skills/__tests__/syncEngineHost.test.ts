@@ -51,8 +51,8 @@ async function settle() {
 beforeEach(() => {
   ipcMock.skillsTargets.mockResolvedValue([target("claude")]);
   ipcMock.skillsScan.mockResolvedValue([installedOld]);
-  ipcMock.skillsInstall.mockResolvedValue({ status: "installed", backupPath: null, detail: null });
-  ipcMock.skillsRemove.mockResolvedValue({ status: "removed", backupPath: null });
+  ipcMock.skillsInstall.mockResolvedValue({ status: "installed", detail: null });
+  ipcMock.skillsRemove.mockResolvedValue({ status: "removed" });
 });
 afterEach(() => {
   vi.clearAllMocks();

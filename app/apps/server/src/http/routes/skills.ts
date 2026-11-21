@@ -269,6 +269,22 @@ export function createSkillRoutes(): Hono {
       }
       change.people = parsed;
     }
+    if (body.groups !== undefined) {
+      const groups = body.groups;
+      if (!Array.isArray(groups) || groups.length > 200) return c.json({ error: "invalid_request" }, 400);
+      const parsed: NonNullable<SkillAccessChange["groups"]> = [];
+      for (const g of groups as unknown[]) {
+        const row = g as { groupId?: unknown; level?: unknown } | null;
+        if (!row || typeof row.groupId !== "string" || !ID_RE.test(row.groupId)) {
+          return c.json({ error: "invalid_request" }, 400);
+        }
+        if (row.level !== null && row.level !== "required" && row.level !== "optional") {
+          return c.json({ error: "invalid_request" }, 400);
+        }
+        parsed.push({ groupId: row.groupId, level: row.level as "required" | "optional" | null });
+      }
+      change.groups = parsed;
+    }
     const out = await setSkillAccess(who.orgId, skillId, who.userId, change);
     await announceSkillsChanged(who.orgId);
     return c.json(out);

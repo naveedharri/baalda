@@ -463,6 +463,39 @@ describe("suppressNext — the revocation's claim on its own echo", () => {
     expect(h.deleted).toEqual(["file-1"]);
   });
 
+  it("a second report of a removal the app made itself is not a delete either (#420)", async () => {
+    // The claim above is spent by the FIRST event for the path. A watcher that
+    // reports the same removal twice used to turn the second report into
+    // `DELETE /api/files/:id`. The registry's own-removal mark is not spent.
+    const owned = new Set(["Examples/Trekking Routes.pdf"]);
+    const h = harness({
+      local: [],
+      server: [blob("b1", "Examples/Trekking Routes.pdf")],
+      onDisk: [],
+      fileIds: { "Examples/Trekking Routes.pdf": "file-1" },
+    });
+    h.deps.isOwnRemoval = (relPath) => owned.has(relPath);
+    h.queue.suppressNext("Examples/Trekking Routes.pdf");
+    h.queue.noteChanged("Examples/Trekking Routes.pdf");
+    h.queue.noteChanged("Examples/Trekking Routes.pdf");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+    expect(h.blobsDeleted).toEqual([]);
+
+    // A window opened BEFORE the mark is judged at the drain too.
+    owned.clear();
+    h.queue.noteChanged("Examples/Trekking Routes.pdf");
+    owned.add("Examples/Trekking Routes.pdf");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+
+    // Once the file is the user's again, their delete goes through.
+    owned.clear();
+    h.queue.noteChanged("Examples/Trekking Routes.pdf");
+    await h.queue.drain();
+    expect(h.deleted).toEqual(["file-1"]);
+  });
+
   it("closes a window already open for the path", async () => {
     // The watcher can beat the plan: a `tree` event lands, then the revocation
     // removes the same file. The pending entry is ours now, not the user's.

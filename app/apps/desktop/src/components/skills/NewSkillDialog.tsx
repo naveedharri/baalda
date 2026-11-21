@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { isValidSkillName, skillNameNeedsWarning } from "../../lib/skills/validate";
 import { BusyButton } from "./parts";
+import { CheckIcon } from "../CheckIcon";
 
 /** SKILL.md's `description` limit (docs/SKILLS.md §1.1). */
 const DESCRIPTION_MAX = 1024;
@@ -97,7 +98,7 @@ export function NewSkillDialog({
           />
         </label>
         <div className={`skills-name-status is-${status.tone}`} aria-live="polite">
-          {status.tone === "ok" && <span aria-hidden="true">✓ </span>}
+          {status.tone === "ok" && <CheckIcon size={12} className="check-inline" />}
           {status.text}
         </div>
         {skillNameNeedsWarning(trimmed) && (

@@ -43,6 +43,7 @@ import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
 import { statusToWire, type ActivityStatus } from "../prefs";
 import { toast } from "../toast";
+import { renameRefusedMessage } from "../renameGate";
 import { AttachmentSync, findEmbedReferences, routesToAttachmentSync } from "./attachments";
 import { applySkippingUnsafe } from "./windowsPaths";
 import { EmbedArrivalFetcher } from "./embedArrival";
@@ -2067,6 +2068,10 @@ export class SyncManager implements InboundHost {
    * only stopped sharing. See `BinaryDeleteQueue.suppressNext`.
    */
   suppressBinaryDelete(relPath: string): void {
+    // The registry's mark too: the queue's own claim is spent by the FIRST
+    // event for the path, and a second report of the same removal must not
+    // become a server delete either.
+    this.registry.markOwnRemovals?.([relPath]);
     this.binaryDeletes?.suppressNext(relPath);
   }
 
@@ -2342,7 +2347,9 @@ export class SyncManager implements InboundHost {
       // to Trash is a rename). Held for the drain, which pairs it with a folder
       // that appeared (#221); on its own it changes nothing it did not before.
       if (kind === "tree" && gone === true) {
-        if (relPath && this.registry.getFolderId?.(relPath)) {
+        // A folder the registry removed itself (an access change, a teammate's
+        // delete) is not one the user deleted on disk.
+        if (relPath && this.registry.getFolderId?.(relPath) && !this.registry.isOwnRemoval?.(relPath)) {
           this.goneFolders.set(relPath, Date.now());
           this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
           queuedDelete = true;
@@ -2498,10 +2505,15 @@ export class SyncManager implements InboundHost {
    */
   private queueDiskDelete(scope: VaultScope, relPath: string): boolean {
     if (this.liveSince == null) return false;
-    // The registry moved this file itself (a same-path conflict copy): the path
-    // is still the teammate's note and is about to be materialized back. Neither
-    // a delete nor half of a rename — pairing it renamed their note on the server.
-    if (this.registry.isOwnMove?.(relPath)) return false;
+    // The registry removed this file itself: a revocation or a teammate's
+    // delete applied here, never this user deleting it (#419, #420).
+    if (this.registry.isOwnRemoval?.(relPath)) return false;
+    // The registry moved this file AWAY from here itself (a same-path conflict
+    // copy, a refused rename put back): the path is still the teammate's note
+    // or about to hold the file again. Neither a delete nor half of a rename —
+    // pairing it renamed their note on the server. The path a move put a file
+    // ONTO is not skipped: deleting it right after is a real delete.
+    if (this.registry.isOwnMoveSource?.(relPath) ?? this.registry.isOwnMove?.(relPath)) return false;
     const mapping = this.registry.getMapping(relPath);
     if (!mapping) return false;
     if (!this.registry.isPushed(mapping.docId)) {
@@ -2563,15 +2575,17 @@ export class SyncManager implements InboundHost {
    */
   private async drainDiskDeletes(scope: VaultScope): Promise<void> {
     if (!this.enabled || !scope.isCurrent()) return;
-    let pending = [...this.pendingDiskDeletes].map(([docId, e]) => ({
-      docId,
-      relPath: e.relPath,
-    }));
+    // A path the registry removed itself never leaves as a user delete, however
+    // it got here (the second rail behind `queueDiskDelete`, #419).
+    const ownRemoval = (relPath: string) => this.registry.isOwnRemoval?.(relPath) === true;
+    let pending = [...this.pendingDiskDeletes]
+      .map(([docId, e]) => ({ docId, relPath: e.relPath }))
+      .filter((p) => !ownRemoval(p.relPath));
     this.pendingDiskDeletes.clear();
     this.pendingDeleteByPath.clear();
     let candidates = [...this.renameCandidates.keys()];
     this.renameCandidates.clear();
-    const goneFolders = [...this.goneFolders.keys()];
+    const goneFolders = [...this.goneFolders.keys()].filter((f) => !ownRemoval(f));
     this.goneFolders.clear();
     /** Vanished registered folders this drain may remove from the server once
      *  their contents are gone (see {@link propagateGoneFolders}): not the ones
@@ -2732,8 +2746,12 @@ export class SyncManager implements InboundHost {
       }
 
       // 4. The user already removed these files from disk. Propagate that final
-      //    choice without manufacturing another retained copy.
-      await this.propagateAndForget(deletes, scope);
+      //    choice without manufacturing another retained copy. Asked once more
+      //    right before the request: the pairing above awaited, and a removal
+      //    pass may have started meanwhile.
+      const finalDeletes = deletes.filter((d) => !ownRemoval(d.relPath));
+      if (finalDeletes.length === 0) return;
+      await this.propagateAndForget(finalDeletes, scope);
     } finally {
       if (folderStep && foldersToRemove.length > 0 && scope.isCurrent() && !this.rootMissing) {
         try {
@@ -2784,7 +2802,11 @@ export class SyncManager implements InboundHost {
       if (!exists) stillGone.push(top);
     }
     if (!scope.isCurrent() || stillGone.length === 0) return;
-    const all = [...new Set(stillGone.flatMap((t) => this.registry.mappedFoldersUnder(t)))].sort(
+    const all = [...new Set(stillGone.flatMap((t) => this.registry.mappedFoldersUnder(t)))]
+      // A subfolder the registry removed itself (an access change) is not part
+      // of what the user deleted (#419).
+      .filter((p) => !this.registry.isOwnRemoval?.(p))
+      .sort(
       (a, b) => b.split("/").length - a.split("/").length || b.localeCompare(a),
     );
     if (all.length === 0) return;
@@ -3140,7 +3162,24 @@ export class SyncManager implements InboundHost {
   ): Promise<void> {
     console.info(`[sync] ${from} → ${to} (renamed on disk; keeping doc ${docId})`);
     try {
-      await this.registry.renamePath(from, to);
+      const res = await this.registry.moveOnServer(from, to);
+      if (!res.ok && res.refused) {
+        // The server will not take this rename (the person can only view the
+        // note, a lock, …). Put the old name back rather than leave a renamed
+        // copy the server never heard of beside the note the next pull restores.
+        if (scope.isCurrent() && (await this.registry.revertRefusedMove(from, to))) {
+          // The index met the file at `to` and may have minted it a fresh
+          // id; give the old path its kept id back.
+          try {
+            await ipc.rebindNoteId(from, docId, scope.vaultEpoch);
+          } catch (e) {
+            if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't rebind ${from} to ${docId}`, e);
+          }
+          toast(renameRefusedMessage(from, false, res.code, res.status), "error");
+          this.note("warn", "rename-refused", `${to} was renamed back to ${from}: the server refused the rename`, { docId, path: from });
+        }
+        return;
+      }
     } catch (e) {
       console.warn(`[sync] couldn't move the mapping ${from} → ${to}`, e);
       return;
@@ -3371,7 +3410,7 @@ export class SyncManager implements InboundHost {
     matched: ReadonlySet<string>,
     notesOnDisk: ReadonlySet<string>,
     scope: VaultScope,
-  ): Promise<boolean> {
+  ): Promise<boolean | "reverted"> {
     console.info(
       `[sync] ${from} → ${to} (folder moved on disk; ${matched.size}/${under.length} notes matched, keeping every doc id)`,
     );
@@ -3385,7 +3424,29 @@ export class SyncManager implements InboundHost {
     if (!scope.isCurrent()) return false;
     let moved = false;
     try {
-      moved = (await this.registry.renamePath(from, to)) !== false;
+      const res = await this.registry.moveOnServer(from, to);
+      moved = res.ok;
+      if (!res.ok && res.refused && scope.isCurrent()) {
+        // Refused (view-only folder, a lock, …): move it back on disk and call
+        // the move handled, so nothing after this pairs, deletes or registers it.
+        if (await this.registry.revertRefusedMove(from, to)) {
+          // Re-index the notes back under their KEPT ids at the old paths.
+          const back = under.filter((n) => notesOnDisk.has(to + n.relPath.slice(from.length)));
+          if (back.length > 0) {
+            try {
+              await ipc.materializeNotesBatch(
+                back.map((n) => ({ relPath: n.relPath, docId: n.docId })),
+                scope.vaultEpoch,
+              );
+            } catch (e) {
+              if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't re-index ${from}`, e);
+            }
+          }
+          toast(renameRefusedMessage(from, true, res.code, res.status), "error");
+          this.note("warn", "rename-refused", `${to} was renamed back to ${from}: the server refused the move`, { path: from });
+          return "reverted";
+        }
+      }
     } catch (e) {
       console.warn(`[sync] couldn't move the folder ${from} → ${to}`, e);
       return false;
@@ -7449,6 +7510,7 @@ export class SyncManager implements InboundHost {
       listLocal: () => ipc.listBinaries(epoch),
       listServer: () => api.listVaultBlobs(vaultId),
       fileId: (relPath) => registry.getFileId(relPath),
+      isOwnRemoval: (relPath) => registry.isOwnRemoval(relPath),
       // The mirror caches ids per path too, and consults that cache BEFORE the
       // registry. Forgetting only the registry's copy left the dead id live for
       // the rest of the session: a file that came back uploaded under a row
@@ -7458,6 +7520,7 @@ export class SyncManager implements InboundHost {
         this.attachments?.forgetFile(relPath);
       },
       moveFileId: (from, to) => registry.moveFileId(from, to),
+      revertMove: (from, to) => registry.revertRefusedMove(from, to),
       deleteFile: (id) => api.deleteFile(id),
       // Never forced: a 409 means a note still embeds those bytes, and that
       // refusal is the whole reason the flag exists.
@@ -7639,6 +7702,7 @@ export class SyncManager implements InboundHost {
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
       forgetFileId: (relPath) => registry.forgetFileId(relPath),
+      followFileMove: (from, to) => registry.followFileMove(from, to),
       // Only ever used to drop a row THIS device minted for bytes the server
       // already holds under another id (`reconcileDedupedRow`).
       deleteFile: (id) => api.deleteFile(id),

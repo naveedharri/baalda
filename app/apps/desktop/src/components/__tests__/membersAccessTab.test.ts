@@ -290,9 +290,10 @@ describe("Members and access tab", () => {
     expect(host.querySelector('[aria-label^="Actions for"]')).toBeNull();
     expect(host.textContent).toContain("Me (you)");
     expect(host.querySelector(".members-access-mcp-hint")).toBeNull();
-    // Rows still open a read-only profile: Personal info only, no Access or Activity tab (#301).
+    // Rows still open a read-only profile: the details alone, with no tab strip (no Access or Activity tab, #301).
     await act(async () => (host.querySelector('[aria-label="Open profile of Owner"] .members-table-name') as HTMLElement).click());
     expect(host.querySelector(".member-profile-name")?.textContent).toBe("Owner");
-    expect([...host.querySelectorAll('[role="tab"]')].map((t) => t.textContent)).toEqual(["Personal info"]);
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(0);
+    expect(host.querySelector(".member-profile-about")).not.toBeNull();
   });
 });

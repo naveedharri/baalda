@@ -39,6 +39,7 @@
 // it.
 
 import { pathKey } from "../pathIdentity";
+import { renameRefusedMessage } from "../renameGate";
 import { IPC_CONCURRENCY, REGISTRY_CONCURRENCY, runPool } from "./pool";
 
 /** How long a vanished binary waits before it is believed. Same window the
@@ -115,6 +116,12 @@ export interface BinaryDeleteDeps {
   listServer(): Promise<RemoteBlob[]>;
   /** The server `files` id this device registered for a path, if any. */
   fileId(relPath: string): string | null;
+  /**
+   * Did the app remove this path from disk ITSELF moments ago (a revocation, a
+   * teammate's delete, a hidden embed; `registry.isOwnRemoval`)? Such a path
+   * is never a user delete, however many watcher events report it.
+   */
+  isOwnRemoval?: (relPath: string) => boolean;
   /** Forget a registration whose file is gone. */
   forgetFileId(relPath: string): void;
   /** Move one to the path its bytes turned up at. */
@@ -126,6 +133,12 @@ export interface BinaryDeleteDeps {
   /** Re-register the SAME files id at a new path; the server treats it as a
    *  move (`POST /api/files`, the by-id branch). */
   moveFile(input: { id: string; relPath: string }): Promise<void>;
+  /**
+   * Put a rename the server refused back on disk (`registry.revertRefusedMove`):
+   * the person can only view the file, didn't create it, … True when the old
+   * name is back. Without it a refusal keeps today's retry.
+   */
+  revertMove?: (from: string, to: string) => Promise<boolean>;
   /** Tell the user about the one thing they can act on: a refused bulk batch. */
   notify?: (text: string, tone?: "error" | "neutral" | "success") => void;
   /**
@@ -152,6 +165,13 @@ interface Pending {
   seenAt: number;
   /** How many windows this candidate has spent on a listing that failed. */
   attempts: number;
+}
+
+/** The server's `code` an api error carries, when it carries one. */
+function errCode(e: unknown): string | null {
+  const body = e && typeof e === "object" ? (e as { body?: unknown }).body : null;
+  const code = body && typeof body === "object" ? (body as { code?: unknown }).code : null;
+  return typeof code === "string" ? code : null;
 }
 
 /** The HTTP status an api/transport error carries, when it carries one. */
@@ -238,6 +258,9 @@ export class BinaryDeleteQueue {
     // Our own removal echoing back. Consumed, so the SECOND event for the path
     // (a file the user later re-creates and deletes for real) is ordinary again.
     if (this.suppressed.delete(key(relPath))) return;
+    // A repeat report of the same removal (the claim above is spent by the
+    // first event): still ours, still not a delete.
+    if (this.deps.isOwnRemoval?.(relPath)) return;
     // Not live ⇒ startup: a file that isn't there yet is a disk (or a pull)
     // catching up, not a deletion. Refused HERE rather than at drain time so
     // the window never starts and the path stays downloadable meanwhile.
@@ -359,7 +382,10 @@ export class BinaryDeleteQueue {
       if (switched || !this.deps.isCurrent()) return;
       const gone: Pending[] = [];
       const present: string[] = [];
-      batch.forEach((item, i) => (missing[i] ? gone.push(item) : present.push(item.relPath)));
+      batch.forEach((item, i) => {
+        if (!missing[i]) present.push(item.relPath);
+        else if (!this.deps.isOwnRemoval?.(item.relPath)) gone.push(item);
+      });
       if (gone.length === 0) return;
 
       let local: LocalBinary[];
@@ -580,6 +606,16 @@ export class BinaryDeleteQueue {
     try {
       await this.deps.moveFile({ id, relPath: to });
     } catch (e) {
+      // A REFUSAL (not the creator, view-only, …) will be refused again: put
+      // the old name back, so the disk agrees with the server for everyone.
+      const status = errStatus(e);
+      if (status !== null && [400, 402, 403, 409, 429].includes(status) && this.deps.revertMove) {
+        if (await this.deps.revertMove(from, to)) {
+          const code = errCode(e);
+          this.deps.notify?.(renameRefusedMessage(from, false, code, status), "error");
+          return true;
+        }
+      }
       // The row stayed where it was. Nothing was deleted, which is the safe
       // half — but the new path is now an unregistered one, and the mirror
       // registering it would fork the file across two doc_ids. Answering

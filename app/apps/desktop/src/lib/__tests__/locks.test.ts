@@ -26,10 +26,13 @@ import {
   hasBillingLapsedLock,
   hasVaultLock,
   itemLockRows,
+  isRemovableLock,
   LOCK_TITLES,
   lockBlocksCaller,
   lockScopesByPath,
 } from "../locks";
+import { createBlockReason } from "../createGate";
+import { renameBlockReason } from "../renameGate";
 
 const dir = (path: string, children: TreeNode[] = []): TreeNode =>
   ({ path, name: path.split("/").pop()!, isDir: true, children }) as TreeNode;
@@ -408,5 +411,78 @@ describe("billing-lapsed vault lock", () => {
     expect(hasBillingLapsedLock([posture])).toBe(false);
     expect(hasBillingLapsedLock([{ ...lapsed, resource_type: "folder" }])).toBe(false);
     expect(hasBillingLapsedLock([])).toBe(false);
+  });
+});
+
+describe("access group lifts (migration 097)", () => {
+  it("a group's edit on a folder lifts the Read-only posture for that subtree only, and is never a personal lift", () => {
+    const groupLift = share({
+      id: "lift-group", resourceType: "folder", resourceId: "f-projects",
+      principalType: "group", principalId: "g-design", permission: "edit",
+    });
+    const map = lockScopesByPath(tree, [vaultLock()], "u1", [groupLift]);
+    expect(lockBlocksCaller(map, "Projects")).toBe(false);
+    expect(lockBlocksCaller(map, "Projects/Deep/buried.md")).toBe(false);
+    expect(lockBlocksCaller(map, "loose.md")).toBe(true);
+    // A per-user readonly caps the group (resolver): a group row never acts as the caller's own lift.
+    expect(map.personalLifts).toBeUndefined();
+    const capped = lockScopesByPath(
+      tree,
+      [vaultLock(), share({ id: "mine", resourceType: "file", resourceId: "n-alpha", principalType: "user", principalId: "u1", permission: "readonly" })],
+      "u1",
+      [groupLift],
+    );
+    expect(lockBlocksCaller(capped, "Projects/alpha.md")).toBe(true);
+    expect(lockBlocksCaller(capped, "Projects/Deep/buried.md")).toBe(false);
+  });
+});
+
+describe("a group's Can view as GET /locks reports it", () => {
+  // Exactly the wire shape the server emits (snake_case, synthetic id).
+  const groupView = (resourceType: "folder" | "file", resourceId: string, userId = "me") =>
+    ({
+      id: `group-view:${resourceId}`,
+      resource_type: resourceType,
+      resource_id: resourceId,
+      principal_type: "user",
+      principal_id: userId,
+      permission: "readonly",
+      reason: "group_view",
+      created_by: null,
+      created_at: null,
+    }) as unknown as Share;
+
+  beforeEach(() => {
+    folderIds.clear();
+    noteIds.clear();
+    fileIds.clear();
+    folderIds.set("Projects", "f-projects");
+    folderIds.set("Projects/Deep", "f-deep");
+    noteIds.set("Projects/Deep/buried.md", "n-buried");
+    noteIds.set("Projects/alpha.md", "n-alpha");
+    noteIds.set("loose.md", "n-loose");
+  });
+
+  it("padlocks the folder and everything in it for the caller, nothing else", () => {
+    const map = lockScopesByPath(tree, [groupView("folder", "f-projects")], "me");
+    for (const p of ["Projects", "Projects/Deep", "Projects/Deep/buried.md", "Projects/alpha.md"]) {
+      expect(lockBlocksCaller(map, p), p).toBe(true);
+      expect(effectiveLockForPath(map, p), p).toBe("you");
+    }
+    expect(lockBlocksCaller(map, "loose.md")).toBe(false);
+  });
+
+  it("blocks new notes, renames and moves into the folder", () => {
+    const map = lockScopesByPath(tree, [groupView("folder", "f-projects")], "me");
+    const lockedForCaller = (p: string) => lockBlocksCaller(map, p);
+    expect(createBlockReason({ dir: "Projects", rootFrozen: false, syncEnabled: true, canCreateRoot: true, lockedForCaller })).not.toBeNull();
+    expect(renameBlockReason({ path: "Projects/alpha.md", isDir: false, syncEnabled: true, rootFrozen: false, canCreateRoot: true, lockedForCaller })).not.toBeNull();
+    expect(renameBlockReason({ path: "loose.md", isDir: false, destDir: "Projects", syncEnabled: true, rootFrozen: false, canCreateRoot: true, lockedForCaller })).not.toBeNull();
+    expect(renameBlockReason({ path: "loose.md", isDir: false, syncEnabled: true, rootFrozen: false, canCreateRoot: true, lockedForCaller })).toBeNull();
+  });
+
+  it("is a grant, not a lock: Unlock never offers to remove it", () => {
+    expect(isRemovableLock(groupView("folder", "f-projects"))).toBe(false);
+    expect(isRemovableLock(share({ resourceType: "folder", resourceId: "f-projects" }))).toBe(true);
   });
 });

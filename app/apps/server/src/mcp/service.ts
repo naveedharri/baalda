@@ -10,6 +10,8 @@ import {
   filterReadableBlobs,
   vaultRootWritable,
   canDeleteItem,
+  canRenameItem,
+  RENAME_NOT_CREATOR_MESSAGE,
   billingReadOnly,
   ACCOUNT_READ_ONLY,
   ACCOUNT_READ_ONLY_MESSAGE,
@@ -157,6 +159,22 @@ async function writeRefusal(orgId: string, message: string, code?: string): Prom
     if (await billingReadOnly(orgId)) return new McpToolError(ACCOUNT_READ_ONLY_MESSAGE, ACCOUNT_READ_ONLY.code);
   } catch { /* fall through to the ordinary refusal */ }
   return new McpToolError(message, code);
+}
+
+/** Members rename/move only what they created; owners/admins anything (`canRenameItem`). */
+async function requireRenamable(
+  ctx: McpContext,
+  kind: "note" | "file" | "folder",
+  id: string,
+): Promise<void> {
+  const gate = await canRenameItem(pool, {
+    orgId: ctx.auth.organizationId,
+    userId: ctx.auth.userId,
+    kind,
+    id,
+  });
+  if (gate.ok) return;
+  throw await writeRefusal(ctx.auth.organizationId, RENAME_NOT_CREATOR_MESSAGE, gate.code);
 }
 
 /** Members delete only what they created; owners/admins delete anything (`canDeleteItem`). */
@@ -576,6 +594,7 @@ export async function moveFolderTool(
   if ((await folderWritePermission(ctx.auth, input.folderId)) !== "edit") {
     throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to move this folder", "no_access");
   }
+  await requireRenamable(ctx, "folder", input.folderId);
   // Re-parenting must not be a way to change inherited access, so edit on the
   // destination is required too — but only for a real folder. `parentId: null`
   // means the vault root, which `folderWritePermission` treats as admin-only;
@@ -618,6 +637,9 @@ export async function moveNoteTool(
   input: { docId: string; relPath?: string; title?: string; folderId?: string | null },
 ) {
   const note = await requireEditableNote(ctx.auth, input.docId);
+  if ((input.relPath !== undefined && input.relPath !== note.rel_path) || input.folderId !== undefined) {
+    await requireRenamable(ctx, "note", input.docId);
+  }
   const moveInput = { relPath: input.relPath, title: input.title, folderId: input.folderId };
   // Judge the RESOLVED destination: `relPath` alone can move the note to another
   // folder or out to the root, and both gates below must see that.
@@ -1417,7 +1439,12 @@ export async function moveFileTool(ctx: McpContext, fileId: string, path: string
     docId: fileId,
     folderId: null,
   });
-  if (out.status === "error") throw new McpToolError(out.message ?? "move refused", "invalid_target");
+  if (out.status === "error") {
+    if (out.code === "rename_not_creator" || out.code === "account_read_only") {
+      throw await writeRefusal(ctx.auth.organizationId, out.message ?? RENAME_NOT_CREATOR_MESSAGE, out.code);
+    }
+    throw new McpToolError(out.message ?? "move refused", "invalid_target");
+  }
   if (out.wrote) ctx.onRegistryChanged?.(row.vault_id);
   return { fileId: out.row.id, path: out.row.path, folderId: out.row.folderId };
 }

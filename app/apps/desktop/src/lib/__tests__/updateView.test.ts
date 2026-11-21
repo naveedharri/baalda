@@ -17,4 +17,10 @@ describe("updateView", () => {
       sub: "The download was interrupted",
     });
   });
+
+  it("never shows an update error in the sidebar, only in About", () => {
+    expect(showsSidebarUpdateLine(updateView({ phase: "error", message: "offline" }, "0.1.98"))).toBe(false);
+    expect(showsSidebarUpdateLine(updateView({ phase: "failed", version: "0.1.99", message: "" }, "0.1.98"))).toBe(false);
+    expect(showsSidebarUpdateLine(updateView({ phase: "ready", version: "0.1.99" }, "0.1.98"))).toBe(true);
+  });
 });

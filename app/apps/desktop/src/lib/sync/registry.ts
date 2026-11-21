@@ -113,6 +113,7 @@ import {
 import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { isSymlinkRefusal, SYMLINK_REFUSAL_REASON } from "./linkRefusals";
 import { toast } from "../toast";
+import { renameRefusedMessage } from "../renameGate";
 import { isHeldCreateCode } from "./createRefusals";
 import { isSafeTreeBinaryRelPath } from "./attachments";
 import { NOT_CREATOR_DETAIL, NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
@@ -670,6 +671,10 @@ const OWN_MOVE_TTL_MS = 120_000;
 /** How long a path this device deleted in-app stays "ours" (see
  *  `RegistrySync.isOwnDelete`): past the pulls its own delete triggers. */
 export const OWN_DELETE_TTL_MS = 60_000;
+/** How long a path the registry removed from disk ITSELF stays "ours" (see
+ *  `VaultRegistry.isOwnRemoval`): past the watcher's echo, the 2.5 s delete
+ *  window and the slowest removal pass, with room for a long one on Windows. */
+export const OWN_REMOVAL_TTL_MS = 120_000;
 
 /**
  * The longest a sidebar delete of a not-yet-registered path waits for the
@@ -781,6 +786,22 @@ function chunked<T>(items: readonly T[], size: number): T[][] {
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
 }
+
+/**
+ * The server answered a rename/move with a "no" on the merits (view-only, a
+ * lock, a frozen root, the creator rule, the rename brake, a read-only plan):
+ * asking again gets the same answer. Network errors, 401 and 5xx are not
+ * refusals; those are retried by the next pass.
+ */
+export function isMoveRefusal(err: unknown): boolean {
+  return err instanceof ApiError && [400, 402, 403, 409, 429].includes(err.status);
+}
+
+/** What `RegistrySync.moveOnServer` reports. `refused`: the server said no
+ *  (see {@link isMoveRefusal}); the caller should put the disk back. */
+export type ServerMoveResult =
+  | { ok: true }
+  | { ok: false; refused: boolean; code: string | null; status: number | null };
 
 function reasonOf(err: unknown): string {
   if (err instanceof ApiError) return `${err.status}: ${err.message}`;
@@ -1149,7 +1170,7 @@ export class VaultRegistry {
    * TEAMMATE'S note on the server to the conflict name — for everyone. See
    * {@link isOwnMove}.
    */
-  private ownMoves = new Map<string, number>();
+  private ownMoves = new Map<string, { at: number; source: boolean }>();
   /**
    * Paths (case-folded) this device deleted in-app moments ago, keyed to when.
    * A sidebar delete is server-first, then disk: between the two, a pull the
@@ -1160,6 +1181,21 @@ export class VaultRegistry {
    * never a teammate's delete to second-guess. See {@link isOwnDelete}.
    */
   private ownDeletes = new Map<string, number>();
+  /**
+   * Paths (`echoKey`) this registry took off the disk ITSELF moments ago: a
+   * revoked or deleted note, a revoked tree binary or embed, a removed folder,
+   * an empty stub. Keyed to when.
+   *
+   * The watcher reports those removals like any other, and to the disk-delete
+   * drain a mapped, pushed note that vanished IS a user delete. The mapping is
+   * only pruned at the END of the pass that removed the file, so whenever the
+   * echo arrived first (a long pass: a thousand revoked notes, a slow disk) the
+   * app's own access-change cleanup went back to the server as soft deletes in
+   * this user's name. Refused while access was off, ACCEPTED the moment it came
+   * back: an owner who set Everyone to No access and then granted folders again
+   * deleted 1,038 notes for the whole team (#419, #420). See {@link isOwnRemoval}.
+   */
+  private ownRemovals = new Map<string, number>();
   private unhydratedPlaceholders = new Set<string>();
   /** Everything that could not be registered in the last run. */
   private failed: RegistryFailure[] = [];
@@ -1449,6 +1485,7 @@ export class VaultRegistry {
     this.materializedByKey.clear();
     this.ownMoves.clear();
     this.ownDeletes.clear();
+    this.ownRemovals.clear();
     this.unhydratedPlaceholders.clear();
     // The identical-config memo (see {@link writeConfig}) is only honest while
     // this registry is the last thing that wrote `.context/config.json`. A
@@ -1583,6 +1620,8 @@ export class VaultRegistry {
     }
     this.materialized.add(relPath);
     this.materializedByKey.set(echoKey(relPath), relPath);
+    // The file is back, written by us: a later removal of it is news again.
+    this.ownRemovals.delete(echoKey(relPath));
     this.clearPendingPath(relPath);
   }
 
@@ -1618,13 +1657,23 @@ export class VaultRegistry {
    * so entries simply age out.
    */
   isOwnMove(relPath: string): boolean {
-    const at = this.ownMoves.get(pathKey(relPath));
-    if (at === undefined) return false;
-    if (Date.now() - at > OWN_MOVE_TTL_MS) {
+    const entry = this.ownMoves.get(pathKey(relPath));
+    if (entry === undefined) return false;
+    if (Date.now() - entry.at > OWN_MOVE_TTL_MS) {
       this.ownMoves.delete(pathKey(relPath));
       return false;
     }
     return true;
+  }
+
+  /**
+   * Did the registry move a file AWAY from `relPath` moments ago? Only that
+   * side's removal is ours. The path a move put a file ONTO is the person's
+   * file again at once: deleting it is a real delete (a refused rename put
+   * back, then deleted, must still be put back if the server refuses).
+   */
+  isOwnMoveSource(relPath: string): boolean {
+    return this.isOwnMove(relPath) && this.ownMoves.get(pathKey(relPath))?.source === true;
   }
 
   /**
@@ -1648,6 +1697,48 @@ export class VaultRegistry {
     return false;
   }
 
+  /**
+   * Did this registry remove `relPath` from disk itself within
+   * {@link OWN_REMOVAL_TTL_MS} (see {@link ownRemovals})? Such a removal is
+   * never a user delete: not a note delete, not a file delete, not a folder
+   * delete, and never half of a rename. Not consumed (the watcher may report a
+   * path more than once); the entry ends when the file is written back
+   * (`markMaterialized`, {@link forgetOwnRemoval}) or ages out.
+   */
+  isOwnRemoval(relPath: string): boolean {
+    if (this.ownRemovals.size === 0) return false;
+    const k = echoKey(relPath);
+    const at = this.ownRemovals.get(k);
+    if (at === undefined) return false;
+    if (Date.now() - at > OWN_REMOVAL_TTL_MS) {
+      this.ownRemovals.delete(k);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Mark paths this registry (or the blob mirror on its behalf) is ABOUT to
+   * remove from disk. Before the removal, never after: the watcher's debounce
+   * is 150 ms and the mark has to be in place when the echo is read.
+   */
+  markOwnRemovals(paths: readonly string[]): void {
+    if (paths.length === 0) return;
+    const now = Date.now();
+    // Bounded by AGE, never by clearing: a revocation of 30,000 notes must not
+    // wipe the marks of the chunks whose echoes have not arrived yet.
+    if (this.ownRemovals.size > 20_000) {
+      for (const [k, at] of this.ownRemovals) if (now - at > OWN_REMOVAL_TTL_MS) this.ownRemovals.delete(k);
+    }
+    for (const p of paths) this.ownRemovals.set(echoKey(p), now);
+  }
+
+  /** The file is on disk again (a watcher event said so): its removal is over. */
+  forgetOwnRemoval(relPath: string): void {
+    if (this.ownRemovals.size === 0) return;
+    this.ownRemovals.delete(echoKey(relPath));
+  }
+
   /** Mark in-app deletes as this device's own (see {@link ownDeletes}). */
   markOwnDeletes(paths: readonly string[]): void {
     if (this.ownDeletes.size > 20_000) this.ownDeletes.clear();
@@ -1659,11 +1750,12 @@ export class VaultRegistry {
     this.ownDeletes.delete(pathKey(path));
   }
 
+  /** The registry is moving a file `from` → `to` on this disk. */
   private noteOwnMove(from: string, to: string): void {
     if (this.ownMoves.size > 20_000) this.ownMoves.clear();
-    const now = Date.now();
-    this.ownMoves.set(pathKey(from), now);
-    this.ownMoves.set(pathKey(to), now);
+    const at = Date.now();
+    this.ownMoves.set(pathKey(from), { at, source: true });
+    this.ownMoves.set(pathKey(to), { at, source: false });
   }
 
   markUnhydratedPlaceholder(docId: string): void {
@@ -1793,6 +1885,26 @@ export class VaultRegistry {
     if (!docId || !sha256 || this.fileBases.get(docId) === sha256) return;
     this.fileBases.set(docId, sha256);
     this.persist();
+  }
+
+  /**
+   * Follow a teammate's move of a tree binary on THIS disk: `from` → `to`,
+   * keeping its `files` id, marked as our own move so the watcher's echo is
+   * never read as a delete or a new file. A destination already taken, or a
+   * file already gone, leaves everything as it was. True when it moved.
+   */
+  async followFileMove(from: string, to: string): Promise<boolean> {
+    if (this.stale() || samePath(from, to) || !this.fileByPath.has(from)) return false;
+    this.noteOwnMove(from, to);
+    try {
+      await ipc.renamePath(from, to, this.epoch());
+    } catch (e) {
+      if (!ipc.isVaultMismatch(e)) console.info(`[registry] couldn't follow the move ${from} → ${to}`, e);
+      return false;
+    }
+    this.moveFileId(from, to);
+    console.info(`[registry] ${from} → ${to} (moved by a teammate; keeping the file id)`);
+    return true;
   }
 
   /** Move a registration with its file — a rename done outside the app, where
@@ -2564,6 +2676,7 @@ export class VaultRegistry {
       return false;
     }
     // BEFORE the removal, so the claim beats the watcher to the queue.
+    this.markOwnRemovals([gone.path]);
     this.host?.suppressBinaryDelete?.(gone.path);
     try {
       // Access removal deletes outright: no local copy, whoever made the file
@@ -2859,6 +2972,22 @@ export class VaultRegistry {
       }
     }
 
+    // A folder a teammate moved: its notes went above, its tree binaries go
+    // here (the server's folder move carried their rows along at the same
+    // sub-path). Without this the old directory kept them, was never emptied,
+    // and the outbound half registered it again as a new folder.
+    for (const mf of plan.movedFolders ?? []) {
+      if (this.stopRun()) break;
+      const prefix = pathKey(mf.from) + "/";
+      for (const [rp] of [...this.fileByPath]) {
+        if (!pathKey(rp).startsWith(prefix)) continue;
+        const to = mf.to + rp.slice(mf.from.length);
+        if (this.unmaterializable.skip(to)) continue;
+        if (await this.followFileMove(rp, to)) changedDisk = true;
+        if (this.stale()) return { changedDisk, suppress: plan.suppress };
+      }
+    }
+
     // Use bounded IPC batches for large revocations. Only one batch is resident
     // and in flight, and each yields to the UI before preparing the next one.
     // Authorization and the unconfirmed-content guard still precede every delete.
@@ -2967,6 +3096,10 @@ export class VaultRegistry {
       }, { concurrency: INBOUND_REMOVE_CONCURRENCY, shouldStop: () => cancelled || this.stopRun() });
       if (cancelled || this.stopRun()) return { changedDisk, suppress: plan.suppress };
       let outcomes: Array<{ path: string; error: string | null }>;
+      // BEFORE the removal: the watcher echo of these files must never read as
+      // the user deleting them (#419). The mappings are still in place until
+      // this pass prunes them, so nothing else would tell the two apart.
+      this.markOwnRemovals(ready.map((gone) => gone.path));
       try {
         if (bulkRemoval) {
           outcomes = ready.length === 0 ? [] : await ipc.deleteFilesBatch(ready.map((gone) => ({
@@ -2992,6 +3125,7 @@ export class VaultRegistry {
       for (const gone of ready) {
         const out = byPath.get(gone.path);
         if (!out || out.error) {
+          this.forgetOwnRemoval(gone.path); // still on disk: nothing of ours to echo
           if (gone.reason === "revoked") this.revokedKept.set(pathKey(gone.path), gone.docId);
           this.sink.item(this.recordFailure({ kind: "inbound", path: gone.path, docId: gone.docId,
             reason: out?.error ?? "local cleanup did not return a result", code: null }));
@@ -3063,6 +3197,7 @@ export class VaultRegistry {
       }
       if (this.stale()) return { changedDisk, suppress: plan.suppress };
       try {
+        this.markOwnRemovals([path]);
         await ipc.deleteFile(path, this.epoch());
         changedDisk = true;
         // Nothing is at that path any more, so no baseline entry may keep
@@ -3095,11 +3230,15 @@ export class VaultRegistry {
         // A folder this device deleted in-app is removed whole (the sidebar's
         // own recursive delete), never kept as a teammate's delete would be.
         const own = this.isOwnDelete(path);
+        // A folder this pass removes is not one the user deleted on disk: its
+        // `tree` echo must never reach the server as a folder delete.
+        this.markOwnRemovals([path]);
         let removed = await ipc.deleteFolderIfEmpty(path, this.epoch());
         if (!removed && own) {
           await ipc.deletePath(path, this.epoch());
           removed = true;
         }
+        if (!removed) this.forgetOwnRemoval(path);
         // A failed child removal also keeps its parents pending. Their being
         // non-empty is not evidence of NEW local work and must not resurrect
         // an otherwise deleted subtree.
@@ -3211,7 +3350,21 @@ export class VaultRegistry {
       const to = byHash.get(await sha256Hex(text));
       if (!to) continue;
       byHash.delete(await sha256Hex(text));
-      if (!(await this.renamePath(from, to))) continue;
+      const res = await this.moveOnServer(from, to);
+      if (!res.ok) {
+        // Renamed in Finder while the app was closed, and the server says no
+        // (view-only, a lock…): the old name goes back, or the next pull
+        // would bring the note back at the old path AND keep the renamed copy.
+        if (res.refused && (await this.revertRefusedMove(from, to))) {
+          try {
+            await ipc.rebindNoteId(from, docId, this.epoch());
+          } catch (e) {
+            if (ipc.isVaultMismatch(e)) return out;
+          }
+          toast(renameRefusedMessage(from, false, res.code, res.status), "error");
+        }
+        continue;
+      }
       try {
         await ipc.rebindNoteId(to, docId, this.epoch());
       } catch (e) {
@@ -3365,7 +3518,14 @@ export class VaultRegistry {
       // egests after the move re-creates the file (and forks the note).
       for (const n of notesUnder) await this.host?.releaseDoc(n.docId);
       if (this.stale()) return out;
-      if (!(await this.renamePath(g, to))) continue;
+      const res = await this.moveOnServer(g, to);
+      if (!res.ok) {
+        // Same as a note above: a refused folder rename is put back on disk.
+        if (res.refused && (await this.revertRefusedMove(g, to))) {
+          toast(renameRefusedMessage(g, true, res.code, res.status), "error");
+        }
+        continue;
+      }
       if (this.stale()) return out;
       // The index row at each new note path was minted a fresh id on launch;
       // give it the kept doc id back (same local half `pairClosedAppRenames` does).
@@ -4224,8 +4384,7 @@ export class VaultRegistry {
         if (this.stale()) return false;
         serverNotes = fresh.notes;
       }
-      this.inboundSuppressed = applied.suppress;
-    } else {
+      this.inboundSuppressed = applied.suppress;    } else {
       this.inboundSuppressed = new Set();
     }
 
@@ -5678,9 +5837,35 @@ export class VaultRegistry {
    * path columns move — so open docs and backlinks survive (spec invariant).
    */
   async renamePath(oldPath: string, newPath: string): Promise<boolean> {
-    if (this.stale()) return false;
+    return (await this.moveOnServer(oldPath, newPath, { reportRefusal: true })).ok;
+  }
+
+  /**
+   * {@link renamePath} with the server's answer kept apart: a REFUSAL (the
+   * person can only view the item, a lock, a frozen root, …) is returned as
+   * `refused` so the caller can move the files back on disk. Left moved, the
+   * new name is a folder or note the server never heard of: it shows as local,
+   * can't sync, and the old one comes back on the next pull. A refusal is not
+   * recorded as a sync failure unless `reportRefusal` (the caller that cannot
+   * put it back) asks for it.
+   */
+  async moveOnServer(
+    oldPath: string,
+    newPath: string,
+    opts: { reportRefusal?: boolean } = {},
+  ): Promise<ServerMoveResult> {
+    const fail = (e: unknown | null): ServerMoveResult =>
+      e === null
+        ? { ok: false, refused: false, code: null, status: null }
+        : {
+            ok: false,
+            refused: isMoveRefusal(e),
+            code: errorCode(e),
+            status: e instanceof ApiError ? e.status : null,
+          };
+    if (this.stale()) return fail(null);
     const vaultId = this.serverVaultId;
-    if (!vaultId) return false;
+    if (!vaultId) return fail(null);
     const folderId = this.folderByPath.get(oldPath);
     if (folderId) {
       // Folder move: rewrite the server subtree, then the local prefix maps.
@@ -5695,18 +5880,20 @@ export class VaultRegistry {
         // swallowing the refusal left the two sides disagreeing with nothing
         // said. `recordFailure` owns the one-toast-per-path explanation.
         console.error("[registry] updateFolder failed", oldPath, e);
-        this.recordFailure({
-          kind: "folder",
-          path: newPath,
-          docId: null,
-          reason: reasonOf(e),
-          code: errorCode(e),
-        });
-        return false;
+        if (!isMoveRefusal(e) || opts.reportRefusal) {
+          this.recordFailure({
+            kind: "folder",
+            path: newPath,
+            docId: null,
+            reason: reasonOf(e),
+            code: errorCode(e),
+          });
+        }
+        return fail(e);
       }
       // The maps may belong to a different vault by now — remapping them would
       // rewrite that vault's paths with this one's move.
-      if (this.stale() || this.serverVaultId !== vaultId) return false;
+      if (this.stale() || this.serverVaultId !== vaultId) return fail(null);
       this.folderByPath = remapPrefix(this.folderByPath, oldPath, newPath);
       this.byPath = remapPrefix(this.byPath, oldPath, newPath);
       // The server moved the subtree's `files` rows too (`planFolderMove`), so
@@ -5715,7 +5902,7 @@ export class VaultRegistry {
       this.rebuildByDocId();
       this.persist();
       this.notifyMapChanged();
-      return true;
+      return { ok: true };
     }
     const mapping = this.byPath.get(oldPath);
     if (mapping) {
@@ -5726,7 +5913,7 @@ export class VaultRegistry {
       // refused, the notes went back to their old paths and the moved files
       // were left unsynced (#410).
       await this.ensureFolderChain(parentDir(newPath));
-      if (this.stale() || this.serverVaultId !== vaultId) return false;
+      if (this.stale() || this.serverVaultId !== vaultId) return fail(null);
       const newFolderId =
         this.folderByPath.get(this.canonicalFolderPath(parentDir(newPath)) ?? parentDir(newPath)) ?? null;
       try {
@@ -5739,24 +5926,56 @@ export class VaultRegistry {
         // with the note quietly back in its old folder and not a word to the
         // user about why.
         console.error("[registry] updateNote failed", oldPath, e);
-        this.recordFailure({
-          kind: "note",
-          path: newPath,
-          docId: mapping.docId,
-          reason: reasonOf(e),
-          code: errorCode(e),
-        });
-        return false;
+        if (!isMoveRefusal(e) || opts.reportRefusal) {
+          this.recordFailure({
+            kind: "note",
+            path: newPath,
+            docId: mapping.docId,
+            reason: reasonOf(e),
+            code: errorCode(e),
+          });
+        }
+        return fail(e);
       }
-      if (this.stale() || this.serverVaultId !== vaultId) return false;
+      if (this.stale() || this.serverVaultId !== vaultId) return fail(null);
       this.byPath.delete(oldPath);
       this.byPath.set(newPath, mapping);
       this.byDocId.set(mapping.docId, newPath);
       this.persist();
       this.notifyMapChanged();
-      return true;
+      return { ok: true };
     }
-    return false;
+    return fail(null);
+  }
+
+  /**
+   * Put a refused rename back on disk: `to` → `from`, marked as this device's
+   * own move so the watcher's echo is never read as a delete or a new rename.
+   * True when the old name is back.
+   */
+  async revertRefusedMove(from: string, to: string): Promise<boolean> {
+    // The file goes `to` → `from`: `to` is the side it leaves.
+    this.noteOwnMove(to, from);
+    try {
+      await ipc.renamePath(to, from, this.epoch());
+      return true;
+    } catch (e) {
+      if (ipc.isVaultMismatch(e)) return false;
+      console.warn(`[registry] couldn't put ${to} back to ${from}`, e);
+      // Couldn't put it back (something already took the old name): at least
+      // say why the new name isn't syncing, as before. (A tree binary has no
+      // failure row of its own; the mirror keeps it unregistered.)
+      if (this.fileByPath.has(from)) return false;
+      const docId = this.byPath.get(from)?.docId ?? null;
+      this.recordFailure({
+        kind: docId ? "note" : "folder",
+        path: to,
+        docId,
+        reason: `The server refused renaming ${from}, and the old name couldn't be restored: ${reasonOf(e)}`,
+        code: "rename_refused",
+      });
+      return false;
+    }
   }
 
   /**

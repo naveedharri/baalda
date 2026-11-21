@@ -23,7 +23,6 @@ import {
 } from "../../lib/skills/syncHost";
 import { useStore } from "../../store";
 import { AsyncButton } from "../AsyncButton";
-import { RowActionsMenu } from "../RowActionsMenu";
 import { Spinner } from "../Spinner";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Switch } from "../Switch";
@@ -111,18 +110,18 @@ export function AiToolsTab() {
       const actions = [
         ...edited.flatMap((t) => [
           { key: `keep-${t}`, label: which(t, edited.length > 1, "Keep mine"), hint: "Leave your edited copy as it is", onSelect: () => keepMySkill(orgId, skill.skillId, t) },
-          { key: `team-${t}`, label: which(t, edited.length > 1, "Use team version"), hint: "Your copy is backed up first", onSelect: () => applyTeamSkillVersion(orgId, skill.skillId, t) },
+          { key: `team-${t}`, label: which(t, edited.length > 1, "Use team version"), hint: "Replaces your edited copy", onSelect: () => applyTeamSkillVersion(orgId, skill.skillId, t) },
         ]),
         ...conflict.flatMap((t) => {
           const own = results.find((r) => r.orgId === orgId && r.skillId === skill.skillId && r.target === t)?.conflict === "unmanaged";
           return own
             ? [
-                { key: `nt-team-${t}`, label: which(t, conflict.length > 1, "Use team version"), hint: "Your copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.skillId, t) },
+                { key: `nt-team-${t}`, label: which(t, conflict.length > 1, "Use team version"), hint: "Replaces your folder", onSelect: () => replaceNameTakenSkill(orgId, skill.skillId, t) },
                 { key: `nt-keep-${t}`, label: which(t, conflict.length > 1, "Keep my own"), hint: "Leave your folder as it is on this computer", onSelect: () => keepMySkill(orgId, skill.skillId, t) },
               ]
             : [
-                // Another vault's, server's or account's copy: backed up, then replaced.
-                { key: `nt-team-${t}`, label: which(t, conflict.length > 1, "Use team version"), hint: "The other copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.skillId, t) },
+                // Another vault's, server's or account's copy: replaced.
+                { key: `nt-team-${t}`, label: which(t, conflict.length > 1, "Use team version"), hint: "Replaces the other copy", onSelect: () => replaceNameTakenSkill(orgId, skill.skillId, t) },
               ];
         }),
         { key: "check", label: "Check again", onSelect: () => checkSkillsNow() },
@@ -177,11 +176,6 @@ export function AiToolsTab() {
     return <InstallButton kind="install" title="Use on this computer" onClick={() => setSkillOnThisDevice(orgId, skill.skillId, true)} />;
   };
 
-  const openBackups = async () => {
-    const dir = await ipc.skillsBackupsDir();
-    await ipc.openInFileManager(dir);
-  };
-
   const checkButton = (
     <AsyncButton
       className="secondary skills-btn-sm"
@@ -202,12 +196,14 @@ export function AiToolsTab() {
     <>
       <p className="ai-tools-lede">Skills from your vaults install into the AI tools on this computer.</p>
       <div className="profile-rows ai-tools-rows">
-        <div className="profile-row profile-row-top">
-          <div className="profile-row-label">
-            <span className="profile-row-title">Install into</span>
-            <span className="profile-row-hint">
-              Tools found on this computer. Switch one off to stop installing skills there.
-            </span>
+        <div className="profile-row profile-row-top ai-tools-stack">
+          <div className="ai-tools-head">
+            <div className="profile-row-label">
+              <span className="profile-row-title">Install into</span>
+              <span className="profile-row-hint">
+                Tools found on this computer. Switch one off to stop installing skills there.
+              </span>
+            </div>
           </div>
           <div className="profile-row-control ai-tools-list">
             {targets.length === 0 && <ToolRowSkeleton />}
@@ -235,19 +231,15 @@ export function AiToolsTab() {
           </div>
         </div>
 
-        <div className="profile-row profile-row-top">
-          <div className="profile-row-label">
-            <span className="profile-row-title">Skills on this computer</span>
-            <span className="profile-row-hint">
-              Required skills always install. Optional ones you can add or remove.
-            </span>
-            <span className="ai-tools-actions">
-              {checkButton}
-              <RowActionsMenu
-                ariaLabel="More"
-                actions={[{ key: "backups", label: "Open backups folder", onSelect: openBackups }]}
-              />
-            </span>
+        <div className="profile-row profile-row-top ai-tools-stack">
+          <div className="ai-tools-head">
+            <div className="profile-row-label">
+              <span className="profile-row-title">Skills on this computer</span>
+              <span className="profile-row-hint">
+                Required skills always install. Optional ones you can add or remove.
+              </span>
+            </div>
+            {checkButton}
           </div>
           <div className="profile-row-control ai-tools-list">
             <ProgressBar active={state.running && !!state.manifest} />

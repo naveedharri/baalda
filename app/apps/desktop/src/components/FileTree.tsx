@@ -43,13 +43,16 @@ import { pinModified, sortTree, TREE_SORTS } from "../lib/tree/sort";
 import { isHomeNavigation, pinKey } from "../lib/pins";
 import { requestNewDashboard } from "../lib/homeEvents";
 import { isBlankTreeTarget } from "../lib/tree/blankTarget";
-import { LOCK_TITLES, effectiveLockForPath, lockScopesByPath, type LockScope } from "../lib/locks";
+import { LOCK_TITLES, effectiveLockForPath, isRemovableLock, lockBlocksCaller, lockScopesByPath, type LockScope } from "../lib/locks";
+import { ROOT_FROZEN_MESSAGE, createBlockReason } from "../lib/createGate";
+import { renameBlockReason, renameRefusedMessage } from "../lib/renameGate";
 import { ancestorPaths } from "../lib/accessTree";
 import { nodeAt } from "../lib/tree/lazyTree";
 import { displayName } from "../lib/notePath";
 import {
   buildTreeSyncIndex,
   FolderWaveTracker,
+  LOCAL_ONLY_TITLE,
   rowSyncMark,
   sidebarMarksVisible,
   type TreeSyncIndex,
@@ -65,7 +68,7 @@ import {
   activeNoteEditable,
   insertIntoActiveNote,
 } from "../lib/editor/activeView";
-import { useStore } from "../store";
+import { createBlockReasonFor, useStore } from "../store";
 import { shareResourceId } from "../lib/api";
 import { syncManager } from "../lib/sync/docSession";
 import { isBulkPhase } from "../lib/sync/vaultScope";
@@ -79,6 +82,7 @@ import { Face } from "./Face";
 import { NothingShared } from "./EditorPlaceholders";
 import { useEmptyVaultView } from "./useEmptyVaultView";
 import type { ShareTarget } from "./ShareDialog";
+import { CheckIcon } from "./CheckIcon";
 
 /* Lazy: the sharing sheet is a context-menu action, and keeping it out of the
    eager graph is also what lets it static-import the avatar chunk. */
@@ -272,6 +276,7 @@ export function FileTree() {
   const automaticItemColors = useStore((s) => s.automaticItemColors);
   const vault = useStore((s) => s.vault);
   const rootFrozen = useStore((s) => s.rootFrozen);
+  const canCreateRoot = useStore((s) => s.vaultVisibility?.canCreateRoot ?? null);
   const itemOrder = useStore((s) => s.itemOrder);
   const treeSort = useStore((s) => s.treeSort);
   const folderSorts = useStore((s) => s.folderSorts);
@@ -435,6 +440,15 @@ export function FileTree() {
   // counters while a run is moving — the same condition under which the corner
   // pill reads "Syncing N/M" — and a column of green dots otherwise.
   const runActive = useStore((s) => isBulkPhase(s.syncProgress?.phase));
+  // New notes and folders the server refused to create for access: on this
+  // computer only (#414). Read in the selector, as one string, so any store
+  // change that follows a registry pass (every refusal is recorded by one)
+  // picks a new list up without re-rendering the tree when nothing moved.
+  const localOnlyKey = useStore((s) =>
+    s.syncEnabled
+      ? syncManager.registry.heldRefusals().map((f) => f.path).join("\u0000")
+      : "",
+  );
   const syncIndex = useMemo<TreeSyncIndex | null>(() => {
     const waveKey = syncEnabled ? vaultPath : null;
     if (lastWaveKeyRef.current !== waveKey) {
@@ -463,6 +477,9 @@ export function FileTree() {
       serverSettled: true,
       // Failures are the Health page's; the sidebar never shows an error.
       failuresAsSynced: true,
+      // …but a note the server refused to create is not synced, and must not
+      // wear the green dot (#414).
+      localOnly: localOnlyKey ? localOnlyKey.split("\u0000") : [],
     });
     // A wave belongs to one run. With none moving there is no counter to draw,
     // and forgetting it here is what stops a finished run's leftovers from
@@ -481,6 +498,7 @@ export function FileTree() {
     fileSyncState,
     localNotePaths,
     vaultPath,
+    localOnlyKey,
   ]);
 
   // ---- Row-order stability while something is syncing ------------------
@@ -732,7 +750,7 @@ export function FileTree() {
   const bulkUnlockUseful = [...selected].some((p) => {
     const n = nodeByPath.get(p);
     const target = n ? shareTargetForPath(p, n.isDir, n.name) : null;
-    return !!target && locks.some((l) => shareResourceId(l) === target.resourceId);
+    return !!target && locks.some((l) => isRemovableLock(l) && shareResourceId(l) === target.resourceId);
   });
 
   async function bulkUnlock() {
@@ -742,7 +760,7 @@ export function FileTree() {
       if (!n) continue;
       const target = shareTargetForPath(p, n.isDir, n.name);
       if (!target) continue;
-      const lock = locks.find((l) => shareResourceId(l) === target.resourceId);
+      const lock = locks.find((l) => isRemovableLock(l) && shareResourceId(l) === target.resourceId);
       if (!lock) continue;
       try {
         await store.removeLock(lock.id);
@@ -952,6 +970,13 @@ export function FileTree() {
           // sidebar drop) or the vault root (dropped on the main area with no
           // note open). Same import the menu uses — files or whole folders.
           const dest = pt ? dirAtClientPoint(pt.x, pt.y) : "";
+          // Read fresh: this listener is registered once, so the render's own
+          // view of locks and the root latch would be the first frame's.
+          const refused = createBlockReasonFor(useStore.getState(), dest);
+          if (refused) {
+            toast(refused, "error");
+            return;
+          }
           try {
             const summary = await ipc.importPaths(
               dest,
@@ -1128,6 +1153,11 @@ export function FileTree() {
     }
     const newPath = dir ? `${dir}/${newName}` : newName;
     if (newPath === oldPath) return;
+    const blocked = renameBlockedReason(oldPath, node.data.isDir);
+    if (blocked) {
+      toast(blocked, "error");
+      return;
+    }
     try {
       // Epoch-pinned like the bulk move below: this runs across awaits, so a vault
       // switch mid-rename must be refused by Rust rather than applied over there.
@@ -1135,7 +1165,18 @@ export function FileTree() {
       // Propagate the rename/move to the server (folder subtree or single note;
       // doc_ids are preserved) so teammates see it live.
       try {
-        await syncManager.registry.renamePath(oldPath, newPath);
+        const res = syncEnabled
+          ? await syncManager.registry.moveOnServer(oldPath, newPath)
+          : { ok: true as const };
+        if (!res.ok && res.refused) {
+          // The server said no (access changed since the padlocks were read):
+          // put the old name back, never leave a copy it doesn't know about.
+          if (await syncManager.registry.revertRefusedMove(oldPath, newPath)) {
+            toast(renameRefusedMessage(oldPath, node.data.isDir, res.code, res.status), "error");
+            await refreshAll();
+            return;
+          }
+        }
       } catch (e) {
         console.warn("[sync] renamePath failed", oldPath, e);
       }
@@ -1178,6 +1219,17 @@ export function FileTree() {
       const dest = destDir ? `${destDir}/${basename(p)}` : basename(p);
       return dest;
     });
+    // A move the server would refuse (an item this person can only view or
+    // didn't create, or a folder they can't add to) is stopped with the reason
+    // before anything changes, the arrangement included.
+    for (let i = 0; i < from.length; i++) {
+      if (from[i] === to[i]) continue;
+      const blocked = renameBlockedReason(from[i], !!nodeByPath.get(from[i])?.isDir, destDir);
+      if (blocked) {
+        toast(blocked, "error");
+        return;
+      }
+    }
 
     // 1) Persist the arrangement first so a same-folder reorder feels instant
     //    (no disk change, no round-trip). Cross-folder drops snap into place
@@ -1218,7 +1270,17 @@ export function FileTree() {
       try {
         await ipc.renamePath(from[i], to[i], moveEpoch);
         try {
-          await syncManager.registry.renamePath(from[i], to[i]);
+          const res = syncEnabled
+            ? await syncManager.registry.moveOnServer(from[i], to[i])
+            : { ok: true as const };
+          if (!res.ok && res.refused && (await syncManager.registry.revertRefusedMove(from[i], to[i]))) {
+            toast(
+              renameRefusedMessage(from[i], !!nodeByPath.get(from[i])?.isDir, res.code, res.status),
+              "error",
+            );
+            movedOnDisk = true;
+            continue;
+          }
         } catch (e) {
           console.warn("[sync] move propagate failed", from[i], e);
         }
@@ -1569,18 +1631,54 @@ export function FileTree() {
   }, [revealRequest]);
 
   /**
-   * Refuse a create/import at the vault root when the root is frozen.
+   * Why a create/import into `dir` would be refused, or null: the root freeze
+   * latch, or a folder this person can only view (the same padlock the row
+   * shows; `lib/createGate.ts`). Unknown access allows.
+   */
+  /** Why renaming/moving `path` (into `destDir`) would be refused, or null. */
+  function renameBlockedReason(path: string, isDir: boolean, destDir?: string): string | null {
+    return renameBlockReason({
+      path,
+      isDir,
+      destDir,
+      syncEnabled,
+      rootFrozen,
+      canCreateRoot,
+      lockedForCaller: (p) => lockBlocksCaller(lockByPath, p),
+      role: myRole,
+      authoredByMe: () => syncManager.registry.isAuthoredByMe(path, isDir),
+    });
+  }
+
+  // Stable for the rows' shared context (a new identity per render would
+  // re-render every row); always calls the latest closure.
+  const renameBlockedRef = useRef(renameBlockedReason);
+  renameBlockedRef.current = renameBlockedReason;
+  const renameBlocked = useCallback(
+    (path: string, isDir: boolean) => renameBlockedRef.current(path, isDir),
+    [],
+  );
+
+  function createBlockedReason(dir: string): string | null {
+    return createBlockReason({
+      dir,
+      rootFrozen,
+      syncEnabled,
+      canCreateRoot,
+      lockedForCaller: (path) => lockBlocksCaller(lockByPath, path),
+    });
+  }
+
+  /**
+   * Refuse a create/import the server would refuse, with the reason in a toast.
    *
-   * Client-side first, purely so the user gets a sentence instead of a failed
-   * write — the server enforces the same latch and is the authority. Only the
-   * root is affected; anything nested is untouched.
+   * Client-side first, purely so the user gets a sentence instead of a file
+   * that never syncs. The server enforces the same rules and is the authority.
    */
   function rootBlocked(dir: string): boolean {
-    if (dir !== "" || !rootFrozen) return false;
-    toast(
-      "This vault's root is frozen. Create this inside a folder instead.",
-      "error",
-    );
+    const reason = createBlockedReason(dir);
+    if (!reason) return false;
+    toast(reason, "error");
     return true;
   }
 
@@ -1646,8 +1744,15 @@ export function FileTree() {
       ? menu.node.data.path
       : parentDir(menu.node.data.path)
     : "";
-  // Create/import from this menu would land at a frozen root.
-  const menuCreateBlocked = menuDir === "" && rootFrozen;
+  // Create/import from this menu would be refused: a frozen root, or a folder
+  // this person can only view.
+  const menuBlockReason = menu ? createBlockedReason(menuDir) : null;
+  const menuCreateBlocked = menuBlockReason != null;
+  const menuCreateHint =
+    menuBlockReason === ROOT_FROZEN_MESSAGE ? ROOT_FROZEN_HINT : (menuBlockReason ?? undefined);
+  // The header's New note / New folder create at the top level.
+  const rootBlockReason = createBlockedReason("");
+  const rootCreateHint = rootBlockReason === ROOT_FROZEN_MESSAGE ? ROOT_FROZEN_HINT : rootBlockReason;
   const navigationGroups: ("dashboard" | "pin" | "home")[] = ["dashboard"];
   if (menu?.node && (menu.node.data.isDir || isNoteExt(menu.node.data.path))) {
     navigationGroups.push("pin");
@@ -1687,7 +1792,7 @@ export function FileTree() {
   // per-item team locks are retired from the UI.
   const menuTarget = menu?.node ? shareTargetFor(menu.node) : null;
   const menuLock = menuTarget
-    ? (locks.find((l) => shareResourceId(l) === menuTarget.resourceId) ?? null)
+    ? (locks.find((l) => isRemovableLock(l) && shareResourceId(l) === menuTarget.resourceId) ?? null)
     : null;
   // The padlock on this row comes from the vault posture and nothing else.
   const menuVaultLockedOnly = !!menu?.node && vaultLockedOnly(menu.node.data.path);
@@ -1727,6 +1832,7 @@ export function FileTree() {
       onDragProbe: beginProbe,
       dragPath,
       dropInto,
+      renameBlocked,
     }),
     [
       selectedPath,
@@ -1742,6 +1848,7 @@ export function FileTree() {
       beginProbe,
       dragPath,
       dropInto,
+      renameBlocked,
     ],
   );
 
@@ -1780,19 +1887,19 @@ export function FileTree() {
               that needs a patient hover. The click routes through
               `rootBlocked("")`, which toasts the reason immediately. */}
           <button
-            className={`tree-tool${rootFrozen ? " blocked" : ""}`}
-            title={rootFrozen ? ROOT_FROZEN_HINT : "New note"}
+            className={`tree-tool${rootBlockReason ? " blocked" : ""}`}
+            title={rootCreateHint ?? "New note"}
             aria-label="New note"
-            aria-disabled={rootFrozen}
+            aria-disabled={rootBlockReason != null}
             onClick={() => void useStore.getState().createNoteIn("")}
           >
             {ICON_NEW_NOTE}
           </button>
           <button
-            className={`tree-tool${rootFrozen ? " blocked" : ""}`}
-            title={rootFrozen ? ROOT_FROZEN_HINT : "New folder"}
+            className={`tree-tool${rootBlockReason ? " blocked" : ""}`}
+            title={rootCreateHint ?? "New folder"}
             aria-label="New folder"
-            aria-disabled={rootFrozen}
+            aria-disabled={rootBlockReason != null}
             onClick={() => createUniqueFolder("")}
           >
             {ICON_NEW_FOLDER}
@@ -1862,7 +1969,7 @@ export function FileTree() {
                     }}
                   >
                     <span className="menu-tick" aria-hidden="true">
-                      {treeSort === s.id ? "✓" : ""}
+                      {treeSort === s.id ? <CheckIcon /> : null}
                     </span>
                     {s.label}
                   </li>
@@ -2032,14 +2139,14 @@ export function FileTree() {
               the refusal toast can say why, but they read as unavailable. */}
           <li
             className={menuCreateBlocked ? "disabled" : undefined}
-            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            title={menuCreateHint}
             onClick={() => void useStore.getState().createNoteIn(menuDir)}
           >
             New note
           </li>
           <li
             className={menuCreateBlocked ? "disabled" : undefined}
-            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            title={menuCreateHint}
             onClick={() => createUniqueFolder(menuDir)}
           >
             New folder
@@ -2059,14 +2166,14 @@ export function FileTree() {
             className={
               menuCreateBlocked ? "menu-sep-item disabled" : "menu-sep-item"
             }
-            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            title={menuCreateHint}
             onClick={() => void importFilesInto(menuDir)}
           >
             Import files…
           </li>
           <li
             className={menuCreateBlocked ? "disabled" : undefined}
-            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            title={menuCreateHint}
             onClick={() => void importFolderInto(menuDir)}
           >
             Import folder…
@@ -2086,7 +2193,18 @@ export function FileTree() {
               {ipc.revealLabel()}
             </li>
           )}
-          {menu.node && <li onClick={() => menu.node!.edit()}>Rename</li>}
+          {menu.node && (() => {
+            const why = renameBlockedReason(menu.node!.data.path, menu.node!.data.isDir);
+            return (
+              <li
+                className={why ? "disabled" : undefined}
+                title={why ?? undefined}
+                onClick={() => (why ? toast(why, "error") : menu.node!.edit())}
+              >
+                Rename
+              </li>
+            );
+          })()}
           {/* At the vault root this is the vault-wide sort (the same setting
               as the header button). Inside a folder it is THAT folder's sort:
               it replaces the vault-wide one for the folder and everything under
@@ -2233,7 +2351,7 @@ export function FileTree() {
               tabIndex={0}
               onClick={() => { action.run(); setMenu(null); }}>
               <span>{action.label}</span>
-              {action.checked && <span className="menu-tick" aria-hidden="true">✓</span>}
+              {action.checked && <span className="menu-tick" aria-hidden="true"><CheckIcon /></span>}
             </li>)
           ) : sub.kind === "sort" ? (
             <>
@@ -2249,7 +2367,7 @@ export function FileTree() {
                   }}
                 >
                   <span className="menu-tick" aria-hidden="true">
-                    {!folderSorts[menuDir] ? "✓" : ""}
+                    {!folderSorts[menuDir] ? <CheckIcon /> : null}
                   </span>
                   Vault default
                 </li>
@@ -2270,7 +2388,7 @@ export function FileTree() {
                     }}
                   >
                     <span className="menu-tick" aria-hidden="true">
-                      {on ? "✓" : ""}
+                      {on ? <CheckIcon /> : null}
                     </span>
                     {t.label}
                   </li>
@@ -2374,6 +2492,8 @@ interface RowShared {
   dragPath: string | null;
   /** The folder a drop would land inside, if the pointer is over one. */
   dropInto: string | null;
+  /** Why this row can't be renamed (view-only, not the creator), or null. */
+  renameBlocked: (path: string, isDir: boolean) => string | null;
 }
 
 const RowSharedContext = createContext<RowShared | null>(null);
@@ -2400,11 +2520,13 @@ function TreeRow(props: NodeRendererProps<TreeNode>) {
       onDragProbe={shared.onDragProbe}
       dragging={shared.dragPath === path}
       dropInto={shared.dropInto}
+      renameBlocked={shared.renameBlocked}
     />
   );
 }
 
 interface NodeExtra {
+  renameBlocked: (path: string, isDir: boolean) => string | null;
   selectedPath: string | null;
   lock: LockScope | null;
   /** Whole-vault sync roll-up; null when sync is off (no indicators at all). */
@@ -2722,6 +2844,7 @@ function Node({
   onDragProbe,
   dragging,
   dropInto,
+  renameBlocked,
 }: NodeRendererProps<TreeNode> & NodeExtra) {
   const isDir = node.data.isDir;
   // Only a folder we have actually listed can be called empty. An unexpanded one
@@ -2731,6 +2854,7 @@ function Node({
     isDir &&
     node.data.childrenLoaded === true &&
     (node.data.children?.length ?? 0) === 0;
+  const localOnly = syncIndex?.localOnly?.has(node.data.path.toLowerCase()) === true;
   const isSelected = !isDir && node.data.path === selectedPath;
   // Subscribed as a boolean rather than by pulling the path and comparing, so a
   // note opening elsewhere in the tree doesn't re-render every other row — this
@@ -2804,7 +2928,11 @@ function Node({
           now - prev.at < RENAME_DOUBLE_CLICK_MS
         ) {
           lastRowClick = null;
-          node.edit();
+          // A row this person can only view is not renamable: say so instead
+          // of opening a box whose result the server would refuse.
+          const why = renameBlocked(node.data.path, node.data.isDir);
+          if (why) toast(why, "error");
+          else node.edit();
         }
       }}
     >
@@ -2874,8 +3002,15 @@ function Node({
               vault padlocks EVERY row, and suppressing the hint everywhere
               would cost the whole vault a signal to spare a collision that is
               no longer rare. An item's own lock still wins the space. */}
-          {isEmpty && (!lock || lock === "vault") && (
+          {isEmpty && (!lock || lock === "vault") && !localOnly && (
             <span className="tree-hint">empty</span>
+          )}
+          {/* On this computer only: the server refused to add it (#414). A
+              word, not just the hollow ring, so it reads at a glance. */}
+          {localOnly && (
+            <span className="tree-local" title={LOCAL_ONLY_TITLE}>
+              Local
+            </span>
           )}
           {lock && (
             <span
@@ -2900,12 +3035,13 @@ function Node({
                 onMenu(r.left, r.bottom + 4, node, r.top - 4);
               }}
             >
-              {/* Three small hollow rings (3.6px across), the middle one on the
-                  button's centre, which sits on the sync dot's. */}
-              <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" strokeWidth="1" aria-hidden="true">
-                <circle cx="5" cy="11" r="1.3" />
-                <circle cx="11" cy="11" r="1.3" />
-                <circle cx="17" cy="11" r="1.3" />
+              {/* Three small solid dots drawn 1:1 (a scaled sub-pixel ring stroke
+                  rendered jagged), the middle one on the button's centre, which
+                  sits on the sync dot's. */}
+              <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <circle cx="3" cy="8" r="1.25" />
+                <circle cx="8" cy="8" r="1.25" />
+                <circle cx="13" cy="8" r="1.25" />
               </svg>
             </button>
           )}

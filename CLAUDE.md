@@ -178,13 +178,13 @@ Errors: single `AppError(String)` (`error.rs`).
   with no `userId` is legacy and matches any user); a marker naming another folder counts as none.
   Anything else (unmanaged, another server/vault/user) is never written or removed by a sync run:
   install `conflict` (`unmanaged`/`other_owner`), remove `conflict`. Only the person's explicit
-  "Use team version" (`replaceUnmanaged`) backs such a folder up to `skill-backups/` and replaces it,
+  "Use team version" (`replaceUnmanaged`) replaces such a folder (no copy kept),
   another owner's copy included (2026-10-28); a symlinked folder is never replaced. Install = validate shas → stage in
   `.baalda-staging-<uuid>` → write the marker last → re-verify staged hashes → rename the old dir
   aside, rename staging in, roll back on failure (never rename over a dir). A drifted (edited) copy
-  is `edited` unless `force` ("Use team version"), which copies it to app data `skill-backups/`
-  first. Remove `delete` backs up a drifted copy then removes the dir; `release` deletes only the
-  marker (no backup) so the folder stays as the user's own skill. Install/remove share one
+  is `edited` unless `force` ("Use team version"), which replaces it with no copy kept (there are
+  no skill backups since 2026-11-20). Remove `delete` removes a clean copy and RELEASES a drifted one;
+  `release` deletes only the marker so the folder stays as the user's own skill. Install/remove share one
   process-wide lock; `skills_scan` sweeps stale staging/old dirs after 1 h.
 
 Tauri events to the UI: **`vault-opened`** and **`files-changed`** (the only two).
@@ -255,7 +255,14 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   Survivors call `registry.deletePath` — or `registry.deletePaths` → `POST /notes/delete-batch`
   above `BULK_THRESHOLD_DOCS`,
   both pooled — the SAME soft delete the sidebar's Delete makes, never `ipc.deletePath` (the file
-  is already gone). Three refusals: a doc that is not `isPushed` (its only copy may be local), a session
+  is already gone). A path the app removed ITSELF is never a user delete (#419, #420): every inbound
+  removal (revoked or deleted notes, empty stubs, folders, binaries and embeds through
+  `suppressBinaryDelete`) is marked `registry.markOwnRemovals` BEFORE the file goes, and
+  `queueDiskDelete`, the folder hold, the drain (again right before the request), `propagateGoneFolders`
+  and `BinaryDeleteQueue` all skip `isOwnRemoval` paths (120 s, cleared by `markMaterialized`). The
+  mappings are pruned only at the end of the pass, so on a long pass the echo used to queue revoked notes
+  as user deletes, sent once access came back (an Everyone → No access followed by folder grants
+  deleted 1,038 notes). Three refusals: a doc that is not `isPushed` (its only copy may be local), a session
   that is not yet live (`liveSince` = vault channel `synced` + one completed pull, so a missing file at
   startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window — judged
   FIRST, before any server call. Over the cap a disk delete is NEVER propagated: deleting for everyone
@@ -328,7 +335,14 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   server==base ⇒ upload with `baseSha` (server 409 `stale_base` if it moved on), no base or both
   changed ⇒ server canonical, the local bytes replaced with no copy kept (2026-11-19) — never a flip.
   `isSafeTreeBinaryRelPath` must reject everything Rust's `ensure_tree_binary_rel` refuses (including
-  `DENIED_DIRS`). A download that fails permanently (sha mismatch or path refusal) is remembered per
+  `DENIED_DIRS`). A teammate's rename/move of a tree binary is FOLLOWED here (`planBinarySync
+  toFollow` → `registry.followFileMove`, an own move keeping the id) when this device holds it by id
+  with the same bytes and the server path is free locally; a folder a teammate moved carries the
+  binaries this device knows under it (`InboundPlan.movedFolders`) before the emptied directory is
+  removed. `GET /vaults/:id/blobs` lists a doc-bound blob at its `files` row's CURRENT path (the
+  blob's own `rel_path` is only where it was uploaded): before, a rename never reached other
+  devices, a new device downloaded under the old name, and an old folder kept alive by a stray
+  binary was registered again as a twin. A download that fails permanently (sha mismatch or path refusal) is remembered per
   blob id+sha (`undownloadable`) and not retried until the server's sha changes. Uploads verify what
   they stream: Rust's `VerifyingReader` hashes and counts the PUT body against the intent's sha/size and
   fails with `file changed during upload` (never completed; the path's cached sha is dropped), and the
@@ -473,7 +487,9 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 
 ### Desktop — React (`src/`)
 The top banners above the editor share ONE notice slot (`lib/noticeSlot.ts`, hook
-`components/useNoticeSlot.ts`): each claims it and only the highest-priority claim shows, in the
+`components/useNoticeSlot.ts`). They FLOAT over the page (`.notice-overlay`, a zero-height anchor
+under the header; `Banner` slides in, no height animation and no `overflow: hidden`), so a notice
+never pushes the note down: each claims it and only the highest-priority claim shows, in the
 order held bulk delete > reconcile summary > open note deleted/access removed > vault made local
 only > membership ended (folder deleted) > vault folder missing > vault folder restored > Team subscription lapsed (read-only sync) > closed-app changes > not syncing > sync paused > note limit > create
 refusal > open note's file gone on disk > attachments local only. Informational notices fade after
@@ -557,6 +573,29 @@ Board drag uses **pointer events**, never native HTML5 drag-and-drop: Tauri's `d
 swallows HTML5 drag events inside the webview, so they never fire. A press becomes a drag after
 4px, the drop target is the whole column band under the pointer, and moves animate (lift, column
 highlight, landing).
+**Access groups** (migration 097, `/health` feature `access-groups`; server `groups/`,
+`http/routes/groups.ts`, MCP `list_groups`/`manage_group`; desktop `components/GroupsPanel.tsx`,
+`lib/groups.ts`): a group's grants are `shares` rows with `principal_type='group'`, `view`/`edit` only. Groups
+only ADD (max with everything else, after every resolver branch except the person's own vault-level row,
+which ignores groups; per-user deny/readonly caps and locks still cap them); a group can open an item that
+is Private or a sealed vault. Membership cascades with `member`; `auto_join` groups take new members (trigger,
+owner excluded); removing someone disconnects only the docs that group reached. Written through
+`POST access/bulk` with `audience: {type:"group"}` (`private` = no row; an Everyone write never clears group
+rows), read through `access-board?groupId=`; `GET /locks` returns the caller's group `edit` rows as lifts, and a group's Can view as the caller's own `readonly` row (`reason: "group_view"`, id `group-view:<id>`, never removable by Unlock — `lib/locks.ts isRemovableLock`) on the topmost visible view-only folder or item, resolving only the subtrees a group can view.
+Skills: `skill_group_access` (required/optional), inherited level = max(Everyone, groups). Invites carry
+`groupIds` (with an access level too ⇒ 400 `access_or_groups`). Management follows `canManageMemberAccess`.
+UI: a People | Groups toggle with one search under the Everyone/New members rows, a Groups column of chips,
+a group page (Members / Access board / Skills / Activity), the person page's Groups row, and groups listed in
+the Everyone menu (opens the group), the New members menu (toggles auto-join) and the invite Access menu
+(join groups instead of a level). `MenuSelect` options take `section` and `checked` for those lists.
+**Ticking people** (owners/admins): the People table leads with checkboxes (a row is tickable when
+`canSetMemberAccess` or `canActOnMember` allows it; invitations never). Ticking cross-fades the toolbar into
+`MemberSelectionBar` in the same 38px slot (nothing below moves): Add to access group, Change access
+(one `access/bulk` call per 100 people), Change role and Remove (sequential, "N of M" on failure). Each
+action filters to the people it may change and its toast names who was skipped
+(`lib/membersAccess.ts splitBulkTargets`/`bulkResultLine`); only No access and Remove confirm.
+Checkboxes app-wide are drawn (`App.css`, not the platform's) and ticks use `components/CheckIcon.tsx`,
+never the "✓" text glyph.
 Personal info shows Name, Email, Role, Joined ("…, invited by X"), Last active and Status
 (Online/Away from vault presence); Activity renders `GET …/members/:userId/activity`. Vault Settings
 no longer has an Updates tab (version + Check for updates live in Account Settings → About), and
@@ -797,6 +836,20 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   where exactly one is recorded, and a file restored by checkpoint revert stays without a creator) → 403 `delete_not_creator`,
   and a member's folder delete is refused whole with 403 `folder_has_others_items` when anything in
   its subtree was created by someone else; checkpoint revert, restore and trash purge are exempt.
+  **Rename/move follows the same authorship rule** (`canRenameItem`, decided 2026-11-20): note and
+  folder PATCH, a file re-registered at a new path (`registerFile`'s move branch) and MCP
+  `move_*` refuse a plain member's move of anything they did not create (a folder: anything in its
+  subtree) with 403 `rename_not_creator`, ON TOP of edit access; a retitle alone is not a move.
+  The desktop mirrors it (`lib/renameGate.ts renameBlockReason`: view-only padlock, the creator
+  rule via `registry.isAuthoredByMe`, a destination the caller can't add to) and disables Rename,
+  double-click rename and drag-moves up front. A refusal that still arrives (Finder, an AI agent,
+  the inline title, an access change mid-flight) is PUT BACK on disk
+  (`registry.moveOnServer` → `revertRefusedMove`, marked an own move; the Finder paths re-bind the
+  kept ids) with a toast, never left as a renamed copy: the next pull restored the old name AND
+  registered the renamed one as a new item, a duplicate for everyone. A put-back marks only the name
+  the file LEFT as an own move (`registry.isOwnMoveSource`, what `queueDiskDelete` skips); deleting
+  the restored name right after is a real delete, put back again if refused (it used to vanish
+  until the next launch).
   **A per-user row on the vault resource is that person's ABSOLUTE level**
   (`personalVaultLevel`, "person wins either way"): for them alone it replaces the org posture, the
   join snapshot, the owner/admin shortcut and authorship — `edit` = edit everywhere, `view` = view

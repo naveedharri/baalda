@@ -8,6 +8,8 @@ import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import {
   canCreateIn,
   canDeleteItem,
+  canRenameItem,
+  RENAME_NOT_CREATOR_MESSAGE,
   canEditDoc,
   canEditFolder,
   canWriteBlob,
@@ -408,17 +410,27 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const vaultId = c.req.param("vaultId");
-    const userId = c.req.query("userId");
-    if (!userId) return c.json({ error: "invalid_request", message: "userId is required" }, 400);
+    const userId = c.req.query("userId") ?? "";
+    // `groupId` instead of `userId`: a group's own board (what its rows give).
+    const groupId = c.req.query("groupId") ?? "";
+    if (!userId && !groupId) {
+      return c.json({ error: "invalid_request", message: "userId or groupId is required" }, 400);
+    }
     const org = await vaultOrg(vaultId);
     if (!org) return c.json({ error: "Unknown vault" }, 404);
     const role = await orgRole(org, session.userId);
     if (role !== "owner" && role !== "admin") {
       return c.json({ error: "Only a vault owner or admin can manage access" }, 403);
     }
-    const targetRole = await orgRole(org, userId);
-    if (!targetRole) {
-      return c.json({ error: "not_member", message: "That person is not a member of this vault" }, 404);
+    let targetRole: string | null = null;
+    if (groupId) {
+      const g = await pool.query("SELECT 1 FROM access_groups WHERE id = $1 AND organization_id = $2", [groupId, org]);
+      if (!g.rowCount) return c.json({ error: "group_not_found", message: "That group does not exist" }, 404);
+    } else {
+      targetRole = await orgRole(org, userId);
+      if (!targetRole) {
+        return c.json({ error: "not_member", message: "That person is not a member of this vault" }, 404);
+      }
     }
     const [index, tree] = await Promise.all([loadAccessIndex(pool, org), loadAccessTreeRows(vaultId)]);
     const items = {
@@ -433,6 +445,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       vaultId,
       userId,
       role: targetRole,
+      ...(groupId ? { groupId } : {}),
       items,
     });
     const modes = encodeBoardModes(result, items);
@@ -765,6 +778,18 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       if (await refusedForBilling(await vaultOrg(row.vault_id))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json({ error: "You cannot modify this folder" }, 403);
     }
+    // Creator-only, like delete: a plain member renames/moves only a folder
+    // they made with nothing of anyone else's inside.
+    {
+      const org = await vaultOrg(row.vault_id);
+      const gate = org
+        ? await canRenameItem(pool, { orgId: org, userId: session.userId, kind: "folder", id })
+        : ({ ok: false, code: "rename_not_creator" } as const);
+      if (!gate.ok) {
+        if (gate.code === "account_read_only") return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+        return c.json({ error: RENAME_NOT_CREATOR_MESSAGE, code: gate.code }, 403);
+      }
+    }
     const newParentId = body.parentId === undefined ? undefined : (body.parentId ?? null);
     const moveInput = {
       path: typeof body.path === "string" ? body.path : undefined,
@@ -1085,6 +1110,20 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "You cannot modify this note" }, 403);
     }
     const folderId = body.folderId === undefined ? undefined : (body.folderId ?? null);
+    // Creator-only rename/move, like delete (a retitle alone is not a move).
+    if (
+      (typeof body.relPath === "string" && body.relPath !== row.rel_path) ||
+      folderId !== undefined
+    ) {
+      const org = await vaultOrg(row.vault_id);
+      const gate = org
+        ? await canRenameItem(pool, { orgId: org, userId: session.userId, kind: "note", id })
+        : ({ ok: false, code: "rename_not_creator" } as const);
+      if (!gate.ok) {
+        if (gate.code === "account_read_only") return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+        return c.json({ error: RENAME_NOT_CREATOR_MESSAGE, code: gate.code }, 403);
+      }
+    }
     const moveInput = {
       relPath: typeof body.relPath === "string" ? body.relPath : undefined,
       title: body.title,
@@ -1255,6 +1294,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       if (out.code === "transient_file") return c.json({ error: out.message, code: out.code }, 400);
       if (out.code === "root_frozen") return c.json(ROOT_FROZEN_ERROR, 403);
       if (out.code === "not_readable") return c.json({ error: out.message, code: out.code }, 409);
+      if (out.code === "rename_not_creator") return c.json({ error: out.message, code: out.code }, 403);
       if (await refusedForBilling(org)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
     }

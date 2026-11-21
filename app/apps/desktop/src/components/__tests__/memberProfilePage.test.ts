@@ -319,9 +319,11 @@ describe("Member profile page, Personal info and Activity tabs", () => {
     expect(dd("Joined")).not.toContain("invited by");
   });
 
-  it("shows a plain member only Personal info on someone else's profile (#301)", async () => {
+  it("shows a plain member only Personal info on someone else's profile, with no tab strip (#301)", async () => {
     await render({ showAccessTab: false });
-    expect(tabs()).toEqual(["Personal info"]);
+    expect(tabs()).toEqual([]);
+    expect(host.querySelector('[role="tablist"]')).toBeNull();
+    expect(host.querySelector(".member-profile-about")).not.toBeNull();
   });
 
   /** Each timeline entry's sentence without its " · 2 hours ago" tail. */

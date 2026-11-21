@@ -12,14 +12,17 @@ import {
 } from "../../permissions/lookup.js";
 import {
   buildAccessContext,
+  buildAccessContextFromIndex,
   createResolverCache,
   loadAccessIndex,
   resolveAccessForUser,
   type AccessIndex,
+  memberGroupIds,
   personalVaultLevel,
 } from "../../permissions/resolver.js";
 import {
   indexHoldsResource,
+  permissionMode,
   summarizeAccess,
   type SummaryResource,
 } from "../../permissions/access-summary.js";
@@ -329,7 +332,8 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           !resource.resourceId,
       ) ||
       (audience.type !== "org" &&
-        (audience.type !== "users" || !Array.isArray(audience.userIds)))
+        (audience.type !== "users" || !Array.isArray(audience.userIds)) &&
+        (audience.type !== "group" || typeof audience.groupId !== "string" || !audience.groupId))
     ) {
       return c.json({ error: "invalid_request", message: "Invalid resources or audience" }, 400);
     }
@@ -740,7 +744,23 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     // Read-only one (reported as a lift below), and a personal `denied` needs
     // nothing here — their readable set is already empty.
     const personal = await personalVaultLevel(pool, org, session.userId);
-    const postureLocked = posture?.permission === "view" || personal === "view";
+    // The caller's access groups lift like their own grants do (resolver
+    // `rowsGroupGrant`), unless they have a vault level of their own, which
+    // ignores groups. A group's whole-vault `edit` lifts the Read-only seed
+    // entirely, so no vault padlock is reported for them.
+    const groupIds = personal === null ? await memberGroupIds(pool, org, session.userId) : [];
+    const groupVaultEdit =
+      groupIds.length > 0 &&
+      ((
+        await pool.query(
+          `SELECT 1 FROM shares
+            WHERE resource_type = 'vault' AND resource_id = $1 AND permission = 'edit'
+              AND principal_type = 'group' AND principal_id = ANY($2::text[])
+            LIMIT 1`,
+          [org, groupIds],
+        )
+      ).rowCount ?? 0) > 0;
+    const postureLocked = (posture?.permission === "view" && !groupVaultEdit) || personal === "view";
     if (postureLocked) {
       rows.push({
         // NOT `posture.id` (nor the caller's personal row id). That is the live vault GRANT row, and
@@ -774,6 +794,9 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           AND (
             ($4::boolean AND s.principal_type = 'org' AND s.principal_id = $2)
             OR (s.principal_type = 'user' AND s.principal_id = $3)
+            -- The caller's group edit rows lift only the posture seed: a
+            -- person's own Can view / No access is never lifted by a group.
+            OR ($4::boolean AND s.principal_type = 'group' AND s.principal_id = ANY($5::text[]))
           )
           AND (
             (s.resource_type = 'folder' AND s.resource_id IN
@@ -786,9 +809,12 @@ export function createShareRoutes(deps: ShareDeps): Hono {
             OR ($4::boolean AND s.resource_type = 'vault' AND s.resource_id = $2
                 AND s.principal_type = 'user' AND s.principal_id = $3)
           )`,
-      [vaultId, org, session.userId, postureLocked],
+      [vaultId, org, session.userId, postureLocked, groupIds],
     );
     rows.push(...lifts);
+    if (!postureLocked && groupIds.length > 0) {
+      rows.push(...(await groupViewLocks(vaultId, org, session.userId, role, groupIds)));
+    }
     return c.json({ locks: rows });
   });
 
@@ -975,10 +1001,14 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const gate = await canManage(session.userId, resourceType, resourceId);
     if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
 
+    // Group rows (migration 097) only with `includeGroups=1`: an older desktop
+    // reads every row here as a person or the team.
+    const includeGroups = c.req.query("includeGroups") === "1";
     const { rows } = await pool.query(
       `SELECT id, resource_type, resource_id, principal_type, principal_id, permission, created_by, created_at
-         FROM shares WHERE resource_type = $1 AND resource_id = $2`,
-      [resourceType, resourceId],
+         FROM shares WHERE resource_type = $1 AND resource_id = $2
+          AND ($3::boolean OR principal_type <> 'group')`,
+      [resourceType, resourceId, includeGroups],
     );
     return c.json({ shares: rows });
   });
@@ -1060,4 +1090,127 @@ export function createShareRoutes(deps: ShareDeps): Hono {
   });
 
   return app;
+}
+
+/**
+ * A group's Can view is a pure grant (`view`, never a cap), so `/locks` used to
+ * say nothing about it and a member who could only VIEW a folder through a group
+ * (in a vault whose Everyone level gives them less) saw it unlocked: rename, new
+ * note and drag-in were offered and then refused by the server. Report it the way
+ * the client already understands a view-only item — the caller's own `readonly`
+ * row — but only where the caller's EFFECTIVE access is view, resolved by the same
+ * resolver the Access board uses, and only at the top of each view-only subtree:
+ * a folder is reported when it is not editable itself and nothing the caller can
+ * SEE under it is editable (a deeper edit from another grant must stay editable,
+ * and an item padlock is a cap the client does not lift; a hidden No access note
+ * inside does not count, since the caller never sees it). Runs only for callers
+ * with a group `view` row in this vault.
+ */
+async function groupViewLocks(
+  vaultId: string,
+  org: string,
+  userId: string,
+  role: string,
+  groupIds: string[],
+): Promise<Array<Record<string, unknown>>> {
+  const { rows: viewRows } = await pool.query<{ resource_type: string; resource_id: string }>(
+    `SELECT s.resource_type, s.resource_id FROM shares s
+      WHERE s.principal_type = 'group' AND s.principal_id = ANY($3::text[]) AND s.permission = 'view'
+        AND ((s.resource_type = 'vault' AND s.resource_id = $2)
+          OR (s.resource_type = 'folder' AND s.resource_id IN (SELECT id FROM folders WHERE vault_id = $1))
+          OR (s.resource_type = 'file' AND s.resource_id IN
+               (SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL
+                UNION SELECT id FROM files WHERE vault_id = $1)))`,
+    [vaultId, org, groupIds],
+  );
+  if (viewRows.length === 0) return [];
+  // The access index already holds this collection's folders and live notes/files.
+  const index = await loadAccessIndex(pool, org);
+  const pick = (m: Map<string, { vaultId: string; folderId: string | null }>) => ({
+    rows: [...m].filter(([, d]) => d.vaultId === vaultId).map(([id, d]) => ({ id, folder_id: d.folderId })),
+  });
+  const allFolders = {
+    rows: [...index.folders].filter(([, f]) => f.vaultId === vaultId).map(([id, f]) => ({ id, parent_id: f.parentId })),
+  };
+  const allNotes = pick(index.notes);
+  const allFiles = pick(index.files);
+  // Only what lies under a group's Can view can be view-only BECAUSE of a group,
+  // so only those subtrees are resolved (a whole-vault Can view takes them all).
+  const wholeVault = viewRows.some((r) => r.resource_type === "vault");
+  const inScope = new Set<string>();
+  if (!wholeVault) {
+    const children = new Map<string, string[]>();
+    for (const f of allFolders.rows) {
+      if (f.parent_id === null) continue;
+      const list = children.get(f.parent_id) ?? [];
+      list.push(f.id);
+      children.set(f.parent_id, list);
+    }
+    const stack = viewRows.filter((r) => r.resource_type === "folder").map((r) => r.resource_id);
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (inScope.has(id)) continue;
+      inScope.add(id);
+      stack.push(...(children.get(id) ?? []));
+    }
+  }
+  const viewDocs = new Set(viewRows.filter((r) => r.resource_type === "file").map((r) => r.resource_id));
+  const docInScope = (d: { id: string; folder_id: string | null }) =>
+    wholeVault || viewDocs.has(d.id) || (d.folder_id !== null && inScope.has(d.folder_id));
+  const folders = { rows: wholeVault ? allFolders.rows : allFolders.rows.filter((f) => inScope.has(f.id)) };
+  const notes = { rows: allNotes.rows.filter(docInScope) };
+  const files = { rows: allFiles.rows.filter(docInScope) };
+  // The same resolution the Access board makes for one item (`boardModes`), for
+  // just these items: that board folds the whole vault, which on a large one is
+  // most of the cost and buys nothing here.
+  const cache = createResolverCache();
+  const own = async (type: "folder" | "file", id: string) => {
+    const ctx = await buildAccessContextFromIndex(index, type, id, pool, cache);
+    return ctx ? permissionMode((await resolveAccessForUser(ctx, userId, role, pool, cache, index)).permission) : "private";
+  };
+  const modes = { ownFolders: new Map<string, string>(), docs: new Map<string, string>() };
+  for (const f of folders.rows) modes.ownFolders.set(f.id, await own("folder", f.id));
+  for (const d of [...notes.rows, ...files.rows]) modes.docs.set(d.id, await own("file", d.id));
+  // A NOTE's own mode decides the editor; a FOLDER's decides create/rename/drag-in.
+  // Fold each folder's own mode with every VISIBLE descendant: "open" anywhere
+  // keeps it unpadlocked; No access items are skipped (not drawn at all).
+  const editableBelow = new Set<string>();
+  const parentOf = new Map(folders.rows.map((f) => [f.id, f.parent_id]));
+  const markUp = (folderId: string | null) => {
+    for (let cur = folderId, guard = 0; cur !== null && guard < 10_000; cur = parentOf.get(cur) ?? null, guard++) {
+      if (editableBelow.has(cur)) return;
+      editableBelow.add(cur);
+    }
+  };
+  for (const f of folders.rows) if (modes.ownFolders.get(f.id) === "open") markUp(f.id);
+  for (const d of [...notes.rows, ...files.rows]) if (modes.docs.get(d.id) === "open") markUp(d.folder_id);
+  // Only folders the caller can see (readable itself, or a path to something
+  // readable): never hand out the ids of folders hidden from them.
+  const visible = new Set<string>();
+  const markVisible = (folderId: string | null) => {
+    for (let cur = folderId, guard = 0; cur !== null && guard < 10_000; cur = parentOf.get(cur) ?? null, guard++) {
+      if (visible.has(cur)) return;
+      visible.add(cur);
+    }
+  };
+  for (const f of folders.rows) if (modes.ownFolders.get(f.id) !== "private") markVisible(f.id);
+  for (const d of [...notes.rows, ...files.rows]) if (modes.docs.get(d.id) !== "private") markVisible(d.folder_id);
+  const viewFolder = (id: string | null) => id !== null && visible.has(id) && !editableBelow.has(id);
+  const lock = (resourceType: "folder" | "file", resourceId: string) => ({
+    id: `group-view:${resourceId}`,
+    resource_type: resourceType,
+    resource_id: resourceId,
+    principal_type: "user",
+    principal_id: userId,
+    permission: "readonly",
+    reason: "group_view",
+    created_by: null,
+    created_at: null,
+  });
+  const out: Array<Record<string, unknown>> = [];
+  for (const f of folders.rows) if (viewFolder(f.id) && !viewFolder(f.parent_id)) out.push(lock("folder", f.id));
+  for (const d of [...notes.rows, ...files.rows]) {
+    if (modes.docs.get(d.id) === "readonly" && !viewFolder(d.folder_id)) out.push(lock("file", d.id));
+  }
+  return out;
 }
