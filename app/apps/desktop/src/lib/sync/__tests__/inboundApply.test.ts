@@ -2638,6 +2638,26 @@ describe("offline reconciliation — same-path create (D4)", () => {
     expect(reg.isOwnMove("P.md")).toBe(true);
     expect(reg.isOwnMove(moved)).toBe(true);
     expect(reg.isOwnMove("a.md")).toBe(false);
+    // Only the side the file left is ours to ignore on removal.
+    expect(reg.isOwnMoveSource("P.md")).toBe(true);
+    expect(reg.isOwnMoveSource(moved)).toBe(false);
+  });
+
+  it("a refused rename put back leaves the old name deletable: only the new name is its own removal", async () => {
+    const { disk, reg } = await sameCreate({
+      serverCreatedAt: "2020-01-01T00:00:00Z",
+      localCreated: Date.parse("2026-09-26T00:00:00Z"),
+    });
+    disk.notes.set("New.md", "renamed by the person");
+    expect(await reg.revertRefusedMove("Old.md", "New.md")).toBe(true);
+    expect(disk.notes.has("Old.md")).toBe(true);
+    expect(disk.notes.has("New.md")).toBe(false);
+    // Both stay "ours" for the watcher echo and rename pairing…
+    expect(reg.isOwnMove("Old.md")).toBe(true);
+    expect(reg.isOwnMove("New.md")).toBe(true);
+    // …but deleting the restored old name right after is a real delete.
+    expect(reg.isOwnMoveSource("New.md")).toBe(true);
+    expect(reg.isOwnMoveSource("Old.md")).toBe(false);
   });
 
   it("the local note is later: it is renamed and never bound to the teammate's id", async () => {

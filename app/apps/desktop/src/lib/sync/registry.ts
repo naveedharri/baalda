@@ -1170,7 +1170,7 @@ export class VaultRegistry {
    * TEAMMATE'S note on the server to the conflict name — for everyone. See
    * {@link isOwnMove}.
    */
-  private ownMoves = new Map<string, number>();
+  private ownMoves = new Map<string, { at: number; source: boolean }>();
   /**
    * Paths (case-folded) this device deleted in-app moments ago, keyed to when.
    * A sidebar delete is server-first, then disk: between the two, a pull the
@@ -1657,13 +1657,23 @@ export class VaultRegistry {
    * so entries simply age out.
    */
   isOwnMove(relPath: string): boolean {
-    const at = this.ownMoves.get(pathKey(relPath));
-    if (at === undefined) return false;
-    if (Date.now() - at > OWN_MOVE_TTL_MS) {
+    const entry = this.ownMoves.get(pathKey(relPath));
+    if (entry === undefined) return false;
+    if (Date.now() - entry.at > OWN_MOVE_TTL_MS) {
       this.ownMoves.delete(pathKey(relPath));
       return false;
     }
     return true;
+  }
+
+  /**
+   * Did the registry move a file AWAY from `relPath` moments ago? Only that
+   * side's removal is ours. The path a move put a file ONTO is the person's
+   * file again at once: deleting it is a real delete (a refused rename put
+   * back, then deleted, must still be put back if the server refuses).
+   */
+  isOwnMoveSource(relPath: string): boolean {
+    return this.isOwnMove(relPath) && this.ownMoves.get(pathKey(relPath))?.source === true;
   }
 
   /**
@@ -1740,11 +1750,12 @@ export class VaultRegistry {
     this.ownDeletes.delete(pathKey(path));
   }
 
+  /** The registry is moving a file `from` → `to` on this disk. */
   private noteOwnMove(from: string, to: string): void {
     if (this.ownMoves.size > 20_000) this.ownMoves.clear();
-    const now = Date.now();
-    this.ownMoves.set(pathKey(from), now);
-    this.ownMoves.set(pathKey(to), now);
+    const at = Date.now();
+    this.ownMoves.set(pathKey(from), { at, source: true });
+    this.ownMoves.set(pathKey(to), { at, source: false });
   }
 
   markUnhydratedPlaceholder(docId: string): void {
@@ -5943,7 +5954,8 @@ export class VaultRegistry {
    * True when the old name is back.
    */
   async revertRefusedMove(from: string, to: string): Promise<boolean> {
-    this.noteOwnMove(from, to);
+    // The file goes `to` → `from`: `to` is the side it leaves.
+    this.noteOwnMove(to, from);
     try {
       await ipc.renamePath(to, from, this.epoch());
       return true;

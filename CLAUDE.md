@@ -846,7 +846,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   the inline title, an access change mid-flight) is PUT BACK on disk
   (`registry.moveOnServer` → `revertRefusedMove`, marked an own move; the Finder paths re-bind the
   kept ids) with a toast, never left as a renamed copy: the next pull restored the old name AND
-  registered the renamed one as a new item, a duplicate for everyone.
+  registered the renamed one as a new item, a duplicate for everyone. A put-back marks only the name
+  the file LEFT as an own move (`registry.isOwnMoveSource`, what `queueDiskDelete` skips); deleting
+  the restored name right after is a real delete, put back again if refused (it used to vanish
+  until the next launch).
   **A per-user row on the vault resource is that person's ABSOLUTE level**
   (`personalVaultLevel`, "person wins either way"): for them alone it replaces the org posture, the
   join snapshot, the owner/admin shortcut and authorship — `edit` = edit everywhere, `view` = view

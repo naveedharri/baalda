@@ -2508,10 +2508,12 @@ export class SyncManager implements InboundHost {
     // The registry removed this file itself: a revocation or a teammate's
     // delete applied here, never this user deleting it (#419, #420).
     if (this.registry.isOwnRemoval?.(relPath)) return false;
-    // The registry moved this file itself (a same-path conflict copy): the path
-    // is still the teammate's note and is about to be materialized back. Neither
-    // a delete nor half of a rename — pairing it renamed their note on the server.
-    if (this.registry.isOwnMove?.(relPath)) return false;
+    // The registry moved this file AWAY from here itself (a same-path conflict
+    // copy, a refused rename put back): the path is still the teammate's note
+    // or about to hold the file again. Neither a delete nor half of a rename —
+    // pairing it renamed their note on the server. The path a move put a file
+    // ONTO is not skipped: deleting it right after is a real delete.
+    if (this.registry.isOwnMoveSource?.(relPath) ?? this.registry.isOwnMove?.(relPath)) return false;
     const mapping = this.registry.getMapping(relPath);
     if (!mapping) return false;
     if (!this.registry.isPushed(mapping.docId)) {
