@@ -322,7 +322,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   `revokedFromManifest` both call `listReadableDocsInVault`, so it only catches a racy short answer; the
   real cross-check is `POST /api/vaults/:id/access-check` (`InboundPlan.needsAccessCheck`, measured on
   the revoked group BEFORE any refusal → `registry.confirmRevocations`, chunked in slices of
-  `ACCESS_CHECK_MAX` — mirrored in `lib/api.ts`, pinned by `accessCheckBound.test.ts`), and a
+  `ACCESS_CHECK_MAX` — mirrored in `lib/api.ts`, pinned by `accessCheckBound.test.ts`). A revoked note
+  holding unsent work (an unseen verdict, or a file whose hash left its disk base) is asked about once
+  more `REVOKE_UNSENT_SETTLE_MS` (2 s) before removal and stays if readable again or unanswered: a
+  quick No access flap used to delete what the person typed; a revocation still in force removes it. And a
   disagreement, an unanswered id, a throw on ANY slice or the 30 s `ACCESS_CHECK_TIMEOUT_MS` abort
   LEAVES the whole group (a refused id also leaves the named set via
   `InboundHost.revocationRefused`). The named set unions across the session
