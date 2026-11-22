@@ -81,6 +81,16 @@ export function createIpcManifestStore(epoch?: ipc.VaultEpoch): ManifestStore {
 export interface VaultDocStoreOptions {
   /** Resolve a docId to its vault-relative path (from the registry). */
   resolvePath: (docId: string) => string | null;
+  /**
+   * The doc's file just left its path on disk and the session has not yet
+   * decided whether that was a rename or a delete (the disk-delete grace
+   * window and the drain after it). Writing a teammate's update now would
+   * recreate the old path: the drain then finds the file "back", pairs
+   * nothing, and the renamed copy is left unsynced beside a resurrected
+   * original. Such updates are parked and applied by {@link settleParked}
+   * once the hold ends, at whatever path the registry then gives.
+   */
+  holdUpdates?: (docId: string) => boolean;
   io?: BridgeIO;
   hotCap?: number;
   /** A cold apply found (and merged) an EXTERNAL edit on disk — bytes the doc
@@ -133,6 +143,7 @@ interface HotEntry {
 export class VaultDocStore implements DocUpdateSink {
   private readonly io: BridgeIO;
   private readonly resolvePath: (docId: string) => string | null;
+  private readonly holdUpdates?: (docId: string) => boolean;
   private readonly onExternalMerge?: (docId: string) => void;
   private readonly onConverged?: (docId: string) => void;
   private readonly createDeferred?: VaultDocStoreOptions["createDeferred"];
@@ -182,6 +193,7 @@ export class VaultDocStore implements DocUpdateSink {
   constructor(opts: VaultDocStoreOptions) {
     this.io = opts.io ?? createTauriBridgeIO();
     this.resolvePath = opts.resolvePath;
+    this.holdUpdates = opts.holdUpdates;
     this.onExternalMerge = opts.onExternalMerge;
     this.onConverged = opts.onConverged;
     this.createDeferred = opts.createDeferred;
@@ -271,6 +283,10 @@ export class VaultDocStore implements DocUpdateSink {
 
   async applyUpdate(docId: string, update: Uint8Array): Promise<void> {
     if (docId === this.suppressed) return; // open note: its own provider owns it
+    if (this.holdUpdates?.(docId)) {
+      this.park(docId, update);
+      return;
+    }
     const entry = this.hot.get(docId);
     if (entry) {
       entry.bridge.applyRemote(update);
@@ -536,6 +552,8 @@ export class VaultDocStore implements DocUpdateSink {
     const now = this.now();
     const ready: Array<[string, Uint8Array]> = [];
     for (const [docId, entry] of [...this.parked]) {
+      // Still being judged as a rename or a delete: neither applied nor dropped.
+      if (this.holdUpdates?.(docId)) continue;
       if (this.resolvePath(docId)) {
         this.unpark(docId);
         ready.push([

@@ -1529,6 +1529,47 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeRegistry.pull).toHaveBeenCalled();
   });
 
+  it("a refused disk rename is put back AND its edits are queued to send", async () => {
+    // A member renames a teammate's note in Finder and types into it under the
+    // new name. The server refuses the rename and the old name comes back, but
+    // the put-back is an own move the watcher ignores: without queueing the
+    // note here, the edit stayed on this disk until the next launch.
+    const sm = new SyncManager();
+    mapOne("Old.md");
+    await live(sm);
+    fakeDisk.files.set("New.md", "edited under the new name");
+    fakeDisk.shas.set("New.md", "e".repeat(64));
+    const meta = vi.mocked(ipc.getNoteMeta);
+    const original = meta.getMockImplementation()!;
+    meta.mockImplementation(async (path: string) =>
+      path === "New.md"
+        ? ({ id: "d1", path, sha256: "e".repeat(64) } as Awaited<ReturnType<typeof ipc.getNoteMeta>>)
+        : original(path),
+    );
+    const queued: Array<[string, string]> = [];
+    const internals = sm as unknown as { localChanges: Map<string, string>; armLocalChangeDrain: () => void };
+    const arm = vi.spyOn(internals, "armLocalChangeDrain").mockImplementation(() => {
+      queued.push(...internals.localChanges);
+    });
+    fakeRegistry.renamePath.mockResolvedValueOnce(false);
+    fakeRegistry.refuseMove = { code: "rename_not_creator" };
+    try {
+      sm.handleLocalFilesChanged([
+        { path: "New.md", kind: "modified" },
+        { path: "Old.md", kind: "removed" },
+      ]);
+      await drain();
+    } finally {
+      fakeRegistry.refuseMove = null;
+      meta.mockImplementation(original);
+      arm.mockRestore();
+    }
+    expect(fakeRegistry.revertRefusedMove).toHaveBeenCalledWith("Old.md", "New.md");
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(queued).toContainEqual(["d1", "Old.md"]);
+    fakeRegistry.revertRefusedMove.mockClear();
+  });
+
   it("pairs a move by the index's file identity even when the text changed too (#410)", async () => {
     // A script moves a note into a new folder and rewrites it in the same
     // breath: no text matches, but the index followed the file itself and

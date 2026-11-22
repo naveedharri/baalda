@@ -833,6 +833,9 @@ export class SyncManager implements InboundHost {
   /** {@link drainDiskDeletes} is running: it took `goneFolders` and the pending
    *  deletes at its start, so they no longer show that a pull must wait. */
   private diskDeleteDrainsInFlight = 0;
+  /** Docs the running disk-delete drain is judging (rename or delete). Their
+   *  incoming updates are held like those of a pending delete. */
+  private drainingDocs = new Set<string>();
   /**
    * The vault root folder is gone while the app is open (#221): renamed, moved
    * or unmounted. Latched until the vault is reopened (teardown clears it);
@@ -2546,6 +2549,9 @@ export class SyncManager implements InboundHost {
     if (docId === undefined) return;
     this.pendingDeleteByPath.delete(relPath);
     this.pendingDiskDeletes.delete(docId);
+    // The file is back: anything held for it applies there now.
+    const scope = this.scope;
+    if (scope?.isCurrent()) this.settleParkedDocs(scope, null, 0);
   }
 
   private armDiskDeleteDrain(scope: VaultScope, delayMs: number): void {
@@ -2595,6 +2601,8 @@ export class SyncManager implements InboundHost {
       .filter((p) => !ownRemoval(p.relPath));
     this.pendingDiskDeletes.clear();
     this.pendingDeleteByPath.clear();
+    for (const p of pending) this.drainingDocs.add(p.docId);
+    const drained = pending.map((p) => p.docId);
     let candidates = [...this.renameCandidates.keys()];
     this.renameCandidates.clear();
     const goneFolders = [...this.goneFolders.keys()].filter((f) => !ownRemoval(f));
@@ -2801,6 +2809,17 @@ export class SyncManager implements InboundHost {
         }
       }
       this.diskDeleteDrainsInFlight = Math.max(0, this.diskDeleteDrainsInFlight - 1);
+      // Updates held while these were judged land now, at the path the drain
+      // left them (a rename's new path; a deleted doc no longer resolves).
+      // A resident bridge keeps the path it was promoted at, so retire it
+      // first: the held update then takes the cold path, which asks the
+      // registry and writes at the renamed path, never the old one.
+      if (drained.length > 0 && scope.isCurrent()) {
+        const store = this.docStore;
+        if (store) await Promise.all(drained.map((id) => store.release(id).catch(() => {})));
+      }
+      for (const id of drained) this.drainingDocs.delete(id);
+      if (drained.length > 0 && scope.isCurrent()) this.settleParkedDocs(scope, null, 0);
       // Whatever happened above, a batch that asked for a pull gets one now —
       // unless the vault root is gone, when no pull may run at all.
       if (this.pullAfterDiskDeletes && scope.isCurrent() && !this.rootMissing) {
@@ -3217,6 +3236,13 @@ export class SyncManager implements InboundHost {
           }
           toast(renameRefusedMessage(from, false, res.code, res.status), "error");
           this.note("warn", "rename-refused", `${to} was renamed back to ${from}: the server refused the rename`, { docId, path: from });
+          // Edits made under the refused name came back with the file, but the
+          // put-back is an own move, so the watcher never reads them: queue the
+          // note like a successful rename does, or they wait for a relaunch.
+          if (scope.isCurrent()) {
+            this.localChanges.set(docId, from);
+            this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+          }
         }
         return;
       }
@@ -3484,6 +3510,12 @@ export class SyncManager implements InboundHost {
           }
           toast(renameRefusedMessage(from, true, res.code, res.status), "error");
           this.note("warn", "rename-refused", `${to} was renamed back to ${from}: the server refused the move`, { path: from });
+          // Same as a refused note rename: edits made inside the moved folder
+          // came back with it and still have to go.
+          if (back.length > 0 && scope.isCurrent()) {
+            for (const n of back) this.localChanges.set(n.docId, n.relPath);
+            this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+          }
           return "reverted";
         }
       }
@@ -7392,6 +7424,7 @@ export class SyncManager implements InboundHost {
         const p = this.registry.pathForDocId(docId);
         return p && this.registry.unmaterializable.skip(p) ? null : p;
       },
+      holdUpdates: (docId) => this.pendingDiskDeletes.has(docId) || this.drainingDocs.has(docId),
       // The background feed writes .md files for docs nobody has open. Pin its
       // IO to this vault's epoch so a cold apply that lands after a vault switch
       // is refused by Rust instead of overwriting the new vault's file at the

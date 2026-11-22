@@ -39,6 +39,37 @@ function registry() {
   };
 }
 
+describe("VaultDocStore — updates held while a rename or delete is judged", () => {
+  it("never recreates the old path of a note renamed on disk, and lands at the new one", async () => {
+    // The person renamed old.md in Finder; inside the 2.5 s grace window a
+    // teammate's edit arrives. Writing it at old.md brought the old name back,
+    // so the drain paired nothing and the renamed file was left unsynced.
+    const server = serverDoc("hello");
+    const { io, fs } = makeHarness({ "new.md": "hello" });
+    const reg = registry();
+    reg.map("docR", "old.md");
+    let held = true;
+    const store = new VaultDocStore({ io, resolvePath: reg.resolvePath, holdUpdates: () => held });
+
+    await store.applyUpdate("docR", server.full());
+    await store.applyUpdate("docR", server.append(" world"));
+    expect(fs.get("old.md")).toBeUndefined();
+    expect(store.parkedDocs()).toEqual(["docR"]);
+
+    // A pull that completes mid-hold neither applies nor drops it.
+    await store.settleParked(store.parkMark());
+    expect(store.parkedDocs()).toEqual(["docR"]);
+
+    // The drain pairs the rename: the mapping moves, the hold ends.
+    reg.map("docR", "new.md");
+    held = false;
+    await store.settleParked(0);
+    expect(fs.get("old.md")).toBeUndefined();
+    expect(fs.get("new.md")).toBe("hello world");
+    expect(store.parkedDocs()).toEqual([]);
+  });
+});
+
 describe("VaultDocStore — parked updates for unmapped docs", () => {
   it("parks a backfill that beats the registry pull, then writes it once the doc maps", async () => {
     const { io, fs } = makeHarness({ "n.md": "" }); // the pull's 0-byte placeholder
