@@ -230,6 +230,8 @@ interface ServerState {
   accessCheck?: "confirm" | "grant" | "fail";
   /** Answer this many access-check calls, then throw — the partial-answer case. */
   accessCheckFailAfter?: number;
+  /** Per-call answers, consumed in order before `accessCheck` applies. */
+  accessCheckSeq?: Array<"confirm" | "grant">;
 }
 
 function fakeApi(state: ServerState) {
@@ -260,7 +262,7 @@ function fakeApi(state: ServerState) {
     deleteNote: vi.fn(async () => {}),
     deleteFolder: vi.fn(async () => {}),
     accessCheck: vi.fn(async (_vaultId: string, docIds: string[]) => {
-      const mode = state.accessCheck ?? "confirm";
+      const mode = state.accessCheckSeq?.shift() ?? state.accessCheck ?? "confirm";
       if (mode === "fail") throw new Error("network down");
       // The real route answers 400 above `ACCESS_CHECK_MAX`, and the client reads
       // a 400 as "no answer" — so a fake that silently accepted any size would
@@ -2263,10 +2265,14 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
     noDiskBase?: boolean;
     indexId?: string;
     copyFails?: boolean;
+    accessCheckSeq?: Array<"confirm" | "grant">;
+    /** The file was edited on disk after the doc last agreed with it. */
+    fileAhead?: boolean;
   }) {
     reconcileReport.clear();
     const disk = new FakeDisk();
     disk.notes.set("n.md", "d1");
+    if (opts.fileAhead) disk.unseen.add("d1");
     disk.bodies.set("n.md", opts.body ?? "the team's words");
     install(disk);
     if (opts.noDiskBase) vi.mocked(ipc.getDiskBase).mockResolvedValue(null as never);
@@ -2287,7 +2293,7 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
       vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
     };
     carry();
-    const then = { notes: [], tombstones: [] };
+    const then = { notes: [], tombstones: [], accessCheckSeq: opts.accessCheckSeq };
     const reg = new VaultRegistry(fakeApi(then));
     const host = recordingHost();
     (host.host as InboundHost).localStateVector = async () => opts.localSv ?? null;
@@ -2341,6 +2347,40 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
     });
     expect(disk.notes.has("n.md")).toBe(false);
     expect(disk.copies).toEqual([]);
+  });
+
+  it("keeps a revoked note's unsent edits when access is back before the removal (a quick flap)", async () => {
+    // The flap: the revocation is confirmed while access is off; by the time
+    // the pass reaches the removal the person can read it again. Removing it
+    // then brought the note back from the server without what they typed.
+    const { disk, reg } = await revokeWith({
+      body: "the team's words + my own lines",
+      localSv: svOf("the team's words"),
+      acked: null,
+      crdtText: "the team's words",
+      // The re-check right before the removal: readable again.
+      accessCheckSeq: ["grant"],
+    });
+    expect(disk.notes.has("n.md")).toBe(true);
+    expect(disk.bodies.get("n.md")).toBe("the team's words + my own lines");
+    expect(reg.isHiddenPath("n.md")).toBe(false);
+  });
+
+  it("keeps an on-disk edit the doc has not taken in yet when access is back (a quick flap)", async () => {
+    // The CRDT says nothing is unsent (the server acknowledged all of it), but
+    // the file was edited on disk and not ingested yet — continuous typing in
+    // another editor keeps resetting that debounce.
+    const sv = svOf("the team's words");
+    const { disk } = await revokeWith({
+      body: "the team's words + typed in another editor",
+      localSv: sv,
+      acked: sv,
+      crdtText: "the team's words",
+      fileAhead: true,
+      accessCheckSeq: ["grant"],
+    });
+    expect(disk.bodies.get("n.md")).toBe("the team's words + typed in another editor");
+    expect(disk.notes.has("n.md")).toBe(true);
   });
 
   it("removes a revoked note outright even with ops beyond a real acknowledgement", async () => {

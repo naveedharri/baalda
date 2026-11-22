@@ -628,6 +628,9 @@ const frozenRootNotified = new Set<string>();
  * re-asks at once ({@link VaultRegistry.retryHeldRefusals}); this is the slow
  * backstop for a grant whose announcement never reached this device.
  */
+/** How long a revoked note with unsent work waits before the access re-check
+ *  that decides whether it leaves the disk (a quick access flap keeps it). */
+export const REVOKE_UNSENT_SETTLE_MS = 2_000;
 export const HELD_REFUSAL_RETRY_MS = 10 * 60_000;
 /** Each refused re-ask doubles the hold (10 → 20 → 40 min …), up to this. */
 export const HELD_REFUSAL_MAX_MS = 6 * 60 * 60_000;
@@ -2780,6 +2783,49 @@ export class VaultRegistry {
     }
   }
 
+  /**
+   * The file holds bytes the doc never took in: edited on disk (an editor, an
+   * AI agent, a script) and not yet ingested, which the CRDT-based verdict
+   * cannot see. Any read failure answers false (nothing provable to keep).
+   */
+  private async fileAheadOfDiskBase(docId: string, relPath: string): Promise<boolean> {
+    try {
+      const text = await ipc.readNote(relPath, this.epoch());
+      if (text.trim().length === 0) return false;
+      const diskBase = (await ipc.getDiskBase(docId, this.epoch()).catch(() => null)) ?? null;
+      if (diskBase === null) return false;
+      return (await sha256Hex(text)) !== diskBase;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The revoked notes with unsent work that must NOT be removed now: readable
+   * again after {@link REVOKE_UNSENT_SETTLE_MS}, or unanswerable (any failed
+   * slice keeps the whole group, like {@link confirmRevocations}).
+   */
+  private async recheckUnsentRevocations(vaultId: string, gone: InboundTrash[]): Promise<Set<string>> {
+    const ids = gone.map((g) => g.docId);
+    if (ids.length === 0) return new Set();
+    await new Promise<void>((resolve) => setTimeout(resolve, REVOKE_UNSENT_SETTLE_MS));
+    try {
+      // `accessCheck` answers the ids that are still unreadable (`none`); every
+      // other id — readable again, or unanswered — stays on disk.
+      const stillRevoked = new Set<string>();
+      for (let i = 0; i < ids.length; i += ACCESS_CHECK_MAX) {
+        for (const docId of await this.api.accessCheck(vaultId, ids.slice(i, i + ACCESS_CHECK_MAX))) {
+          stillRevoked.add(docId);
+        }
+        if (this.stopRun()) return new Set(ids);
+      }
+      return new Set(ids.filter((id) => !stillRevoked.has(id)));
+    } catch (e) {
+      console.warn("[sync] could not re-check access before removing unsent edits; kept them", reasonOf(e));
+      return new Set(ids);
+    }
+  }
+
   private async confirmRevocations(vaultId: string, plan: InboundPlan): Promise<void> {
     const asked = new Set(plan.needsAccessCheck);
     let confirmed: Set<string>;
@@ -3068,6 +3114,9 @@ export class VaultRegistry {
     for (const group of chunked(plan.trash, bulkRemoval ? 64 : INBOUND_REMOVE_CONCURRENCY)) {
       if (this.stopRun()) return { changedDisk, suppress: plan.suppress };
       const ready: InboundTrash[] = [];
+      /** Revoked notes holding work the server never saw: judged again just
+       *  before they leave the disk (see below). */
+      const unsentRevoked = new Set<string>();
       let cancelled = false;
       await runPool(group, async (gone) => {
         try {
@@ -3142,6 +3191,12 @@ export class VaultRegistry {
           // A delete or an access removal leaves this disk outright (decided
           // 2026-11-19): no local copy, and unsent edits are not pushed into
           // the deleted note either. Deleted means deleted.
+          if (
+            gone.reason === "revoked" &&
+            (verdict === "unseen" || (await this.fileAheadOfDiskBase(gone.docId, gone.path)))
+          ) {
+            unsentRevoked.add(gone.docId);
+          }
           if (!this.stopRun()) ready.push(gone);
         } catch (e) {
           if (ipc.isVaultMismatch(e) || this.stale()) {
@@ -3155,6 +3210,31 @@ export class VaultRegistry {
         }
       }, { concurrency: INBOUND_REMOVE_CONCURRENCY, shouldStop: () => cancelled || this.stopRun() });
       if (cancelled || this.stopRun()) return { changedDisk, suppress: plan.suppress };
+      // A quick access flap (No access, then back a second later) must not cost
+      // the person what they typed: the revocation was confirmed while access
+      // was off, but this pass can reach the removal after it came back, and
+      // the files then returned from the server WITHOUT the unsent edits. So a
+      // revoked note holding unsent work is asked about once more, after a
+      // short settle, and stays (and is pushed) if the server reads it as
+      // readable again. A failed check also keeps it: removal needs an answer.
+      // A revocation still in force removes it exactly as before.
+      if (unsentRevoked.size > 0) {
+        const kept = await this.recheckUnsentRevocations(
+          vaultId,
+          ready.filter((g) => unsentRevoked.has(g.docId)),
+        );
+        if (this.stopRun()) return { changedDisk, suppress: plan.suppress };
+        if (kept.size > 0) {
+          for (let i = ready.length - 1; i >= 0; i--) {
+            const g = ready[i];
+            if (!kept.has(g.docId)) continue;
+            ready.splice(i, 1);
+            plan.suppress.delete(g.path);
+            console.info(`[sync] ${g.path}: access came back before its unsent edits were removed; kept`);
+          }
+          this.host?.revocationRefused?.([...kept]);
+        }
+      }
       let outcomes: Array<{ path: string; error: string | null }>;
       // BEFORE the removal: the watcher echo of these files must never read as
       // the user deleting them (#419). The mappings are still in place until
