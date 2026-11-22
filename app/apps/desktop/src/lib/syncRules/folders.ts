@@ -46,6 +46,8 @@ const OS_JUNK = [
  */
 export function isFloorName(name: string): boolean {
   if (name === ".context" || name === ".git") return true;
+  // The vault's rules file: shown and edited on disk, carried by the server.
+  if (name.toLowerCase() === ".baaldaignore") return true;
   if (name.startsWith(".~lock.") || name.startsWith("._")) return true;
   const lower = name.toLowerCase();
   if (OS_JUNK.includes(lower)) return true;

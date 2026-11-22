@@ -11,7 +11,14 @@
  * the server accepts is one every desktop will apply whole.
  */
 export type SyncRules = {
-  version: 1;
+  /**
+   * 1 = the Sync tab's shape: `patterns` plus the type and folder switches,
+   * with dot names and build folders hidden unless switched on.
+   * 2 = the vault's `.baaldaignore` file: `patterns` is the whole file and
+   * says everything (the default file lists the dot and build folders), and
+   * the switches are never stored.
+   */
+  version: 1 | 2;
   /** Gitignore-style lines; empty means "no rules". */
   patterns: string;
   /**
@@ -36,6 +43,8 @@ export const SYNC_RULES_FEATURE = "sync-rules";
 export const MORE_FILE_TYPES_FEATURE = "more-file-types";
 /** This server accepts `rules.folders`. */
 export const SYNC_FOLDER_SWITCHES_FEATURE = "sync-folder-switches";
+/** This server accepts version 2 rules (the vault's `.baaldaignore` file). */
+export const BAALDAIGNORE_FEATURE = "baaldaignore";
 export const MAX_PATTERN_BYTES = 64 * 1024;
 export const MAX_PATTERN_LINES = 500;
 
@@ -66,7 +75,11 @@ export function parseSyncRules(raw: unknown): SyncRulesParse {
   for (const k of Object.keys(o)) {
     if (k !== "version" && k !== "patterns" && k !== "types" && k !== "folders") return bad(`unknown key: ${k}`);
   }
-  if (o.version !== undefined && o.version !== 1) return bad("unsupported rules version");
+  if (o.version !== undefined && o.version !== 1 && o.version !== 2) return bad("unsupported rules version");
+  const version: 1 | 2 = o.version === 2 ? 2 : 1;
+  if (version === 2 && (o.types != null || o.folders != null)) {
+    return bad("version 2 rules carry everything in patterns");
+  }
   if (typeof o.patterns !== "string") return bad("patterns must be a string");
   const patterns = o.patterns.replace(/\r\n?/g, "\n");
   if (Buffer.byteLength(patterns, "utf8") > MAX_PATTERN_BYTES) {
@@ -97,7 +110,7 @@ export function parseSyncRules(raw: unknown): SyncRulesParse {
     }
     if (f.hidden === true || f.build === true) folders = { hidden: f.hidden === true, build: f.build === true };
   }
-  const rules: SyncRules = { version: 1, patterns };
+  const rules: SyncRules = { version, patterns };
   if (types) rules.types = types;
   if (folders) rules.folders = folders;
   return { ok: true, rules };

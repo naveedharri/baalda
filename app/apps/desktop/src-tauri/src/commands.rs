@@ -1809,145 +1809,27 @@ pub async fn set_sync_rules(
     Ok(SyncRulesApplied { changed })
 }
 
-/// Counts for one rule set over the vault, for the Sync tab's preview.
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncRulesCounts {
-    /// Files of a type the vault would otherwise sync.
-    pub files: usize,
-    /// Excluded folders, counting only the topmost of each excluded subtree.
-    pub folders: usize,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncRulesPreview {
-    /// What the rules in force today exclude on this disk.
-    pub current: SyncRulesCounts,
-    /// What `patterns` would exclude on this disk.
-    pub candidate: SyncRulesCounts,
-    /// Topmost paths `patterns` would newly hide (at most 50).
-    pub newly_hidden: Vec<String>,
-    /// Topmost paths `patterns` would bring back (at most 50).
-    pub newly_shown: Vec<String>,
-    /// The walk stopped at its entry cap, so the counts are a floor.
-    pub truncated: bool,
-}
-
-const PREVIEW_SAMPLE: usize = 50;
-const PREVIEW_MAX_ENTRIES: usize = 200_000;
-
-/// Walk the vault under the fixed floor only and say what the candidate
-/// rules (patterns AND switches) would exclude, beside what the rules in force
-/// exclude. Reads no file contents.
+/// The vault's `.baaldaignore` (#401): the on-disk face of its sync rules,
+/// or `None` when there is no such file (or it is not a plain file).
 #[tauri::command]
-pub async fn preview_sync_rules(
+pub async fn read_rules_file(
     state: State<'_, AppState>,
-    patterns: String,
-    types: Option<crate::sync_rules::RulesTypes>,
-    folders: Option<crate::sync_rules::RulesFolders>,
-) -> AppResult<SyncRulesPreview> {
-    let (vault, _) = require_vault(&state)?;
-    let candidate = crate::sync_rules::SyncRules::compile(crate::sync_rules::RulesDoc {
-        patterns,
-        types,
-        folders,
-        ..Default::default()
-    })?;
-    let current = crate::sync_rules::active(&vault);
-    Ok(preview_rules(&vault, current.as_deref(), vault::opt_in_groups(), &candidate))
+    expected_epoch: Option<u64>,
+) -> AppResult<Option<String>> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    crate::sync_rules::read_rules_file(&vault)
 }
 
-pub fn preview_rules(
-    vault: &Path,
-    current: Option<&crate::sync_rules::SyncRules>,
-    current_groups: u8,
-    candidate: &crate::sync_rules::SyncRules,
-) -> SyncRulesPreview {
-    let mut out = SyncRulesPreview::default();
-    let cand_groups = candidate.doc().opt_in_groups();
-    let either = current_groups | cand_groups;
-    // Excluded-subtree roots currently open in the walk, per rule set: a path
-    // under one of these is counted but never sampled again.
-    let mut cur_root: Option<String> = None;
-    let mut cand_root: Option<String> = None;
-    let under = |root: &Option<String>, rel: &str| {
-        root.as_deref().is_some_and(|r| rel.len() > r.len() && rel.starts_with(r) && rel.as_bytes()[r.len()] == b'/')
-    };
-    let mut seen = 0usize;
-    for entry in walkdir::WalkDir::new(vault)
-        .min_depth(1)
-        .into_iter()
-        // Never the floor; and a name both sides hide (a node_modules with
-        // build folders off before and after) is not walked: it changes nothing.
-        .filter_entry(|e| {
-            let n = e.file_name().to_string_lossy();
-            !vault::is_floor_name(&n)
-                && !(vault::is_ignored_name_with(&n, current_groups) && vault::is_ignored_name_with(&n, cand_groups))
-        })
-        .filter_map(|e| e.ok())
-    {
-        seen += 1;
-        if seen > PREVIEW_MAX_ENTRIES {
-            out.truncated = true;
-            break;
-        }
-        let Ok(rel) = vault::rel_from_abs(vault, entry.path()) else {
-            continue;
-        };
-        if rel == "attachments" || rel.starts_with("attachments/") {
-            continue;
-        }
-        let is_dir = entry.file_type().is_dir();
-        let name = entry.file_name().to_string_lossy();
-        // Only files some side would sync: an unsupported type is not "hidden".
-        if !is_dir && !(entry.file_type().is_file() && vault::is_allowed_with(&name, either)) {
-            continue;
-        }
-        if !under(&cur_root, &rel) {
-            cur_root = None;
-        }
-        if !under(&cand_root, &rel) {
-            cand_root = None;
-        }
-        let by_switch = |groups: u8| {
-            vault::is_ignored_name_with(&name, groups) || (!is_dir && !vault::is_allowed_with(&name, groups))
-        };
-        let in_cur = cur_root.is_some()
-            || by_switch(current_groups)
-            || current.is_some_and(|r| r.excludes_entry(&rel, is_dir));
-        let in_cand = cand_root.is_some() || by_switch(cand_groups) || candidate.excludes_entry(&rel, is_dir);
-        let cur_top = in_cur && cur_root.is_none();
-        let cand_top = in_cand && cand_root.is_none();
-        if is_dir {
-            if cur_top {
-                out.current.folders += 1;
-            }
-            if cand_top {
-                out.candidate.folders += 1;
-            }
-        } else {
-            if in_cur {
-                out.current.files += 1;
-            }
-            if in_cand {
-                out.candidate.files += 1;
-            }
-        }
-        if cand_top && !in_cur && out.newly_hidden.len() < PREVIEW_SAMPLE {
-            out.newly_hidden.push(rel.clone());
-        }
-        if cur_top && !in_cand && out.newly_shown.len() < PREVIEW_SAMPLE {
-            out.newly_shown.push(rel.clone());
-        }
-        if is_dir && cur_top {
-            cur_root = Some(rel.clone());
-        }
-        if is_dir && cand_top {
-            cand_root = Some(rel);
-        }
-    }
-    out
+/// Write the vault's `.baaldaignore` when its text differs. Returns whether it
+/// wrote. The watcher's echo of this write is answered by comparing texts.
+#[tauri::command]
+pub async fn write_rules_file(
+    state: State<'_, AppState>,
+    text: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<bool> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    crate::sync_rules::write_rules_file(&vault, &text)
 }
 
 /// Lazy sidebar loading: return only one directory's immediate children.

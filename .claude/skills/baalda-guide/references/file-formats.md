@@ -9,7 +9,7 @@ four different things in Baalda and people usually mean one of them:
 | **Viewable file** | Shows in the sidebar, opens in a built-in viewer, cannot be edited inside Baalda | Images: `.png` `.jpg` `.jpeg` `.gif` `.webp` `.svg` `.avif` · Documents: `.pdf` |
 | **File** | Shows in the sidebar and syncs as a file (opened in a viewer, or as a card with "Open externally") | Images, PDF, Office files, audio/video, `.csv`/`.json` style data, and archives: `.zip` `.tar` `.tar.gz` `.tgz` `.gz` `.7z` (full list: `ALLOWED_EXTS`) |
 | **Attachment** | Any file dragged onto an open note. Copied into the vault's hidden `attachments/` folder, linked from the note, synced to teammates | Anything: `.docx` `.xlsx` `.pptx` `.csv` `.zip` `.mp4`, code files, and so on |
-| **Ignored** | Not shown, not indexed, not synced | By default: everything else (for example `.rar`, `.dmg`, `.exe`, `.js`), plus `node_modules`, `dist`, `build`, `target`, `vendor`, `venv`, `__pycache__`, and any dot-folder like `.github`. An owner or admin can turn several of these on in Vault Settings → Sync (see below) |
+| **Ignored** | Not shown, not indexed, not synced | Types Baalda can't handle (for example `.dmg`, `.exe`, files with no extension), plus whatever the vault's `.baaldaignore` lists. By default that is `node_modules`, `dist`, `build`, `target`, `vendor`, `venv`, `__pycache__`, any dot-folder like `.github`, and `.tfvars` files. An owner or admin can change that file (see below) |
 
 Source: `app/apps/desktop/src-tauri/src/vault.rs` (`ALLOWED_EXTS`, `DENIED_DIRS`),
 `app/apps/desktop/src/lib/sync/registry.ts` (`NOTE_EXTS`), `app/apps/desktop/src/lib/preview.ts`,
@@ -50,29 +50,30 @@ note, convert it to Markdown first (Pandoc, "Save as Markdown", or ask your AI).
 **Spreadsheet data opens as a table.** `.csv` and `.tsv` open in a read-only table view. Tables
 inside notes are ordinary Markdown tables.
 
-**Some code files show by default; the rest is a vault switch.** `.py`, `.rs`, `.go`, `.sh`, `.sql`
-and data files (`.json`, `.yaml`, `.toml`, `.xml`) show in the sidebar, open read-only with syntax
-colouring and sync as files. `.js`, `.ts`, `.css`, `.java`, `.c`/`.cpp` and similar are off by
-default, so pointing Baalda at a project folder does not flood the sidebar; an owner or admin turns
-them on for the whole vault with Vault Settings → Sync → "Code and text files". Code files sync as
-whole files: if two people change the same one, the latest saved version wins.
+**Code files sync like any other file.** Source code and config (`.js`, `.ts`, `.css`, `.py`, `.rs`,
+`.go`, `.java`, `.c`/`.cpp`, `.json`, `.yaml` and many more) show in the sidebar, open read-only with
+syntax colouring and sync as files. So do fonts, design files (`.psd`, `.ai`, `.eps`, `.sketch`), older
+Office and OpenDocument files, `.rtf`, `.epub`, more video and audio types (`.mkv`, `.avi`, `.opus`,
+`.aiff`) and more archives (`.rar`, `.bz2`, `.xz`). Build and dependency folders stay out by default,
+so pointing Baalda at a project folder does not flood the sidebar. Code files sync as whole files: if
+two people change the same one, the server's version wins.
 
-**Vault Settings → Sync: what syncs in a vault.** One setting for the whole vault. Owners and
-admins change it, every computer in the vault follows it, members can read it. It has:
-- **File types:** notes, images, PDFs, Office files, audio and video always sync. "Code and text
-  files" and "More file types" (fonts, design files, older Office formats, more video and archive
-  types) are off until switched on.
-- **Folders:** "Hidden folders and files" (names starting with a dot, like `.github` or
-  `.obsidian`) and "Build and dependency folders" (`node_modules`, `dist`, `build`…), both off.
-- **Don't sync:** a list of folders or patterns (like a `.gitignore`) that stay on each computer
-  only, for example a Git checkout inside a project folder. "Edit as text" shows the raw list.
+**`.baaldaignore`: what a vault doesn't sync.** Every vault has a `.baaldaignore` file at its top
+level. It works like a `.gitignore`: one pattern per line, `folder/`, `/folder/` (only at the top),
+`*.psd`, and `!keep/` to bring something back. It is one setting for the whole vault: when an owner or
+admin edits the file, every computer in the vault follows it. If a member edits it, Baalda puts it back
+and says only owners and admins can change what syncs. Deleting or emptying the file brings the
+current rules back. The file itself is hidden from the sidebar and never syncs as a note; open it
+from a text editor or the Terminal (in Finder, press Cmd+Shift+. to show hidden files). There is no settings page for it. Out of the box it lists
+hidden files and folders (names starting with a dot), build and dependency folders (`node_modules`,
+`dist`, `build`…, matched only in lower case so a "Build" notes folder still syncs) and `.tfvars` files.
 
-Nothing in this setting ever deletes a file. What stops syncing stays where it is, on every
+A line in `.baaldaignore` never deletes a file. What stops syncing stays where it is, on every
 computer and on the server, is hidden from the sidebar and search, and edits to it no longer
-travel. Switching it back on picks the same files up again. A note edited on both sides while it
+travel. Removing the line picks the same files up again. A note edited on both sides while it
 was hidden merges both edits. A file (code, image, document) changed on both sides takes the
 server's version, and the local copy is replaced with no copy kept.
-Some things never sync whatever the setting says, because syncing them would break them: Baalda's
+Some things never sync whatever the file says, because syncing them would break them: Baalda's
 own `.context` folder, Git's internal `.git` folder, app lock files, system files like
 `.DS_Store` and `Thumbs.db`, and links (symlinks). Files with no extension (`Makefile`,
 `.gitignore`) and empty files are not synced either.

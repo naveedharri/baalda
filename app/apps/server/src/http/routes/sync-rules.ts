@@ -86,7 +86,8 @@ export function createSyncRulesRoutes(): Hono {
       const before = current ? { ...EMPTY_SYNC_RULES, ...current.rules } : EMPTY_SYNC_RULES;
       const sameTypes = JSON.stringify(before.types ?? null) === JSON.stringify(parsed.rules.types ?? null);
       const sameFolders = JSON.stringify(before.folders ?? null) === JSON.stringify(parsed.rules.folders ?? null);
-      if (before.patterns === parsed.rules.patterns && sameTypes && sameFolders) {
+      const sameVersion = (before.version ?? 1) === parsed.rules.version;
+      if (before.patterns === parsed.rules.patterns && sameTypes && sameFolders && sameVersion) {
         await db.query("ROLLBACK");
         return c.json(body(current));
       }

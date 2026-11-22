@@ -1262,15 +1262,17 @@ export interface FilesChanged {
    *  `changes`; only the delete drain reads them (a move INTO a folder that
    *  doesn't sync parks the note instead of deleting it). Absent when empty. */
   ignored?: string[];
+  /** The vault root's `.baaldaignore` changed (#401). Absent when not. */
+  rulesFile?: boolean;
 }
 
 /** Subscribe to whole watcher batches — what the sync layer wants, because a
  *  batch has exactly ONE structural conclusion to draw. */
 export const onFilesChanged = (
-  cb: (changes: FileChanged[], ignored: string[]) => void,
+  cb: (changes: FileChanged[], ignored: string[], rulesFile: boolean) => void,
 ): Promise<UnlistenFn> =>
   listen<FilesChanged>("files-changed", (event) =>
-    cb(event.payload?.changes ?? [], event.payload?.ignored ?? []),
+    cb(event.payload?.changes ?? [], event.payload?.ignored ?? [], event.payload?.rulesFile === true),
   );
 
 // ---- Sync rules (#401) ------------------------------------------------------
@@ -1286,31 +1288,18 @@ export interface SyncRulesDoc {
   revision?: number | null;
   [extra: string]: unknown;
 }
-export interface SyncRulesCounts {
-  files: number;
-  folders: number;
-}
-export interface SyncRulesPreview {
-  current: SyncRulesCounts;
-  candidate: SyncRulesCounts;
-  newlyHidden: string[];
-  newlyShown: string[];
-  truncated: boolean;
-}
 /** The rules Rust walks with right now (null = none saved on this device). */
 export const getSyncRules = (expectedEpoch?: VaultEpoch) =>
   invoke<SyncRulesDoc | null>("get_sync_rules", { expectedEpoch: expectedEpoch ?? null });
 /** Save + install; Rust re-walks the index when the patterns changed. */
 export const setSyncRules = (doc: SyncRulesDoc, expectedEpoch?: VaultEpoch) =>
   invoke<{ changed: boolean }>("set_sync_rules", { doc, expectedEpoch: expectedEpoch ?? null });
-/** What `patterns` would hide and show on this computer, without applying it. */
-/** What the candidate rules (patterns AND switches) would hide here, beside
- *  what the rules in force hide. */
-export const previewSyncRules = (
-  patterns: string,
-  types?: { code: boolean; extra: boolean },
-  folders?: { hidden: boolean; build: boolean },
-) => invoke<SyncRulesPreview>("preview_sync_rules", { patterns, types: types ?? null, folders: folders ?? null });
+/** The vault root's `.baaldaignore` text, or null when there is none. */
+export const readRulesFile = (expectedEpoch?: VaultEpoch) =>
+  invoke<string | null>("read_rules_file", { expectedEpoch: expectedEpoch ?? null });
+/** Write the vault root's `.baaldaignore` when it differs; true if it wrote. */
+export const writeRulesFile = (text: string, expectedEpoch?: VaultEpoch) =>
+  invoke<boolean>("write_rules_file", { text, expectedEpoch: expectedEpoch ?? null });
 /** sha256 of the files at/under these excluded paths (the delete drain's
  *  move-into-a-hidden-folder pairing). */
 export const excludedHashes = (paths: string[], expectedEpoch?: VaultEpoch) =>

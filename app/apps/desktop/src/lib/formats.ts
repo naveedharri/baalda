@@ -141,7 +141,7 @@ const clike = (key: string) => legacy(() => import("@codemirror/legacy-modes/mod
 const mllike = (key: string) => legacy(() => import("@codemirror/legacy-modes/mode/mllike"), key);
 const legacyCss = (key: string) => legacy(() => import("@codemirror/legacy-modes/mode/css"), key);
 
-/** Which optional group switches a format on (Vault Settings → Sync). */
+/** Which optional group switches a format on (#401; on for every `.baaldaignore` vault). */
 export type OptInGroup = "code" | "extra";
 
 type Lang = () => Promise<Extension>;
@@ -798,10 +798,9 @@ export const FORMATS: readonly FormatDef[] = [
   },
 
   // --- source code and more text: openable, surfaced only when switched on --
-  // Importing a real project directory would otherwise flood the sidebar with
-  // thousands of files (the same flood guard as `vault.rs DENIED_DIRS`), so
-  // these are off until an owner or admin turns on "Code and text files" in
-  // Vault Settings → Sync (#401: `optIn: "code"`). They always open — and
+  // On for every `.baaldaignore` vault (#401: `optIn: "code"`); the default
+  // file's build-folder lines keep a project directory from flooding the
+  // sidebar (the old flood guard, `vault.rs DENIED_DIRS`). They always open — and
   // embed — if something points at one. Each MIME is unique and `text/*`, so
   // the server skips its byte sniff and files them under its text ceiling.
   ...CODE_TABLE.map(

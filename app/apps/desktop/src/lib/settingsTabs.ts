@@ -15,8 +15,6 @@ export type SettingsTab =
   // signed-out app has no account page to show its local folders on.
   | "vaults"
   | "members"
-  // The vault's sync rules (#401).
-  | "sync"
   | "billing"
   | "mcp"
   | "skills"

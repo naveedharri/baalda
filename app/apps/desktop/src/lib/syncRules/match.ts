@@ -16,9 +16,15 @@
 //   - case is ignored, like every path comparison in sync.
 // A path is excluded when it, or any folder above it, is excluded: as in git,
 // a file inside an excluded folder cannot be re-included.
+//
+// One exception to "case is ignored": a line that is exactly one of the
+// default build folders (`node_modules/`, `build/`… — {@link BUILD_DIRS},
+// lowercase, folder-only) matches that exact name, as those folders always
+// have. A notes folder called "Build" or "Target" kept syncing before
+// `.baaldaignore` existed, and the default file must not hide it now.
 
 /** Caps, mirrored by Rust and by the server's `sync-rules/schema.ts`. */
-import { NO_FOLDERS, normalizeFolders, type SyncFolders } from "./folders";
+import { BUILD_DIRS, NO_FOLDERS, normalizeFolders, type SyncFolders } from "./folders";
 export const MAX_PATTERN_BYTES = 64 * 1024;
 export const MAX_PATTERN_LINES = 500;
 
@@ -77,8 +83,9 @@ export function compileLine(raw: string): Rule | null {
   if (line === "") return null;
   const body = globToRegex(line);
   const src = anchored ? `^${body}$` : `^(?:.*/)?${body}$`;
+  const exactCase = dirOnly && !anchored && BUILD_DIRS.includes(line);
   try {
-    return { negate, dirOnly, re: new RegExp(src, "i") };
+    return { negate, dirOnly, re: new RegExp(src, exactCase ? "" : "i") };
   } catch {
     return null;
   }

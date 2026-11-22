@@ -43,9 +43,10 @@ pub const ALLOWED_EXTS: &[&str] = &[
 ];
 
 /// Optional types, surfaced only while the open vault's sync rules switch their
-/// group on (#401, Vault Settings → Sync): source code, config and other plain
-/// text ("Code and text files"). Off by default, so a project folder never
-/// floods a vault that didn't ask for it. ONE CONTRACT with `OPT_IN_EXTS.code`
+/// group on (#401): source code, config and other plain text. A `.baaldaignore`
+/// vault switches them on (its default file hides build and dependency folders
+/// instead, so a project folder still doesn't flood the vault); the old v1
+/// rules shape left them off. ONE CONTRACT with `OPT_IN_EXTS.code`
 /// in `src/lib/formats.ts` (lockstep test) and the server's `EXT_MIME`.
 pub const CODE_EXTS: &[&str] = &[
     "js", "jsx", "mjs", "cjs",
@@ -242,6 +243,7 @@ pub fn is_floor_name(name: &str) -> bool {
         || name.starts_with("._")
         || OS_JUNK.iter().any(|j| name.eq_ignore_ascii_case(j))
         || (name.starts_with('.') && name.to_ascii_lowercase().ends_with(".tmp"))
+        || name.eq_ignore_ascii_case(crate::sync_rules::RULES_FILE)
 }
 
 /// True if a directory/file name should be skipped by the tree walk & watcher:

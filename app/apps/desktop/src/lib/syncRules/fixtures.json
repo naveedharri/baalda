@@ -444,5 +444,82 @@
         false
       ]
     ]
+  },
+  {
+    "name": "default build folders match their exact lowercase name; other lines ignore case",
+    "patterns": ".*\nnode_modules/\nbuild/\ntarget/\ncode/\n",
+    "cases": [
+      [
+        "build",
+        true,
+        true
+      ],
+      [
+        "Build",
+        true,
+        false
+      ],
+      [
+        "Build/plan.md",
+        false,
+        false
+      ],
+      [
+        "projects/app/build/out.js",
+        false,
+        true
+      ],
+      [
+        "Target/notes.md",
+        false,
+        false
+      ],
+      [
+        "target/debug/x.rs",
+        false,
+        true
+      ],
+      [
+        "Node_Modules",
+        true,
+        false
+      ],
+      [
+        "projects/Code/a.md",
+        false,
+        true
+      ],
+      [
+        ".github/ci.yml",
+        false,
+        true
+      ],
+      [
+        "notes/.obsidian",
+        true,
+        true
+      ],
+      [
+        "build.md",
+        false,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "a negated default build line is exact-case too",
+    "patterns": "build/\n!build/\n",
+    "cases": [
+      [
+        "build",
+        true,
+        false
+      ],
+      [
+        "Build",
+        true,
+        false
+      ]
+    ]
   }
 ]

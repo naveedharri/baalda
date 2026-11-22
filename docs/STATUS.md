@@ -349,8 +349,11 @@ and hover/pressed colours are one accent tint (`--bg-hover`/`--bg-active`).
 
 - One per-vault setting (`vault_sync_rules`, `GET|PUT /api/orgs/:orgId/sync-rules`, owners/admins write,
   409 `stale_sync_rules`, `sync-rules-changed` frame); local-only vaults keep it in `.context/sync-rules.json`.
-- Vault Settings → Sync: File types (Code and text files, More file types), Folders (hidden, build and
-  dependency), a Don't sync list with a folder picker, Edit as text. Defaults equal the old hard-coded rules.
+- Since 2026-11-22 the setting is a `.baaldaignore` file at the vault root (no settings tab): owners/admins
+  edit it and every device follows (`{version: 2, patterns}`, feature `baaldaignore`); a member's edit is
+  put back. The default file hides dot names, build/dependency folders (exact lowercase names) and
+  `*.tfvars`, and every supported type syncs (code and the extra types included). The file itself never syncs
+  and is hidden from the sidebar. Round trip verified for 153 code extensions (`.tfvars` is ignored by default) and all 24 extra ones.
 - A rule never deletes: hidden items are PARKED (`registry.parkedDocs/parkedFiles/frozenFiles`), the
   server copy stays frozen, un-hiding rebinds the same ids. Parked docs stay on the CRDT GC keep list
   (`registry.crdtKeepIds`) so edits made while hidden survive.

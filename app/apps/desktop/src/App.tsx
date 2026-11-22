@@ -1446,6 +1446,17 @@ export default function App() {
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
+  // A vault that doesn't sync applies its own .baaldaignore (#401): written
+  // with the defaults when missing. A syncing vault asks the server first,
+  // inside the sync session, so this skips any folder stamped for sync.
+  const rulesVaultPath = useStore((s) => s.vault?.path ?? null);
+  const rulesSyncEnabled = useStore((s) => s.syncEnabled);
+  useEffect(() => {
+    if (!rulesVaultPath || rulesSyncEnabled) return;
+    const t = window.setTimeout(() => void syncManager.applyLocalRulesFile(), 1500);
+    return () => window.clearTimeout(t);
+  }, [rulesVaultPath, rulesSyncEnabled]);
+
   // Subscribe to Rust events: tree refresh + open-note reconciliation.
   useEffect(() => {
     let unlistenFile: (() => void) | undefined;
@@ -1495,10 +1506,13 @@ export default function App() {
       // Whole batches, not one event per file: the sync layer folds every
       // unmapped/structural item in a batch into a SINGLE registry pull, which it
       // cannot do when the items arrive one at a time.
-      unlistenFile = await ipc.onFilesChanged((changes, ignored) => {
+      unlistenFile = await ipc.onFilesChanged((changes, ignored, rulesFile) => {
         // Paths the vault's sync rules hide: only the delete drain's move
         // pairing reads them (#401).
         if (ignored.length > 0) syncManager.noteIgnoredPaths(ignored);
+        // The vault's .baaldaignore: an edit here becomes the vault's rules
+        // (owners/admins) or is put back (#401).
+        if (rulesFile) syncManager.rulesFileChanged();
         if (changes.length === 0) return;
         const open = useStore.getState().openNote;
         const forSync: ipc.FileChanged[] = [];

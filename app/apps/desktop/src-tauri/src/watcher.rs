@@ -90,6 +90,10 @@ pub struct FilesChanged {
     /// it for everyone. Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignored: Vec<String>,
+    /// The vault root's `.baaldaignore` changed (#401). A floor name, so it is
+    /// never in `changes`; the sync layer re-reads it. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rules_file: bool,
 }
 
 /// How many paths one index transaction may cover.
@@ -336,6 +340,8 @@ pub struct Plan {
     /// Excluded paths (#401) that exist on disk, sorted: see
     /// `FilesChanged::ignored`.
     pub ignored: Vec<String>,
+    /// The vault root's `.baaldaignore` was touched: see `FilesChanged::rules_file`.
+    pub rules_file: bool,
 }
 
 /// Turn a dirty set into a [`Plan`]: drop ignored paths, sort for determinism,
@@ -364,10 +370,15 @@ pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Pl
     }
     let mut planned: Vec<PlannedChange> = Vec::new();
     let mut ignored: Vec<String> = Vec::new();
+    let mut rules_file = false;
     for abs in batch {
         let Ok(rel) = rel_from_abs(vault, &abs) else {
             continue;
         };
+        if rel.eq_ignore_ascii_case(crate::sync_rules::RULES_FILE) {
+            rules_file = true;
+            continue;
+        }
         if rel.is_empty() || rel_path_is_ignored(&rel) {
             continue;
         }
@@ -447,6 +458,7 @@ pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Pl
         indexable_files,
         changes: planned,
         ignored,
+        rules_file,
     }
 }
 
@@ -460,12 +472,13 @@ fn process_batch(
 ) {
     let plan = plan_batch(vault, batch);
     if plan.changes.is_empty() {
-        if !plan.ignored.is_empty() {
+        if !plan.ignored.is_empty() || plan.rules_file {
             let _ = app.emit(
                 "files-changed",
                 FilesChanged {
                     changes: Vec::new(),
                     ignored: plan.ignored,
+                    rules_file: plan.rules_file,
                 },
             );
         }
@@ -548,6 +561,7 @@ fn process_batch(
         FilesChanged {
             changes: mark_unchanged(plan.changes, &unchanged),
             ignored: plan.ignored,
+            rules_file: plan.rules_file,
         },
     );
 }

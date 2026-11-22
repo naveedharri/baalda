@@ -419,24 +419,40 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   as `keptLocally`, reported quietly and left out of the "N changes to review" count.
   `reconcileReport.forgetReadable(docIds)` drops `keptLocally`/`deletedByTeammate`/`selfRevoked`
   entries for docs the server lists again on a later pull, so regained access shrinks the banner.
-- **Sync rules (#401)** (`lib/syncRules/`, Rust `sync_rules.rs`, server `sync-rules/` +
-  `routes/sync-rules.ts`, Vault Settings → Sync `components/SyncRulesTab.tsx`): ONE per-vault
-  setting (owners/admins PUT with `baseRevision`, 409 `stale_sync_rules`; members read; frame
-  `sync-rules-changed`; a local-only vault keeps it in `.context/sync-rules.json`). It holds gitignore
-  `patterns`, `types` (`code`, `extra`, features `more-file-types`) and `folders` (`hidden` = dot
-  names, `build` = `DENIED_DIRS`, feature `sync-folder-switches`), all OFF by default, which is
-  exactly the old hard-coded behaviour; Rust mirrors the switches as process-wide `OPT_IN_GROUPS` bits
-  and TS as `syncRules/folders.ts setFolderSwitches` (`BUILD_DIRS`/`OS_JUNK` pinned to `vault.rs` by
-  `formatsLockstep.test.ts`). The FLOOR never syncs whatever the rules say (`vault.rs is_floor_name`,
-  `folders.ts isFloorName`): `.context`, `.git`, lock files, Baalda's temp files, OS bookkeeping
-  (`._*`, `.DS_Store`, `Thumbs.db`…), symlinks. **A rule never deletes:** what it hides is PARKED
+- **Sync rules (#401) = `.baaldaignore`** (`lib/syncRules/` incl. `baaldaignore.ts`, Rust `sync_rules.rs`,
+  server `sync-rules/` + `routes/sync-rules.ts`; there is NO settings tab, removed 2026-11-22): ONE per-vault
+  setting whose face is a `.baaldaignore` file at the vault root (gitignore syntax, last match wins).
+  The file is FLOOR-hidden (`vault.rs is_floor_name`, `folders.ts isFloorName`): never in the tree, index
+  or sync, so it can never sync as a note. The watcher flags it (`files-changed.rulesFile`) and
+  `docSession.rulesFileChanged` (700 ms debounce) → `refreshSyncRules` (serialized): an owner's or admin's
+  edit becomes the vault's rules (`PUT` `{version: 2, patterns: <whole file>}` with `baseRevision`, server
+  feature `baaldaignore`); a member's edit is answered 403 and PUT BACK with a toast; an edit made on a
+  stale base (409, or the server moved on) is replaced; an empty or missing file is restored; a network
+  failure, an unreadable file or text over the caps keeps the file as it is. Every device writes the
+  server's text to its own file (members read, `sync-rules-changed` frame). A v1 row (the retired Sync
+  tab's switches, or no row) reads through `rulesTextOf`: the default file with the switched-on lines
+  commented out, plus its own patterns. Under v2 Rust gets every type group on (`code`/`extra` when the
+  server lists `more-file-types`; local vaults always) and both folder switches on: the default file's
+  `.*` and build-folder lines (`BUILD_DIRS`) do the hiding instead, so the default reproduces the old
+  hidden set while code and the extra types sync. Those default build lines match the EXACT lowercase
+  name (both matchers, shared `fixtures.json`), every other line ignores case: an existing `Build/` notes
+  folder keeps syncing. The default also ignores `*.tfvars` (secrets). A local-only vault
+  (`applyLocalRulesFile`, run from `App.tsx` while sync is off) writes the default file and applies it
+  locally (cached in `.context/sync-rules.json`). The FLOOR never syncs whatever the file says:
+  `.context`, `.git`, `.baaldaignore`, lock files, Baalda's temp files, OS bookkeeping (`._*`,
+  `.DS_Store`, `Thumbs.db`…), symlinks; `BUILD_DIRS`/`OS_JUNK` are pinned to `vault.rs` by
+  `formatsLockstep.test.ts`. **A rule never deletes:** what it hides is PARKED
   (`registry.parkedDocs`/`parkedFiles`/`frozenFiles`, persisted as `config.json parked`; `changeRules`
   parks before Rust installs, serialized on the pull chain), the server copy stays frozen, a teammate's
   move into a hidden folder is followed then parked, a local move parks without a server delete, and
   removing the rule rebinds the same ids. `isExcludedPath` = type hidden OR hidden segment OR pattern.
   Parked docs MUST stay on the CRDT GC keep list (`registry.crdtKeepIds`, used by every
   `collectCrdtGarbage` call): dropping their history and disk base made the next un-hide write the
-  server's text over edits made while hidden. Patterns never enable an unsupported or switched-off type.
+  server's text over edits made while hidden. Patterns never enable an unsupported type. Desktops
+  that lack a newly synced type (0.1.113, checked on the Twins) refuse its download permanently per
+  blob+sha (`isPermanentDownloadFailure`): no retry loop, no server change, the file is simply absent.
+  They also know no rules at all: only the default file's lines match their hard-coded hiding, so a
+  custom line is not honoured there and they upload what it hides (a server-side refusal is not built).
   Membership loss (`delete_departed_vault` → `remove_departed_contents`) deletes every path the
   folder's own config registered (`docs`/`files`/`folders`, `parked` included — hidden by a rule is
   still the team's), every file the vault would sync under its cached rules, and `.context`; only

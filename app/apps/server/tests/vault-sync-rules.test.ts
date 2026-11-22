@@ -203,4 +203,25 @@ describe("vault sync rules", () => {
     });
     expect(((await folders.json()) as { revision: number }).revision).toBe(2);
   });
+
+  it("version 2 (.baaldaignore) stores the whole file and never the switches", async () => {
+    const { owner, member, orgId } = await setup();
+    const putV2 = (rules: unknown, baseRevision: number) =>
+      app.request(`/api/orgs/${orgId}/sync-rules`, {
+        method: "PUT",
+        headers: { ...authHeaders(owner), "content-type": "application/json" },
+        body: JSON.stringify({ rules, baseRevision }),
+      });
+    const text = "# what does not sync\n.*\nnode_modules/\nprojects/app/code/\n";
+    const res = await putV2({ version: 2, patterns: text }, 0);
+    expect(res.status).toBe(200);
+    expect(((await (await get(member, orgId)).json()) as { rules: unknown }).rules).toEqual({ version: 2, patterns: text });
+    // The switches belong to version 1 only.
+    const mixed = await putV2({ version: 2, patterns: text, folders: { hidden: true, build: false } }, 1);
+    expect(mixed.status).toBe(400);
+    // Same text as version 1 is a change: it means something else there.
+    const v1 = await putV2({ version: 1, patterns: text }, 1);
+    expect(((await v1.json()) as { revision: number }).revision).toBe(2);
+    expect(parseSyncRules({ version: 3, patterns: "" }).ok).toBe(false);
+  });
 });

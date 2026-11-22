@@ -4008,6 +4008,17 @@ export class ApiClient {
     return normalizeSyncRules(data);
   }
 
+  /** Replace the vault's rules with its `.baaldaignore` text (version 2,
+   *  owner/admin; server feature `baaldaignore`). Same answers as {@link putSyncRules}. */
+  async putSyncRulesFile(orgId: string, text: string, baseRevision: number): Promise<VaultSyncRulesResponse> {
+    const { data } = await this.request<VaultSyncRulesResponse>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/sync-rules`,
+      { body: { rules: { version: 2, patterns: text }, baseRevision } },
+    );
+    return normalizeSyncRules(data);
+  }
+
   // ---- Skills (docs/SKILLS.md §3.3) --------------------------------------
 
   /** Every vault this user belongs to on this server, with the skills to install. */
@@ -4848,6 +4859,7 @@ export function skillErrorCode(e: unknown): string | null {
 /** `GET|PUT /api/orgs/:orgId/sync-rules` (#401). */
 export interface VaultSyncRulesResponse {
   rules: {
+    /** 1 = the old Sync tab's shape (or nothing saved), 2 = a `.baaldaignore` text. */
     version: number;
     patterns: string;
     types: { code: boolean; extra: boolean };
@@ -4865,7 +4877,7 @@ function normalizeSyncRules(data: Partial<VaultSyncRulesResponse> | null | undef
   const f = (data?.rules as { folders?: Record<string, unknown> } | undefined)?.folders ?? {};
   return {
     rules: {
-      version: 1,
+      version: data?.rules?.version === 2 ? 2 : 1,
       patterns,
       types: { code: t.code === true, extra: t.extra === true },
       folders: { hidden: f.hidden === true, build: f.build === true },

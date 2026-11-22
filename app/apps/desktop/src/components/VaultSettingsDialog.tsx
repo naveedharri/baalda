@@ -58,7 +58,6 @@ import { VaultIconSettings } from "./VaultIconSettings";
 import { VaultDashboardsTab } from "./VaultDashboardsTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
 import { SkillsTab } from "./skills/SkillsTab";
-import { SyncRulesTab } from "./SyncRulesTab";
 import { VaultKeySection } from "./VaultKeySection";
 import { SaveVaultKeyCard } from "./SaveVaultKeyCard";
 import { syncManager } from "../lib/sync/docSession";
@@ -118,17 +117,6 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNo
         <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
         <circle cx="9" cy="7" r="4" />
         <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
-      </MenuIcon>
-    ),
-  },
-  {
-    id: "sync",
-    label: "Sync",
-    icon: (
-      <MenuIcon>
-        <path d="M21 12a9 9 0 0 1-15.5 6.2L3 16" />
-        <path d="M3 12a9 9 0 0 1 15.5-6.2L21 8" />
-        <path d="M21 3v5h-5M3 21v-5h5" />
       </MenuIcon>
     ),
   },
@@ -406,8 +394,6 @@ export function VaultSettingsDialog({
               onCloseSettings={onClose}
               resetToken={tabReset}
             />
-          ) : shown === "sync" ? (
-            <SyncRulesTab canManage={canManage} isSynced={isSynced} />
           ) : shown === "billing" ? (
             <BillingTab canManage={canManage} isSynced={isSynced} />
           ) : shown === "mcp" ? (

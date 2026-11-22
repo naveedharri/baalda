@@ -26,7 +26,9 @@
 //! - a pattern with a `/` anywhere but the end is anchored to the vault root
 //!   (a leading `/` is dropped); without one it matches a name at any depth;
 //! - `*` is any run within one segment, `?` one character, `**` any depth;
-//! - matching ignores case, like every path comparison in sync.
+//! - matching ignores case, like every path comparison in sync, except
+//!   that a bare default build-folder line (`node_modules/`, `build/`…) matches
+//!   that exact lowercase name, as `DENIED_DIRS` always did;
 //!
 //! A path is excluded when it, or any folder above it, is excluded. As in git,
 //! a file inside an excluded folder cannot be re-included.
@@ -217,10 +219,15 @@ fn compile_line(raw: &str) -> Option<Rule> {
         return None;
     }
     let body = glob_to_regex(line);
+    // The default build-folder lines match their exact lowercase name, as
+    // `DENIED_DIRS` always did (a notes folder "Build" keeps syncing). Mirrors
+    // `compileLine` in `match.ts`.
+    let exact_case = dir_only && !anchored && crate::vault::DENIED_DIRS.contains(&line);
+    let flags = if exact_case { "" } else { "(?i)" };
     let src = if anchored {
-        format!("(?i)^{body}$")
+        format!("{flags}^{body}$")
     } else {
-        format!("(?i)^(?:.*/)?{body}$")
+        format!("{flags}^(?:.*/)?{body}$")
     };
     Regex::new(&src).ok().map(|re| Rule { negate, dir_only, re })
 }
@@ -325,6 +332,56 @@ pub fn save_and_install(vault: &Path, doc: RulesDoc) -> AppResult<()> {
     crate::notefile::write_atomic_fsync(&target, &json)?;
     install(vault, rules);
     Ok(())
+}
+
+// ---- the vault's .baaldaignore ------------------------------------------------
+
+/// The file at the vault root that shows and edits the vault's rules. It is a
+/// floor name (`vault.rs is_floor_name`): never synced as a file, never in the
+/// sidebar. The rules themselves travel through the server, so every device
+/// applies the same set; the sync layer keeps this file equal to them.
+pub const RULES_FILE: &str = ".baaldaignore";
+/// Past this the file is refused rather than half-read (the rules' own cap is
+/// [`MAX_PATTERN_BYTES`]; this only bounds the read).
+pub const MAX_RULES_FILE_BYTES: u64 = 256 * 1024;
+
+/// The vault's `.baaldaignore` text, or `None` when there is none. A link or
+/// a folder by that name counts as none: it is never followed or replaced.
+pub fn read_rules_file(vault: &Path) -> AppResult<Option<String>> {
+    let path = vault.join(RULES_FILE);
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    if meta.len() > MAX_RULES_FILE_BYTES {
+        return Err(AppError::new(".baaldaignore is too long"));
+    }
+    let bytes = std::fs::read(&path)?;
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// Write `text` as the vault's `.baaldaignore` when it differs (atomic).
+/// Refuses to replace a link or a folder by that name.
+pub fn write_rules_file(vault: &Path, text: &str) -> AppResult<bool> {
+    if text.len() as u64 > MAX_RULES_FILE_BYTES {
+        return Err(AppError::new(".baaldaignore is too long"));
+    }
+    let path = vault.join(RULES_FILE);
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) if !m.is_file() => return Err(AppError::new(".baaldaignore is not a plain file")),
+        Ok(_) => {
+            if std::fs::read(&path).ok().as_deref() == Some(text.as_bytes()) {
+                return Ok(false);
+            }
+        }
+        Err(_) => {}
+    }
+    crate::notefile::write_atomic_fsync(&path, text.as_bytes())?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -525,18 +582,73 @@ mod tests {
     }
 
     #[test]
-    fn preview_counts_what_a_candidate_would_hide_and_show() {
+    fn the_rules_file_is_read_written_and_never_surfaced() {
         let dir = vault_with_code_checkout();
         let v = dir.path();
-        let cand = SyncRules::compile(RulesDoc { patterns: "code/\n".into(), ..Default::default() }).unwrap();
-        let p = crate::commands::preview_rules(v, None, 0, &cand);
-        // README.md, main.py, diagram.png — every surfaced file under code/.
-        assert_eq!(p.candidate.files, 3);
-        assert_eq!(p.candidate.folders, 1);
-        assert_eq!(p.newly_hidden, vec!["projects/my-app/code".to_string()]);
-        assert_eq!(p.current.files, 0);
-        let back = crate::commands::preview_rules(v, Some(&cand), 0, &SyncRules::empty());
-        assert_eq!(back.newly_shown, vec!["projects/my-app/code".to_string()]);
+        assert_eq!(read_rules_file(v).unwrap(), None);
+        assert!(write_rules_file(v, ".*\nnode_modules/\n").unwrap());
+        assert!(!write_rules_file(v, ".*\nnode_modules/\n").unwrap(), "same text writes nothing");
+        assert_eq!(read_rules_file(v).unwrap().as_deref(), Some(".*\nnode_modules/\n"));
+        // A floor name even when dot names may sync: never in the tree or the index.
+        assert!(crate::vault::is_floor_name(".baaldaignore"));
+        assert!(crate::vault::is_floor_name(".BaaldaIgnore"));
+        let mut all = Vec::new();
+        paths(&crate::tree::list_tree(v).unwrap(), &mut all);
+        assert!(all.iter().all(|p| !p.contains("baaldaignore")), "{all:?}");
+        // The watcher reports it apart from every other change.
+        let plan = crate::watcher::plan_batch(v, vec![v.join(".baaldaignore"), v.join("projects/my-app/context.md")]);
+        assert!(plan.rules_file);
+        assert_eq!(plan.changes.len(), 1);
+        let nested = crate::watcher::plan_batch(v, vec![v.join("projects/.baaldaignore")]);
+        assert!(!nested.rules_file, "only the vault root's file counts");
+        // A folder by that name is never replaced.
+        let d2 = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d2.path().join(".baaldaignore")).unwrap();
+        assert_eq!(read_rules_file(d2.path()).unwrap(), None);
+        assert!(write_rules_file(d2.path(), "x").is_err());
+    }
+
+    /// The default `.baaldaignore` with the switches on (what the desktop
+    /// installs since the file exists) hides what the fixed rules hid before,
+    /// and code files now show.
+    #[test]
+    fn the_default_file_hides_what_was_hidden_before() {
+        let dir = vault_with_code_checkout();
+        let v = dir.path();
+        for d in [".obsidian", "node_modules/pkg", "Build", "projects/my-app/code/target/debug", ".git"] {
+            std::fs::create_dir_all(v.join(d)).unwrap();
+        }
+        std::fs::write(v.join(".obsidian/app.json"), "{}").unwrap();
+        std::fs::write(v.join("node_modules/pkg/index.json"), "{}").unwrap();
+        std::fs::write(v.join("Build/plan.md"), "# plan").unwrap();
+        std::fs::write(v.join("projects/my-app/code/target/debug/out.md"), "x").unwrap();
+        std::fs::write(v.join("projects/my-app/code/app.ts"), "let a = 1").unwrap();
+        std::fs::write(v.join("projects/my-app/code/infra.tfvars"), "key = 1").unwrap();
+        std::fs::write(v.join(".git/HEAD.md"), "x").unwrap();
+        let text = ".*\nnode_modules/\ndist/\nbuild/\ntarget/\nvendor/\n__pycache__/\nvenv/\n*.tfvars\n";
+        save_and_install(
+            v,
+            RulesDoc {
+                version: 2,
+                patterns: text.into(),
+                types: Some(RulesTypes { code: true, extra: true }),
+                folders: Some(RulesFolders { hidden: true, build: true }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut all = Vec::new();
+        paths(&crate::tree::list_tree(v).unwrap(), &mut all);
+        assert!(all.contains(&"Build/plan.md".to_string()), "{all:?}");
+        assert!(all.contains(&"projects/my-app/code/app.ts".to_string()), "{all:?}");
+        for hidden in [".obsidian", "node_modules", "target", ".git", "tfvars"] {
+            assert!(all.iter().all(|p| !p.contains(hidden)), "{hidden}: {all:?}");
+        }
+        let index = crate::index::Index::open(v).unwrap();
+        index.rebuild(v).unwrap();
+        assert!(index.get_note_meta("Build/plan.md").unwrap().is_some());
+        assert!(index.get_note_meta("projects/my-app/code/target/debug/out.md").unwrap().is_none());
+        install(v, SyncRules::empty());
     }
 
     #[test]

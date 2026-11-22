@@ -25,7 +25,12 @@ import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
 import { ACCESS_GROUPS_FEATURE, createGroupRoutes } from "./routes/groups.js";
 import { createAppearanceRoutes } from "./routes/appearance.js";
 import { createSyncRulesRoutes } from "./routes/sync-rules.js";
-import { MORE_FILE_TYPES_FEATURE, SYNC_FOLDER_SWITCHES_FEATURE, SYNC_RULES_FEATURE } from "../sync-rules/schema.js";
+import {
+  BAALDAIGNORE_FEATURE,
+  MORE_FILE_TYPES_FEATURE,
+  SYNC_FOLDER_SWITCHES_FEATURE,
+  SYNC_RULES_FEATURE,
+} from "../sync-rules/schema.js";
 import { createFontRoutes } from "./fonts.js";
 import { createSkillRoutes } from "./routes/skills.js";
 import { SKILL_ACCESS_FEATURE, SKILLS_FEATURE } from "../skills/feature.js";
@@ -355,6 +360,7 @@ export function createApp(deps: AppDeps): Hono {
         SYNC_RULES_FEATURE,
         MORE_FILE_TYPES_FEATURE,
         SYNC_FOLDER_SWITCHES_FEATURE,
+        BAALDAIGNORE_FEATURE,
         // Client-held vault keys (W3), only while BAALDA_VAULT_KEYS is on.
         ...(vaultKeysEnabled() ? [VAULT_KEYS_FEATURE] : []),
       ],

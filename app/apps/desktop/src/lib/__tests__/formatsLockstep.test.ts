@@ -63,7 +63,7 @@ describe("format lockstep", () => {
     expect(new Set(rust).size).toBe(rust.length); // no duplicate in the Rust list
   });
 
-  // #401: the optional groups an owner can switch on in Vault Settings → Sync.
+  // #401: the optional groups (on whenever a vault's rules come from .baaldaignore).
   it("agrees with Rust on the optional groups, which never overlap the default set", () => {
     expect(new Set(literals(vaultRs, rustArray("CODE_EXTS")))).toEqual(new Set(OPT_IN_EXTS.code));
     expect(new Set(literals(vaultRs, rustArray("EXTRA_EXTS")))).toEqual(new Set(OPT_IN_EXTS.extra));

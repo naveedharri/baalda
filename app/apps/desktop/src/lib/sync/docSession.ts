@@ -31,7 +31,16 @@ import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
-import { normalizeFolders, normalizeTypes, SyncRuleSet } from "../syncRules/match";
+import { normalizeFolders, normalizeTypes, patternsProblem, SyncRuleSet } from "../syncRules/match";
+import {
+  BAALDAIGNORE_FEATURE,
+  DEFAULT_BAALDAIGNORE,
+  isUsableRulesFile,
+  MORE_FILE_TYPES_FEATURE,
+  rulesDocFor,
+  rulesTextOf,
+  sameRulesText,
+} from "../syncRules/baaldaignore";
 import {
   isVaultKeyBlocked,
   onVaultKeyEvent,
@@ -4230,6 +4239,18 @@ export class SyncManager implements InboundHost {
     return this.registry.syncRules().source;
   }
 
+  /**
+   * The vault's rules as this device last applied them, as `.baaldaignore`
+   * text, and the server revision they came from. A `.baaldaignore` that
+   * says something else was edited on this computer.
+   */
+  private appliedRules: { text: string; revision: number | null } | null = null;
+  /** One rules reconcile at a time: a file save and a frame can race. */
+  private rulesChain: Promise<void> = Promise.resolve();
+  private rulesFileTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Editors save in bursts (write, rename, touch); read the file once they settle. */
+  private static readonly RULES_FILE_SETTLE_MS = 700;
+
   /** Launch: what Rust already walks with, before anything else reads the tree. */
   private async loadLocalSyncRules(scope: VaultScope): Promise<void> {
     try {
@@ -4238,19 +4259,41 @@ export class SyncManager implements InboundHost {
         this.registry.setSyncRules(
           new SyncRuleSet(doc?.patterns ?? "", normalizeTypes(doc?.types), normalizeFolders(doc?.folders)),
         );
+        this.appliedRules = doc
+          ? { text: rulesTextOf(doc), revision: typeof doc.revision === "number" ? doc.revision : null }
+          : null;
       }
     } catch (e) {
       console.warn("[sync-rules] could not read this vault's saved rules", e);
     }
   }
 
+  /** The watcher saw the vault root's `.baaldaignore` change (App routes it here). */
+  rulesFileChanged(): void {
+    if (this.rulesFileTimer) clearTimeout(this.rulesFileTimer);
+    this.rulesFileTimer = setTimeout(() => {
+      this.rulesFileTimer = null;
+      const scope = this.scope;
+      if (scope?.isCurrent() && scope.orgId && this.enabled) void this.refreshSyncRules(scope, scope.orgId);
+      else void this.applyLocalRulesFile();
+    }, SyncManager.RULES_FILE_SETTLE_MS);
+  }
+
   /**
-   * Fetch the vault's rules and apply them when they differ from what this
-   * device walks with. Never throws. A server without the feature (404), or no
-   * answer, keeps what this device already has: a rule never deletes, so the
+   * Fetch the vault's rules, send this computer's `.baaldaignore` edit when
+   * there is one, apply the result and write it back to the file. Never
+   * throws. A server without the feature (404), or no answer, keeps what this
+   * device already has and leaves the file alone: a rule never deletes, so the
    * only cost of a stale set is a file shown or hidden a little longer.
    */
-  async refreshSyncRules(scope: VaultScope, orgId: string, opts: { pull?: boolean } = {}): Promise<void> {
+  refreshSyncRules(scope: VaultScope, orgId: string, opts: { pull?: boolean } = {}): Promise<void> {
+    const run = this.rulesChain.then(() => this.refreshSyncRulesNow(scope, orgId, opts));
+    this.rulesChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async refreshSyncRulesNow(scope: VaultScope, orgId: string, opts: { pull?: boolean }): Promise<void> {
+    if (!scope.isCurrent()) return;
     let res: Awaited<ReturnType<typeof api.getSyncRules>>;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -4269,53 +4312,175 @@ export class SyncManager implements InboundHost {
       if (timer !== undefined) clearTimeout(timer);
     }
     if (!scope.isCurrent()) return;
-    // The vault has never had rules on the server, but this folder has some of
-    // its own (set while it was a local vault): they become the vault's rules.
-    // Never install the empty default over them, which would upload everything
-    // they hid. A member can't write them, so this device keeps its own.
-    const localRules = this.registry.syncRules();
-    const local = localRules.source;
-    const anyOn = (r: { types: { code: boolean; extra: boolean }; folders: { hidden: boolean; build: boolean } }) =>
-      r.types.code || r.types.extra || r.folders.hidden || r.folders.build;
-    const localHasRules = local.trim() !== "" || anyOn(localRules);
-    if (res.revision === 0 && res.rules.patterns === "" && !anyOn(res.rules) && localHasRules) {
-      try {
-        const put = await api.putSyncRules(orgId, local, 0, localRules.types, localRules.folders);
-        if (!scope.isCurrent()) return;
-        await ipc.setSyncRules(
-          {
-            version: 1,
-            patterns: put.rules.patterns,
-            types: put.rules.types,
-            folders: put.rules.folders,
-            revision: put.revision,
-          },
-          scope.vaultEpoch,
-        );
-        console.info("[sync-rules] this folder's own rules are now the vault's rules");
-      } catch (e) {
-        console.warn("[sync-rules] kept this folder's own rules; the vault has none yet", e);
+    const features = await this.serverFeatures().catch(() => new Set<string>());
+    if (!scope.isCurrent()) return;
+    let text = rulesTextOf(res.rules);
+    let revision = res.revision;
+    let keepFile = false;
+    const local = await this.localRulesEdit(scope, res);
+    if (!scope.isCurrent()) return;
+    if (local === "unreadable") {
+      keepFile = true;
+    } else if (local !== null) {
+      const sent = await this.sendRulesEdit(orgId, local, res, features);
+      if (!scope.isCurrent()) return;
+      if (sent.kind === "kept") keepFile = true;
+      else if (sent.kind === "saved") {
+        text = sent.text;
+        revision = sent.revision;
       }
-      return;
     }
-    await this.applySyncRules(
-      scope,
-      {
-        version: 1,
-        patterns: res.rules.patterns,
-        types: res.rules.types,
-        folders: res.rules.folders,
-        revision: res.revision,
-      },
-      opts,
-    );
+    const doc = rulesDocFor(text, revision, features.has(MORE_FILE_TYPES_FEATURE));
+    const previous = this.appliedRules;
+    const applied = await this.applySyncRules(scope, doc, opts);
+    if (!scope.isCurrent()) return;
+    // Same rules, newer revision: remember it, or a later edit made here reads
+    // as based on an old revision and is replaced.
+    if (!applied && previous?.revision !== revision) {
+      await ipc.setSyncRules(doc, scope.vaultEpoch).catch(() => undefined);
+    }
+    this.appliedRules = { text, revision };
+    if (!keepFile) await this.writeRulesFile(scope, text);
   }
 
-  /** The open vault's scope, for UI callers (the Sync tab after a save). */
-  async applySyncRulesNow(doc: ipc.SyncRulesDoc): Promise<boolean> {
-    const scope = this.scope;
-    if (!scope || !scope.isCurrent()) return false;
-    return this.applySyncRules(scope, doc, { pull: true });
+  /**
+   * The edit this computer's `.baaldaignore` holds, if any: it says something
+   * real, other than the vault's rules and other than what this device last
+   * applied (equal to that, the vault simply moved on and the file is stale).
+   * A folder that had its own rules before the file existed (a local vault
+   * turning sync on) offers those while the vault has none.
+   */
+  private async localRulesEdit(
+    scope: VaultScope,
+    res: { rules: { version: number; patterns: string }; revision: number },
+  ): Promise<{ text: string; base: number | null } | null | "unreadable"> {
+    let file: string | null;
+    try {
+      file = await ipc.readRulesFile(scope.vaultEpoch);
+    } catch (e) {
+      console.warn("[sync-rules] could not read .baaldaignore", e);
+      toast(".baaldaignore couldn't be read, so this computer keeps the vault's current rules.", "neutral");
+      return "unreadable";
+    }
+    const server = rulesTextOf(res.rules);
+    const applied = this.appliedRules;
+    if (isUsableRulesFile(file)) {
+      if (sameRulesText(file, server)) return null;
+      if (applied && sameRulesText(file, applied.text)) return null;
+      return { text: file, base: applied?.revision ?? null };
+    }
+    if (res.revision === 0 && applied && !sameRulesText(applied.text, server)) {
+      return { text: applied.text, base: null };
+    }
+    return null;
+  }
+
+  /** Send a `.baaldaignore` edit as the vault's rules. */
+  private async sendRulesEdit(
+    orgId: string,
+    edit: { text: string; base: number | null },
+    res: { revision: number },
+    features: ReadonlySet<string>,
+  ): Promise<{ kind: "saved"; text: string; revision: number } | { kind: "refused" } | { kind: "kept" }> {
+    const problem = patternsProblem(edit.text);
+    if (problem) {
+      toast(`.baaldaignore wasn't applied. ${problem}`, "error");
+      return { kind: "kept" };
+    }
+    if (!features.has(BAALDAIGNORE_FEATURE)) {
+      console.warn("[sync-rules] this server can't store .baaldaignore yet; kept the file as it is");
+      return { kind: "kept" };
+    }
+    if (edit.base !== null && edit.base !== res.revision) {
+      toast(
+        "Someone changed what syncs in this vault meanwhile, so your edit to .baaldaignore was replaced with theirs.",
+        "neutral",
+      );
+      return { kind: "refused" };
+    }
+    try {
+      const put = await api.putSyncRulesFile(orgId, edit.text, res.revision);
+      console.info(`[sync-rules] .baaldaignore is now the vault's rules (revision ${put.revision})`);
+      toast("Saved .baaldaignore. Everyone in this vault follows it now.", "success");
+      return { kind: "saved", text: rulesTextOf(put.rules), revision: put.revision };
+    } catch (e) {
+      const status = (e as { status?: number } | null)?.status;
+      if (status === 403) {
+        toast("Only owners and admins can change what syncs, so your edit to .baaldaignore was undone.", "neutral");
+        return { kind: "refused" };
+      }
+      if (status === 409) {
+        toast(
+          "Someone changed what syncs in this vault meanwhile, so your edit to .baaldaignore was replaced with theirs.",
+          "neutral",
+        );
+        return { kind: "refused" };
+      }
+      if (status === 400) {
+        const body = (e as { body?: { message?: unknown } }).body;
+        const why = typeof body?.message === "string" ? ` ${body.message}` : "";
+        toast(`.baaldaignore wasn't applied.${why}`, "error");
+        return { kind: "kept" };
+      }
+      console.warn("[sync-rules] could not save .baaldaignore; will try again", e);
+      return { kind: "kept" };
+    }
+  }
+
+  private async writeRulesFile(scope: VaultScope, text: string): Promise<void> {
+    try {
+      await ipc.writeRulesFile(text, scope.vaultEpoch);
+    } catch (e) {
+      console.warn("[sync-rules] could not write .baaldaignore", e);
+    }
+  }
+
+  /**
+   * A vault that doesn't sync: its `.baaldaignore` is the whole story. A
+   * missing or empty file is written from the rules in force (the defaults
+   * when there are none). A stamped vault is left to the sync session, which
+   * asks the server first; signed out, its file waits until then.
+   */
+  applyLocalRulesFile(): Promise<void> {
+    const run = this.rulesChain.then(() => this.applyLocalRulesFileNow());
+    this.rulesChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async applyLocalRulesFileNow(): Promise<void> {
+    if (this.enabled) return;
+    try {
+      const cfg = await ipc.getVaultConfig().catch(() => null);
+      if (cfg && /"serverVaultId"\s*:\s*"[^"]+"/.test(cfg)) return;
+      const cached = await ipc.getSyncRules();
+      let text: string | null;
+      try {
+        text = await ipc.readRulesFile();
+      } catch (e) {
+        console.warn("[sync-rules] could not read .baaldaignore", e);
+        return;
+      }
+      if (this.enabled) return;
+      if (!isUsableRulesFile(text)) {
+        text = cached ? rulesTextOf(cached) : DEFAULT_BAALDAIGNORE;
+        await ipc.writeRulesFile(text).catch((e) => console.warn("[sync-rules] could not write .baaldaignore", e));
+      }
+      const problem = patternsProblem(text);
+      if (problem) {
+        toast(`.baaldaignore wasn't applied. ${problem}`, "error");
+        return;
+      }
+      const doc = rulesDocFor(text, null, true);
+      const now = new SyncRuleSet(doc.patterns, normalizeTypes(doc.types), normalizeFolders(doc.folders));
+      if (cached?.version === 2 && now.sameAs(cached) && this.registry.syncRules().sameAs(cached)) return;
+      await ipc.setSyncRules(doc);
+      if (this.enabled) return;
+      this.registry.setSyncRules(now);
+      console.info("[sync-rules] applied this local vault's .baaldaignore");
+      this.onSyncRulesApplied?.();
+    } catch (e) {
+      console.warn("[sync-rules] could not apply this vault's .baaldaignore", e);
+    }
   }
 
   /**
