@@ -847,7 +847,7 @@ pub async fn delete_departed_vault(
     state: State<'_, AppState>,
     path: String,
     organization_id: String,
-) -> AppResult<()> {
+) -> AppResult<usize> {
     let vaults_root = read_config(&app, &state)
         .vaults_root
         .map(PathBuf::from)
@@ -870,13 +870,95 @@ pub async fn delete_departed_vault(
     };
     drop(watcher);
     drop(index);
-    std::fs::remove_dir_all(&target).map_err(io_ctx("delete the vault folder", &target))?;
+    let kept = remove_departed_contents(&target)?;
+    if kept > 0 {
+        log::info!(
+            "[vault] membership ended: kept {kept} item(s) that never synced in {}",
+            target.display()
+        );
+    }
     let mut cfg = read_config(&app, &state);
     cfg.recent_vaults.retain(|r| r.path != path);
     if cfg.last_vault.as_deref() == Some(path.as_str()) {
         cfg.last_vault = None;
     }
-    write_config(&app, &state, &cfg)
+    write_config(&app, &state, &cfg)?;
+    Ok(kept)
+}
+
+/// Membership ended: remove what this vault synced, and keep what it never
+/// did (#401). A sync rule only ever hides; a person's own Git checkout or
+/// build output kept in the vault folder under a "Don't sync" rule, a dot
+/// folder, a `.git`, or a file type Baalda does not sync existed only on this
+/// computer, so deleting it here would be the one place a rule loses data.
+///
+/// Judged by the folder's own cached rules (`.context/sync-rules.json`, which
+/// every synced vault keeps) with the type and folder switches they carry;
+/// no cache means today's defaults. Removed: every file the vault would sync,
+/// OS bookkeeping (`.DS_Store`, `._x`), `.context`, and the folders left
+/// empty. Kept: everything else, symlinks included (never followed). The
+/// folder itself goes when nothing is kept. Returns how many entries were kept.
+pub fn remove_departed_contents(target: &Path) -> AppResult<usize> {
+    let rules = crate::sync_rules::read_cached(target)
+        .and_then(|doc| crate::sync_rules::SyncRules::compile(doc).ok())
+        .unwrap_or_default();
+    let groups = rules.doc().opt_in_groups();
+    fn junk(name: &str) -> bool {
+        name.starts_with("._") || crate::vault::OS_JUNK.iter().any(|j| name.eq_ignore_ascii_case(j))
+    }
+    fn walk(
+        dir: &Path,
+        rel: &str,
+        rules: &crate::sync_rules::SyncRules,
+        groups: u8,
+        kept: &mut usize,
+    ) -> AppResult<()> {
+        let entries = std::fs::read_dir(dir).map_err(io_ctx("read the vault folder", dir))?;
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let child_rel = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            let path = entry.path();
+            let ft = std::fs::symlink_metadata(&path)?.file_type();
+            if rel.is_empty() && name == ".context" && ft.is_dir() {
+                continue; // removed last, after everything it describes
+            }
+            if ft.is_symlink() {
+                *kept += 1;
+                continue;
+            }
+            if junk(&name) && !ft.is_dir() {
+                std::fs::remove_file(&path).map_err(io_ctx("delete a file", &path))?;
+                continue;
+            }
+            let hidden = crate::vault::is_ignored_name_with(&name, groups)
+                || rules.excludes_entry(&child_rel, ft.is_dir());
+            if ft.is_dir() {
+                if hidden {
+                    *kept += 1;
+                    continue;
+                }
+                walk(&path, &child_rel, rules, groups, kept)?;
+                // Only an emptied folder goes; one still holding kept work stays.
+                let _ = std::fs::remove_dir(&path);
+            } else if hidden || !crate::vault::is_allowed_with(&name, groups) {
+                *kept += 1;
+            } else {
+                std::fs::remove_file(&path).map_err(io_ctx("delete a file", &path))?;
+            }
+        }
+        Ok(())
+    }
+    let mut kept = 0usize;
+    walk(target, "", &rules, groups, &mut kept)?;
+    let ctx = target.join(".context");
+    if ctx.is_dir() {
+        std::fs::remove_dir_all(&ctx).map_err(io_ctx("delete the vault's sync data", &ctx))?;
+    }
+    if kept == 0 {
+        std::fs::remove_dir(target).map_err(io_ctx("delete the vault folder", target))?;
+    }
+    Ok(kept)
 }
 
 /// The refusals of [`delete_departed_vault`], pure so each one is testable.
@@ -3776,6 +3858,61 @@ mod tests {
         // separator trimmed so the label reads "D:".
         assert_eq!(root_label("D:\\"), "D:");
         assert_eq!(root_label("/"), "/");
+    }
+
+    /// Membership ended: what the vault synced goes, what a rule kept local stays.
+    #[test]
+    fn departed_removal_keeps_what_never_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = dir.path().join("team");
+        let w = |rel: &str| {
+            let p = v.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        };
+        w(".context/config.json");
+        std::fs::write(
+            v.join(".context/sync-rules.json"),
+            r#"{"patterns":"/projects/app/code/\n","types":{},"folders":{}}"#,
+        )
+        .unwrap();
+        w("Notes/a.md");
+        w("Notes/.DS_Store");
+        w("attachments/abc.png");
+        w("projects/app/context.md");
+        w("projects/app/code/main.py");
+        w("projects/app/code/.git/HEAD");
+        w("projects/app/.git/config");
+        w("projects/app/node_modules/x/index.js");
+        w(".obsidian/app.json");
+        w("tools/setup.exe");
+        let kept = remove_departed_contents(&v).unwrap();
+        // Synced content and the CRDT store are gone, and the emptied folder too.
+        for gone in ["Notes", "attachments", "projects/app/context.md", ".context"] {
+            assert!(!v.join(gone).exists(), "{gone} should be removed");
+        }
+        // The rule-hidden checkout, Git internals, build output, dot folder and
+        // an unsupported type existed only here: kept.
+        for stays in [
+            "projects/app/code/main.py",
+            "projects/app/code/.git/HEAD",
+            "projects/app/.git/config",
+            "projects/app/node_modules/x/index.js",
+            ".obsidian/app.json",
+            "tools/setup.exe",
+        ] {
+            assert!(v.join(stays).exists(), "{stays} should be kept");
+        }
+        assert_eq!(kept, 5);
+
+        // A vault holding only synced content leaves nothing behind.
+        let v2 = dir.path().join("plain");
+        std::fs::create_dir_all(v2.join(".context")).unwrap();
+        std::fs::write(v2.join(".context/config.json"), "{}").unwrap();
+        std::fs::create_dir_all(v2.join("A")).unwrap();
+        std::fs::write(v2.join("A/n.md"), "x").unwrap();
+        assert_eq!(remove_departed_contents(&v2).unwrap(), 0);
+        assert!(!v2.exists());
     }
 
     /// Membership-loss deletion is permanent, so its target checks are strict.

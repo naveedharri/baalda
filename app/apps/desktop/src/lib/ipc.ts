@@ -333,12 +333,15 @@ export const removeRecentVault = (path: string) =>
 export const deleteVault = (path: string) =>
   invoke<void>("delete_vault", { path });
 /**
- * Membership ended: PERMANENTLY delete a vault folder stamped with
- * `organizationId` (no Trash, no recovery copy). Rust refuses links, roots,
- * the home and vaults folders, and any folder whose stamp names another vault.
+ * Membership ended: PERMANENTLY delete what a vault folder stamped with
+ * `organizationId` synced (no Trash, no recovery copy), and keep what it never
+ * did — rule-hidden folders, dot folders, `.git`, build output, unsupported
+ * types (#401). Resolves how many entries were kept; the folder itself goes
+ * when that is 0. Rust refuses links, roots, the home and vaults folders, and
+ * any folder whose stamp names another vault.
  */
 export const deleteDepartedVault = (path: string, organizationId: string) =>
-  invoke<void>("delete_departed_vault", { path, organizationId });
+  invoke<number>("delete_departed_vault", { path, organizationId });
 /**
  * Reset local copy (#228): PERMANENTLY delete the open vault's folder on this
  * device (never the Trash) after stopping its watcher. Rust refuses anything

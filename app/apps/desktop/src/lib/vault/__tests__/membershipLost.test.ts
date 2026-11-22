@@ -18,6 +18,12 @@ describe("membershipLostNotice", () => {
     );
     expect(membershipLostNotice("  ", "left")).toContain("this vault");
   });
+
+  it("says where files that never synced were kept (#401)", () => {
+    expect(membershipLostNotice("Acme", "removed", "/Users/me/Baalda Vaults/Acme")).toBe(
+      "You were removed from Acme. Its synced files were removed from this device. Files that never synced are still in /Users/me/Baalda Vaults/Acme.",
+    );
+  });
 });
 
 describe("frameTargetsMe", () => {

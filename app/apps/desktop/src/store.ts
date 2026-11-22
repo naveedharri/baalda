@@ -4783,13 +4783,20 @@ export const useStore = create<AppStore>((set, get) => ({
     // the vault goes too. Wraps are deleted server-side; the account key stays.
     await forgetVaultKeysForOrg(userId, organizationId, keyHint);
 
+    let kept = 0;
     if (path) {
       // Rust refuses links, roots, the home and vaults folders, and any folder
       // whose own stamp names a different vault. Permanent: no Trash, and the
-      // CRDT store under `.context/` goes with it. Also drops it from recents.
-      await ipc.deleteDepartedVault(path, organizationId).catch((e: unknown) => {
-        console.warn("[vault] membership ended but the folder could not be deleted", path, e);
-      });
+      // CRDT store under `.context/` goes with it. What the vault never synced
+      // (a rule-hidden checkout, dot folders, other file types) stays (#401).
+      // Also drops it from recents.
+      kept = await ipc.deleteDepartedVault(path, organizationId).then(
+        (n) => (typeof n === "number" ? n : 0),
+        (e: unknown) => {
+          console.warn("[vault] membership ended but the folder could not be deleted", path, e);
+          return 0;
+        },
+      );
     }
 
     if (isOpen) {
@@ -4800,7 +4807,7 @@ export const useStore = create<AppStore>((set, get) => ({
           .catch((e: unknown) => console.warn("[vault] switch after membership loss failed", e));
       }
     }
-    const text = membershipLostNotice(name ?? path?.split(/[\\/]/).filter(Boolean).pop() ?? "", reason);
+    const text = membershipLostNotice(name ?? path?.split(/[\\/]/).filter(Boolean).pop() ?? "", reason, kept > 0 ? path : null);
     // The notice slot lives in the editor column; with no vault open (welcome
     // screen) the same line goes out as a toast instead, never both.
     if (get().vault) set({ membershipLost: { text, at: Date.now() } });
