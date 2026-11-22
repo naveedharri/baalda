@@ -29,6 +29,7 @@ import {
   encodePubsubOrgChanged,
   encodePubsubAppearanceChanged,
   encodePubsubSkillsChanged,
+  encodePubsubSyncRulesChanged,
   encodePubsubMessagesChanged,
   MESSAGES_TOPIC,
   PS_MESSAGES_CHANGED,
@@ -369,6 +370,11 @@ export class VaultChannel {
    *  manifest (same org-wide fan-out as {@link publishOrgChanged}). */
   async publishSkillsChanged(vaultId: string, orgId: string): Promise<void> {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubSkillsChanged(orgId));
+  }
+
+  /** The vault's sync rules changed (#401); every subscriber refetches them. */
+  async publishSyncRulesChanged(vaultId: string, orgId: string, revision: number): Promise<void> {
+    await this.pubsub.publish(vaultTopic(vaultId), encodePubsubSyncRulesChanged(orgId, revision));
   }
 
   /** In-app messages changed for everyone. Rides {@link MESSAGES_TOPIC}, which
@@ -1357,6 +1363,11 @@ class VaultConnection {
     if (msg.type === "skills-changed") {
       // Org-wide like `appearance-changed`: skills are not doc-scoped, no ACL filter.
       this.send({ t: "skills-changed", orgId: msg.orgId });
+      return;
+    }
+    if (msg.type === "sync-rules-changed") {
+      // Org-wide: the rules are the vault's, every member applies the same ones.
+      this.send({ t: "sync-rules-changed", orgId: msg.orgId, revision: msg.revision });
       return;
     }
     if (msg.type === "presence") {

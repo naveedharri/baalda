@@ -14,8 +14,14 @@ describe("updateView", () => {
     expect(updateView({ phase: "failed", version: "0.1.99", message: "" }, "0.1.98")).toMatchObject({
       tone: "error",
       action: "retry",
-      sub: "The download was interrupted",
+      sub: "The download was interrupted. Try again later.",
     });
+  });
+
+  it("words an updater failure plainly, never with the raw error text", () => {
+    const raw = "StartingBinary found current_exe() that contains a symlink on a non-allowed platform: /var";
+    expect(updateView({ phase: "error", message: raw }, "0.1.114").sub).toBe("Couldn't check for updates. Try again later.");
+    expect(updateView({ phase: "failed", version: "0.1.115", message: raw }, "0.1.114").sub).not.toContain("StartingBinary");
   });
 
   it("never shows an update error in the sidebar, only in About", () => {

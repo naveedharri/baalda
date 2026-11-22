@@ -87,6 +87,7 @@ pub fn write_note_cas(
 ) -> AppResult<WriteNoteOutcome> {
     let abs = resolve_in_vault(vault, rel)?;
     require_vault_root(vault)?;
+    crate::vault::refuse_excluded(vault, rel, false)?;
     let state = vault_path_state(vault, rel);
     match state {
         PathState::Symlink => return Err(symlink_refusal(rel)),
@@ -184,6 +185,7 @@ pub fn write_atomic_fsync(target: &Path, content: &[u8]) -> AppResult<()> {
 /// wrong *decision*, not a concurrent one.
 pub fn write_note_if_missing(vault: &Path, rel: &str, content: &str) -> AppResult<bool> {
     resolve_in_vault(vault, rel)?;
+    crate::vault::refuse_excluded(vault, rel, false)?;
     // `symlink_metadata`, not `exists()` (#216): a link at (or above) this path
     // is invisible to the tree walk, so "already there" would keep a stale doc
     // id mapped to whatever the link points at. Refused outright — never
@@ -244,6 +246,7 @@ pub fn write_note_if_absent_or_empty(
     content: &str,
 ) -> AppResult<WriteOutcome> {
     let abs = resolve_in_vault(vault, rel)?;
+    crate::vault::refuse_excluded(vault, rel, false)?;
     // One stat answers both "is it there" and "is it empty", and a missing file
     // is not an error here — it is the common case.
     let size = match std::fs::metadata(&abs) {
@@ -276,6 +279,7 @@ pub fn create_note(vault: &Path, parent_rel: &str, name: &str) -> AppResult<Stri
     let rel = join_rel(parent_rel, &name);
     let abs = resolve_in_vault(vault, &rel)?;
     require_vault_root(vault)?;
+    crate::vault::refuse_excluded(vault, &rel, false)?;
     if abs.exists() {
         return Err(AppError::new("a note with that name already exists"));
     }
@@ -296,6 +300,7 @@ pub fn create_folder(vault: &Path, parent_rel: &str, name: &str) -> AppResult<St
     let rel = join_rel(parent_rel, name);
     let abs = resolve_in_vault(vault, &rel)?;
     require_vault_root(vault)?;
+    crate::vault::refuse_excluded(vault, &rel, true)?;
     if abs.exists() {
         return Err(AppError::new("a folder with that name already exists"));
     }
@@ -305,11 +310,35 @@ pub fn create_folder(vault: &Path, parent_rel: &str, name: &str) -> AppResult<St
 
 /// Rename/move a file or folder within the vault. Returns the new rel path.
 pub fn rename_path(vault: &Path, old_rel: &str, new_rel: &str) -> AppResult<String> {
+    rename_path_opts(vault, old_rel, new_rel, false)
+}
+
+/// [`rename_path`], optionally allowing the DESTINATION to be excluded by the
+/// vault's sync rules (#401). Only the sync layer asks for that: a teammate
+/// moved a note into a folder that doesn't sync, and following the move on
+/// disk (then parking the note) is what keeps its id and avoids a duplicate.
+/// The source must still be visible, and the floor (`.context`, `.git`, dot
+/// names) still refuses through `resolve_in_vault`'s callers as before.
+pub fn rename_path_opts(
+    vault: &Path,
+    old_rel: &str,
+    new_rel: &str,
+    allow_excluded_target: bool,
+) -> AppResult<String> {
     let old_abs = resolve_in_vault(vault, old_rel)?;
     let new_abs = resolve_in_vault(vault, new_rel)?;
     if !old_abs.exists() {
         return Err(AppError::new("source path does not exist"));
     }
+    // Neither end may be excluded (#401): moving something INTO an excluded
+    // folder from the app would take it out of sync, and moving an excluded
+    // item out would mean the app reached into a folder it hides.
+    if !allow_excluded_target {
+        crate::vault::refuse_excluded(vault, new_rel, old_abs.is_dir())?;
+    } else if crate::vault::rel_path_is_ignored(new_rel.trim_start_matches('/')) {
+        return Err(AppError::new("that path is never synced"));
+    }
+    crate::vault::refuse_excluded(vault, old_rel, old_abs.is_dir())?;
     if new_abs.exists() {
         return Err(AppError::new("destination already exists"));
     }
@@ -340,6 +369,7 @@ pub fn ensure_folder(vault: &Path, rel: &str) -> AppResult<bool> {
             "refusing to create a folder in an ignored dir",
         ));
     }
+    crate::vault::refuse_excluded(vault, rel, true)?;
     let abs = resolve_in_vault(vault, rel)?;
     require_vault_root(vault)?;
     if abs.is_dir() {
@@ -501,6 +531,11 @@ pub fn delete_folder_if_empty(vault: &Path, rel: &str) -> AppResult<bool> {
     if crate::vault::rel_path_is_ignored(rel) {
         return Err(AppError::new("refusing to touch an ignored dir"));
     }
+    // An excluded folder (#401) is never removed by sync: it is kept, the same
+    // answer a folder that still holds something gets.
+    if crate::sync_rules::excludes(vault, rel, true) {
+        return Ok(false);
+    }
     let abs = resolve_in_vault(vault, rel)?;
     if !abs.exists() {
         // Already gone — the goal state, but NOT something this call did: the
@@ -586,6 +621,8 @@ pub fn delete_file(vault: &Path, rel: &str) -> AppResult<()> {
     if crate::vault::rel_path_is_ignored(rel) {
         return Err(AppError::new(format!("refusing to delete an ignored path: {rel}")));
     }
+    // Sync never deletes what the vault's rules exclude (#401).
+    crate::vault::refuse_excluded(vault, rel, false)?;
     let abs = resolve_in_vault(vault, rel)?;
     if !abs.exists() {
         return Ok(());

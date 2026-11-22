@@ -101,6 +101,33 @@ export async function announceAppearanceChanged(change: AppearanceChangedFields)
   }
 }
 
+type SyncRulesChangedPublisher = (vaultId: string, orgId: string, revision: number) => void;
+
+let publishSyncRules: SyncRulesChangedPublisher | null = null;
+
+export function setSyncRulesChangedPublisher(fn: SyncRulesChangedPublisher | null): void {
+  publishSyncRules = fn;
+}
+
+/**
+ * Tell every live member app that the vault's sync rules changed (#401). A
+ * hint: desktops refetch `GET /api/orgs/:orgId/sync-rules` and apply it. Same
+ * org-wide fan-out and best-effort contract as {@link announceSkillsChanged};
+ * a missed frame is caught up on the next connect, which refetches too.
+ */
+export async function announceSyncRulesChanged(orgId: string, revision: number): Promise<void> {
+  if (!publishSyncRules) return;
+  try {
+    const { rows } = await pool.query<{ id: string }>(
+      "SELECT id FROM vaults WHERE organization_id = $1",
+      [orgId],
+    );
+    for (const { id } of rows) publishSyncRules(id, orgId, revision);
+  } catch (err) {
+    console.error("announceSyncRulesChanged failed:", err);
+  }
+}
+
 type SkillsChangedPublisher = (vaultId: string, orgId: string) => void;
 
 let publishSkills: SkillsChangedPublisher | null = null;

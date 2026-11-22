@@ -88,6 +88,7 @@ const sync = vi.hoisted(() => ({
   setSyncProgressListener: vi.fn(),
   setDocStateListener: vi.fn(),
   setFileStateListener: vi.fn(),
+  setSyncRulesListeners: vi.fn(),
   setAttachmentEntitlementListener: vi.fn((listener: (blocked: boolean) => void) => {
     attachmentEntitlement.listener = listener;
   }),

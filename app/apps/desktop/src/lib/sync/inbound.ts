@@ -18,6 +18,7 @@
  * codebase — this is the code that decides to delete someone's notes.
  */
 
+import { isHiddenName } from "../syncRules/folders";
 import { pathKey, samePathKey } from "../pathIdentity";
 
 /** docId → vault-relative path, on one side of the comparison. */
@@ -287,7 +288,6 @@ export interface InboundPlan {
 // `rel_path = ".context/config.json"` would be "move this note over the vault's
 // doc map". Hence an explicit allowlist on this side.
 
-/** Mirrors `IGNORED_DIRS` in src-tauri/src/vault.rs. */
 /**
  * Two vault paths that name the same file.
  *
@@ -305,17 +305,6 @@ export function samePath(a: string, b: string): boolean {
   return samePathKey(a, b);
 }
 
-const IGNORED_DIRS = [".context", ".git"];
-/** Mirrors `DENIED_DIRS` in src-tauri/src/vault.rs. */
-const DENIED_DIRS = [
-  "node_modules",
-  "dist",
-  "build",
-  "target",
-  "vendor",
-  "__pycache__",
-  "venv",
-];
 /** Note extensions the registry reconciles (mirrors `NOTE_EXTS` in registry.ts,
  *  `lib/formats.ts` and Rust `vault.rs`; a literal on purpose — see the note on
  *  registry.ts's copy, and `__tests__/formatsLockstep.test.ts`). */
@@ -334,11 +323,11 @@ function segmentsOk(path: string): boolean {
   const segs = path.split("/");
   for (const seg of segs) {
     if (!seg || seg === "." || seg === "..") return false;
-    // Any dot-prefixed segment: covers `.context`, `.git`, and every hidden dir
-    // the Rust walker skips, so we can never move a note somewhere the tree
-    // walk and watcher would then ignore it.
-    if (seg.startsWith(".")) return false;
-    if (IGNORED_DIRS.includes(seg) || DENIED_DIRS.includes(seg)) return false;
+    // The floor (`.context`, `.git`…) always, and dot names and build folders
+    // unless the vault switched them on: exactly what the Rust walker skips,
+    // so we can never move a note somewhere the tree walk and watcher would
+    // then ignore it (`syncRules/folders.ts`).
+    if (isHiddenName(seg)) return false;
     if (seg.length > MAX_SEGMENT_BYTES) return false;
   }
   return true;

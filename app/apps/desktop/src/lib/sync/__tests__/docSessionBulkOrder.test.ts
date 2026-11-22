@@ -36,6 +36,15 @@ const realTick = () => new Promise<void>((r) => realSetTimeout(r, 1));
 
 const fakeRegistry = vi.hoisted(() => {
   const reg = {
+    // Sync rules (#401): these fixtures have none.
+    isParked: () => false,
+    filterBlobListing: <T,>(b: T[]) => b,
+    isFrozenPath: () => false,
+    isExcludedPath: () => false,
+    frozenFilePaths: () => [] as string[],
+    setSyncRules: () => {},
+    syncRules: () => ({ source: "", types: { code: false, extra: false }, isEmpty: true, sameAs: () => true }),
+    parkedCount: () => ({ notes: 0, files: 0 }),
     vaultId: "collection-1" as string | null,
     pushed: new Set<string>(),
     // Phase A of `enable`: nothing to prime from in these fixtures (the mapping
@@ -50,6 +59,7 @@ const fakeRegistry = vi.hoisted(() => {
     emptyOnDisk: new Set<string>(),
     isNoteEmptyOnDisk: vi.fn(async (relPath: string) => reg.emptyOnDisk.has(relPath)),
     allDocIds: vi.fn((): string[] => []),
+    crdtKeepIds: (): string[] => reg.allDocIds(),
     setProgressSink: vi.fn(),
     setMapListener: vi.fn(),
     setNoteMetaListener: vi.fn(),

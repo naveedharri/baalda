@@ -97,6 +97,11 @@ export interface BinaryDeleteDeps {
   /** Is the vault this queue belongs to still the open one? */
   isCurrent(): boolean;
   /**
+   * Did these bytes move INTO a folder the vault's sync rules hide (#401)?
+   * True parks the file (the caller did it); nothing is deleted on the server.
+   */
+  movedIntoHidden?(relPath: string, sha256: string): Promise<boolean>;
+  /**
    * Is the session live enough to believe a missing file? The same gate the
    * note queue's `liveSince` is: at startup a file that isn't there yet means
    * the disk (or the pull) hasn't caught up, not that anyone deleted it.
@@ -490,6 +495,10 @@ export class BinaryDeleteQueue {
             // delete with nothing to pair it to.
             if (this.pending.has(key(renamedTo))) this.retained.add(key(renamedTo));
           }
+          continue;
+        }
+        if (await this.deps.movedIntoHidden?.(item.relPath, blob.sha256)) {
+          if (!this.deps.isCurrent()) return;
           continue;
         }
         deletes.push({ relPath: item.relPath, blob });

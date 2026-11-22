@@ -65,9 +65,10 @@
 // back to the legacy `POST /api/vaults/:id/blobs` and remembers, so exactly one
 // upload pays for the probe.
 
+import { isHiddenName } from "../syncRules/folders";
 import { UnmaterializablePaths } from "./windowsPaths";
 import { announceAttachmentArrived } from "../attachmentArrivals";
-import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
+import { formatFor, isNoteExt, isSurfacedFormat, mimeForPath as mimeForFormat } from "../formats";
 import { isTransientPath, pathKey } from "../pathIdentity";
 import { BATCH_MAX_FILES, runPool, useBulkPath } from "./pool";
 import {
@@ -159,9 +160,7 @@ export function isSafeAttachmentRelPath(relPath: string): boolean {
   // Normalize separators; reject Windows-style just in case.
   const parts = relPath.split(/[\\/]/);
   if (parts[0] !== "attachments" || parts.length < 2) return false;
-  return parts.every(
-    (seg) => seg !== "" && seg !== "." && seg !== ".." && !seg.startsWith("."),
-  );
+  return parts.every((seg) => seg !== "" && seg !== "." && seg !== ".." && !isHiddenName(seg));
 }
 
 /** Does this vault-relative path live in the hidden `attachments/` store? */
@@ -183,8 +182,6 @@ export function isUnderAttachments(relPath: string): boolean {
  * the authority, including the denied build dirs this side does not enumerate;
  * this filter is what keeps the pass from queueing work Rust will refuse.
  */
-/** Mirrors `DENIED_DIRS` in src-tauri/src/vault.rs (and `sync/inbound.ts`). */
-const TREE_DENIED_DIRS = ["node_modules", "dist", "build", "target", "vendor", "__pycache__", "venv"];
 
 /**
  * Download failures retrying cannot fix while the server row stays the same:
@@ -211,19 +208,19 @@ export function isSafeTreeBinaryRelPath(relPath: string): boolean {
   if (!relPath) return false;
   const parts = relPath.split(/[\\/]/);
   if (parts.length === 0) return false;
-  if (!parts.every((seg) => seg !== "" && seg !== "." && seg !== ".." && !seg.startsWith(".")))
-    return false;
-  // Rust's `ensure_tree_binary_rel` refuses these build dirs (`vault.rs
-  // DENIED_DIRS`). A row an older client registered there would otherwise be
+  // Dot names and build folders only when the vault switched them on, and
+  // never the floor (`syncRules/folders.ts`, the twin of Rust's
+  // `ensure_tree_binary_rel`): a row registered there would otherwise be
   // planned on every pass, presigned, refused by Rust and planned again.
-  if (parts.some((seg) => TREE_DENIED_DIRS.includes(seg))) return false;
+  if (!parts.every((seg) => seg !== "" && seg !== "." && seg !== ".." && !isHiddenName(seg)))
+    return false;
   if (isNoteExt(relPath)) return false;
   // Another device's Office lock file (`~$Report.docx`, #265), registered by a
   // client that predates the ignore rule: never pulled onto this disk. Its row
   // is left alone — this only declines the download.
   if (isTransientPath(relPath)) return false;
   const format = formatFor(relPath);
-  return !!format && format.surface && format.syncAs === "attachment";
+  return !!format && isSurfacedFormat(format) && format.syncAs === "attachment";
 }
 
 /**
@@ -1162,8 +1159,7 @@ export interface AttachmentSyncDeps {
   forgetFileId?: (relPath: string) => void;
   /** Move a known tree binary on disk to where a teammate moved it, keeping
    *  its id (`registry.followFileMove`). True when it moved. */
-  followFileMove?: (from: string, to: string) => Promise<boolean>;
-  /** `DELETE /api/files/:id` — used for exactly one thing here: dropping a row
+  followFileMove?: (from: string, to: string) => Promise<boolean>;  /** `DELETE /api/files/:id` — used for exactly one thing here: dropping a row
    *  THIS device created for bytes the server already knows under another id.
    *  It deletes only blobs carrying that id, and a forked row carries none. */
   deleteFile?: (id: string) => Promise<void>;
@@ -2209,8 +2205,7 @@ export class AttachmentSync {
   }
 
   private async replaceOne(r: BinaryReplace, kept: string[]): Promise<void> {
-    const relPath = r.local.relPath;
-    // Both sides changed (or no shared base): the server's version wins and
+    const relPath = r.local.relPath;    // Both sides changed (or no shared base): the server's version wins and
     // no local copy is kept (decided 2026-11-19: nothing goes to .context/trash).
     if (r.keepCopy) {
       console.info(`[attachments] ${relPath} (${r.reason}) — replaced by the server's version`);

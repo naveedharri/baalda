@@ -3346,6 +3346,20 @@ export const useStore = create<AppStore>((set, get) => ({
         }
       },
     });
+    // The vault's sync rules changed (#401): the sidebar re-lists, and a note
+    // they now hide closes (its file stays on disk; it just stops syncing).
+    syncManager.setSyncRulesListeners({
+      onApplied: () => {
+        void get().refreshTree();
+        void get().refreshTitles();
+        const open = get().openNote;
+        if (open && syncManager.registry.isExcludedPath(open.path)) get().closeNote();
+      },
+      onNoteParked: (_docId, path) => {
+        get().pruneTabs([path]);
+        if (get().openNote?.path === path) get().closeNote();
+      },
+    });
     // A teammate joined the vault — refresh the roster live (no reload) and
     // celebrate. Fires for everyone already connected; the joiner celebrates
     // locally in joinVault/acceptInvitation (they connect after the push).

@@ -33,6 +33,15 @@ const COLLECTION = "collection-1";
 
 const fakeRegistry = vi.hoisted(() => {
   const reg = {
+    // Sync rules (#401): these fixtures have none.
+    isParked: () => false,
+    filterBlobListing: <T,>(b: T[]) => b,
+    isFrozenPath: () => false,
+    isExcludedPath: () => false,
+    frozenFilePaths: () => [] as string[],
+    setSyncRules: () => {},
+    syncRules: () => ({ source: "", types: { code: false, extra: false }, isEmpty: true, sameAs: () => true }),
+    parkedCount: () => ({ notes: 0, files: 0 }),
     vaultId: "collection-1" as string | null,
     notes: [] as Array<{ docId: string; relPath: string }>,
     pushedSet: new Set<string>(),

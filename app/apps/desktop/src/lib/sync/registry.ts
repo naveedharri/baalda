@@ -22,6 +22,15 @@
 //     (`failures()`), so a vault with failures can never report fully synced.
 
 import { UnmaterializablePaths, isWindowsHost, strippedServerIndex, windowsStrip } from "./windowsPaths";
+import { NO_RULES, type SyncRuleSet } from "../syncRules/match";
+import { formatFor, setEnabledOptIns, type OptInGroup } from "../formats";
+import { hasHiddenSegment, setFolderSwitches } from "../syncRules/folders";
+
+/** The slice of a blob listing entry {@link VaultRegistry.filterBlobListing} reads. */
+interface ServerBlobLike {
+  relPath: string | null;
+  docId?: string | null;
+}
 import { markAccessTreeStale } from "../accessTreeStale";
 import {
   ACCESS_CHECK_MAX,
@@ -141,6 +150,19 @@ export interface NoteDeleteOutcome {
 }
 
 interface VaultSyncConfig {
+  /**
+   * Items the vault's sync rules hide (#401), kept apart from `docs`/`files`
+   * so no sync step can act on them: neither deleted, revoked, materialized
+   * nor pushed. `docs` is note doc_id → the path it sits at on THIS disk;
+   * `files` is `files` id → path. `frozenFiles` are binaries a teammate
+   * moved into a hidden folder: this device keeps its copy where it was,
+   * tagged Local, and stops syncing it. Omitted when empty.
+   */
+  parked?: {
+    docs?: Record<string, string>;
+    files?: Record<string, string>;
+    frozenFiles?: Record<string, string>;
+  };
   /**
    * The vault (Better Auth org) this folder was last reconciled under. The
    * org→folder binding itself lives in webview localStorage (`context.orgVaults`),
@@ -371,6 +393,12 @@ export interface InboundHost {
   releaseDoc(docId: string): Promise<void>;
   /** The file moved: re-point anything showing it (e.g. the open editor). */
   notePathChanged(docId: string, from: string, to: string): void;
+  /** The vault's sync rules (#401) now hide this note: close it if it is open
+   *  (the file stays on disk, the app just stops showing and syncing it). */
+  noteParked?(docId: string, relPath: string): void;
+  /** A parked note the rules no longer hide is mapped again: send whatever
+   *  was edited in it while hidden, through the external-edit route. */
+  parkedReturned?(docId: string, relPath: string): void;
   /**
    * The file is gone: close anything showing it. Confirmed deletions and
    * revocations now pass `null`; the nullable destination remains in the host
@@ -1157,7 +1185,18 @@ export class VaultRegistry {
    * never retried: creating them either fails on every pull or lands under a
    * stripped name the watcher reports back as a new folder (`windowsPaths.ts`).
    */
-  unmaterializable = new UnmaterializablePaths();
+  unmaterializable = new UnmaterializablePaths(isWindowsHost, (p) => this.isExcludedPath(p));
+
+  // ---- Sync rules (#401) --------------------------------------------------
+  /** The vault's rules as Rust walks with them (`setSyncRules`). */
+  private rules: SyncRuleSet = NO_RULES;
+  /** Notes the rules hide: doc_id → path on this disk. See `VaultSyncConfig.parked`. */
+  private parkedDocs = new Map<string, string>();
+  /** Tree binaries the rules hide: `files` id → path on this disk. */
+  private parkedFiles = new Map<string, string>();
+  /** Binaries a teammate moved into a hidden folder: id → the VISIBLE path
+   *  this device keeps them at, unsynced and tagged Local. */
+  private frozenFiles = new Map<string, string>();
   /**
    * Paths the same-path conflict step ({@link resolveSamePathConflicts}) just
    * moved a local file away from or onto, with the time it did so.
@@ -1487,6 +1526,9 @@ export class VaultRegistry {
     this.ownDeletes.clear();
     this.ownRemovals.clear();
     this.unhydratedPlaceholders.clear();
+    this.parkedDocs.clear();
+    this.parkedFiles.clear();
+    this.frozenFiles.clear();
     // The identical-config memo (see {@link writeConfig}) is only honest while
     // this registry is the last thing that wrote `.context/config.json`. A
     // teardown ends that: `store.clearVaultStamp` writes the same file through
@@ -2025,6 +2067,15 @@ export class VaultRegistry {
     return [...this.byDocId.keys()];
   }
 
+  /** Every note whose local CRDT and disk base must survive a garbage sweep:
+   *  the mapped ones AND the ones the sync rules set aside (#401). A hidden
+   *  note has no index row, so without this the sweep deleted its history
+   *  and disk base, and when the rule went the server text was written over
+   *  whatever had been typed into the file meanwhile. */
+  crdtKeepIds(): string[] {
+    return [...this.byDocId.keys(), ...this.parkedDocs.keys()];
+  }
+
   /** Every mapped note as {docId, relPath} — the bulk upload's work list. */
   mappedNotes(): Array<{ docId: string; relPath: string }> {
     return [...this.byDocId].map(([docId, relPath]) => ({ docId, relPath }));
@@ -2506,6 +2557,15 @@ export class VaultRegistry {
         ? { unhydratedPlaceholders: [...this.unhydratedPlaceholders] }
         : {}),
       baseline,
+      ...(this.parkedDocs.size + this.parkedFiles.size + this.frozenFiles.size > 0
+        ? {
+            parked: {
+              ...(this.parkedDocs.size > 0 ? { docs: Object.fromEntries(this.parkedDocs) } : {}),
+              ...(this.parkedFiles.size > 0 ? { files: Object.fromEntries(this.parkedFiles) } : {}),
+              ...(this.frozenFiles.size > 0 ? { frozenFiles: Object.fromEntries(this.frozenFiles) } : {}),
+            },
+          }
+        : {}),
       // Written only when we know whose it is; an unattributed list is worse
       // than none (see `VaultSyncConfig.authored`).
       ...(this.authoredBy
@@ -3886,6 +3946,7 @@ export class VaultRegistry {
     this.adoptRevokedFolders(cfg.revokedFolders);
     this.adoptConfigFiles(cfg.files ?? {}, cfg.filesConfirmed ?? [], cfg.fileBases ?? {});
     this.adoptAttachmentBases(cfg.attachmentBases);
+    this.adoptParked(cfg.parked);
     this.pushed = new Set(cfg.pushed ?? []);
     this.ackedSvs = adoptAcked(cfg.ackedSv, null);
     this.unhydratedPlaceholders = new Set(cfg.unhydratedPlaceholders ?? []);
@@ -4071,6 +4132,7 @@ export class VaultRegistry {
       this.adoptConfigFiles(cfg.files, cfg.filesConfirmed ?? [], cfg.fileBases ?? {});
     }
     if (cfg.serverVaultId === vaultId) this.adoptAttachmentBases(cfg.attachmentBases);
+    if (cfg.serverVaultId === vaultId) this.adoptParked(cfg.parked);
     this.adoptBootstrap(cfg, vaultId);
 
     // 1b. First-run seeding. A vault the user JUST created (`seedIfEmpty`) —
@@ -4260,8 +4322,22 @@ export class VaultRegistry {
       hiddenContent: noteRegistry.hiddenContent ?? null,
       canCreateRoot: noteRegistry.canCreateRoot ?? null,
     });
-    const serverFolders = folderRegistry.folders;
+    let serverFolders = folderRegistry.folders;
     let serverNotes = noteRegistry.notes;
+    // The vault's sync rules (#401) FIRST: everything below sees neither a
+    // hidden server row nor a parked mapping, so no step can delete, revoke,
+    // materialize or push one.
+    {
+      const part = await this.partitionByRules(vaultId, workingTree, serverFolders, serverNotes);
+      if (this.stale()) return false;
+      serverFolders = part.serverFolders;
+      serverNotes = part.serverNotes;
+      if (part.changedDisk) {
+        mutated = true;
+        workingTree = await this.readFullTree();
+        if (this.stale()) return false;
+      }
+    }
     let { folders, notes } = flattenTree(workingTree);
     let binaries = treeBinaryPaths(workingTree);
     // The paths this device already knew BEFORE this pass (#221 drift report).
@@ -4357,10 +4433,15 @@ export class VaultRegistry {
         titles,
         serverFolders,
         serverNotes,
-        tombstones:
-          noteRegistry.tombstones && this.serverTombstones.size > 0
-            ? [...new Set([...noteRegistry.tombstones, ...this.serverTombstones])]
-            : noteRegistry.tombstones,
+        // A teammate deleting a note the rules hide here changes nothing here:
+        // the file is outside sync, and keeping it is the rule (#401).
+        tombstones: (() => {
+          const t =
+            noteRegistry.tombstones && this.serverTombstones.size > 0
+              ? [...new Set([...noteRegistry.tombstones, ...this.serverTombstones])]
+              : noteRegistry.tombstones;
+          return t && this.parkedDocs.size > 0 ? t.filter((id) => !this.parkedDocs.has(id)) : t;
+        })(),
         folderTombstones: folderRegistry.tombstones,
       });
       if (this.stale()) return false;
@@ -4382,7 +4463,7 @@ export class VaultRegistry {
         // raced, and a stale list here would undo the move we just applied.
         const fresh = await this.api.listNoteRegistryPaged(vaultId, { limit: PULL_PAGE_LIMIT });
         if (this.stale()) return false;
-        serverNotes = fresh.notes;
+        serverNotes = this.filterServerNotes(fresh.notes);
       }
       this.inboundSuppressed = applied.suppress;    } else {
       this.inboundSuppressed = new Set();
@@ -5666,6 +5747,391 @@ export class VaultRegistry {
   isHiddenPath(relPath: string): boolean {
     const key = pathKey(relPath);
     return this.hiddenPaths.has(key) || this.revokedKept.has(key);
+  }
+
+  // ---- Sync rules (#401) --------------------------------------------------
+  //
+  // One vault-wide setting (owners/admins) for which paths no device syncs.
+  // An item the rules hide is PARKED: it leaves `byPath`/`byDocId`/`fileByPath`
+  // and the baseline, so no step of a pull, the delete drain, the content run
+  // or the vault channel can act on it — never deleted, revoked, materialized
+  // or pushed. Its file stays on disk exactly as it was and its local CRDT
+  // stays in SQLite; when the rule goes, it returns under the SAME doc_id
+  // (`rebindNoteId`) and any edit made meanwhile goes up through the ordinary
+  // external-edit route. The server copy is untouched for everyone.
+
+  /**
+   * Install the rules Rust walks with. The caller then calls
+   * {@link parkExcluded} BEFORE Rust starts hiding the paths (a mapped note
+   * that vanishes from the tree while still mapped would read as missing), and
+   * pulls only after Rust installed them (an un-parked note needs its index
+   * row back for `rebindNoteId`). `docSession.applySyncRules` keeps that order.
+   */
+  setSyncRules(rules: SyncRuleSet): void {
+    this.rules = rules;
+    // What every "does this format sync?" question reads (formats.ts).
+    setEnabledOptIns(
+      (Object.keys(rules.types) as OptInGroup[]).filter((g) => rules.types[g]),
+    );
+    // And what every "may this folder name sync?" question reads.
+    setFolderSwitches(rules.folders);
+  }
+
+  syncRules(): SyncRuleSet {
+    return this.rules;
+  }
+
+  /**
+   * Swap the rules in pull order: no pull runs between "TS parks what the new
+   * rules hide" and "Rust hides it" (`install`). A failed install puts the old
+   * rules back, so the two layers never disagree about what is visible.
+   */
+  changeRules(rules: SyncRuleSet, install: () => Promise<void>): Promise<void> {
+    const previous = this.rules;
+    const step = async () => {
+      this.setSyncRules(rules);
+      this.parkExcluded();
+      try {
+        await install();
+      } catch (e) {
+        this.setSyncRules(previous);
+        throw e;
+      }
+    };
+    const run = this.pullChain.then(step, step);
+    this.pullChain = run.then(
+      () => false,
+      () => false,
+    );
+    return run;
+  }
+
+  /** Does the vault's rules hide this path (as a file or a folder)? */
+  isExcludedPath(relPath: string): boolean {
+    if (!relPath) return false;
+    if (this.typeHidden(relPath)) return true;
+    // A dot or build folder the vault switched off again: what synced under
+    // it is parked, never read as deleted.
+    if (hasHiddenSegment(relPath, this.rules.folders)) return true;
+    if (this.rules.isEmpty) return false;
+    return this.rules.excludes(relPath, false) || this.rules.excludes(relPath, true);
+  }
+
+  /**
+   * A file of an optional type whose group this vault has not switched on
+   * (formats.ts `optIn`). Treated exactly like a hidden path, so turning a
+   * group OFF parks what synced under it instead of reading as deletes.
+   * Never the root `attachments/` store: an embedded drop of any openable
+   * type syncs there as before.
+   */
+  private typeHidden(relPath: string): boolean {
+    if (relPath.toLowerCase().startsWith("attachments/")) return false;
+    const group = formatFor(relPath)?.optIn;
+    return !!group && !this.rules.types[group];
+  }
+
+  /** Is anything at all hidden beyond the fixed floor? The fast paths below
+   *  skip their walk only when not. An optional group left off counts: a file
+   *  of that type may still be mapped from when it was on. */
+  private rulesHideNothing(): boolean {
+    return (
+      this.rules.isEmpty &&
+      this.rules.types.code &&
+      this.rules.types.extra &&
+      this.rules.folders.hidden &&
+      this.rules.folders.build
+    );
+  }
+
+  /** Is this note or `files` id set aside by the rules? Every receiver that
+   *  is handed ids by the server (`ready.empty/behind/revoked`, tombstones)
+   *  asks this before acting. */
+  isParked(id: string): boolean {
+    return this.parkedDocs.has(id) || this.parkedFiles.has(id) || this.frozenFiles.has(id);
+  }
+
+  /** How much the rules set aside on this computer. */
+  parkedCount(): { notes: number; files: number } {
+    return { notes: this.parkedDocs.size, files: this.parkedFiles.size + this.frozenFiles.size };
+  }
+
+  /** Visible binaries kept here unsynced because a teammate moved them into a
+   *  hidden folder: the sidebar tags them Local. */
+  frozenFilePaths(): string[] {
+    return [...this.frozenFiles.values()];
+  }
+
+  isFrozenPath(relPath: string): boolean {
+    if (this.frozenFiles.size === 0) return false;
+    const key = pathKey(relPath);
+    for (const p of this.frozenFiles.values()) if (pathKey(p) === key) return true;
+    return false;
+  }
+
+  private adoptParked(rec: VaultSyncConfig["parked"]): void {
+    const take = (src: Record<string, string> | undefined, into: Map<string, string>) => {
+      for (const [id, rp] of Object.entries(src ?? {})) {
+        if (typeof rp === "string" && rp && typeof id === "string" && id) into.set(id, rp);
+      }
+    };
+    take(rec?.docs, this.parkedDocs);
+    take(rec?.files, this.parkedFiles);
+    take(rec?.frozenFiles, this.frozenFiles);
+    // A config can name the same note in `docs` too (written before the park
+    // reached disk): parked wins, the mapping goes.
+    for (const [docId, rp] of this.parkedDocs) {
+      if (this.byDocId.get(docId) === rp) {
+        this.byPath.delete(rp);
+        this.byDocId.delete(docId);
+      }
+    }
+  }
+
+  private parkDoc(docId: string, relPath: string): void {
+    if (this.byPath.get(relPath)?.docId === docId) this.byPath.delete(relPath);
+    const at = this.byDocId.get(docId);
+    if (at !== undefined) {
+      if (this.byPath.get(at)?.docId === docId) this.byPath.delete(at);
+      this.byDocId.delete(docId);
+    }
+    this.byPathCi = null;
+    // Out of the baseline too: a baseline doc absent from the (filtered)
+    // listing with no tombstone is exactly what inbound reads as a revocation.
+    this.baselineDocs.delete(docId);
+    this.parkedDocs.set(docId, relPath);
+    void this.host?.releaseDoc(docId);
+    this.host?.noteParked?.(docId, relPath);
+  }
+
+  /**
+   * Set aside every mapped note and binary the current rules hide. Synchronous
+   * and offline: no server call, no disk write. Returns how many moved.
+   */
+  parkExcluded(): number {
+    if (this.rulesHideNothing()) return 0;
+    let n = 0;
+    for (const [rp, m] of [...this.byPath]) {
+      if (!this.isExcludedPath(rp)) continue;
+      this.parkDoc(m.docId, rp);
+      n++;
+    }
+    for (const [rp, id] of [...this.fileByPath]) {
+      if (!this.isExcludedPath(rp)) continue;
+      this.fileByPath.delete(rp);
+      this.parkedFiles.set(id, rp);
+      n++;
+    }
+    for (const rp of [...this.folderByPath.keys()]) {
+      if (this.isExcludedPath(rp)) this.folderByPath.delete(rp);
+    }
+    if (n > 0) {
+      this.persist();
+      this.notifyMapChanged();
+    }
+    return n;
+  }
+
+  /** A mapped note was moved on THIS disk into a hidden folder (the delete
+   *  drain paired it by content): park it at its new path, no server call. */
+  parkMovedOut(docId: string, from: string, to: string): void {
+    if (this.byDocId.get(docId) !== from && this.byPath.get(from)?.docId !== docId) return;
+    this.parkDoc(docId, to);
+    this.persist();
+    this.notifyMapChanged();
+  }
+
+  /** The binary twin of {@link parkMovedOut}. False when `from` maps no file. */
+  parkMovedFile(from: string, to: string): boolean {
+    const id = this.fileByPath.get(from);
+    if (!id) return false;
+    this.fileByPath.delete(from);
+    this.parkedFiles.set(id, to);
+    this.persist();
+    this.notifyMapChanged();
+    return true;
+  }
+
+  /** Notes whose listing entry this pass keeps despite a hidden server path:
+   *  a teammate's move into a hidden folder this device could not follow, so
+   *  inbound skips the move (as for a path Windows cannot hold) and the note
+   *  stays where it is. Reset per partition. */
+  private rulesKeep = new Set<string>();
+  /** Listing paths this pass rewrote after telling the server about a move
+   *  made while the note was hidden. Reset per partition. */
+  private rulesPathOverride = new Map<string, string>();
+
+  /** The note listing as this device may act on it. */
+  private filterServerNotes(notes: RegisteredNote[]): RegisteredNote[] {
+    if (this.rulesHideNothing() && this.parkedDocs.size === 0 && this.rulesPathOverride.size === 0) {
+      return notes;
+    }
+    const out: RegisteredNote[] = [];
+    for (const n of notes) {
+      const id = noteDocId(n);
+      const override = this.rulesPathOverride.get(id);
+      if (override) {
+        out.push({ ...n, relPath: override, rel_path: override } as RegisteredNote);
+        continue;
+      }
+      if (this.parkedDocs.has(id)) continue;
+      const rp = noteRelPath(n);
+      if (rp && this.isExcludedPath(rp) && !this.rulesKeep.has(id)) continue;
+      out.push(n);
+    }
+    return out;
+  }
+
+  /**
+   * The blob listing as this device may act on it (the file-sync pass and the
+   * binary delete queue both read through this). A binary a teammate moved
+   * into a hidden folder is FROZEN: this device keeps its copy at the visible
+   * path, stops syncing it and tags it Local; it thaws when the rules stop
+   * hiding the server path, and the ordinary three-way pass follows the move.
+   */
+  filterBlobListing<T extends ServerBlobLike>(blobs: T[]): T[] {
+    if (this.rulesHideNothing() && this.parkedFiles.size === 0 && this.frozenFiles.size === 0) {
+      return blobs;
+    }
+    const out: T[] = [];
+    let changed = false;
+    for (const b of blobs) {
+      const id = b.docId ?? null;
+      const hidden = !!b.relPath && this.isExcludedPath(b.relPath);
+      if (id && this.frozenFiles.has(id)) {
+        if (hidden) continue;
+        const kept = this.frozenFiles.get(id)!;
+        this.frozenFiles.delete(id);
+        if (!this.fileByPath.has(kept)) this.fileByPath.set(kept, id);
+        changed = true;
+        out.push(b);
+        continue;
+      }
+      if (id && this.parkedFiles.has(id)) continue;
+      if (!hidden) {
+        out.push(b);
+        continue;
+      }
+      if (id) {
+        for (const [rp, fid] of this.fileByPath) {
+          if (fid !== id || this.isExcludedPath(rp)) continue;
+          this.fileByPath.delete(rp);
+          this.frozenFiles.set(id, rp);
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (changed) {
+      this.persist();
+      this.notifyMapChanged();
+    }
+    return out;
+  }
+
+  /**
+   * The rules step at the top of every pull: park what the rules now hide,
+   * return what they stopped hiding, follow a teammate's move INTO a hidden
+   * folder (then park it), and hand back the listings with every hidden or
+   * parked entry taken out — so nothing below this point ever sees them.
+   */
+  private async partitionByRules(
+    vaultId: string,
+    tree: FullTree,
+    serverFolders: FolderRegistry["folders"],
+    serverNotes: RegisteredNote[],
+  ): Promise<{ serverFolders: FolderRegistry["folders"]; serverNotes: RegisteredNote[]; changedDisk: boolean }> {
+    this.rulesKeep = new Set();
+    this.rulesPathOverride = new Map();
+    if (
+      this.rulesHideNothing() &&
+      this.parkedDocs.size === 0 &&
+      this.parkedFiles.size === 0
+    ) {
+      return { serverFolders, serverNotes, changedDisk: false };
+    }
+    this.parkExcluded();
+    let changedDisk = false;
+    let dirty = false;
+    const onDisk = new Set(flattenTree(tree).notes.map((n) => pathKey(n.path)));
+    const serverPathOf = new Map<string, string | undefined>(
+      serverNotes.map((n) => [noteDocId(n), noteRelPath(n)] as const),
+    );
+    const epoch = this.epoch();
+
+    // 1. Return what the rules no longer hide, under the same doc_id.
+    for (const [docId, rp] of [...this.parkedDocs]) {
+      if (this.isExcludedPath(rp)) continue;
+      this.parkedDocs.delete(docId);
+      dirty = true;
+      // Gone from disk while hidden: the server row materializes as usual.
+      if (!onDisk.has(pathKey(rp)) || this.byPath.has(rp)) continue;
+      try {
+        await ipc.rebindNoteId(rp, docId, epoch);
+      } catch (e) {
+        console.warn(`[registry] could not restore the id of ${rp}`, e);
+      }
+      if (this.stale()) return { serverFolders, serverNotes: [], changedDisk };
+      const sp = serverPathOf.get(docId);
+      if (sp && !samePath(sp, rp) && !onDisk.has(pathKey(sp))) {
+        // Moved on THIS disk while hidden (e.g. into the hidden folder in
+        // Finder, then the rule went): tell the server, like a Finder rename.
+        this.setMapping(sp, docId, vaultId);
+        this.baselineDocs.set(docId, sp);
+        const moved = await this.moveOnServer(sp, rp, { reportRefusal: true });
+        if (this.stale()) return { serverFolders, serverNotes: [], changedDisk };
+        if (moved.ok) {
+          this.baselineDocs.set(docId, rp);
+          this.rulesPathOverride.set(docId, rp);
+        }
+      } else {
+        this.setMapping(rp, docId, vaultId);
+        this.baselineDocs.set(docId, rp);
+      }
+      // Whatever was typed into it while hidden goes up now.
+      this.host?.parkedReturned?.(docId, this.byDocId.get(docId) ?? rp);
+    }
+    for (const [id, rp] of [...this.parkedFiles]) {
+      if (this.isExcludedPath(rp)) continue;
+      this.parkedFiles.delete(id);
+      if (!this.fileByPath.has(rp)) this.fileByPath.set(rp, id);
+      dirty = true;
+    }
+
+    // 2. A teammate moved a note this device maps into a hidden folder:
+    //    follow it there (id kept, marked our own move), then park it. Left
+    //    alone, the old file would read as a new note on the next pass.
+    for (const n of serverNotes) {
+      const rp = noteRelPath(n);
+      const id = noteDocId(n);
+      if (!rp || !this.isExcludedPath(rp)) continue;
+      const from = this.byDocId.get(id);
+      if (!from || this.isExcludedPath(from) || !onDisk.has(pathKey(from))) continue;
+      await this.host?.releaseDoc(id);
+      if (this.stale()) return { serverFolders, serverNotes: [], changedDisk };
+      this.noteOwnMove(from, rp);
+      try {
+        await ipc.renamePath(from, rp, epoch, { allowExcludedTarget: true });
+      } catch (e) {
+        // Could not follow (the target exists, say): keep it where it is,
+        // still mapped. Inbound skips the move like a path Windows can't hold.
+        console.warn(`[registry] could not follow ${from} into a folder that doesn't sync`, e);
+        this.rulesKeep.add(id);
+        continue;
+      }
+      if (this.stale()) return { serverFolders, serverNotes: [], changedDisk };
+      changedDisk = true;
+      this.parkDoc(id, rp);
+      dirty = true;
+    }
+    if (dirty) {
+      this.persist();
+      this.notifyMapChanged();
+    }
+    return {
+      serverFolders: serverFolders.filter((f) => !this.isExcludedPath(f.path)),
+      serverNotes: this.filterServerNotes(serverNotes),
+      changedDisk,
+    };
   }
 
   registerNote(

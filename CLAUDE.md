@@ -414,6 +414,24 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   as `keptLocally`, reported quietly and left out of the "N changes to review" count.
   `reconcileReport.forgetReadable(docIds)` drops `keptLocally`/`deletedByTeammate`/`selfRevoked`
   entries for docs the server lists again on a later pull, so regained access shrinks the banner.
+- **Sync rules (#401)** (`lib/syncRules/`, Rust `sync_rules.rs`, server `sync-rules/` +
+  `routes/sync-rules.ts`, Vault Settings → Sync `components/SyncRulesTab.tsx`): ONE per-vault
+  setting (owners/admins PUT with `baseRevision`, 409 `stale_sync_rules`; members read; frame
+  `sync-rules-changed`; a local-only vault keeps it in `.context/sync-rules.json`). It holds gitignore
+  `patterns`, `types` (`code`, `extra`, features `more-file-types`) and `folders` (`hidden` = dot
+  names, `build` = `DENIED_DIRS`, feature `sync-folder-switches`), all OFF by default, which is
+  exactly the old hard-coded behaviour; Rust mirrors the switches as process-wide `OPT_IN_GROUPS` bits
+  and TS as `syncRules/folders.ts setFolderSwitches` (`BUILD_DIRS`/`OS_JUNK` pinned to `vault.rs` by
+  `formatsLockstep.test.ts`). The FLOOR never syncs whatever the rules say (`vault.rs is_floor_name`,
+  `folders.ts isFloorName`): `.context`, `.git`, lock files, Baalda's temp files, OS bookkeeping
+  (`._*`, `.DS_Store`, `Thumbs.db`…), symlinks. **A rule never deletes:** what it hides is PARKED
+  (`registry.parkedDocs`/`parkedFiles`/`frozenFiles`, persisted as `config.json parked`; `changeRules`
+  parks before Rust installs, serialized on the pull chain), the server copy stays frozen, a teammate's
+  move into a hidden folder is followed then parked, a local move parks without a server delete, and
+  removing the rule rebinds the same ids. `isExcludedPath` = type hidden OR hidden segment OR pattern.
+  Parked docs MUST stay on the CRDT GC keep list (`registry.crdtKeepIds`, used by every
+  `collectCrdtGarbage` call): dropping their history and disk base made the next un-hide write the
+  server's text over edits made while hidden. Patterns never enable an unsupported or switched-off type.
 - **One-step creates** (`registry.ts registerNotesBatched`, pure packing/classification in
   `sync/seedRegister.ts`): when the server's `/health` `features` (cached per server URL,
   `lib/serverFeatures.ts cachedServerFeatures`) lists `notes-with-state`, EVERY new note, 1 or

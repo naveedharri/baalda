@@ -44,12 +44,13 @@ export function updateView(state: UpdateState, current: string | null): UpdateVi
     case "pending":
       return { tone: "wait", title: "An update is on its way", sub: "Baalda checks again on its own", percent: null, action: null };
     case "error":
-      return { tone: "error", title: `Baalda ${here}`, sub: `Couldn't check for updates: ${state.message}`, percent: null, action: "retry" };
+      return { tone: "error", title: `Baalda ${here}`, sub: "Couldn't check for updates. Try again later.", percent: null, action: "retry" };
     case "failed":
       return {
         tone: "error",
         title: `Couldn't install ${state.version}`,
-        sub: state.message || "The download was interrupted",
+        // Never the raw error text (it goes to the log, lib/updater.ts).
+        sub: "The download was interrupted. Try again later.",
         percent: null,
         action: "retry",
       };

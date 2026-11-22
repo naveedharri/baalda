@@ -3033,6 +3033,15 @@ html:not(.rd-off) .plan-skeleton-legend { display: flex; flex-direction: column;
 .update-row-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .update-row-bar { height: 4px; width: 100%; }
 .update-row-sub { font-size: 11.5px; color: var(--text-tertiary); }
+/* The two-line row (a status under the title) must shrink and wrap inside the
+   popover: the menu's "labels never truncate" rule (flex: none) plus the
+   label's nowrap sized it to the full sentence and ran it past the edge. */
+html:not(.rd-off) .account-popover .update-row .update-row-text { flex: 1 1 auto; min-width: 0; white-space: normal; }
+.update-row-text > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.update-row-sub {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden; overflow-wrap: anywhere; line-height: 1.35;
+}
 .update-row.is-ready { background: var(--success-soft); }
 .update-row.is-ready .update-row-sub { color: var(--success); }
 .update-row.is-error { background: rgba(187, 67, 58, 0.07); }

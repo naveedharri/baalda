@@ -372,6 +372,12 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
     // stream vault files (e.g. `<img src>` in notes) via convertFileSrc.
     let _ = app.asset_protocol_scope().allow_directory(&path, true);
 
+    // The vault's sync rules (#401) BEFORE anything walks it: the rebuild below,
+    // the watcher and the first tree listing must all see the same excluded
+    // paths, and the network has not answered yet — the cached copy is the
+    // last set the vault's owners/admins wrote (empty: today's behaviour).
+    crate::sync_rules::load_and_install(&path);
+
     let opened_at = std::time::Instant::now();
     let index = Arc::new(Mutex::new(Index::open(&path)?));
     let index_open_ms = opened_at.elapsed().as_millis() as u64;
@@ -1601,6 +1607,224 @@ pub async fn list_tree(
     tree::list_tree(&vault)
 }
 
+// ---- sync rules (#401) ------------------------------------------------------
+
+/// The vault's last-known sync rules (the `.context/sync-rules.json` cache), or
+/// `None` when this vault has never been given any.
+#[tauri::command]
+pub async fn get_sync_rules(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Option<crate::sync_rules::RulesDoc>> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    Ok(crate::sync_rules::read_cached(&vault))
+}
+
+/// What [`set_sync_rules`] did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncRulesApplied {
+    /// The patterns differ from the ones in force before, so the tree, the
+    /// index and the sync map all moved.
+    pub changed: bool,
+}
+
+/// Make `doc` the vault's sync rules: cache it, install it, and re-reconcile
+/// the index so excluded notes and files leave it (and lifted ones come back).
+///
+/// Only INDEX rows move. The CRDT tables, file identities and the sync map's
+/// ids are untouched, so nothing is deleted and lifting a rule restores the same
+/// notes. The sync layer parks what it held at excluded paths itself.
+#[tauri::command]
+pub async fn set_sync_rules(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    doc: crate::sync_rules::RulesDoc,
+    expected_epoch: Option<u64>,
+) -> AppResult<SyncRulesApplied> {
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let before = crate::sync_rules::read_cached(&vault);
+    // A pattern change, or a file-type switch: either changes what the walk surfaces.
+    let changed = before.as_ref().map(|d| d.patterns.as_str()).unwrap_or("") != doc.patterns
+        || before.as_ref().map(|d| d.opt_in_groups()).unwrap_or(0) != doc.opt_in_groups();
+    let same_doc = before.as_ref() == Some(&doc);
+    if !same_doc {
+        crate::sync_rules::save_and_install(&vault, doc)?;
+    }
+    if changed {
+        let queue = state.inner.lock().unwrap().watcher.as_ref().map(|w| w.extract_queue());
+        let started = std::time::Instant::now();
+        let guard = index.lock().unwrap();
+        let result = guard.rebuild_report(&vault);
+        drop(guard);
+        let (ok, skipped) = match result {
+            Ok(report) => {
+                if let Some(q) = queue {
+                    q.enqueue(report.pending);
+                }
+                (true, report.skipped)
+            }
+            Err(e) => {
+                log::error!("[sync-rules] index rebuild failed for {}: {e}", vault.display());
+                (false, 0)
+            }
+        };
+        let epoch = state.inner.lock().unwrap().vault_epoch;
+        let _ = app.emit(
+            "index-ready",
+            IndexReady {
+                path: vault.to_string_lossy().to_string(),
+                epoch,
+                ok,
+                ms: started.elapsed().as_millis() as u64,
+                skipped,
+            },
+        );
+    }
+    Ok(SyncRulesApplied { changed })
+}
+
+/// Counts for one rule set over the vault, for the Sync tab's preview.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncRulesCounts {
+    /// Files of a type the vault would otherwise sync.
+    pub files: usize,
+    /// Excluded folders, counting only the topmost of each excluded subtree.
+    pub folders: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncRulesPreview {
+    /// What the rules in force today exclude on this disk.
+    pub current: SyncRulesCounts,
+    /// What `patterns` would exclude on this disk.
+    pub candidate: SyncRulesCounts,
+    /// Topmost paths `patterns` would newly hide (at most 50).
+    pub newly_hidden: Vec<String>,
+    /// Topmost paths `patterns` would bring back (at most 50).
+    pub newly_shown: Vec<String>,
+    /// The walk stopped at its entry cap, so the counts are a floor.
+    pub truncated: bool,
+}
+
+const PREVIEW_SAMPLE: usize = 50;
+const PREVIEW_MAX_ENTRIES: usize = 200_000;
+
+/// Walk the vault under the fixed floor only and say what the candidate
+/// rules (patterns AND switches) would exclude, beside what the rules in force
+/// exclude. Reads no file contents.
+#[tauri::command]
+pub async fn preview_sync_rules(
+    state: State<'_, AppState>,
+    patterns: String,
+    types: Option<crate::sync_rules::RulesTypes>,
+    folders: Option<crate::sync_rules::RulesFolders>,
+) -> AppResult<SyncRulesPreview> {
+    let (vault, _) = require_vault(&state)?;
+    let candidate = crate::sync_rules::SyncRules::compile(crate::sync_rules::RulesDoc {
+        patterns,
+        types,
+        folders,
+        ..Default::default()
+    })?;
+    let current = crate::sync_rules::active(&vault);
+    Ok(preview_rules(&vault, current.as_deref(), vault::opt_in_groups(), &candidate))
+}
+
+pub fn preview_rules(
+    vault: &Path,
+    current: Option<&crate::sync_rules::SyncRules>,
+    current_groups: u8,
+    candidate: &crate::sync_rules::SyncRules,
+) -> SyncRulesPreview {
+    let mut out = SyncRulesPreview::default();
+    let cand_groups = candidate.doc().opt_in_groups();
+    let either = current_groups | cand_groups;
+    // Excluded-subtree roots currently open in the walk, per rule set: a path
+    // under one of these is counted but never sampled again.
+    let mut cur_root: Option<String> = None;
+    let mut cand_root: Option<String> = None;
+    let under = |root: &Option<String>, rel: &str| {
+        root.as_deref().is_some_and(|r| rel.len() > r.len() && rel.starts_with(r) && rel.as_bytes()[r.len()] == b'/')
+    };
+    let mut seen = 0usize;
+    for entry in walkdir::WalkDir::new(vault)
+        .min_depth(1)
+        .into_iter()
+        // Never the floor; and a name both sides hide (a node_modules with
+        // build folders off before and after) is not walked: it changes nothing.
+        .filter_entry(|e| {
+            let n = e.file_name().to_string_lossy();
+            !vault::is_floor_name(&n)
+                && !(vault::is_ignored_name_with(&n, current_groups) && vault::is_ignored_name_with(&n, cand_groups))
+        })
+        .filter_map(|e| e.ok())
+    {
+        seen += 1;
+        if seen > PREVIEW_MAX_ENTRIES {
+            out.truncated = true;
+            break;
+        }
+        let Ok(rel) = vault::rel_from_abs(vault, entry.path()) else {
+            continue;
+        };
+        if rel == "attachments" || rel.starts_with("attachments/") {
+            continue;
+        }
+        let is_dir = entry.file_type().is_dir();
+        let name = entry.file_name().to_string_lossy();
+        // Only files some side would sync: an unsupported type is not "hidden".
+        if !is_dir && !(entry.file_type().is_file() && vault::is_allowed_with(&name, either)) {
+            continue;
+        }
+        if !under(&cur_root, &rel) {
+            cur_root = None;
+        }
+        if !under(&cand_root, &rel) {
+            cand_root = None;
+        }
+        let by_switch = |groups: u8| {
+            vault::is_ignored_name_with(&name, groups) || (!is_dir && !vault::is_allowed_with(&name, groups))
+        };
+        let in_cur = cur_root.is_some()
+            || by_switch(current_groups)
+            || current.is_some_and(|r| r.excludes_entry(&rel, is_dir));
+        let in_cand = cand_root.is_some() || by_switch(cand_groups) || candidate.excludes_entry(&rel, is_dir);
+        let cur_top = in_cur && cur_root.is_none();
+        let cand_top = in_cand && cand_root.is_none();
+        if is_dir {
+            if cur_top {
+                out.current.folders += 1;
+            }
+            if cand_top {
+                out.candidate.folders += 1;
+            }
+        } else {
+            if in_cur {
+                out.current.files += 1;
+            }
+            if in_cand {
+                out.candidate.files += 1;
+            }
+        }
+        if cand_top && !in_cur && out.newly_hidden.len() < PREVIEW_SAMPLE {
+            out.newly_hidden.push(rel.clone());
+        }
+        if cur_top && !in_cand && out.newly_shown.len() < PREVIEW_SAMPLE {
+            out.newly_shown.push(rel.clone());
+        }
+        if is_dir && cur_top {
+            cur_root = Some(rel.clone());
+        }
+        if is_dir && cand_top {
+            cand_root = Some(rel);
+        }
+    }
+    out
+}
+
 /// Lazy sidebar loading: return only one directory's immediate children.
 /// `path` is the vault-relative dir ("" = root). Sub-dirs come back as
 /// expandable-but-unloaded folders (empty `children`); the UI fetches deeper
@@ -1864,17 +2088,90 @@ pub async fn rename_path(
     from: String,
     to: String,
     expected_epoch: Option<u64>,
+    allow_excluded_target: Option<bool>,
 ) -> AppResult<String> {
     // Epoch-pinned because the UI renames a multi-select in a loop: every lap
     // after the first runs past an await, and a rename applied to the wrong vault
     // moves a same-named file the user never touched.
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let old_abs = vault::resolve_in_vault(&vault, &from)?;
-    let new_rel = notefile::rename_path(&vault, &from, &to)?;
+    let allow = allow_excluded_target.unwrap_or(false);
+    let new_rel = notefile::rename_path_opts(&vault, &from, &to, allow)?;
     let new_abs = vault::resolve_in_vault(&vault, &new_rel)?;
-    // Keep doc_id stable across the move (file or folder subtree).
-    index.lock().unwrap().rename_note(&vault, &old_abs, &new_abs)?;
+    let guard = index.lock().unwrap();
+    if allow && vault::is_excluded_any_kind(&vault, &new_rel) {
+        // Followed into a folder that doesn't sync (#401): the index forgets the
+        // rows (search, links, the sidebar) while the CRDT tables, keyed by
+        // doc_id, stay for the day the rule goes and `rebind_note_id` returns it.
+        let gone = [old_abs.clone()];
+        let _ = guard.remove_notes(&vault, &gone);
+        let _ = guard.remove_files(&vault, &gone);
+    } else {
+        // Keep doc_id stable across the move (file or folder subtree).
+        guard.rename_note(&vault, &old_abs, &new_abs)?;
+    }
     Ok(new_rel)
+}
+
+/// One excluded file's content hash (#401), see [`excluded_hashes`].
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExcludedHash {
+    pub path: String,
+    pub sha256: String,
+    pub is_note: bool,
+}
+
+/// sha256 of every surfaced file at or under these EXCLUDED paths (#401),
+/// capped at 5000 files. The delete drain pairs a note or binary that vanished
+/// with one of these to tell "moved into a folder that doesn't sync" (park it)
+/// from a delete. Paths that are not excluded, gone, or links are skipped.
+#[tauri::command]
+pub async fn excluded_hashes(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<ExcludedHash>> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    tauri::async_runtime::spawn_blocking(move || Ok(excluded_hashes_impl(&vault, &paths)))
+        .await
+        .map_err(|e| AppError::new(e.to_string()))?
+}
+
+pub fn excluded_hashes_impl(vault: &Path, paths: &[String]) -> Vec<ExcludedHash> {
+    const CAP: usize = 5000;
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for rel in paths {
+        let rel = rel.trim_start_matches('/');
+        if rel.is_empty() || vault::rel_path_is_ignored(rel) || !vault::is_excluded_any_kind(vault, rel) {
+            continue;
+        }
+        let Ok(abs) = vault::resolve_in_vault(vault, rel) else { continue };
+        let walker = walkdir::WalkDir::new(&abs).follow_links(false).into_iter().filter_entry(|e| {
+            e.file_name().to_str().map(|n| !vault::is_ignored_name(n)).unwrap_or(false)
+        });
+        for entry in walker.flatten() {
+            if out.len() >= CAP {
+                return out;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str() else { continue };
+            if !vault::is_allowed_file(name) {
+                continue;
+            }
+            let Ok(r) = entry.path().strip_prefix(vault) else { continue };
+            let r = r.to_string_lossy().replace('\\', "/");
+            if !seen.insert(r.clone()) {
+                continue;
+            }
+            let Ok(sha) = notefile::sha256_file(entry.path()) else { continue };
+            out.push(ExcludedHash { path: r, sha256: sha, is_note: vault::is_note_file(name) });
+        }
+    }
+    out
 }
 
 /// Idempotent folder create, for reconciliation (see `notefile::ensure_folder`).

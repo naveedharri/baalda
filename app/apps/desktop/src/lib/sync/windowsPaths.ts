@@ -54,9 +54,16 @@ export function isWindowsHost(): boolean {
  */
 export class UnmaterializablePaths {
   private warned = new Set<string>();
-  constructor(private readonly windows: () => boolean = isWindowsHost) {}
+  constructor(
+    private readonly windows: () => boolean = isWindowsHost,
+    /** The vault's sync rules (#401): a path they hide is no path at all on
+     *  this device, exactly like one Windows cannot hold — never created,
+     *  written, downloaded or moved to. Silent: it is a choice, not a fault. */
+    private readonly excluded: (relPath: string) => boolean = () => false,
+  ) {}
 
   skip(relPath: string): boolean {
+    if (this.excluded(relPath)) return true;
     if (!this.windows()) return false;
     const problem = windowsPathProblem(relPath);
     if (!problem) return false;

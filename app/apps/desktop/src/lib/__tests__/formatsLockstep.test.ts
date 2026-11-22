@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { FORMATS, NOTE_EXTS, SURFACED_EXTS } from "../formats";
+import { FORMATS, NOTE_EXTS, OPT_IN_EXTS, SURFACED_EXTS } from "../formats";
 import { TRANSIENT_PREFIXES, isTransientFileName } from "../pathIdentity";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -37,10 +37,22 @@ function literals(source: string, pattern: RegExp): string[] {
 const vaultRs = read("src-tauri/src/vault.rs");
 const registryTs = read("src/lib/sync/registry.ts");
 const inboundTs = read("src/lib/sync/inbound.ts");
+const foldersTs = read("src/lib/syncRules/folders.ts");
 
 const rustArray = (name: string) =>
   new RegExp(`pub const ${name}:\\s*&\\[&str\\]\\s*=\\s*&\\[([\\s\\S]*?)\\];`);
 const tsArray = (name: string) => new RegExp(`const ${name}\\s*=\\s*\\[([\\s\\S]*?)\\];`);
+
+describe("folder-name lockstep (#401)", () => {
+  it("build folders and OS bookkeeping match Rust's vault.rs", () => {
+    expect(new Set(literals(foldersTs, tsArray("BUILD_DIRS")))).toEqual(
+      new Set(literals(vaultRs, rustArray("DENIED_DIRS"))),
+    );
+    expect(new Set(literals(foldersTs, tsArray("OS_JUNK")))).toEqual(
+      new Set(literals(vaultRs, rustArray("OS_JUNK")).map((s) => s.toLowerCase())),
+    );
+  });
+});
 
 describe("format lockstep", () => {
   it("surfaces exactly what Rust's ALLOWED_EXTS surfaces", () => {
@@ -49,6 +61,23 @@ describe("format lockstep", () => {
     // Sets, not order: Rust groups by category, TS by canonical MIME.
     expect(new Set(rust)).toEqual(new Set(SURFACED_EXTS));
     expect(new Set(rust).size).toBe(rust.length); // no duplicate in the Rust list
+  });
+
+  // #401: the optional groups an owner can switch on in Vault Settings → Sync.
+  it("agrees with Rust on the optional groups, which never overlap the default set", () => {
+    expect(new Set(literals(vaultRs, rustArray("CODE_EXTS")))).toEqual(new Set(OPT_IN_EXTS.code));
+    expect(new Set(literals(vaultRs, rustArray("EXTRA_EXTS")))).toEqual(new Set(OPT_IN_EXTS.extra));
+    const surfaced = new Set(SURFACED_EXTS);
+    for (const ext of [...OPT_IN_EXTS.code, ...OPT_IN_EXTS.extra]) {
+      expect(surfaced.has(ext), ext).toBe(false);
+      expect(NOTE_EXTS, ext).not.toContain(ext);
+    }
+    for (const f of FORMATS) if (f.optIn) expect(f.surface, f.exts[0]).toBe(false);
+  });
+
+  it("claims every extension in exactly one format", () => {
+    const all = FORMATS.flatMap((f) => f.exts);
+    expect(all.filter((e, i) => all.indexOf(e) !== i)).toEqual([]);
   });
 
   it("agrees with Rust on the CRDT note family", () => {
@@ -116,7 +145,8 @@ describe("format lockstep", () => {
       ...literals(serverTs, /export const ALLOWED_MIME[^=]*=\s*(?:new Set<string>|lowerSet)\(\[([\s\S]*?)\]\);/),
     ]);
     for (const format of FORMATS) {
-      if (!format.surface || format.syncAs !== "attachment") continue;
+      // Optional groups too: switched on, they upload like any other file.
+      if (!(format.surface || format.optIn) || format.syncAs !== "attachment") continue;
       for (const ext of format.exts) {
         expect(serverMime.has(ext), ext).toBe(true);
         expect(allowed.has(format.mimes[0]), `${ext} uploads as ${format.mimes[0]}`).toBe(true);

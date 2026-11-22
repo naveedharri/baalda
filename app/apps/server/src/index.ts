@@ -17,6 +17,7 @@ import {
   setMemberJoinedPublisher, setMemberRemovedPublisher,
   setOrgChangedPublisher,
   setSkillsChangedPublisher,
+  setSyncRulesChangedPublisher,
 } from "./sync/member-events.js";
 import { publishUserEvent, setUserEventPublisher } from "./sync/user-events.js";
 import { setMessagesPublisher } from "./messages/events.js";
@@ -155,6 +156,12 @@ async function main() {
     void vaultChannel
       .publishSkillsChanged(vaultId, orgId)
       .catch(broadcastFailed("skills-changed"));
+  });
+  // A sync-rules change (#401) reaches every member's desktop.
+  setSyncRulesChangedPublisher((vaultId, orgId, revision) => {
+    void vaultChannel
+      .publishSyncRulesChanged(vaultId, orgId, revision)
+      .catch(broadcastFailed("sync-rules-changed"));
   });
   // Soft delete / restore / purge → open Activity feeds refetch Trash (#260).
   // Messages (messages/events.ts): "all" rides the one process-wide topic every

@@ -3973,6 +3973,41 @@ export class ApiClient {
     };
   }
 
+  // ---- Sync rules (#401) --------------------------------------------------
+
+  /** The vault's sync rules (any member). A server without the feature 404s. */
+  async getSyncRules(orgId: string): Promise<VaultSyncRulesResponse> {
+    const { data } = await this.request<VaultSyncRulesResponse>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/sync-rules`,
+    );
+    return normalizeSyncRules(data);
+  }
+
+  /** Replace the vault's sync rules (owner/admin). 409 `stale_sync_rules`
+   *  carries the current state in `current`. */
+  async putSyncRules(
+    orgId: string,
+    patterns: string,
+    baseRevision: number,
+    types?: { code: boolean; extra: boolean },
+    folders?: { hidden: boolean; build: boolean },
+  ): Promise<VaultSyncRulesResponse> {
+    // Each switch group only when one is on: a server without the feature
+    // refuses the key, and an all-off set means the same as none.
+    const rules: Record<string, unknown> = { version: 1, patterns };
+    if (types && (types.code || types.extra)) rules.types = { code: types.code, extra: types.extra };
+    if (folders && (folders.hidden || folders.build)) {
+      rules.folders = { hidden: folders.hidden, build: folders.build };
+    }
+    const { data } = await this.request<VaultSyncRulesResponse>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/sync-rules`,
+      { body: { rules, baseRevision } },
+    );
+    return normalizeSyncRules(data);
+  }
+
   // ---- Skills (docs/SKILLS.md §3.3) --------------------------------------
 
   /** Every vault this user belongs to on this server, with the skills to install. */
@@ -4808,6 +4843,37 @@ export function skillErrorCode(e: unknown): string | null {
   return b && typeof b === "object" && typeof (b as { error?: unknown }).error === "string"
     ? (b as { error: string }).error
     : null;
+}
+
+/** `GET|PUT /api/orgs/:orgId/sync-rules` (#401). */
+export interface VaultSyncRulesResponse {
+  rules: {
+    version: number;
+    patterns: string;
+    types: { code: boolean; extra: boolean };
+    folders: { hidden: boolean; build: boolean };
+  };
+  /** 0 = never saved. */
+  revision: number;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+function normalizeSyncRules(data: Partial<VaultSyncRulesResponse> | null | undefined): VaultSyncRulesResponse {
+  const patterns = typeof data?.rules?.patterns === "string" ? data.rules.patterns : "";
+  const t = (data?.rules as { types?: Record<string, unknown> } | undefined)?.types ?? {};
+  const f = (data?.rules as { folders?: Record<string, unknown> } | undefined)?.folders ?? {};
+  return {
+    rules: {
+      version: 1,
+      patterns,
+      types: { code: t.code === true, extra: t.extra === true },
+      folders: { hidden: f.hidden === true, build: f.build === true },
+    },
+    revision: typeof data?.revision === "number" ? data.revision : 0,
+    updatedAt: data?.updatedAt ?? null,
+    updatedBy: data?.updatedBy ?? null,
+  };
 }
 
 export function noteDocId(n: RegisteredNote): string {

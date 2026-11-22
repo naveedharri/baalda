@@ -82,6 +82,14 @@ pub struct FileChanged {
 #[serde(rename_all = "camelCase")]
 pub struct FilesChanged {
     pub changes: Vec<FileChanged>,
+    /// Paths under the vault's sync rules (#401) that exist right now: an
+    /// excluded file or folder that appeared or changed. They are never indexed
+    /// and never in `changes`, so no existing consumer sees them; the sync
+    /// layer's delete drain reads them as the possible new half of a move INTO
+    /// a folder that doesn't sync, which must park the note rather than delete
+    /// it for everyone. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<String>,
 }
 
 /// How many paths one index transaction may cover.
@@ -325,6 +333,9 @@ pub struct Plan {
     pub indexable_files: Vec<PathBuf>,
     /// The UI event payload, in a deterministic order.
     pub changes: Vec<PlannedChange>,
+    /// Excluded paths (#401) that exist on disk, sorted: see
+    /// `FilesChanged::ignored`.
+    pub ignored: Vec<String>,
 }
 
 /// Turn a dirty set into a [`Plan`]: drop ignored paths, sort for determinism,
@@ -352,11 +363,29 @@ pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Pl
         };
     }
     let mut planned: Vec<PlannedChange> = Vec::new();
+    let mut ignored: Vec<String> = Vec::new();
     for abs in batch {
         let Ok(rel) = rel_from_abs(vault, &abs) else {
             continue;
         };
         if rel.is_empty() || rel_path_is_ignored(&rel) {
+            continue;
+        }
+        // The vault's sync rules (#401): an excluded path is invisible here
+        // exactly like a dot folder. A path that is gone has no kind to ask
+        // about, so either reading drops it (dropping is the safe direction:
+        // nothing at an excluded path was ever in the index or the sync map).
+        let excluded = match std::fs::symlink_metadata(&abs) {
+            Ok(m) => {
+                let ex = crate::sync_rules::excludes(vault, &rel, m.is_dir());
+                if ex && !m.file_type().is_symlink() {
+                    ignored.push(rel.clone());
+                }
+                ex
+            }
+            Err(_) => crate::vault::is_excluded_any_kind(vault, &rel),
+        };
+        if excluded {
             continue;
         }
         // The whole note family, not just `.md` — `index.rs` indexes all of it,
@@ -411,11 +440,13 @@ pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Pl
         .filter(|c| c.kind == "tree" && !c.gone && is_indexable_file(&c.rel) && c.abs.is_file())
         .map(|c| c.abs.clone())
         .collect();
+    ignored.sort();
     Plan {
         modified,
         removed,
         indexable_files,
         changes: planned,
+        ignored,
     }
 }
 
@@ -429,6 +460,15 @@ fn process_batch(
 ) {
     let plan = plan_batch(vault, batch);
     if plan.changes.is_empty() {
+        if !plan.ignored.is_empty() {
+            let _ = app.emit(
+                "files-changed",
+                FilesChanged {
+                    changes: Vec::new(),
+                    ignored: plan.ignored,
+                },
+            );
+        }
         return;
     }
 
@@ -507,6 +547,7 @@ fn process_batch(
         "files-changed",
         FilesChanged {
             changes: mark_unchanged(plan.changes, &unchanged),
+            ignored: plan.ignored,
         },
     );
 }

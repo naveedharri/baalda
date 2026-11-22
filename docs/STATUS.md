@@ -344,3 +344,15 @@ and hover/pressed colours are one accent tint (`--bg-hover`/`--bg-active`).
   GitHub bridge that publishes a Claude plugin marketplace so claude.ai's org sync reaches
   Chat/Cowork. `/health` advertises `skills`.
 - **Settings.** Vault Settings → Skills (catalog) and Account Settings → AI tools (this machine).
+
+## Sync rules: what syncs in a vault (#401, 2026-11-22, local)
+
+- One per-vault setting (`vault_sync_rules`, `GET|PUT /api/orgs/:orgId/sync-rules`, owners/admins write,
+  409 `stale_sync_rules`, `sync-rules-changed` frame); local-only vaults keep it in `.context/sync-rules.json`.
+- Vault Settings → Sync: File types (Code and text files, More file types), Folders (hidden, build and
+  dependency), a Don't sync list with a folder picker, Edit as text. Defaults equal the old hard-coded rules.
+- A rule never deletes: hidden items are PARKED (`registry.parkedDocs/parkedFiles/frozenFiles`), the
+  server copy stays frozen, un-hiding rebinds the same ids. Parked docs stay on the CRDT GC keep list
+  (`registry.crdtKeepIds`) so edits made while hidden survive.
+- Floor (never syncs): `.context`, `.git`, lock files, Baalda temp files, OS bookkeeping, symlinks.
+- Known gaps: extensionless and 0-byte files never sync; a re-shown binary returns to its server path.

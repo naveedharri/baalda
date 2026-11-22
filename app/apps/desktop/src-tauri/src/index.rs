@@ -13,7 +13,7 @@ use crate::extract::kind_for;
 use crate::notefile::sha256_hex;
 use crate::parse::{parse_html, parse_note, parse_plain, ParsedNote};
 use crate::stats::now_ms;
-use crate::vault::{is_ignored_name, is_indexable_file, is_note_file, rel_from_abs};
+use crate::vault::{is_ignored_name, is_indexable_file, is_indexable_in, is_note_file, rel_from_abs};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -726,12 +726,26 @@ impl Index {
         let mut folders_written = 0usize;
         let mut stale = 0usize;
 
+        // The vault's sync rules (#401): an excluded path leaves the index like a
+        // dot folder does. Only the INDEX rows go; the CRDT tables and file
+        // identities are keyed by doc_id and never touched here, so lifting the
+        // rule later brings the same note back with the same history.
+        let rules = crate::sync_rules::active(vault);
         for entry in WalkDir::new(vault)
             .into_iter()
             .filter_entry(|e| {
                 // Skip ignored dirs entirely (don't descend into .context/.git/dotfolders).
                 let name = e.file_name().to_string_lossy();
-                !(e.depth() > 0 && is_ignored_name(&name))
+                if e.depth() == 0 {
+                    return true;
+                }
+                if is_ignored_name(&name) {
+                    return false;
+                }
+                match (&rules, rel_from_abs(vault, e.path())) {
+                    (Some(r), Ok(rel)) => !r.excludes_entry(&rel, e.file_type().is_dir()),
+                    _ => true,
+                }
             })
             .filter_map(|e| e.ok())
         {
@@ -1118,7 +1132,7 @@ impl Index {
             let Ok(rel) = rel_from_abs(vault, abs) else {
                 continue;
             };
-            if !is_indexable_file(&rel) {
+            if !is_indexable_in(vault, &rel) {
                 continue;
             }
             let prior = self.file_state(&tx, &rel)?;

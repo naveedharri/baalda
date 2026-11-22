@@ -67,8 +67,11 @@ export interface FormatDef {
   readonly category: FormatCategory;
   readonly viewer: ViewerKind;
   readonly embed: EmbedKind;
-  /** Mirrors Rust `ALLOWED_EXTS`: does the tree walk surface this at all? */
+  /** Mirrors Rust `ALLOWED_EXTS`: does the tree walk surface this by default? */
   readonly surface: boolean;
+  /** Surfaced (and synced) only while the vault's sync rules switch this group
+   *  on (#401). Mirrors Rust `CODE_EXTS`/`EXTRA_EXTS`. Implies `!surface`. */
+  readonly optIn?: OptInGroup;
   /** Invariant: `surface` ⇒ `openable`. */
   readonly openable: boolean;
   /** `note` is the CRDT family (bridge + `notes` registry); everything else
@@ -124,6 +127,144 @@ const shellLang = () =>
     import("@codemirror/language"),
     import("@codemirror/legacy-modes/mode/shell"),
   ]).then(([cm, m]) => new cm.LanguageSupport(cm.StreamLanguage.define(m.shell)));
+
+
+/** A stream grammar from `@codemirror/legacy-modes`. Each loader is a literal
+ *  import so the bundler can split it; nothing here is in the startup bundle. */
+const legacy =
+  (load: () => Promise<Record<string, unknown>>, key: string) => () =>
+    Promise.all([import("@codemirror/language"), load()]).then(
+      ([cm, m]) =>
+        new cm.LanguageSupport(cm.StreamLanguage.define(m[key] as Parameters<typeof cm.StreamLanguage.define>[0])),
+    );
+const clike = (key: string) => legacy(() => import("@codemirror/legacy-modes/mode/clike"), key);
+const mllike = (key: string) => legacy(() => import("@codemirror/legacy-modes/mode/mllike"), key);
+const legacyCss = (key: string) => legacy(() => import("@codemirror/legacy-modes/mode/css"), key);
+
+/** Which optional group switches a format on (Vault Settings → Sync). */
+export type OptInGroup = "code" | "extra";
+
+type Lang = () => Promise<Extension>;
+
+/** Source code, config and other plain-text formats, behind "Code and text files". */
+const CODE_TABLE: ReadonlyArray<readonly [readonly string[], string, Lang | null]> = [
+  // web
+  [["js", "jsx", "mjs", "cjs"], "text/javascript", jsLang],
+  [["ts", "tsx", "mts", "cts"], "text/x-typescript", tsLang],
+  [["css"], "text/css", cssLang],
+  [["scss"], "text/x-scss", legacyCss("sCSS")],
+  [["sass"], "text/x-sass", legacy(() => import("@codemirror/legacy-modes/mode/sass"), "sass")],
+  [["less"], "text/x-less", legacyCss("less")],
+  [["styl"], "text/x-stylus", legacy(() => import("@codemirror/legacy-modes/mode/stylus"), "stylus")],
+  [["vue"], "text/x-vue", htmlLang],
+  [["svelte"], "text/x-svelte", htmlLang],
+  [["astro"], "text/x-astro", htmlLang],
+  [["hbs", "handlebars", "mustache", "ejs", "erb", "liquid"], "text/x-template", htmlLang],
+  [["pug", "jade"], "text/x-pug", legacy(() => import("@codemirror/legacy-modes/mode/pug"), "pug")],
+  [["j2", "jinja", "jinja2", "njk"], "text/x-jinja", legacy(() => import("@codemirror/legacy-modes/mode/jinja2"), "jinja2")],
+  [["coffee"], "text/x-coffeescript", legacy(() => import("@codemirror/legacy-modes/mode/coffeescript"), "coffeeScript")],
+  [["php"], "text/x-php", null],
+  [["graphql", "gql"], "text/x-graphql", null],
+  // C family and the JVM
+  [["c", "h"], "text/x-c", cppLang],
+  [["cpp", "cc", "cxx", "hpp", "hh", "hxx"], "text/x-c++src", cppLang],
+  [["cs"], "text/x-csharp", clike("csharp")],
+  [["java"], "text/x-java-source", javaLang],
+  [["kt", "kts"], "text/x-kotlin", clike("kotlin")],
+  [["scala"], "text/x-scala", clike("scala")],
+  [["groovy", "gradle"], "text/x-groovy", legacy(() => import("@codemirror/legacy-modes/mode/groovy"), "groovy")],
+  [["dart"], "text/x-dart", clike("dart")],
+  [["swift"], "text/x-swift", legacy(() => import("@codemirror/legacy-modes/mode/swift"), "swift")],
+  // scripting
+  [["pyi", "pyw"], "text/x-python-stub", pythonLang],
+  [["rb", "rake", "gemspec"], "text/x-ruby", legacy(() => import("@codemirror/legacy-modes/mode/ruby"), "ruby")],
+  [["pl", "pm"], "text/x-perl", legacy(() => import("@codemirror/legacy-modes/mode/perl"), "perl")],
+  [["lua"], "text/x-lua", legacy(() => import("@codemirror/legacy-modes/mode/lua"), "lua")],
+  [["r"], "text/x-r", legacy(() => import("@codemirror/legacy-modes/mode/r"), "r")],
+  [["jl"], "text/x-julia", legacy(() => import("@codemirror/legacy-modes/mode/julia"), "julia")],
+  [["bash", "zsh", "ksh", "fish"], "text/x-shellscript", shellLang],
+  [["ps1", "psm1", "psd1"], "text/x-powershell", legacy(() => import("@codemirror/legacy-modes/mode/powershell"), "powerShell")],
+  [["bat", "cmd"], "text/x-bat", null],
+  [["tcl"], "text/x-tcl", legacy(() => import("@codemirror/legacy-modes/mode/tcl"), "tcl")],
+  // functional and other languages
+  [["hs"], "text/x-haskell", legacy(() => import("@codemirror/legacy-modes/mode/haskell"), "haskell")],
+  [["erl", "hrl"], "text/x-erlang", legacy(() => import("@codemirror/legacy-modes/mode/erlang"), "erlang")],
+  [["ex", "exs"], "text/x-elixir", null],
+  [["clj", "cljs", "cljc", "edn"], "text/x-clojure", legacy(() => import("@codemirror/legacy-modes/mode/clojure"), "clojure")],
+  [["elm"], "text/x-elm", legacy(() => import("@codemirror/legacy-modes/mode/elm"), "elm")],
+  [["ml", "mli"], "text/x-ocaml", mllike("oCaml")],
+  [["fs", "fsi", "fsx"], "text/x-fsharp", mllike("fSharp")],
+  [["lisp", "cl", "el"], "text/x-common-lisp", legacy(() => import("@codemirror/legacy-modes/mode/commonlisp"), "commonLisp")],
+  [["scm", "ss", "rkt"], "text/x-scheme", legacy(() => import("@codemirror/legacy-modes/mode/scheme"), "scheme")],
+  [["cr"], "text/x-crystal", legacy(() => import("@codemirror/legacy-modes/mode/crystal"), "crystal")],
+  [["vb"], "text/x-vb", legacy(() => import("@codemirror/legacy-modes/mode/vb"), "vb")],
+  [["pas"], "text/x-pascal", legacy(() => import("@codemirror/legacy-modes/mode/pascal"), "pascal")],
+  [["f90", "f95", "f03", "f08"], "text/x-fortran", legacy(() => import("@codemirror/legacy-modes/mode/fortran"), "fortran")],
+  [["zig"], "text/x-zig", null],
+  [["nim"], "text/x-nim", null],
+  [["sol"], "text/x-solidity", null],
+  // hardware
+  [["v", "sv", "svh"], "text/x-verilog", legacy(() => import("@codemirror/legacy-modes/mode/verilog"), "verilog")],
+  [["vhd", "vhdl"], "text/x-vhdl", legacy(() => import("@codemirror/legacy-modes/mode/vhdl"), "vhdl")],
+  [["asm", "s"], "text/x-asm", legacy(() => import("@codemirror/legacy-modes/mode/gas"), "gas")],
+  // build, config and infrastructure
+  [["proto"], "text/x-protobuf", legacy(() => import("@codemirror/legacy-modes/mode/protobuf"), "protobuf")],
+  [["cmake"], "text/x-cmake", legacy(() => import("@codemirror/legacy-modes/mode/cmake"), "cmake")],
+  [["mk", "mak"], "text/x-makefile", shellLang],
+  [["dockerfile"], "text/x-dockerfile", legacy(() => import("@codemirror/legacy-modes/mode/dockerfile"), "dockerFile")],
+  [["ini", "cfg", "conf", "properties"], "text/x-ini", legacy(() => import("@codemirror/legacy-modes/mode/properties"), "properties")],
+  [["tf", "tfvars", "hcl"], "text/x-hcl", null],
+  [["prisma"], "text/x-prisma", null],
+  [["lock"], "text/x-lockfile", null],
+  [["jsonc", "json5"], "text/x-json5", jsonLang],
+  [["jsonl", "ndjson"], "text/x-ndjson", null],
+  [["ipynb"], "text/x-ipynb", jsonLang],
+  [["xsd", "xsl", "xslt", "kml", "gpx", "csproj", "fsproj", "vbproj", "props", "targets", "xaml", "resx"], "text/xml", xmlLang],
+  // writing and plain-text data
+  [["log"], "text/x-log", null],
+  [["diff", "patch"], "text/x-diff", legacy(() => import("@codemirror/legacy-modes/mode/diff"), "diff")],
+  [["tex", "sty", "cls", "ltx"], "text/x-tex", legacy(() => import("@codemirror/legacy-modes/mode/stex"), "stex")],
+  [["bib"], "text/x-bibtex", null],
+  [["rst"], "text/x-rst", null],
+  [["adoc", "asciidoc"], "text/x-asciidoc", null],
+  [["org"], "text/x-org", null],
+  [["ics"], "text/calendar", null],
+  [["vcf"], "text/vcard", null],
+  [["srt"], "text/x-subrip", null],
+  [["vtt"], "text/vtt", null],
+];
+
+/** Binary formats behind "More file types". */
+const EXTRA_TABLE: ReadonlyArray<readonly [readonly string[], string, FormatCategory]> = [
+  // fonts
+  [["ttf"], "font/ttf", "data"],
+  [["otf"], "font/otf", "data"],
+  [["woff"], "font/woff", "data"],
+  [["woff2"], "font/woff2", "data"],
+  // design
+  [["psd"], "image/vnd.adobe.photoshop", "image"],
+  [["ai"], "application/illustrator", "image"],
+  [["eps"], "application/eps", "image"],
+  [["sketch"], "application/x-sketch", "image"],
+  // older and open document formats
+  [["doc"], "application/msword", "office-doc"],
+  [["xls"], "application/vnd.ms-excel", "spreadsheet"],
+  [["ppt"], "application/vnd.ms-powerpoint", "presentation"],
+  [["odt"], "application/vnd.oasis.opendocument.text", "office-doc"],
+  [["ods"], "application/vnd.oasis.opendocument.spreadsheet", "spreadsheet"],
+  [["odp"], "application/vnd.oasis.opendocument.presentation", "presentation"],
+  [["rtf"], "application/rtf", "office-doc"],
+  [["epub"], "application/epub+zip", "office-doc"],
+  // audio and video no webview plays everywhere
+  [["mkv"], "video/matroska", "video"],
+  [["avi"], "video/vnd.avi", "video"],
+  [["opus"], "audio/opus", "audio"],
+  [["aiff", "aif"], "audio/aiff", "audio"],
+  // more archives
+  [["rar"], "application/x-rar-compressed", "archive"],
+  [["bz2"], "application/x-bzip2", "archive"],
+  [["xz"], "application/x-xz", "archive"],
+];
 
 // ---- The table -------------------------------------------------------------
 //
@@ -656,88 +797,50 @@ export const FORMATS: readonly FormatDef[] = [
     cmLang: sqlLang,
   },
 
-  // --- source code: openable, NEVER surfaced --------------------------------
+  // --- source code and more text: openable, surfaced only when switched on --
   // Importing a real project directory would otherwise flood the sidebar with
-  // thousands of files (the same flood guard as `vault.rs DENIED_DIRS`). They
-  // still open — and embed — if something points at one.
-  {
-    exts: ["js", "jsx"],
-    mimes: ["text/javascript"],
-    category: "data",
-    viewer: "code",
-    embed: "chip",
-    surface: false,
-    openable: true,
-    syncAs: "attachment",
-    maxBytes: MAX_ATTACHMENT_BYTES,
-    textExtract: "utf8",
-    cmLang: jsLang,
-  },
-  {
-    exts: ["ts", "tsx"],
-    mimes: ["text/typescript"],
-    category: "data",
-    viewer: "code",
-    embed: "chip",
-    surface: false,
-    openable: true,
-    syncAs: "attachment",
-    maxBytes: MAX_ATTACHMENT_BYTES,
-    textExtract: "utf8",
-    cmLang: tsLang,
-  },
-  {
-    exts: ["css"],
-    mimes: ["text/css"],
-    category: "data",
-    viewer: "code",
-    embed: "chip",
-    surface: false,
-    openable: true,
-    syncAs: "attachment",
-    maxBytes: MAX_ATTACHMENT_BYTES,
-    textExtract: "utf8",
-    cmLang: cssLang,
-  },
-  {
-    exts: ["c", "h"],
-    mimes: ["text/x-c"],
-    category: "data",
-    viewer: "code",
-    embed: "chip",
-    surface: false,
-    openable: true,
-    syncAs: "attachment",
-    maxBytes: MAX_ATTACHMENT_BYTES,
-    textExtract: "utf8",
-    cmLang: cppLang,
-  },
-  {
-    exts: ["cpp"],
-    mimes: ["text/x-c++src"],
-    category: "data",
-    viewer: "code",
-    embed: "chip",
-    surface: false,
-    openable: true,
-    syncAs: "attachment",
-    maxBytes: MAX_ATTACHMENT_BYTES,
-    textExtract: "utf8",
-    cmLang: cppLang,
-  },
-  {
-    exts: ["java"],
-    mimes: ["text/x-java"],
-    category: "data",
-    viewer: "code",
-    embed: "chip",
-    surface: false,
-    openable: true,
-    syncAs: "attachment",
-    maxBytes: MAX_ATTACHMENT_BYTES,
-    textExtract: "utf8",
-    cmLang: javaLang,
-  },
+  // thousands of files (the same flood guard as `vault.rs DENIED_DIRS`), so
+  // these are off until an owner or admin turns on "Code and text files" in
+  // Vault Settings → Sync (#401: `optIn: "code"`). They always open — and
+  // embed — if something points at one. Each MIME is unique and `text/*`, so
+  // the server skips its byte sniff and files them under its text ceiling.
+  ...CODE_TABLE.map(
+    ([exts, mime, cmLang]): FormatDef => ({
+      exts: [...exts],
+      mimes: [mime],
+      category: "data",
+      viewer: "code",
+      embed: "chip",
+      surface: false,
+      optIn: "code",
+      openable: true,
+      syncAs: "attachment",
+      maxBytes: MAX_ATTACHMENT_BYTES,
+      textExtract: "utf8",
+      ...(cmLang ? { cmLang } : {}),
+    }),
+  ),
+
+  // --- more binary types: surfaced only when switched on ---------------------
+  // Fonts, design files, older and open Office formats, more audio/video and
+  // archives (`optIn: "extra"`). Opaque here: a card with "Open externally".
+  // Each declared MIME is what the server's byte sniff (`file-type`) reports
+  // for those bytes, or sits in one of its equivalence groups.
+  ...EXTRA_TABLE.map(
+    ([exts, mime, category]): FormatDef => ({
+      exts: [...exts],
+      mimes: [mime],
+      category,
+      viewer: "card",
+      embed: "chip",
+      surface: false,
+      optIn: "extra",
+      openable: true,
+      syncAs: "attachment",
+      maxBytes: MAX_ATTACHMENT_BYTES,
+      textExtract: "none",
+    }),
+  ),
 
   // --- archives -------------------------------------------------------------
   // All opaque: a card with name, size and "Open externally", never unpacked.
@@ -853,6 +956,31 @@ export function embedMarkdown(name: string, src: string): string {
 /** The drop/paste size ceiling for an extension (dot-less, any case). */
 export function maxBytesFor(ext: string): number {
   return BY_EXT.get(ext.replace(/^\./, "").toLowerCase())?.maxBytes ?? MAX_ATTACHMENT_BYTES;
+}
+
+/** Every extension each optional group adds, sorted — Rust `CODE_EXTS` and
+ *  `EXTRA_EXTS` (lockstep test). */
+export const OPT_IN_EXTS: Readonly<Record<OptInGroup, readonly string[]>> = {
+  code: FORMATS.filter((f) => f.optIn === "code").flatMap((f) => f.exts).sort(),
+  extra: FORMATS.filter((f) => f.optIn === "extra").flatMap((f) => f.exts).sort(),
+};
+
+/** The optional groups the OPEN vault's sync rules switch on. Set by the sync
+ *  layer whenever the rules change (`registry.setSyncRules`), read by every
+ *  "does this sync?" question. One vault is open at a time. */
+let enabledOptIns: ReadonlySet<OptInGroup> = new Set();
+
+export function setEnabledOptIns(groups: Iterable<OptInGroup>): void {
+  enabledOptIns = new Set(groups);
+}
+
+export function optInEnabled(group: OptInGroup): boolean {
+  return enabledOptIns.has(group);
+}
+
+/** Does the tree surface (and sync) this format in the open vault? */
+export function isSurfacedFormat(format: FormatDef): boolean {
+  return format.surface || (!!format.optIn && enabledOptIns.has(format.optIn));
 }
 
 /** Every surfaced extension, sorted — the same set as Rust `ALLOWED_EXTS`. */

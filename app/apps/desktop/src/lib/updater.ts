@@ -240,9 +240,24 @@ export async function checkForUpdate(
       parkReleasePending();
       return false;
     }
-    setState({ phase: "error", message });
+    reportUpdateError(message);
     return false;
   }
+}
+
+/**
+ * A failed check or install: the raw text goes to the log only; the UI words it
+ * plainly (lib/updateView.ts). A debug or test build run from a temp folder
+ * under /var (a symlink on macOS) cannot update itself at all, so in dev that
+ * one case is not shown as an error.
+ */
+function reportUpdateError(message: string): void {
+  console.warn("[updater] update failed:", message);
+  if (import.meta.env.DEV && /contains a symlink/i.test(message)) {
+    setState({ phase: "idle" });
+    return;
+  }
+  setState({ phase: "error", message });
 }
 
 /** Write the open note's debounced buffer to disk. Never throws. */
@@ -335,7 +350,7 @@ export async function installUpdate(
       parkReleasePending();
       return false;
     }
-    setState({ phase: "error", message });
+    reportUpdateError(message);
     return false;
   }
 }

@@ -446,7 +446,12 @@ export function FileTree() {
   // picks a new list up without re-rendering the tree when nothing moved.
   const localOnlyKey = useStore((s) =>
     s.syncEnabled
-      ? syncManager.registry.heldRefusals().map((f) => f.path).join("\u0000")
+      ? [
+          ...syncManager.registry.heldRefusals().map((f) => f.path),
+          // Kept here unsynced: a teammate moved it into a folder this vault's
+          // sync rules hide (#401).
+          ...syncManager.registry.frozenFilePaths(),
+        ].join("\u0000")
       : "",
   );
   const syncIndex = useMemo<TreeSyncIndex | null>(() => {

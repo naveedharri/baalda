@@ -51,10 +51,10 @@ export function updateCheckToast(state: UpdateState): { text: string; tone: Toas
     case "available":
       return { text: `Version ${state.version} found. Starting the download…`, tone: "neutral" };
     case "error":
-      return { text: `Couldn't check for updates: ${state.message}`, tone: "error" };
+      return { text: "Couldn't check for updates. Try again later.", tone: "error" };
     case "failed":
       return {
-        text: `Couldn't install version ${state.version}${state.message ? `: ${state.message}` : ""}`,
+        text: `Couldn't install version ${state.version}. Try again later.`,
         tone: "error",
       };
     default:

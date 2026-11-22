@@ -31,6 +31,7 @@ import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
+import { normalizeFolders, normalizeTypes, SyncRuleSet } from "../syncRules/match";
 import {
   isVaultKeyBlocked,
   onVaultKeyEvent,
@@ -315,6 +316,7 @@ const USER_PULL_REASONS: ReadonlySet<RegistryPullReason> = new Set<RegistryPullR
   "delete-confirmed",
   "revert",
   "shared-navigation",
+  "rules",
 ]);
 
 /**
@@ -385,6 +387,8 @@ export type RegistryPullReason =
   | "revert"
   // #221: the user answered a held bulk delete.
   | "delete-restore"
+  // #401: the vault's sync rules changed (this device saved them, or a frame).
+  | "rules"
   | "delete-confirmed"
   // #262: a `meta` frame (last-edited stamps only), after its throttle.
   | "meta-frame";
@@ -1660,6 +1664,11 @@ export class SyncManager implements InboundHost {
     // "the server told us the structure moved" from "the server told us to
     // re-mint a token, and we pulled anyway" in #93.
     console.info(`[sync] registry pull requested (${reason})`);
+    // A reconnect may have missed a `sync-rules-changed` frame (#401).
+    if (reason === "channel-synced") {
+      const scope = this.scope;
+      if (scope?.isCurrent() && scope.orgId) void this.refreshSyncRules(scope, scope.orgId);
+    }
     if (reason === "registry-frame") this.attachmentsOwedByFrame = true;
     this.armRegistryPull(reason, opts?.fileChange === true);
   }
@@ -2226,6 +2235,9 @@ export class SyncManager implements InboundHost {
   }
 
   handleServerRevoked(docIds: string[], truncated: boolean, scope: VaultScope): void {
+    // A note the sync rules hide is outside sync: what happens to its access
+    // changes nothing on this disk (#401).
+    docIds = docIds.filter((id) => !this.registry.isParked(id));
     if (!scope.isCurrent() || docIds.length === 0) return;
     this.aclChangedAt = Date.now();
     // Unioned, never replaced: a later connect's list is bounded by whatever is
@@ -2649,8 +2661,36 @@ export class SyncManager implements InboundHost {
         { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
       );
       if (!scope.isCurrent()) return;
-      const gone = stillGone.filter((x): x is { docId: string; relPath: string } => x != null);
+      let gone = stillGone.filter((x): x is { docId: string; relPath: string } => x != null);
       if (gone.length === 0) return;
+
+      // 1b. Moved INTO a folder the vault's sync rules hide (#401), e.g. in
+      //     Finder: the watcher never reports the new half as a change, only as
+      //     `ignored`. Same text there ⇒ the note is parked, never deleted for
+      //     everyone; the server copy stays where it was for the team.
+      if (this.recentIgnored.size > 0) {
+        const hidden = await this.hiddenArrivals(scope);
+        if (!scope.isCurrent()) return;
+        if (hidden.size > 0) {
+          const kept: typeof gone = [];
+          for (const item of gone) {
+            const text = await this.docText(item.docId, item.relPath);
+            if (!scope.isCurrent()) return;
+            // An empty note pairs with an empty hidden file too: a wrong pairing
+            // only keeps the server copy, the safe direction.
+            const sha = text == null ? null : await sha256Hex(text);
+            const to = sha ? hidden.get(sha)?.shift() : undefined;
+            if (sha && to) {
+              this.registry.parkMovedOut(item.docId, item.relPath, to);
+              this.tellMovedToHidden(item.relPath);
+              continue;
+            }
+            kept.push(item);
+          }
+          gone = kept;
+          if (gone.length === 0) return;
+        }
+      }
 
       // 2. Blast radius FIRST (see {@link diskDeleteCap}) — but ONLY for a
       //    window that carries no rename candidates at all.
@@ -4058,6 +4098,217 @@ export class SyncManager implements InboundHost {
     this.onNotePathChanged?.(docId, from, to);
   }
 
+  // ---- Sync rules (#401) --------------------------------------------------
+
+  /** Hidden paths the watcher saw exist lately (path → when): the possible new
+   *  half of a move into a folder that doesn't sync. */
+  private recentIgnored = new Map<string, number>();
+  private static readonly HIDDEN_ARRIVAL_MS = 30_000;
+
+  /** The watcher's `ignored` list (App routes it here). */
+  noteIgnoredPaths(paths: readonly string[]): void {
+    if (paths.length === 0) return;
+    const now = Date.now();
+    for (const p of paths) this.recentIgnored.set(p, now);
+    for (const [p, at] of this.recentIgnored) {
+      if (now - at > SyncManager.HIDDEN_ARRIVAL_MS) this.recentIgnored.delete(p);
+    }
+  }
+
+  /** sha256 → hidden paths (oldest first), for the files that appeared in
+   *  hidden folders lately. Each pairing consumes one path. */
+  private async hiddenArrivals(scope: VaultScope): Promise<Map<string, string[]>> {
+    const now = Date.now();
+    for (const [p, at] of this.recentIgnored) {
+      if (now - at > SyncManager.HIDDEN_ARRIVAL_MS) this.recentIgnored.delete(p);
+    }
+    const out = new Map<string, string[]>();
+    if (this.recentIgnored.size === 0) return out;
+    try {
+      const rows = await ipc.excludedHashes([...this.recentIgnored.keys()], scope.vaultEpoch);
+      for (const r of rows) {
+        const list = out.get(r.sha256);
+        if (list) list.push(r.path);
+        else out.set(r.sha256, [r.path]);
+      }
+    } catch (e) {
+      console.warn("[sync-rules] could not read the hidden folder for a move", e);
+    }
+    return out;
+  }
+
+  /** The binary delete queue's question: did this file move into a hidden
+   *  folder? Parks it (no server call) when it did. */
+  private async binaryMovedToHidden(scope: VaultScope, relPath: string, sha256: string): Promise<boolean> {
+    if (this.recentIgnored.size === 0 || !sha256) return false;
+    const hidden = await this.hiddenArrivals(scope);
+    const to = hidden.get(sha256)?.[0];
+    if (!to || !scope.isCurrent()) return false;
+    if (!this.registry.parkMovedFile(relPath, to)) return false;
+    this.attachments?.forgetFile(relPath);
+    this.tellMovedToHidden(relPath);
+    return true;
+  }
+
+  private tellMovedToHidden(relPath: string): void {
+    const name = relPath.split("/").pop() ?? relPath;
+    toast(`${name} moved to a folder that doesn't sync. Your teammates keep their copy.`, "neutral");
+  }
+
+  private onNoteParked?: (docId: string, relPath: string) => void;
+  private onSyncRulesApplied?: () => void;
+
+  /** Registry host hook: the rules now hide this note. Its bridge is already
+   *  released; the UI closes the tab (the file stays on disk). */
+  noteParked(docId: string, relPath: string): void {
+    this.onNoteParked?.(docId, relPath);
+  }
+
+  /** Registry host hook: a hidden note came back. Whatever was typed into the
+   *  file meanwhile goes up through the external-edit route, and the forced
+   *  connect also pulls what teammates wrote while it was hidden (those live
+   *  updates were dropped here, never written into the old CRDT). */
+  parkedReturned(docId: string, relPath: string): void {
+    this.divergedDocs.add(docId);
+    this.handleLocalFileChanged(relPath, "modified");
+  }
+
+  /** The UI: refresh the sidebar (and close what is now hidden) after rules change. */
+  setSyncRulesListeners(listeners: {
+    onApplied?: () => void;
+    onNoteParked?: (docId: string, relPath: string) => void;
+  }): void {
+    this.onSyncRulesApplied = listeners.onApplied;
+    this.onNoteParked = listeners.onNoteParked;
+  }
+
+  /** The rules this session applies (what Rust walks with). */
+  syncRulesSource(): string {
+    return this.registry.syncRules().source;
+  }
+
+  /** Launch: what Rust already walks with, before anything else reads the tree. */
+  private async loadLocalSyncRules(scope: VaultScope): Promise<void> {
+    try {
+      const doc = await ipc.getSyncRules(scope.vaultEpoch);
+      if (scope.isCurrent()) {
+        this.registry.setSyncRules(
+          new SyncRuleSet(doc?.patterns ?? "", normalizeTypes(doc?.types), normalizeFolders(doc?.folders)),
+        );
+      }
+    } catch (e) {
+      console.warn("[sync-rules] could not read this vault's saved rules", e);
+    }
+  }
+
+  /**
+   * Fetch the vault's rules and apply them when they differ from what this
+   * device walks with. Never throws. A server without the feature (404), or no
+   * answer, keeps what this device already has: a rule never deletes, so the
+   * only cost of a stale set is a file shown or hidden a little longer.
+   */
+  async refreshSyncRules(scope: VaultScope, orgId: string, opts: { pull?: boolean } = {}): Promise<void> {
+    let res: Awaited<ReturnType<typeof api.getSyncRules>>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      res = await Promise.race([
+        api.getSyncRules(orgId),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("timed out")), 8000);
+        }),
+      ]);
+    } catch (e) {
+      if ((e as { status?: number } | null)?.status !== 404) {
+        console.warn("[sync-rules] could not fetch the vault's rules; keeping this device's", e);
+      }
+      return;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if (!scope.isCurrent()) return;
+    // The vault has never had rules on the server, but this folder has some of
+    // its own (set while it was a local vault): they become the vault's rules.
+    // Never install the empty default over them, which would upload everything
+    // they hid. A member can't write them, so this device keeps its own.
+    const localRules = this.registry.syncRules();
+    const local = localRules.source;
+    const anyOn = (r: { types: { code: boolean; extra: boolean }; folders: { hidden: boolean; build: boolean } }) =>
+      r.types.code || r.types.extra || r.folders.hidden || r.folders.build;
+    const localHasRules = local.trim() !== "" || anyOn(localRules);
+    if (res.revision === 0 && res.rules.patterns === "" && !anyOn(res.rules) && localHasRules) {
+      try {
+        const put = await api.putSyncRules(orgId, local, 0, localRules.types, localRules.folders);
+        if (!scope.isCurrent()) return;
+        await ipc.setSyncRules(
+          {
+            version: 1,
+            patterns: put.rules.patterns,
+            types: put.rules.types,
+            folders: put.rules.folders,
+            revision: put.revision,
+          },
+          scope.vaultEpoch,
+        );
+        console.info("[sync-rules] this folder's own rules are now the vault's rules");
+      } catch (e) {
+        console.warn("[sync-rules] kept this folder's own rules; the vault has none yet", e);
+      }
+      return;
+    }
+    await this.applySyncRules(
+      scope,
+      {
+        version: 1,
+        patterns: res.rules.patterns,
+        types: res.rules.types,
+        folders: res.rules.folders,
+        revision: res.revision,
+      },
+      opts,
+    );
+  }
+
+  /** The open vault's scope, for UI callers (the Sync tab after a save). */
+  async applySyncRulesNow(doc: ipc.SyncRulesDoc): Promise<boolean> {
+    const scope = this.scope;
+    if (!scope || !scope.isCurrent()) return false;
+    return this.applySyncRules(scope, doc, { pull: true });
+  }
+
+  /**
+   * Apply one rules document, in the only safe order: the registry parks what
+   * the new rules hide, THEN Rust starts hiding it, THEN one pull returns what
+   * they stopped hiding (`registry.changeRules` serializes this on the pull
+   * chain). Nothing here deletes, uploads or downloads by itself.
+   */
+  private async applySyncRules(
+    scope: VaultScope,
+    doc: ipc.SyncRulesDoc,
+    opts: { pull?: boolean },
+  ): Promise<boolean> {
+    if (!scope.isCurrent()) return false;
+    if (this.registry.syncRules().sameAs(doc)) return false;
+    try {
+      await this.registry.changeRules(new SyncRuleSet(doc.patterns, normalizeTypes(doc.types), normalizeFolders(doc.folders)), async () => {
+        await ipc.setSyncRules(doc, scope.vaultEpoch);
+      });
+    } catch (e) {
+      console.warn("[sync-rules] could not apply the vault's rules", e);
+      return false;
+    }
+    if (!scope.isCurrent()) return true;
+    const parked = this.registry.parkedCount();
+    console.info(
+      `[sync-rules] applied (${parked.notes} notes, ${parked.files} files set aside on this computer)`,
+    );
+    this.onSyncRulesApplied?.();
+    if (opts.pull !== false && this.enabled) {
+      this.handleRegistryChanged("rules");
+      this.attachments?.scheduleReconcile();
+    }
+    return true;
+  }
+
   /**
    * Fill a freshly materialized placeholder from THIS DEVICE's local CRDT.
    *
@@ -4591,7 +4842,7 @@ export class SyncManager implements InboundHost {
       this.lastCrdtSweepAt = Date.now();
       console.info("[crdt-gc] idle sweep");
       void collectCrdtGarbage(
-        { registryDocIds: () => this.registry.allDocIds() },
+        { registryDocIds: () => this.registry.crdtKeepIds() },
         { epoch: scope.vaultEpoch ?? undefined, pinned: this.crdtSweepPinned() },
       );
     }, delay);
@@ -5072,6 +5323,8 @@ export class SyncManager implements InboundHost {
    */
   private handleServerBehind(docIds: string[], scope: VaultScope): void {
     if (!scope.isCurrent()) return;
+    // Hidden by the vault's sync rules (#401): never pushed from here.
+    docIds = docIds.filter((id) => !this.registry.isParked(id));
     if (docIds.length > 0) {
       this.note(
         "info",
@@ -5094,6 +5347,7 @@ export class SyncManager implements InboundHost {
    */
   private handleServerEmpty(docIds: string[], truncated: boolean, scope: VaultScope): void {
     if (!scope.isCurrent()) return;
+    docIds = docIds.filter((id) => !this.registry.isParked(id));
     this.clearChannelWatchdog(); // `ready` arrived — the channel is alive
     if (docIds.length > 0) {
       this.note(
@@ -5430,6 +5684,11 @@ export class SyncManager implements InboundHost {
     // it seeds (spec 03 §5) instead of taking the local-only branch and forking
     // the doc. Best-effort: a folder with no (or a foreign) stamp doesn't prime,
     // and a broken config must not fail the enable.
+    // The vault's saved sync rules (#401), read alongside the prime: the prime
+    // only adopts the saved map (parked ids included), and Rust already walks
+    // with these rules, so the registry needs them before the first PULL, not
+    // before this read. Never throws.
+    const localRulesLoaded = this.loadLocalSyncRules(scope);
     try {
       if (await registry.primeLocal(vault.orgId)) {
         if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
@@ -5474,6 +5733,13 @@ export class SyncManager implements InboundHost {
     // the verified key held): a primed vault the early check held back opens its
     // channel here, still beside the reconcile. Idempotent if it already opened.
     if (this.primed) this.startVaultEngine(scope);
+    // The vault's CURRENT sync rules, before the first pass decides anything:
+    // a device that saw them change while closed parks or returns items now,
+    // rather than one pass late. No answer keeps the saved ones.
+    await localRulesLoaded;
+    if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
+    await this.refreshSyncRules(scope, vault.orgId, { pull: false });
+    if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
     // ---- PHASE B: the networked reconcile. Unchanged. ----
     try {
       // The registry reads the vault tree itself (the FULL recursive walk); it
@@ -5525,7 +5791,7 @@ export class SyncManager implements InboundHost {
       // two id spaces.
       this.lastCrdtSweepAt = Date.now();
       void collectCrdtGarbage(
-        { registryDocIds: () => registry.allDocIds() },
+        { registryDocIds: () => registry.crdtKeepIds() },
         { epoch: scope.vaultEpoch ?? undefined, pinned: this.crdtSweepPinned() },
       );
       this.setupAttachments(scope);
@@ -7305,6 +7571,12 @@ export class SyncManager implements InboundHost {
       onAppearanceChanged: (change) => this.onAppearanceChanged?.(change),
       // Team skills changed — the skills sync refetches its manifest.
       onSkillsChanged: (orgId) => this.onSkillsChanged?.(orgId),
+      // The vault's sync rules changed (#401): refetch and apply them here.
+      onSyncRulesChanged: (orgId) => {
+        if (scope.isCurrent() && (!scope.orgId || scope.orgId === orgId)) {
+          void this.refreshSyncRules(scope, orgId);
+        }
+      },
       // A teammate's viewing state changed — update the sidebar presence roster.
       onPresence: (peer) => this.handleVaultPresence(peer),
       // A teammate is talking. Play it as it lands; nothing is kept.
@@ -7508,7 +7780,9 @@ export class SyncManager implements InboundHost {
       // for binaries that never left the disk.
       exists: (relPath) => ipc.binaryExists(relPath, epoch),
       listLocal: () => ipc.listBinaries(epoch),
-      listServer: () => api.listVaultBlobs(vaultId),
+      // What the vault's sync rules hide is never deleted from here (#401).
+      listServer: () => api.listVaultBlobs(vaultId).then((b) => registry.filterBlobListing(b)),
+      movedIntoHidden: (relPath, sha) => this.binaryMovedToHidden(scope, relPath, sha),
       fileId: (relPath) => registry.getFileId(relPath),
       isOwnRemoval: (relPath) => registry.isOwnRemoval(relPath),
       // The mirror caches ids per path too, and consults that cache BEFORE the
@@ -7570,7 +7844,10 @@ export class SyncManager implements InboundHost {
       refusals: scopedRefusalStore(defaultRefusalStore(), `${refusalServerScope()}|${vaultId}`),
       // The WHOLE vault, not just `attachments/`: a `.docx` in `Team/` is a
       // blob like any other since it got its own `files` row (PR3 Stage A).
-      listLocal: () => ipc.listBinaries(epoch),
+      // Minus the copies kept here unsynced after a teammate moved them into a
+      // folder the sync rules hide (#401): uploading those would undo the move.
+      listLocal: () =>
+        ipc.listBinaries(epoch).then((l) => l.filter((a) => !registry.isFrozenPath(a.relPath))),
       readLocal: (relPath) => ipc.readBinaryFile(relPath, epoch),
       writeLocal: (relPath, bytes) => ipc.writeBinaryFile(relPath, bytes, epoch),
       // A tree binary materializes through its OWN guard; the `attachments/`
@@ -7587,7 +7864,9 @@ export class SyncManager implements InboundHost {
       // folder a teammate deleted, waits with the folder like the notes in it:
       // each ask would be `path_folder_mismatch`.
       isHeldCreate: (relPath) => registry.isHeldRefusal(relPath) || registry.isInsideDeadFolder(relPath),
-      listServer: () => api.listVaultBlobs(vaultId),
+      // Minus what the vault's sync rules hide (#401): never downloaded,
+      // uploaded or followed from here.
+      listServer: () => api.listVaultBlobs(vaultId).then((b) => registry.filterBlobListing(b)),
       // The legacy pair: still the whole flow for a server that predates the
       // intent route, and the fallback the client drops to on its 404.
       uploadServer: (relPath, bytes, mime, docId, baseSha) =>
@@ -7702,8 +7981,7 @@ export class SyncManager implements InboundHost {
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
       forgetFileId: (relPath) => registry.forgetFileId(relPath),
-      followFileMove: (from, to) => registry.followFileMove(from, to),
-      // Only ever used to drop a row THIS device minted for bytes the server
+      followFileMove: (from, to) => registry.followFileMove(from, to),      // Only ever used to drop a row THIS device minted for bytes the server
       // already holds under another id (`reconcileDedupedRow`).
       deleteFile: (id) => api.deleteFile(id),
       // A rename the delete queue could not settle (the server was unreachable

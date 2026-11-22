@@ -1495,7 +1495,10 @@ export default function App() {
       // Whole batches, not one event per file: the sync layer folds every
       // unmapped/structural item in a batch into a SINGLE registry pull, which it
       // cannot do when the items arrive one at a time.
-      unlistenFile = await ipc.onFilesChanged((changes) => {
+      unlistenFile = await ipc.onFilesChanged((changes, ignored) => {
+        // Paths the vault's sync rules hide: only the delete drain's move
+        // pairing reads them (#401).
+        if (ignored.length > 0) syncManager.noteIgnoredPaths(ignored);
         if (changes.length === 0) return;
         const open = useStore.getState().openNote;
         const forSync: ipc.FileChanged[] = [];

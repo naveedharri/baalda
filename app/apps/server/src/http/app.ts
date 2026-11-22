@@ -24,6 +24,8 @@ import { invitationRoutes } from "./routes/invitations.js";
 import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
 import { ACCESS_GROUPS_FEATURE, createGroupRoutes } from "./routes/groups.js";
 import { createAppearanceRoutes } from "./routes/appearance.js";
+import { createSyncRulesRoutes } from "./routes/sync-rules.js";
+import { MORE_FILE_TYPES_FEATURE, SYNC_FOLDER_SWITCHES_FEATURE, SYNC_RULES_FEATURE } from "../sync-rules/schema.js";
 import { createFontRoutes } from "./fonts.js";
 import { createSkillRoutes } from "./routes/skills.js";
 import { SKILL_ACCESS_FEATURE, SKILLS_FEATURE } from "../skills/feature.js";
@@ -349,6 +351,10 @@ export function createApp(deps: AppDeps): Hono {
         MESSAGES_FEATURE,
         // `DELETE /api/folders/:id?ifEmpty=1` (registry/tree-ops.ts).
         FOLDER_DELETE_IF_EMPTY_FEATURE,
+        // The vault's sync rules (`/api/orgs/:orgId/sync-rules`, #401).
+        SYNC_RULES_FEATURE,
+        MORE_FILE_TYPES_FEATURE,
+        SYNC_FOLDER_SWITCHES_FEATURE,
         // Client-held vault keys (W3), only while BAALDA_VAULT_KEYS is on.
         ...(vaultKeysEnabled() ? [VAULT_KEYS_FEATURE] : []),
       ],
@@ -492,6 +498,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api", memberRoutes);
   app.route("/api", accessAuditRoutes);
   app.route("/api", createAppearanceRoutes(deps));
+  app.route("/api", createSyncRulesRoutes());
   app.route("/api", createSkillRoutes());
   app.route("/api", createMessageRoutes());
   // Client-held vault keys (W3): off unless BAALDA_VAULT_KEYS is on. The

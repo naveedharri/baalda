@@ -170,6 +170,7 @@ fn ensure_tree_binary_rel(rel: &str) -> AppResult<()> {
 /// different accepted set.
 pub fn write_tree_binary(vault: &Path, rel: &str, bytes: &[u8]) -> AppResult<()> {
     ensure_tree_binary_rel(rel)?;
+    crate::vault::refuse_excluded(vault, rel, false)?;
     write_bytes_atomic(vault, rel, bytes)
 }
 
@@ -377,10 +378,14 @@ fn walk(
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
+            // The vault's sync rules (#401): never walked, never uploaded.
+            if crate::sync_rules::excludes(vault, &rel_from(vault, &path), true) {
+                continue;
+            }
             walk(vault, &path, keep, out)?;
         } else if file_type.is_file() {
             let rel = rel_from(vault, &path);
-            if !keep(&rel) {
+            if !keep(&rel) || crate::sync_rules::excludes(vault, &rel, false) {
                 continue;
             }
             let meta = entry.metadata()?;
@@ -768,6 +773,8 @@ pub async fn download_file(
 ) -> AppResult<DownloadOutcome> {
     if tree {
         ensure_tree_binary_rel(rel)?;
+        // Not a permanent failure on purpose: lifting the rule makes it valid.
+        crate::vault::refuse_excluded(vault, rel, false)?;
     } else {
         ensure_attachment_rel(rel)?;
     }

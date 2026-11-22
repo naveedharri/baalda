@@ -525,8 +525,20 @@ export const createFolder = (parent: string, name: string, expectedEpoch?: Vault
 // loop or a native dialog. A rename/delete that lands after a vault switch would
 // otherwise move or destroy the same relative path in the vault the user just
 // opened.
-export const renamePath = (from: string, to: string, expectedEpoch?: VaultEpoch) =>
-  invoke<string>("rename_path", { from, to, expectedEpoch: expectedEpoch ?? null });
+export const renamePath = (
+  from: string,
+  to: string,
+  expectedEpoch?: VaultEpoch,
+  opts?: { allowExcludedTarget?: boolean },
+) =>
+  invoke<string>("rename_path", {
+    from,
+    to,
+    expectedEpoch: expectedEpoch ?? null,
+    // Only the sync layer sets it: following a teammate's move INTO a folder
+    // the vault's sync rules hide (#401). The UI never may.
+    allowExcludedTarget: opts?.allowExcludedTarget ?? null,
+  });
 /** Idempotent folder create — safe to call on every reconcile. Resolves true
  *  when THIS call created the directory (the watcher will echo it), false when
  *  it already existed — including under another spelling on a case-insensitive
@@ -1243,14 +1255,66 @@ export const getVaultEpoch = () => invoke<number>("get_vault_epoch");
  */
 export interface FilesChanged {
   changes: FileChanged[];
+  /** Paths the vault's sync rules hide (#401) that exist right now. Never in
+   *  `changes`; only the delete drain reads them (a move INTO a folder that
+   *  doesn't sync parks the note instead of deleting it). Absent when empty. */
+  ignored?: string[];
 }
 
 /** Subscribe to whole watcher batches — what the sync layer wants, because a
  *  batch has exactly ONE structural conclusion to draw. */
 export const onFilesChanged = (
-  cb: (changes: FileChanged[]) => void,
+  cb: (changes: FileChanged[], ignored: string[]) => void,
 ): Promise<UnlistenFn> =>
-  listen<FilesChanged>("files-changed", (event) => cb(event.payload?.changes ?? []));
+  listen<FilesChanged>("files-changed", (event) =>
+    cb(event.payload?.changes ?? [], event.payload?.ignored ?? []),
+  );
+
+// ---- Sync rules (#401) ------------------------------------------------------
+
+/** The vault's sync rules as Rust holds them (`.context/sync-rules.json`). */
+export interface SyncRulesDoc {
+  version: number;
+  patterns: string;
+  /** Optional file-type groups (`syncRules/match.ts SyncTypes`). */
+  types?: { code?: boolean; extra?: boolean };
+  /** Folder switches (`syncRules/folders.ts SyncFolders`). */
+  folders?: { hidden?: boolean; build?: boolean };
+  revision?: number | null;
+  [extra: string]: unknown;
+}
+export interface SyncRulesCounts {
+  files: number;
+  folders: number;
+}
+export interface SyncRulesPreview {
+  current: SyncRulesCounts;
+  candidate: SyncRulesCounts;
+  newlyHidden: string[];
+  newlyShown: string[];
+  truncated: boolean;
+}
+/** The rules Rust walks with right now (null = none saved on this device). */
+export const getSyncRules = (expectedEpoch?: VaultEpoch) =>
+  invoke<SyncRulesDoc | null>("get_sync_rules", { expectedEpoch: expectedEpoch ?? null });
+/** Save + install; Rust re-walks the index when the patterns changed. */
+export const setSyncRules = (doc: SyncRulesDoc, expectedEpoch?: VaultEpoch) =>
+  invoke<{ changed: boolean }>("set_sync_rules", { doc, expectedEpoch: expectedEpoch ?? null });
+/** What `patterns` would hide and show on this computer, without applying it. */
+/** What the candidate rules (patterns AND switches) would hide here, beside
+ *  what the rules in force hide. */
+export const previewSyncRules = (
+  patterns: string,
+  types?: { code: boolean; extra: boolean },
+  folders?: { hidden: boolean; build: boolean },
+) => invoke<SyncRulesPreview>("preview_sync_rules", { patterns, types: types ?? null, folders: folders ?? null });
+/** sha256 of the files at/under these excluded paths (the delete drain's
+ *  move-into-a-hidden-folder pairing). */
+export const excludedHashes = (paths: string[], expectedEpoch?: VaultEpoch) =>
+  invoke<Array<{ path: string; sha256: string; isNote: boolean }>>("excluded_hashes", {
+    paths,
+    expectedEpoch: expectedEpoch ?? null,
+  });
 
 /** Per-item adapter over {@link onFilesChanged}, for callers that only care that
  *  *something* changed (the graph, the HTML view, the open note's bridge). */

@@ -57,6 +57,7 @@ const fakeRegistry = vi.hoisted(() => {
     }),
     pathForDocId: vi.fn((): string | null => null),
     allDocIds: vi.fn((): string[] => []),
+    crdtKeepIds: (): string[] => reg.allDocIds(),
     isNoteEmptyOnDisk: vi.fn(async () => false),
     setProgressSink: vi.fn(),
     setMapListener: vi.fn((cb: (() => void) | null) => {

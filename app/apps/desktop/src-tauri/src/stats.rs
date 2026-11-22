@@ -202,7 +202,14 @@ pub fn census_files(vault: &Path, index: &Index) -> AppResult<Census> {
             // Never descend into .context/.git/dotfolders/node_modules — same
             // predicate `Index::rebuild` and the watcher use.
             let name = e.file_name().to_string_lossy();
-            !(e.depth() > 0 && is_ignored_name(&name))
+            if e.depth() == 0 {
+                return true;
+            }
+            // …and the vault's own sync rules (#401), like the tree.
+            !is_ignored_name(&name)
+                && rel_from_abs(vault, e.path())
+                    .map(|rel| !crate::sync_rules::excludes(vault, &rel, e.file_type().is_dir()))
+                    .unwrap_or(true)
         })
         .filter_map(|e| e.ok())
     {

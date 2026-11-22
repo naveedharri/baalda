@@ -27,6 +27,7 @@ const fakeRegistry = vi.hoisted(() => {
     getMapping: vi.fn((_relPath: string): { vaultId: string; docId: string } | null => null),
     pathForDocId: vi.fn((_docId: string): string | null => null),
     allDocIds: vi.fn((): string[] => []),
+    crdtKeepIds: (): string[] => reg.allDocIds(),
     isNoteEmptyOnDisk: vi.fn(async () => false),
     setProgressSink: vi.fn(),
     setMapListener: vi.fn(),

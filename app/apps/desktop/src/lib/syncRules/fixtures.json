@@ -1,0 +1,448 @@
+[
+  {
+    "name": "the issue's example: a code checkout inside a project",
+    "patterns": "projects/my-app/code/\n",
+    "cases": [
+      [
+        "projects/my-app/code",
+        true,
+        true
+      ],
+      [
+        "projects/my-app/code/README.md",
+        false,
+        true
+      ],
+      [
+        "projects/my-app/code/src/deep/x.py",
+        false,
+        true
+      ],
+      [
+        "projects/my-app/context.md",
+        false,
+        false
+      ],
+      [
+        "projects/my-app/code.md",
+        false,
+        false
+      ],
+      [
+        "projects/my-app/code",
+        false,
+        false
+      ],
+      [
+        "other/projects/my-app/code/a.md",
+        false,
+        false
+      ],
+      [
+        "Projects/My-App/Code/README.md",
+        false,
+        true
+      ]
+    ]
+  },
+  {
+    "name": "a bare folder name matches at any depth",
+    "patterns": "code/\n",
+    "cases": [
+      [
+        "code",
+        true,
+        true
+      ],
+      [
+        "a/b/code",
+        true,
+        true
+      ],
+      [
+        "a/b/code/x.md",
+        false,
+        true
+      ],
+      [
+        "code",
+        false,
+        false
+      ],
+      [
+        "a/codes/x.md",
+        false,
+        false
+      ],
+      [
+        "a/code.md",
+        false,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "a bare name without slash matches files and folders",
+    "patterns": "drafts\n",
+    "cases": [
+      [
+        "drafts",
+        false,
+        true
+      ],
+      [
+        "drafts",
+        true,
+        true
+      ],
+      [
+        "a/drafts/x.md",
+        false,
+        true
+      ],
+      [
+        "a/drafts.md",
+        false,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "leading slash anchors to the root",
+    "patterns": "/archive\n",
+    "cases": [
+      [
+        "archive",
+        true,
+        true
+      ],
+      [
+        "archive/x.md",
+        false,
+        true
+      ],
+      [
+        "notes/archive",
+        true,
+        false
+      ],
+      [
+        "notes/archive/x.md",
+        false,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "star stays within one folder",
+    "patterns": "*.log\nnotes/*.tmp.md\n",
+    "cases": [
+      [
+        "a.log",
+        false,
+        true
+      ],
+      [
+        "deep/dir/a.log",
+        false,
+        true
+      ],
+      [
+        "a.log.md",
+        false,
+        false
+      ],
+      [
+        "notes/x.tmp.md",
+        false,
+        true
+      ],
+      [
+        "notes/sub/x.tmp.md",
+        false,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "double star crosses folders",
+    "patterns": "**/build-output/\nreports/**/draft-*.md\nlogs/**\n",
+    "cases": [
+      [
+        "build-output",
+        true,
+        true
+      ],
+      [
+        "a/b/build-output/x.md",
+        false,
+        true
+      ],
+      [
+        "reports/draft-1.md",
+        false,
+        true
+      ],
+      [
+        "reports/2026/q1/draft-x.md",
+        false,
+        true
+      ],
+      [
+        "reports/final.md",
+        false,
+        false
+      ],
+      [
+        "logs/a.md",
+        false,
+        true
+      ],
+      [
+        "logs/x/y.md",
+        false,
+        true
+      ],
+      [
+        "logs",
+        true,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "question mark is one character",
+    "patterns": "v?.md\n",
+    "cases": [
+      [
+        "v1.md",
+        false,
+        true
+      ],
+      [
+        "x/v2.md",
+        false,
+        true
+      ],
+      [
+        "v10.md",
+        false,
+        false
+      ],
+      [
+        "v/.md",
+        false,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "negation re-includes, last match wins",
+    "patterns": "*.csv\n!keep.csv\n",
+    "cases": [
+      [
+        "a.csv",
+        false,
+        true
+      ],
+      [
+        "keep.csv",
+        false,
+        false
+      ],
+      [
+        "dir/keep.csv",
+        false,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "a file inside an excluded folder cannot be re-included",
+    "patterns": "private/\n!private/ok.md\n",
+    "cases": [
+      [
+        "private/ok.md",
+        false,
+        true
+      ],
+      [
+        "private/other.md",
+        false,
+        true
+      ],
+      [
+        "public/ok.md",
+        false,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "comments, blanks and escapes",
+    "patterns": "# a comment\n\n   \n\\#hash.md\n\\!bang.md\n  spaced.md  \n",
+    "cases": [
+      [
+        "#hash.md",
+        false,
+        true
+      ],
+      [
+        "!bang.md",
+        false,
+        true
+      ],
+      [
+        "spaced.md",
+        false,
+        true
+      ],
+      [
+        "a comment",
+        false,
+        false
+      ],
+      [
+        "comment",
+        false,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "regex metacharacters are literal",
+    "patterns": "notes (old)/\na+b.md\n[draft].md\nprice$.md\n",
+    "cases": [
+      [
+        "notes (old)/x.md",
+        false,
+        true
+      ],
+      [
+        "notes old/x.md",
+        false,
+        false
+      ],
+      [
+        "a+b.md",
+        false,
+        true
+      ],
+      [
+        "aab.md",
+        false,
+        false
+      ],
+      [
+        "[draft].md",
+        false,
+        true
+      ],
+      [
+        "d.md",
+        false,
+        false
+      ],
+      [
+        "price$.md",
+        false,
+        true
+      ]
+    ]
+  },
+  {
+    "name": "dot is literal, not any character",
+    "patterns": "a.md\n",
+    "cases": [
+      [
+        "a.md",
+        false,
+        true
+      ],
+      [
+        "axmd",
+        false,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "directory-only pattern ignores a same-named file",
+    "patterns": "media/\n",
+    "cases": [
+      [
+        "media",
+        false,
+        false
+      ],
+      [
+        "media",
+        true,
+        true
+      ],
+      [
+        "x/media/clip.mp4",
+        false,
+        true
+      ]
+    ]
+  },
+  {
+    "name": "CRLF line endings",
+    "patterns": "code/\r\nsecret.md\r\n",
+    "cases": [
+      [
+        "code/a.md",
+        false,
+        true
+      ],
+      [
+        "secret.md",
+        false,
+        true
+      ],
+      [
+        "context.md",
+        false,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "empty rules exclude nothing",
+    "patterns": "",
+    "cases": [
+      [
+        "anything.md",
+        false,
+        false
+      ],
+      [
+        "deep/folder",
+        true,
+        false
+      ]
+    ]
+  },
+  {
+    "name": "unicode names",
+    "patterns": "Café/\n",
+    "cases": [
+      [
+        "Café/menu.md",
+        false,
+        true
+      ],
+      [
+        "café/menu.md",
+        false,
+        true
+      ],
+      [
+        "Cafe/menu.md",
+        false,
+        false
+      ]
+    ]
+  }
+]

@@ -226,6 +226,12 @@ export type ServerControl =
    * `GET /api/skills/manifest`; old clients ignore an unknown `t`.
    */
   | { t: "skills-changed"; orgId: string }
+  /**
+   * The vault's sync rules changed (owner/admin `PUT
+   * /api/orgs/:orgId/sync-rules`, #401). A hint to refetch them; old clients
+   * ignore an unknown `t`.
+   */
+  | { t: "sync-rules-changed"; orgId: string; revision: number }
   | ({ t: "presence" } & PresenceState) // a teammate's live viewing state changed
   /**
    * A new desktop release exists (`sync/release-watch.ts`, #269). A HINT to run
@@ -522,6 +528,18 @@ export const PS_SKILLS_CHANGED = 0x0f;
  *  subscribes once and tells its own `messages`-cap connections. No body. */
 export const PS_MESSAGES_CHANGED = 0x10;
 
+/** The vault's sync rules changed — see the `sync-rules-changed` frame. */
+export const PS_SYNC_RULES_CHANGED = 0x11;
+
+/** JSON body after the type: `{orgId, revision}`. */
+export function encodePubsubSyncRulesChanged(orgId: string, revision: number): Uint8Array {
+  const body = enc.encode(JSON.stringify({ orgId, revision }));
+  const out = new Uint8Array(1 + body.length);
+  out[0] = PS_SYNC_RULES_CHANGED;
+  out.set(body, 1);
+  return out;
+}
+
 /** The one process-wide topic message hints travel on. */
 export const MESSAGES_TOPIC = "messages";
 
@@ -687,6 +705,7 @@ export type PubsubMessage =
   | { type: "org-changed"; change: OrgChange }
   | { type: "appearance-changed"; change: AppearanceChange }
   | { type: "skills-changed"; orgId: string }
+  | { type: "sync-rules-changed"; orgId: string; revision: number }
   | { type: "messages-changed" }
   | { type: "presence"; presence: PresenceState }
   | { type: "presence-query" }
@@ -812,6 +831,15 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
     }
     case PS_MESSAGES_CHANGED:
       return { type: "messages-changed" };
+    case PS_SYNC_RULES_CHANGED: {
+      try {
+        const p = JSON.parse(dec.decode(bytes.subarray(1))) as { orgId?: unknown; revision?: unknown };
+        if (typeof p?.orgId !== "string" || typeof p.revision !== "number") return null;
+        return { type: "sync-rules-changed", orgId: p.orgId, revision: p.revision };
+      } catch {
+        return null;
+      }
+    }
     case PS_SKILLS_CHANGED: {
       try {
         const p = JSON.parse(dec.decode(bytes.subarray(1))) as { orgId?: unknown };

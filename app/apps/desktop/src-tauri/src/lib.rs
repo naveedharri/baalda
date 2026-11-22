@@ -28,6 +28,7 @@ mod relaunch;
 pub mod skills_sync;
 mod state;
 pub mod stats;
+pub mod sync_rules;
 pub mod trash;
 pub mod tree;
 pub mod vault;
@@ -268,6 +269,10 @@ pub fn run() {
             commands::create_vault,
             commands::is_vault,
             commands::list_tree,
+            commands::get_sync_rules,
+            commands::set_sync_rules,
+            commands::preview_sync_rules,
+            commands::excluded_hashes,
             commands::list_children,
             commands::read_note,
             commands::note_exists,
