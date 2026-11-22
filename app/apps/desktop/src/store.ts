@@ -4787,8 +4787,8 @@ export const useStore = create<AppStore>((set, get) => ({
     if (path) {
       // Rust refuses links, roots, the home and vaults folders, and any folder
       // whose own stamp names a different vault. Permanent: no Trash, and the
-      // CRDT store under `.context/` goes with it. What the vault never synced
-      // (a rule-hidden checkout, dot folders, other file types) stays (#401).
+      // CRDT store under `.context/` goes with it. Only files the vault never
+      // registered and could not sync (a local checkout's own files) stay (#401).
       // Also drops it from recents.
       kept = await ipc.deleteDepartedVault(path, organizationId).then(
         (n) => (typeof n === "number" ? n : 0),

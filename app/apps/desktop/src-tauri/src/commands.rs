@@ -886,33 +886,46 @@ pub async fn delete_departed_vault(
     Ok(kept)
 }
 
-/// Membership ended: remove what this vault synced, and keep what it never
-/// did (#401). A sync rule only ever hides; a person's own Git checkout or
-/// build output kept in the vault folder under a "Don't sync" rule, a dot
-/// folder, a `.git`, or a file type Baalda does not sync existed only on this
-/// computer, so deleting it here would be the one place a rule loses data.
+/// Membership ended: remove the vault's content and keep only what never
+/// belonged to it (#401). A person's own work kept in the vault folder under a
+/// "Don't sync" rule, a dot or build folder, a `.git`, or a file type Baalda
+/// does not sync existed only on this computer, and deleting it here would be
+/// the one place a sync rule loses data.
 ///
-/// Judged by the folder's own cached rules (`.context/sync-rules.json`, which
-/// every synced vault keeps) with the type and folder switches they carry;
-/// no cache means today's defaults. Removed: every file the vault would sync,
-/// OS bookkeeping (`.DS_Store`, `._x`), `.context`, and the folders left
-/// empty. Kept: everything else, symlinks included (never followed). The
-/// folder itself goes when nothing is kept. Returns how many entries were kept.
+/// "Belonged to the vault" is judged by the folder's own `.context/config.json`
+/// (read before `.context` goes): every path it registered — `docs`, `files`,
+/// `folders`, and the `parked` items a rule hid after they synced — is the
+/// team's and is removed wherever it sits, hidden or not. Every file the vault
+/// would sync under its cached rules (`.context/sync-rules.json`; none means
+/// today's defaults) is removed too, as is OS bookkeeping. Kept: files never
+/// registered that could not sync, and symlinks (never followed). Emptied
+/// folders go, and the vault folder itself when nothing is kept. Returns how
+/// many entries were kept (a wholly kept folder counts once).
 pub fn remove_departed_contents(target: &Path) -> AppResult<usize> {
+    use std::collections::HashSet;
     let rules = crate::sync_rules::read_cached(target)
         .and_then(|doc| crate::sync_rules::SyncRules::compile(doc).ok())
         .unwrap_or_default();
     let groups = rules.doc().opt_in_groups();
+    let registered: HashSet<String> = registered_paths(target);
+    struct Ctx<'a> {
+        rules: &'a crate::sync_rules::SyncRules,
+        groups: u8,
+        registered: &'a HashSet<String>,
+    }
+    impl Ctx<'_> {
+        fn is_registered(&self, rel: &str) -> bool {
+            self.registered.contains(&rel.to_lowercase())
+        }
+        fn holds_registered(&self, dir_rel: &str) -> bool {
+            let prefix = format!("{}/", dir_rel.to_lowercase());
+            self.registered.iter().any(|p| p.starts_with(&prefix))
+        }
+    }
     fn junk(name: &str) -> bool {
         name.starts_with("._") || crate::vault::OS_JUNK.iter().any(|j| name.eq_ignore_ascii_case(j))
     }
-    fn walk(
-        dir: &Path,
-        rel: &str,
-        rules: &crate::sync_rules::SyncRules,
-        groups: u8,
-        kept: &mut usize,
-    ) -> AppResult<()> {
+    fn walk(dir: &Path, rel: &str, hidden_above: bool, cx: &Ctx, kept: &mut usize) -> AppResult<()> {
         let entries = std::fs::read_dir(dir).map_err(io_ctx("read the vault folder", dir))?;
         for entry in entries {
             let entry = entry?;
@@ -927,30 +940,34 @@ pub fn remove_departed_contents(target: &Path) -> AppResult<usize> {
                 *kept += 1;
                 continue;
             }
-            if junk(&name) && !ft.is_dir() {
-                std::fs::remove_file(&path).map_err(io_ctx("delete a file", &path))?;
-                continue;
-            }
-            let hidden = crate::vault::is_ignored_name_with(&name, groups)
-                || rules.excludes_entry(&child_rel, ft.is_dir());
+            let hidden = hidden_above
+                || crate::vault::is_ignored_name_with(&name, cx.groups)
+                || cx.rules.excludes_entry(&child_rel, ft.is_dir());
             if ft.is_dir() {
-                if hidden {
+                // A hidden folder the vault never registered anything in is
+                // wholly the person's own (a checkout, node_modules): keep it
+                // without walking it.
+                if hidden && !cx.is_registered(&child_rel) && !cx.holds_registered(&child_rel) {
                     *kept += 1;
                     continue;
                 }
-                walk(&path, &child_rel, rules, groups, kept)?;
+                walk(&path, &child_rel, hidden, cx, kept)?;
                 // Only an emptied folder goes; one still holding kept work stays.
                 let _ = std::fs::remove_dir(&path);
-            } else if hidden || !crate::vault::is_allowed_with(&name, groups) {
-                *kept += 1;
-            } else {
+            } else if cx.is_registered(&child_rel)
+                || junk(&name)
+                || (!hidden && crate::vault::is_allowed_with(&name, cx.groups))
+            {
                 std::fs::remove_file(&path).map_err(io_ctx("delete a file", &path))?;
+            } else {
+                *kept += 1;
             }
         }
         Ok(())
     }
+    let cx = Ctx { rules: &rules, groups, registered: &registered };
     let mut kept = 0usize;
-    walk(target, "", &rules, groups, &mut kept)?;
+    walk(target, "", false, &cx, &mut kept)?;
     let ctx = target.join(".context");
     if ctx.is_dir() {
         std::fs::remove_dir_all(&ctx).map_err(io_ctx("delete the vault's sync data", &ctx))?;
@@ -959,6 +976,32 @@ pub fn remove_departed_contents(target: &Path) -> AppResult<usize> {
         std::fs::remove_dir(target).map_err(io_ctx("delete the vault folder", target))?;
     }
     Ok(kept)
+}
+
+/// Every vault-relative path (lowercased) the folder's sync config registered:
+/// `docs`/`files`/`folders` keys and the `parked` values. Unreadable config ⇒
+/// none, so only the syncable-file rule applies.
+fn registered_paths(target: &Path) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(bytes) = std::fs::read(target.join(".context").join("config.json")) else {
+        return out;
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return out;
+    };
+    for key in ["docs", "files", "folders"] {
+        if let Some(map) = v.get(key).and_then(|m| m.as_object()) {
+            out.extend(map.keys().map(|k| k.to_lowercase()));
+        }
+    }
+    if let Some(parked) = v.get("parked").and_then(|m| m.as_object()) {
+        for group in parked.values() {
+            if let Some(map) = group.as_object() {
+                out.extend(map.values().filter_map(|p| p.as_str()).map(|p| p.to_lowercase()));
+            }
+        }
+    }
+    out
 }
 
 /// The refusals of [`delete_departed_vault`], pure so each one is testable.
@@ -3870,7 +3913,14 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "x").unwrap();
         };
-        w(".context/config.json");
+        std::fs::create_dir_all(v.join(".context")).unwrap();
+        std::fs::write(
+            v.join(".context/config.json"),
+            r#"{"organizationId":"org-1","docs":{"Notes/a.md":"d1","projects/app/context.md":"d2"},
+                "files":{"projects/app/node_modules/x/index.js":"f9"},
+                "parked":{"docs":{"d3":"projects/app/code/synced-before-the-rule.md"}}}"#,
+        )
+        .unwrap();
         std::fs::write(
             v.join(".context/sync-rules.json"),
             r#"{"patterns":"/projects/app/code/\n","types":{},"folders":{}}"#,
@@ -3881,6 +3931,8 @@ mod tests {
         w("attachments/abc.png");
         w("projects/app/context.md");
         w("projects/app/code/main.py");
+        w("projects/app/code/synced-before-the-rule.md");
+        w("projects/app/node_modules/y/local-only.js");
         w("projects/app/code/.git/HEAD");
         w("projects/app/.git/config");
         w("projects/app/node_modules/x/index.js");
@@ -3888,22 +3940,32 @@ mod tests {
         w("tools/setup.exe");
         let kept = remove_departed_contents(&v).unwrap();
         // Synced content and the CRDT store are gone, and the emptied folder too.
-        for gone in ["Notes", "attachments", "projects/app/context.md", ".context"] {
+        // Synced content, what the vault registered anywhere (a parked note under
+        // the rule, a file the team synced before build folders were hidden),
+        // and the CRDT store are gone.
+        for gone in [
+            "Notes",
+            "attachments",
+            "projects/app/context.md",
+            "projects/app/code/synced-before-the-rule.md",
+            "projects/app/node_modules/x",
+            ".context",
+        ] {
             assert!(!v.join(gone).exists(), "{gone} should be removed");
         }
-        // The rule-hidden checkout, Git internals, build output, dot folder and
-        // an unsupported type existed only here: kept.
+        // Never registered and never syncable: existed only here, kept.
         for stays in [
             "projects/app/code/main.py",
             "projects/app/code/.git/HEAD",
             "projects/app/.git/config",
-            "projects/app/node_modules/x/index.js",
+            "projects/app/node_modules/y/local-only.js",
             ".obsidian/app.json",
             "tools/setup.exe",
         ] {
             assert!(v.join(stays).exists(), "{stays} should be kept");
         }
-        assert_eq!(kept, 5);
+        assert!(kept > 0);
+        assert!(v.exists(), "the folder stays while it holds kept work");
 
         // A vault holding only synced content leaves nothing behind.
         let v2 = dir.path().join("plain");

@@ -435,9 +435,11 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   Parked docs MUST stay on the CRDT GC keep list (`registry.crdtKeepIds`, used by every
   `collectCrdtGarbage` call): dropping their history and disk base made the next un-hide write the
   server's text over edits made while hidden. Patterns never enable an unsupported or switched-off type.
-  Membership loss (`delete_departed_vault` → `remove_departed_contents`) deletes only what the vault
-  syncs under its cached rules, plus `.context`; rule-hidden folders, dot/build folders, `.git`,
-  symlinks and unsupported types existed only on that device and stay (the notice names the folder).
+  Membership loss (`delete_departed_vault` → `remove_departed_contents`) deletes every path the
+  folder's own config registered (`docs`/`files`/`folders`, `parked` included — hidden by a rule is
+  still the team's), every file the vault would sync under its cached rules, and `.context`; only
+  files never registered that could not sync (a local checkout's own files, `.git`, unsynced types)
+  and symlinks stay, and the notice names the folder (narrows the 2026-10-09 whole-folder delete).
 - **One-step creates** (`registry.ts registerNotesBatched`, pure packing/classification in
   `sync/seedRegister.ts`): when the server's `/health` `features` (cached per server URL,
   `lib/serverFeatures.ts cachedServerFeatures`) lists `notes-with-state`, EVERY new note, 1 or

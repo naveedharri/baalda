@@ -334,10 +334,10 @@ export const deleteVault = (path: string) =>
   invoke<void>("delete_vault", { path });
 /**
  * Membership ended: PERMANENTLY delete what a vault folder stamped with
- * `organizationId` synced (no Trash, no recovery copy), and keep what it never
- * did — rule-hidden folders, dot folders, `.git`, build output, unsupported
- * types (#401). Resolves how many entries were kept; the folder itself goes
- * when that is 0. Rust refuses links, roots, the home and vaults folders, and
+ * `organizationId` registered or would sync (no Trash, no recovery copy), and
+ * keep only files it never registered that could not sync — a local
+ * checkout's own files, `.git`, unsynced types (#401). Resolves how many
+ * entries were kept; the folder itself goes when that is 0. Rust refuses links, roots, the home and vaults folders, and
  * any folder whose stamp names another vault.
  */
 export const deleteDepartedVault = (path: string, organizationId: string) =>
