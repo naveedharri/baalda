@@ -2805,9 +2805,12 @@ export class VaultRegistry {
    * again after {@link REVOKE_UNSENT_SETTLE_MS}, or unanswerable (any failed
    * slice keeps the whole group, like {@link confirmRevocations}).
    */
-  private async recheckUnsentRevocations(vaultId: string, gone: InboundTrash[]): Promise<Set<string>> {
+  private async recheckUnsentRevocations(
+    vaultId: string,
+    gone: InboundTrash[],
+  ): Promise<{ kept: Set<string>; readable: Set<string> }> {
     const ids = gone.map((g) => g.docId);
-    if (ids.length === 0) return new Set();
+    if (ids.length === 0) return { kept: new Set(), readable: new Set() };
     await new Promise<void>((resolve) => setTimeout(resolve, REVOKE_UNSENT_SETTLE_MS));
     try {
       // `accessCheck` answers the ids that are still unreadable (`none`); every
@@ -2817,12 +2820,13 @@ export class VaultRegistry {
         for (const docId of await this.api.accessCheck(vaultId, ids.slice(i, i + ACCESS_CHECK_MAX))) {
           stillRevoked.add(docId);
         }
-        if (this.stopRun()) return new Set(ids);
+        if (this.stopRun()) return { kept: new Set(ids), readable: new Set() };
       }
-      return new Set(ids.filter((id) => !stillRevoked.has(id)));
+      const readable = new Set(ids.filter((id) => !stillRevoked.has(id)));
+      return { kept: readable, readable };
     } catch (e) {
       console.warn("[sync] could not re-check access before removing unsent edits; kept them", reasonOf(e));
-      return new Set(ids);
+      return { kept: new Set(ids), readable: new Set() };
     }
   }
 
@@ -3117,6 +3121,16 @@ export class VaultRegistry {
       /** Revoked notes holding work the server never saw: judged again just
        *  before they leave the disk (see below). */
       const unsentRevoked = new Set<string>();
+      // Revoked notes whose file left its disk base (edited on disk, not yet
+      // taken in): one index query per chunk, never a read per note. A failed
+      // query falls back to reading each one.
+      const revokedNotes = group.filter((g) => g.reason === "revoked" && !g.binary);
+      const drifted: Set<string> | null =
+        revokedNotes.length === 0
+          ? new Set()
+          : await (async () =>
+              ipc.listDiskDrift(revokedNotes.map((g) => ({ docId: g.docId, path: g.path })), this.epoch()))()
+              .then((rows) => new Set(rows.map((r) => r.docId)), () => null);
       let cancelled = false;
       await runPool(group, async (gone) => {
         try {
@@ -3193,7 +3207,8 @@ export class VaultRegistry {
           // the deleted note either. Deleted means deleted.
           if (
             gone.reason === "revoked" &&
-            (verdict === "unseen" || (await this.fileAheadOfDiskBase(gone.docId, gone.path)))
+            (verdict === "unseen" ||
+              (drifted ? drifted.has(gone.docId) : await this.fileAheadOfDiskBase(gone.docId, gone.path)))
           ) {
             unsentRevoked.add(gone.docId);
           }
@@ -3219,7 +3234,7 @@ export class VaultRegistry {
       // readable again. A failed check also keeps it: removal needs an answer.
       // A revocation still in force removes it exactly as before.
       if (unsentRevoked.size > 0) {
-        const kept = await this.recheckUnsentRevocations(
+        const { kept, readable } = await this.recheckUnsentRevocations(
           vaultId,
           ready.filter((g) => unsentRevoked.has(g.docId)),
         );
@@ -3232,7 +3247,10 @@ export class VaultRegistry {
             plan.suppress.delete(g.path);
             console.info(`[sync] ${g.path}: access came back before its unsent edits were removed; kept`);
           }
-          this.host?.revocationRefused?.([...kept]);
+          // Only an id the server ANSWERED as readable leaves the named set;
+          // an unanswered one stays named, so the next pass judges it again
+          // (as `confirmRevocations` does on a failed check).
+          if (readable.size > 0) this.host?.revocationRefused?.([...readable]);
         }
       }
       let outcomes: Array<{ path: string; error: string | null }>;

@@ -2266,6 +2266,7 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
     indexId?: string;
     copyFails?: boolean;
     accessCheckSeq?: Array<"confirm" | "grant">;
+    accessCheck?: "confirm" | "grant" | "fail";
     /** The file was edited on disk after the doc last agreed with it. */
     fileAhead?: boolean;
   }) {
@@ -2293,7 +2294,7 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
       vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
     };
     carry();
-    const then = { notes: [], tombstones: [], accessCheckSeq: opts.accessCheckSeq };
+    const then = { notes: [], tombstones: [], accessCheckSeq: opts.accessCheckSeq, accessCheck: opts.accessCheck };
     const reg = new VaultRegistry(fakeApi(then));
     const host = recordingHost();
     (host.host as InboundHost).localStateVector = async () => opts.localSv ?? null;
@@ -2381,6 +2382,27 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
     });
     expect(disk.bodies.get("n.md")).toBe("the team's words + typed in another editor");
     expect(disk.notes.has("n.md")).toBe(true);
+  });
+
+  it("keeps a note whose re-check went unanswered, and removes it on a later pass if access is still off", async () => {
+    const { disk, reg, carry } = await revokeWith({
+      body: "the team's words + my own lines",
+      localSv: svOf("the team's words"),
+      acked: null,
+      crdtText: "the team's words",
+      accessCheck: "fail",
+    });
+    expect(disk.notes.has("n.md")).toBe(true); // no answer, nothing removed
+    // Next pass: the server answers, and access is still off.
+    carry();
+    const again = new VaultRegistry(fakeApi({ notes: [], tombstones: [] }));
+    const host = recordingHost();
+    (host.host as InboundHost).localStateVector = async () => svOf("the team's words");
+    (host.host as InboundHost).localText = async () => "the team's words";
+    again.setInboundHost(host.host);
+    await again.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(disk.notes.has("n.md")).toBe(false);
+    void reg;
   });
 
   it("removes a revoked note outright even with ops beyond a real acknowledgement", async () => {
