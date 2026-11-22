@@ -91,6 +91,15 @@ export interface VaultDocStoreOptions {
    * once the hold ends, at whatever path the registry then gives.
    */
   holdUpdates?: (docId: string) => boolean;
+  /**
+   * Is the doc's file missing on disk? A background apply for a registered
+   * note whose file is gone must not recreate it: the person just renamed or
+   * deleted it (a note, or the folder around it), and the disk-delete drain
+   * judges which. Writing the old path first is what made the drain find it
+   * "back", pair nothing and fork the note. Parked instead, and applied by
+   * {@link settleParked} once a pull has placed the doc again.
+   */
+  fileMissing?: (path: string) => Promise<boolean>;
   io?: BridgeIO;
   hotCap?: number;
   /** A cold apply found (and merged) an EXTERNAL edit on disk — bytes the doc
@@ -144,6 +153,7 @@ export class VaultDocStore implements DocUpdateSink {
   private readonly io: BridgeIO;
   private readonly resolvePath: (docId: string) => string | null;
   private readonly holdUpdates?: (docId: string) => boolean;
+  private readonly fileMissing?: (path: string) => Promise<boolean>;
   private readonly onExternalMerge?: (docId: string) => void;
   private readonly onConverged?: (docId: string) => void;
   private readonly createDeferred?: VaultDocStoreOptions["createDeferred"];
@@ -194,6 +204,7 @@ export class VaultDocStore implements DocUpdateSink {
     this.io = opts.io ?? createTauriBridgeIO();
     this.resolvePath = opts.resolvePath;
     this.holdUpdates = opts.holdUpdates;
+    this.fileMissing = opts.fileMissing;
     this.onExternalMerge = opts.onExternalMerge;
     this.onConverged = opts.onConverged;
     this.createDeferred = opts.createDeferred;
@@ -676,6 +687,14 @@ export class VaultDocStore implements DocUpdateSink {
         this.rememberSv(docId, sv);
         return;
       }
+    }
+    // A registered note whose file left the disk (renamed, moved with its
+    // folder, deleted): never bring the old path back from here.
+    // Only for a doc this device already held (it had a file here): a new
+    // arrival or a pending bootstrap note has no file yet by design.
+    if (this.fileMissing && this.svCache.has(docId) && (await this.fileMissing(path).catch(() => false))) {
+      this.park(docId, update);
+      return;
     }
     // Transient bridge: hydrate from local CRDT, apply the delta, write, persist,
     // evict. seedFromFile:false — the server feed is the source for background docs.

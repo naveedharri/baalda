@@ -2602,7 +2602,18 @@ export class SyncManager implements InboundHost {
     this.pendingDiskDeletes.clear();
     this.pendingDeleteByPath.clear();
     for (const p of pending) this.drainingDocs.add(p.docId);
-    const drained = pending.map((p) => p.docId);
+    // Notes under a vanished folder too: a resident bridge keeps the path it
+    // was promoted at, so it is retired with the drained notes at the end.
+    const goneAtStart = [...this.goneFolders.keys()];
+    const underGone =
+      goneAtStart.length === 0
+        ? []
+        : this.registry
+            .mappedNotes()
+            .filter((n) => goneAtStart.some((f) => isUnder(n.relPath, f)))
+            .map((n) => n.docId);
+    for (const id of underGone) this.drainingDocs.add(id);
+    const drained = [...new Set([...pending.map((p) => p.docId), ...underGone])];
     let candidates = [...this.renameCandidates.keys()];
     this.renameCandidates.clear();
     const goneFolders = [...this.goneFolders.keys()].filter((f) => !ownRemoval(f));
@@ -7424,7 +7435,15 @@ export class SyncManager implements InboundHost {
         const p = this.registry.pathForDocId(docId);
         return p && this.registry.unmaterializable.skip(p) ? null : p;
       },
-      holdUpdates: (docId) => this.pendingDiskDeletes.has(docId) || this.drainingDocs.has(docId),
+      holdUpdates: (docId) => {
+        if (this.pendingDiskDeletes.has(docId) || this.drainingDocs.has(docId)) return true;
+        // A registered folder around it vanished and the drain has not judged
+        // it yet (a folder rename or delete): same hold as a note's own delete.
+        if (this.goneFolders.size === 0) return false;
+        const p = this.registry.pathForDocId(docId);
+        return !!p && [...this.goneFolders.keys()].some((f) => isUnder(p, f));
+      },
+      fileMissing: async (path) => !(await ipc.noteExists(path, scope.vaultEpoch)),
       // The background feed writes .md files for docs nobody has open. Pin its
       // IO to this vault's epoch so a cold apply that lands after a vault switch
       // is refused by Rust instead of overwriting the new vault's file at the

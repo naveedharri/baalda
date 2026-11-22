@@ -70,6 +70,42 @@ describe("VaultDocStore — updates held while a rename or delete is judged", ()
   });
 });
 
+describe("VaultDocStore — a known note whose file left the disk", () => {
+  it("is not recreated at its old path by a background apply (folder renamed under it)", async () => {
+    const server = serverDoc("base");
+    const { io, fs } = makeHarness({ "A/n.md": "" });
+    const reg = registry();
+    reg.map("docF", "A/n.md");
+    const store = new VaultDocStore({ io, resolvePath: reg.resolvePath, fileMissing: async (p) => fs.get(p) === undefined });
+    await store.applyUpdate("docF", server.full());
+    expect(fs.get("A/n.md")).toBe("base");
+
+    // Finder renames A → B; the watcher has not reported it yet.
+    fs.externalWrite("B/n.md", fs.get("A/n.md")!);
+    fs.externalRemove("A/n.md");
+    await store.applyUpdate("docF", server.append(" + teammate"));
+    expect(fs.get("A/n.md")).toBeUndefined();
+    expect(store.parkedDocs()).toEqual(["docF"]);
+
+    // The drain pairs the folder move; the pull places the doc at B.
+    reg.map("docF", "B/n.md");
+    await store.settleParked(0);
+    expect(fs.get("A/n.md")).toBeUndefined();
+    expect(fs.get("B/n.md")).toBe("base + teammate");
+  });
+
+  it("still creates a brand-new arrival's file (no file yet is normal there)", async () => {
+    const server = serverDoc("fresh");
+    const { io, fs } = makeHarness({});
+    const reg = registry();
+    reg.map("docN", "new.md");
+    const store = new VaultDocStore({ io, resolvePath: reg.resolvePath, fileMissing: async (p) => fs.get(p) === undefined });
+    await store.applyUpdate("docN", server.full());
+    expect(store.parkedDocs()).toEqual([]);
+    expect(fs.get("new.md")).toBe("fresh");
+  });
+});
+
 describe("VaultDocStore — parked updates for unmapped docs", () => {
   it("parks a backfill that beats the registry pull, then writes it once the doc maps", async () => {
     const { io, fs } = makeHarness({ "n.md": "" }); // the pull's 0-byte placeholder
