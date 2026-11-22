@@ -1785,6 +1785,23 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     expect(reconcileReport.items().filter((i) => i.kind === "keptLocally")).toEqual([]);
   });
 
+  it("keeps a binary edited here when access is back before the removal (a quick flap)", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.xlsx");
+    disk.editedBinaries.set("Team/report.xlsx", "edited-offline");
+    await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [], accessCheckSeq: ["grant"] },
+      authority: true,
+      files: { "Team/report.xlsx": "file-1" },
+      named: new Set(["file-1"]),
+    });
+    expect(disk.binaries.has("Team/report.xlsx")).toBe(true);
+    expect(disk.deleted).toEqual([]);
+  });
+
   it("removes a revoked binary outright with no agreed base or an unhashable disk", async () => {
     for (const patch of [undefined, () => { vi.mocked(ipc.listBinaries).mockRejectedValue(new Error("busy")); }]) {
       reconcileReport.clear();

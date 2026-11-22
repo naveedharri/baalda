@@ -3121,6 +3121,9 @@ export class VaultRegistry {
       /** Revoked notes holding work the server never saw: judged again just
        *  before they leave the disk (see below). */
       const unsentRevoked = new Set<string>();
+      /** Revoked binaries whose bytes left their agreed base (edited here and
+       *  not uploaded yet): judged again with the notes, removed after. */
+      const unsentBinaries: InboundTrash[] = [];
       // Revoked notes whose file left its disk base (edited on disk, not yet
       // taken in): one index query per chunk, never a read per note. A failed
       // query falls back to reading each one.
@@ -3135,6 +3138,14 @@ export class VaultRegistry {
       await runPool(group, async (gone) => {
         try {
           if (gone.binary) {
+            if (gone.reason === "revoked") {
+              const base = this.fileBases.get(gone.docId) ?? null;
+              const local = base === null ? null : await localBinarySha(gone.path);
+              if (base !== null && local !== null && local !== base) {
+                unsentBinaries.push(gone);
+                return;
+              }
+            }
             const removed = await this.removeRevokedBinary(gone, localBinarySha);
             if (removed) changedDisk = true;
             this.sink.item(removed ? "ok" : "failed");
@@ -3233,12 +3244,23 @@ export class VaultRegistry {
       // short settle, and stays (and is pushed) if the server reads it as
       // readable again. A failed check also keeps it: removal needs an answer.
       // A revocation still in force removes it exactly as before.
-      if (unsentRevoked.size > 0) {
-        const { kept, readable } = await this.recheckUnsentRevocations(
-          vaultId,
-          ready.filter((g) => unsentRevoked.has(g.docId)),
-        );
+      if (unsentRevoked.size > 0 || unsentBinaries.length > 0) {
+        const { kept, readable } = await this.recheckUnsentRevocations(vaultId, [
+          ...ready.filter((g) => unsentRevoked.has(g.docId)),
+          ...unsentBinaries,
+        ]);
         if (this.stopRun()) return { changedDisk, suppress: plan.suppress };
+        for (const g of unsentBinaries) {
+          if (kept.has(g.docId)) {
+            plan.suppress.delete(g.path);
+            console.info(`[sync] ${g.path}: access came back before its unsent changes were removed; kept`);
+            this.sink.item("ok");
+            continue;
+          }
+          const removed = await this.removeRevokedBinary(g, localBinarySha);
+          if (removed) changedDisk = true;
+          this.sink.item(removed ? "ok" : "failed");
+        }
         if (kept.size > 0) {
           for (let i = ready.length - 1; i >= 0; i--) {
             const g = ready[i];
