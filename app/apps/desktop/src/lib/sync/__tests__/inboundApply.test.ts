@@ -21,6 +21,7 @@ vi.mock("../../ipc", () => ({
   binaryExists: vi.fn(),
   listBinaries: vi.fn(),
   getDiskBase: vi.fn(),
+  listDiskDrift: vi.fn(),
   copyToTrash: vi.fn(),
   writeTrashCopy: vi.fn(),
   rebindNoteId: vi.fn(async () => true),
@@ -188,6 +189,10 @@ function install(disk: FakeDisk) {
     if (!disk.notes.has(p) && !disk.binaries.has(p)) throw new Error("no such file");
     return { size: 1 };
   }) as never);
+  vi.mocked(ipc.listDiskDrift).mockImplementation((async (entries: Array<{ docId: string; path: string }>) =>
+    entries
+      .filter((e) => disk.unseen.has(e.docId) && disk.notes.has(e.path))
+      .map((e) => ({ ...e, sha256: "drifted" }))) as never);
   vi.mocked(ipc.getDiskBase).mockImplementation((async (docId: string) => {
     if (disk.unseen.has(docId)) return "base-before-the-offline-edit";
     const path = [...disk.notes].find(([, id]) => id === docId)?.[0];
@@ -2399,6 +2404,20 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
     });
     expect(disk.bodies.get("n.md")).toBe("the team's words + typed in another editor");
     expect(disk.notes.has("n.md")).toBe(true);
+  });
+
+  it("still finds an on-disk edit when the index query fails (per-note read)", async () => {
+    vi.mocked(ipc.listDiskDrift).mockRejectedValueOnce(new Error("index busy") as never);
+    const sv = svOf("the team's words");
+    const { disk } = await revokeWith({
+      body: "the team's words + typed in another editor",
+      localSv: sv,
+      acked: sv,
+      crdtText: "the team's words",
+      fileAhead: true,
+      accessCheckSeq: ["grant"],
+    });
+    expect(disk.bodies.get("n.md")).toBe("the team's words + typed in another editor");
   });
 
   it("keeps a note whose re-check went unanswered, and removes it on a later pass if access is still off", async () => {

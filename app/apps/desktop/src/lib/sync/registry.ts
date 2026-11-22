@@ -2823,6 +2823,9 @@ export class VaultRegistry {
         if (this.stopRun()) return { kept: new Set(ids), readable: new Set() };
       }
       const readable = new Set(ids.filter((id) => !stillRevoked.has(id)));
+      if (stillRevoked.size > 0) {
+        console.info(`[sync] re-checked ${ids.length} revoked item(s) with unsent changes: ${stillRevoked.size} still without access, removing`);
+      }
       return { kept: readable, readable };
     } catch (e) {
       console.warn("[sync] could not re-check access before removing unsent edits; kept them", reasonOf(e));

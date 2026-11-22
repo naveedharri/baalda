@@ -323,9 +323,11 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   real cross-check is `POST /api/vaults/:id/access-check` (`InboundPlan.needsAccessCheck`, measured on
   the revoked group BEFORE any refusal → `registry.confirmRevocations`, chunked in slices of
   `ACCESS_CHECK_MAX` — mirrored in `lib/api.ts`, pinned by `accessCheckBound.test.ts`). A revoked note
-  holding unsent work (an unseen verdict, or a file whose hash left its disk base) is asked about once
-  more `REVOKE_UNSENT_SETTLE_MS` (2 s) before removal and stays if readable again or unanswered: a
-  quick No access flap used to delete what the person typed; a revocation still in force removes it. And a
+  holding unsent work (an unseen verdict, or a file whose hash left its disk base, found with one
+  `list_disk_drift` query per chunk) — and a revoked tree binary whose bytes left its `fileBases` sha —
+  is asked about once more `REVOKE_UNSENT_SETTLE_MS` (2 s) before removal and stays if readable again
+  or unanswered (an unanswered one stays named for the next pass): a quick No access flap used to
+  delete what the person typed; a revocation still in force at that check removes it. And a
   disagreement, an unanswered id, a throw on ANY slice or the 30 s `ACCESS_CHECK_TIMEOUT_MS` abort
   LEAVES the whole group (a refused id also leaves the named set via
   `InboundHost.revocationRefused`). The named set unions across the session
@@ -1365,7 +1367,7 @@ permission resolution and readable-set listings. Explicit denies and vault postu
 Migration 057 records the owner as creator of null-creator files, notes and folders only in a sole-owner legacy vault with no ACL rows;
 it writes no share or audit row and never changes an explicit rule. Revoked confirmed attachments are
 DELETED from the ex-reader's disk outright (`registry.ts removeRevokedBinary`; since 2026-11-19 an
-edited copy too, no `.context/trash` copy). `attachments/` drops only now-hidden notes embed leave
+edited copy too, no `.context/trash` copy, unless access is back at the 2 s unsent-changes re-check). `attachments/` drops only now-hidden notes embed leave
 the same way (#408, `settleHiddenEmbeds`); a drop any local note still names is kept. A failed
 removal leaves the file and identity intact.
 
