@@ -94,6 +94,29 @@ describe("VaultDocStore — a known note whose file left the disk", () => {
     expect(fs.get("B/n.md")).toBe("base + teammate");
   });
 
+  it("holds a missing file's updates across pulls without dropping, growing or forcing a reconnect", async () => {
+    const server = serverDoc("base");
+    const { io, fs } = makeHarness({ "n.md": "" });
+    const reg = registry();
+    reg.map("docM", "n.md");
+    const store = new VaultDocStore({ io, resolvePath: reg.resolvePath, fileMissing: async (p) => fs.get(p) === undefined });
+    await store.applyUpdate("docM", server.full());
+    fs.externalRemove("n.md"); // deleted on disk; the drain will put it back
+    await store.applyUpdate("docM", server.append(" one"));
+    for (let i = 0; i < 4; i++) {
+      await store.applyUpdate("docM", server.append(` u${i}`));
+      await store.settleParked(store.parkMark()); // a pull that cannot place the file
+      expect(store.parkedDocs()).toEqual(["docM"]);
+      expect(fs.get("n.md")).toBeUndefined();
+    }
+    expect(store.takeOverflowed()).toEqual([]);
+    // The put-back recreates the file; the next settle lands every held edit.
+    fs.externalWrite("n.md", "base");
+    await store.settleParked(store.parkMark());
+    expect(store.parkedDocs()).toEqual([]);
+    expect(fs.get("n.md")).toBe("base one u0 u1 u2 u3");
+  });
+
   it("still creates a brand-new arrival's file (no file yet is normal there)", async () => {
     const server = serverDoc("fresh");
     const { io, fs } = makeHarness({});
