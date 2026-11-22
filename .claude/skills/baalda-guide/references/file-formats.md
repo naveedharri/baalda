@@ -76,7 +76,8 @@ server's version, and the local copy is replaced with no copy kept.
 Some things never sync whatever the file says, because syncing them would break them: Baalda's
 own `.context` folder, Git's internal `.git` folder, app lock files, system files like
 `.DS_Store` and `Thumbs.db`, and links (symlinks). Files with no extension (`Makefile`,
-`.gitignore`) and empty files are not synced either.
+`.gitignore`) are not synced either. Empty files (an empty `__init__.py`, say) do sync on an
+up-to-date server; on an older server they stay on the computer that has them, marked Local.
 
 **Archives are stored, never opened.** `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.gz` and `.7z` show
 in the sidebar and sync as files; clicking one shows a card with "Open externally". Search

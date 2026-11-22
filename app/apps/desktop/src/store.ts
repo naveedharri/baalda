@@ -345,6 +345,11 @@ interface AppStore {
   session: SessionInfo | null;
   serverUrl: string;
   authError: string | null;
+  /** Signed out only because the server could not be reached at launch: a
+   *  saved login is kept and retried (`scheduleAuthRetry`). */
+  authOffline: boolean;
+  /** Retry the session check now (the not-syncing banner's Try again). */
+  retryAuth: () => void;
   /**
    * A flow needs the sign-in dialog on screen NOW. Three of them:
    *   - "note-link": a shared link arrived while signed out, and the link is
@@ -2165,6 +2170,42 @@ applyEditorFont(readEditorFont());
 syncManager.setVaultKeyGate?.(vaultKeysGate);
 syncManager.setEarlyVaultChannelCheck?.(vaultKeysEarlyChannel);
 
+/**
+ * The launch could not reach the server to check a saved login
+ * (`authManager.waitingForServer`): ask again, 3 s then doubling to 30 s, and
+ * at once when the network comes back or the window is focused. A launch
+ * before Wi-Fi connected used to stay "Signed out" until the person signed in
+ * again, though the token was valid all along. The retry re-runs `initAuth`,
+ * whose success path is the ordinary launch landing.
+ */
+const AUTH_RETRY_FIRST_MS = 3_000;
+const AUTH_RETRY_MAX_MS = 30_000;
+let authRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let authRetryDelay = AUTH_RETRY_FIRST_MS;
+let authRetryWired = false;
+
+function clearAuthRetry(reset = false): void {
+  if (authRetryTimer) clearTimeout(authRetryTimer);
+  authRetryTimer = null;
+  if (reset) authRetryDelay = AUTH_RETRY_FIRST_MS;
+}
+
+function scheduleAuthRetry(get: () => AppStore): void {
+  if (!authRetryWired && typeof window !== "undefined") {
+    authRetryWired = true;
+    const now = () => get().retryAuth();
+    window.addEventListener("online", now);
+    window.addEventListener("focus", now);
+  }
+  clearAuthRetry();
+  const delay = authRetryDelay;
+  authRetryDelay = Math.min(authRetryDelay * 2, AUTH_RETRY_MAX_MS);
+  authRetryTimer = setTimeout(() => {
+    authRetryTimer = null;
+    get().retryAuth();
+  }, delay);
+}
+
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
   tree: null,
@@ -2257,6 +2298,12 @@ export const useStore = create<AppStore>((set, get) => ({
   session: null,
   serverUrl: authManager.getServerUrl(),
   authError: null,
+  authOffline: false,
+  retryAuth: () => {
+    if (!authManager.waitingForServer || get().authStatus === "signed-in") return;
+    clearAuthRetry();
+    void get().initAuth();
+  },
   authPrompt: null,
   setAuthPrompt: (prompt) => set({ authPrompt: prompt }),
   pendingServerLink: null,
@@ -3450,7 +3497,8 @@ export const useStore = create<AppStore>((set, get) => ({
       if (superseded()) return;
       set({ serverUrl: authManager.getServerUrl() });
       if (session) {
-        set({ session, authStatus: "signed-in", authError: null });
+        clearAuthRetry(true);
+        set({ session, authStatus: "signed-in", authError: null, authOffline: false });
         // Seamless keys F at launch: a remembered password refreshes the
         // account key's password wrap (or unlocks it). Background; never blocks.
         void launchPasswordUnlock(authManager.getServerUrl(), session.user.id, session.user.email);
@@ -3489,7 +3537,9 @@ export const useStore = create<AppStore>((set, get) => ({
         await consumeQueuedNoteLink(get);
       } else {
         if (superseded()) return;
-        set({ session: null, authStatus: "signed-out" });
+        const offline = authManager.waitingForServer;
+        set({ session: null, authStatus: "signed-out", authOffline: offline });
+        if (offline) scheduleAuthRetry(get);
         // Signed out: no note will ever get a provider, so nothing is waiting
         // for (see the open gate in `openNoteByPath`).
         resolveSyncGate();
@@ -3498,7 +3548,9 @@ export const useStore = create<AppStore>((set, get) => ({
       }
     } catch (e) {
       if (superseded()) return;
-      set({ authStatus: "signed-out", authError: errMsg(e) });
+      const offline = authManager.waitingForServer;
+      set({ authStatus: "signed-out", authError: errMsg(e), authOffline: offline });
+      if (offline) scheduleAuthRetry(get);
       resolveSyncGate();
       if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
       else if (hasPendingNoteLink()) promptSignInForQueuedLink(set);

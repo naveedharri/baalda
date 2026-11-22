@@ -39,7 +39,7 @@ import { openLinkRoutes, publicBaseUrl } from "./routes/open-link.js";
 import { esc } from "./pages.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
 import { ACCESS_BOARD_FEATURE } from "../permissions/access-board.js";
-import { blobRoutes, FILES_WITH_BYTES_FEATURE, setBlobRegistryNotifier } from "./routes/blobs.js";
+import { blobRoutes, EMPTY_FILES_FEATURE, FILES_WITH_BYTES_FEATURE, setBlobRegistryNotifier } from "./routes/blobs.js";
 import { setAttachmentCleanupNotifier } from "../blobs/attachment-cleanup.js";
 import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
 import { createBulkRoutes } from "./routes/bulk.js";
@@ -347,6 +347,8 @@ export function createApp(deps: AppDeps): Hono {
         NOTES_WITH_STATE_FEATURE,
         BOOTSTRAP_ONLY_FEATURE,
         FILES_WITH_BYTES_FEATURE,
+        // `intent` takes 0-byte files (routes/blobs.ts).
+        EMPTY_FILES_FEATURE,
         ACCESS_BOARD_FEATURE,
         // Access groups (migration 097, `routes/groups.ts`).
         ACCESS_GROUPS_FEATURE,

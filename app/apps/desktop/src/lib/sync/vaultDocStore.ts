@@ -330,7 +330,7 @@ export class VaultDocStore implements DocUpdateSink {
       this.hot.delete(docId);
       const i = this.recent.indexOf(docId);
       if (i !== -1) this.recent.splice(i, 1);
-      await this.retire(entry.bridge);
+      await this.retireHeld(docId, entry.bridge);
     }
   }
 
@@ -339,7 +339,7 @@ export class VaultDocStore implements DocUpdateSink {
     if (entry) {
       this.hot.delete(docId);
       // Flush any pending write, then tear down — access is gone, so stop syncing.
-      void this.retire(entry.bridge);
+      void this.retireHeld(docId, entry.bridge);
     }
     this.svCache.delete(docId);
     this.dirtySv.delete(docId);
@@ -454,7 +454,7 @@ export class VaultDocStore implements DocUpdateSink {
     if (!entry) return;
     this.hot.delete(docId);
     this.rememberSv(docId, Y.encodeStateVector(entry.bridge.doc));
-    await this.retire(entry.bridge);
+    await this.retireHeld(docId, entry.bridge);
   }
 
   hotBridge(docId: string): NoteBridge | null {
@@ -767,12 +767,28 @@ export class VaultDocStore implements DocUpdateSink {
       const e = this.hot.get(lruId)!;
       this.hot.delete(lruId);
       // Keep the svCache entry so the manifest stays cheap after eviction.
-      void this.retire(e.bridge);
+      void this.retireHeld(lruId, e.bridge);
     }
   }
 
   /** Flush a bridge's pending write, then tear it down. Never throws, and always
    *  destroys — a failed flush must not leak the bridge's observers. */
+  /**
+   * Retire a bridge that just left the hot tier, holding the doc's cold chain
+   * until it is done. Between leaving `hot` and `whenPersisted` the bridge's
+   * last ops are in the file but not yet in the local CRDT store; a feed update
+   * (or a promote) for the doc in that window would open a second bridge from
+   * the store that lacks them, then either merge the file's copy of that text
+   * in again (a doubled edit) or egest over it (a lost one). Seen live
+   * 2026-11-22: an offline edit arrived twice when the reconnect's push
+   * demoted the note just as the backfill delivered a teammate's edit to it.
+   */
+  private retireHeld(docId: string, bridge: NoteBridge): Promise<void> {
+    const done = this.retire(bridge);
+    this.holdUntil(docId, done);
+    return done;
+  }
+
   private async retire(bridge: NoteBridge): Promise<void> {
     try {
       await bridge.flushEgest();

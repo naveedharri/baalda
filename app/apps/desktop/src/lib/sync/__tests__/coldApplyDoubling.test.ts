@@ -262,3 +262,101 @@ describe("closing hold", () => {
     await store.destroyAll();
   });
 });
+
+/**
+ * The background bridge's own close (2026-11-22, four-app test). `demote`
+ * (and `release`, `drop`, LRU eviction) took the bridge out of the hot tier
+ * and THEN flushed and persisted it. A feed update arriving in that window saw
+ * no hot bridge and opened a cold one from a local store that did not yet hold
+ * the closing bridge's last ops, while the file already did: the cold apply
+ * merged that text in again under a fresh clientID. Seen live as an edit made
+ * offline arriving twice: the reconnect's push demoted the note just as the
+ * reconnect's backfill delivered a teammate's edit to it.
+ */
+describe("a retiring hot bridge", () => {
+  it("holds a feed update until its last ops are persisted", async () => {
+    const LOCAL = "- [[Typed here]]\n";
+    const REMOTE = "Teammate line\n";
+    const { io, fs, persistence } = makeHarness({ [PATH]: BASE });
+    const store = new VaultDocStore({ io, resolvePath: () => PATH });
+    const server = serverDoc(BASE);
+    await store.applyUpdate(DOC, stateOf(server));
+
+    const bridge = await store.promote(DOC, PATH);
+    // Appends from here on are slow: the local store lags the bridge.
+    let openGate!: () => void;
+    const gate = new Promise<void>((r) => {
+      openGate = r;
+    });
+    const append = persistence.appendUpdate.bind(persistence);
+    persistence.appendUpdate = async (docId: string, update: Uint8Array) => {
+      await gate;
+      return append(docId, update);
+    };
+    fs.externalWrite(PATH, BASE + LOCAL);
+    expect(await bridge.ingestNow()).toBe(true);
+
+    server.getText("content").insert(0, REMOTE);
+    const demoted = store.demote(DOC);
+    const applied = store.applyUpdate(DOC, stateOf(server));
+    await new Promise((r) => setTimeout(r, 20));
+    openGate();
+    await demoted;
+    await applied;
+
+    const after = await store.promote(DOC, PATH);
+    expect(occurrences(after.serialize(), "Typed here")).toBe(1);
+    expect(occurrences(after.serialize(), "Teammate line")).toBe(1);
+    expect(occurrences(fs.get(PATH)!, "Typed here")).toBe(1);
+    await store.destroyAll();
+  });
+
+  it("never inserts the bridge's last edit twice when its write lags too", async () => {
+    const LOCAL = "- [[Typed offline]]\n";
+    const REMOTE = "Teammate line\n";
+    const { io: base, fs, persistence } = makeHarness({ [PATH]: BASE });
+    let gated = false;
+    let openGate!: () => void;
+    const gate = new Promise<void>((r) => {
+      openGate = r;
+    });
+    // The closing bridge's egest AND its persist both lag (a busy disk).
+    const io = {
+      ...base,
+      writeFileAtomic: async (...a: Parameters<typeof base.writeFileAtomic>) => {
+        if (gated) await gate;
+        return base.writeFileAtomic(...a);
+      },
+    };
+    const store = new VaultDocStore({ io, resolvePath: () => PATH });
+    const server = serverDoc(BASE);
+    await store.applyUpdate(DOC, stateOf(server));
+
+    const bridge = await store.promote(DOC, PATH);
+    const append = persistence.appendUpdate.bind(persistence);
+    persistence.appendUpdate = async (docId: string, update: Uint8Array) => {
+      if (gated) await gate;
+      return append(docId, update);
+    };
+    gated = true;
+    // An edit made offline: in the file, folded into the hot bridge only.
+    fs.externalWrite(PATH, BASE + LOCAL);
+    expect(await bridge.ingestNow()).toBe(true);
+
+    server.getText("content").insert(0, REMOTE);
+    const demoted = store.demote(DOC);
+    const applied = store.applyUpdate(DOC, stateOf(server));
+    await new Promise((r) => setTimeout(r, 20));
+    gated = false;
+    openGate();
+    await demoted;
+    await applied;
+
+    const after = await store.promote(DOC, PATH);
+    expect(occurrences(after.serialize(), "Typed offline")).toBe(1);
+    expect(occurrences(after.serialize(), "Teammate line")).toBe(1);
+    await after.flushEgest();
+    expect(occurrences(fs.get(PATH)!, "Typed offline")).toBe(1);
+    await store.destroyAll();
+  });
+});

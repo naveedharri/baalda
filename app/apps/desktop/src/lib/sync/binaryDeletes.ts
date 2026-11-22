@@ -108,6 +108,13 @@ export interface BinaryDeleteDeps {
    */
   isLive(): boolean;
   /**
+   * Has the server connection dropped since it was last up? A vanished file is
+   * then kept pending (and so never re-downloaded) without spending its
+   * retries, until `resume()` after reconnecting. Before, three failed
+   * listings while offline gave up and the deleted file came back.
+   */
+  isOffline?(): boolean;
+  /**
    * Is the file at this path on disk right now (`ipc.binaryExists`)?
    *
    * `false` ONLY for a definite not-found. Anything that stopped the disk from
@@ -348,11 +355,18 @@ export class BinaryDeleteQueue {
    * Public because the timer is not the only caller that matters: the tests
    * drive it directly, and nothing about it assumes the timer fired.
    */
+  /** The server is reachable again: drain whatever waited for it. */
+  resume(): void {
+    if (this.pending.size > 0 && this.deps.isCurrent()) this.arm();
+  }
+
   async drain(): Promise<void> {
     if (this.draining) return;
     if (!this.deps.isCurrent()) return;
     const batch = [...this.pending.values()];
     if (batch.length === 0) return;
+    // Offline: everything stays pending, uncounted, for `resume()`.
+    if (this.deps.isOffline?.()) return;
     this.draining = true;
     try {
       if (!this.deps.isLive()) {

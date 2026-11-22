@@ -24,7 +24,10 @@
 export const REFUSAL_TTL_MS = 24 * 60 * 60 * 1000;
 /** Upper bound on remembered refusals; the soonest-expiring go first. */
 export const REFUSAL_MAX_ENTRIES = 2000;
-const STORAGE_KEY = "context.blobRefusals.v1";
+// v2 (2026-11-22): v1 held `400 invalid_rel_path` refusals for files sent
+// before the local index had given them an id, which kept most of a dropped
+// repo from syncing for a day. Starting fresh asks each refusal once more.
+const STORAGE_KEY = "context.blobRefusals.v2";
 
 export interface RefusalStore {
   has(key: string): boolean;

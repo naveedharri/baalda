@@ -106,6 +106,16 @@ export const blobRoutes = new Hono();
 export const FILES_WITH_BYTES_FEATURE = "files-with-bytes";
 
 /**
+ * `/health` feature: `intent` accepts `size: 0` (an empty `__init__.py`, an empty
+ * `.gitkeep`-style file). It answers like a dedupe hit: nothing to upload. A
+ * desktop that does not see it keeps empty files local, as it always has.
+ */
+export const EMPTY_FILES_FEATURE = "empty-files";
+
+/** sha256 of zero bytes: the only content a 0-byte file can have. */
+const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/**
  * Who hears that a one-step upload created or moved a `files` row.
  *
  * `blobRoutes` is a module-level router with no deps object, unlike the
@@ -971,7 +981,7 @@ async function checkStorageQuota(
 /** A positive, integral byte count, or null. */
 function normalizeSize(raw: unknown): number | null {
   const n = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) return null;
+  if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return null;
   return n;
 }
 
@@ -1012,7 +1022,10 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   }
   const size = normalizeSize(body.size);
   if (size === null) {
-    return c.json({ error: "size must be a positive integer", code: "invalid_size" }, 400);
+    return c.json({ error: "size must be a whole number of bytes", code: "invalid_size" }, 400);
+  }
+  if (size === 0 && sha256 !== EMPTY_SHA256) {
+    return c.json({ error: "An empty file's sha256 must be the hash of no bytes", code: "invalid_sha256" }, 400);
   }
   const filename = typeof body.filename === "string" ? body.filename : null;
   // `docId`: these bytes are a registered tree file. Same meaning as the legacy
@@ -1170,6 +1183,25 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
 
   const quota = await checkStorageQuota(vaultId, org, size);
   if (quota) return c.json(quota, 402);
+
+  // An empty file has no bytes to send, so there is no PUT and no `complete`:
+  // the row is made ready here, in this database whatever the store (a
+  // zero-byte object buys nothing, and `resolveStoreForRow` always reads
+  // Postgres rows), unclaimed so `dedupedAnswer` binds it to the file exactly
+  // like any dedupe hit, registration included.
+  if (size === 0) {
+    const { rows } = await pool.query<BlobRow>(
+      `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, data, rel_path, filename,
+                          storage_provider, storage_key, status, created_by, doc_id)
+       VALUES ($1, $2, $3, $4, 0, $5, '\\x'::bytea, $6, $7, 'postgres', NULL, 'ready', $8, NULL)
+       ON CONFLICT DO NOTHING
+       RETURNING ${BLOB_ROW_COLUMNS}`,
+      [randomUUID(), vaultId, org, sha256, mime, relPath, filename, session.userId],
+    );
+    const empty = rows[0] ?? (await findBlob(vaultId, sha256, docId));
+    if (!empty) return c.json({ error: "Upload conflicted. Retry" }, 409);
+    return dedupedAnswer(empty);
+  }
 
   // An existing PENDING row for the same content is re-used rather than
   // conflicting: the per-doc unique index would refuse a second insert anyway, and

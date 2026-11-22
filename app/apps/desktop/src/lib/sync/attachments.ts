@@ -105,6 +105,9 @@ export interface LocalAttachment {
  * quiet period.
  */
 export const UPLOAD_QUIET_MS = 3_000;
+/** How many quick passes (one per {@link UPLOAD_QUIET_MS}) may wait for the
+ *  local index to give newly dropped files their ids. */
+export const INDEX_WAIT_MAX_ROUNDS = 40;
 
 /** Rust's `attachments.rs CHANGED_DURING_UPLOAD`: the bytes streamed were not
  *  the bytes the intent declared. Never completed; rehashed on a later pass. */
@@ -644,6 +647,21 @@ class ParentNotRegistered extends Error {
 }
 
 /**
+ * A tree binary the local index has not given an id yet: a big folder was just
+ * dropped and the watcher's index pass is still catching up. Without an id
+ * there is no `files` row to register, and bytes sent without one are a
+ * guaranteed `400 invalid_rel_path` that used to be remembered as permanent
+ * for those bytes, so most of a cloned repo never synced (2026-11-22). The
+ * file waits, queued, and the next pass registers it with its id.
+ */
+class NotIndexedYet extends Error {
+  constructor() {
+    super("not_indexed_yet");
+    this.name = "NotIndexedYet";
+  }
+}
+
+/**
  * The server refused an upload because this device's base is stale (409
  * `stale_base`): a teammate uploaded a newer version since. `current` is the
  * server's version, which the pass downloads instead (keeping the local bytes
@@ -985,6 +1003,8 @@ export interface AttachmentSyncDeps {
    * register-then-upload flow, unchanged.
    */
   filesWithBytes?: () => Promise<boolean>;
+  /** Does the server advertise `empty-files` (0-byte tree files sync)? */
+  emptyFiles?: () => Promise<boolean>;
   /** Re-mint presigned part URLs whose own presign expired mid-upload. */
   requestParts?: (
     partsUrl: string,
@@ -1289,6 +1309,15 @@ export class AttachmentSync {
   /** Paths whose one-step registration the server refused this session: they
    *  take the old register-then-upload path, which owns those refusals. */
   private readonly oneStepDeclined = new Set<string>();
+  /** Bytes refused with a 403 (no write access): about access, which changes.
+   *  An access change forgets them ({@link forgetAccessRefusals}); before, a
+   *  short No access left every file's bytes, an empty file's included, skipped
+   *  until the next launch, so a new empty file never synced. */
+  private readonly accessSkips = new Set<string>();
+  /** Per path: passes that found no id for it yet (see {@link NotIndexedYet}). */
+  private readonly indexWaits = new Map<string, number>();
+  /** Consecutive passes that left files waiting for the local index. */
+  private indexWaitRounds = 0;
   /** The local index's path → `files.id` map, read once per pass. */
   private localIds: Map<string, string> | null = null;
   /**
@@ -1420,6 +1449,16 @@ export class AttachmentSync {
 
   // ---- The sidebar's file dots (see `deps.onFileStates`) -----------------
 
+  /** Tree binaries on this disk the server does not hold and no pass will
+   *  send: never synced (an empty file on an older server, a rule's leftovers)
+   *  or kept after access ended. The sidebar flags them Local, never green. */
+  private localOnlyFiles = new Map<string, "unsynced" | "kept">();
+
+  /** See {@link localOnlyFiles}: each path with why it is local. */
+  localOnlyPaths(): Array<[path: string, why: "unsynced" | "kept"]> {
+    return [...this.localOnlyFiles];
+  }
+
   /** Hand the current map to the UI. One emission, whole map. */
   private publishFileStates(): void {
     this.deps.onFileStates?.(Object.fromEntries(this.fileStates));
@@ -1431,7 +1470,8 @@ export class AttachmentSync {
     if (!this.deps.onFileStates) return;
     // The hidden root store has no sidebar row to badge.
     if (isUnderAttachments(relPath)) return;
-    if (this.fileStates.get(relPath) === state) return;
+    if (this.fileStates.get(relPath) === state && !this.localOnlyFiles.has(relPath)) return;
+    this.localOnlyFiles.delete(relPath);
     this.fileStates.set(relPath, state);
     this.publishFileStates();
   }
@@ -1452,7 +1492,9 @@ export class AttachmentSync {
     this.registerRefused.delete(relPath);
     this.permanentSkips.delete(relPath);
     this.localIds?.delete(relPath);
-    if (this.fileStates.delete(relPath)) this.publishFileStates();
+    this.indexWaits.delete(relPath);
+    const wasLocal = this.localOnlyFiles.delete(relPath);
+    if (this.fileStates.delete(relPath) || wasLocal) this.publishFileStates();
   }
 
   /**
@@ -1581,6 +1623,14 @@ export class AttachmentSync {
    * index batch. Deliberately NOT part of {@link recheckEmbedUploads}, which
    * also runs on every channel reconnect and would re-ask on each one.
    */
+  /** This user's access changed: uploads refused for access are asked again. */
+  forgetAccessRefusals(): void {
+    if (this.accessSkips.size === 0) return;
+    for (const sha of this.accessSkips) this.permanentSkips.delete(sha);
+    this.accessSkips.clear();
+    this.scheduleReconcile();
+  }
+
   forgetTextRefusals(): void {
     this.refusals.deletePrefix(TEXT_REFUSAL_PREFIX);
     for (const id of this.textRefused) this.textDone.delete(id);
@@ -1806,8 +1856,15 @@ export class AttachmentSync {
     // push, so it is settled, never registered and never queued.
     // An Office lock file never uploads (#265). Rust's listing already leaves
     // them out; this is the same rule held on the side that talks to the server.
+    // A server advertising `empty-files` takes them (no bytes move: the intent
+    // answers like a dedupe hit), so an empty tree file syncs and follows
+    // access like any other. Without it they stay settled and local.
+    const emptyOk = await this.emptyFilesEnabled();
     const toUpload = plan.toUpload.filter(
-      (a) => a.size !== 0 && !isTransientPath(a.relPath) && !hiddenEmbeds.has(a.relPath),
+      (a) =>
+        (a.size !== 0 || (emptyOk && !isUnderAttachments(a.relPath))) &&
+        !isTransientPath(a.relPath) &&
+        !hiddenEmbeds.has(a.relPath),
     );
     // Replacements grow during the upload phase: a 409 `stale_base` is one more.
     const replacements: BinaryReplace[] = [...plan.toReplace];
@@ -1864,18 +1921,26 @@ export class AttachmentSync {
         ...toUpload.map((a) => a.relPath),
         ...replacements.map((r) => r.local.relPath),
       ]);
+      // Green means the server HOLDS these bytes at this path. A file that is
+      // neither held nor queued (an empty file on a server without
+      // `empty-files`, a copy kept after access ended) is local only: it used
+      // to read "synced" and lend its green to every folder above it.
+      const held = new Set<string>();
+      for (const b of server) {
+        if (b.relPath && b.sha256) held.add(`${pathKey(b.relPath)}\0${b.sha256}`);
+      }
       this.fileStates = new Map<string, DocSyncState>();
+      this.localOnlyFiles = new Map<string, "unsynced" | "kept">();
       for (const a of local) {
         if (isUnderAttachments(a.relPath)) continue;
-        if (this.unreadable.has(pathKey(a.relPath))) continue;
-        this.fileStates.set(
-          a.relPath,
-          this.isPermanentlySkipped(a.sha256)
-            ? "error"
-            : queued.has(a.relPath)
-              ? "queued"
-              : "synced",
-        );
+        if (this.unreadable.has(pathKey(a.relPath))) {
+          this.localOnlyFiles.set(a.relPath, "kept");
+          continue;
+        }
+        if (this.isPermanentlySkipped(a.sha256)) this.fileStates.set(a.relPath, "error");
+        else if (queued.has(a.relPath)) this.fileStates.set(a.relPath, "queued");
+        else if (held.has(`${pathKey(a.relPath)}\0${a.sha256}`)) this.fileStates.set(a.relPath, "synced");
+        else this.localOnlyFiles.set(a.relPath, "unsynced");
       }
       // …plus the files this pass is about to PULL DOWN. They have no local row
       // yet — the sidebar's tree is the disk — but the roll-up credits a path to
@@ -1885,6 +1950,7 @@ export class AttachmentSync {
       for (const b of downloads) {
         if (!b.relPath || isUnderAttachments(b.relPath)) continue;
         this.fileStates.set(b.relPath, "queued");
+        this.localOnlyFiles.delete(b.relPath);
       }
       this.publishFileStates();
     }
@@ -1902,6 +1968,7 @@ export class AttachmentSync {
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
 
     let uploaded = 0;
+    let waitingForIndex = 0;
     let downloaded = 0;
     // Abandoned for the whole pass, not the one file (see {@link AbortPass}):
     // the quota refusal is the vault's answer, so it becomes a flag the pool's
@@ -1962,6 +2029,20 @@ export class AttachmentSync {
           if (e instanceof ParentNotRegistered) {
             this.setFileState(a.relPath, "queued");
             console.info(`[attachments] ${a.relPath} waits for its folder to reach the server`);
+            return;
+          }
+          if (e instanceof NotIndexedYet) {
+            const waits = (this.indexWaits.get(a.relPath) ?? 0) + 1;
+            this.indexWaits.set(a.relPath, waits);
+            if (waits > INDEX_WAIT_MAX_ROUNDS) {
+              // Never indexed: it is only on this computer, and says so.
+              this.fileStates.delete(a.relPath);
+              this.localOnlyFiles.set(a.relPath, "unsynced");
+              this.publishFileStates();
+              return;
+            }
+            this.setFileState(a.relPath, "queued");
+            waitingForIndex++;
             return;
           }
           if (e instanceof StaleBase) {
@@ -2032,6 +2113,15 @@ export class AttachmentSync {
       },
     );
     if (aborted) return { uploaded, downloaded };
+    // Files the index has not caught up on: ask again shortly, a bounded number
+    // of times (the watcher's next batch starts a pass of its own as well).
+    if (waitingForIndex > 0 && this.indexWaitRounds < INDEX_WAIT_MAX_ROUNDS) {
+      this.indexWaitRounds++;
+      console.info(`[attachments] ${waitingForIndex} file(s) wait for the local index before they upload`);
+      this.retryAfterSettle();
+    } else if (waitingForIndex === 0) {
+      this.indexWaitRounds = 0;
+    }
     const replaces = replacements.filter((r) => {
       if (this.attachmentSyncBlocked) return false;
       if (this.deps.isDeletePending?.(r.local.relPath)) return false;
@@ -2272,6 +2362,18 @@ export class AttachmentSync {
     let docId = register ? undefined : await this.ensureFileRow(a);
     if (docId === undefined && this.parentMissing.delete(a.relPath)) throw new ParentNotRegistered();
     if (this.unreadable.has(pathKey(a.relPath))) throw new HiddenFile();
+    // A tree binary never goes up without a `files` row: the server cannot
+    // place it and refuses it (`invalid_rel_path`). No row yet and no refusal
+    // on record means the index or the server has not answered yet: wait.
+    if (
+      docId === undefined &&
+      !register &&
+      !isUnderAttachments(a.relPath) &&
+      this.deps.registerFile &&
+      !this.registerRefused.has(a.relPath)
+    ) {
+      throw new NotIndexedYet();
+    }
     /** Record the row a one-step upload created or bound to — exactly what
      *  `ensureFileRow` records after `POST /api/files`. */
     const bindOneStep = (file: OneStepFileRow | undefined): void => {
@@ -2398,8 +2500,21 @@ export class AttachmentSync {
         // remembered beyond this instance, so the next session start does not
         // ask again; a 403 is about access, which an owner can change, so it
         // stays a session-only skip.
-        if (status === 403) this.permanentSkips.add(a.sha256);
-        else this.skipPermanently(a.sha256);
+        if (
+          status === 400 &&
+          errCode(e) === "invalid_rel_path" &&
+          !docId &&
+          !isUnderAttachments(a.relPath) &&
+          !this.registerRefused.has(a.relPath)
+        ) {
+          // No row to place it under: about this request, never these bytes
+          // (other paths may hold the same bytes, every empty file does).
+          throw new NotIndexedYet();
+        }
+        if (status === 403) {
+          this.permanentSkips.add(a.sha256);
+          this.accessSkips.add(a.sha256);
+        } else this.skipPermanently(a.sha256);
         if (status === 415) this.noteUnsupportedType(a);
         console.warn(
           `[attachments] ${a.relPath} refused permanently (${status} ${errCode(e) ?? "?"}) — skipping`,
@@ -2612,6 +2727,17 @@ export class AttachmentSync {
       if (errCode(e) !== "upload_incomplete") throw e;
       await retryPut();
       return await complete(completeUrl, body());
+    }
+  }
+
+  /** Does this server take 0-byte files (`empty-files`)? Unknown ⇒ false. */
+  private async emptyFilesEnabled(): Promise<boolean> {
+    if (!this.deps.emptyFiles || !this.deps.createIntent) return false;
+    if (this.intentSupported === false) return false;
+    try {
+      return await this.deps.emptyFiles();
+    } catch {
+      return false;
     }
   }
 
@@ -2991,7 +3117,9 @@ export class AttachmentSync {
         return undefined;
       }
       if (code === "path_folder_mismatch") this.parentMissing.add(relPath);
-      const permanent = status != null && status >= 400 && status < 500 && status !== 400;
+      // A 400 other than `path_folder_mismatch` is an answer too: read as
+      // transient, the file would wait for a row that never comes.
+      const permanent = status != null && status >= 400 && status < 500 && code !== "path_folder_mismatch";
       if (permanent) this.registerRefused.add(relPath);
       console.warn(
         `[attachments] ${relPath} — no files row (${status ?? "?"} ${code ?? "?"})${

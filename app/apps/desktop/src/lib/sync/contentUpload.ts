@@ -657,10 +657,17 @@ export class ContentUploader {
       // file holds that the doc does not is about to be overwritten by the
       // flush below and is unsendable besides. Keep a copy and say so.
       if (push.readOnly) {
-        const safeToReplace = await this.keepUnsendableEdit(docId, relPath, bridge);
+        const verdict = await this.keepUnsendableEdit(docId, relPath, bridge);
+        const safeToReplace = verdict !== false;
         // Never merge the file into a doc this user cannot write; release the
         // pull wait, and let its deferred write go ahead only when it is safe.
         bridge.abandonPull(safeToReplace);
+        // The file holds an edit the server will never take: write the team's
+        // text back over it NOW. The pull usually brings nothing new for such a
+        // doc, so no egest was ever armed and the flush below wrote nothing —
+        // the unsendable edit used to stay on disk for good, visible only here.
+        // `writeThrough` keeps the empty-over-non-empty guard.
+        if (verdict === "replace") await bridge.writeThrough();
         if (!safeToReplace) {
           // The file is still the durable copy. Do not flush the Remote Vault's
           // state over it unless the differing bytes were preserved first.
@@ -765,7 +772,7 @@ export class ContentUploader {
     docId: string,
     relPath: string,
     bridge: NoteBridge,
-  ): Promise<boolean> {
+  ): Promise<"same" | "replace" | false> {
     const read = this.opts.deps.readFile;
     if (!read) return false;
     let fileText: string;
@@ -774,13 +781,13 @@ export class ContentUploader {
     } catch {
       return false; // nothing readable to compare or safely replace
     }
-    if (fileText === bridge.serialize()) return true; // converged — nothing to keep
+    if (fileText === bridge.serialize()) return "same"; // converged — nothing to keep
     // The registry created this file as an empty landing place for a remote
     // note. It is not a local delete/edit, and keeping a copy of zero bytes both
     // invents a warning and prevents the canonical pull from ever reaching
     // disk. The caller's provenance callback is deliberately stricter than
     // `fileText.length === 0`: a real user truncation must still be recovered.
-    if (this.opts.isUnhydratedPlaceholder?.(docId, relPath, fileText)) return true;
+    if (this.opts.isUnhydratedPlaceholder?.(docId, relPath, fileText)) return "replace";
     // No copy is kept (decided 2026-11-19): the edit is reported, then replaced.
     this.report({
       docId,
@@ -789,7 +796,7 @@ export class ContentUploader {
       permanent: true,
       kind: "no-write-access",
     });
-    return true;
+    return "replace";
   }
 
   /** Record a failure WITHOUT touching the progress counters or the streak —

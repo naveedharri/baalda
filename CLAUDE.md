@@ -523,6 +523,50 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   pickUniqueEmptyRename`): every 0-byte placeholder hashes the same, so a renamed empty note used to
   reach the server as delete + create; the drain now pairs one only when exactly one empty note went
   and exactly one empty unmapped file appeared, sharing a basename or a parent folder.
+- **Found by the four-app test (owner, admin, two members; 2026-11-22)**:
+  - **Empty files sync** (server feature `empty-files`): `blobs/intent` takes `size: 0` with the empty
+    sha256 and answers like a dedupe hit. Older servers: the desktop keeps empty files local, as before.
+    `blobRefusals` storage moved to `v2` so remembered `invalid_rel_path` refusals are asked again.
+  - **Not indexed yet is bounded** (`attachments.ts indexWaits`): a file whose intent keeps answering 400
+    before Rust indexed it waits a few rounds, then is marked `unsynced` (Local) instead of spinning.
+    A register refusal is permanent only for a 4xx other than `path_folder_mismatch`.
+  - **Honest sidebar marks** (`syncRollup.ts`): outside a run an `unsynced` (Local) file stays hollow
+    with its reason on hover, and a folder holding one says "N of M files not on the server yet"
+    (`folderUnsentTitle`); `error`/`queued` read green outside a run. A vault waiting for its key
+    shows **Sync paused**, never Synced, and no sidebar marks (`useVaultKeyBlocked`).
+  - **No access removes rule-hidden files too** (`registry.revokeParked`): parked docs/files the
+    access check answers `none` go like any revoked item, after the same unsent-work re-check.
+  - **A refused edit to a view-only note is put back** (`contentUpload.ts`): `keepUnsendableEdit`
+    answers `same` | `replace` | false and `replace` runs `bridge.writeThrough()` (the empty-over-
+    populated guard still applies). At launch `closedAppEdits` no longer skips a view-only/padlocked
+    note whose file differs from a non-empty local CRDT: it queues it, the uploader's read-only
+    branch writes the team's text back. It never merges or pushes such a note.
+  - **A 2xx is not an upload on its own** (Rust `upload_file`): it counts only once `VerifyingReader`
+    read the whole body and its length/sha check passed (`verified`); a server answering before the
+    body ended used to make wrong bytes look uploaded. A 0-byte body is judged up front.
+  - **Launching offline is not signing out** (`authManager.waitingForServer`, store
+    `authOffline`/`retryAuth`): a kept token the server could not check is retried 3 s → 30 s and on
+    `online`/`focus`; the not-syncing banner says "Can't reach the server" with Try again, not
+    Sign in, and the identity bar reads "Synced · offline". Before, the app stayed "Signed out" until the
+    person signed in again.
+  - **Deletes made offline wait for the server** (`docSession.channelDown`): once the vault channel
+    has dropped, `drainDiskDeletes` keeps its pending maps (which also holds the registry pull) and
+    `BinaryDeleteQueue` (`isOffline`/`resume`) keeps its paths pending without spending retries;
+    both drain on the next `synced` (or at once on the terminal `no-access`), before the reconnect pull. A network error used to count as a
+    refusal, so the deleted file came back. A delete made while the app is CLOSED still comes back
+    (a missing file at startup is never a delete), and the creator rule still puts back a member's
+    delete of someone else's file.
+  - **Edits made while offline wait for the server too** (`localChangesAwaitChannel`): with the
+    channel down `runLocalChangePush` keeps its queue and drains on the next `synced`, re-reading
+    each note's path from the registry (a teammate may have moved its folder meanwhile). The per-note
+    path now requeues retryable failures (15 s, at most 5 tries) like the batch path already did.
+    Before, an external edit (an editor, an AI agent) to a closed note made offline failed once and
+    reached nobody until the next launch.
+  - **A retiring background bridge holds its doc** (`vaultDocStore.retireHeld`): `demote`,
+    `release`, `drop` and LRU eviction take a bridge out of `hot` before its final flush and
+    persist; they now `holdUntil` that finishes, so a feed update or promote in the window waits.
+    Before, a cold apply opened from a local store lacking the bridge's last ops while the file had
+    them, and either merged that text in again (an offline edit arrived twice) or wrote over it.
 - **Paths compare case-insensitively everywhere** — notes (`samePath`) AND folders in `planInbound`, like
   the server's `lower(path)` unique indexes and the outbound `registry.ts` adoption. A vault whose disk
   said `Projects/community` while the server said `Projects/Community` (with empty server folders under
@@ -581,10 +625,13 @@ Vault Settings has ONE **Members and access** tab (id `members`; the old `access
 `AccessPanel.tsx` are gone): `components/MembersAccessTab.tsx`, `MemberProfilePage.tsx` (a PAGE
 inside Vault Settings with a back link, not a dialog; rows open it on click; tabs Personal info /
 Access / Activity), `InvitePeopleDialog.tsx`, pure logic in `lib/membersAccess.ts`. Owners/admins see the
-**Everyone in <vault>** row (Can edit / Can view / No access = wire `open`/`readonly`/`private`), the
+**Default access** row (the vault's team access, called "Everyone in <vault>" until 2026-11-22; Can edit / Can view /
+No access = wire `open`/`readonly`/`private`; copy says it is where every member STARTS and that groups and
+personal settings change it), the
 **New members** row ("For notes made before they joined": Can edit / Can view / No access
 = `join_default`), and a per-person Access cell (Can edit everything / Can view everything /
-No access / Custom) plus a ⋯ menu (View profile, Manage access, Make admin/member, Remove). Plain
+No access / Custom; hovering it says where that comes from, `membersAccess.ts accessSources().lines`, with no
+visible second line; the profile's Access tab says it in one sentence under "Across the vault", `accessSources().sentence`) plus a ⋯ menu (View profile, Manage access, Make admin/member, Remove). Plain
 members get a read-only roster from `GET /orgs/:orgId/members/overview`. Who may change one person's access is one rule,
 `lib/membersAccess.ts canManageMemberAccess` mirrored by the server's `access-management.ts` helper
 (bulk access, per-user `POST /shares`, the share reset): an owner manages anyone, themselves included;
@@ -1007,7 +1054,7 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   is the server package version read once at startup, `minDesktopVersion` the live
   `client-version.ts` floor (null when off), `features` today `notes-with-state`
   (`registry/seed-on-register.ts`), `bootstrap-only` (`routes/bootstrap.ts`), `files-with-bytes`
-  (`routes/blobs.ts`), `access-board` (`routes/registry.ts`) and `skills` (`skills/feature.ts`). A missing `features` means none. Desktops pick their path from it once per
+  (`routes/blobs.ts`), `empty-files` (`routes/blobs.ts`), `access-board` (`routes/registry.ts`) and `skills` (`skills/feature.ts`). A missing `features` means none. Desktops pick their path from it once per
   server URL; the per-item `seeded` flag stays the fallback.
 - **Registration with state** (`registry/seed-on-register.ts`, used by `POST
   /api/vaults/:vaultId/notes/batch` in `routes/bulk.ts` and `POST /api/notes` in

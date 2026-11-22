@@ -13,6 +13,7 @@ import { ReconcileBanner } from "./components/ReconcileBanner";
 import { HeldDeleteNotice } from "./components/HeldDeleteNotice";
 import { NoteRemovedNotice } from "./components/NoteRemovedNotice";
 import { useNoticeSlot } from "./components/useNoticeSlot";
+import { useVaultKeyBlocked } from "./components/useVaultKeyBlocked";
 import { useLiveInvitations } from "./components/useLiveInvitations";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
 import { SyncPausedBannerView } from "./components/SyncPausedBanner";
@@ -206,7 +207,9 @@ function NotSyncingBanner() {
   const vaultSyncStatus = useStore((s) => s.vaultSyncStatus);
   const folderIsSynced = useStore((s) => s.openFolderIsSynced);
   const noteOpen = useStore((s) => s.openNote != null);
+  const authOffline = useStore((s) => s.authOffline);
   const reason = notSyncingReason({
+    authOffline,
     authStatus,
     hasSession,
     syncStatus,
@@ -220,6 +223,7 @@ function NotSyncingBanner() {
     <NotSyncingBannerView
       reason={visible ? reason : null}
       onSignIn={() => useStore.getState().setAuthPrompt("sign-in")}
+      onRetry={() => useStore.getState().retryAuth()}
     />
   );
 }
@@ -1092,6 +1096,7 @@ function SyncIndicator({
   const vaultStatus = useStore((s) => s.vaultSyncStatus);
   const rootMissing = useStore((s) => s.structureNotice.rootMissing);
   const syncPause = useStore((s) => s.syncPause);
+  const keyLocked = useVaultKeyBlocked();
   // The folder is gone (#228) or the shrink brake holds our writes (#252):
   // SyncBadge renders both itself (`syncBadgeHold`), and they outrank the
   // attachment notice and the idle-vault hide below.
@@ -1106,7 +1111,7 @@ function SyncIndicator({
       .some((f) => f.kind === "note" && f.path.toLowerCase() === key);
   });
   const held =
-    syncBadgeHold({ rootMissing, enabled: syncEnabled, pause: syncPause, now: Date.now() }) != null;
+    syncBadgeHold({ rootMissing, enabled: syncEnabled, pause: syncPause, keyLocked, now: Date.now() }) != null;
   if (!held && (attachmentLocalOnly || (noteOpen && openNoteLocalOnly))) {
     return <SyncBadge status="offline" enabled={false} noteOpen />;
   }
@@ -1123,6 +1128,7 @@ function SyncIndicator({
       vaultStatus={vaultStatus}
       rootMissing={rootMissing}
       pause={syncPause}
+      keyLocked={keyLocked}
     />
   );
 }

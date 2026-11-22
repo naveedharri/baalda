@@ -197,3 +197,41 @@ describe("AuthManager server switching", () => {
     expect(mgr.getServerUrl()).toBe("http://localhost:3010");
   });
 });
+
+describe("AuthManager.init when the server cannot be reached", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("keeps the saved token and says it is waiting for the server, not signed out", async () => {
+    vi.mocked(ipc.keychainGet).mockResolvedValueOnce("sess-1");
+    const api = fakeApi({
+      setBaseUrl: vi.fn(),
+      setToken: vi.fn(),
+      getSession: vi.fn(async () => {
+        throw new TypeError("Load failed");
+      }),
+    } as Partial<ApiClient>);
+    const mgr = new AuthManager(api);
+    expect(await mgr.init()).toBeNull();
+    expect(mgr.waitingForServer).toBe(true);
+    expect(ipc.keychainDelete).not.toHaveBeenCalled();
+    // The retry: the server is back and the same token is good.
+    vi.mocked(ipc.keychainGet).mockResolvedValueOnce("sess-1");
+    const session = { user: { id: "u1", email: "a@b.co", name: "" } };
+    (api.getSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce(session);
+    expect(await mgr.init()).toBe(session);
+    expect(mgr.waitingForServer).toBe(false);
+  });
+
+  it("is not waiting when there is no saved token or the server refused it", async () => {
+    const api = fakeApi({ setBaseUrl: vi.fn(), setToken: vi.fn(), getSession: vi.fn(async () => null) } as Partial<ApiClient>);
+    const mgr = new AuthManager(api);
+    expect(await mgr.init()).toBeNull();
+    expect(mgr.waitingForServer).toBe(false);
+    vi.mocked(ipc.keychainGet).mockResolvedValueOnce("sess-1");
+    expect(await mgr.init()).toBeNull();
+    expect(mgr.waitingForServer).toBe(false);
+    expect(ipc.keychainDelete).toHaveBeenCalled();
+  });
+});

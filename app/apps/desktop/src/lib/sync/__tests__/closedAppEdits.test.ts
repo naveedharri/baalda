@@ -92,7 +92,10 @@ function harness(opts: { notes: Note[]; live?: boolean; open?: string | null; pe
 describe("closed-app edits pass (#284)", () => {
   beforeEach(() => reconcileReport.clear());
 
-  it("leaves a read-only note with a differing disk base alone: no push, no copy, no banner", async () => {
+  it("hands a read-only note whose file differs to the uploader, which puts the team's text back", async () => {
+    // It used to be left alone: an edit made while closed then stayed on disk
+    // for good, a copy nobody else had. The uploader's read-only branch never
+    // merges or pushes it; it writes the doc's text back and reports it.
     const h = harness({
       notes: [
         { docId: "ro", relPath: "ro.md", sha: "new", base: "old", viewOnly: true },
@@ -100,14 +103,26 @@ describe("closed-app edits pass (#284)", () => {
       ],
     });
     const r = await runClosedAppEdits(h.deps);
-    expect(r).toMatchObject({ drifted: 2, queued: 0, readOnly: 2, chunks: 0 });
-    expect(h.chunks).toEqual([]);
-    expect(h.acked.size).toBe(0);
+    expect(r).toMatchObject({ drifted: 2, queued: 2, readOnly: 2, chunks: 1 });
+    expect(h.chunks).toEqual([["ro", "lk"]]);
+    // The pass itself writes nothing and reports nothing.
     expect(h.trash).toEqual([]);
     expect(reconcileReport.items()).toEqual([]);
     // The padlocked note never even cost a permission request.
     expect(h.minted).toEqual(["ro"]);
-    expect(h.bases.get("ro")).toBe("old");
+  });
+
+  it("never queues a read-only note it holds no text for, or one already equal", async () => {
+    const h = harness({
+      notes: [
+        { docId: "none", relPath: "none.md", sha: "new", base: "old", viewOnly: true, doc: null },
+        { docId: "empty", relPath: "empty.md", sha: "new", base: "old", viewOnly: true, doc: "" },
+        { docId: "same", relPath: "same.md", sha: "new", base: "old", viewOnly: true, doc: "x", file: "x" },
+      ],
+    });
+    const r = await runClosedAppEdits(h.deps);
+    expect(r).toMatchObject({ drifted: 3, queued: 0, readOnly: 3 });
+    expect(h.chunks).toEqual([]);
   });
 
   it("treats an unanswered permission check as read-only", async () => {
@@ -115,9 +130,11 @@ describe("closed-app edits pass (#284)", () => {
     h.deps.canEdit = async () => {
       throw new Error("403");
     };
+    // Counted read-only and handed to the uploader, which asks the server again
+    // with its own token before it merges or replaces anything.
     const r = await runClosedAppEdits(h.deps);
-    expect(r).toMatchObject({ queued: 0, readOnly: 1 });
-    expect(h.chunks).toEqual([]);
+    expect(r).toMatchObject({ queued: 1, readOnly: 1 });
+    expect(h.chunks).toEqual([["a"]]);
   });
 
   it("pushes nothing when the lock view cannot be read", async () => {

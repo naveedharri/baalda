@@ -296,4 +296,19 @@ describe("Members and access tab", () => {
     expect(host.querySelectorAll('[role="tab"]')).toHaveLength(0);
     expect(host.querySelector(".member-profile-about")).not.toBeNull();
   });
+
+  it("calls the vault-wide row Default access and keeps where access comes from to the hover", async () => {
+    const own = { ...person("u2", "Sara Own"), access: { level: "view" as const, own: true } };
+    const plain = { ...person("u3", "Ali Default"), access: { level: "view" as const } };
+    api.getMembersOverview.mockResolvedValue(overview([person("u1", "Owner One", "owner"), own, plain]));
+    await render();
+    await flush();
+    const rows = host.querySelector(".members-access-rows")!;
+    expect(rows.textContent).toContain("Default access");
+    expect(rows.textContent).toContain("Every member starts here");
+    expect(rows.textContent).not.toContain("Everyone in");
+    const rowOf = (name: string) => [...host.querySelectorAll("tbody tr")].find((r) => r.textContent?.includes(name))!;
+    expect(host.querySelector(".members-access-source")).toBeNull();
+    expect(rowOf("Ali Default").querySelector(".members-access-cell")?.getAttribute("title")).toBe("Default access: Can view.");
+  });
 });

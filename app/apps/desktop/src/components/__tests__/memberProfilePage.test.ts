@@ -93,10 +93,10 @@ describe("Member profile page, Access tab", () => {
     expect(rows.every((r) => r.querySelector(".member-access-icon svg"))).toBe(true);
     const byName = (n: string) => rows.find((r) => r.querySelector(".member-access-name")?.textContent === n)!;
     // Team mode is Can edit: an open row is inherited, a view row is the person's own.
-    expect(byName("Specs").textContent).toContain("Same as everyone");
+    expect(byName("Specs").textContent).toContain("Same as default");
     expect(byName("Specs").querySelector(".member-access-pill")?.textContent).toContain("Can edit");
     expect(byName("Welcome").querySelector(".member-access-pill")?.textContent).toContain("Can view");
-    expect(byName("Welcome").textContent).not.toContain("Same as everyone");
+    expect(byName("Welcome").textContent).not.toContain("Same as default");
     expect(byName("Archive").querySelector(".member-access-pill")).toBeNull();
   });
 

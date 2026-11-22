@@ -70,6 +70,7 @@ import { SEED_BATCH_MAX_ITEMS } from "./seedRegister";
 import {
   BOOTSTRAP_ONLY,
   FILES_WITH_BYTES,
+  EMPTY_FILES,
   FOLDER_DELETE_IF_EMPTY,
   serverFeatures as cachedServerFeatures,
 } from "../serverFeatures";
@@ -181,6 +182,12 @@ const LOCAL_CHANGE_DEBOUNCE_MS = 800;
 const MERGE_PUSH_WAIT_MS = 60_000;
 /** Re-check interval while a bulk run holds the uploader slot. */
 const LOCAL_CHANGE_RETRY_MS = 2_000;
+/** A local change whose push failed for a reason a retry can fix (timeout,
+ *  5xx, a dropped socket) goes back on the queue this long after, at most
+ *  {@link LOCAL_CHANGE_MAX_RETRIES} times. Offline is not a retry: the queue
+ *  simply waits for the channel (`localChangesAwaitChannel`). */
+const LOCAL_CHANGE_FAILURE_RETRY_MS = 15_000;
+const LOCAL_CHANGE_MAX_RETRIES = 5;
 /**
  * Grace window before a disk-observed delete is propagated to the server.
  *
@@ -799,6 +806,10 @@ export class SyncManager implements InboundHost {
    *  .md on disk. Drained by {@link runLocalChangePush}, debounced so a burst
    *  (an AI writing many files) coalesces into one run. */
   private localChanges = new Map<string, string>();
+  /** The local-change drain found the channel down and kept its queue. */
+  private localChangesAwaitChannel = false;
+  /** Failed-push retries per doc for the local-change queue. */
+  private localChangeAttempts = new Map<string, number>();
   /** Resolvers waiting for the next local-change drain to finish (#284). */
   private localDrainWaiters: Array<() => void> = [];
   /** The closed-app edits pass ran for this vault open (#284). */
@@ -1041,6 +1052,16 @@ export class SyncManager implements InboundHost {
   private docStatus: SyncStatus | null = null;
   /** Latest vault-channel status (the always-on background feed). */
   private vaultStatus: VaultSyncStatus = "idle";
+  /**
+   * The vault channel WAS synced and has dropped since (offline, server down).
+   * Disk deletes made meanwhile wait for it instead of failing: a network error
+   * used to count as a refusal, so the next pull after reconnecting put the
+   * deleted note back (and a binary came back after three listing failures).
+   * Never set before a first `synced`, so a startup is still judged by
+   * `isLive`, never by this.
+   */
+  private channelDown = false;
+  private deletesAwaitChannel = false;
 
   // Vault-wide presence: which teammate is viewing which note. Keyed by userId
   // (last-write-wins across a user's devices), fed by the engine's presence
@@ -1669,6 +1690,7 @@ export class SyncManager implements InboundHost {
     // text the server refused with a 403.
     if (reason === "reauth" || reason === "acl-revoked") {
       this.attachments?.forgetTextRefusals();
+      this.attachments?.forgetAccessRefusals();
     }
     // Which trigger asked for this pull. A pull that keeps re-arming itself is
     // invisible without this line — the badge just blinks "Syncing" — and the
@@ -1917,6 +1939,12 @@ export class SyncManager implements InboundHost {
 
   /** True while the blob mirror has a debounced pass armed — the binary half of
    *  {@link hasPendingRegistryPull} (teardown assertions / tests). */
+  /** Tree binaries on this disk the server does not hold and no pass sends,
+   *  with why (`AttachmentSync.localOnlyPaths`). */
+  localOnlyFilePaths(): Array<[path: string, why: "unsynced" | "kept"]> {
+    return this.attachments?.localOnlyPaths() ?? [];
+  }
+
   hasPendingAttachmentReconcile(): boolean {
     return this.attachments?.hasPendingReconcile() ?? false;
   }
@@ -2602,6 +2630,14 @@ export class SyncManager implements InboundHost {
    */
   private async drainDiskDeletes(scope: VaultScope): Promise<void> {
     if (!this.enabled || !scope.isCurrent()) return;
+    // Offline: decide nothing and drop nothing. The pending maps stay as they
+    // are (which also keeps the registry pull waiting, see
+    // `pullAfterDiskDeletes`), and the drain runs again the moment the channel
+    // is back, ahead of the reconnect pull.
+    if (this.channelDown) {
+      this.deletesAwaitChannel = true;
+      return;
+    }
     // A path the registry removed itself never leaves as a user delete, however
     // it got here (the second rail behind `queueDiskDelete`, #419).
     const ownRemoval = (relPath: string) => this.registry.isOwnRemoval?.(relPath) === true;
@@ -3976,7 +4012,20 @@ export class SyncManager implements InboundHost {
       }
       return;
     }
-    const notes = [...this.localChanges].map(([docId, relPath]) => ({ docId, relPath }));
+    // Offline (the channel was up and dropped): pushing now fails every note,
+    // and nothing used to try again, so a file edited while offline (by an
+    // editor, a script, an AI agent) reached nobody until the next launch.
+    // Keep the queue; the channel's next `synced` drains it.
+    if (this.channelDown) {
+      if (this.localChanges.size > 0) this.localChangesAwaitChannel = true;
+      return;
+    }
+    // The CURRENT path: a teammate may have moved the note (or its folder)
+    // while this entry waited.
+    const notes = [...this.localChanges].map(([docId, relPath]) => ({
+      docId,
+      relPath: this.registry.pathForDocId(docId) ?? relPath,
+    }));
     this.localChanges.clear();
     if (notes.length === 0) return;
 
@@ -4116,6 +4165,29 @@ export class SyncManager implements InboundHost {
     const result = await uploader.run();
     if (!scope.isCurrent() || this.uploader !== uploader) return requeue(pending);
     this.recordPermanentFailures(uploader);
+    // Retryable failures go back on the queue (bounded); the bulk path above
+    // already does this, the per-note path used to only log them.
+    {
+      // A shrink-brake hold is lifted by its own path (#274), not by retrying.
+      const failed = uploader.failedDocs().filter((f) => !f.permanent && f.kind !== "shrink-held");
+      const failedIds = new Set(failed.map((f) => f.docId));
+      for (const n of pending) if (!failedIds.has(n.docId)) this.localChangeAttempts.delete(n.docId);
+      let again = 0;
+      for (const f of failed) {
+        const tries = (this.localChangeAttempts.get(f.docId) ?? 0) + 1;
+        if (tries > LOCAL_CHANGE_MAX_RETRIES) {
+          this.localChangeAttempts.delete(f.docId);
+          continue;
+        }
+        this.localChangeAttempts.set(f.docId, tries);
+        if (!this.localChanges.has(f.docId)) this.localChanges.set(f.docId, f.relPath);
+        again++;
+      }
+      if (again > 0) {
+        if (this.channelDown) this.localChangesAwaitChannel = true;
+        else this.armLocalChangeDrain(scope, LOCAL_CHANGE_FAILURE_RETRY_MS);
+      }
+    }
     await this.registry.flushCheckpoint();
     if (!scope.isCurrent() || this.uploader !== uploader) return requeue(pending);
     if (result.cancelled) return requeue(pending);
@@ -7218,6 +7290,10 @@ export class SyncManager implements InboundHost {
       this.presenceRepushTimer = null;
     }
     this.vaultStatus = "idle";
+    this.channelDown = false;
+    this.deletesAwaitChannel = false;
+    this.localChangesAwaitChannel = false;
+    this.localChangeAttempts.clear();
     this.onVaultStatus?.("idle");
     // A pause is about our writes in the vault we are leaving.
     this.syncPause.reset();
@@ -7732,7 +7808,25 @@ export class SyncManager implements InboundHost {
         if (s !== "synced") this.clearVaultPresence();
         // Nothing more is coming over a dropped channel: deferred small
         // arrivals get their placeholders now.
-        if (s !== "synced" && this.vaultStatus === "synced") this.deferredArrivalFlush.flushNow();
+        if (s !== "synced" && this.vaultStatus === "synced") {
+          this.deferredArrivalFlush.flushNow();
+          this.channelDown = true;
+        }
+        // `no-access` is terminal (the channel stops retrying): nothing would
+        // ever release a hold, so whatever waited runs now and meets the
+        // server's answer like any other delete.
+        if (s === "no-access" && this.channelDown) {
+          this.channelDown = false;
+          if (this.deletesAwaitChannel) {
+            this.deletesAwaitChannel = false;
+            this.armDiskDeleteDrain(scope, 0);
+          }
+          this.binaryDeletes?.resume();
+          if (this.localChangesAwaitChannel) {
+            this.localChangesAwaitChannel = false;
+            this.armLocalChangeDrain(scope, 0);
+          }
+        }
         this.vaultStatus = s;
         this.emitStatus();
         this.onVaultStatus?.(s);
@@ -7746,6 +7840,19 @@ export class SyncManager implements InboundHost {
         if (s === "synced") {
           this.channelSynced = true;
           this.markLive();
+          if (this.channelDown) {
+            this.channelDown = false;
+            // Deletes made while offline go first; the pull below waits for them.
+            if (this.deletesAwaitChannel) {
+              this.deletesAwaitChannel = false;
+              this.armDiskDeleteDrain(scope, 0);
+            }
+            this.binaryDeletes?.resume();
+            if (this.localChangesAwaitChannel) {
+              this.localChangesAwaitChannel = false;
+              this.armLocalChangeDrain(scope, 0);
+            }
+          }
           this.handleRegistryChanged("channel-synced");
         }
       },
@@ -7990,6 +8097,7 @@ export class SyncManager implements InboundHost {
       // The same liveness the note queue uses: the vault channel is synced and
       // one pull has completed, so a missing file is a decision, not a startup.
       isLive: () => this.isLive(),
+      isOffline: () => this.channelDown,
       // `false` only for a definite not-found; every other failure — a vault
       // switch, an IPC hiccup under load — rejects, and the drain reads a
       // rejection as "couldn't ask" rather than "gone". This used to be a
@@ -8110,6 +8218,7 @@ export class SyncManager implements InboundHost {
         api.completeBlob(completeUrl, body).then((r) => ({ file: r?.file })),
       // One-step file upload (`files-with-bytes`), from the cached `/health`.
       filesWithBytes: async () => (await this.serverFeatures()).has(FILES_WITH_BYTES),
+      emptyFiles: async () => (await this.serverFeatures()).has(EMPTY_FILES),
       requestParts: (partsUrl, partNumbers) => api.requestBlobParts(partsUrl, partNumbers),
       putFile: (input) =>
         ipc.uploadAttachment(

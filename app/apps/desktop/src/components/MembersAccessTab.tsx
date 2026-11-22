@@ -19,6 +19,9 @@ import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
 import {
   countLine,
   EVERYONE_OPTIONS,
+  DEFAULT_ACCESS_SUB,
+  DEFAULT_ACCESS_TITLE,
+  accessSources,
   everyoneLabel,
   filterPeople,
   freshViewerRole,
@@ -358,7 +361,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     await authManager.api.setTeamAccess(orgId, mode);
     patchRoster((r) => ({ ...r, teamAccess: r.teamAccess ? patchedTeamAccess(r.teamAccess, mode) : r.teamAccess }));
     refreshBehind();
-    toast(`Everyone in ${vaultName}: ${EVERYONE_OPTIONS.find((o) => o.value === mode)?.label}`);
+    toast(`${DEFAULT_ACCESS_TITLE}: ${EVERYONE_OPTIONS.find((o) => o.value === mode)?.label}`);
   });
 
   const chooseEveryone = (mode: TeamAccessMode) => {
@@ -377,8 +380,8 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       apply: () => writeEveryone(mode),
       subtitle: <>People set by name keep their own setting.</>,
       change: {
-        who: `Everyone in ${vaultName}`,
-        sub: "Default for every member",
+        who: DEFAULT_ACCESS_TITLE,
+        sub: `Every member of ${vaultName} starts here`,
         from: teamAccess.posture === "none" ? "private" : teamAccess.mode,
         to: mode,
       },
@@ -437,7 +440,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       subtitle: (
         <>
           This applies across {vaultName}
-          {self ? ", and owners and admins are not exempt." : ", over the default for everyone."}
+          {self ? ", and owners and admins are not exempt." : ", just for them. Default access and their groups no longer change it."}
         </>
       ),
       change: {
@@ -509,7 +512,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       label: "Set to No access",
       tone: "danger",
       apply,
-      subtitle: <>This applies across {vaultName}, over the default for everyone.</>,
+      subtitle: <>This applies across {vaultName}, just for these people. Default access and their groups no longer change it.</>,
       cancelLabel: "Keep as is",
       body: <p className="confirm-note">{namesLine(split.apply)} will not open anything in {vaultName} until someone gives them access again.</p>,
     });
@@ -639,6 +642,16 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   // The Everyone row shows nothing current until the server has answered; a
   // cached mode only paints the trigger as a hint, it never authorises a write.
   const everyone = teamAccess ? everyoneLabel(teamAccess.mode, teamAccess.posture) : null;
+  // Where each person's access comes from (the Access column's second line).
+  const sourceOf = (m: MemberOverview) => m.access ? accessSources({
+    level: m.access.level,
+    own: !!m.access.own,
+    isSelf: m.userId === myUserId,
+    defaultLabel: everyone?.label ?? null,
+    groups: groupsOn
+      ? groups.filter((g) => (m.groupIds ?? []).includes(g.id)).map((g) => ({ name: g.name, summary: groupAccessSummary(g.grants) }))
+      : [],
+  }) : null;
 
   // A profile asked for before the roster has arrived: hold its layout.
   if (profile && orgId && !overview) {
@@ -749,8 +762,8 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
               <PeopleIcon />
             </span>
             <span className="members-access-row-copy">
-              <span className="members-access-row-title">Everyone in {vaultName}</span>
-              <span className="muted">{everyone?.sub ?? "Default for every member"}</span>
+              <span className="members-access-row-title">{DEFAULT_ACCESS_TITLE}</span>
+              <span className="muted">{everyone?.sub ?? DEFAULT_ACCESS_SUB}</span>
             </span>
             {teamAccess ? (
               <MenuSelect<string>
@@ -769,13 +782,13 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
                   else chooseEveryone(v as TeamAccessMode);
                 }}
                 disabled={busy}
-                ariaLabel={`Access for everyone in ${vaultName}`}
+                ariaLabel={`Default access for members of ${vaultName}`}
                 triggerClassName={`members-access-trigger is-level ${levelClass(teamAccess.posture === "none" ? "private" : teamAccess.mode)}`}
                 menuClassName="access-menu"
                 triggerContent={everyone?.label}
               />
             ) : (
-              <PillSkeleton label={`Loading access for everyone in ${vaultName}`} />
+              <PillSkeleton label={`Loading default access for ${vaultName}`} />
             )}
           </div>
           <div className="members-access-row">
@@ -998,6 +1011,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
                   )}
                   {manage && (
                     <td>
+                      <span className="members-access-cell" title={sourceOf(m)?.lines.join("\n")}>
                       {m.access && canSetAccess(m) ? (
                         <MenuSelect<PersonChoice>
                           value={m.access.level === "custom" ? "custom" : LEVEL_TO_MODE[m.access.level]}
@@ -1019,6 +1033,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
                       ) : (
                         <span className="muted">—</span>
                       )}
+                      </span>
                     </td>
                   )}
                   <td>{lastActiveLabel(presentIds.has(m.userId), m.lastActiveAt, now)}</td>

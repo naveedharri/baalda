@@ -62,6 +62,7 @@ export class AuthManager {
    * Returns the live session, or null if signed out / token invalid / offline.
    */
   async init(): Promise<SessionInfo | null> {
+    this.waiting = false;
     try {
       // `resolveServerUrl` — not the raw persisted value — so a dev build that
       // was once pointed at the managed instance doesn't silently keep talking
@@ -94,8 +95,22 @@ export class AuthManager {
     } catch {
       // Network error (server down): keep the token for a later retry, but we
       // are effectively signed out for now (the app stays usable offline).
+      // `waitingForServer` tells the store to retry rather than ask the
+      // person to sign in: a launch before the network is up used to read as
+      // "Signed out" for good, with a perfectly valid token in the keychain.
+      this.waiting = true;
       return null;
     }
+  }
+
+  private waiting = false;
+
+  /**
+   * True after `init()` found a saved token but could not reach the server to
+   * check it. Cleared by the next `init()`, a sign-in or a sign-out.
+   */
+  get waitingForServer(): boolean {
+    return this.waiting;
   }
 
   /** Change + persist the server URL. Restores that server's token if present. */
@@ -118,6 +133,7 @@ export class AuthManager {
 
   async signIn(input: { email: string; password: string }): Promise<AuthUser> {
     const { user, token } = await this.api.signIn(input);
+    this.waiting = false;
     if (token) await ipc.keychainSet(this.keychainKey(), token);
     return user;
   }
@@ -195,6 +211,7 @@ export class AuthManager {
   }
 
   private async clearToken(): Promise<void> {
+    this.waiting = false;
     this.api.setToken(null);
     try {
       await ipc.keychainDelete(this.keychainKey());

@@ -577,6 +577,10 @@ struct VerifyingReader<R> {
     hasher: Sha256,
     expected_sha256: Option<String>,
     mismatch: Arc<Mutex<Option<String>>>,
+    /// Set once the read that completes the body passed its checks. A 2xx
+    /// is only success with this set: a server may answer before the body
+    /// reached its end, and then nothing was ever verified.
+    verified: Arc<std::sync::atomic::AtomicBool>,
     done: bool,
 }
 
@@ -586,6 +590,7 @@ impl<R> VerifyingReader<R> {
         len: u64,
         expected_sha256: Option<String>,
         mismatch: Arc<Mutex<Option<String>>>,
+        verified: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             inner,
@@ -594,6 +599,7 @@ impl<R> VerifyingReader<R> {
             hasher: Sha256::new(),
             expected_sha256: expected_sha256.map(|s| s.to_ascii_lowercase()),
             mismatch,
+            verified,
             done: false,
         }
     }
@@ -645,6 +651,7 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for VerifyingReader<R
                         buf.set_filled(before);
                         return Poll::Ready(Err(this.fail(why)));
                     }
+                    this.verified.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 Poll::Ready(Ok(()))
             }
@@ -712,7 +719,18 @@ pub async fn upload_file(
     // a part is verified for length (its sha is not knowable here).
     let mismatch: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let expect_sha = if range.is_none() { expected_sha256.map(str::to_owned) } else { None };
-    let reader = VerifyingReader::new(file.take(len), len, expect_sha, mismatch.clone());
+    // An empty body may never be polled at all, so it is judged here.
+    let verified = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if len == 0 {
+        if let Some(want) = expect_sha.as_deref() {
+            let empty = format!("{:x}", Sha256::new().finalize());
+            if !want.eq_ignore_ascii_case(&empty) {
+                return Err(changed_error(rel, &format!("file is empty, intent declared {want}")));
+            }
+        }
+        verified.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let reader = VerifyingReader::new(file.take(len), len, expect_sha, mismatch.clone(), verified.clone());
     let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(reader));
 
     let mut req = client()?
@@ -734,6 +752,13 @@ pub async fn upload_file(
     }
     let res = sent.map_err(|e| AppError::new(format!("upload failed: {e}")))?;
     let status = res.status().as_u16();
+    // A 2xx that arrived before the body reached its end proves nothing about
+    // the bytes: the sha check never ran. Never report that as success.
+    if (200..300).contains(&status) && !verified.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(AppError::new(format!(
+            "upload failed: the server answered before all {len} bytes of {rel} were sent"
+        )));
+    }
     let etag = res
         .headers()
         .get(reqwest::header::ETAG)
@@ -1193,6 +1218,7 @@ mod tests {
             len,
             sha.map(str::to_owned),
             mismatch.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
         let mut out = Vec::new();
         let res = block_on(r.read_to_end(&mut out)).map(|_| out);
@@ -1264,9 +1290,14 @@ mod tests {
         std::thread::spawn(move || {
             use std::io::{Read, Write};
             if let Ok((mut sock, _)) = listener.accept() {
+                // Read the WHOLE request (until the client stops sending or
+                // gives up) before answering, as a real store does. Replying
+                // after the first read raced the client's body stream: under
+                // a busy test run the 200 could land before the body reached
+                // its end, where the sha check runs, and the test failed.
                 let mut buf = [0u8; 4096];
                 let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
-                let _ = sock.read(&mut buf);
+                while matches!(sock.read(&mut buf), Ok(n) if n > 0) {}
                 let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
             }
         });
@@ -1284,6 +1315,40 @@ mod tests {
         ));
         let err = res.expect_err("mismatched bytes must not report success");
         assert!(err.to_string().starts_with(CHANGED_DURING_UPLOAD), "{err}");
+    }
+
+    /// A server that answers 200 before the body reached its end (so the sha
+    /// check never ran) must not make wrong bytes look uploaded. This is the
+    /// race the old version of the test above lost under a busy test run.
+    #[test]
+    fn an_early_200_is_never_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let big = vec![5u8; 8 * 1024 * 1024];
+        write_binary_file(tmp.path(), "attachments/big.bin", &big).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf); // headers only, then answer at once
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+        let headers = HashMap::new();
+        let declared = sha256_bytes(&[6u8; 16]); // never the file's sha
+        let res = block_on(upload_file(
+            tmp.path(),
+            "attachments/big.bin",
+            &format!("http://{addr}/put"),
+            "PUT",
+            &headers,
+            None,
+            Some(&declared),
+            Some(big.len() as u64),
+        ));
+        assert!(res.is_err(), "an early 200 reported success: {res:?}");
     }
 
     /// The client is built lazily on the FIRST transfer, and with

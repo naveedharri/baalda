@@ -171,7 +171,8 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   teammate to get their attention.
 - **Sharing model**: new vaults are shared with the whole team by default (vaults created before
   mid-2026 stayed private until their owner changes them on the Members and access page). The
-  **Everyone** row sets the default for every member: **Can edit**, **Can view** or **No access**.
+  **Default access** row (called "Everyone" in older versions) is where every member starts: **Can edit**,
+  **Can view** or **No access**. Access groups add to it.
   Each person can then be given their own level (**Can edit everything**, **Can view everything**,
   **No access**) and that person's level wins either way, for them only. A person's level can also
   be **Custom**: per-folder choices made in their profile. Permissions cascade down folders, and
@@ -200,8 +201,10 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   access; they carry no access themselves.
 - **Push-to-talk voice**: hold a button to talk to everyone in the vault. Nothing is recorded.
 - **Members and access** (Vault Settings): one page for people and permissions. Everyone sees the
-  member list; owners and admins also see and change access. The **Everyone** row applies to every
-  folder and note at once. If some folders still have their own older setting for everyone, a
+  member list; owners and admins also see and change access. The **Default access** row applies to every
+  folder and note at once. Hovering a person's access says where it comes from (default access, a group
+  adding to it, or a level set just for them that default access and groups don't change); their
+  profile's Access tab says the same in one sentence under "Across the vault". If some folders still have their own older setting for everyone, a
   banner says how many, and **Reset** brings them back in line; people given access by name keep
   it either way. Each person's **⋯** menu has View profile, Manage access, Make admin or Make
   member, and Remove. Clicking a person opens their profile as a page inside Vault settings (a back

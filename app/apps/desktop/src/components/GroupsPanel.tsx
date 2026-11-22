@@ -1,4 +1,5 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { groupIconFor } from "../lib/groupIcon";
 import { ActivitySkeleton } from "./MemberProfileSkeletons";
 import { dayLabel } from "../lib/memberActivity";
 import { createPortal } from "react-dom";
@@ -63,6 +64,19 @@ export function useAccessGroups(orgId: string | null, enabled: boolean) {
   return { list, failed, reload };
 }
 
+const GroupIconSvg = lazy(() => import("./GroupIconSvg"));
+
+/** The group's square: its icon (from its name) on its own tint; the first letter while the icon loads. */
+export function GroupBadge({ group, large = false }: { group: Pick<AccessGroup, "id" | "color" | "name">; large?: boolean }) {
+  return (
+    <span className={`groups-row-badge${large ? " is-lg" : ""} group-c-${groupColor(group)}`} aria-hidden="true">
+      <Suspense fallback={group.name.trim().charAt(0).toUpperCase()}>
+        <GroupIconSvg icon={groupIconFor(group)} />
+      </Suspense>
+    </span>
+  );
+}
+
 export function GroupDot({ group }: { group: Pick<AccessGroup, "id" | "color"> }) {
   return <span className={`group-dot group-c-${groupColor(group)}`} aria-hidden="true" />;
 }
@@ -75,9 +89,9 @@ export function GroupChip({ group, onRemove, onOpen }: {
 }) {
   return (
     <span className={`group-chip group-c-${groupColor(group)}`}>
-      <svg className="group-chip-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <circle cx="9" cy="8" r="3.5" /><path d="M2.5 20a6.5 6.5 0 0 1 13 0" /><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M21.5 20a6.5 6.5 0 0 0-4-6" />
-      </svg>
+      <span className="group-chip-icon" aria-hidden="true">
+        <Suspense fallback={null}><GroupIconSvg icon={groupIconFor(group)} /></Suspense>
+      </span>
       {onOpen ? (
         <button type="button" className="group-chip-name" onClick={(e) => { e.stopPropagation(); onOpen(); }}>{group.name}</button>
       ) : (
@@ -165,7 +179,7 @@ export function GroupsList({ list, failed, members, manage, busy, query, onOpen,
                   onOpen(g);
                 }}
               >
-                <span className={`groups-row-badge group-c-${groupColor(g)}`} aria-hidden="true">{g.name.trim().charAt(0).toUpperCase()}</span>
+                <GroupBadge group={g} />
                 <span className="groups-row-copy">
                   <span className="groups-row-name">
                     {g.name}
@@ -506,7 +520,7 @@ export function GroupPage({
     <section className="member-profile group-page" aria-label={group.name}>
       <button type="button" className="link-btn member-profile-back" onClick={onBack}>← Access groups</button>
       <header className="member-profile-head">
-        <span className={`groups-row-badge is-lg group-c-${groupColor(group)}`} aria-hidden="true">{group.name.trim().charAt(0).toUpperCase()}</span>
+        <GroupBadge group={group} large />
         <span className="member-profile-names">
           <span className="member-profile-name">{group.name}</span>
           <span className="muted">

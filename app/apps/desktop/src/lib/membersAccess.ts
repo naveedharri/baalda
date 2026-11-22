@@ -14,12 +14,16 @@ import type {
 } from "./api";
 import { relativeTime } from "./health/format";
 
-/** The three wire modes in the page's words, for the Everyone row. */
+/** The three wire modes in the page's words, for the Default access row (wire: team access). */
 export const EVERYONE_OPTIONS: ReadonlyArray<{ value: TeamAccessMode; label: string; hint: string }> = [
-  { value: "open", label: "Can edit", hint: "Read and change every note" },
-  { value: "readonly", label: "Can view", hint: "Read only" },
-  { value: "private", label: "No access", hint: "Can't open any notes until you change this" },
+  { value: "open", label: "Can edit", hint: "Members can open and change every note" },
+  { value: "readonly", label: "Can view", hint: "Members can open every note, but not change it" },
+  { value: "private", label: "No access", hint: "Members only see what a group or their own setting gives them" },
 ];
+
+/** The Default access row (the vault's team access, the old "Everyone" row). */
+export const DEFAULT_ACCESS_TITLE = "Default access";
+export const DEFAULT_ACCESS_SUB = "Every member starts here. Access groups and personal settings can change it.";
 
 /** New members: what they get of notes made before they joined. */
 export const NEW_MEMBER_OPTIONS: ReadonlyArray<{ value: TeamAccessMode; label: string; hint?: string }> = [
@@ -231,7 +235,7 @@ export function reduceAccessCopy(
       ? (scope.self ? "Remove your access to this vault?" : `Remove ${scope.name}'s access to this vault?`)
       : (scope.self ? "Make yourself view only across the vault?" : `Make ${scope.name} view only across the vault?`);
   } else {
-    title = to === "private" ? "Set everyone to No access?" : "Make the vault view only for everyone?";
+    title = to === "private" ? "Set default access to No access?" : "Set default access to Can view?";
   }
   return { title, button, outcome };
 }
@@ -242,7 +246,7 @@ export function accessChangeFor(
   from: TeamAccessMode | "custom" | null,
   to: TeamAccessMode,
 ): { who: string; sub?: string; from: TeamAccessMode | "custom" | null; to: TeamAccessMode } {
-  if (scope.kind === "everyone") return { who: "Everyone", sub: "Default for every member", from, to };
+  if (scope.kind === "everyone") return { who: DEFAULT_ACCESS_TITLE, sub: "Every member starts here", from, to };
   if (scope.kind === "person") {
     return scope.self ? { who: "You", sub: scope.name, from, to } : { who: scope.name, from, to };
   }
@@ -451,4 +455,62 @@ export function chunkIds<T>(ids: readonly T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
   return out;
+}
+
+// ── Where a person's access comes from ─────────────────────────────────────
+
+/** One of a person's access groups, with what it gives (`groupAccessSummary`). */
+export interface AccessSourceGroup {
+  name: string;
+  /** null for a caller who can't see grants; "No access yet" for a group that gives nothing. */
+  summary: string | null;
+}
+
+/**
+ * Where one person's vault-wide access comes from, in plain words: a short
+ * label for the Access column and the full lines for its tooltip and the
+ * profile. Mirrors the resolver without asking it: a person with their OWN
+ * vault-wide level (`access.own`) ignores default access and groups;
+ * everyone else starts at default access and their groups add to it.
+ */
+export function accessSources(input: {
+  level: MemberAccessLevel;
+  own: boolean;
+  isSelf?: boolean;
+  /** Default access as the row shows it ("No access"); null until known. */
+  defaultLabel: string | null;
+  groups: readonly AccessSourceGroup[];
+}): { short: string; lines: string[]; sentence: string } {
+  const who = input.isSelf ? "you" : "them";
+  if (input.own) {
+    const head = input.level === "custom"
+      ? `Set just for ${who}, with some folders or notes set differently.`
+      : `Set just for ${who}: ${PERSON_LEVEL_LABEL[input.level]}.`;
+    const tail = input.groups.length ? "Default access and access groups don't change it." : "Default access doesn't change it.";
+    return {
+      short: `Set just for ${who}`,
+      lines: [head, input.groups.length ? "Default access and access groups don't change this." : "Default access doesn't change this."],
+      sentence: `Set just for ${who}. ${tail}`,
+    };
+  }
+  const giving = input.groups.filter((g) => g.summary && g.summary !== "No access yet");
+  const lines: string[] = [];
+  if (input.defaultLabel) lines.push(`Default access: ${input.defaultLabel}.`);
+  for (const g of giving) lines.push(`${g.name} group: ${g.summary}.`);
+  if (input.level === "custom" && giving.length === 0) lines.push(`Some folders or notes are set differently for ${who}.`);
+  const short = giving.length === 0
+    ? (input.level === "custom" ? "Default, with changes" : "Default access")
+    : giving.length === 1
+      ? `Default + ${giving[0].name}`
+      : `Default + ${giving.length} groups`;
+  const lower = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
+  const from = [
+    input.defaultLabel ? `default access (${lower(input.defaultLabel)})` : "default access",
+    ...(giving.length > 2
+      ? [`${giving.length} access groups`]
+      : giving.map((g) => `the ${g.name} group (${lower(g.summary!)})`)),
+  ];
+  const changed = input.level === "custom" && giving.length === 0 ? ", with some folders or notes set differently" : "";
+  const sentence = `From ${from.join(" and ")}${changed}. Choosing a level here sets it just for ${who}.`;
+  return { short, lines, sentence };
 }

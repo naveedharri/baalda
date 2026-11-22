@@ -528,12 +528,19 @@ fn unique_trash_dest(vault: &Path, rel: &str) -> AppResult<String> {
 /// recursive — `remove_dir`, not `remove_dir_all` — so it can only ever take
 /// away a folder that holds nothing.
 pub fn delete_folder_if_empty(vault: &Path, rel: &str) -> AppResult<bool> {
+    delete_folder_if_empty_with(vault, rel, false)
+}
+
+/// [`delete_folder_if_empty`], optionally for a folder the vault's rules hide:
+/// what the removal of a revoked team's rule-hidden files emptied
+/// (`registry.revokeParked`). Still empty-only; the floor is refused either way.
+pub fn delete_folder_if_empty_with(vault: &Path, rel: &str, allow_excluded: bool) -> AppResult<bool> {
     if crate::vault::rel_path_is_ignored(rel) {
         return Err(AppError::new("refusing to touch an ignored dir"));
     }
     // An excluded folder (#401) is never removed by sync: it is kept, the same
     // answer a folder that still holds something gets.
-    if crate::sync_rules::excludes(vault, rel, true) {
+    if !allow_excluded && crate::sync_rules::excludes(vault, rel, true) {
         return Ok(false);
     }
     let abs = resolve_in_vault(vault, rel)?;
@@ -614,6 +621,13 @@ pub fn delete_path(vault: &Path, rel: &str) -> AppResult<()> {
 /// `remove_dir_all` on a tree, or to remove the vault's own doc-id map and CRDT
 /// store. Both guards belong here, where they cannot be refactored away from.
 pub fn delete_file(vault: &Path, rel: &str) -> AppResult<()> {
+    delete_file_with(vault, rel, false)
+}
+
+/// [`delete_file`], optionally for a path the vault's sync rules hide: the
+/// removal of a rule-hidden copy of a TEAM file whose access ended, which the
+/// server confirmed (`registry.revokeParked`). The floor is refused either way.
+pub fn delete_file_with(vault: &Path, rel: &str, allow_excluded: bool) -> AppResult<()> {
     // `.context/`, `.git`, dotfiles — the same refusal `trash_note` and
     // `delete_folder_if_empty` make. Checked BEFORE the directory test, so
     // `.context/config.json` is refused on its own merits rather than surviving
@@ -621,8 +635,11 @@ pub fn delete_file(vault: &Path, rel: &str) -> AppResult<()> {
     if crate::vault::rel_path_is_ignored(rel) {
         return Err(AppError::new(format!("refusing to delete an ignored path: {rel}")));
     }
-    // Sync never deletes what the vault's rules exclude (#401).
-    crate::vault::refuse_excluded(vault, rel, false)?;
+    // Sync never deletes what the vault's rules exclude (#401), except a
+    // confirmed revocation of a team file the rules merely hid.
+    if !allow_excluded {
+        crate::vault::refuse_excluded(vault, rel, false)?;
+    }
     let abs = resolve_in_vault(vault, rel)?;
     if !abs.exists() {
         return Ok(());
@@ -1233,6 +1250,29 @@ mod tests {
         assert!(ensure_folder(tmp.path(), ".context/evil").is_err());
         assert!(ensure_folder(tmp.path(), "node_modules/x").is_err());
         assert!(ensure_folder(tmp.path(), "../up").is_err());
+    }
+
+    #[test]
+    fn delete_file_with_excluded_still_refuses_the_floor() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join(".git/config"), "x").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".context")).unwrap();
+        std::fs::write(tmp.path().join(".context/config.json"), "{}").unwrap();
+        assert!(delete_file_with(tmp.path(), ".git/config", true).is_err());
+        assert!(delete_file_with(tmp.path(), ".context/config.json", true).is_err());
+        assert!(tmp.path().join(".git/config").exists());
+        assert!(tmp.path().join(".context/config.json").exists());
+    }
+
+    #[test]
+    fn delete_folder_if_empty_with_reaches_only_what_it_is_told() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_folder(tmp.path(), "A/B").unwrap();
+        // Ignored names stay refused even when excluded paths are allowed.
+        assert!(delete_folder_if_empty_with(tmp.path(), ".git", true).is_err());
+        assert!(delete_folder_if_empty_with(tmp.path(), "A/B", true).unwrap());
+        assert!(!tmp.path().join("A/B").exists());
     }
 
     #[test]

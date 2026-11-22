@@ -17,14 +17,18 @@
  * agent rewrote overnight never promotes thousands of CRDTs at once.
  *
  * Never pushes what cannot or need not go up, so it can never cause a read-only
- * rejection (and its recovery copy + reconcile entry) on its own:
+ * rejection on its own:
  *  - a note under a lock or the vault's Read-only posture (the editor's own
- *    padlock source) is skipped, and so is one the server's resolver says this
- *    user cannot edit (the same per-doc answer the editor's read-only mode uses);
- *    an unanswered check counts as "cannot edit";
+ *    padlock source), or one the server's resolver says this user cannot edit
+ *    (an unanswered check counts as "cannot edit"), is never merged. When its
+ *    file differs from the local CRDT it still joins the queue: the uploader's
+ *    read-only branch takes the server's answer, never ingests, writes the
+ *    team's text back over the file and reports it (the rule for refused
+ *    read-only edits since 2026-11-19). It used to be skipped, so an edit made
+ *    while closed stayed on disk for good, a copy nobody else had;
  *  - a note whose file text already equals its local CRDT text is skipped and
  *    its disk base re-recorded, so a stale base alone never triggers a push.
- * This pass itself writes no recovery copy and records no reconcile entry.
+ * This pass itself writes nothing and records no reconcile entry.
  *
  * Pure and dependency-injected so it runs under vitest.
  */
@@ -156,11 +160,7 @@ export async function runClosedAppEdits(deps: ClosedAppEditsDeps): Promise<Close
     }
     if (!deps.isCurrent()) return null;
   }
-  const push = planned.push.filter((n) => {
-    if (!lockedPath(n.relPath)) return true;
-    readOnly++;
-    return false;
-  });
+  const push = planned.push;
   const shaOf = new Map(drift.map((d) => [d.docId, d.sha256]));
   deps.log?.(
     `${drift.length} ${drift.length === 1 ? "note" : "notes"} changed on disk while Baalda was closed; checking ${push.length}`,
@@ -177,20 +177,25 @@ export async function runClosedAppEdits(deps: ClosedAppEditsDeps): Promise<Close
     const verdicts = await mapLimit(
       candidates,
       CHECK_CONCURRENCY,
-      async (n): Promise<"push" | "readOnly" | "converged"> => {
+      async (n): Promise<"push" | "readOnly" | "replace" | "converged"> => {
         let editable = false;
-        try {
-          editable = await deps.canEdit(n.docId);
-        } catch {
-          editable = false;
+        if (!lockedPath(n.relPath)) {
+          try {
+            editable = await deps.canEdit(n.docId);
+          } catch {
+            editable = false;
+          }
         }
-        if (!editable) return "readOnly";
         const [doc, file] = await Promise.all([
           deps.docText(n.docId).catch(() => null),
           deps.fileText(n.relPath).catch(() => null),
         ]);
         // No local CRDT: no common base to merge against. Opening the note
         // reconciles it (hydrate + pull-first), which is the safe order.
+        if (!editable) {
+          // Only over a doc that holds the team's text: never an empty write.
+          return doc != null && file != null && doc.length > 0 && doc !== file ? "replace" : "readOnly";
+        }
         if (doc == null || file == null) return "converged";
         if (doc === file) {
           const sha = shaOf.get(n.docId);
@@ -201,8 +206,8 @@ export async function runClosedAppEdits(deps: ClosedAppEditsDeps): Promise<Close
       },
     );
     if (!deps.isCurrent()) break;
-    const chunk = candidates.filter((_, k) => verdicts[k] === "push");
-    readOnly += verdicts.filter((v) => v === "readOnly").length;
+    const chunk = candidates.filter((_, k) => verdicts[k] === "push" || verdicts[k] === "replace");
+    readOnly += verdicts.filter((v) => v === "readOnly" || v === "replace").length;
     converged += verdicts.filter((v) => v === "converged").length;
     skipped += push.slice(i, i + size).length - candidates.length;
     if (chunk.length === 0) continue;

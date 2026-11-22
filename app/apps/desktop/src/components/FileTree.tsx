@@ -53,6 +53,7 @@ import {
   buildTreeSyncIndex,
   FolderWaveTracker,
   LOCAL_ONLY_TITLE,
+  localOnlyEntry,
   rowSyncMark,
   sidebarMarksVisible,
   type TreeSyncIndex,
@@ -117,6 +118,7 @@ const ShareDialog = lazy(() =>
 );
 import { placeMenu, type Placement } from "../lib/menuPlacement";
 import { fileDropsClaimed } from "../lib/dropClaim";
+import { useVaultKeyBlocked } from "./useVaultKeyBlocked";
 
 /** A refusal reason carrying the creator-rule sentence (`registry.deletePath`). */
 const isNotCreatorReason = (reason: unknown) =>
@@ -447,13 +449,22 @@ export function FileTree() {
   const localOnlyKey = useStore((s) =>
     s.syncEnabled
       ? [
-          ...syncManager.registry.heldRefusals().map((f) => f.path),
+          // Each entry is "path\u0001why", so the row can say WHY it is local.
+          ...syncManager.registry.heldRefusals().map((f) => `${f.path}\u0001refused`),
           // Kept here unsynced: a teammate moved it into a folder this vault's
           // sync rules hide (#401).
-          ...syncManager.registry.frozenFilePaths(),
+          ...syncManager.registry.frozenFilePaths().map((p) => `${p}\u0001unsynced`),
+          // Folders kept after access ended: they still hold unsynced files.
+          ...syncManager.registry.keptFolderPaths().map((p) => `${p}\u0001kept`),
+          // Files the server does not hold: never synced, or kept after access
+          // ended. They used to read "synced" and turn their folders green.
+          ...syncManager.localOnlyFilePaths().map(([p, why]) => `${p}\u0001${why === "kept" ? "keptFile" : "unsynced"}`),
         ].join("\u0000")
       : "",
   );
+  // Waiting for the vault's key: nothing can be confirmed, so no marks (the
+  // same reading as offline; the banner says why).
+  const keyLocked = useVaultKeyBlocked();
   const syncIndex = useMemo<TreeSyncIndex | null>(() => {
     const waveKey = syncEnabled ? vaultPath : null;
     if (lastWaveKeyRef.current !== waveKey) {
@@ -470,7 +481,7 @@ export function FileTree() {
     // No server contact yet this session ⇒ no marks (see `sidebarMarksVisible`).
     // The wave tracker is left alone so the counters resume where they were
     // once the channel comes back, rather than restarting at "0/N".
-    if (!sidebarMarksVisible(syncStatus)) return null;
+    if (!sidebarMarksVisible(syncStatus) || keyLocked) return null;
     const index = buildTreeSyncIndex({
       docIdByPath,
       docSyncState,
@@ -484,7 +495,7 @@ export function FileTree() {
       failuresAsSynced: true,
       // …but a note the server refused to create is not synced, and must not
       // wear the green dot (#414).
-      localOnly: localOnlyKey ? localOnlyKey.split("\u0000") : [],
+      localOnly: localOnlyKey ? localOnlyKey.split("\u0000").map(localOnlyEntry) : [],
     });
     // A wave belongs to one run. With none moving there is no counter to draw,
     // and forgetting it here is what stops a finished run's leftovers from
@@ -504,6 +515,7 @@ export function FileTree() {
     localNotePaths,
     vaultPath,
     localOnlyKey,
+    keyLocked,
   ]);
 
   // ---- Row-order stability while something is syncing ------------------
@@ -3013,7 +3025,7 @@ function Node({
           {/* On this computer only: the server refused to add it (#414). A
               word, not just the hollow ring, so it reads at a glance. */}
           {localOnly && (
-            <span className="tree-local" title={LOCAL_ONLY_TITLE}>
+            <span className="tree-local" title={syncIndex?.localOnly?.get(node.data.path.toLowerCase()) ?? LOCAL_ONLY_TITLE}>
               Local
             </span>
           )}

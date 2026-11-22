@@ -67,6 +67,9 @@ export interface FolderSyncSummary {
    * one genuinely new note). See {@link FolderWaveTracker}.
    */
   unreported: number;
+  /** Rows under it that are not on the server with nothing moving them
+   *  (`unsynced` with a verdict): a settled folder shows the hollow ring. */
+  unsent?: number;
   /** The folder row's state. See {@link rollupState}. */
   state: DocSyncState;
   /** `synced / total` as a whole percentage, floored (so it reads 99% at 499/500
@@ -105,7 +108,7 @@ export interface TreeSyncIndex {
    * access (`registry.heldRefusals()`): they exist only on this computer.
    * Absent ⇒ none. See {@link rowSyncMark}.
    */
-  localOnly?: ReadonlySet<string>;
+  localOnly?: ReadonlyMap<string, string>;
   /**
    * A sync run is moving right now (the pill's "Syncing N/M" condition). Not
    * derived here — the sidebar stamps it after building, so rows read it off
@@ -143,7 +146,7 @@ export interface TreeSyncInput {
    * (`registry.heldRefusals()`). Drawn as not on the server whatever else is
    * known about them (#414).
    */
-  localOnly?: Iterable<string>;
+  localOnly?: Iterable<string | readonly [path: string, title: string]>;
   /**
    * The server has answered this session (the vault channel's first `ready`
    * landed — `store.vaultReadySeen`). From then on a mapped note with no
@@ -173,6 +176,8 @@ interface Counts {
   pending: number;
   failed: number;
   unreported: number;
+  /** Not on the server and nothing moving it: an `unsynced` row with a verdict. */
+  unsent: number;
 }
 
 /**
@@ -246,13 +251,14 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
   const credit = (dir: string, state: DocSyncState, isUnreported: boolean): void => {
     let c = counts.get(dir);
     if (!c) {
-      c = { total: 0, synced: 0, pending: 0, failed: 0, unreported: 0 };
+      c = { total: 0, synced: 0, pending: 0, failed: 0, unreported: 0, unsent: 0 };
       counts.set(dir, c);
     }
     c.total++;
     if (state === "synced") c.synced++;
     else if (state === "error") c.failed++;
     else if (state === "queued" || state === "syncing") c.pending++;
+    else if (state === "unsynced" && !isUnreported) c.unsent++;
     if (isUnreported) c.unreported++;
   };
   /** Credit one row to every folder above it, up to and including the root (""). */
@@ -281,8 +287,12 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
     if (dir === "") vault = summary;
     else folders.set(dir, summary);
   }
-  const localOnly = new Set<string>();
-  for (const p of input.localOnly ?? []) localOnly.add(p.toLowerCase());
+  // Lower-cased path → the row's tooltip (why it is on this computer only).
+  const localOnly = new Map<string, string>();
+  for (const p of input.localOnly ?? []) {
+    if (typeof p === "string") localOnly.set(p.toLowerCase(), LOCAL_ONLY_TITLE);
+    else localOnly.set(p[0].toLowerCase(), p[1]);
+  }
   return { notes, files, folders, vault, ...(localOnly.size > 0 ? { localOnly } : {}) };
 }
 
@@ -408,14 +418,55 @@ export function folderSyncTitle(
   return `All ${plural(s.total, "file")} synced`;
 }
 
+/** A settled folder holding things that never reached the server. */
+export function folderUnsentTitle(s: FolderSyncSummary): string {
+  const n = s.unsent ?? 0;
+  return `${n} of ${plural(s.total, "file")} not on the server yet`;
+}
+
 /** Tooltip on a row the server refused to create (see {@link TreeSyncIndex.localOnly}). */
 export const LOCAL_ONLY_TITLE =
   "Local only: not syncing. The server didn't accept it here. Open it to see how to sync it.";
 
+/**
+ * One sidebar local-only entry, "path\u0001why", as the tree's selector encodes
+ * it, back to [path, tooltip]. `why`: refused (#414), unsynced (never synced),
+ * kept (a folder kept after access ended), keptFile (a file kept the same way).
+ */
+export function localOnlyEntry(entry: string): [string, string] {
+  const at = entry.lastIndexOf("\u0001");
+  if (at < 0) return [entry, LOCAL_ONLY_TITLE];
+  const why = entry.slice(at + 1);
+  const title =
+    why === "kept"
+      ? LOCAL_KEPT_TITLE
+      : why === "keptFile"
+        ? LOCAL_KEPT_FILE_TITLE
+        : why === "unsynced"
+          ? LOCAL_FILE_TITLE
+          : LOCAL_ONLY_TITLE;
+  return [entry.slice(0, at), title];
+}
+
+/** Tooltip on a file the server does not hold and nothing will send. */
+export const LOCAL_FILE_TITLE = "Local only: this file isn't synced, so only this computer has it.";
+
+/** Tooltip on a file or folder kept here after this person's access ended. */
+export const LOCAL_KEPT_TITLE =
+  "Local only: you no longer have access to this in the vault, so it doesn't sync. It stays on this computer because it holds files that never synced.";
+
+/** Tooltip on a file kept here after this person's access ended. */
+export const LOCAL_KEPT_FILE_TITLE =
+  "Local only: you no longer have access to this in the vault, so it doesn't sync. Only this computer has it.";
+
 /** A row's state as the sidebar draws it: live only while a run is moving, and
  *  never `error` (per-note failures are the Health page's job). */
 function sidebarState(state: DocSyncState, runActive: boolean): DocSyncState {
-  if (!runActive || state === "error") return "synced";
+  if (state === "error") return "synced";
+  // Not on the server, and no run is moving it: the hollow ring, never green.
+  // (Only a LIVE in-flight state is folded into green outside a run, which is
+  // what keeps a finished run's leftovers from pinning "0/14".)
+  if (!runActive) return state === "unsynced" ? "unsynced" : "synced";
   return state;
 }
 
@@ -443,8 +494,9 @@ export function rowSyncMark(
   // The server said no to creating it, so it is not "synced and quiet": it is
   // on this computer only. The hollow "not on the server" ring, never an error
   // tone, and it stays after the refusal banner fades (#414).
-  if (index.localOnly?.has(row.path.toLowerCase())) {
-    return { state: "unsynced", progress: null, title: LOCAL_ONLY_TITLE };
+  const localTitle = index.localOnly?.get(row.path.toLowerCase());
+  if (localTitle) {
+    return { state: "unsynced", progress: null, title: localTitle };
   }
   if (row.isDir) {
     const summary = row.path === "" ? index.vault : (index.folders.get(row.path) ?? null);
@@ -460,6 +512,9 @@ export function rowSyncMark(
           },
         )
       : null;
+    if (!progress && (summary.unsent ?? 0) > 0) {
+      return { state: "unsynced", progress: null, title: folderUnsentTitle(summary) };
+    }
     return {
       state: progress ? "syncing" : "synced",
       progress,

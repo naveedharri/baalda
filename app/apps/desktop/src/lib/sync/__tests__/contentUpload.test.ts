@@ -440,6 +440,34 @@ describe("ContentUploader — pushing local content", () => {
     expect(r.marked).toEqual(["d1"]);
   });
 
+  it("writes the team's text back over an edit to a view-only note it already holds", async () => {
+    // The device already holds the server's text in its local CRDT, so the pull
+    // brings nothing new and no write was ever armed: the unsendable edit used
+    // to stay on disk for good (found on a four-app run, 2026-11-22).
+    const server = new FakeServer();
+    server.seed("d1", "theirs");
+    const notes = [{ docId: "d1", relPath: "Note.md" }];
+    const behaviour = { readOnly: new Set(["d1"]) };
+    const first = rig({
+      files: { "Note.md": "" },
+      notes,
+      server,
+      behaviour,
+      readFile: true,
+      isUnhydratedPlaceholder: (docId, _relPath, fileText) => docId === "d1" && fileText.length === 0,
+    });
+    await first.uploader.run();
+    expect(first.harness.fs.get("Note.md")).toBe("theirs");
+
+    first.harness.fs.externalWrite("Note.md", "theirs\nan edit nobody can send");
+    const second = rig({ files: {}, harness: first.harness, notes, server, behaviour, readFile: true });
+    await second.uploader.run();
+
+    expect(second.harness.fs.get("Note.md")).toBe("theirs");
+    expect(server.text("d1")).toBe("theirs");
+    expect(second.uploader.failedDocs()[0]).toMatchObject({ kind: "no-write-access" });
+  });
+
   it("still protects an unmarked 0-byte file as a possible local deletion", async () => {
     const server = new FakeServer();
     server.seed("d1", "theirs");

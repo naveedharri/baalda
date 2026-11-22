@@ -9,7 +9,9 @@ import { createAccessSummaryBatcher } from "../lib/accessSummaryBatch";
 import { accessResourceType, ancestorPaths, entriesFromServer, rowsFromEntries, type AccessRow } from "../lib/accessTree";
 import { resourceIdsByPath } from "../lib/locks";
 import { needsAccessConfirm, levelClass, LEVEL_TO_MODE, reduceAccessCopy,
-  accessChangeFor, tickGrantMode, type ReduceScope, dateWithAgo, GRANT_LABEL, PERSON_LEVEL_LABEL, ROLE_LABEL, splitNotePath } from "../lib/membersAccess";
+  accessChangeFor, tickGrantMode, type ReduceScope, dateWithAgo, GRANT_LABEL, PERSON_LEVEL_LABEL, ROLE_LABEL, splitNotePath,
+  accessSources, everyoneLabel } from "../lib/membersAccess";
+import { groupAccessSummary } from "../lib/groups";
 import { syncManager } from "../lib/sync/docSession";
 import { activitySummary, buildTimeline, commonFolder, runNames, type TimelineEntry } from "../lib/memberActivity";
 import { relativeTime } from "../lib/health/format";
@@ -228,6 +230,7 @@ export function MemberProfilePage({
             orgId={orgId}
             member={member}
             teamAccess={teamAccess}
+            groups={groups}
             onChanged={onChanged}
             onItemWritten={onItemWritten}
             viewToggle={viewToggle}
@@ -298,9 +301,6 @@ function ProfileGroups({ member, groups, onJoin, onLeave, onOpen }: {
           menuClassName="access-menu"
           triggerContent="+ Add to access group"
         />
-      )}
-      {member.access?.own && mine.length > 0 && (
-        <span className="muted profile-groups-note">Access groups change nothing for them: they have their own vault-wide access.</span>
       )}
     </span>
   );
@@ -527,10 +527,12 @@ const resourceOf = (row: { kind: AccessRow["kind"]; id: string }): BulkAccessRes
   resourceId: row.id,
 });
 
-function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, viewToggle, view = "list", board, onVaultWide }: {
+function PersonAccess({ orgId, member, teamAccess, groups = null, onChanged, onItemWritten, viewToggle, view = "list", board, onVaultWide }: {
   orgId: string;
   member: MemberOverview;
   teamAccess: TeamAccess | null;
+  /** Every access group of the vault, for "Where this comes from"; null when groups are off. */
+  groups?: readonly AccessGroup[] | null;
   onChanged: () => Promise<void>;
   onItemWritten: () => void;
   /** The List/Board switch, placed at the end of the "Across the vault" row. */
@@ -682,6 +684,15 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
   const vaultFrom = level === null ? null : level === "custom" ? "custom" : LEVEL_TO_MODE[level];
   // A never-shared vault (posture none) grants Everyone nothing to inherit.
   const tickMode = tickGrantMode(vaultFrom, teamAccess && teamAccess.posture !== "none" ? teamAccess.mode : null);
+  const sources = member.access ? accessSources({
+    level: member.access.level,
+    own: !!member.access.own,
+    isSelf,
+    defaultLabel: teamAccess ? everyoneLabel(teamAccess.mode, teamAccess.posture).label : null,
+    groups: (groups ?? [])
+      .filter((g) => g.memberIds.includes(member.userId))
+      .map((g) => ({ name: g.name, summary: groupAccessSummary(g.grants) })),
+  }) : null;
 
   return (
     <div className="member-profile-access">
@@ -689,7 +700,7 @@ function PersonAccess({ orgId, member, teamAccess, onChanged, onItemWritten, vie
       <div className="members-access-row">
         <span className="members-access-row-copy">
           <span className="members-access-row-title">Across the vault</span>
-          <span className="muted">{isSelf ? "Your" : "Their"} setting wins over the default setting</span>
+          <span className="muted">{sources?.sentence ?? `Choosing a level here sets it just for ${isSelf ? "you" : "them"}.`}</span>
         </span>
         <MenuSelect<TeamAccessMode | "custom">
           value={vaultFrom ?? "custom"}
@@ -819,11 +830,11 @@ function PersonAccessRow({ row, mode, failed, teamMode, tickMode, locked, setFor
         <span className="member-access-name">{row.name}</span>
       </span>
       <span className="member-access-notes">
-        {setForEveryone && <span className="member-access-tag">Set for everyone</span>}
+        {setForEveryone && <span className="member-access-tag">Set for all members</span>}
         {mode === null ? (
           failed ? <span className="member-access-note" title="Couldn't load">—</span> : <RowLevelSkeleton />
         ) : inherited ? (
-          <span className="member-access-note">Same as everyone</span>
+          <span className="member-access-note">Same as default</span>
         ) : null}
         {checked && locked && mode === "readonly" && <span className="member-access-note">View (locked)</span>}
       </span>

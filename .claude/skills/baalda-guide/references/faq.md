@@ -52,7 +52,12 @@ needed for sync between devices, team collaboration, and the hosted AI endpoint.
 
 ## Does it work offline?
 Yes. Everything local (editing, search, backlinks, graph) works with no connection. When you
-reconnect, your changes merge with everyone else's; there are no conflict dialogs.
+reconnect, your changes merge with everyone else's; there are no conflict dialogs. Opening the app
+with no connection does not sign you out: it says it can't reach the server and keeps trying, and
+syncs as soon as the connection is back. Files you delete while offline are deleted for the team
+once you reconnect (subject to the usual rule that a member can only delete what they created);
+a file deleted while the app is closed comes back instead, because Baalda can't tell that from a
+drive that isn't mounted yet.
 
 ## What happens if two people edit the same note at once?
 Both edits are kept and merged character by character, live, with visible cursors. The same is

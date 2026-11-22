@@ -9112,6 +9112,19 @@ button.secondary:active:not(:disabled),
   height: 8px;
 }
 
+/* Access column: the level, then one quiet line saying where it comes from. */
+.members-access-cell {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.members-access-source {
+  padding-left: 2px;
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
 /* Quiet MCP tip under the table. */
 .members-access-mcp-hint {
   display: flex;
@@ -9194,7 +9207,9 @@ button.secondary:active:not(:disabled),
 .member-profile-about {
   display: grid;
   grid-template-columns: minmax(120px, 200px) 1fr;
-  align-items: center;
+  /* stretch, not center: a tall value (group chips plus a note) must carry
+     its label cell, and that cell's line, down with it. */
+  align-items: stretch;
   margin: var(--sp-2) 0 0;
   font-size: var(--fs-sm);
 }
@@ -10164,11 +10179,12 @@ body.access-board-grabbing * {
 .context-menu.access-board-column-menu .menu-tick {
   display: none;
 }
-/* The column menu's "Remove all" is destructive. */
-.context-menu.access-board-column-menu li:nth-child(2) .role-option-label {
+/* A destructive option (MenuSelect `danger`, e.g. the column menu's
+   "Remove all"): a red label over the usual grey hint. */
+.context-menu li.is-danger .role-option-label {
   color: var(--danger);
 }
-.context-menu.access-board-column-menu li:nth-child(2) .menu-option-hint {
+.context-menu li.is-danger .menu-option-hint {
   color: var(--text-secondary);
 }
 .access-board-intro-drag {
@@ -11921,6 +11937,11 @@ button.group-chip-name:hover { text-decoration: underline; }
   font-weight: 600;
 }
 .groups-row-badge.is-lg { width: 40px; height: 40px; font-size: 18px; }
+/* The group's icon (GroupIconSvg): the glyph alone, in the tint's ink. */
+.group-icon-svg { display: inline-flex; width: 78%; height: 78%; }
+.group-icon-svg svg { width: 100%; height: 100%; }
+.group-chip-icon { display: inline-flex; flex: none; width: 13px; height: 13px; }
+.group-chip-icon .group-icon-svg { width: 100%; height: 100%; }
 .groups-row-copy { display: flex; flex-direction: column; min-width: 0; flex: 1; font-size: var(--fs-sm); }
 .groups-row-copy > .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); }
 .groups-row-name { display: inline-flex; align-items: center; gap: var(--sp-2); font-weight: 500; color: var(--text-primary); }

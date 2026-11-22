@@ -5978,6 +5978,12 @@ export class VaultRegistry {
     return { notes: this.parkedDocs.size, files: this.parkedFiles.size + this.frozenFiles.size };
   }
 
+  /** Folders kept on this disk after access to them ended, because they still
+   *  hold files that never synced (`revokedFolders`): the sidebar tags them Local. */
+  keptFolderPaths(): string[] {
+    return [...this.revokedFolders.keys()];
+  }
+
   /** Visible binaries kept here unsynced because a teammate moved them into a
    *  hidden folder: the sidebar tags them Local. */
   frozenFilePaths(): string[] {
@@ -6250,11 +6256,130 @@ export class VaultRegistry {
       this.persist();
       this.notifyMapChanged();
     }
+    // Access ended for team files the rules hide: they leave this disk like
+    // any other revoked file (membership loss already removed them).
+    if (await this.revokeParked(vaultId, serverNotes)) changedDisk = true;
+    if (this.stale()) return { serverFolders, serverNotes: [], changedDisk };
     return {
       serverFolders: serverFolders.filter((f) => !this.isExcludedPath(f.path)),
       serverNotes: this.filterServerNotes(serverNotes),
       changedDisk,
     };
+  }
+
+  /**
+   * Rule-hidden copies of TEAM notes and files whose access ended. Parking
+   * keeps them out of every step that could delete, so without this a person
+   * set to No access kept the team's `.github/` workflows, `node_modules`
+   * leftovers and the like on disk. Three locks, each one enough to keep a
+   * file: a fresh access change on a live session (`revocationAuthority`), the
+   * listing no longer naming a parked note, and the server's own resolver
+   * (`access-check`, different SQL) answering `none` for it. Any failed check
+   * keeps everything; a failed removal keeps that file and its parking.
+   */
+  private async revokeParked(vaultId: string, listed: RegisteredNote[]): Promise<boolean> {
+    if (this.parkedDocs.size + this.parkedFiles.size === 0) return false;
+    if (this.host?.revocationAuthority?.() !== true) return false;
+    const listedIds = new Set(listed.map((n) => noteDocId(n)));
+    const ids = [
+      ...[...this.parkedDocs.keys()].filter((id) => !listedIds.has(id)),
+      ...this.parkedFiles.keys(),
+    ];
+    if (ids.length === 0) return false;
+    const none = new Set<string>();
+    try {
+      for (let i = 0; i < ids.length; i += ACCESS_CHECK_MAX) {
+        for (const id of await this.api.accessCheck(vaultId, ids.slice(i, i + ACCESS_CHECK_MAX))) none.add(id);
+        if (this.stopRun()) return false;
+      }
+    } catch (e) {
+      console.warn("[sync] could not confirm access for rule-hidden files; kept them", reasonOf(e));
+      return false;
+    }
+    // A rule-hidden file never uploads, so any of these may hold edits made
+    // here: the same second look a revoked note with unsent work gets, after
+    // `REVOKE_UNSENT_SETTLE_MS`, so a quick No access flip back keeps them
+    // all. Unanswered or readable again ⇒ kept. A binary whose bytes this
+    // device never confirmed upstream is kept too (`removeRevokedBinary`).
+    const first = ids.filter((id) => none.has(id) && (this.parkedDocs.has(id) || this.filesConfirmed.has(id)));
+    if (first.length === 0) return false;
+    const { kept } = await this.recheckUnsentRevocations(
+      vaultId,
+      first.map((docId) => ({ docId }) as InboundTrash),
+    );
+    if (this.stopRun()) return false;
+    const gone = first
+      .filter((id) => !kept.has(id) && (this.parkedDocs.has(id) || this.parkedFiles.has(id)))
+      .map((id) => ({ id, doc: this.parkedDocs.has(id), path: this.parkedDocs.get(id) ?? this.parkedFiles.get(id)! }));
+    if (gone.length === 0) return false;
+    let removedCount = 0;
+    const removed: typeof gone = [];
+    for (let i = 0; i < gone.length; i += 64) {
+      const chunk = gone.slice(i, i + 64);
+      // BEFORE the removal: the watcher's echo is ours, never a user delete.
+      this.markOwnRemovals(chunk.map((g) => g.path));
+      for (const g of chunk) if (!g.doc) this.host?.suppressBinaryDelete?.(g.path);
+      let outcomes: Array<{ path: string; error: string | null }>;
+      try {
+        outcomes = await ipc.deleteFilesBatch(
+          chunk.map((g) => ({ path: g.path, docId: g.doc ? g.id : null })),
+          this.epoch(),
+          { allowExcluded: true },
+        );
+      } catch (e) {
+        for (const g of chunk) this.forgetOwnRemoval(g.path);
+        if (ipc.isVaultMismatch(e) || this.stale()) break;
+        console.warn("[sync] could not remove rule-hidden files after access ended; kept them", reasonOf(e));
+        continue;
+      }
+      if (this.stale()) break;
+      const byPath = new Map(outcomes.map((o) => [o.path, o]));
+      for (const g of chunk) {
+        const out = byPath.get(g.path);
+        if (!out || out.error) {
+          this.forgetOwnRemoval(g.path);
+          console.warn(`[sync] ${g.path} stays: ${out?.error ?? "no result"}`);
+          continue;
+        }
+        removedCount++;
+        removed.push(g);
+        this.authoredDocs.delete(g.id);
+        if (g.doc) {
+          this.parkedDocs.delete(g.id);
+          this.baselineDocs.delete(g.id);
+          this.host?.noteRemoved(g.id, g.path, null, "revoked", true);
+        } else {
+          this.parkedFiles.delete(g.id);
+          this.host?.fileRemoved?.(g.id, g.path, null);
+        }
+      }
+    }
+    if (removedCount === 0) return false;
+    // The folders those files emptied go too, deepest first and only when
+    // empty: the rule hides them from the folder pass, which is how a whole
+    // hidden tree of empty folders used to stay behind. A folder that still
+    // holds anything (this person's own files) stays.
+    const dirs = new Set<string>();
+    for (const g of removed) {
+      const parts = g.path.split("/");
+      for (let i = parts.length - 1; i > 0; i--) dirs.add(parts.slice(0, i).join("/"));
+    }
+    const ordered = [...dirs].sort((a, b) => b.split("/").length - a.split("/").length);
+    let foldersRemoved = 0;
+    for (const dir of ordered) {
+      if (this.stale()) break;
+      try {
+        if (await ipc.deleteFolderIfEmpty(dir, this.epoch(), { allowExcluded: true })) foldersRemoved++;
+      } catch (e) {
+        if (ipc.isVaultMismatch(e)) break;
+      }
+    }
+    console.info(
+      `[sync] access ended: removed ${removedCount} rule-hidden file(s) the team holds and ${foldersRemoved} emptied folder(s)`,
+    );
+    this.persist();
+    this.notifyMapChanged();
+    return true;
   }
 
   registerNote(

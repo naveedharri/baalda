@@ -25,6 +25,15 @@ describe("notSyncingReason", () => {
     expect(notSyncingReason(signedOutOnSyncedVault)).toBe("signed-out");
   });
 
+  it("says the server is unreachable, not signed out, while a saved login waits for it", () => {
+    expect(notSyncingReason({ ...signedOutOnSyncedVault, authOffline: true })).toBe("server-unreachable");
+    expect(notSyncingReason({ ...signedOutOnSyncedVault, authOffline: false })).toBe("signed-out");
+    // Never once actually signed in.
+    expect(
+      notSyncingReason({ ...signedOutOnSyncedVault, authStatus: "signed-in", hasSession: true, authOffline: true }),
+    ).toBeNull();
+  });
+
   it("reports signed out whatever the socket last said", () => {
     // A 401 at token mint maps to "offline" (`mintFailureStatus`), which is the
     // very disguise this banner exists to strip off — so the auth fact must win

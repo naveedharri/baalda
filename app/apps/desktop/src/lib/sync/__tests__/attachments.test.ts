@@ -913,9 +913,9 @@ describe("AttachmentSync per-file state (store.fileSyncState)", () => {
     expect(last()["Media/huge.mp4"]).toBe("error");
   });
 
-  it("settles an empty file without registering or announcing it", async () => {
-    // The server refuses a 0-byte blob (`invalid_size`); asking anyway used to
-    // mint a `files` row, fail, and leave the file `syncing` on every pass.
+  it("keeps an empty file local on a server without empty-files, never green", async () => {
+    // An older server refuses a 0-byte blob (`invalid_size`); asking anyway used
+    // to mint a `files` row, fail, and leave the file `syncing` on every pass.
     const registered: string[] = [];
     const { deps, log, last } = withStates(
       [
@@ -942,7 +942,78 @@ describe("AttachmentSync per-file state (store.fileSyncState)", () => {
     expect(log.intents.map((i) => i.relPath)).not.toContain("Code/pkg/__init__.py");
     expect(registered).toContain("Code/pkg/main.py");
     expect(registered).not.toContain("Code/pkg/__init__.py");
-    expect(last()["Code/pkg/__init__.py"]).toBe("synced");
+    // The server does not hold it, so it is not "synced": it is local only
+    // (it used to read synced and turn every folder above it green).
+    expect(last()["Code/pkg/__init__.py"]).toBeUndefined();
+    expect(sync.localOnlyPaths()).toContainEqual(["Code/pkg/__init__.py", "unsynced"]);
+  });
+
+  it("sends an empty file like any other when the server takes them (empty-files)", async () => {
+    const { deps, log } = withStates(
+      [{ relPath: "Code/pkg/__init__.py", bytes: new Uint8Array([]) }],
+      () => SINGLE_INTENT,
+      {
+        emptyFiles: async () => true,
+        registerFile: async ({ id }) => id,
+        localFileIds: async () => new Map([["Code/pkg/__init__.py", "local-init"]]),
+      },
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    const asked = log.intents.filter((i) => i.relPath === "Code/pkg/__init__.py");
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ size: 0 });
+  });
+
+  it("sends a file whose registration was refused at most once, never in a loop", async () => {
+    const { deps, log } = withStates(
+      [{ relPath: "Team/locked.pdf", bytes: new Uint8Array([9]) }],
+      () => serverError(400, "invalid_rel_path"),
+      {
+        registerFile: async () => {
+          throw serverError(403, "no_write_access");
+        },
+        localFileIds: async () => new Map([["Team/locked.pdf", "local-locked"]]),
+      },
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    await sync.reconcile();
+    await sync.reconcile();
+    expect(log.intents.filter((i) => i.relPath === "Team/locked.pdf").length).toBeLessThanOrEqual(1);
+  });
+
+  it("asks again for bytes refused for access once access changes", async () => {
+    // A short No access: every upload in that window is answered 403. Those
+    // answers are about access, so after it comes back an empty file (whose
+    // bytes every empty file shares) must not stay skipped until a relaunch.
+    let refuse = true;
+    const { deps, log } = withStates(
+      [{ relPath: "Code/new.py", bytes: new Uint8Array([3]) }],
+      () => (refuse ? serverError(403, "no_write_access") : SINGLE_INTENT),
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    await sync.reconcile();
+    const asked = () => log.intents.filter((i) => i.relPath === "Code/new.py").length;
+    expect(asked()).toBe(1);
+
+    refuse = false;
+    sync.forgetAccessRefusals();
+    await sync.reconcile();
+    expect(asked()).toBe(2);
+  });
+
+  it("marks a file green only when the server holds its bytes at that path", async () => {
+    const { deps, last } = withStates(
+      [{ relPath: "Docs/kept.pdf", bytes: new Uint8Array([7]) }],
+      () => SINGLE_INTENT,
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    // Uploaded this pass ⇒ the server holds it.
+    expect(last()["Docs/kept.pdf"]).toBe("synced");
+    expect(sync.localOnlyPaths()).toEqual([]);
   });
 
   it.each([

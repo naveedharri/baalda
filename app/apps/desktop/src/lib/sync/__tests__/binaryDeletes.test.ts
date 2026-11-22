@@ -401,6 +401,25 @@ describe("BinaryDeleteQueue", () => {
     expect(h.deleted).toEqual([]);
   });
 
+  it("holds a delete made offline, uncounted, and sends it once the server is back", async () => {
+    // Three failed listings while offline used to give up, and the deleted file
+    // was downloaded back on reconnect.
+    const h = harness({ server: [blob("b1", "Team/guide.pdf")], onDisk: [], fileIds: { "Team/guide.pdf": "file-1" } });
+    let offline = true;
+    h.deps.isOffline = () => offline;
+    const queue = new BinaryDeleteQueue(h.deps);
+    queue.noteChanged("Team/guide.pdf");
+    for (let i = 0; i < 5; i++) await queue.drain();
+    expect(queue.isPending("Team/guide.pdf")).toBe(true);
+    expect(h.deleted).toEqual([]);
+
+    offline = false;
+    queue.resume();
+    await queue.drain();
+    expect(h.deleted).toEqual(["file-1"]);
+    expect(queue.isPending("Team/guide.pdf")).toBe(false);
+  });
+
   it("keeps the candidate when the server refuses the rename's move", async () => {
     // Same fork, one step later: the pairing was right and the move failed. The
     // new path is unregistered either way, so the candidate waits.

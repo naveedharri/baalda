@@ -47,6 +47,8 @@ export interface MenuSelectOption<T extends string> {
   checked?: boolean;
   /** A small pill after the label, e.g. "Default". */
   tag?: string;
+  /** A destructive action: its label is drawn in the danger colour. */
+  danger?: boolean;
 }
 
 /** Gap between the trigger and the menu, on whichever side it opens. */
@@ -211,7 +213,7 @@ export function MenuSelect<T extends string>({
             <li
               role={o.checked === undefined ? "menuitemradio" : "menuitemcheckbox"}
               aria-checked={on}
-              className={on ? "is-on" : undefined}
+              className={[on ? "is-on" : "", o.danger ? "is-danger" : ""].filter(Boolean).join(" ") || undefined}
               onClick={() => {
                 setOpen(false);
                 if (o.checked !== undefined || o.value !== value) void onSelect(o.value);

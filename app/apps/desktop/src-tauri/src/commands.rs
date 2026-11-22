@@ -2222,12 +2222,13 @@ pub async fn delete_folder_if_empty(
     state: State<'_, AppState>,
     path: String,
     expected_epoch: Option<u64>,
+    allow_excluded: Option<bool>,
 ) -> AppResult<bool> {
     // Epoch-pinned like `trash_note`: driven by a debounced registry pull that
     // can outlive a vault switch.
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let abs = vault::resolve_in_vault(&vault, &path)?;
-    let removed = notefile::delete_folder_if_empty(&vault, &path)?;
+    let removed = notefile::delete_folder_if_empty_with(&vault, &path, allow_excluded.unwrap_or(false))?;
     if removed {
         index.lock().unwrap().remove_note(&vault, &abs)?;
     }
@@ -2273,7 +2274,7 @@ pub struct InboundRemovalOutcome {
 fn remove_inbound_file(vault: &Path, index: &Mutex<Index>, item: &InboundRemoval) -> AppResult<()> {
     let outcomes = remove_inbound_files(vault, index, vec![InboundRemoval {
         path: item.path.clone(), doc_id: item.doc_id.clone(),
-    }], || Ok(()))?;
+    }], false, || Ok(()))?;
     if let Some(error) = &outcomes[0].error {
         return Err(AppError::new(error));
     }
@@ -2285,9 +2286,10 @@ pub fn delete_files_batch(
     state: State<'_, AppState>,
     items: Vec<InboundRemoval>,
     expected_epoch: Option<u64>,
+    allow_excluded: Option<bool>,
 ) -> AppResult<Vec<InboundRemovalOutcome>> {
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
-    remove_inbound_files(&vault, &index, items, || {
+    remove_inbound_files(&vault, &index, items, allow_excluded.unwrap_or(false), || {
         require_vault_at(&state, expected_epoch).map(|_| ())
     })
 }
@@ -2296,6 +2298,7 @@ fn remove_inbound_files(
     vault: &Path,
     index: &Mutex<Index>,
     items: Vec<InboundRemoval>,
+    allow_excluded: bool,
     check_epoch: impl Fn() -> AppResult<()>,
 ) -> AppResult<Vec<InboundRemovalOutcome>> {
     if items.len() > 64 {
@@ -2307,7 +2310,7 @@ fn remove_inbound_files(
         // Re-check between files so a vault switch cancels the remaining work.
         check_epoch()?;
         let result = vault::resolve_in_vault(&vault, &item.path).and_then(|abs| {
-            notefile::delete_file(&vault, &item.path)?;
+            notefile::delete_file_with(&vault, &item.path, allow_excluded)?;
             removed.push((abs, item.doc_id));
             Ok(())
         });

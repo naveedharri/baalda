@@ -209,6 +209,9 @@ export function AccountMenu() {
   // about a synced vault, so pending renders the vault's name and nothing else.
   const authPending = authStatus === "unknown";
   const signedOut = !authPending && (authStatus !== "signed-in" || !session);
+  // Signed out only because the launch could not reach the server: the saved
+  // login is kept and retried, so "signed out" would be the wrong word.
+  const authOffline = useStore((s) => s.authOffline);
   const vaultPath = vault?.path ?? null;
   useEffect(() => {
     // Runs while PENDING too (the peek is ~60 bytes and answers the question
@@ -321,7 +324,9 @@ export function AccountMenu() {
               ? authPending
                 ? vault.name
                 : openFolderSynced
-                  ? `${vault.name} · Synced vault, signed out`
+                  ? authOffline
+                    ? `${vault.name} · Synced vault, can't reach the server`
+                    : `${vault.name} · Synced vault, signed out`
                   : `${vault.name} · Local`
               : authPending
                 ? ""
@@ -356,7 +361,9 @@ export function AccountMenu() {
                     ? // A synced vault whose session is gone, not a local one —
                       // edits still merge on the next sign-in, and sign-in (not
                       // "turn on sync") is how it comes back online.
-                      "Synced · signed out"
+                      authOffline
+                      ? "Synced · offline"
+                      : "Synced · signed out"
                     : "Local · not synced"
                   : "Sync & collaborate"}
             </span>

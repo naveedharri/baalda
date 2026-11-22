@@ -12,7 +12,7 @@ import type { SyncStatus } from "../lib/sync/syncManager";
  * offline or reconnecting is NOT here; it resolves itself, and the corner pill
  * already says so.
  */
-export type NotSyncingReason = "signed-out" | "no-access" | "vault-no-access";
+export type NotSyncingReason = "signed-out" | "server-unreachable" | "no-access" | "vault-no-access";
 
 /**
  * Should the "not syncing" banner be up, and for which reason?
@@ -57,11 +57,14 @@ export function notSyncingReason(args: {
   folderIsSynced: boolean | null;
   /** Is a note actually on screen? `syncStatus` is only about the open doc. */
   noteOpen: boolean;
+  /** Signed out only because the launch could not reach the server; the saved
+   *  login is kept and retried, so asking to sign in would be wrong. */
+  authOffline?: boolean;
 }): NotSyncingReason | null {
   const { authStatus, hasSession, syncStatus, folderIsSynced, noteOpen } = args;
   if (folderIsSynced !== true) return null;
   if (authStatus === "unknown") return null;
-  if (authStatus !== "signed-in" || !hasSession) return "signed-out";
+  if (authStatus !== "signed-in" || !hasSession) return args.authOffline ? "server-unreachable" : "signed-out";
   if (args.vaultSyncStatus === "no-access") return "vault-no-access";
   if (noteOpen && syncStatus === "no-access") return "no-access";
   return null;
@@ -84,10 +87,13 @@ export function notSyncingReason(args: {
 export function NotSyncingBannerView({
   reason,
   onSignIn,
+  onRetry,
 }: {
   reason: NotSyncingReason | null;
   /** Opens the app's sign-in card. Only rendered for the signed-out reason. */
   onSignIn: () => void;
+  /** Checks the saved login again now. Only for the server-unreachable reason. */
+  onRetry?: () => void;
 }) {
   return (
     <Banner show={reason != null} className="not-syncing-banner" role="alert">
@@ -99,11 +105,21 @@ export function NotSyncingBannerView({
               : "You no longer have access to this note"}
           </strong>: changes here are not syncing.
         </span>
+      ) : reason === "server-unreachable" ? (
+        <span>
+          <strong>Can't reach the server</strong>. Your changes stay on this device and
+          sync once it's back.
+        </span>
       ) : (
         <span>
           <strong>Signed out</strong>. Your changes are not syncing. Edits stay on this
           device until you sign in.
         </span>
+      )}
+      {reason === "server-unreachable" && onRetry && (
+        <div className="banner-actions">
+          <button onClick={onRetry}>Try again</button>
+        </div>
       )}
       {reason === "signed-out" && (
         <div className="banner-actions">

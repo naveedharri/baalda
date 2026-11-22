@@ -579,9 +579,13 @@ export const deleteFile = (path: string, expectedEpoch?: VaultEpoch) =>
 export const deleteFilesBatch = (
   items: Array<{ path: string; docId: string | null }>,
   expectedEpoch?: VaultEpoch,
+  /** Only for a confirmed revocation of rule-hidden team files
+   *  (`registry.revokeParked`): Rust otherwise refuses an excluded path. */
+  opts?: { allowExcluded?: boolean },
 ) => invoke<Array<{ path: string; error: string | null }>>("delete_files_batch", {
   items,
   expectedEpoch: expectedEpoch ?? null,
+  allowExcluded: opts?.allowExcluded ?? null,
 });
 
 /**
@@ -590,8 +594,17 @@ export const deleteFilesBatch = (
  * it was already gone, or when anything still lives inside, in which case the
  * folder stays, deliberately.
  */
-export const deleteFolderIfEmpty = (path: string, expectedEpoch?: VaultEpoch) =>
-  invoke<boolean>("delete_folder_if_empty", { path, expectedEpoch: expectedEpoch ?? null });
+export const deleteFolderIfEmpty = (
+  path: string,
+  expectedEpoch?: VaultEpoch,
+  /** Only for folders emptied by `registry.revokeParked`. */
+  opts?: { allowExcluded?: boolean },
+) =>
+  invoke<boolean>("delete_folder_if_empty", {
+    path,
+    expectedEpoch: expectedEpoch ?? null,
+    allowExcluded: opts?.allowExcluded ?? null,
+  });
 
 /** Import external files/folders (absolute host paths) into `dest` (vault-relative). */
 export const importPaths = (dest: string, sources: string[], expectedEpoch?: VaultEpoch) =>

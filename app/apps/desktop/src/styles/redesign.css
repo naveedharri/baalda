@@ -988,11 +988,13 @@ html:not(.rd-off) .access-board-column-title {
   display: inline-flex; align-items: center; gap: 8px;
   font-size: 13px; font-weight: 600; color: var(--text-primary);
 }
-html:not(.rd-off) .access-board-column-title::before {
-  content: ""; width: 8px; height: 8px; border-radius: 50%; flex: none;
-  background: var(--col-fg);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--col-fg) 16%, transparent);
+/* The column's icon (MemberAccessBoard ColumnGlyph): its ink on its tint. */
+.access-board-column-glyph {
+  display: inline-grid; place-items: center; flex: none;
+  width: 24px; height: 24px; border-radius: 7px;
+  color: var(--col-fg); background: var(--col-bg);
 }
+.access-board-column-glyph svg { display: block; }
 html:not(.rd-off) .access-board-column-title .access-board-count {
   font-size: 11px; font-weight: 600; opacity: 1; font-variant-numeric: tabular-nums;
   color: var(--col-fg); background: var(--col-bg);
@@ -2531,10 +2533,9 @@ html:not(.rd-off) .io-tip { margin: 0; padding-left: 4px; font-size: 12.5px; col
    beside the hint. */
 html:not(.rd-off) .context-menu.role-menu li .menu-tick { align-self: flex-start; line-height: 1.4; }
 
-/* "No access" reads as the soft red it is in the confirm dialogs, not as a
-   disabled-looking grey. Can edit and Can view are unchanged. Light and dark. */
-html:not(.rd-off) { --access-none-bg: #fbe9e6; --access-none-fg: #a8352b; }
-html:not(.rd-off)[data-theme="dark"] { --access-none-bg: rgba(240, 139, 128, 0.14); --access-none-fg: #f08b80; }
+/* "No access" pills and the board's No access column use the neutral grey
+   from tokens.css (2026-11-22): red read as an alarm on Default access, where
+   No access is a normal starting point. Confirm dialogs keep their own red. */
 
 /* Copy buttons in the token dialog and MCP tab: the redesign's tinted icon
    tile (as in toasts and Import and export), green once copied. */

@@ -378,6 +378,68 @@ describe("sync rules park, never delete (#401)", () => {
     expect(ctx.disk.deleted).toEqual([]);
   });
 
+  it("No access removes a rule-hidden team note once the server confirms it", async () => {
+    const ctx = await syncedVault();
+    await applyRules(ctx, RULE);
+    // Access ended: the listing drops d2, the change is fresh, and the
+    // server's resolver answers `none` for it.
+    ctx.reg.setInboundHost({ ...host(), revocationAuthority: () => true } as InboundHost);
+    const accessCheck = vi.fn(async (_v: string, ids: string[]) => ids.filter((id) => id === "d2"));
+    (ctx.api as unknown as { accessCheck: typeof accessCheck }).accessCheck = accessCheck;
+    ctx.state.notes = ctx.state.notes.filter((n) => n.id !== "d2");
+    await ctx.reg.pull();
+
+    expect(accessCheck).toHaveBeenCalledWith(VAULT, ["d2"]);
+    expect(ipc.deleteFilesBatch).toHaveBeenCalledWith(
+      [{ path: `${CODE}/README.md`, docId: "d2" }],
+      null,
+      { allowExcluded: true },
+    );
+    expect(ctx.disk.notes.has(`${CODE}/README.md`)).toBe(false);
+    // The hidden folder it emptied goes too; the folder holding a visible note stays.
+    expect(ipc.deleteFolderIfEmpty).toHaveBeenCalledWith(CODE, null, { allowExcluded: true });
+    expect(ctx.disk.folders.has(CODE)).toBe(false);
+    expect(ctx.disk.folders.has("projects/app")).toBe(true);
+    expect(ctx.reg.isParked("d2")).toBe(false);
+    expect(lastConfig().parked).toBeUndefined();
+    // The visible note is untouched.
+    expect(ctx.disk.notes.get("projects/app/context.md")).toBe("d1");
+  });
+
+  it("keeps a rule-hidden note when access comes back within the settle window", async () => {
+    const ctx = await syncedVault();
+    await applyRules(ctx, RULE);
+    ctx.reg.setInboundHost({ ...host(), revocationAuthority: () => true } as InboundHost);
+    ctx.state.notes = ctx.state.notes.filter((n) => n.id !== "d2");
+    let calls = 0;
+    (ctx.api as unknown as { accessCheck: (v: string, ids: string[]) => Promise<string[]> }).accessCheck =
+      vi.fn(async (_v: string, ids: string[]) => (++calls === 1 ? ids : []));
+    await ctx.reg.pull();
+
+    expect(calls).toBe(2);
+    expect(ipc.deleteFilesBatch).not.toHaveBeenCalled();
+    expect(ctx.disk.notes.has(`${CODE}/README.md`)).toBe(true);
+    expect(ctx.reg.isParked("d2")).toBe(true);
+  });
+
+  it("keeps a rule-hidden note when the access check fails or says it is readable", async () => {
+    const ctx = await syncedVault();
+    await applyRules(ctx, RULE);
+    ctx.reg.setInboundHost({ ...host(), revocationAuthority: () => true } as InboundHost);
+    ctx.state.notes = ctx.state.notes.filter((n) => n.id !== "d2");
+    const api = ctx.api as unknown as { accessCheck: (v: string, ids: string[]) => Promise<string[]> };
+    api.accessCheck = vi.fn(async () => {
+      throw new Error("offline");
+    });
+    await ctx.reg.pull();
+    api.accessCheck = vi.fn(async () => []);
+    await ctx.reg.pull();
+
+    expect(ipc.deleteFilesBatch).not.toHaveBeenCalled();
+    expect(ctx.disk.notes.has(`${CODE}/README.md`)).toBe(true);
+    expect(ctx.reg.isParked("d2")).toBe(true);
+  });
+
   it("removing the rule returns the same doc_id and touches no bytes", async () => {
     const ctx = await syncedVault();
     await applyRules(ctx, RULE);

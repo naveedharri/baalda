@@ -402,15 +402,23 @@ describe("tree binaries register as `files` rows", () => {
     expect(log.legacyUploads).toEqual([{ relPath: "Team/report.docx", docId: "local-id-0" }]);
   });
 
-  it("registers nothing when the local index has no `files` row yet", async () => {
-    // The extraction worker is seconds behind a drop; the next pass has the id.
+  it("waits, sending nothing, until the local index has the file's id", async () => {
+    // The index is seconds behind a drop (a cloned repo: thousands of files).
+    // Sent without an id the server cannot place the bytes (400
+    // invalid_rel_path), and that used to be remembered as permanent.
+    let ids = new Map<string, string>();
     const { sync, log } = makeVault([{ relPath: "Team/report.docx" }], {
-      localFileIds: async () => new Map(),
+      localFileIds: async () => ids,
     });
     await sync.reconcile();
-
     expect(log.registered).toEqual([]);
-    expect(log.intents[0].docId).toBeUndefined();
+    expect(log.intents).toEqual([]);
+
+    ids = new Map([["Team/report.docx", "local-id-0"]]);
+    await sync.reconcile();
+    expect(log.registered).toEqual([{ relPath: "Team/report.docx", id: "local-id-0" }]);
+    expect(log.intents).toHaveLength(1);
+    expect(log.intents[0].docId).toBe("local-id-0");
   });
 });
 

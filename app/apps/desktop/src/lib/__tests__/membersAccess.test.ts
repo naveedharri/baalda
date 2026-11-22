@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  accessSources,
   countLine,
   everyoneLabel,
   filterPeople,
@@ -108,8 +109,8 @@ describe("confirm copy for taking access away", () => {
     expect(reduceAccessCopy({ kind: "person", name: "Me", self: true }, "private")).toMatchObject({
       title: "Remove your access to this vault?", outcome: expect.stringContaining("removed from your devices"),
     });
-    expect(reduceAccessCopy({ kind: "everyone" }, "private").title).toBe("Set everyone to No access?");
-    expect(reduceAccessCopy({ kind: "everyone" }, "readonly").title).toBe("Make the vault view only for everyone?");
+    expect(reduceAccessCopy({ kind: "everyone" }, "private").title).toBe("Set default access to No access?");
+    expect(reduceAccessCopy({ kind: "everyone" }, "readonly").title).toBe("Set default access to Can view?");
     for (const to of ["private", "readonly"] as const) {
       const c = reduceAccessCopy({ kind: "everyone" }, to);
       expect(`${c.title} ${c.button} ${c.outcome}`).not.toMatch(/narrow|apply/i);
@@ -175,5 +176,40 @@ describe("the viewer's role follows the freshest authority", () => {
     expect(withViewerRole([], "org", "me", "admin", "m-me")).toEqual([
       { id: "m-me", organizationId: "org", userId: "me", role: "admin" },
     ]);
+  });
+});
+
+describe("where a person's access comes from", () => {
+  const design = { name: "Design", summary: "Can edit Design" };
+  it("starts at default access when there are no groups", () => {
+    expect(accessSources({ level: "none", own: false, defaultLabel: "No access", groups: [] }))
+      .toEqual({ short: "Default access", lines: ["Default access: No access."], sentence: "From default access (no access). Choosing a level here sets it just for them." });
+  });
+  it("names the groups that add something, and skips groups that give nothing", () => {
+    const empty = { name: "Sales", summary: "No access yet" };
+    expect(accessSources({ level: "custom", own: false, defaultLabel: "No access", groups: [design, empty] }))
+      .toEqual({
+        short: "Default + Design",
+        lines: ["Default access: No access.", "Design group: Can edit Design."],
+        sentence: "From default access (no access) and the Design group (can edit Design). Choosing a level here sets it just for them.",
+      });
+    const two = accessSources({ level: "custom", own: false, defaultLabel: "Can view", groups: [design, { name: "Ops", summary: "Can edit Ops" }] });
+    expect(two.short).toBe("Default + 2 groups");
+  });
+  it("says a person's own setting replaces default access and groups", () => {
+    expect(accessSources({ level: "view", own: true, defaultLabel: "No access", groups: [design] })).toEqual({
+      short: "Set just for them",
+      lines: ["Set just for them: Can view everything.", "Default access and access groups don't change this."],
+      sentence: "Set just for them. Default access and access groups don't change it.",
+    });
+    expect(accessSources({ level: "edit", own: true, isSelf: true, defaultLabel: "No access", groups: [] }).lines)
+      .toEqual(["Set just for you: Can edit everything.", "Default access doesn't change this."]);
+  });
+  it("explains a mixed level with no group behind it", () => {
+    expect(accessSources({ level: "custom", own: false, defaultLabel: "Can edit", groups: [] })).toEqual({
+      short: "Default, with changes",
+      lines: ["Default access: Can edit.", "Some folders or notes are set differently for them."],
+      sentence: "From default access (can edit), with some folders or notes set differently. Choosing a level here sets it just for them.",
+    });
   });
 });
