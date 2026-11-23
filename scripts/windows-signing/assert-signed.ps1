@@ -44,4 +44,7 @@ foreach ($f in $files) {
     $bad++
   }
 }
+# Always exit explicitly: callers test $LASTEXITCODE, which a script that just
+# ends leaves at whatever it was (in a fresh session, $null, which is not 0).
 if ($bad -gt 0) { exit 1 }
+exit 0
