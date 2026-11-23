@@ -33,8 +33,25 @@ export function readOnlyCopyKeeper(): ReadOnlyCopyKeeper | null {
   return keeper;
 }
 
+/**
+ * Asked when a note's file is EXACTLY empty while its doc holds text (the
+ * bridge refused to take that in). The sync layer waits for the file to stay
+ * empty, then writes the doc's text back, so the disk shows what everyone sees.
+ */
+export type EmptyFileRefiller = (docId: string, path: string) => void;
+let refiller: EmptyFileRefiller | null = null;
+
+export function setEmptyFileRefiller(fn: EmptyFileRefiller | null): void {
+  refiller = fn;
+}
+
+export function emptyFileRefiller(): EmptyFileRefiller | null {
+  return refiller;
+}
+
 /** Test/teardown helper. */
 export function resetReadOnlyDocs(): void {
   readOnly.clear();
   keeper = null;
+  refiller = null;
 }

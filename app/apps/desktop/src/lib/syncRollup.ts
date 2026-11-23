@@ -512,8 +512,16 @@ export function rowSyncMark(
           },
         )
       : null;
-    if (!progress && (summary.unsent ?? 0) > 0) {
-      return { state: "unsynced", progress: null, title: folderUnsentTitle(summary) };
+    // The hollow ring only when NOTHING inside reached the server. One unsent
+    // file among a thousand synced ones keeps the folder green (its own row
+    // carries the ring); the hover still counts what is not on the server.
+    const unsent = summary.unsent ?? 0;
+    if (!progress && unsent > 0) {
+      return {
+        state: unsent >= summary.total ? "unsynced" : "synced",
+        progress: null,
+        title: folderUnsentTitle(summary),
+      };
     }
     return {
       state: progress ? "syncing" : "synced",

@@ -23,7 +23,7 @@ import {
   useUpdateState,
 } from "../lib/updater";
 import { isUpdateBusy, updateCheckToast } from "../lib/updateMenuRow";
-import { showsSidebarUpdateLine, updateView } from "../lib/updateView";
+import { menuUpdateView, showsSidebarUpdateLine, updateView } from "../lib/updateView";
 import { toast } from "../lib/toast";
 import { CheckIcon } from "./CheckIcon";
 
@@ -619,7 +619,7 @@ function UpdateMenuRow({ onClose }: { onClose: () => void }) {
       alive = false;
     };
   }, []);
-  const view = updateView(update, version);
+  const view = menuUpdateView(updateView(update, version));
   return (
     <button
       className={`menu-item update-row is-${view.tone}`}

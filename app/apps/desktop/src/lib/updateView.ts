@@ -67,3 +67,13 @@ export function updateView(state: UpdateState, current: string | null): UpdateVi
 export function showsSidebarUpdateLine(view: UpdateView): boolean {
   return view.tone === "busy" || view.tone === "ready" || view.tone === "wait";
 }
+
+/**
+ * The account menu's update row under the same rule: a failed check or install
+ * reads as the plain "Check for updates" row with the version, never a red card
+ * in the menu. About says what went wrong. Clicking still checks (and its toast
+ * answers that click).
+ */
+export function menuUpdateView(view: UpdateView): UpdateView {
+  return view.tone === "error" ? { ...view, tone: "idle", sub: "", percent: null, action: "check" } : view;
+}

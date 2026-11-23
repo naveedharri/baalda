@@ -105,6 +105,8 @@ export interface LocalAttachment {
  * quiet period.
  */
 export const UPLOAD_QUIET_MS = 3_000;
+/** How soon a pass held back by a failed deleted-files listing asks again. */
+export const HELD_FILES_RETRY_MS = 15_000;
 /** How many quick passes (one per {@link UPLOAD_QUIET_MS}) may wait for the
  *  local index to give newly dropped files their ids. */
 export const INDEX_WAIT_MAX_ROUNDS = 40;
@@ -335,6 +337,9 @@ export interface BinaryPlan {
    * disk (and an old folder left holding it came back as a new folder).
    */
   toFollow: Array<{ docId: string; from: string; to: string; sha256: string }>;
+  /** Known files left alone this pass because the deleted-files listing failed
+   *  ({@link BinaryPlanContext.tombstonesUnknown}); the pass asks again later. */
+  held: LocalAttachment[];
 }
 
 /** What the three-way needs to know about this device's history. */
@@ -345,6 +350,21 @@ export interface BinaryPlanContext {
   baseFor: (docId: string) => string | null;
   /** Did the server delete the `files` row with this id (`file_tombstones`)? */
   isTombstoned?: (docId: string) => boolean;
+  /**
+   * The server has the deleted-files listing but it failed this pass. A file
+   * this device knows by an id the server no longer lists then waits: it may
+   * be one a teammate deleted, and the server accepts a deleted id back, so
+   * uploading it would undo their delete for everyone.
+   */
+  tombstonesUnknown?: boolean;
+  /**
+   * Did the server name this `files` id as revoked for this user (the
+   * session's named revocations)? The registry takes such a file off this disk;
+   * until it does, it is neither uploaded nor held. Uploading it was a request
+   * per file the server could only refuse (403 or 409 `not_readable`), and
+   * the refusals were remembered for the session.
+   */
+  isRevoked?: (docId: string) => boolean;
 }
 
 /**
@@ -422,6 +442,7 @@ export function planBinarySync(
   const toTrash: BinaryPlan["toTrash"] = [];
   const toMove: BinaryPlan["toMove"] = [];
   const toFollow: BinaryPlan["toFollow"] = [];
+  const held: LocalAttachment[] = [];
   /** Server rows the three-way consumed: never also a plain download. */
   const consumed = new Set<string>();
   /** Local paths the three-way decided: never also a plain upload. */
@@ -452,6 +473,18 @@ export function planBinarySync(
         if (knownId && ctx.isTombstoned?.(knownId)) {
           decided.add(a.relPath);
           toTrash.push({ local: a, docId: knownId });
+          continue;
+        }
+        if (knownId && ctx.tombstonesUnknown) {
+          decided.add(a.relPath);
+          held.push(a);
+          continue;
+        }
+        // Access was taken away: the registry is removing it. A known id the
+        // server is merely missing bytes for (a row minted before its upload)
+        // is never in that set, so it still uploads below.
+        if (knownId && ctx.isRevoked?.(knownId)) {
+          decided.add(a.relPath);
           continue;
         }
         // Nothing on the server at this path either (a known id whose row is
@@ -583,7 +616,7 @@ export function planBinarySync(
       (isUnderAttachments(b.relPath) || !unboundShas.has(b.sha256)) &&
       !localPaths.has(pathKey(b.relPath)),
   );
-  return { toUpload, toDownload, toReplace, agreed, toTrash, toMove, toFollow };
+  return { toUpload, toDownload, toReplace, agreed, toTrash, toMove, toFollow, held };
 }
 
 /**
@@ -925,6 +958,16 @@ export interface AttachmentSyncDeps {
    * to always-current when omitted (unit tests).
    */
   isCurrent?: () => boolean;
+  /** {@link BinaryPlanContext.isRevoked}: a `files` id the server named as
+   *  revoked for this user this session (`docSession.authoritativeRevoked`). */
+  isRevokedFile?: (fileId: string) => boolean;
+  /**
+   * This user's view-only paths, from the same lock view the editor and the
+   * sidebar padlocks use (`docSession.setReadOnlyPathCheck`). The text pass
+   * sends nothing for them: the server refuses it (403), and the device that
+   * uploaded the bytes sends their text. A throw means "unknown": sent as before.
+   */
+  readOnlyPaths?: () => Promise<(relPath: string) => boolean>;
   /** List the vault's local binaries — `attachments/` AND the tree binaries
    *  (`ipc.listBinaries`). */
   listLocal: () => Promise<LocalAttachment[]>;
@@ -957,6 +1000,9 @@ export interface AttachmentSyncDeps {
   listFileTombstones?: () => Promise<string[]>;
   /** Remove a local tree binary outright (`ipc.deleteFile`). */
   removeLocal?: (relPath: string) => Promise<void>;
+  /** Files a teammate deleted left this disk: the folders they emptied are
+   *  removed by the registry's next pass, which this asks for. */
+  deletedFilesRemoved?: () => void;
   /** LEGACY upload: POST the whole body in one shot. The fallback for a server
    *  with no intent route, and the reason that route stays forever. `docId` is
    *  the `files` row a tree binary belongs to — sent as `x-doc-id`. */
@@ -1295,6 +1341,8 @@ export class AttachmentSync {
    *  changed mid-upload). One timer for all of them, so a file that keeps
    *  changing costs one pass per quiet period, never a tight loop. */
   private settleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The retry for files held by a failed deleted-files listing. */
+  private heldTimer: ReturnType<typeof setTimeout> | null = null;
   /** The "your image could not be shared" toast, once per sync instance. */
   private embedRefusalNotified = false;
   /** The storage-full toast is raised at most once per sync instance. */
@@ -1314,6 +1362,8 @@ export class AttachmentSync {
    *  short No access left every file's bytes, an empty file's included, skipped
    *  until the next launch, so a new empty file never synced. */
   private readonly accessSkips = new Set<string>();
+  /** The text pass said once that it could not read the lock view. */
+  private lockViewWarned = false;
   /** Per path: passes that found no id for it yet (see {@link NotIndexedYet}). */
   private readonly indexWaits = new Map<string, number>();
   /** Consecutive passes that left files waiting for the local index. */
@@ -1756,6 +1806,16 @@ export class AttachmentSync {
     return hidden;
   }
 
+  /** Ask again for files the failed deleted-files listing held: a slower retry
+   *  than the quiet period, since the server is the one failing. */
+  private retryHeldFiles(): void {
+    if (this.heldTimer) return;
+    this.heldTimer = this.setTimeoutImpl(() => {
+      this.heldTimer = null;
+      if (this.current()) this.scheduleReconcile();
+    }, HELD_FILES_RETRY_MS);
+  }
+
   /** Ask again once the quiet period has passed (see {@link settleTimer}). */
   private retryAfterSettle(): void {
     if (this.settleTimer) return;
@@ -1820,19 +1880,31 @@ export class AttachmentSync {
       }
     }
     let tombstoned: Set<string> | null = null;
+    let tombstonesUnknown = false;
     if (this.deps.listFileTombstones) {
       try {
         tombstoned = new Set(await this.deps.listFileTombstones());
       } catch (e) {
-        console.warn("[attachments] file tombstones unavailable — no suppression this pass", e);
+        // A 404 is a server without the listing (older than #215): there is
+        // nothing to wait for, so the older behaviour holds.
+        tombstonesUnknown = (e as { status?: number } | null)?.status !== 404;
+        console.warn(
+          tombstonesUnknown
+            ? "[attachments] file tombstones unavailable — known files the server no longer lists wait for the next pass"
+            : "[attachments] this server has no file tombstones listing",
+          e,
+        );
       }
     }
     const plan = planBinarySync(local, server, {
       docIdFor: (relPath) => this.docIdFor(relPath),
       baseFor: (docId) => this.baseFor(docId),
       isTombstoned: tombstoned ? (docId) => tombstoned.has(docId) : undefined,
+      tombstonesUnknown,
+      isRevoked: this.deps.isRevokedFile,
     });
     await this.trashTombstoned(plan.toTrash);
+    if (plan.held.length > 0) this.retryHeldFiles();
     // #408: `attachments/` drops this listing no longer names for us.
     const hiddenEmbeds = await this.settleHiddenEmbeds(local, server);
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
@@ -2240,6 +2312,7 @@ export class AttachmentSync {
    *  local copy. */
   private async trashTombstoned(items: BinaryPlan["toTrash"]): Promise<void> {
     const remove = this.deps.removeLocal;
+    let removed = 0;
     for (const { local, docId } of items) {
       if (!remove || !this.current()) {
         console.info(`[attachments] ${local.relPath} was deleted on the server — not uploading it back`);
@@ -2251,10 +2324,15 @@ export class AttachmentSync {
         this.fileIds.delete(local.relPath);
         this.deps.forgetFileId?.(local.relPath);
         console.info(`[attachments] ${local.relPath} (file ${docId}) was deleted by a teammate — removed here`);
+        removed++;
       } catch (e) {
         console.warn(`[attachments] couldn't remove deleted file ${local.relPath}; leaving it`, e);
       }
     }
+    // A deleted folder still holding these files was kept pending by the pass
+    // that ran before them; nothing else asks again, so it stayed on disk,
+    // empty, until the next unrelated change.
+    if (removed > 0 && this.current()) this.deps.deletedFilesRemoved?.();
   }
 
   /**
@@ -3287,8 +3365,26 @@ export class AttachmentSync {
     const upload = this.deps.uploadText;
     const read = this.deps.fileText;
     if (!upload || !read) return;
+    // View-only here: the server would refuse each one (403). One lock read per
+    // batch instead of a refused request per downloaded file.
+    let sendable = paths;
+    if (this.deps.readOnlyPaths && paths.length > 0) {
+      try {
+        const readOnly = await this.deps.readOnlyPaths();
+        sendable = paths.filter((p) => !readOnly(p));        if (sendable.length < paths.length) {
+          console.info(`[attachments] ${paths.length - sendable.length} view-only file(s): no text sent`);
+        }
+      } catch (e) {
+        // Unknown: send as before; a 403 still stops that blob for the session.
+        if (!this.lockViewWarned) {
+          this.lockViewWarned = true;
+          console.warn("[attachments] no lock view for the text pass — sending text as before", e);
+        }
+      }
+      if (!this.current()) return;
+    }
     await runProbeFirst(
-      paths,
+      sendable,
       async (relPath) => {
         let text: Awaited<ReturnType<typeof read>>;
         try {
@@ -3322,7 +3418,18 @@ export class AttachmentSync {
         } catch (e) {
           const status = errStatus(e);
           if (status === 404) {
-            // The route is absent, or the blob is. Neither is worth another file.
+            // This blob only (gone since the listing, not ready yet, another
+            // vault's): the server answers that with a JSON body. Skip it and
+            // keep going; its next completion or listing brings it back. Only
+            // a route that is absent (the framework's plain 404) ends the
+            // session's text uploads. Before, one stale blob id switched off
+            // file search text for every upload until the app restarted.
+            const body = (e as { body?: unknown } | null)?.body;
+            if (body && typeof body === "object") {
+              this.textDone.delete(blobId);
+              if (this.blobIdBySha.get(text.sha256) === blobId) this.blobIdBySha.delete(text.sha256);
+              return;
+            }
             this.textSupported = false;
             this.pendingText.clear();
             console.warn("[attachments] server takes no extracted text — stopping for this session");
@@ -3387,6 +3494,10 @@ export class AttachmentSync {
     if (this.settleTimer) {
       this.clearTimeoutImpl(this.settleTimer);
       this.settleTimer = null;
+    }
+    if (this.heldTimer) {
+      this.clearTimeoutImpl(this.heldTimer);
+      this.heldTimer = null;
     }
     // The text pass holds the same captured vaultId and must die with it.
     if (this.textTimer) {

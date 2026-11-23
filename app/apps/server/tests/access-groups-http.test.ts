@@ -180,6 +180,21 @@ describe("access groups: lock list ≡ resolver", () => {
     expect(await canCreateIn(ana.userId, vault, folders.other)).toBe(false);
   });
 
+  it("a group's Can view on a SUBFOLDER whose parent it does not reach is padlocked there", async () => {
+    // The parent is visible (a path to the readable subfolder) but outside the
+    // group's grant: the padlock used to be left for it, and never sent.
+    await sealVault(org);
+    const inner = await seedFolder(vault, folders.other, "Inner", "Other/Inner", owner.userId);
+    const innerNote = await seedNote(vault, inner, "Other/Inner/e.md", owner.userId);
+    await grant("folder", inner, "view");
+    const { locks } = (await (await call(ana, "GET", `/api/vaults/${vault}/locks`)).json()) as { locks: any[] };
+    const ids = locks.filter((l) => l.reason === "group_view").map((l) => l.resource_id);
+    expect(ids).toContain(inner);
+    expect(ids).not.toContain(folders.other);
+    expect(ids).not.toContain(innerNote);
+    expect(await canCreateIn(ana.userId, vault, inner)).toBe(false);
+  });
+
   it("concrete: Read-only vault, group edit on a folder", async () => {
     await seedVaultGrant(org, "view");
     expect(await resolverEditable(ana)).toEqual({ root: false, open: true, sub: true, frozen: false, other: false });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { showsSidebarUpdateLine, updateView } from "../updateView";
+import { menuUpdateView, showsSidebarUpdateLine, updateView } from "../updateView";
 
 describe("updateView", () => {
   it("reads progress as a whole percent and hides the sidebar line when up to date", () => {
@@ -28,5 +28,15 @@ describe("updateView", () => {
     expect(showsSidebarUpdateLine(updateView({ phase: "error", message: "offline" }, "0.1.98"))).toBe(false);
     expect(showsSidebarUpdateLine(updateView({ phase: "failed", version: "0.1.99", message: "" }, "0.1.98"))).toBe(false);
     expect(showsSidebarUpdateLine(updateView({ phase: "ready", version: "0.1.99" }, "0.1.98"))).toBe(true);
+  });
+
+  it("never shows an update error in the account menu either", () => {
+    for (const s of [{ phase: "error", message: "offline" }, { phase: "failed", version: "0.1.99", message: "" }] as const) {
+      const v = menuUpdateView(updateView(s, "0.1.98"));
+      expect(v.tone).not.toBe("error");
+      expect(v.sub).toBe("");
+    }
+    const ready = updateView({ phase: "ready", version: "0.1.99" }, "0.1.98");
+    expect(menuUpdateView(ready)).toEqual(ready);
   });
 });

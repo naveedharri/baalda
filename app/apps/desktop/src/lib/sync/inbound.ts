@@ -849,6 +849,7 @@ function applyBreakers(
         path: t.path,
         docId: t.docId,
         reason: `refused: ${group.length} ${label} in one pass exceeds the ${cap} safety limit`,
+        capped: true,
       });
     }
     plan.trash = plan.trash.filter((t) => !refused.has(t));

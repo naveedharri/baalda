@@ -114,7 +114,7 @@ import {
 import { bytesToBase64, type VoiceFrame } from "./vaultProtocol";
 import { svFromBase64 } from "./ackedSv";
 import { ReadOnlyRejections } from "./readOnlyRejections";
-import { setReadOnlyCopyKeeper } from "../bridge/readOnlyDocs";
+import { setEmptyFileRefiller, setReadOnlyCopyKeeper } from "../bridge/readOnlyDocs";
 import { SyncPauseTracker, type SyncPause } from "./syncPause";
 import {
   createDeferredWithContent,
@@ -160,6 +160,10 @@ function reasonOf(err: unknown): string {
  * writes/second) for the same reason.
  */
 const REGISTRY_MAP_PUBLISH_MS = 100;
+
+/** How long a note's file must stay EXACTLY empty, while its doc holds text,
+ *  before the doc's text is written back over it (see `setEmptyFileRefiller`). */
+const EMPTY_FILE_REFILL_MS = 5_000;
 
 /**
  * Coalescing window for the presence re-announce a registry map change earns.
@@ -233,6 +237,12 @@ export const DELETE_DECISION_REASON =
   "removed from this folder in a bulk delete. It stays for your team and will be restored here";
 /** How long an appeared folder stays a candidate for a move's new half. */
 const FOLDER_CANDIDATE_TTL_MS = 10_000;
+/** How long after an over-cap note batch a vanished file beside it is refused
+ *  too (see `binaryBesideNoteDeletes`): long enough for the pull that puts
+ *  the folder back. */
+const HELD_BINARY_REFUSE_MS = 60_000;
+/** How long the text pass reuses one read of the lock view. */
+const READ_ONLY_TEXT_TTL_MS = 10_000;
 
 /** `path` is `folder` or inside it. */
 function isUnder(path: string, folder: string): boolean {
@@ -406,6 +416,9 @@ export type RegistryPullReason =
   // #401: the vault's sync rules changed (this device saved them, or a frame).
   | "rules"
   | "delete-confirmed"
+  // The attachment pass removed files a teammate deleted: their emptied
+  // folders are the registry's to remove.
+  | "deleted-files-removed"
   // #262: a `meta` frame (last-edited stamps only), after its throttle.
   | "meta-frame";
 
@@ -681,6 +694,8 @@ export class SyncManager implements InboundHost {
   private readOnlyRejections: ReadOnlyRejections | null = null;
   /** Read-only docs whose differing file already has its quiet copy this session. */
   private readonly readOnlyCopied = new Set<string>();
+  /** Docs whose empty file is waiting to be written back (see the refiller). */
+  private readonly emptyRefills = new Map<string, ReturnType<typeof setTimeout>>();
   /**
    * The collection id {@link vaultEngine} was started for.
    *
@@ -857,6 +872,13 @@ export class SyncManager implements InboundHost {
   /** {@link drainDiskDeletes} is running: it took `goneFolders` and the pending
    *  deletes at its start, so they no longer show that a pull must wait. */
   private diskDeleteDrainsInFlight = 0;
+  /** Folders of the last over-cap note batch (held or refused), and when. The
+   *  binary delete queue refuses files under them for a while: before, a folder
+   *  deleted in Finder came back with its notes and without its files, which
+   *  had already been deleted for everyone. */
+  private heldDeleteDirs: { dirs: string[]; at: number } | null = null;
+  /** The text pass's cached lock view (see `readOnlyPaths` in the attachment wiring). */
+  private readOnlyForText: { at: number; check: Promise<(relPath: string) => boolean> } | null = null;
   /** Docs the running disk-delete drain is judging (rename or delete). Their
    *  incoming updates are held like those of a pending delete. */
   private drainingDocs = new Set<string>();
@@ -924,9 +946,10 @@ export class SyncManager implements InboundHost {
    * event is what would let an unrelated permission change plus one transient
    * short listing take a whole vault off disk.
    *
-   * It shrinks in exactly one way: when the access-check round trip contradicts
-   * an entry ({@link revocationRefused}), which is the server's own resolver
-   * saying the doc is readable after all.
+   * It shrinks only on evidence the doc is readable: the access-check round
+   * trip contradicts an entry, or a registry pull finds the note or file in its
+   * listing again (both through {@link revocationRefused}). Emptied, it reads as
+   * null, the same as a fresh session that was never told anything.
    */
   private serverRevoked = new Set<string>();
   /** Docs holding local-only ops from an out-of-band merge (a resident bridge
@@ -2000,6 +2023,12 @@ export class SyncManager implements InboundHost {
       docText: (docId) => this.localText(docId),
       fileText: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
       recordBase: (docId, sha256) => ipc.setDiskBase(docId, sha256, scope.vaultEpoch),
+      // Still exactly empty right now, and only from a CRDT that holds text.
+      refillEmpty: async (docId, relPath) => {
+        if ((await ipc.readNote(relPath, scope.vaultEpoch).catch(() => null)) !== "") return false;
+        if (!scope.isCurrent()) return false;
+        return this.materializeContent(docId, relPath);
+      },
       enqueue: (chunk) => {
         for (const n of chunk) {
           this.emptyEverywhere.delete(n.docId);
@@ -3587,6 +3616,7 @@ export class SyncManager implements InboundHost {
               await ipc.materializeNotesBatch(
                 back.map((n) => ({ relPath: n.relPath, docId: n.docId })),
                 scope.vaultEpoch,
+                { indexOnly: true },
               );
             } catch (e) {
               if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't re-index ${from}`, e);
@@ -3609,14 +3639,16 @@ export class SyncManager implements InboundHost {
     }
     if (!moved || !scope.isCurrent()) return false;
     // The watcher pruned the old prefix from the index and never saw the new
-    // files. Index them under their KEPT ids in one create-only batch (a path
-    // that is not on disk is left out: this call would create it empty).
+    // files. Index them under their KEPT ids in one batch that never creates a
+    // file: the listing above is seconds old by now, and a note deleted inside
+    // the moved folder meanwhile was written back empty, which lost the delete
+    // (`removedWhilePairing` judges those once this returns).
     const items = under
       .map((n) => ({ relPath: to + n.relPath.slice(from.length), docId: n.docId }))
       .filter((i) => notesOnDisk.has(i.relPath));
     if (items.length > 0) {
       try {
-        await ipc.materializeNotesBatch(items, scope.vaultEpoch);
+        await ipc.materializeNotesBatch(items, scope.vaultEpoch, { indexOnly: true });
       } catch (e) {
         if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't re-index ${to}`, e);
       }
@@ -3893,6 +3925,10 @@ export class SyncManager implements InboundHost {
     cap: number,
     scope: VaultScope,
   ): Promise<void> {
+    this.heldDeleteDirs = {
+      dirs: [...new Set(items.map((d) => parentDirOf(d.relPath) ?? ""))],
+      at: Date.now(),
+    };
     const rootPresent = await this.checkVaultRoot(scope);
     if (!scope.isCurrent()) return;
     if (!rootPresent || !this.isLive()) {
@@ -3912,6 +3948,33 @@ export class SyncManager implements InboundHost {
       `${this.deleteDecision.length} notes were removed from this folder at once. They stay for the team and will be restored here`,
     );
     this.emitStructureNotice();
+  }
+
+  /**
+   * `BinaryDeleteDeps.noteDeleteVerdict`: may a vanished binary be deleted on
+   * the server right now? A folder deleted on disk removes notes and files in
+   * one go, and the two queues decide apart. Over the notes' cap the folder
+   * comes back, so its files must not be deleted for everyone meanwhile.
+   *  - `wait`: a note delete window is still open or being decided;
+   *  - `held`: an over-cap note batch in the last {@link HELD_BINARY_REFUSE_MS}
+   *    sat in this file's folder, above it or below it.
+   */
+  private binaryBesideNoteDeletes(relPath: string): "wait" | "held" | null {
+    const dir = parentDirOf(relPath) ?? "";
+    const within = (p: string, f: string) => f === "" || isUnder(p, f);
+    const held = this.heldDeleteDirs;
+    if (held && Date.now() - held.at < HELD_BINARY_REFUSE_MS) {
+      if (held.dirs.some((d) => within(d, dir) || within(dir, d))) return "held";
+    }
+    if (
+      this.pendingDiskDeletes.size > 0 ||
+      this.goneFolders.size > 0 ||
+      this.diskDeleteDrainsInFlight > 0 ||
+      this.diskDeleteTimer != null
+    ) {
+      return "wait";
+    }
+    return null;
   }
 
   /** A held note's file is back on disk: it is no longer part of the question. */
@@ -7378,6 +7441,8 @@ export class SyncManager implements InboundHost {
     this.goneFolders.clear();
     this.folderCandidates.clear();
     this.removedWhilePairing.clear();
+    for (const t of this.emptyRefills.values()) clearTimeout(t);
+    this.emptyRefills.clear();
     this.rootMissing = false;
     // A failing pull describes the vault we are leaving.
     this.pullFailures = null;
@@ -7820,6 +7885,25 @@ export class SyncManager implements InboundHost {
       console.info(`[sync] ${path} is read-only for you; the file's differing text is replaced`);
       return true;
     });
+    // A note's file left EXACTLY empty while its doc holds text: the bridge
+    // refuses to clear the doc, and without this the file stayed empty on this
+    // disk for good (an AI or a search read nothing there). Once it has stayed
+    // empty for EMPTY_FILE_REFILL_MS, the doc's text is written back.
+    setEmptyFileRefiller((docId, path) => {
+      if (!scope.isCurrent() || this.emptyRefills.has(docId)) return;
+      const timer = setTimeout(() => {
+        this.emptyRefills.delete(docId);
+        void (async () => {
+          if (!scope.isCurrent()) return;
+          if (this.registry.getMapping(path)?.docId !== docId) return;
+          const text = await ipc.readNote(path, scope.vaultEpoch).catch(() => null);
+          if (text !== "" || !scope.isCurrent()) return;
+          const wrote = await this.materializeContent(docId, path).catch(() => false);
+          if (wrote) console.info(`[sync] ${path} was empty on disk; its text was written back`);
+        })();
+      }, EMPTY_FILE_REFILL_MS);
+      this.emptyRefills.set(docId, timer);
+    });
     this.vaultEngine = new VaultSyncEngine({
       api,
       vaultId,
@@ -8133,6 +8217,7 @@ export class SyncManager implements InboundHost {
       // `file_stat` whose EVERY error meant "deleted", which propagated deletes
       // for binaries that never left the disk.
       exists: (relPath) => ipc.binaryExists(relPath, epoch),
+      noteDeleteVerdict: (relPath) => this.binaryBesideNoteDeletes(relPath),
       listLocal: () => ipc.listBinaries(epoch),
       // What the vault's sync rules hide is never deleted from here (#401).
       listServer: () => api.listVaultBlobs(vaultId).then((b) => registry.filterBlobListing(b)),
@@ -8190,7 +8275,25 @@ export class SyncManager implements InboundHost {
     // An image that could not load asks for its file, whatever the fetcher's
     // own scan decided earlier (scrolled back into view, note reopened).
     this.embedWantOff = onAttachmentWanted((relPath) => void embeds.request([relPath]));
+    // A lock view read for another vault says nothing about this one.
+    this.readOnlyForText = null;
     this.attachments = new AttachmentSync({
+      isRevokedFile: (fileId) => this.authoritativeRevoked()?.has(fileId) ?? false,
+      readOnlyPaths: () => {
+        const check = this.readOnlyPathCheck;
+        if (!check) return Promise.reject(new Error("no lock view"));
+        // One lock read per few seconds, not one per text batch: a big download
+        // indexes in many batches. An access change is at most this stale, and
+        // stale only means one refused (403) send or one skipped one.
+        const cached = this.readOnlyForText;
+        if (cached && Date.now() - cached.at < READ_ONLY_TEXT_TTL_MS) return cached.check;
+        const next = check();
+        this.readOnlyForText = { at: Date.now(), check: next };
+        next.catch(() => {
+          if (this.readOnlyForText?.check === next) this.readOnlyForText = null;
+        });
+        return next;
+      },
       // A vanished vault root (#221) stops the binary mirror too: a download
       // would re-create the old folder, a missing file would read as a delete.
       isCurrent: () => scope.isCurrent() && !this.rootMissing,
@@ -8315,6 +8418,7 @@ export class SyncManager implements InboundHost {
       // instead of being uploaded back (#215).
       listFileTombstones: () => api.listFileTombstones(vaultId),
       removeLocal: (relPath) => ipc.deleteFile(relPath, epoch).then(() => undefined),
+      deletedFilesRemoved: () => this.handleRegistryChanged("deleted-files-removed"),
       // #408: `attachments/` drops only now-hidden notes embed leave this disk,
       // under the same live + fresh-ACL-signal authority as a revoked note.
       attachmentBase: (relPath) => registry.getAttachmentBase(relPath),

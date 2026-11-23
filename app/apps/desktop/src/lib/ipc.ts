@@ -916,10 +916,15 @@ export interface MaterializeOutcome {
 export const materializeNotesBatch = (
   items: MaterializeItem[],
   expectedEpoch?: VaultEpoch,
+  /** `indexOnly`: index and re-key the files that are there, never create a
+   *  missing one (a folder move outside the app, where a note deleted while
+   *  the move was being paired must stay deleted). */
+  opts?: { indexOnly?: boolean },
 ): Promise<MaterializeOutcome[]> =>
   invoke<MaterializeOutcome[]>("materialize_notes_batch", {
     items,
     expectedEpoch: expectedEpoch ?? null,
+    indexOnly: opts?.indexOnly ?? false,
   });
 
 // ---- Attachment binary I/O (Phase 3 blob store, spec 02 §2) ---------------

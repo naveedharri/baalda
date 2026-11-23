@@ -197,10 +197,19 @@ vi.mock("../../ipc", () => ({
   noteExists: vi.fn(async (path: string) => fakeDisk.files.has(path)),
   vaultRootState: vi.fn(async () => fakeDisk.root),
   listTree: vi.fn(async () => fakeTree()),
-  materializeNotesBatch: vi.fn(async (items: Array<{ relPath: string; docId: string | null }>) => {
-    fakeDisk.materialized.push(items);
-    return items.map((i) => ({ relPath: i.relPath, created: false, rebound: true, error: null }));
-  }),
+  materializeNotesBatch: vi.fn(
+    async (items: Array<{ relPath: string; docId: string | null }>, _epoch?: unknown, opts?: { indexOnly?: boolean }) => {
+      fakeDisk.materialized.push(items);
+      // Like Rust: create-only by default (a missing path is written EMPTY),
+      // `indexOnly` never creates one.
+      return items.map((i) => {
+        const there = fakeDisk.files.has(i.relPath);
+        if (!there && opts?.indexOnly) return { relPath: i.relPath, created: false, rebound: false, error: null };
+        if (!there) fakeDisk.files.set(i.relPath, "");
+        return { relPath: i.relPath, created: !there, rebound: true, error: null };
+      });
+    },
+  ),
   readNote: vi.fn(async (path: string) => fakeDisk.files.get(path) ?? ""),
   getNoteMeta: vi.fn(async (path: string) =>
     fakeDisk.shas.has(path) ? { path, sha256: fakeDisk.shas.get(path) } : null,
@@ -1364,6 +1373,32 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     sm.handleLocalFilesChanged([{ path: "Early.md", kind: "removed" }]);
     await drain();
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+  });
+
+  it("a file beside notes held over the cap is not deleted for everyone either", async () => {
+    // A folder deleted in Finder: its notes come back, so its files must stay on
+    // the server too (the binary queue asks `binaryBesideNoteDeletes`).
+    const sm = new SyncManager();
+    const notes = Array.from({ length: 20 }, (_, i) => ({ docId: `m${i}`, relPath: `Docs/sub/N${i}.md` }));
+    fakeRegistry.mappedNotes.mockReturnValue(notes);
+    fakeRegistry.getMapping.mockImplementation((p: string) => {
+      const hit = notes.find((n) => n.relPath === p);
+      return hit ? { vaultId: "collection-1", docId: hit.docId } : null;
+    });
+    for (const n of notes) fakeRegistry.pushed.add(n.docId);
+    await live(sm);
+    const verdict = (p: string) =>
+      (sm as unknown as { binaryBesideNoteDeletes(p: string): string | null }).binaryBesideNoteDeletes(p);
+
+    sm.handleLocalFilesChanged(notes.map((n) => ({ path: n.relPath, kind: "removed" as const })));
+    // The note window is open: a file in it waits for that decision.
+    expect(verdict("Docs/names.yml")).toBe("wait");
+    await drain();
+
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(verdict("Docs/names.yml")).toBe("held"); // above the held notes
+    expect(verdict("Docs/sub/x.pdf")).toBe("held"); // beside them
+    expect(verdict("Elsewhere/x.pdf")).toBeNull(); // unrelated: decided as before
   });
 
   it("holds the WHOLE batch for the user when too many notes vanish at once", async () => {

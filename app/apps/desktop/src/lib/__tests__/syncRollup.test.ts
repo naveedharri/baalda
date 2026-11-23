@@ -340,7 +340,8 @@ describe("rowSyncMark", () => {
     // THE bug: a run ended with leftovers (a failed note, two never reached)
     // and the folder sat at an amber "0/3" forever. With no run moving there is
     // never a counter: in-flight and failed rows are the green dot, and only a
-    // note the server never got (d) wears the hollow ring, as does its folder.
+    // note the server never got (d) wears the hollow ring. Its folder stays
+    // green (the rest is synced) and says how many are not on the server.
     const index = indexOf({ "A/a.md": "synced", "A/b.md": "error", "A/c.md": "queued" }, [
       "A/d.md",
     ]);
@@ -351,10 +352,15 @@ describe("rowSyncMark", () => {
     for (const row of [file("A/b.md"), file("A/c.md")]) {
       expect(rowSyncMark(row, index, false)).toMatchObject({ state: "synced", progress: null });
     }
-    for (const row of [dir("A"), dir(""), file("A/d.md")]) {
-      expect(rowSyncMark(row, index, false)).toMatchObject({ state: "unsynced", progress: null });
+    expect(rowSyncMark(file("A/d.md"), index, false)).toMatchObject({ state: "unsynced", progress: null });
+    for (const row of [dir("A"), dir("")]) {
+      expect(rowSyncMark(row, index, false)).toMatchObject({ state: "synced", progress: null });
     }
     expect(rowSyncMark(dir("A"), index, false)!.title).toBe("1 of 4 files not on the server yet");
+    // A folder where NOTHING reached the server wears the ring itself.
+    const none = indexOf({}, ["B/x.md", "B/y.md"]);
+    expect(rowSyncMark(dir("B"), none, false)).toMatchObject({ state: "unsynced", progress: null });
+    expect(rowSyncMark(dir("B"), none, false)!.title).toBe("2 of 2 files not on the server yet");
     // Once d is on the server the settled folder is green again.
     const done = indexOf({ "A/a.md": "synced", "A/b.md": "error", "A/c.md": "queued", "A/d.md": "synced" });
     expect(rowSyncMark(dir("A"), done, false)).toMatchObject({ state: "synced", progress: null });

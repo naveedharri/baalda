@@ -28,7 +28,9 @@
  *    while closed stayed on disk for good, a copy nobody else had;
  *  - a note whose file text already equals its local CRDT text is skipped and
  *    its disk base re-recorded, so a stale base alone never triggers a push.
- * This pass itself writes nothing and records no reconcile entry.
+ * A note whose file is EXACTLY empty is never merged (an empty file never clears
+ * a populated doc); `refillEmpty` writes the local CRDT's text back over it
+ * instead. Apart from that this pass writes nothing and records no reconcile entry.
  *
  * Pure and dependency-injected so it runs under vitest.
  */
@@ -88,6 +90,12 @@ export interface ClosedAppEditsDeps {
   fileText: (relPath: string) => Promise<string | null>;
   /** File and CRDT already agree: record the file's hash as the disk base. */
   recordBase: (docId: string, sha256: string) => Promise<void>;
+  /**
+   * A mapped note whose file is EXACTLY empty while its local CRDT holds text:
+   * write that text back (never the other way round). Resolves true when it
+   * wrote. Absent ⇒ such files are only skipped, as before.
+   */
+  refillEmpty?: (docId: string, relPath: string) => Promise<boolean>;
   /** Put a chunk on the local-change queue and arm its drain. */
   enqueue: (chunk: Array<{ docId: string; relPath: string }>) => void;
   /** Resolves when the drain that carries the last enqueue has run. */
@@ -103,6 +111,8 @@ export interface ClosedAppEditsResult {
   queued: number;
   /** Skipped: 0-byte file, the open note, a permanent failure, or unmapped. */
   skipped: number;
+  /** Of the 0-byte files, those whose text was written back from the CRDT. */
+  refilled: number;
   /** Skipped because this user cannot edit the note. */
   readOnly: number;
   /** Skipped because the file already equals the local CRDT (base re-recorded),
@@ -115,9 +125,14 @@ export interface ClosedAppEditsResult {
 export function planClosedAppEdits(
   drift: DiskDrift[],
   deps: Pick<ClosedAppEditsDeps, "openDocId" | "isPermanentFailure" | "pathForDocId">,
-): { push: Array<{ docId: string; relPath: string }>; skipped: number } {
+): {
+  push: Array<{ docId: string; relPath: string }>;
+  empty: Array<{ docId: string; relPath: string }>;
+  skipped: number;
+} {
   const open = deps.openDocId();
   const push: Array<{ docId: string; relPath: string }> = [];
+  const empty: Array<{ docId: string; relPath: string }> = [];
   const seen = new Set<string>();
   let skipped = 0;
   for (const d of drift) {
@@ -130,24 +145,36 @@ export function planClosedAppEdits(
       d.docId === open ||
       deps.isPermanentFailure(d.docId)
     ) {
+      if (relPath != null && d.sha256 === EMPTY_SHA256 && d.docId !== open) empty.push({ docId: d.docId, relPath });
       skipped++;
       continue;
     }
     push.push({ docId: d.docId, relPath });
   }
-  return { push, skipped };
+  return { push, empty, skipped };
 }
 
 export async function runClosedAppEdits(deps: ClosedAppEditsDeps): Promise<ClosedAppEditsResult | null> {
   if (!deps.isLive() || !deps.isCurrent()) return null;
   const mapped = deps.mappedNotes();
-  const none: ClosedAppEditsResult = { drifted: 0, queued: 0, skipped: 0, readOnly: 0, converged: 0, chunks: 0 };
+  const none: ClosedAppEditsResult = { drifted: 0, queued: 0, skipped: 0, refilled: 0, readOnly: 0, converged: 0, chunks: 0 };
   if (mapped.length === 0) return none;
   const drift = await deps.listDrift(mapped.map((n) => ({ docId: n.docId, path: n.relPath })));
   if (!deps.isCurrent()) return null;
   if (drift.length === 0) return none;
   const planned = planClosedAppEdits(drift, deps);
   let skipped = planned.skipped;
+  // An empty file never clears a populated doc (the bridge refuses it), so a
+  // note left 0 bytes (an interrupted write, a placeholder never filled) stayed
+  // empty on this disk for good. Its CRDT's text is written back instead.
+  let refilled = 0;
+  if (deps.refillEmpty && planned.empty.length > 0) {
+    const refill = deps.refillEmpty;
+    const wrote = await mapLimit(planned.empty, CHECK_CONCURRENCY, (n) => refill(n.docId, n.relPath).catch(() => false));
+    refilled = wrote.filter(Boolean).length;
+    if (refilled > 0) deps.log?.(`${refilled} empty ${refilled === 1 ? "file" : "files"} given back their text`);
+    if (!deps.isCurrent()) return null;
+  }
   let readOnly = 0;
   // The lock view first: it costs one request for the whole vault.
   let lockedPath: (relPath: string) => boolean = () => false;
@@ -216,5 +243,5 @@ export async function runClosedAppEdits(deps: ClosedAppEditsDeps): Promise<Close
     chunks++;
     await deps.waitForDrain();
   }
-  return { drifted: drift.length, queued, skipped, readOnly, converged, chunks };
+  return { drifted: drift.length, queued, skipped, refilled, readOnly, converged, chunks };
 }

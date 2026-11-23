@@ -1808,10 +1808,22 @@ export class VaultRegistry {
 
   /** The registry is moving a file `from` → `to` on this disk. */
   private noteOwnMove(from: string, to: string): void {
-    if (this.ownMoves.size > 20_000) this.ownMoves.clear();
+    // Expired marks go first; clearing everything instead dropped the marks of
+    // the move still running (a 10,000-note folder move crosses 20,000).
+    if (this.ownMoves.size > 20_000) {
+      const now = Date.now();
+      for (const [k, e] of this.ownMoves) if (now - e.at > OWN_MOVE_TTL_MS) this.ownMoves.delete(k);
+      if (this.ownMoves.size > 200_000) this.ownMoves.clear();
+    }
     const at = Date.now();
     this.ownMoves.set(pathKey(from), { at, source: true });
     this.ownMoves.set(pathKey(to), { at, source: false });
+  }
+
+  /** A move that did not happen marks nothing as ours. */
+  private forgetOwnMove(from: string, to: string): void {
+    this.ownMoves.delete(pathKey(from));
+    this.ownMoves.delete(pathKey(to));
   }
 
   markUnhydratedPlaceholder(docId: string): void {
@@ -2128,6 +2140,19 @@ export class VaultRegistry {
   /** Server folder id for a folder's vault-relative path, if registered. */
   getFolderId(relPath: string): string | null {
     return this.folderByPath.get(relPath) ?? null;
+  }
+
+  /**
+   * Every mapped folder, note and tree file as id → path. The sidebar tree is
+   * lazy (an unexpanded folder has no children), so a lock check made away from
+   * the sidebar resolves ids here instead (`locks.ts lockScopesByPath` index).
+   */
+  idToPathIndex(): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const [rp, id] of this.folderByPath) out.set(id, rp);
+    for (const [rp, m] of this.byPath) out.set(m.docId, rp);
+    for (const [rp, id] of this.fileByPath) out.set(id, rp);
+    return out;
   }
 
   /**
@@ -2668,14 +2693,25 @@ export class VaultRegistry {
   private async learnFileAuthorship(vaultId: string): Promise<void> {
     const me = this.host?.localUserId?.() ?? null;
     const list = (this.api as { listFiles?: ApiClient["listFiles"] }).listFiles;
-    if (me === null || typeof list !== "function") return;
+    if (typeof list !== "function") return;
     let files: RegisteredFile[];
     try {
       files = await list.call(this.api, vaultId);
     } catch {
       return;
     }
-    if (this.stale() || (this.host?.localUserId?.() ?? null) !== me) return;
+    if (this.stale()) return;
+    // A file listed again is readable again: it leaves the session's
+    // named-revocation set, as a listed note does. Kept there, every later
+    // access signal (a teammate's delete sends one) planned to remove every
+    // file whose access had once been taken away and given back; only the
+    // access-check stood between that and the disk.
+    const named = this.host?.authoritativeRevoked?.();
+    if (named && named.size > 0) {
+      const again = files.map((f) => f.id).filter((id) => named.has(id));
+      if (again.length > 0) this.host?.revocationRefused?.(again);
+    }
+    if (me === null || (this.host?.localUserId?.() ?? null) !== me) return;
     if (this.authoredBy !== me) {
       this.authoredBy = me;
       this.authoredDocs.clear();
@@ -2995,9 +3031,37 @@ export class VaultRegistry {
       if (rp) server.set(noteDocId(n), rp);
     }
 
+    // A folder a teammate moved carries the tree files this device knows under
+    // it. The vault channel names deleted FILES (`ready.tombstones`) only once it
+    // is connected, so a pass that runs first (an app opened after a teammate's
+    // move and delete) would carry deleted files to the new path and re-create
+    // the deleted folders there. Asked once, only when a known folder moved and
+    // files sit under it; the planner then judges those deletes like any other
+    // (same per-pass limit). A failed listing leaves today's behaviour.
+    let tombstones = args.tombstones ? new Set(args.tombstones) : null;
+    if (tombstones && this.fileByPath.size > 0 && typeof this.api.listFileTombstones === "function") {
+      const serverPathById = new Map(args.serverFolders.map((f) => [f.id, f.path] as const));
+      const movedFrom = [...this.revokedFolders, ...this.folderByPath]
+        .filter(([p, id]) => {
+          const at = serverPathById.get(id);
+          return at !== undefined && pathKey(at) !== pathKey(p);
+        })
+        .map(([p]) => pathKey(p) + "/");
+      const carries =
+        movedFrom.length > 0 &&
+        [...this.fileByPath.keys()].some((rp) => movedFrom.some((f) => pathKey(rp).startsWith(f)));
+      if (carries) {
+        try {
+          for (const id of await this.api.listFileTombstones(vaultId)) tombstones.add(id);
+        } catch (e) {
+          console.warn("[registry] couldn't list deleted files before following a folder move", e);
+        }
+        if (this.stale()) return none;
+      }
+    }
     const plan = planInbound({
       server,
-      tombstones: args.tombstones ? new Set(args.tombstones) : null,
+      tombstones,
       baseline: this.baselineDocs,
       local,
       serverFolders: new Set(args.serverFolders.map((f) => f.path)),
@@ -3114,6 +3178,8 @@ export class VaultRegistry {
         this.host?.notePathChanged(move.docId, move.from, move.to);
       } catch (e) {
         if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
+        // Not moved: the old path is still this note, and deleting it is a real delete.
+        this.forgetOwnMove(move.from, move.to);
         this.recordFailure({
           kind: "inbound",
           path: move.to,
@@ -3131,44 +3197,15 @@ export class VaultRegistry {
     // A file the server DELETED is not carried: the folder's move took only its
     // live rows. Carried, it made the deleted subfolder again at the new path,
     // and the outbound half registered it as new folders: a teammate's delete
-    // came back, empty, for everyone. The id match proves which file it is, so
-    // it leaves this disk outright, as the blob pass would remove it.
-    const deadIds = new Set(args.tombstones ?? []);
-    // The vault channel names deleted FILES (`ready.tombstones`) only once it is
-    // connected; a pass that runs first (an app opened after a teammate's move
-    // and delete) would carry them. Asked once, only when there is a carry; a
-    // failed listing leaves today's behaviour.
-    const carried = (plan.movedFolders ?? []).some((mf) => {
-      const prefix = pathKey(mf.from) + "/";
-      return [...this.fileByPath.keys()].some((rp) => pathKey(rp).startsWith(prefix));
-    });
-    if (carried && this.api.listFileTombstones) {
-      try {
-        for (const id of await this.api.listFileTombstones(vaultId)) deadIds.add(id);
-      } catch (e) {
-        console.warn("[registry] couldn't list deleted files before following a folder move", e);
-      }
-      if (this.stale()) return { changedDisk, suppress: plan.suppress };
-    }
+    // came back, empty, for everyone. It stays where it is; the removal loop
+    // below deletes it there, under the same per-pass limit as every delete.
+    const deadIds = tombstones ?? new Set<string>();
     for (const mf of plan.movedFolders ?? []) {
       if (this.stopRun()) break;
       const prefix = pathKey(mf.from) + "/";
       for (const [rp, fileId] of [...this.fileByPath]) {
         if (!pathKey(rp).startsWith(prefix)) continue;
-        if (deadIds.has(fileId)) {
-          this.markOwnRemovals([rp]);
-          try {
-            await ipc.deleteFile(rp, this.epoch());
-            this.dropFileId(rp);
-            changedDisk = true;
-            console.info(`[registry] ${rp} (file ${fileId}) was deleted by a teammate — removed here`);
-          } catch (e) {
-            if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
-            this.forgetOwnRemoval(rp);
-            console.warn(`[registry] couldn't remove deleted file ${rp}; leaving it`, e);
-          }
-          continue;
-        }
+        if (deadIds.has(fileId)) continue;
         const to = mf.to + rp.slice(mf.from.length);
         if (this.unmaterializable.skip(to)) continue;
         if (await this.followFileMove(rp, to)) changedDisk = true;
@@ -4691,7 +4728,52 @@ export class VaultRegistry {
         // raced, and a stale list here would undo the move we just applied.
         const fresh = await this.api.listNoteRegistryPaged(vaultId, { limit: PULL_PAGE_LIMIT });
         if (this.stale()) return false;
+        const planned = serverNotes;
         serverNotes = this.filterServerNotes(fresh.notes);
+        // A note the PLANNED listing had and this one lacks was deleted (or its
+        // access removed) while the pass ran. Nothing above judged that, so the
+        // steps below would see a local note missing from the server and register
+        // it as NEW: a teammate deleting three folders in a row made every other
+        // device re-register the second and third ("No folder at …"), then their
+        // folders, empty, for everyone. Held for this pass; the next pull (the
+        // delete's own broadcast asks for one) judges it like any other.
+        const freshIds = new Set(serverNotes.map((n) => noteDocId(n)));
+        // Both paths: a note this pass moved (a teammate's folder move) sits
+        // at the listing's path already, while the mapping still names the old
+        // one until the pass ends. Holding only the old path let 608 deleted
+        // notes register as new at the moved path, then their folders.
+        // And the note's identity follows its file. Its mapping goes at the end
+        // of this pass (the server no longer lists it), so what the next pass
+        // knows it by is the local index and the baseline. Both still named the
+        // path this pass moved it AWAY from, or a different local id: the next
+        // pass found an unknown file at the new path and registered it as a new
+        // note, which brought the teammate's deleted folder back for everyone.
+        const onDiskCi = new Set(notes.map((x) => pathKey(x.path)));
+        const followed: Array<[string, string]> = [];
+        for (const n of planned) {
+          const id = noteDocId(n);
+          if (freshIds.has(id)) continue;
+          const mapped = this.byDocId.get(id);
+          if (mapped) applied.suppress.add(mapped);
+          const listed = noteRelPath(n);
+          if (listed) applied.suppress.add(listed);
+          if (
+            mapped && listed && pathKey(mapped) !== pathKey(listed) &&
+            !onDiskCi.has(pathKey(mapped)) && onDiskCi.has(pathKey(listed))
+          ) {
+            followed.push([listed, id]);
+          }
+        }
+        for (const [listed, id] of followed) {
+          this.baselineDocs.set(id, listed);
+          try {
+            await ipc.rebindNoteId(listed, id, this.epoch());
+          } catch (e) {
+            if (ipc.isVaultMismatch(e) || this.stale()) return false;
+            console.warn("[registry] couldn't re-key a moved note the server deleted", listed, e);
+          }
+          if (this.stale()) return false;
+        }
       }
       this.inboundSuppressed = applied.suppress;    } else {
       this.inboundSuppressed = new Set();
@@ -4780,10 +4862,16 @@ export class VaultRegistry {
     // upload held by `isInsideDeadFolder`.
     const newLocalWork = (rp: string): boolean => {
       const prefix = pathKey(rp) + "/";
+      // A path this app is removing itself is not new work either: the
+      // attachment pass removes a deleted file and forgets its id while this
+      // pass runs, so the file it is taking away read as a new drop and released
+      // the deleted folder to be registered again (a teammate's delete during a
+      // move came back as empty folders).
       const fresh = (p: string) =>
         pathKey(p).startsWith(prefix) &&
         !this.deletedPaths.has(pathKey(p)) &&
-        !this.isOwnDelete(p);
+        !this.isOwnDelete(p) &&
+        !this.isOwnRemoval(p);
       return (
         notes.some(
           (n) => fresh(n.path) && !this.byPath.has(n.path) && !this.inboundSuppressed.has(n.path),
@@ -4859,9 +4947,29 @@ export class VaultRegistry {
     // pass. Such a folder waits; a NOTE made inside re-registers the parent
     // (`newLocalWork` above), and then its subfolders go too.
     const insideDeadFolder = (path: string): boolean => this.isInsideDeadFolder(path);
+    // A folder holding nothing but notes the server no longer gives us (deleted
+    // or revoked, kept on disk by a refusal: `inboundSuppressed`) is not one the
+    // user made. A teammate's folder move followed here creates the new
+    // directories; a delete landing before this device recorded their ids left
+    // them unmapped, and registering them brought the deleted folders back,
+    // empty, for everyone. An empty folder, or one with any other note or file,
+    // still registers.
+    const holdsOnlySuppressed = (rp: string): boolean => {
+      const prefix = pathKey(rp) + "/";
+      const under = (p: string) => pathKey(p).startsWith(prefix);
+      // Only a file this device has no id for (and is not removing) is new,
+      // like `newLocalWork`: a known one the move carried here, deleted since,
+      // is the attachment pass's to remove.
+      const files = binaries.filter(under);
+      if (files.some((p) => !this.fileByPath.has(p) && !this.isOwnRemoval(p))) return false;
+      const inside = notes.filter((n) => under(n.path));
+      if (inside.some((n) => !this.inboundSuppressed.has(n.path))) return false;
+      return inside.length + files.length > 0;
+    };
     const missingFolders = folders.filter(
       (f) =>
         !this.folderByPath.has(f.path) &&
+        !holdsOnlySuppressed(f.path) &&
         !this.unmaterializable.skipShadow(f.path, strippedServer) &&
         !deadFolderIds.has(this.revokedFolders.get(f.path) ?? "") &&
         !movedAway(f.path, this.revokedFolders.get(f.path) ?? "") &&

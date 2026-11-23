@@ -287,7 +287,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   the vault's stamp is rebound (toast "<Vault> moved to <folder>."), else a synced vault is recreated
   and synced down with an informational notice whose one action is "Locate the original instead…";
   outside the root, a local-only vault, or a missing root keep the prompt. The ingest side is
-  guarded too: a 0-byte file never clears a populated doc (`allowTruncateFromDisk`, default false). A disk delete the server refuses on the creator rule (403
+  guarded too: a 0-byte file never clears a populated doc (`allowTruncateFromDisk`, default false),
+  and an EXACTLY empty file of a mapped note is written back from the local CRDT 5 s later
+  (`readOnlyDocs.setEmptyFileRefiller` → `materializeContent`, re-checked before writing; at launch
+  `closedAppEdits` `refillEmpty` does the same before any merge), so emptied notes no longer stay empty. A disk delete the server refuses on the creator rule (403
   `delete_not_creator` / `folder_has_others_items`, per item in a batch) is put back, never retried:
   `registry.restoreRefusedDelete` re-creates the file create-only, fills it from the local CRDT, owes
   one `consumeMaterialized` echo and records one `restoredFromServer` entry (detail
@@ -330,7 +333,9 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   delete what the person typed; a revocation still in force at that check removes it. And a
   disagreement, an unanswered id, a throw on ANY slice or the 30 s `ACCESS_CHECK_TIMEOUT_MS` abort
   LEAVES the whole group (a refused id also leaves the named set via
-  `InboundHost.revocationRefused`). The named set unions across the session
+  `InboundHost.revocationRefused`). The named set unions across the session and shrinks only on evidence of access: an access-check
+  that contradicts it, or a pull whose note or FILE listing names the id again (`revocationRefused`,
+  also from `learnFileAuthorship`), so a revoke → regrant → delete never reads stale names
   (`handleServerReauth` never clears it; `onServerDrop` feeds the live path) and a truncated list keeps
   its 2000 as the allow-list for older peers. Clients advertising `revocation-batches` receive all
   named revocations in frames of at most 2000 ids (before `ready` on connect, before `reauth` live).
@@ -363,8 +368,11 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   applies after conversion. Reading a 600 MB drop whole used to push the app past 700 MB.
   A local binary this device knows by a `files` id the server TOMBSTONED (`GET /vaults/:id/file-tombstones`,
   ids from `file_tombstones` with no live row) is `toTrash`: removed outright, its id
-  forgotten — never re-uploaded, which used to undo a teammate's delete (#215). Id match only; a
-  failed listing means no suppression that pass.
+  forgotten — never re-uploaded, which used to undo a teammate's delete (#215). Id match only. A
+  failed listing (`tombstonesUnknown`; a 404 is an older server and keeps the old behaviour) HOLDS
+  every known file the server no longer lists for that pass — neither removed nor uploaded, since the
+  server accepts a deleted id back; the pass asks again after `HELD_FILES_RETRY_MS` (15 s). Removing any asks one registry pull (`deleted-files-removed`), so
+  the folders those files kept alive are removed too instead of lingering empty.
   Clients advertising `bulk-regrant` receive `bootstrap` for live grants of 25 or more
   notes, then pull the registry and use the HTTP bulk downloader. Bootstrap pages are
   gzip without `Content-Encoding`; the desktop explicitly inflates before decoding.
@@ -532,7 +540,8 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     A register refusal is permanent only for a 4xx other than `path_folder_mismatch`.
   - **Honest sidebar marks** (`syncRollup.ts`): outside a run an `unsynced` (Local) file stays hollow
     with its reason on hover, and a folder holding one says "N of M files not on the server yet"
-    (`folderUnsentTitle`); `error`/`queued` read green outside a run. A vault waiting for its key
+    (`folderUnsentTitle`) but stays GREEN unless nothing inside reached the server (only then the
+    folder wears the hollow ring: one unsent file among a thousand flags that file, not its folder); `error`/`queued` read green outside a run. A vault waiting for its key
     shows **Sync paused**, never Synced, and no sidebar marks (`useVaultKeyBlocked`).
   - **No access removes rule-hidden files too** (`registry.revokeParked`): parked docs/files the
     access check answers `none` go like any revoked item, after the same unsent-work re-check.
@@ -573,9 +582,22 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     got `rename_not_creator` and put the file back: a toast flood and a loop). Renames explained by a
     folder whose server id moved are exempt from the rename cap (`inbound.ts`); a capped or
     unmaterializable rename keeps the note mapped at its current path (`heldRenames`; an occupied
-    destination keeps #129). The folder carry removes a file the server tombstoned (`ready.tombstones`
-    plus `GET file-tombstones`, asked only when there is a carry) instead of moving it, and a followed
-    file released mid-rename is removed at its new path. A moved folder's old directory that still holds
+    destination keeps #129). The folder carry SKIPS a file the server tombstoned (`ready.tombstones` plus `GET file-tombstones`,
+    fetched BEFORE planning whenever a known folder moved and files sit under it) and leaves it to the
+    attachment pass's tombstone removal (by id, with no per-pass limit; deleted NOTES keep the
+    deletion cap), and a followed file released mid-rename is removed at its new path.
+    A note the planned listing named but the post-apply re-read no longer does (a teammate deleted it
+    while the pass ran) is suppressed at BOTH its mapped and its listed path (a note this pass moved
+    already sits at the listing's path while the mapping names the old one until the pass ends), never
+    registered as new (its baseline and local index id are re-keyed to the path it was moved to,
+    `rebindNoteId`: the next pass otherwise found an unknown file there under a drifted local id and
+    registered it, bringing the deleted folder back); a local folder holding nothing but such suppressed notes (`holdsOnlySuppressed`:
+    the directories a followed move created, deleted before this device recorded their ids) never
+    registers either, while an empty folder, or one with any other note or a file this device has no id for, still does; and a path this app is removing
+    itself (`isOwnRemoval`, e.g. the attachment pass taking a deleted file away) is never "new local
+    work" that releases a deleted folder: three folder deletes in a row used to re-create the
+    folders, empty, for everyone. The own-move list prunes expired entries past 20,000 (cleared only
+    past 200,000), and a failed inbound rename forgets its own-move mark. A moved folder's old directory that still holds
     leftovers stays pending in `revokedFolders` (never registered as a new folder), and a folder being
     removed first loses its empty subdirectories that no server folder owns. Before, an offline teammate
     coming back after a move + delete re-created the deleted subtree and the old folder name, empty, for everyone.
@@ -583,6 +605,23 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     (it took 37 s for 1,568 notes), is still mapped at its OLD path: `queueDiskDelete` holds such
     unmatched removals (`removedWhilePairing`) and the drain re-judges them once the move re-pointed
     the notes. Dropped, the next pull wrote each one back as an empty file and the delete was lost.
+    The move step itself indexes the moved notes with `materializeNotesBatch(…, { indexOnly: true })`
+    (Rust `index_existing_notes`): it never creates a missing file, because a note deleted between
+    the pairing's disk listing and the server's answer was otherwise written back empty by the
+    create-only batch, and the re-judged delete then found it "still there".
+  - **No refused requests from a view-only or revoked file** (`attachments.ts`): the text pass skips
+    paths the caller can only view (`readOnlyPaths` = the store's lock view, cached 10 s; a throw sends
+    as before; the uploader's device sends the text), and `planBinarySync` neither uploads nor holds a
+    known file whose id the server named revoked (`isRevoked` ← `docSession.authoritativeRevoked`;
+    a row merely missing bytes still uploads). Lock checks made away from the sidebar resolve ids
+    through `registry.idToPathIndex()` (`lockScopesByPath` `index`), never the LAZY tree: a padlock
+    on an unexpanded folder used to resolve to no path. Server `groupViewLocks` reports a group's
+    Can view on a subfolder whose parent the group does not reach (it used to report nothing).
+  - **A file beside notes held over the cap stays too** (`BinaryDeleteDeps.noteDeleteVerdict` →
+    `docSession.binaryBesideNoteDeletes`): the binary queue waits while a note delete window is
+    open or being decided, and for 60 s after an over-cap note batch refuses files in, above or below
+    those notes' folders. Before, a folder deleted in Finder came back with its notes and without its
+    files, which had already been deleted for everyone.
   - **Unfinished temp files are swept at vault open** (`notefile.rs sweep_stale_temp_files`, background
     thread in `open_vault_impl`): an app killed mid-download or mid-save left its `.{name}.{pid}.{n}.tmp`
     forever (hidden, never synced, but its bytes stayed). Only that exact name shape, regular files,
@@ -715,7 +754,9 @@ Checkboxes app-wide are drawn (`App.css`, not the platform's) and ticks use `com
 never the "✓" text glyph.
 Personal info shows Name, Email, Role, Joined ("…, invited by X"), Last active and Status
 (Online/Away from vault presence); Activity renders `GET …/members/:userId/activity`. Vault Settings
-no longer has an Updates tab (version + Check for updates live in Account Settings → About), and
+no longer has an Updates tab (version + Check for updates live in Account Settings → About; a failed
+check or install is shown ONLY there: the sidebar line and the account menu's update row never show an
+update error, `updateView.ts showsSidebarUpdateLine`/`menuUpdateView`), and
 each settings dialog cross-links the other bottom-left. Hover/pressed colours are one accent tint
 app-wide (`--bg-hover`/`--bg-active` in `tokens.css`). A quiet tip under the list links to the MCP tab. The vault mode is **unknown until fetched** (`lib/teamAccessCache.ts` seeds the paint
 from localStorage but can never authorise a write); `lib/accessMode.ts` `effectiveTeamMode` stays

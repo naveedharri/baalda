@@ -1195,7 +1195,13 @@ async function groupViewLocks(
   };
   for (const f of folders.rows) if (modes.ownFolders.get(f.id) !== "private") markVisible(f.id);
   for (const d of [...notes.rows, ...files.rows]) if (modes.docs.get(d.id) !== "private") markVisible(d.folder_id);
-  const viewFolder = (id: string | null) => id !== null && visible.has(id) && !editableBelow.has(id);
+  // Only folders inside a group's Can view can carry (or absorb) the padlock. An
+  // ancestor outside it is visible as a path, but nothing here reports it, so
+  // counting it as view-only left the subtree's own top folder unreported: a
+  // subfolder viewable through a group showed no padlock at all.
+  const inRows = new Set(folders.rows.map((f) => f.id));
+  const viewFolder = (id: string | null) =>
+    id !== null && inRows.has(id) && visible.has(id) && !editableBelow.has(id);
   const lock = (resourceType: "folder" | "file", resourceId: string) => ({
     id: `group-view:${resourceId}`,
     resource_type: resourceType,

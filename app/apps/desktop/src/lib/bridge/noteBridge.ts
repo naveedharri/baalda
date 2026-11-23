@@ -11,7 +11,7 @@ import * as Y from "yjs";
 import { isBlankTruncation } from "./blankFile";
 import { applyDiff, changeRatio, computeDiff, withoutPullInsertions } from "./diff";
 import { markLocalEdit } from "./localEdits";
-import { isReadOnlyDoc, readOnlyCopyKeeper } from "./readOnlyDocs";
+import { emptyFileRefiller, isReadOnlyDoc, readOnlyCopyKeeper } from "./readOnlyDocs";
 import {
   DEFAULT_CONFIG,
   ORIGIN_DISK,
@@ -822,10 +822,13 @@ export class NoteBridge {
     // server's shrink floor), so clearing a short note elsewhere still works;
     // an edit typed in Baalda's own editor never comes through here at all.
     // Both halves only REFUSE: the doc keeps its text and the file is left as
-    // it is, never rewritten by this branch.
+    // it is, never rewritten by this branch. A file that is EXACTLY empty is
+    // handed to the sync layer, which writes the doc's text back once the file
+    // has stayed empty a while (a tool rewriting it in two steps is done by then).
     const blankFile =
       fileText.length === 0 ? current.length > 0 : isBlankTruncation(current, fileText);
     if (blankFile && !this.cfg.allowTruncateFromDisk) {
+      if (fileText.length === 0) emptyFileRefiller()?.(this.docId, this._path);
       if (!this.truncateReported) {
         this.truncateReported = true;
         this.reportError(

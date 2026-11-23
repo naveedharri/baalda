@@ -3318,7 +3318,15 @@ export const useStore = create<AppStore>((set, get) => ({
         .map((s) => (s.permission === "readonly" ? { ...s, permission: "locked" as const } : s));
       const lifts = overlay.filter((s) => s.permission === "edit");
       const state = get();
-      const map = lockScopesByPath(state.tree, locks, state.session?.user.id, lifts);
+      // The registry's full id map, not the lazy sidebar tree: a padlock on a
+      // folder nobody expanded resolved to no path and the check said "editable".
+      const map = lockScopesByPath(
+        state.tree,
+        locks,
+        state.session?.user.id,
+        lifts,
+        syncManager.registry.idToPathIndex(),
+      );
       return (relPath) => lockBlocksCaller(map, relPath);
     });
     syncManager.setSyncPauseListener((pause) => set({ syncPause: pause }));

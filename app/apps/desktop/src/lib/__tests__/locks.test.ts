@@ -486,3 +486,34 @@ describe("a group's Can view as GET /locks reports it", () => {
     expect(isRemovableLock(share({ resourceType: "folder", resourceId: "f-projects" }))).toBe(true);
   });
 });
+
+describe("lockScopesByPath — a registry index instead of the lazy tree", () => {
+  // The sidebar tree is lazy: an unexpanded folder has no children, so a
+  // padlock on a folder inside it resolved to no path and a check made away
+  // from the sidebar (the text pass, closed-app edits) answered "editable".
+  const lazy: TreeNode = dir("", [dir("Projects", [])]);
+  const index = new Map([
+    ["f-projects", "Projects"],
+    ["f-deep", "Projects/Deep"],
+    ["n-buried", "Projects/Deep/buried.md"],
+  ]);
+  const mine = share({ resourceType: "folder", resourceId: "f-deep", principalType: "user", principalId: "u1", permission: "locked" });
+
+  it("the lazy tree alone misses a padlock on an unexpanded folder", () => {
+    expect(lockBlocksCaller(lockScopesByPath(lazy, [mine], "u1"), "Projects/Deep/buried.md")).toBe(false);
+  });
+
+  it("the index finds it, and everything under it", () => {
+    const map = lockScopesByPath(lazy, [mine], "u1", [], index);
+    expect(lockBlocksCaller(map, "Projects/Deep/buried.md")).toBe(true);
+    expect(lockBlocksCaller(map, "Projects/Deep/new-download.pdf")).toBe(true);
+    expect(lockBlocksCaller(map, "Projects/other.md")).toBe(false);
+  });
+
+  it("the vault posture seeds every indexed path; a lift still clears its subtree", () => {
+    const map = lockScopesByPath(null, [vaultLock()], "u1", [lift("folder", "f-deep", { type: "user", id: "u1" })], index);
+    expect(lockBlocksCaller(map, "Projects")).toBe(true);
+    expect(lockBlocksCaller(map, "Projects/Deep/buried.md")).toBe(false);
+  });
+});
+

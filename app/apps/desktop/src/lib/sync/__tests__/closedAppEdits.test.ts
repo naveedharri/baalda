@@ -203,6 +203,25 @@ describe("closed-app edits pass (#284)", () => {
     expect(h.bases.get("a")).toBe("full");
   });
 
+  it("writes the local text back over a 0-byte file instead of merging it", async () => {
+    const h = harness({
+      notes: [
+        { docId: "a", relPath: "a.md", sha: EMPTY_SHA256, base: "full" },
+        { docId: "open", relPath: "o.md", sha: EMPTY_SHA256, base: "full" },
+      ],
+      open: "open",
+    });
+    const asked: string[] = [];
+    h.deps.refillEmpty = async (docId) => {
+      asked.push(docId);
+      return true;
+    };
+    const r = await runClosedAppEdits(h.deps);
+    expect(asked).toEqual(["a"]);
+    expect(r).toMatchObject({ drifted: 2, queued: 0, refilled: 1 });
+    expect(h.chunks).toEqual([]);
+  });
+
   it("skips the open note and permanent failures", async () => {
     const h = harness({
       notes: [

@@ -272,6 +272,47 @@ describe("BinaryDeleteQueue", () => {
     expect(h.blobsDeleted).toEqual([]);
   });
 
+  it("keeps a file the notes beside it were held for, and waits while they are decided", async () => {
+    // A folder deleted in Finder: its notes went over the cap and come back, so
+    // its one file must not be deleted for everyone in the same breath.
+    const h = harness({
+      server: [blob("b1", "Docs/names.yml"), blob("b2", "Other/x.pdf")],
+      onDisk: [],
+      fileIds: { "Docs/names.yml": "file-1", "Other/x.pdf": "file-2" },
+    });
+    let verdict: "wait" | "held" | null = "wait";
+    h.deps.noteDeleteVerdict = (p) => (p.startsWith("Docs/") ? verdict : null);
+    h.queue.noteChanged("Docs/names.yml");
+    h.queue.noteChanged("Other/x.pdf");
+    await h.queue.drain();
+    // Undecided: nothing sent, and both stay pending (never downloaded back yet).
+    expect(h.deleted).toEqual([]);
+    expect(h.queue.isPending("Docs/names.yml")).toBe(true);
+    expect(h.queue.isPending("Other/x.pdf")).toBe(true);
+
+    verdict = "held";
+    await h.queue.drain();
+    // Held beside the notes: left on the server; the unrelated file goes.
+    expect(h.deleted).toEqual(["file-2"]);
+    expect(h.queue.isPending("Docs/names.yml")).toBe(false);
+  });
+
+  it("deletes a file once the notes beside it were decided below the cap", async () => {
+    const h = harness({
+      server: [blob("b1", "Docs/names.yml")],
+      onDisk: [],
+      fileIds: { "Docs/names.yml": "file-1" },
+    });
+    let verdict: "wait" | "held" | null = "wait";
+    h.deps.noteDeleteVerdict = () => verdict;
+    h.queue.noteChanged("Docs/names.yml");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+    verdict = null;
+    await h.queue.drain();
+    expect(h.deleted).toEqual(["file-1"]);
+  });
+
   it("refuses the whole batch when too much vanished at once", async () => {
     const gone = Array.from({ length: 6 }, (_, i) => `Team/f${i}.pdf`);
     const h = harness({

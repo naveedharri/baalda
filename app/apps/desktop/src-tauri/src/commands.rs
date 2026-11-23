@@ -3141,6 +3141,31 @@ pub fn materialize_notes(
     index: &Index,
     items: &[MaterializeItem],
 ) -> AppResult<Vec<MaterializeOutcome>> {
+    materialize_notes_with(vault, index, items, true)
+}
+
+/// [`materialize_notes`] for files that are already on disk: index and re-key
+/// them, and NEVER create a missing one. A path that is not there (or not a
+/// regular file) is left out, `created: false, rebound: false`.
+///
+/// For a folder move made outside the app: the move is paired from a listing,
+/// the server is asked, and only then are the moved files indexed under their
+/// kept ids. A note deleted in that window must stay deleted; the create-only
+/// batch wrote it back empty, and the delete was lost.
+pub fn index_existing_notes(
+    vault: &Path,
+    index: &Index,
+    items: &[MaterializeItem],
+) -> AppResult<Vec<MaterializeOutcome>> {
+    materialize_notes_with(vault, index, items, false)
+}
+
+fn materialize_notes_with(
+    vault: &Path,
+    index: &Index,
+    items: &[MaterializeItem],
+    create_missing: bool,
+) -> AppResult<Vec<MaterializeOutcome>> {
     let mut outcomes: Vec<MaterializeOutcome> = Vec::with_capacity(items.len());
     // (rel_path, doc_id) for the rows that exist on disk, plus where each one's
     // outcome sits.
@@ -3153,6 +3178,17 @@ pub fn materialize_notes(
                 "[materialize] refusing {}: {reason}",
                 item.rel_path
             );
+            outcomes.push(MaterializeOutcome {
+                rel_path: item.rel_path.clone(),
+                created: false,
+                rebound: false,
+                error: None,
+            });
+            continue;
+        }
+        if !create_missing
+            && !matches!(crate::vault::vault_path_state(vault, &item.rel_path), crate::vault::PathState::Regular)
+        {
             outcomes.push(MaterializeOutcome {
                 rel_path: item.rel_path.clone(),
                 created: false,
@@ -3200,11 +3236,15 @@ pub async fn materialize_notes_batch(
     state: State<'_, AppState>,
     items: Vec<MaterializeItem>,
     expected_epoch: Option<u64>,
+    index_only: Option<bool>,
 ) -> AppResult<Vec<MaterializeOutcome>> {
     // Epoch-pinned like `rebind_note_id`: the doc ids come from ONE vault's
     // registry map, and writing them into another vault's index forks its notes.
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let guard = index.lock().unwrap();
+    if index_only.unwrap_or(false) {
+        return index_existing_notes(&vault, &guard, &items);
+    }
     materialize_notes(&vault, &guard, &items)
 }
 

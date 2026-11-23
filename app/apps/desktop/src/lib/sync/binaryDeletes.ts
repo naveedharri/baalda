@@ -122,6 +122,15 @@ export interface BinaryDeleteDeps {
    * `false` here is the first step toward deleting the server's copy.
    */
   exists(relPath: string): Promise<boolean>;
+  /**
+   * The note side's say on a vanished binary (`docSession.binaryBesideNoteDeletes`).
+   * `wait`: a note delete window is still being decided, so this one waits
+   * for another window; `held`: notes beside it were just held or refused
+   * over the cap, so the folder is coming back and this file is not deleted on
+   * the server either. Before, a folder deleted on disk came back with its
+   * notes and without its files, which were already gone for everyone.
+   */
+  noteDeleteVerdict?(relPath: string): "wait" | "held" | null;
   /** Every local binary — the rename hunt and the blast-radius cap read it. */
   listLocal(): Promise<LocalBinary[]>;
   /** Every blob the server holds for this vault. */
@@ -533,6 +542,26 @@ export class BinaryDeleteQueue {
           "error",
         );
         return;
+      }
+
+      // 3b. The notes beside these files. A folder deleted on disk removes both,
+      //     and over the notes' cap the folder comes back: its files stay too.
+      if (this.deps.noteDeleteVerdict) {
+        const verdicts = deletes.map((d) => this.deps.noteDeleteVerdict!(d.relPath));
+        if (verdicts.some((v) => v === "wait")) {
+          for (const d of deletes) this.retained.add(key(d.relPath));
+          this.arm();
+          return;
+        }
+        const keptBack = deletes.filter((_, i) => verdicts[i] === "held");
+        if (keptBack.length > 0) {
+          console.info(
+            `[attachments] ${keptBack.length} files vanished beside notes held for the team — not removed from the server`,
+            keptBack.slice(0, 10).map((d) => d.relPath),
+          );
+          for (let i = deletes.length - 1; i >= 0; i--) if (verdicts[i] === "held") deletes.splice(i, 1);
+          if (deletes.length === 0) return;
+        }
       }
 
       // 4. Tell the server. A tree file goes through its `files` row, which

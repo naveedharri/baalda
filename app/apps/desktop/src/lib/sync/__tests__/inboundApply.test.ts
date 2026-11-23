@@ -692,6 +692,283 @@ describe("inbound rename", () => {
     });
   }
 
+  it("keeps a deleted folder pending while this app is still removing its deleted files", async () => {
+    // The attachment pass removes a teammate's deleted file and forgets its id
+    // while the registry pass runs: the file it is taking away is not new work,
+    // so the deleted folder must not be registered again.
+    const disk = new FakeDisk();
+    disk.folders.add("Keep");
+    disk.folders.add("Gone");
+    disk.notes.set("Keep/n.md", "d1");
+    disk.binaries.add("Gone/a.png");
+    // The real tree lists binaries beside notes; this fake's does not by default.
+    const baseTree = disk.tree.bind(disk);
+    disk.tree = () => {
+      const t = baseTree();
+      return {
+        ...t,
+        children: [
+          ...(t.children ?? []),
+          ...[...disk.binaries].map((p) => ({ id: p, name: p, path: p, isDir: false })),
+        ],
+      } as TreeNode;
+    };
+    install(disk);
+    vi.mocked(ipc.deleteFolderIfEmpty).mockImplementation((async (p: string) => {
+      const prefix = p + "/";
+      if ([...disk.binaries, ...disk.notes.keys()].some((x) => x.startsWith(prefix))) return false;
+      disk.folders.delete(p);
+      return true;
+    }) as never);
+    const state: ServerState = {
+      notes: [{ id: "d1", rel_path: "Keep/n.md" }],
+      folders: [{ id: "fk", path: "Keep" }, { id: "fg", path: "Gone" }],
+    };
+    const api = fakeApi(state);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const files = (reg as unknown as { fileByPath: Map<string, string> }).fileByPath;
+    files.set("Gone/a.png", "fa");
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    state.folders = [{ id: "fk", path: "Keep" }];
+    state.folderTombstones = ["fg"];
+    state.tombstones = ["fa"];
+    // Mid-removal: the attachment pass has claimed the file and dropped its id.
+    reg.markOwnRemovals(["Gone/a.png"]);
+    files.delete("Gone/a.png");
+    const mkFolder = vi.mocked((api as unknown as { createFolder: (i: { path: string }) => unknown }).createFolder);
+    mkFolder.mockClear();
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(mkFolder.mock.calls.map((c) => c[0].path)).not.toContain("Gone");
+    // The file has gone: the next pass removes the folder, still registering nothing.
+    disk.binaries.delete("Gone/a.png");
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(disk.folders.has("Gone")).toBe(false);
+    expect(mkFolder.mock.calls.map((c) => c[0].path)).toEqual([]);
+  });
+
+  it("forgets a named revocation once the file is listed as readable again", async () => {
+    // Access taken away and given back: the session's named set must not keep
+    // the files, or the next access signal plans to remove them all.
+    const disk = new FakeDisk();
+    disk.notes.set("n.md", "d1");
+    install(disk);
+    const state: ServerState = { notes: [{ id: "d1", rel_path: "n.md" }] };
+    const api = fakeApi(state) as unknown as Record<string, unknown>;
+    api.listFiles = vi.fn(async () => [{ id: "f-back", relPath: "a.png" }]);
+    const reg = new VaultRegistry(api as unknown as ApiClient);
+    const rec = recordingHost(false, new Set(["f-back", "f-gone"]));
+    reg.setInboundHost(rec.host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    await vi.waitFor(() => expect(rec.refused).toContain("f-back"));
+    expect(rec.refused).not.toContain("f-gone");
+  });
+
+  it("never registers a note as new when it vanished from the listing while the pass ran", async () => {
+    // A teammate deletes folder A, then folder B, while this pass runs: the plan
+    // removes A's note, the re-read listing no longer has B's either. B's note
+    // must wait for the next pull, not be re-registered as a new note.
+    const disk = new FakeDisk();
+    for (const f of ["A", "B", "C"]) disk.folders.add(f);
+    disk.notes.set("A/a.md", "d1");
+    disk.notes.set("B/b.md", "d2");
+    disk.notes.set("C/c.md", "d3");
+    install(disk);
+    const all = [
+      { id: "d1", rel_path: "A/a.md" },
+      { id: "d2", rel_path: "B/b.md" },
+      { id: "d3", rel_path: "C/c.md" },
+    ];
+    const state: ServerState = {
+      notes: all,
+      folders: [{ id: "fa", path: "A" }, { id: "fbb", path: "B" }, { id: "fc", path: "C" }],
+    };
+    const api = fakeApi(state);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    state.folders = [{ id: "fbb", path: "B" }, { id: "fc", path: "C" }];
+    state.folderTombstones = ["fa"];
+    const paged = vi.mocked((api as unknown as { listNoteRegistryPaged: (...a: unknown[]) => unknown }).listNoteRegistryPaged);
+    paged.mockImplementationOnce(async () => ({ notes: all.slice(1), tombstones: ["d1"] }) as never);
+    paged.mockImplementationOnce(async () => ({ notes: all.slice(2), tombstones: ["d1", "d2"] }) as never);
+    vi.mocked((api as unknown as { createNote: (...a: unknown[]) => unknown }).createNote).mockClear();
+    state.folders = [{ id: "fc", path: "C" }];
+    state.folderTombstones = ["fa", "fbb"];
+    const mkFolder = vi.mocked((api as unknown as { createFolder: (i: { path: string }) => unknown }).createFolder);
+    mkFolder.mockClear();
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(disk.notes.has("A/a.md")).toBe(false);
+    const created = vi.mocked((api as unknown as { createNote: (i: { relPath: string }) => unknown }).createNote).mock.calls.map((c) => c[0].relPath);
+    expect(created).not.toContain("B/b.md");
+    // The next pull, with the delete settled: B's note and folder leave this
+    // disk, and nothing is registered again.
+    state.notes = all.slice(2);
+    state.tombstones = ["d1", "d2"];
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(disk.notes.has("B/b.md")).toBe(false);
+    expect(disk.folders.has("B")).toBe(false);
+    expect(mkFolder.mock.calls.map((c) => c[0].path)).toEqual([]);
+    expect(vi.mocked((api as unknown as { createNote: (i: { relPath: string }) => unknown }).createNote).mock.calls.map((c) => c[0].relPath)).toEqual([]);
+  });
+
+  it("never registers notes or folders a teammate moved and then deleted while the pass ran", async () => {
+    // A teammate moves Src to Dst and deletes it moments later. This pass
+    // follows the move (the notes now sit under Dst), the re-read listing has
+    // none of them, and the next pass's delete is over the limit, so they stay
+    // on disk. Neither the notes nor Dst may register as new.
+    const disk = new FakeDisk();
+    disk.folders.add("Src");
+    disk.folders.add("Src/lang");
+    disk.folders.add("Src/lang/docs");
+    const ids = Array.from({ length: 8 }, (_, i) => `d${i}`);
+    for (const id of ids) disk.notes.set(`Src/lang/docs/${id}.md`, id);
+    install(disk);
+    // The real tree lists binaries beside notes; this fake's does not by default.
+    const baseTree = disk.tree.bind(disk);
+    disk.tree = () => {
+      const tr = baseTree();
+      return {
+        ...tr,
+        children: [
+          ...(tr.children ?? []),
+          ...[...disk.binaries].map((p) => ({ id: p, name: p, path: p, isDir: false })),
+        ],
+      } as TreeNode;
+    };
+    // Like Rust, a rename creates the destination's parent folders.
+    const baseRename = vi.mocked(ipc.renamePath).getMockImplementation()!;
+    vi.mocked(ipc.renamePath).mockImplementation((async (from: string, to: string, ...rest: unknown[]) => {
+      const parts = to.split("/");
+      for (let i = 1; i < parts.length; i++) disk.folders.add(parts.slice(0, i).join("/"));
+      return (baseRename as (...a: unknown[]) => unknown)(from, to, ...rest);
+    }) as never);
+    const state: ServerState = {
+      notes: ids.map((id) => ({ id, rel_path: `Src/lang/docs/${id}.md` })),
+      folders: [{ id: "fs", path: "Src" }, { id: "fl", path: "Src/lang" }, { id: "fd", path: "Src/lang/docs" }],
+    };
+    const api = fakeApi(state);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    // The move lands; the delete lands while the pass runs.
+    state.notes = ids.map((id) => ({ id, rel_path: `Dst/lang/docs/${id}.md` }));
+    // The note listing still has them; the folder listing, read a moment
+    // later, already lacks the deleted subfolders.
+    state.folders = [{ id: "fs", path: "Dst" }];
+    state.folderTombstones = ["fl", "fd"];
+    const paged = vi.mocked((api as unknown as { listNoteRegistryPaged: (...a: unknown[]) => unknown }).listNoteRegistryPaged);
+    paged.mockImplementationOnce(async () => ({ notes: state.notes, tombstones: [] }) as never);
+    paged.mockImplementationOnce(async () => {
+      state.notes = [];
+      state.tombstones = ids;
+      // Only the subfolder went: Dst itself stays.
+      state.folders = [{ id: "fs", path: "Dst" }];
+      state.folderTombstones = ["fl", "fd"];
+      return { notes: [], tombstones: ids } as never;
+    });
+    const mkNote = vi.mocked((api as unknown as { createNote: (i: { relPath: string }) => unknown }).createNote);
+    const mkFolder = vi.mocked((api as unknown as { createFolder: (i: { path: string }) => unknown }).createFolder);
+    mkNote.mockClear();
+    mkFolder.mockClear();
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    // A file the move carried, deleted since and not yet removed by the
+    // attachment pass, sits beside the held notes.
+    disk.binaries.add("Dst/lang/a.png");
+    (reg as unknown as { fileByPath: Map<string, string> }).fileByPath.set("Dst/lang/a.png", "fx");
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(mkNote.mock.calls.map((c) => c[0].relPath)).toEqual([]);
+    expect(mkFolder.mock.calls.map((c) => c[0].path)).toEqual([]);
+  });
+
+  it("removes, never re-registers, notes a teammate moved and then deleted while the pass ran", async () => {
+    // Under the delete limit this time: the next pass must judge the moved
+    // notes as deleted (by id, at the path this pass moved them to) and remove
+    // them, not find unmapped files at the new path and register them.
+    const disk = new FakeDisk();
+    disk.folders.add("Keep");
+    disk.folders.add("Src");
+    const keep = Array.from({ length: 20 }, (_, i) => `k${i}`);
+    for (const id of keep) disk.notes.set(`Keep/${id}.md`, id);
+    disk.notes.set("Src/a.md", "da");
+    disk.notes.set("Src/b.md", "db");
+    install(disk);
+    const keepRows = keep.map((id) => ({ id, rel_path: `Keep/${id}.md` }));
+    const state: ServerState = {
+      notes: [...keepRows, { id: "da", rel_path: "Src/a.md" }, { id: "db", rel_path: "Src/b.md" }],
+      folders: [{ id: "fk", path: "Keep" }, { id: "fs", path: "Src" }],
+    };
+    const api = fakeApi(state);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    // The local index may know a note under another id than the server's (the
+    // registry map is the authority): seen on a real device for 563 notes.
+    disk.notes.set("Src/a.md", "local-a");
+    disk.notes.set("Src/b.md", "local-b");
+    vi.mocked(ipc.rebindNoteId).mockImplementation(async (p: string, id: string) => {
+      if (!disk.notes.has(p)) return false;
+      disk.notes.set(p, id);
+      return true;
+    });
+    state.notes = [...keepRows, { id: "da", rel_path: "Dst/a.md" }, { id: "db", rel_path: "Dst/b.md" }];
+    state.folders = [{ id: "fk", path: "Keep" }, { id: "fs", path: "Dst" }];
+    const paged = vi.mocked((api as unknown as { listNoteRegistryPaged: (...a: unknown[]) => unknown }).listNoteRegistryPaged);
+    paged.mockImplementationOnce(async () => ({ notes: state.notes, tombstones: [] }) as never);
+    paged.mockImplementationOnce(async () => {
+      state.notes = keepRows;
+      state.tombstones = ["da", "db"];
+      return { notes: keepRows, tombstones: ["da", "db"] } as never;
+    });
+    const mkNote = vi.mocked((api as unknown as { createNote: (i: { relPath: string }) => unknown }).createNote);
+    mkNote.mockClear();
+    // The pass that follows the move (and meets the delete), then the next
+    // one, which must remove the files where they now are.
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(mkNote.mock.calls.map((c) => c[0].relPath)).toEqual([]);
+    expect(disk.notes.has("Dst/a.md")).toBe(false);
+    expect(disk.notes.has("Dst/b.md")).toBe(false);
+  });
+
+  it("the folder follow neither moves nor removes deleted files the delete limit refused", async () => {
+    // Eight deleted files against a limit of five: neither carried to the new
+    // folder (that re-creates the delete) nor removed past the limit.
+    const disk = new FakeDisk();
+    disk.folders.add("Big");
+    disk.notes.set("Big/n.md", "d1");
+    install(disk);
+    const state: ServerState = { notes: [{ id: "d1", rel_path: "Big/n.md" }], folders: [{ id: "fb", path: "Big" }] };
+    const reg = new VaultRegistry(fakeApi(state));
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const files = (reg as unknown as { fileByPath: Map<string, string> }).fileByPath;
+    files.set("Big/keep.png", "fk");
+    for (let i = 0; i < 8; i++) files.set(`Big/gone${i}.png`, `fg${i}`);
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    state.notes = [{ id: "d1", rel_path: "Big2/n.md" }];
+    state.folders = [{ id: "fb", path: "Big2" }];
+    state.tombstones = Array.from({ length: 8 }, (_, i) => `fg${i}`);
+    vi.mocked(ipc.renamePath).mockClear();
+    vi.mocked(ipc.deleteFile).mockClear();
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const moved = vi.mocked(ipc.renamePath).mock.calls.map((c) => `${c[0]} → ${c[1]}`);
+    expect(moved).toContain("Big/keep.png → Big2/keep.png");
+    expect(moved.some((m) => m.includes("gone"))).toBe(false);
+    expect(vi.mocked(ipc.deleteFile).mock.calls.some((c) => String(c[0]).includes("gone"))).toBe(false);
+    expect(files.get("Big/gone0.png")).toBe("fg0");
+  });
+
   it("marks a teammate's rename as its own move, so the watcher echo is never a user rename", async () => {
     const disk = new FakeDisk();
     disk.notes.set("old.md", "d1");
