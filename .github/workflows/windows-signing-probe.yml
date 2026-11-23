@@ -1,0 +1,326 @@
+name: windows-signing-probe
+
+# TEMPORARY. Proves Windows code signing through SignPath with the TEST
+# certificate before any of it goes into release.yml. Builds production's
+# Windows installers (NSIS -setup.exe and MSI), signs them, checks everything,
+# and publishes NOTHING: no release, no tag, no latest.json. The signed files
+# are kept as a workflow artifact so the signature can be inspected by hand
+# (right-click -> Properties -> Digital Signatures). Do NOT install them on a
+# machine with real vaults: they are production builds (production identifier,
+# server and version number) signed only with SignPath's test certificate.
+#
+# Runs on a push to the throwaway branch `windows-signing-probe` (a new
+# workflow file cannot be dispatched until it is on the default branch), or by
+# hand once it is.
+#
+# ── The order, and why it is so specific ─────────────────────────────────────
+# While bundling, tauri-bundler writes the installer type into the app's .exe
+# (placeholder __TAURI_BUNDLE_TYPE_VAR_UNK -> NSS or MSI) so the updater knows
+# how it was installed. That edit happens inside `tauri bundle`, so an exe
+# signed before bundling would come out with a broken signature, and each
+# installer type needs its own copy. So:
+#   1. build the app without installers
+#   2. make one copy per installer type with the type written in
+#      (scripts/windows-signing/bundle-type.mjs)
+#   3. SignPath signs both copies
+#   4. bundle each installer around its signed copy; the bundler finds no
+#      placeholder, warns, and leaves the exe alone
+#   5. SignPath signs the installers
+#   6. re-make the updater signatures (.sig) over the SIGNED installers, since
+#      the ones the bundler wrote match the unsigned bytes
+#   7. check: Authenticode on every file, the installed/extracted app exe, the
+#      installer type it records, the .sig against tauri.conf.json's pubkey,
+#      and that tauri-action collects these exact files without rebuilding
+#
+# Quota: each run uploads roughly 150 MB to SignPath (48 GB a year on the OSS
+# plan), so run it when testing, not on every push.
+on:
+  push:
+    branches:
+      - windows-signing-probe
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The SignPath connector reads this run's artifacts through the job token.
+  actions: read
+
+concurrency:
+  group: windows-signing-probe
+  cancel-in-progress: true
+
+env:
+  # Not secrets: the organization id, project and policy names only say WHERE
+  # to sign. The secret is the CI user's token, SIGNPATH_API_TOKEN.
+  SIGNPATH_ORGANIZATION_ID: 28ebe8a8-3c7b-46b2-8500-40a15482bc81
+  SIGNPATH_PROJECT_SLUG: baalda
+  SIGNPATH_SIGNING_POLICY_SLUG: test-signing
+  SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: windows-zip
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './app/apps/desktop/src-tauri -> target'
+
+      - name: Install dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      # ── 1. The app, no installers ──────────────────────────────────────────
+      - name: Build the app without installers
+        working-directory: app/apps/desktop
+        run: pnpm tauri build --no-bundle
+
+      # The main binary is the one carrying the bundle-type placeholder. Fail
+      # loudly if that is not exactly one file: it would mean the bundler's
+      # layout changed and the rest of this job would sign the wrong thing.
+      - name: Find the app binary
+        id: bin
+        run: |
+          set -euo pipefail
+          rel=app/apps/desktop/src-tauri/target/release
+          ls -la "$rel"/*.exe
+          found=()
+          for f in "$rel"/*.exe; do
+            if grep -qa "__TAURI_BUNDLE_TYPE_VAR_UNK" "$f"; then found+=("$f"); fi
+          done
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::expected one app binary carrying the bundle-type placeholder, found ${#found[@]}: ${found[*]}"
+            exit 1
+          fi
+          echo "path=${found[0]}" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "${found[0]}")" >> "$GITHUB_OUTPUT"
+          echo "App binary: ${found[0]}"
+
+      # ── 2. One copy per installer type ─────────────────────────────────────
+      - name: Write the installer type into one copy per installer
+        env:
+          BIN: ${{ steps.bin.outputs.path }}
+          NAME: ${{ steps.bin.outputs.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p signing/app
+          for t in nsis msi; do
+            node scripts/windows-signing/bundle-type.mjs patch "$BIN" "$t" "signing/app/${t}__${NAME}"
+          done
+          ls -la signing/app
+
+      # ── 3. SignPath signs the app binaries ─────────────────────────────────
+      - name: Upload the app binaries for signing
+        id: up-app
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-app
+          path: signing/app/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Sign the app binaries (SignPath)
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ env.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.up-app.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signing/app-signed
+
+      - name: Check the app binaries came back signed
+        shell: pwsh
+        run: ./scripts/windows-signing/assert-signed.ps1 -Path signing/app-signed -Include '*.exe' -Expect 2
+
+      # ── 4. Installers around the signed app ────────────────────────────────
+      # The updater key is needed here only because createUpdaterArtifacts is
+      # on and the bundler refuses to run without it; the .sig files it writes
+      # are replaced in step 6.
+      - name: Build each installer around its signed app binary
+        working-directory: app/apps/desktop
+        env:
+          NAME: ${{ steps.bin.outputs.name }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for t in nsis msi; do
+            cp "../../../signing/app-signed/${t}__${NAME}" "src-tauri/target/release/${NAME}"
+            pnpm tauri bundle --bundles "$t" 2>&1 | tee "../../../signing/bundle-${t}.log"
+          done
+          ls -la src-tauri/target/release/bundle/nsis src-tauri/target/release/bundle/msi
+
+      # ── 5. SignPath signs the installers ───────────────────────────────────
+      - name: Collect the installers
+        run: |
+          set -euo pipefail
+          b=app/apps/desktop/src-tauri/target/release/bundle
+          mkdir -p signing/installers
+          cp "$b"/nsis/*-setup.exe signing/installers/
+          cp "$b"/msi/*.msi signing/installers/
+          ls -la signing/installers
+
+      - name: Upload the installers for signing
+        id: up-inst
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-installers
+          path: signing/installers/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Sign the installers (SignPath)
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ env.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.up-inst.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signing/installers-signed
+
+      - name: Check the installers came back signed
+        shell: pwsh
+        run: ./scripts/windows-signing/assert-signed.ps1 -Path signing/installers-signed -Expect 2
+
+      # ── 6. Updater signatures over the SIGNED installers ───────────────────
+      - name: Put the signed installers back and re-make their updater signatures
+        working-directory: app/apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for f in ../../../signing/installers-signed/*; do
+            name=$(basename "$f")
+            case "$name" in
+              *-setup.exe) dest="src-tauri/target/release/bundle/nsis/$name" ;;
+              *.msi)       dest="src-tauri/target/release/bundle/msi/$name" ;;
+              *) echo "::error::unexpected file from SignPath: $name"; exit 1 ;;
+            esac
+            if [ ! -f "$dest" ]; then echo "::error::$dest does not exist"; exit 1; fi
+            cp "$f" "$dest"
+            rm -f "$dest.sig"
+            pnpm tauri signer sign "$dest"
+            if [ ! -s "$dest.sig" ]; then echo "::error::no updater signature written for $dest"; exit 1; fi
+          done
+
+      # ── 7. Checks ──────────────────────────────────────────────────────────
+      - name: Check the updater signatures match the signed installers
+        run: |
+          set -euo pipefail
+          b=app/apps/desktop/src-tauri/target/release/bundle
+          for f in "$b"/nsis/*-setup.exe "$b"/msi/*.msi; do
+            node scripts/windows-signing/verify-updater-sig.mjs "$f" "$f.sig" app/apps/desktop/src-tauri/tauri.conf.json
+          done
+          mkdir -p signing/final
+          cp "$b"/nsis/*-setup.exe "$b"/nsis/*-setup.exe.sig "$b"/msi/*.msi "$b"/msi/*.msi.sig signing/final/
+          (cd signing/final && sha256sum * > ../final.sha256 && cat ../final.sha256)
+
+      # Install the NSIS build for real, extract the MSI (administrative
+      # install), and check the app exe each one ships: intact signature, and
+      # it records its own installer type. The NSIS uninstaller is generated
+      # at bundle time and is not signed by this flow; it is listed, not failed.
+      - name: Install and check the app each installer ships
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b = 'app/apps/desktop/src-tauri/target/release/bundle'
+          $setup = (Get-ChildItem "$b/nsis/*-setup.exe").FullName
+          $msi = (Get-ChildItem "$b/msi/*.msi").FullName
+
+          $p = Start-Process -FilePath $setup -ArgumentList '/S', '/D=C:\probe\nsis' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Host "::error::NSIS install exited $($p.ExitCode)"; exit 1 }
+          # If the installer ignored /D (per-user installs can), copy what it
+          # put in the default per-user location so the checks below find it.
+          if (-not (Test-Path C:\probe\nsis)) {
+            $default = Get-ChildItem "$env:LOCALAPPDATA" -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'uninstall.exe') } | Select-Object -First 1
+            if (-not $default) { Write-Host '::error::cannot find where the NSIS installer put the app'; exit 1 }
+            Write-Host "NSIS ignored /D; installed to $($default.FullName)"
+            Copy-Item -Recurse $default.FullName C:\probe\nsis
+          }
+          $p = Start-Process -FilePath msiexec.exe -ArgumentList '/a', ('"' + $msi + '"'), '/qn', 'TARGETDIR=C:\probe\msi' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Host "::error::MSI extract exited $($p.ExitCode)"; exit 1 }
+
+          Get-ChildItem -Recurse C:\probe -Filter *.exe | ForEach-Object { Write-Host $_.FullName }
+
+          # The installed name can differ from the cargo binary's (Tauri may
+          # name it after the product), so take the one exe that is not the
+          # uninstaller.
+          foreach ($kind in 'nsis', 'msi') {
+            ./scripts/windows-signing/assert-signed.ps1 -Path "C:\probe\$kind" -Include '*.exe' -Exclude 'uninstall*.exe' -Expect 1 -Recurse
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+            $exe = (Get-ChildItem -Recurse "C:\probe\$kind" -Filter *.exe | Where-Object { $_.Name -notlike 'uninstall*.exe' }).FullName
+            node scripts/windows-signing/bundle-type.mjs check $exe $kind
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+          Write-Host 'Uninstaller (not signed by this flow):'
+          Get-ChildItem -Recurse C:\probe\nsis -Filter 'uninstall*.exe' | ForEach-Object { Get-AuthenticodeSignature $_.FullName | Format-List Path, Status }
+
+      # The release workflows will hand these files to tauri-action to upload
+      # and to write latest.json from. Its build step cannot be skipped, so it
+      # runs a no-op instead of `tauri build`; prove here that it then finds
+      # exactly the signed files and changes none of them. No tagName means it
+      # creates no release and uploads nothing.
+      - name: Collect with tauri-action (no-op build, no release)
+        id: collect
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app/apps/desktop
+          tauriScript: node -e process.exit(0)
+
+      - name: Check tauri-action found the signed files, unchanged
+        env:
+          ARTIFACT_PATHS: ${{ steps.collect.outputs.artifactPaths }}
+        run: |
+          set -euo pipefail
+          echo "$ARTIFACT_PATHS"
+          b=app/apps/desktop/src-tauri/target/release/bundle
+          for f in "$b"/nsis/*-setup.exe "$b"/msi/*.msi; do
+            name=$(basename "$f")
+            cmp "$f" "signing/final/$name" || { echo "::error::$name changed after signing"; exit 1; }
+            cmp "$f.sig" "signing/final/$name.sig" || { echo "::error::$name.sig changed after signing"; exit 1; }
+            echo "$ARTIFACT_PATHS" | grep -qF "$name" || { echo "::error::tauri-action did not collect $name"; exit 1; }
+          done
+          echo "tauri-action collected the signed files and changed none of them."
+
+      - name: Keep the signed files for a hand check
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-windows-probe
+          path: |
+            signing/final/
+            signing/final.sha256
+            signing/bundle-*.log
+          if-no-files-found: warn
+          retention-days: 7
