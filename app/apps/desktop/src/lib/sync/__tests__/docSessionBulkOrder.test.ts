@@ -1921,6 +1921,42 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     expect(fakeRegistry.pull).toHaveBeenCalled();
   });
 
+  it("deletes a note removed inside a moved folder while the move is still being paired", async () => {
+    // The note was still mapped at its OLD path when its removal arrived, so the
+    // event matched nothing, the delete was dropped, and the pull that followed
+    // wrote it back as an empty file.
+    const sm = new SyncManager();
+    mapNotes([...oldNotes, ...others], ["Old", "Old/sub", "Keep"]);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub", "Keep"]);
+    for (const n of oldNotes) fakeDisk.files.set(n.relPath.replace(/^Old/, "Archive"), textOf(n.docId));
+    fakeRegistry.renamePath.mockImplementationOnce(async () => {
+      mapNotes(
+        [...oldNotes.map((n) => ({ ...n, relPath: n.relPath.replace(/^Old/, "Archive") })), ...others],
+        ["Archive", "Archive/sub", "Keep"],
+      );
+      return true;
+    });
+    vi.spyOn(sm as unknown as { armLocalChangeDrain: () => void }, "armLocalChangeDrain").mockImplementation(() => {});
+
+    sm.handleLocalFilesChanged([
+      { path: "Archive", kind: "tree", gone: false },
+      { path: "Old", kind: "tree", gone: true },
+    ]);
+    // The drain has started pairing the folder when the user deletes a note in it.
+    await vi.advanceTimersByTimeAsync(2_600);
+    fakeDisk.files.delete("Archive/d.md");
+    sm.handleLocalFilesChanged([{ path: "Archive/d.md", kind: "removed" }]);
+    await drain(30);
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Archive"]]);
+    const deleted = [
+      ...fakeRegistry.deletePath.mock.calls.map((c) => c[0]),
+      ...fakeRegistry.deletePaths.mock.calls.flatMap((c) => c[0] as string[]),
+    ];
+    expect(deleted).toContain("Archive/d.md");
+  });
+
   it("holds a registry frame's pull while a moved folder is still being paired", async () => {
     const sm = new SyncManager();
     mapNotes([...oldNotes, ...others], ["Old", "Keep"]);

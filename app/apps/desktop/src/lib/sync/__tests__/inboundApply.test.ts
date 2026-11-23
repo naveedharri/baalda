@@ -473,6 +473,248 @@ describe("inbound rename", () => {
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
   });
 
+  it("follows a teammate's move of a folder holding most of the vault, past the rename cap", async () => {
+    // A folder move is proven by the folder's own server id moving, so its notes
+    // are not a "mass rename". Refused, every other device wrote each note again
+    // at the new path and left the old files behind: the whole folder twice.
+    const disk = new FakeDisk();
+    disk.folders.add("Big");
+    disk.folders.add("Big/sub");
+    const before: Array<{ id: string; rel_path: string }> = [];
+    const after: Array<{ id: string; rel_path: string }> = [];
+    for (let i = 0; i < 40; i++) {
+      const rest = i % 2 === 0 ? `n${i}.md` : `sub/n${i}.md`;
+      disk.notes.set(`Big/${rest}`, `d${i}`);
+      before.push({ id: `d${i}`, rel_path: `Big/${rest}` });
+      after.push({ id: `d${i}`, rel_path: `Big2/${rest}` });
+    }
+    disk.notes.set("top.md", "dtop");
+    before.push({ id: "dtop", rel_path: "top.md" });
+    after.push({ id: "dtop", rel_path: "top.md" });
+    const r = await twoPasses({
+      disk,
+      first: { notes: before, folders: [{ id: "fb", path: "Big" }, { id: "fs", path: "Big/sub" }] },
+      then: { notes: after, folders: [{ id: "fb", path: "Big2" }, { id: "fs", path: "Big2/sub" }] },
+    });
+    const paths = [...disk.notes.keys()];
+    expect(paths.filter((p) => p.startsWith("Big/"))).toEqual([]);
+    expect(paths.filter((p) => p.startsWith("Big2/"))).toHaveLength(40);
+    expect(r.renamed).toHaveLength(40);
+    expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
+  });
+
+  it("keeps a note where it is when its rename is refused, instead of writing it again at the new path", async () => {
+    // 30 notes renamed one by one in a 30-note vault: past the cap, refused. The
+    // notes must stay mapped at the paths they still have on disk. Re-mapping
+    // them to the server paths wrote each one again there and left the old
+    // file unmapped, which registered as a duplicate.
+    const disk = new FakeDisk();
+    const before: Array<{ id: string; rel_path: string }> = [];
+    const after: Array<{ id: string; rel_path: string }> = [];
+    for (let i = 0; i < 30; i++) {
+      disk.notes.set(`n${i}.md`, `d${i}`);
+      before.push({ id: `d${i}`, rel_path: `n${i}.md` });
+      after.push({ id: `d${i}`, rel_path: `renamed ${i}.md` });
+    }
+    install(disk);
+    const state: ServerState = { notes: before };
+    const api = fakeApi(state);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    state.notes = after;
+    vi.mocked(ipc.renamePath).mockClear();
+    vi.mocked(ipc.writeNoteIfMissing).mockClear();
+    vi.mocked(api.createNote).mockClear();
+
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(ipc.renamePath).not.toHaveBeenCalled();
+    expect(ipc.writeNoteIfMissing).not.toHaveBeenCalled();
+    expect(vi.mocked(api.createNote)).not.toHaveBeenCalled();
+    expect([...disk.notes.keys()].sort()).toEqual(before.map((n) => n.rel_path).sort());
+    expect(reg.getMapping("n0.md")?.docId).toBe("d0");
+    expect(reg.failures().some((f) => f.kind === "inbound-blocked" && /safety limit/.test(f.reason))).toBe(true);
+  });
+
+  it("removes a followed file whose id was released while its move ran", async () => {
+    // A teammate moved a folder and then deleted a file in it; a device that was
+    // offline learns both at once. The folder carry renamed the file while the
+    // blob pass removed it as deleted: the removal found nothing at the old path,
+    // so the bytes survived at the new one with no id and were uploaded again.
+    const disk = new FakeDisk();
+    install(disk);
+    const reg = new VaultRegistry(fakeApi({ notes: [] }));
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    (reg as unknown as { fileByPath: Map<string, string> }).fileByPath.set("Old/a.png", "f1");
+    vi.mocked(ipc.renamePath).mockImplementationOnce((async () => {
+      (reg as unknown as { dropFileId(p: string): void }).dropFileId("Old/a.png");
+      return "New/a.png";
+    }) as never);
+    vi.mocked(ipc.deleteFile).mockClear();
+
+    expect(await reg.followFileMove("Old/a.png", "New/a.png")).toBe(false);
+    expect(vi.mocked(ipc.deleteFile).mock.calls.map((c) => c[0])).toEqual(["New/a.png"]);
+    expect(reg.isOwnRemoval("New/a.png")).toBe(true);
+  });
+
+  it("removes a deleted file inside a moved folder instead of carrying it to the new path", async () => {
+    // Offline device learns a folder move AND a delete inside it at once. The
+    // carry moved the deleted file too, re-creating its folder at the new path,
+    // which then registered as new folders: the delete came back, empty.
+    const disk = new FakeDisk();
+    disk.folders.add("Big");
+    disk.folders.add("Big/sub");
+    disk.notes.set("Big/n.md", "d1");
+    install(disk);
+    const state: ServerState = {
+      notes: [{ id: "d1", rel_path: "Big/n.md" }],
+      folders: [{ id: "fb", path: "Big" }, { id: "fs", path: "Big/sub" }],
+    };
+    const reg = new VaultRegistry(fakeApi(state));
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const files = (reg as unknown as { fileByPath: Map<string, string> }).fileByPath;
+    files.set("Big/a.png", "f1");
+    files.set("Big/sub/b.png", "f2");
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    state.notes = [{ id: "d1", rel_path: "Big2/n.md" }];
+    state.folders = [{ id: "fb", path: "Big2" }];
+    state.folderTombstones = ["fs"];
+    state.tombstones = ["f2"];
+    vi.mocked(ipc.renamePath).mockClear();
+    vi.mocked(ipc.deleteFile).mockClear();
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const moved = vi.mocked(ipc.renamePath).mock.calls.map((c) => `${c[0]} → ${c[1]}`);
+    expect(moved).toContain("Big/a.png → Big2/a.png");
+    expect(moved.some((m) => m.includes("b.png"))).toBe(false);
+    expect(vi.mocked(ipc.deleteFile).mock.calls.map((c) => c[0])).toContain("Big/sub/b.png");
+    expect(files.has("Big/sub/b.png")).toBe(false);
+    expect([...files.keys()].some((p) => p.startsWith("Big2/sub"))).toBe(false);
+  });
+
+  it("never registers a moved folder's old name while deleted notes a cap kept are still in it", async () => {
+    // A teammate moved Big to Big2 and deleted Big/sub with more notes than one
+    // pass may delete. The leftovers kept Big non-empty, and the old name was
+    // registered as a brand-new folder: the move left an empty twin for everyone.
+    const disk = new FakeDisk();
+    disk.folders.add("Big");
+    disk.folders.add("Big/sub");
+    disk.notes.set("Big/n.md", "d0");
+    const before: Array<{ id: string; rel_path: string }> = [{ id: "d0", rel_path: "Big/n.md" }];
+    for (let i = 1; i <= 12; i++) {
+      disk.notes.set(`Big/sub/s${i}.md`, `d${i}`);
+      before.push({ id: `d${i}`, rel_path: `Big/sub/s${i}.md` });
+    }
+    install(disk);
+    const state: ServerState = { notes: before, folders: [{ id: "fb", path: "Big" }, { id: "fs", path: "Big/sub" }] };
+    const api = fakeApi(state);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    for (let i = 0; i <= 12; i++) reg.markPushed(`d${i}`);
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    state.notes = [{ id: "d0", rel_path: "Big2/n.md" }];
+    state.folders = [{ id: "fb", path: "Big2" }];
+    state.folderTombstones = ["fs"];
+    state.tombstones = before.slice(1).map((n) => n.id);
+    vi.mocked(api.createFolder).mockClear();
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const created = vi.mocked(api.createFolder).mock.calls.map((c) => (c[0] as { path: string }).path);
+    expect(created.filter((p) => p === "Big" || p.startsWith("Big/"))).toEqual([]);
+    expect(disk.notes.has("Big2/n.md")).toBe(true);
+  });
+
+  it("removes a deleted folder whose only contents are empty directories no server folder owns", async () => {
+    // A teammate's move made the subdirectories while the folder was being
+    // deleted; nothing recorded them, so the empty-only removal of the folder
+    // never succeeded and an empty tree stayed on this one disk.
+    const disk = new FakeDisk();
+    disk.folders.add("Dead");
+    disk.notes.set("keep.md", "d0");
+    install(disk);
+    const state: ServerState = { notes: [{ id: "d0", rel_path: "keep.md" }], folders: [{ id: "fd", path: "Dead" }] };
+    const reg = new VaultRegistry(fakeApi(state));
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    disk.folders.add("Dead/a");
+    disk.folders.add("Dead/a/b");
+    state.folders = [];
+    state.folderTombstones = ["fd"];
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect([...disk.folders].filter((p) => p.startsWith("Dead"))).toEqual([]);
+  });
+
+  for (const mode of ["listed", "throws"] as const) {
+    it(`asks the server which files were deleted before carrying a moved folder (${mode})`, async () => {
+      // A pass that runs before the vault channel named the deleted files.
+      const disk = new FakeDisk();
+      disk.folders.add("Big");
+      disk.notes.set("Big/n.md", "d1");
+      install(disk);
+      const state: ServerState = { notes: [{ id: "d1", rel_path: "Big/n.md" }], folders: [{ id: "fb", path: "Big" }] };
+      const api = fakeApi(state) as unknown as { listFileTombstones?: () => Promise<string[]> };
+      api.listFileTombstones = vi.fn(async () => {
+        if (mode === "throws") throw new Error("network down");
+        return ["f2"];
+      });
+      const reg = new VaultRegistry(api as unknown as ApiClient);
+      reg.setInboundHost(recordingHost().host);
+      await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+      const files = (reg as unknown as { fileByPath: Map<string, string> }).fileByPath;
+      files.set("Big/a.png", "f1");
+      files.set("Big/b.png", "f2");
+      const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+      vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+      state.notes = [{ id: "d1", rel_path: "Big2/n.md" }];
+      state.folders = [{ id: "fb", path: "Big2" }];
+      vi.mocked(ipc.renamePath).mockClear();
+      vi.mocked(ipc.deleteFile).mockClear();
+      await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+      const moved = vi.mocked(ipc.renamePath).mock.calls.map((c) => `${c[0]} → ${c[1]}`);
+      const deleted = vi.mocked(ipc.deleteFile).mock.calls.map((c) => c[0]);
+      expect(moved).toContain("Big/a.png → Big2/a.png");
+      if (mode === "listed") {
+        expect(deleted).toContain("Big/b.png");
+        expect(moved).not.toContain("Big/b.png → Big2/b.png");
+      } else {
+        // No answer: today's behaviour, the file is carried and nothing removed.
+        expect(deleted).not.toContain("Big/b.png");
+        expect(moved).toContain("Big/b.png → Big2/b.png");
+      }
+    });
+  }
+
+  it("marks a teammate's rename as its own move, so the watcher echo is never a user rename", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("old.md", "d1");
+    let marked: [boolean, boolean] | null = null;
+    let reg: VaultRegistry | null = null;
+    install(disk);
+    const inner = vi.mocked(ipc.renamePath).getMockImplementation()!;
+    vi.mocked(ipc.renamePath).mockImplementation((async (from: string, to: string, epoch: unknown) => {
+      marked = [reg!.isOwnMoveSource(from), reg!.isOwnMove(to)];
+      return (inner as (...a: unknown[]) => unknown)(from, to, epoch);
+    }) as never);
+    const state: ServerState = { notes: [{ id: "d1", rel_path: "old.md" }] };
+    reg = new VaultRegistry(fakeApi(state));
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    state.notes = [{ id: "d1", rel_path: "new.md" }];
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(marked).toEqual([true, true]);
+    expect([...disk.notes.keys()]).toEqual(["new.md"]);
+  });
+
   it("refuses a rename onto a path another note already occupies (#129)", async () => {
     // The doomed rename. A second file is sitting at the destination — a copy, a
     // half-finished move, a placeholder materialized before the rename was

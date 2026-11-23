@@ -198,6 +198,9 @@ export interface InboundRejection {
   path: string;
   docId: string | null;
   reason: string;
+  /** Refused only by a per-pass safety cap: the item itself was fine, and the
+   *  next pass plans it again. */
+  capped?: true;
 }
 
 export interface InboundPlan {
@@ -871,16 +874,33 @@ function applyBreakers(
     if (t.binary && t.reason === "revoked") owed.add(t.docId);
   }
   plan.needsAccessCheck = [...owed];
+  // A rename that a teammate's FOLDER move explains is not counted: the
+  // folder's own server id moved from `mf.from` to `mf.to` and the note keeps
+  // the same place under it. That is identity evidence, not a path diff, and
+  // a move destroys nothing. Without this a teammate renaming one big folder
+  // (more than 30% of the vault) was refused on every other device, which then
+  // wrote the notes again at the new path and left the old files behind.
   const rCap = renameCap(mapped);
-  if (plan.renames.length > rCap) {
-    for (const r of plan.renames) {
+  const folderMoves = plan.movedFolders.map((mf) => [pathKey(mf.from) + "/", pathKey(mf.to) + "/"] as const);
+  const explained = (r: InboundRename): boolean => {
+    const from = pathKey(r.from);
+    const to = pathKey(r.to);
+    return folderMoves.some(
+      ([f, t]) => from.startsWith(f) && to.startsWith(t) && from.slice(f.length) === to.slice(t.length),
+    );
+  };
+  const unexplained = plan.renames.filter((r) => !explained(r));
+  if (unexplained.length > rCap) {
+    const refused = new Set(unexplained);
+    for (const r of unexplained) {
       plan.rejected.push({
         kind: "rename",
         path: r.to,
         docId: r.docId,
-        reason: `refused: ${plan.renames.length} moves in one pass exceeds the ${rCap} safety limit`,
+        reason: `refused: ${unexplained.length} moves in one pass exceeds the ${rCap} safety limit`,
+        capped: true,
       });
     }
-    plan.renames = [];
+    plan.renames = plan.renames.filter((r) => !refused.has(r));
   }
 }

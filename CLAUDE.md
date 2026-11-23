@@ -567,6 +567,22 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     persist; they now `holdUntil` that finishes, so a feed update or promote in the window waits.
     Before, a cold apply opened from a local store lacking the bridge's last ops while the file had
     them, and either merged that text in again (an offline edit arrived twice) or wrote over it.
+  - **A teammate's big folder move is followed, never echoed back** (`registry.ts`, 2026-11-23): every
+    inbound rename is marked an own move BEFORE `renamePath` (a pass following a big move runs for
+    minutes, and unmarked the delete drain paired each echo as this user's rename, sent it to the server,
+    got `rename_not_creator` and put the file back: a toast flood and a loop). Renames explained by a
+    folder whose server id moved are exempt from the rename cap (`inbound.ts`); a capped or
+    unmaterializable rename keeps the note mapped at its current path (`heldRenames`; an occupied
+    destination keeps #129). The folder carry removes a file the server tombstoned (`ready.tombstones`
+    plus `GET file-tombstones`, asked only when there is a carry) instead of moving it, and a followed
+    file released mid-rename is removed at its new path. A moved folder's old directory that still holds
+    leftovers stays pending in `revokedFolders` (never registered as a new folder), and a folder being
+    removed first loses its empty subdirectories that no server folder owns. Before, an offline teammate
+    coming back after a move + delete re-created the deleted subtree and the old folder name, empty, for everyone.
+    A note deleted inside a folder the user just moved on disk, while the move is still being paired
+    (it took 37 s for 1,568 notes), is still mapped at its OLD path: `queueDiskDelete` holds such
+    unmatched removals (`removedWhilePairing`) and the drain re-judges them once the move re-pointed
+    the notes. Dropped, the next pull wrote each one back as an empty file and the delete was lost.
   - **Unfinished temp files are swept at vault open** (`notefile.rs sweep_stale_temp_files`, background
     thread in `open_vault_impl`): an app killed mid-download or mid-save left its `.{name}.{pid}.{n}.tmp`
     forever (hidden, never synced, but its bytes stayed). Only that exact name shape, regular files,

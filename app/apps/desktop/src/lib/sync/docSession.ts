@@ -850,6 +850,10 @@ export class SyncManager implements InboundHost {
   private folderCandidates = new Map<string, number>();
   /** {@link drainFolderMoves} is deciding: `goneFolders` was already taken. */
   private pairingFolders = false;
+  /** Paths removed on disk while a folder move was being paired, which no
+   *  mapping named yet (the notes were still recorded under the old folder).
+   *  Judged again once the move has re-pointed them (path → seenAt). */
+  private removedWhilePairing = new Map<string, number>();
   /** {@link drainDiskDeletes} is running: it took `goneFolders` and the pending
    *  deletes at its start, so they no longer show that a pull must wait. */
   private diskDeleteDrainsInFlight = 0;
@@ -2567,7 +2571,16 @@ export class SyncManager implements InboundHost {
     // ONTO is not skipped: deleting it right after is a real delete.
     if (this.registry.isOwnMoveSource?.(relPath) ?? this.registry.isOwnMove?.(relPath)) return false;
     const mapping = this.registry.getMapping(relPath);
-    if (!mapping) return false;
+    if (!mapping) {
+      // Inside a folder that just moved on disk, before the move is paired: the
+      // note is still mapped at its old path. Dropped here, the next pull wrote
+      // it back as an empty file and the delete was lost.
+      if (this.pairingFolders || this.goneFolders.size > 0 || this.diskDeleteDrainsInFlight > 0) {
+        if (this.removedWhilePairing.size > 50_000) this.removedWhilePairing.clear();
+        this.removedWhilePairing.set(relPath, Date.now());
+      }
+      return false;
+    }
     if (!this.registry.isPushed(mapping.docId)) {
       console.info(
         `[sync] ${relPath} was deleted on disk but its content was never confirmed on the server — not propagating`,
@@ -2691,6 +2704,21 @@ export class SyncManager implements InboundHost {
           this.pairingFolders = false;
         }
         if (!scope.isCurrent() || this.rootMissing) return;
+        // Removed inside the new folder while the move was being paired: mapped
+        // there now, so they are judged in this drain like any other delete.
+        if (this.removedWhilePairing.size > 0) {
+          const late = [...this.removedWhilePairing.keys()].filter((p) => out.movedTo.some((t) => isUnder(p, t)));
+          this.removedWhilePairing.clear();
+          const lateSet = new Set(late);
+          for (const p of late) this.queueDiskDelete(scope, p);
+          for (const [docId, e] of [...this.pendingDiskDeletes]) {
+            if (!lateSet.has(e.relPath)) continue;
+            this.pendingDiskDeletes.delete(docId);
+            this.pendingDeleteByPath.delete(e.relPath);
+            this.drainingDocs.add(docId);
+            pending.push({ docId, relPath: e.relPath });
+          }
+        }
         foldersToRemove = foldersToRemove.filter((g) => !out.movedFrom.some((f) => isUnder(g, f)));
         pending = pending.filter((p) => !out.movedFrom.some((f) => isUnder(p.relPath, f)));
         candidates = candidates.filter((c) => !out.movedTo.some((t) => isUnder(c, t)));
@@ -7349,6 +7377,7 @@ export class SyncManager implements InboundHost {
     // closed-app notice is evaluated afresh.
     this.goneFolders.clear();
     this.folderCandidates.clear();
+    this.removedWhilePairing.clear();
     this.rootMissing = false;
     // A failing pull describes the vault we are leaving.
     this.pullFailures = null;
