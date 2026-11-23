@@ -500,6 +500,22 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
 
     let publish_ms = publish_started.elapsed().as_millis() as u64;
 
+    // Temp files a killed or crashed run left mid-write (a download, a save):
+    // invisible to the tree and sync, but they kept their bytes forever.
+    {
+        let sweep_root = path.clone();
+        std::thread::spawn(move || {
+            let n = crate::notefile::sweep_stale_temp_files(
+                &sweep_root,
+                std::process::id(),
+                crate::notefile::STALE_TEMP_AGE,
+            );
+            if n > 0 {
+                log::info!("[temp-sweep] removed {n} unfinished temp file(s) in {}", sweep_root.display());
+            }
+        });
+    }
+
     let config_started = std::time::Instant::now();
     let mut info = vault_info(&path, epoch);
     // Preserve other config keys (e.g. server_url) when updating recents.

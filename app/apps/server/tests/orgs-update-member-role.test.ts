@@ -224,4 +224,45 @@ describe("change a member's role", () => {
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(await roleOf(org.id, member.userId)).toBe("member");
   });
+
+  async function ownVaultLevel(orgId: string, userId: string): Promise<string | null> {
+    const { rows } = await pool.query<{ permission: string }>(
+      `SELECT permission FROM shares
+        WHERE resource_type = 'vault' AND resource_id = $1
+          AND principal_type = 'user' AND principal_id = $2`,
+      [orgId, userId],
+    );
+    return rows[0]?.permission ?? null;
+  }
+
+  it("gives a member made admin Can edit everything as their own level, kept on demotion", async () => {
+    const owner = await signUp("owner@role10.com");
+    const org = await createOrg(owner, "Acme", "acme-role10");
+    const member = await signUp("member@role10.com");
+    await addMember(org.id, member.userId);
+    expect(await ownVaultLevel(org.id, member.userId)).toBeNull();
+
+    expect((await changeRole(owner.token, org.id, member.userId, { role: "admin" })).status).toBe(200);
+    expect(await ownVaultLevel(org.id, member.userId)).toBe("edit");
+
+    // An ordinary personal setting: demotion leaves it, as any other.
+    expect((await changeRole(owner.token, org.id, member.userId, { role: "member" })).status).toBe(200);
+    expect(await ownVaultLevel(org.id, member.userId)).toBe("edit");
+  });
+
+  it("keeps a level the member already has when made admin", async () => {
+    const owner = await signUp("owner@role11.com");
+    const org = await createOrg(owner, "Acme", "acme-role11");
+    for (const [i, level] of (["view", "denied"] as const).entries()) {
+      const member = await signUp(`member${i}@role11.com`);
+      await addMember(org.id, member.userId);
+      await pool.query(
+        `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
+         VALUES ($1, $2, 'vault', $2, 'user', $3, $4, $5)`,
+        [randomUUID(), org.id, member.userId, level, owner.userId],
+      );
+      expect((await changeRole(owner.token, org.id, member.userId, { role: "admin" })).status).toBe(200);
+      expect(await ownVaultLevel(org.id, member.userId)).toBe(level);
+    }
+  });
 });

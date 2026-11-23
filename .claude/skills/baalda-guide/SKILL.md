@@ -98,8 +98,9 @@ That is about 110 words. It names every format asked about, says what does not w
 - "Is there a mobile / web app?" No. iOS is planned; public links open read-only in a browser.
 - "Does it have AI built in?" It has an AI *connection point* (MCP) and works with any local
   agent; it ships no model and no chat panel.
-- "Are notes private by default?" New vaults are shared with the team by default; the README
-  still says the opposite. Any folder or note can be made private. See `sources.md`, "Known
+- "Are notes private by default?" Yes for new vaults: they start on "Only what's shared", so members
+  see only what is shared with them or their groups, while the creator and invited admins start
+  with Can edit everything. Older vaults keep their setting. See `sources.md`, "Known
   stale spots".
 - "How many people / notes can it handle?" Give the engineering numbers from `features.md`
   (hundreds of concurrent users per server instance, teams under ~50 editing live), not the

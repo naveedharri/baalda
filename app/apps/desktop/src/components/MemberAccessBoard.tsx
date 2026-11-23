@@ -119,6 +119,8 @@ export interface MemberAccessBoardProps {
   onChanged: () => Promise<void>;
   /** The host already shows a vault-wide control: skip "Set everything to". */
   hideSetEverything?: boolean;
+  /** Extra controls at the end of the header (the profile's List/Board switch). */
+  headExtra?: React.ReactNode;
   /** The Access tab's shared load (tree + modes). Absent: the board loads its own. */
   accessMap?: AccessMap;
   /**
@@ -192,6 +194,7 @@ export function MemberAccessBoard({
   onItemWritten,
   onChanged,
   hideSetEverything = false,
+  headExtra,
   accessMap,
   group,
 }: MemberAccessBoardProps) {
@@ -887,6 +890,7 @@ export function MemberAccessBoard({
           menuClassName="access-menu access-board-everything-menu"
           onSelect={(v) => { if (v !== "none") setEverything(v); }}
         />}
+        {headExtra && <span className="access-board-head-extra">{headExtra}</span>}
       </div>
       {error && <div className="auth-error">{error}</div>}
       {!serverTree ? (

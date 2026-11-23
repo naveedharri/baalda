@@ -19,6 +19,7 @@ import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
 import {
   countLine,
   EVERYONE_OPTIONS,
+  DEFAULT_PRIVATE_LABEL,
   DEFAULT_ACCESS_SUB,
   DEFAULT_ACCESS_TITLE,
   accessSources,
@@ -282,13 +283,6 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       </p>
     ),
   });
-  /** New members menu: a group toggles whether new members join it. */
-  const toggleAutoJoin = (g: AccessGroup) => run(async () => {
-    if (!orgId) return;
-    await authManager.api.updateGroup(orgId, g.id, { autoJoin: !g.autoJoin });
-    toast(!g.autoJoin ? `New members now join ${g.name}.` : `New members no longer join ${g.name}.`);
-    await groupsState.reload();
-  });
 
   /**
    * Patch the roster on screen (and its session cache) right after a write,
@@ -384,6 +378,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
         sub: `Every member of ${vaultName} starts here`,
         from: teamAccess.posture === "none" ? "private" : teamAccess.mode,
         to: mode,
+        labels: { private: DEFAULT_PRIVATE_LABEL },
       },
       cancelLabel: "Keep as is",
       body: <p className="confirm-note">{copy.outcome}</p>,
@@ -396,7 +391,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     const next = await authManager.api.setAccessDefault(orgId, mode);
     setAccessDefault(next);
     patchRoster((r) => ({ ...r, accessDefault: next }));
-    toast(`New members: ${NEW_MEMBER_OPTIONS.find((o) => o.value === next.mode)?.label}`);
+    toast(`People who join now get: ${NEW_MEMBER_OPTIONS.find((o) => o.value === next.mode)?.label}`);
   });
 
   // ── One person ──────────────────────────────────────────────────────────
@@ -751,7 +746,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
           <button className="primary members-invite-btn" onClick={() => setInviteOpen(true)}>Invite people</button>
         )}
       </div>
-      <p className="members-access-intro">Owners and admins can always manage access.</p>
+      <p className="members-access-intro">Owners and admins can always manage access. Default access applies to them too.</p>
       {error && <div className="auth-error">{error}</div>}
       {limitCause != null && <PeopleLimitNotice error={limitCause} canManageBilling={myRole === "owner"} ownerName={ownerName(members)} freeLimit={seatAccount ? freeLimitOf(seatAccount) : null} />}
 
@@ -789,47 +784,6 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
               />
             ) : (
               <PillSkeleton label={`Loading default access for ${vaultName}`} />
-            )}
-          </div>
-          <div className="members-access-row">
-            <span className="members-access-row-icon" aria-hidden="true">
-              <ClockIcon />
-            </span>
-            <span className="members-access-row-copy">
-              <span className="members-access-row-title">New members</span>
-              <span className="muted">For notes made before they joined</span>
-            </span>
-            {accessDefault ? (
-              <MenuSelect<string>
-                value={accessDefault.mode}
-                options={[
-                  ...NEW_MEMBER_OPTIONS,
-                  ...(groupsOn ? groups.map((g, i) => ({
-                    value: `${GROUP_OPTION}${g.id}`,
-                    label: g.name,
-                    hint: i === 0 ? "New members join the ticked groups" : undefined,
-                    section: i === 0 ? "Also join access groups" : undefined,
-                    checked: g.autoJoin,
-                  })) : []),
-                ]}
-                triggerContent={(() => {
-                  const label = NEW_MEMBER_OPTIONS.find((o) => o.value === accessDefault.mode)?.label ?? accessDefault.mode;
-                  const joined = groupsOn ? groups.filter((g) => g.autoJoin).length : 0;
-                  return <span className="role-trigger-label">{joined ? `${label} + ${joined} ${joined === 1 ? "group" : "groups"}` : label}</span>;
-                })()}
-                onSelect={(v) => {
-                  if (isGroupOption(v)) {
-                    const g = groups.find((x) => x.id === groupOptionId(v));
-                    if (g) void toggleAutoJoin(g);
-                  } else void chooseDefault(v as TeamAccessMode);
-                }}
-                disabled={busy}
-                ariaLabel="Access for new members"
-                triggerClassName={`members-access-trigger is-level ${levelClass(accessDefault.mode)}`}
-                menuClassName="access-menu"
-              />
-            ) : (
-              <PillSkeleton label="Loading access for new members" />
             )}
           </div>
         </div>
@@ -1141,6 +1095,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
           orgId={orgId}
           vaultName={vaultName}
           newMembersAccess={accessDefault?.mode ?? null}
+          defaultAccess={teamAccess ? (teamAccess.posture === "none" ? "private" : teamAccess.mode) : null}
           onNewMembersAccess={manage ? (mode) => void chooseDefault(mode) : undefined}
           canManageBilling={myRole === "owner"}
           seatAccount={seatAccount}
@@ -1234,15 +1189,6 @@ function PeopleIcon() {
       <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
       <circle cx="9" cy="7" r="4" />
       <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
-    </svg>
-  );
-}
-
-function ClockIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
-      <path d="M3 3v5h5M12 7v5l3 2" />
     </svg>
   );
 }

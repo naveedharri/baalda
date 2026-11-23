@@ -444,11 +444,11 @@ describe("Member profile page, Personal info and Activity tabs", () => {
       await flush();
       expect(view("Board view").getAttribute("aria-checked")).toBe("true");
       expect(host.querySelector(".access-board")).not.toBeNull();
-      // One header row in both views: same vault-wide control, same toggle spot,
-      // and the board's own "Set everything to" stays hidden.
-      expect(acrossRow()).toBe(true);
-      expect(view("Board view").closest(".members-access-row")?.querySelector('[aria-label="Access across the vault"]')).not.toBeNull();
-      expect(host.querySelector('[aria-label="Set everything to"]')).toBeNull();
+      // The board's own "Set everything to" is the vault-wide control there, with
+      // the switch beside it; the "Across the vault" row is the List's alone.
+      expect(acrossRow()).toBe(false);
+      expect(host.querySelector('[aria-label="Access across the vault"]')).toBeNull();
+      expect(view("Board view").closest(".access-board-head")?.querySelector('[aria-label="Set everything to"]')).not.toBeNull();
 
       await act(async () => view("List view").click());
       await flush();

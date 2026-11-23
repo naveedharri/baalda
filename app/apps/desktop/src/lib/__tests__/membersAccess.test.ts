@@ -28,8 +28,9 @@ describe("members and access rules", () => {
     expect(needsAccessConfirm("private", "private")).toBe(false);
   });
 
-  it("a never-shared vault reads as No access and says authors keep their notes", () => {
-    expect(everyoneLabel("private", "none")).toEqual({ label: "No access", sub: "Members keep notes they wrote" });
+  it("a never-shared vault reads as Only what's shared and says authors keep their notes", () => {
+    expect(everyoneLabel("private", "none")).toEqual({ label: "Only what's shared", sub: "Members also keep notes they wrote" });
+    expect(everyoneLabel("private", "sealed")).toEqual({ label: "Only what's shared", sub: null });
     expect(everyoneLabel("open", "edit")).toEqual({ label: "Can edit", sub: null });
   });
 
@@ -109,7 +110,7 @@ describe("confirm copy for taking access away", () => {
     expect(reduceAccessCopy({ kind: "person", name: "Me", self: true }, "private")).toMatchObject({
       title: "Remove your access to this vault?", outcome: expect.stringContaining("removed from your devices"),
     });
-    expect(reduceAccessCopy({ kind: "everyone" }, "private").title).toBe("Set default access to No access?");
+    expect(reduceAccessCopy({ kind: "everyone" }, "private").title).toBe("Set default access to Only what's shared?");
     expect(reduceAccessCopy({ kind: "everyone" }, "readonly").title).toBe("Set default access to Can view?");
     for (const to of ["private", "readonly"] as const) {
       const c = reduceAccessCopy({ kind: "everyone" }, to);

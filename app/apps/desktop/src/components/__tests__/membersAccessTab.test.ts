@@ -88,7 +88,7 @@ describe("Members and access tab", () => {
     expect(host.textContent).not.toContain("Stale Owner");
   });
 
-  it("shows no Everyone or New members value before the server answers", async () => {
+  it("shows no Default access value before the server answers, and no New members row", async () => {
     const team = deferred<unknown>();
     const joining = deferred<unknown>();
     api.getTeamAccess.mockReturnValueOnce(team.promise);
@@ -104,18 +104,19 @@ describe("Members and access tab", () => {
     });
     await flush();
     const triggers = rows()!.querySelectorAll(".members-access-trigger");
-    expect(triggers).toHaveLength(2);
+    // New members moved to the invite dialog: only Default access is left here.
+    expect(triggers).toHaveLength(1);
     expect(triggers[0].textContent).toContain("Can view");
-    expect(triggers[1].textContent).toContain("No access");
+    expect(rows()!.textContent).not.toContain("New members");
   });
 
-  it("reads a never-shared vault as No access with the authorship note", async () => {
+  it("reads a never-shared vault as Only what's shared with the authorship note", async () => {
     api.getTeamAccess.mockResolvedValueOnce({ mode: "private", posture: "none", grantId: null, overrides: [] });
     await render();
     await flush();
     const everyone = host.querySelector(".members-access-row");
-    expect(everyone?.textContent).toContain("No access");
-    expect(everyone?.textContent).toContain("Members keep notes they wrote");
+    expect(everyone?.textContent).toContain("Only what's shared");
+    expect(everyone?.textContent).toContain("Members also keep notes they wrote");
   });
 
   it("lets an owner in a No access vault give themselves Can edit everything", async () => {

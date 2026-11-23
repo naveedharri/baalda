@@ -18,7 +18,10 @@ export function groupIconSvg(icon: GroupIconName): string {
     .toString()
     // Only the glyph's group: the viewbox mask's rect is also fill="#fff", and a
     // coloured mask lets only part of the glyph through (it read washed out).
-    .replace(/<g fill="#fff">/g, '<g fill="currentColor">');
+    .replace(/<g fill="#fff">/g, '<g fill="currentColor">')
+    // Single-shape icons (megaphone, laptop, inbox, egg…) carry the white fill
+    // on the path itself; left white they vanished on the group's light tint.
+    .replace(/(<path\b[^>]*?)\sfill="#fff"/g, '$1 fill="currentColor"');
 }
 
 export default function GroupIconSvg({ icon }: { icon: GroupIconName }) {

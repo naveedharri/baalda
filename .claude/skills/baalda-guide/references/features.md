@@ -169,10 +169,12 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - **Live presence**: coloured cursors and selections in the note, "who is viewing" avatars,
   and small presence dots in the sidebar showing who is in which note or folder. Ping a
   teammate to get their attention.
-- **Sharing model**: new vaults are shared with the whole team by default (vaults created before
-  mid-2026 stayed private until their owner changes them on the Members and access page). The
+- **Sharing model**: since late November 2026 a new vault starts on **Only what's shared**: members
+  see only what is shared with them or their access groups. Whoever creates the vault starts with
+  **Can edit everything** as their own level, and so does anyone invited as an admin (both can be
+  lowered later). Vaults created earlier keep the setting they had. The
   **Default access** row (called "Everyone" in older versions) is where every member starts: **Can edit**,
-  **Can view** or **No access**. Access groups add to it.
+  **Can view** or **Only what's shared** (shown as "No access" in older versions). Access groups add to it.
   Each person can then be given their own level (**Can edit everything**, **Can view everything**,
   **No access**) and that person's level wins either way, for them only. A person's level can also
   be **Custom**: per-folder choices made in their profile. Permissions cascade down folders, and
@@ -180,8 +182,9 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   admin, not even the person who wrote the note, until someone gives them access. So when you
   close off the whole vault, give yourself access too. Owners and admins can always manage access
   and change the setting back.
-- **New members**: a separate row decides what someone who joins later sees of the notes that
-  already existed: **Can edit**, **Can view** or **No access** (they start with only new and shared notes).
+- **New members**: what someone who joins later gets of the notes that already existed is chosen
+  when inviting (the Access level marked Default, and "People who join get" on the Join code tab).
+  If the person would see nothing yet, the invite says so.
 - The MCP screen in the app puts the AI rule plainly: "Connect any MCP-compatible AI client to
   this vault. It gets the same access you do: read, search, create, edit and delete notes and
   folders. Owners and admins can also manage the team's access from the same chat — ask Claude or

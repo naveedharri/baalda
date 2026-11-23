@@ -22,6 +22,8 @@ export interface ConfirmChange {
   avatar?: ReactNode;
   from: "open" | "readonly" | "private" | "custom" | null;
   to: "open" | "readonly" | "private";
+  /** Level names for this confirm, where they differ (Default access says "Only what's shared"). */
+  labels?: Partial<Record<"open" | "readonly" | "private" | "custom", string>>;
 }
 
 /**
@@ -135,11 +137,11 @@ export function ConfirmDialog({
             </span>
             {change.from && (
               <>
-                <span className={`confirm-level ${levelClass(change.from)}`}>{LEVEL_NAME[change.from]}</span>
+                <span className={`confirm-level ${levelClass(change.from)}`}>{change.labels?.[change.from] ?? LEVEL_NAME[change.from]}</span>
                 <span className="confirm-change-arrow" aria-label="to">→</span>
               </>
             )}
-            <span className={`confirm-level ${levelClass(change.to)}`}>{LEVEL_NAME[change.to]}</span>
+            <span className={`confirm-level ${levelClass(change.to)}`}>{change.labels?.[change.to] ?? LEVEL_NAME[change.to]}</span>
           </div>
         )}
         <div className="confirm-body">{children}</div>

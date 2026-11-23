@@ -18,8 +18,12 @@ import { relativeTime } from "./health/format";
 export const EVERYONE_OPTIONS: ReadonlyArray<{ value: TeamAccessMode; label: string; hint: string }> = [
   { value: "open", label: "Can edit", hint: "Members can open and change every note" },
   { value: "readonly", label: "Can view", hint: "Members can open every note, but not change it" },
-  { value: "private", label: "No access", hint: "Members only see what a group or their own setting gives them" },
+  { value: "private", label: "Only what's shared", hint: "Everyone, owners and admins too, sees only what's shared with them or their groups" },
 ];
+
+/** Default access's third level in its own words: the board and a person's
+ * own level keep "No access", where it really means nothing at all. */
+export const DEFAULT_PRIVATE_LABEL = "Only what's shared";
 
 /** The Default access row (the vault's team access, the old "Everyone" row). */
 export const DEFAULT_ACCESS_TITLE = "Default access";
@@ -72,9 +76,9 @@ export function needsAccessConfirm(from: TeamAccessMode | "custom" | null, to: T
 /** The Everyone row's label. A never-shared vault reads as No access, with a
  * sub-line explaining that authors keep their own notes. */
 export function everyoneLabel(mode: TeamAccessMode, posture: TeamAccessPosture): { label: string; sub: string | null } {
-  if (posture === "none") return { label: "No access", sub: "Members keep notes they wrote" };
+  if (posture === "none") return { label: DEFAULT_PRIVATE_LABEL, sub: "Members also keep notes they wrote" };
   const option = EVERYONE_OPTIONS.find((o) => o.value === mode);
-  return { label: option?.label ?? "No access", sub: null };
+  return { label: option?.label ?? DEFAULT_PRIVATE_LABEL, sub: null };
 }
 
 /** Case-insensitive name/email filter for the people table. */
@@ -235,7 +239,7 @@ export function reduceAccessCopy(
       ? (scope.self ? "Remove your access to this vault?" : `Remove ${scope.name}'s access to this vault?`)
       : (scope.self ? "Make yourself view only across the vault?" : `Make ${scope.name} view only across the vault?`);
   } else {
-    title = to === "private" ? "Set default access to No access?" : "Set default access to Can view?";
+    title = to === "private" ? `Set default access to ${DEFAULT_PRIVATE_LABEL}?` : "Set default access to Can view?";
   }
   return { title, button, outcome };
 }

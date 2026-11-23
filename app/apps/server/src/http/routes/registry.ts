@@ -282,41 +282,35 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       [id, organizationId, name, requestEncryption, session.userId],
     );
 
-    // Shared-with-team by default: a brand-new vault gets an org-wide `edit`
-    // grant, so anyone invited can read and write its notes the moment they
-    // join.
+    // Only what's shared by default (decided 2026-11-23): a brand-new vault is
+    // SEALED for the team (an org `denied` row: nobody, owners and admins
+    // included, reads anything until something is shared with them or their
+    // group), and people who join later start there too (`join_default`
+    // private). The person creating it gets Can edit everything as THEIR OWN
+    // level (a per-user vault `edit` row, "person wins either way"): without
+    // it they could not read or add a note in their own vault, and turning on
+    // sync for a folder of notes would fail to upload them. It is an ordinary
+    // personal setting, so it shows on their profile and can be lowered.
     //
-    // This replaces an earlier private-by-default posture. That one was right
-    // about solo vaults and wrong about what vaults are FOR: you invited
-    // someone, and they landed on an empty sidebar with no way to ask for
-    // access. Owners can still lock a vault down — Access panel → Private
-    // (`setVaultMode` in AccessPanel.tsx) sends `PUT /api/orgs/:orgId/team-access`,
-    // which drops this row AND every per-folder/per-file org grant with it.
+    // This reverses the 2026-07-30 shared-by-default posture, for NEW vaults
+    // only: existing vaults keep whatever they have.
     //
-    // Only on the first collection. The grant is keyed on the ORG (one org can
-    // own several collections and the grant covers all of them), so re-running
-    // it later would resurrect a grant an owner had deliberately revoked —
-    // silently re-opening a vault they had set to Private. A default is only a
-    // default at creation time; after that the owner's choice is the truth.
+    // Only on the first collection. These rows are keyed on the ORG (one org
+    // can own several collections), so re-running them later would overwrite
+    // what an owner chose since. A default is only a default at creation time.
     if (isFirstVault) {
       await pool.query(
         `INSERT INTO shares
            (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
-         VALUES ($1, $2, 'vault', $2, 'org', $2, 'edit', $3)
+         VALUES ($1, $2, 'vault', $2, 'org', $2, 'denied', $4),
+                ($3, $2, 'vault', $2, 'user', $4, 'edit', $4)
          ON CONFLICT (resource_type, resource_id, principal_type, principal_id) DO NOTHING`,
-        [randomUUID(), organizationId, session.userId],
+        [randomUUID(), organizationId, randomUUID(), session.userId],
       );
-      // …and for the people invited LATER, too. The future-member default
-      // (migration 032) starts `private`, which hid every note that existed
-      // before someone joined: a vault that read as shared showed a new
-      // teammate an empty sidebar. `open` is what migration 033 maps an
-      // org-wide `edit` vault grant to, so the two halves now agree. Same
-      // first-collection rule as the grant: after creation the owner's
-      // choice (Access → Everyone) is the truth.
       await pool.query(
         `INSERT INTO organization_access_settings (organization_id, join_default)
-         VALUES ($1, 'open')
-         ON CONFLICT (organization_id) DO UPDATE SET join_default = 'open', updated_at = now()`,
+         VALUES ($1, 'private')
+         ON CONFLICT (organization_id) DO UPDATE SET join_default = 'private', updated_at = now()`,
         [organizationId],
       );
     }

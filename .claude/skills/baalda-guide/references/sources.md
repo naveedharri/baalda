@@ -72,9 +72,9 @@ Do a targeted read of one file, never a sweep. Good entry points:
 
 ## Known stale spots (trust the code / CLAUDE.md over these)
 
-- `README.md` and `docs/specs/04-team-collaboration.md` say notes are *private by default*. The
-  current behaviour is *shared with the team by default* for new vaults (see `CLAUDE.md`,
-  "permissions/resolver"); older vaults stayed private.
+- `README.md` and `docs/specs/04-team-collaboration.md` say notes are *private by default*. Since
+  2026-11-23 new vaults start on *Only what's shared* again, with the creator on Can edit everything
+  (see `CLAUDE.md`, "permissions/resolver"); vaults created from 2026-07-30 to 2026-11-22 started shared.
 - `docs/specs/REQUIREMENTS.md` lists graph view, semantic search and version history as
   deferred. All three shipped.
 - `CHANGELOG.md` at the repo root is abandoned; use `docs/RELEASE_NOTES.md`.

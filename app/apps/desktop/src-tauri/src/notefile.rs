@@ -33,6 +33,62 @@ pub fn temp_sibling(parent: &Path, file_name: &str) -> PathBuf {
     parent.join(format!(".{file_name}.{}.{n}.tmp", std::process::id()))
 }
 
+/// The process id in one of OUR atomic-write temp names
+/// (`.{file_name}.{pid}.{n}.tmp`, [`temp_sibling`]), or `None` for any other
+/// name. Strict on purpose: only this exact shape is ever swept, so a user's
+/// own `.notes.tmp` or an editor's `~WRL0001.tmp` is never touched.
+pub fn temp_sibling_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (head, n) = rest.rsplit_once('.')?;
+    let (file, pid) = head.rsplit_once('.')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if file.is_empty() || !digits(pid) || !digits(n) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// How long an unchanged temp file of ANOTHER process waits before it counts as
+/// debris. A download streams into its temp file, so its modified time keeps
+/// moving while it is written; one untouched this long has no writer left.
+pub const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Remove the temp files a killed or crashed run left behind (found by the
+/// four-app test, 2026-11-23: a member app killed mid-download kept three
+/// `.Audio ….tmp` files forever; a video would leave hundreds of MB).
+///
+/// Only [`temp_sibling_pid`] names, only regular files (never through a
+/// symlink), never this process's own (`own_pid`: a write may be in flight)
+/// and never one modified within `max_age` (another Baalda process on the
+/// same folder may still be writing it). `.git` and `node_modules` are not
+/// walked: nothing Baalda writes lives there. Returns how many were removed.
+pub fn sweep_stale_temp_files(root: &Path, own_pid: u32, max_age: std::time::Duration) -> usize {
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    let walk = walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
+        !(e.file_type().is_dir() && matches!(e.file_name().to_str(), Some(".git" | "node_modules")))
+    });
+    for entry in walk.flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(pid) = entry.file_name().to_str().and_then(temp_sibling_pid) else { continue };
+        if pid == own_pid {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else { continue };
+        let Ok(modified) = meta.modified() else { continue };
+        if now.duration_since(modified).map_or(true, |age| age < max_age) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(e) => log::warn!("[temp-sweep] could not remove {}: {e}", entry.path().display()),
+        }
+    }
+    removed
+}
+
 /// Read a `.md` note to a string (vault-relative path).
 pub fn read_note(vault: &Path, rel: &str) -> AppResult<String> {
     let abs = resolve_in_vault(vault, rel)?;
@@ -708,6 +764,70 @@ fn join_rel(parent_rel: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn temp_sibling_pid_reads_only_our_own_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let ours = temp_sibling(dir.path(), "note.md");
+        let name = ours.file_name().unwrap().to_str().unwrap();
+        assert_eq!(temp_sibling_pid(name), Some(std::process::id()));
+        assert_eq!(temp_sibling_pid(".Audio mp3.mp3.37240.36.tmp"), Some(37240));
+        assert_eq!(temp_sibling_pid(".a.b.c.md.12.0.tmp"), Some(12));
+        for other in [
+            ".note.md.tmp",       // import_export's single name, not swept
+            ".notes.tmp",
+            ".x.abc.3.tmp",
+            ".x.12.tmp",
+            "~WRL0001.tmp",
+            "note.md.12.3.tmp",   // no leading dot: a user's file
+            "..12.3.tmp",         // no file name
+            ".note.md.12.3.TMP2",
+            "note.md",
+        ] {
+            assert_eq!(temp_sibling_pid(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn sweep_removes_only_old_temp_files_of_other_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("Folder/Deep")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let debris = [
+            root.join(".Audio mp3.mp3.37240.36.tmp"),
+            root.join("Folder/Deep/.Video mov.mov.37240.40.tmp"),
+        ];
+        let keep = [
+            root.join(format!(".mine.md.{}.1.tmp", std::process::id())), // own process
+            root.join(".git/.HEAD.37240.1.tmp"),                          // not walked
+            root.join(".notes.tmp"),
+            root.join("Folder/note.md"),
+            root.join("Folder/report.37240.1.tmp"),
+        ];
+        for p in debris.iter().chain(keep.iter()) {
+            std::fs::write(p, b"x").unwrap();
+        }
+        // Everything was written just now: with the real age nothing goes.
+        assert_eq!(sweep_stale_temp_files(root, std::process::id(), STALE_TEMP_AGE), 0);
+        assert!(debris.iter().all(|p| p.exists()));
+        // Old enough: only the other process's temp files go.
+        assert_eq!(sweep_stale_temp_files(root, std::process::id(), std::time::Duration::ZERO), 2);
+        assert!(debris.iter().all(|p| !p.exists()));
+        assert!(keep.iter().all(|p| p.exists()), "kept files must survive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_never_follows_a_symlinked_folder() {
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join(".other.md.37240.1.tmp");
+        std::fs::write(&target, b"x").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        assert_eq!(sweep_stale_temp_files(dir.path(), std::process::id(), std::time::Duration::ZERO), 0);
+        assert!(target.exists());
+    }
     use super::*;
 
     /// #221: a vault root that moved away while the app was open is never

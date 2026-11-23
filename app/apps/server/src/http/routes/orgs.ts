@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole } from "../../permissions/lookup.js";
+import { nextAccessRevision } from "../../permissions/access-management.js";
 import { forgetMemberKeys } from "../../crypto/member-keys.js";
 import { getSession } from "../session.js";
 import { canAddMember } from "../../billing/entitlements.js";
@@ -1007,10 +1008,36 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
         )
       : { rows: [] as Array<{ id: string; vault_id: string }> };
 
-    await withAuditActor(session.userId, client => client.query(
-      `UPDATE member SET role = $1 WHERE "organizationId" = $2 AND "userId" = $3`,
-      [role, orgId, targetUserId],
-    ));
+    await withAuditActor(session.userId, async (client) => {
+      await client.query(
+        `UPDATE member SET role = $1 WHERE "organizationId" = $2 AND "userId" = $3`,
+        [role, orgId, targetUserId],
+      );
+      // Owners and admins START at Can edit everything (decided 2026-11-23): a
+      // member made admin gets it as their own vault level, unless they already
+      // have a level of their own (any per-user vault row, which is kept as it
+      // is). In a vault on Only what's shared they would otherwise manage a
+      // vault they can't see. An ordinary personal setting: it can be lowered.
+      if (role === "admin") {
+        const own = await client.query(
+          `SELECT 1 FROM shares
+            WHERE resource_type = 'vault' AND resource_id = $1
+              AND principal_type = 'user' AND principal_id = $2`,
+          [orgId, targetUserId],
+        );
+        if (own.rows.length === 0) {
+          const revision = await nextAccessRevision(client, orgId);
+          await client.query(
+            `INSERT INTO shares
+               (id, org_id, resource_type, resource_id, principal_type, principal_id,
+                permission, created_by, access_revision)
+             VALUES ($1, $2, 'vault', $2, 'user', $3, 'edit', $4, $5)
+             ON CONFLICT (resource_type, resource_id, principal_type, principal_id) DO NOTHING`,
+            [randomUUID(), orgId, targetUserId, session.userId, revision],
+          );
+        }
+      }
+    });
 
     // A role change flips effective permissions in BOTH directions, but the
     // `readOnly` flag is baked into the sync token and only checked at connect

@@ -220,8 +220,24 @@ export function MemberProfilePage({
               <dd>{present ? "Online" : "Away"}</dd>
             </dl>
             {canAct && (
-              <div className="member-profile-remove">
-                <button className="link-btn danger" onClick={onRemove}>Remove from {vaultName}</button>
+              <div className="vault-local-only-card member-profile-remove">
+                <span className="vault-local-only-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="9" cy="8" r="4" />
+                    <path d="M2 21a7 7 0 0 1 14 0" />
+                    <path d="M17 11h5" />
+                  </svg>
+                </span>
+                <div className="vault-local-only-copy">
+                  <strong>Remove from {vaultName}</strong>
+                  <span className="field-hint">
+                    {name} loses access to {vaultName}, and its folder is removed from their computer. What they
+                    wrote stays with the team.
+                  </span>
+                </div>
+                <button className="vault-local-only-action" onClick={onRemove}>
+                  Remove
+                </button>
               </div>
             )}
           </>
@@ -249,7 +265,7 @@ export function MemberProfilePage({
                 personVaultMode={vaultFrom}
                 onItemWritten={onItemWritten}
                 onChanged={onChanged}
-                hideSetEverything
+                headExtra={viewToggle}
               />
             )}
           />
@@ -697,6 +713,9 @@ function PersonAccess({ orgId, member, teamAccess, groups = null, onChanged, onI
   return (
     <div className="member-profile-access">
       {error && <div className="auth-error">{error}</div>}
+      {view === "board" ? (
+        sources?.sentence ? <p className="member-access-sources muted">{sources.sentence}</p> : null
+      ) : (
       <div className="members-access-row">
         <span className="members-access-row-copy">
           <span className="members-access-row-title">Across the vault</span>
@@ -721,6 +740,7 @@ function PersonAccess({ orgId, member, teamAccess, groups = null, onChanged, onI
         />
         {viewToggle}
       </div>
+      )}
       {view === "board" ? (
         <div className="member-access-board-pane">{typeof board === "function" ? board(map) : board}</div>
       ) : !serverTree ? (

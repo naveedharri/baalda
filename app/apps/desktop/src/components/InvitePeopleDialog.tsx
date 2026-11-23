@@ -15,6 +15,8 @@ import { MenuSelect } from "./MenuSelect";
 import { UpgradeDialog } from "./UpgradeDialog";
 
 type InviteAccess = TeamAccessMode | "default";
+
+const SEES_NOTHING = "They won't see any notes until you share something with them or add them to a group.";
 /** The Access menu's values: a level, or a group to join (`group:<id>`, toggles). */
 type AccessChoice = InviteAccess | `group:${string}` | "groups";
 
@@ -30,9 +32,14 @@ const ACCESS_LEVELS: ReadonlyArray<{ value: TeamAccessMode; label: string }> = [
  * it keeps the person on the vault's setting rather than pinning that level.
  * Only while that setting is unknown is a separate "Vault default" row shown.
  */
-export function inviteAccessOptions(newMembersAccess: TeamAccessMode | null): Array<{ value: InviteAccess; label: string; hint?: string; tag?: string }> {
-  if (!newMembersAccess) {
-    return [...ACCESS_LEVELS, { value: "default", label: "Vault default", hint: "Whatever the New members setting says" }];
+export function inviteAccessOptions(
+  newMembersAccess: TeamAccessMode | null,
+  role: "member" | "admin" = "member",
+): Array<{ value: InviteAccess; label: string; hint?: string; tag?: string }> {
+  // An admin starts on an explicit Can edit everything, so every level stays a
+  // level of its own here, with the vault default as a separate choice.
+  if (!newMembersAccess || role === "admin") {
+    return [...ACCESS_LEVELS, { value: "default", label: "Vault default", hint: "What people who join with the code get" }];
   }
   return ACCESS_LEVELS.map((o) => (o.value === newMembersAccess ? { value: "default" as const, label: o.label, tag: "Default" } : o));
 }
@@ -55,10 +62,12 @@ export function addChips(chips: readonly string[], text: string): string[] {
  * messages the old Members tab showed (emailed / no email server / email
  * failed, with the link to share).
  */
-export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembersAccess = null, onNewMembersAccess, canManageBilling = false, seatAccount = null, ownerName = null, groups = [], onClose, onInvited }: {
+export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembersAccess = null, defaultAccess = null, onNewMembersAccess, canManageBilling = false, seatAccount = null, ownerName = null, groups = [], onClose, onInvited }: {
   orgId: string;
   /** For the join-code sentence. */
   vaultName?: string;
+  /** Default access (the vault's team mode), for the "won't see any notes" warning. */
+  defaultAccess?: TeamAccessMode | null;
   /** The vault's New members setting: what someone who joins by code gets. */
   newMembersAccess?: TeamAccessMode | null;
   /** Change the New members setting from the Join code tab (owners/admins). */
@@ -80,6 +89,17 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
   const [draft, setDraft] = useState("");
   const [role, setRole] = useState<"member" | "admin">("member");
   const [access, setAccess] = useState<InviteAccess>("default");
+  // Owners and admins start with Can edit everything (their own level, which
+  // can still be lowered later); members start on the vault default. Switching
+  // the role moves the Access choice along until it is picked by hand.
+  const [accessPicked, setAccessPicked] = useState(false);
+  const chooseRole = (next: "member" | "admin") => {
+    setRole(next);
+    if (!accessPicked) setAccess(next === "admin" ? "open" : "default");
+    // The member menu shows the New members level as "default": keep a hand
+    // pick of that level on an entry that exists there.
+    else if (next === "member" && access === newMembersAccess) setAccess("default");
+  };
   // Groups to join on acceptance. Picking any means no personal level: a
   // personal vault-wide level would make the groups do nothing (the server
   // refuses both together).
@@ -87,7 +107,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
   const groupIds = role === "admin" ? [] : joinGroups.filter((id) => groups.some((g) => g.id === id));
   const accessValue: AccessChoice = groupIds.length ? "groups" : access;
   const accessOptions: ReadonlyArray<{ value: AccessChoice; label: string; hint?: string; section?: string; checked?: boolean }> = [
-    ...inviteAccessOptions(newMembersAccess),
+    ...inviteAccessOptions(newMembersAccess, role),
     ...groups.map((g, i) => ({
       value: `${GROUP_OPTION}${g.id}` as const,
       label: g.name,
@@ -104,6 +124,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
       return;
     }
     setAccess(v as InviteAccess);
+    setAccessPicked(true);
     setJoinGroups([]);
   };
   const groupsLabel = groupIds.length
@@ -175,6 +196,17 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
     }
   };
 
+  // Nothing to open yet: they'd land on an empty sidebar. A level of their own
+  // (No access) is not lifted by groups, so that case names their access instead.
+  const codeSeesNothing = newMembersAccess === "private" && defaultAccess === "private";
+  const emailWarning = groupIds.length
+    ? null
+    : access === "private"
+      ? "They won't see any notes until you change their access."
+      : access === "default" && codeSeesNothing
+        ? SEES_NOTHING
+        : null;
+
   const prewarning = seatAccount ? invitePrewarning(seatAccount, ownerName, canManageBilling) : null;
 
   // A people limit is ONE notice, whether the whole call was refused or some
@@ -230,7 +262,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
             <div className="invite-code-row">
               <span>
                 People who join get
-                <small>The vault's New members setting</small>
+                <small>Of the notes made before they join; later ones follow Default access</small>
               </span>
               {newMembersAccess && onNewMembersAccess ? (
                 <MenuSelect<TeamAccessMode>
@@ -246,7 +278,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
               )}
             </div>
             <div className="invite-foot">
-              <span className="invite-foot-hint">They join as Members.</span>
+              <span className={`invite-foot-hint${codeSeesNothing ? " is-warning" : ""}`}>{codeSeesNothing ? SEES_NOTHING : "They join as Members."}</span>
               <button type="button" className="ghost-pill" onClick={onClose}>Done</button>
             </div>
           </>
@@ -292,7 +324,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
             <MenuSelect
               value={role}
               options={[{ value: "member", label: "Member" }, { value: "admin", label: "Admin", hint: "Can manage people and access" }]}
-              onSelect={setRole}
+              onSelect={chooseRole}
               ariaLabel="Role"
               triggerClassName="invite-field-trigger"
               menuClassName="access-menu"
@@ -363,7 +395,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
           );
         })}
         <div className="invite-foot">
-          <span className="invite-foot-hint">They get an email with a link.</span>
+          <span className={`invite-foot-hint${emailWarning ? " is-warning" : ""}`}>{emailWarning ?? "They get an email with a link."}</span>
           <div className="confirm-actions invite-people-actions">
             <button type="button" className="ghost-pill" onClick={onClose}>{results ? "Done" : "Cancel"}</button>
             <AsyncButton

@@ -9231,7 +9231,7 @@ button.secondary:active:not(:disabled),
   overflow-wrap: anywhere;
 }
 .member-profile-remove {
-  padding-top: var(--sp-4);
+  margin-top: var(--sp-5);
 }
 .member-access-board-pane {
   margin: var(--sp-2) 0 0;
@@ -9901,7 +9901,15 @@ button.member-access-twisty:hover {
 }
 .access-board-intro {
   margin: 0;
+  margin-right: auto;
   color: var(--text-secondary);
+}
+.access-board-head-extra { display: inline-flex; }
+/* Board view of a person's Access tab: where their access comes from, as one
+   plain line above the board (its "Set everything to" is the vault-wide control). */
+.member-access-sources {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-xs);
 }
 /* Nothing on the board is text to select: a drag used to paint selections
    across column titles and the empty placeholder. */

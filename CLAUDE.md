@@ -567,6 +567,11 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     persist; they now `holdUntil` that finishes, so a feed update or promote in the window waits.
     Before, a cold apply opened from a local store lacking the bridge's last ops while the file had
     them, and either merged that text in again (an offline edit arrived twice) or wrote over it.
+  - **Unfinished temp files are swept at vault open** (`notefile.rs sweep_stale_temp_files`, background
+    thread in `open_vault_impl`): an app killed mid-download or mid-save left its `.{name}.{pid}.{n}.tmp`
+    forever (hidden, never synced, but its bytes stayed). Only that exact name shape, regular files,
+    another process id and unmodified for `STALE_TEMP_AGE` (10 min, so another Baalda process on the
+    folder is never cut off mid-write); `.git`/`node_modules` are not walked, symlinks never followed.
 - **Paths compare case-insensitively everywhere** — notes (`samePath`) AND folders in `planInbound`, like
   the server's `lower(path)` unique indexes and the outbound `registry.ts` adoption. A vault whose disk
   said `Projects/community` while the server said `Projects/Community` (with empty server folders under
@@ -626,12 +631,17 @@ Vault Settings has ONE **Members and access** tab (id `members`; the old `access
 inside Vault Settings with a back link, not a dialog; rows open it on click; tabs Personal info /
 Access / Activity), `InvitePeopleDialog.tsx`, pure logic in `lib/membersAccess.ts`. Owners/admins see the
 **Default access** row (the vault's team access, called "Everyone in <vault>" until 2026-11-22; Can edit / Can view /
-No access = wire `open`/`readonly`/`private`; copy says it is where every member STARTS and that groups and
-personal settings change it), the
-**New members** row ("For notes made before they joined": Can edit / Can view / No access
-= `join_default`), and a per-person Access cell (Can edit everything / Can view everything /
+**Only what's shared** = wire `open`/`readonly`/`private`; that third label is Default access's alone, while a
+person's own level and the board keep "No access"; copy says it is where every member STARTS, that groups and
+personal settings change it, and that it applies to owners and admins too). The **New members** setting
+(`join_default`, notes made before someone joined) has NO row in Vault Settings since 2026-11-23: it lives in the
+invite dialog (the Access level tagged Default, and the Join code tab's "People who join get"); groups' auto-join
+is set on the group page. Making a member an admin (`PATCH /orgs/:orgId/members/:userId`) gives them a per-user vault `edit` row unless they
+already have a per-user vault row (kept as is; demotion leaves it). The invite's Access starts on "Can edit everything" for Admin and on the vault default
+for Member until picked by hand, and warns when the person would see nothing ("…until you share something with
+them or add them to a group", or for an explicit No access "…until you change their access"). Then a per-person Access cell (Can edit everything / Can view everything /
 No access / Custom; hovering it says where that comes from, `membersAccess.ts accessSources().lines`, with no
-visible second line; the profile's Access tab says it in one sentence under "Across the vault", `accessSources().sentence`) plus a ⋯ menu (View profile, Manage access, Make admin/member, Remove). Plain
+visible second line; the profile's Access tab says it in one sentence, `accessSources().sentence`: under the List's "Across the vault" row, or as a plain line above the Board, whose own "Set everything to" is the vault-wide control there) plus a ⋯ menu (View profile, Manage access, Make admin/member, Remove). Plain
 members get a read-only roster from `GET /orgs/:orgId/members/overview`. Who may change one person's access is one rule,
 `lib/membersAccess.ts canManageMemberAccess` mirrored by the server's `access-management.ts` helper
 (bulk access, per-user `POST /shares`, the share reset): an owner manages anyone, themselves included;
@@ -656,7 +666,7 @@ move applies at once with no confirm and no undo; the app's standard toast state
 ("Sara can now view X."). **Confirms are for destructive changes only**, i.e. a target of No access
 (`private`): the Everyone row, a person's vault-wide level, a List row/note change, the board's Set
 everything to → No access, Add all → No access, Remove all and Reset to vault default. Can view, Can edit, Set
-everything to → Can view and the New members row never confirm. Access levels are colour-coded
+everything to → Can view and the invite's New members level never confirm. Access levels are colour-coded
 everywhere (List and Members-table pills, board column headers, drag highlight, landing pulse):
 Can edit green, Can view amber, No access grey, Custom/Mixed neutral, from `--access-{edit,view,none}-{bg,fg}`
 in `src/styles/tokens.css` (light and dark).
@@ -675,9 +685,9 @@ owner excluded); removing someone disconnects only the docs that group reached. 
 rows), read through `access-board?groupId=`; `GET /locks` returns the caller's group `edit` rows as lifts, and a group's Can view as the caller's own `readonly` row (`reason: "group_view"`, id `group-view:<id>`, never removable by Unlock — `lib/locks.ts isRemovableLock`) on the topmost visible view-only folder or item, resolving only the subtrees a group can view.
 Skills: `skill_group_access` (required/optional), inherited level = max(Everyone, groups). Invites carry
 `groupIds` (with an access level too ⇒ 400 `access_or_groups`). Management follows `canManageMemberAccess`.
-UI: a People | Groups toggle with one search under the Everyone/New members rows, a Groups column of chips,
+UI: a People | Groups toggle with one search under the Default access row, a Groups column of chips,
 a group page (Members / Access board / Skills / Activity), the person page's Groups row, and groups listed in
-the Everyone menu (opens the group), the New members menu (toggles auto-join) and the invite Access menu
+the Default access menu (opens the group), the group page (auto-join) and the invite Access menu
 (join groups instead of a level). `MenuSelect` options take `section` and `checked` for those lists.
 **Ticking people** (owners/admins): the People table leads with checkboxes (a row is tickable when
 `canSetMemberAccess` or `canActOnMember` allows it; invitations never). Ticking cross-fades the toolbar into
@@ -972,11 +982,12 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   attachment search and whole-vault checkpoint revert), everyone else only what a readable note references (matched on each note's
   reference excerpt `note_index.ref_text` when its `ref_heads` cover the anchors, else its full text;
   `blobs/ref-windows.ts`, migration 063, #343). **New
-  vaults are shared with their team by default** — `POST /api/vaults` creates the org-wide `edit`
-  grant, but only alongside the org's *first* collection, so re-running it can't resurrect a grant an
-  owner revoked via Access → Private. (This reverses the private-by-default posture of 2026-07-21,
-  which left an invited teammate on an empty sidebar with no way to ask for access.) Vaults that
-  predate the reversal are untouched: no grant means private, and the owner flips it in Access. Keep
+  vaults start on Only what's shared** (decided 2026-11-23, reversing the 2026-07-30 shared default for
+  NEW vaults only) — `POST /api/vaults`, alongside the org's *first* collection only, writes the org
+  `denied` vault row (sealed: owners and admins included), `join_default = private`, and a per-user
+  vault `edit` row for the CREATOR (without it they could not read or add a note, and turning on sync
+  for a folder of notes would fail to upload). Re-running on a later collection writes nothing, so an
+  owner's later choice sticks. Existing vaults keep whatever they have. Keep
   this in lockstep with `permissions/vault-docs.ts` (the readable-set dual that gates live sync +
   registry listings). The Access panel's vault-level control is **"Entire vault"** and **enforces** a
   mode rather than defaulting it: `PUT /api/orgs/:orgId/team-access` (`http/routes/shares.ts`,
@@ -1016,8 +1027,8 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `join_default` (Private by default), per-membership snapshots and an ordered ACL revision, and
   migration 033 seeds that default ONCE from each existing vault's posture (org-wide vault grant
   `edit` → `open`, `view` → `readonly`, sealed or ungranted → `private`) so a Shared team sees no
-  change. A vault created later gets `open` alongside its org-wide `edit` grant (`POST /api/vaults`,
-  first collection only), so people who join afterwards see the notes that already exist. Only
+  change. Vaults created from 2026-09-30 to 2026-11-22 got `open` alongside an org-wide `edit` grant;
+  since 2026-11-23 a new vault gets `private` (see "New vaults start on Only what's shared"). Only
   content that already existed when someone joined uses that snapshot; a team grant written before
   a Private join stays hidden, while a later Everyone action has a newer revision and deliberately
   opens the selected subtree. Existing memberships have no snapshot and are unchanged. The default
