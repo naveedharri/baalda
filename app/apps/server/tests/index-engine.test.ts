@@ -8,6 +8,7 @@ import {
   localEmbedder,
   tokenize,
 } from "../src/index/embedder.js";
+import { searchTokenSet } from "../src/index/search-tokens.js";
 
 describe("wikilink parsing", () => {
   it("extracts plain [[targets]]", () => {
@@ -74,6 +75,24 @@ describe("local embedder (default, offline)", () => {
 describe("embedder helpers", () => {
   it("tokenize lowercases and splits on non-word chars", () => {
     expect(tokenize("Hello, World_2!")).toEqual(["hello", "world_2"]);
+  });
+
+  it("preserves the existing ASCII embedding buckets", () => {
+    const expected = new Array<number>(EMBED_DIM).fill(0);
+    for (const bucket of [27, 162, 171]) expected[bucket] = 1 / Math.sqrt(3);
+    expect(embed("Hello WORLD_2 123")).toEqual(expected);
+  });
+
+  it("keeps Korean letters alongside ASCII digits and underscores", () => {
+    expect(tokenize("파일 드래그앤드롭 ABC_12 v1.0")).toEqual([
+      "파일", "드래그앤드롭", "abc_12", "v1", "0",
+    ]);
+    expect(embed("회의록").some((value) => value !== 0)).toBe(true);
+  });
+
+  it("keeps non-ASCII letters in the stored search token set", () => {
+    expect(tokenize("Café ÉCOLE 日本語")).toEqual(["café", "école", "日本語"]);
+    expect(searchTokenSet("회의록 작성, 회의록!")).toBe("회의록 작성");
   });
 
   it("l2normalize leaves an all-zero vector unchanged", () => {
@@ -231,6 +250,55 @@ describe("indexer — boot backfill", () => {
       )
     ).rows[0].updated_at.getTime();
     expect(freshAfter).toBe(freshBefore); // untouched
+  });
+});
+
+describe("indexer — Korean note search", () => {
+  beforeEach(async () => {
+    const { resetDb } = await import("./helpers/db.js");
+    await resetDb();
+  });
+
+  it("ranks Korean body text and keeps unreadable notes outside the candidate set", async () => {
+    const { indexDoc, searchNoteIndex } = await import("../src/index/indexer.js");
+    const { appendUpdate } = await import("../src/yjs/persistence.js");
+    const { listReadableDocsInVault } = await import("../src/permissions/vault-docs.js");
+    const { seedOrg, seedVault, seedNote, seedUser, seedMember, seedShare } = await import("./helpers/seed.js");
+    const Y = await import("yjs");
+    const org = await seedOrg("Korean Search", "korean-search");
+    const owner = await seedUser("owner@korean-search.test");
+    const member = await seedUser("member@korean-search.test");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, member, "member");
+    const vault = await seedVault(org);
+    const ids: string[] = [];
+    for (const [path, text] of [["attachment.md", "드래그앤드롭 파일 첨부"], ["meeting.md", "회의록 작성 담당"], ["private.md", "드래그앤드롭 비공개기밀"]]) {
+      const id = await seedNote(vault, null, path, owner);
+      const doc = new Y.Doc();
+      doc.getText("content").insert(0, text);
+      await appendUpdate(id, Y.encodeStateAsUpdate(doc));
+      doc.destroy();
+      await indexDoc(id);
+      ids.push(id);
+    }
+    await seedShare(org, "file", ids[0], member, "view");
+    await seedShare(org, "file", ids[1], member, "view");
+    const readable = await listReadableDocsInVault(member, vault);
+    expect(readable.has(ids[2])).toBe(false);
+    const search = (query: string) => searchNoteIndex({ vaultId: vault, query, k: 10, readableDocIds: readable, includeFiles: false });
+    const hits = await search("드래그앤드롭");
+    expect(hits[0].docId).toBe(ids[0]);
+    expect(hits[0].score).toBeGreaterThan(0);
+    expect(hits.map((hit) => hit.docId)).not.toContain(ids[2]);
+    expect((await search("회의록"))[0].docId).toBe(ids[1]);
+    expect((await search("비공개기밀")).map((hit) => hit.docId)).not.toContain(ids[2]);
+    // Existing contract: empty/zero-match queries may return zero-score candidates.
+    // Do not confuse these fallback hits with relevant answers.
+    for (const query of ["", "없는검색어가나다라마바사아자차카타파하"]) {
+      const fallback = await search(query);
+      expect(fallback).toHaveLength(2);
+      expect(fallback.every((hit) => hit.score === 0)).toBe(true);
+    }
   });
 });
 

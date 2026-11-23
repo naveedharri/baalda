@@ -526,11 +526,13 @@ function extOf(relPath: string): string {
  * notes the caller may not read are never scored (they'd be a content oracle).
  * The same rule governs the FILE pass — see `searchBlobText`.
  *
- * Note on `lower()`: query tokens are ASCII by construction (`tokenize` yields
- * `[a-z0-9_]+`), and Postgres `lower()` matches JS `toLowerCase()` on ASCII, so
- * substring matching is equivalent for every realistic input. Exotic Unicode
- * that case-folds INTO ASCII (e.g. U+212A KELVIN SIGN) is the only place the two
- * could disagree, and only in the small keyword-boost term.
+ * Note on `lower()`: query tokens are Unicode letter/number/underscore runs
+ * (`tokenize` yields `[\p{L}\p{N}_]+`). Postgres `lower()` matches JS
+ * `toLowerCase()` on ASCII and on uncased scripts (Hangul, CJK), so substring
+ * matching is equivalent there. Cased non-ASCII letters follow the database
+ * collation in the SQL fallback, and exotic Unicode that case-folds INTO ASCII
+ * (e.g. U+212A KELVIN SIGN) can disagree; both affect only the small
+ * keyword-boost term.
  */
 export async function searchNoteIndex(opts: {
   vaultId: string;
