@@ -90,6 +90,8 @@ export interface RemoteBlob {
   id: string;
   sha256: string;
   relPath: string | null;
+  /** The `files` row these bytes are (null for an `attachments/` drop). */
+  docId?: string | null;
 }
 
 /** Injected I/O, so the queue runs under vitest without Tauri or a server. */
@@ -152,6 +154,9 @@ export interface BinaryDeleteDeps {
    * deleted the moved file for everyone.
    */
   isOwnMoveSource?: (relPath: string) => boolean;
+  /** Drop only this path's id mapping: the same id lives on at another path
+   *  (a move), so what this device knows about its bytes stays. */
+  forgetStalePath?: (relPath: string) => void;
   /** Forget a registration whose file is gone. */
   forgetFileId(relPath: string): void;
   /** Move one to the path its bytes turned up at. */
@@ -477,6 +482,9 @@ export class BinaryDeleteQueue {
 
       const blobByPath = new Map<string, RemoteBlob>();
       for (const b of server) if (b.relPath) blobByPath.set(key(b.relPath), b);
+      /** Where the server holds each `files` id now. */
+      const pathById = new Map<string, string>();
+      for (const b of server) if (b.docId && b.relPath) pathById.set(b.docId, b.relPath);
       const localBySha = new Map<string, LocalBinary[]>();
       for (const a of local) {
         const list = localBySha.get(a.sha256);
@@ -492,6 +500,19 @@ export class BinaryDeleteQueue {
       const deletes: Array<{ relPath: string; blob: RemoteBlob | null }> = [];
       for (const item of gone) {
         const blob = blobByPath.get(key(item.relPath));
+        // The id this name maps to lives on at ANOTHER path on the server: the
+        // file moved (a teammate's move this device followed), and this name is
+        // a stale mapping left by a pass that read its listings mid-move. A
+        // delete by id here removed the moved file for everyone.
+        const mappedId = this.deps.fileId(item.relPath);
+        const livesAt = mappedId ? pathById.get(mappedId) : undefined;
+        if (!blob && livesAt && key(livesAt) !== key(item.relPath)) {
+          console.info(
+            `[attachments] ${item.relPath} moved to ${livesAt} on the server — not a delete`,
+          );
+          this.deps.forgetStalePath?.(item.relPath);
+          continue;
+        }
         if (!blob) {
           // The server never held these bytes: nothing that could ever come
           // back down, and so no copy to protect. The note queue's `isPushed`

@@ -606,6 +606,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     is never a binary delete (`BinaryDeleteQueue` skips `isOwnMoveSource`), and `setFileId` never maps an
     id back onto that name while it lives elsewhere: a blob pass reading its listings mid-move named the
     old path again, and the old name's echo deleted the moved file for everyone (4 of 41 in one move).
+    The drain also refuses a delete whose `files` id the server lists at ANOTHER path (no time limit;
+    `forgetStaleFilePath` drops just that name), and `moveFileId` tells the blob mirror's own id cache
+    (`setFileMovedListener` → `noteFileMoved`). Rust's binary walk skips a file or folder that
+    vanishes mid-walk: one vanished entry used to fail the whole listing, and every folder-move pairing.
     A note the planned listing named but the post-apply re-read no longer does (a teammate deleted it
     while the pass ran) is suppressed at BOTH its mapped and its listed path (a note this pass moved
     already sits at the listing's path while the mapping names the old one until the pass ends), never

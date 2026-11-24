@@ -336,7 +336,12 @@ fn hash_listing(
             Some(sha) => sha,
             None => {
                 hashed += 1;
-                sha256_file(&abs)?
+                match sha256_file(&abs) {
+                    Ok(sha) => sha,
+                    // Gone between the walk and its hash: not in the listing.
+                    Err(_) if !abs.exists() => continue,
+                    Err(e) => return Err(e.into()),
+                }
             }
         };
         cache.insert(
@@ -369,14 +374,31 @@ fn walk(
     keep: &dyn Fn(&str) -> bool,
     out: &mut Vec<(String, PathBuf, u64, i64)>,
 ) -> AppResult<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+    // A file or folder that disappears while the walk runs (a move, a download's
+    // rename, an editor's save) is simply not in the listing: it is gone. Failing
+    // the whole walk instead stopped every pass that needed it, folder-move
+    // pairing included, for as long as anything in the vault kept changing.
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && dir != vault => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
         let name = entry.file_name().to_string_lossy().to_string();
         if is_ignored_name(&name) {
             continue; // skip dotfiles / .context / .git / node_modules and our .*.tmp writes
         }
         let path = entry.path();
-        let file_type = entry.file_type()?;
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
         if file_type.is_dir() {
             // The vault's sync rules (#401): never walked, never uploaded.
             if crate::sync_rules::excludes(vault, &rel_from(vault, &path), true) {
@@ -388,7 +410,11 @@ fn walk(
             if !keep(&rel) || crate::sync_rules::excludes(vault, &rel, false) {
                 continue;
             }
-            let meta = entry.metadata()?;
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
             out.push((rel, path, meta.len(), mtime_ns(&meta)));
         }
     }
@@ -884,6 +910,29 @@ mod tests {
             .build()
             .unwrap()
             .block_on(f)
+    }
+
+    #[test]
+    fn a_file_gone_between_walk_and_hash_is_left_out_of_the_listing() {
+        // A folder moved (or a download renamed into place) while the walk ran:
+        // the file the walk saw is not there to hash. It used to fail the whole
+        // listing, and with it every folder-move pairing in the vault.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("Docs")).unwrap();
+        std::fs::write(tmp.path().join("Docs/kept.pdf"), b"%PDF-1").unwrap();
+        let found = vec![
+            ("Docs/gone.pdf".to_string(), tmp.path().join("Docs/gone.pdf"), 6, 1),
+            ("Docs/kept.pdf".to_string(), tmp.path().join("Docs/kept.pdf"), 6, 1),
+        ];
+        let listing = hash_listing(found, &HashMap::new()).unwrap();
+        let paths: Vec<_> = listing.items.iter().map(|i| i.rel_path.as_str()).collect();
+        assert_eq!(paths, vec!["Docs/kept.pdf"]);
+        // A whole subfolder gone mid-walk is skipped the same way.
+        let mut out = Vec::new();
+        walk(tmp.path(), &tmp.path().join("Moved away"), &|_| true, &mut out).unwrap();
+        assert!(out.is_empty());
+        // The vault root itself missing is still an error.
+        assert!(walk(&tmp.path().join("nope"), &tmp.path().join("nope"), &|_| true, &mut out).is_err());
     }
 
     #[test]

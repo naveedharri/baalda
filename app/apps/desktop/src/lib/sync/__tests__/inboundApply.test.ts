@@ -569,11 +569,15 @@ describe("inbound rename", () => {
     const reg = new VaultRegistry(fakeApi({ notes: [] }));
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
     (reg as unknown as { fileByPath: Map<string, string> }).fileByPath.set("Old/a.png", "f1");
+    const movedSeen: Array<[string, string, string]> = [];
+    reg.setFileMovedListener((from, to, id) => movedSeen.push([from, to, id]));
     vi.mocked(ipc.renamePath).mockImplementationOnce((async () => "New/a.png") as never);
     expect(await reg.followFileMove("Old/a.png", "New/a.png")).toBe(true);
 
     reg.setFileId("Old/a.png", "f1");
     expect(reg.getFileId("Old/a.png")).toBeNull();
+    // …and the blob mirror's own id cache was told, so it drops the old name too.
+    expect(movedSeen).toEqual([["Old/a.png", "New/a.png", "f1"]]);
     expect(reg.getFileId("New/a.png")).toBe("f1");
     // Another id at that name (a new file the person put there) still maps.
     reg.setFileId("Old/a.png", "f2");

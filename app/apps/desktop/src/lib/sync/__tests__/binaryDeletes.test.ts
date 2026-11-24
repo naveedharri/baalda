@@ -588,6 +588,35 @@ describe("suppressNext — the revocation's claim on its own echo", () => {
     expect(h.deleted).toEqual(["file-1"]);
   });
 
+  it("a name whose id the server holds at another path is a stale mapping, not a delete", async () => {
+    // The own-move mark can be gone (aged out, another device's pass). The
+    // server listing is the evidence that does not age: the id moved.
+    const stale: string[] = [];
+    const h = harness({
+      local: [],
+      server: [{ ...blob("b1", "New/small-12.csv"), docId: "file-1" }],
+      onDisk: [],
+      fileIds: { "Old/small-12.csv": "file-1", "New/small-12.csv": "file-1" },
+    });
+    h.deps.forgetStalePath = (relPath) => stale.push(relPath);
+    h.queue.noteChanged("Old/small-12.csv");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+    expect(h.blobsDeleted).toEqual([]);
+    expect(stale).toEqual(["Old/small-12.csv"]);
+
+    // The same id at THIS path on the server is an ordinary delete.
+    const h2 = harness({
+      local: [],
+      server: [{ ...blob("b1", "Old/small-12.csv"), docId: "file-1" }],
+      onDisk: [],
+      fileIds: { "Old/small-12.csv": "file-1" },
+    });
+    h2.queue.noteChanged("Old/small-12.csv");
+    await h2.queue.drain();
+    expect(h2.deleted).toEqual(["file-1"]);
+  });
+
   it("closes a window already open for the path", async () => {
     // The watcher can beat the plan: a `tree` event lands, then the revocation
     // removes the same file. The pending entry is ours now, not the user's.

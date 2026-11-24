@@ -1934,6 +1934,20 @@ export class VaultRegistry {
     this.persist();
   }
 
+  private fileMovedListener: ((from: string, to: string, id: string) => void) | null = null;
+
+  /** Told of every registration that moved with its file (see {@link moveFileId}). */
+  setFileMovedListener(fn: ((from: string, to: string, id: string) => void) | null): void {
+    this.fileMovedListener = fn;
+  }
+
+  /** Drop one path's id mapping and nothing else: the same `files` id lives on
+   *  at another path, so its confirmation and base stay with it. */
+  forgetStaleFilePath(relPath: string): void {
+    if (this.stale()) return;
+    if (this.fileByPath.delete(relPath)) this.persist();
+  }
+
   /** Forget a tree binary whose file is gone (the delete queue drained it), so
    *  a path re-used later registers afresh instead of adopting a dead id. */
   forgetFileId(relPath: string): void {
@@ -2036,6 +2050,7 @@ export class VaultRegistry {
     if (!id) return;
     this.fileByPath.delete(from);
     this.fileByPath.set(to, id);
+    this.fileMovedListener?.(from, to, id);
     // `filesConfirmed` is keyed by doc_id precisely so a move needs no entry of
     // its own: the row travelled, and so did what we know about its bytes.
     this.persist();

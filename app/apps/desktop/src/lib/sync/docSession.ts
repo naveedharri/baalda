@@ -8374,6 +8374,7 @@ export class SyncManager implements InboundHost {
       fileId: (relPath) => registry.getFileId(relPath),
       isOwnRemoval: (relPath) => registry.isOwnRemoval(relPath),
       isOwnMoveSource: (relPath) => registry.isOwnMoveSource(relPath),
+      forgetStalePath: (relPath) => registry.forgetStaleFilePath(relPath),
       // The mirror caches ids per path too, and consults that cache BEFORE the
       // registry. Forgetting only the registry's copy left the dead id live for
       // the rest of the session: a file that came back uploaded under a row
@@ -8639,6 +8640,11 @@ export class SyncManager implements InboundHost {
       onDownloadsQueued: (count) => this.handleBinaryDownloads(count, scope),
       onDownloadSettled: (outcome) => this.handleBinaryDownloadSettled(outcome, scope),
     });
+    // The registry follows teammates' moves; the mirror caches ids by path and
+    // must not keep the old name (a file made there later would upload under the
+    // moved file's id and pull it back).
+    const mirror = this.attachments;
+    registry.setFileMovedListener?.((from, to, id) => mirror.noteFileMoved(from, to, id));
   }
 
   /**

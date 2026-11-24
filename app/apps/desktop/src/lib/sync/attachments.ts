@@ -1519,6 +1519,12 @@ export class AttachmentSync {
     this.deps.setFileBase?.(docId, sha256);
   }
 
+  /** The registry moved a registration with its file: the cached id follows. */
+  noteFileMoved(from: string, to: string, id: string): void {
+    if (this.fileIds.get(from) === id) this.fileIds.delete(from);
+    this.fileIds.set(to, id);
+  }
+
   private docIdFor(relPath: string): string | null {
     return this.fileIds.get(relPath) ?? this.deps.knownFileId?.(relPath) ?? null;
   }
