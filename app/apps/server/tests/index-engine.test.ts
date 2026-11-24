@@ -90,6 +90,18 @@ describe("embedder helpers", () => {
     expect(embed("회의록").some((value) => value !== 0)).toBe(true);
   });
 
+  it("keeps combining marks inside a word (Devanagari, Thai)", () => {
+    expect(tokenize("हिन्दी में खोज")).toEqual(["हिन्दी", "में", "खोज"]);
+    expect(tokenize("ภาษาไทย ค้นหา")).toEqual(["ภาษาไทย", "ค้นหา"]);
+  });
+
+  it("treats a precomposed and a decomposed accent as the same word", () => {
+    expect(tokenize("cafe\u0301")).toEqual(["café"]);
+    expect(tokenize("caf\u00e9")).toEqual(["café"]);
+    expect(embed("cafe\u0301")).toEqual(embed("caf\u00e9"));
+    expect(searchTokenSet("Re\u0301sume\u0301 draft")).toBe("résumé draft");
+  });
+
   it("keeps non-ASCII letters in the stored search token set", () => {
     expect(tokenize("Café ÉCOLE 日本語")).toEqual(["café", "école", "日本語"]);
     expect(searchTokenSet("회의록 작성, 회의록!")).toBe("회의록 작성");

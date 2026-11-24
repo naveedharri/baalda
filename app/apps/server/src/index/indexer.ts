@@ -527,7 +527,7 @@ function extOf(relPath: string): string {
  * The same rule governs the FILE pass — see `searchBlobText`.
  *
  * Note on `lower()`: query tokens are Unicode letter/number/underscore runs
- * (`tokenize` yields `[\p{L}\p{N}_]+`). Postgres `lower()` matches JS
+ * (`tokenize` yields NFC `[\p{L}\p{M}\p{N}_]+`). Postgres `lower()` matches JS
  * `toLowerCase()` on ASCII and on uncased scripts (Hangul, CJK), so substring
  * matching is equivalent there. Cased non-ASCII letters follow the database
  * collation in the SQL fallback, and exotic Unicode that case-folds INTO ASCII

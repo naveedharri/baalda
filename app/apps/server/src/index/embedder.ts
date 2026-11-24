@@ -18,9 +18,19 @@ export interface Embedder {
   embed(text: string): number[];
 }
 
-/** Split into lowercase word tokens (Unicode letter/number/underscore runs). */
+/**
+ * Split into lowercase word tokens: runs of Unicode letters, combining marks,
+ * numbers and underscore, after NFC normalization.
+ *
+ * Combining marks belong to the word: Devanagari, Thai, Arabic and other
+ * scripts spell words with them (`हिन्दी` is letters AND marks), and without
+ * \p{M} each such word fell apart into single letters. NFC first, so the same
+ * word typed precomposed (`é`) or decomposed (`e` + U+0301, common in text
+ * from macOS) yields one token. ASCII is NFC-invariant, so ASCII tokens (and
+ * their embedding buckets) are unchanged.
+ */
 export function tokenize(text: string): string[] {
-  const matches = text.toLowerCase().match(/[\p{L}\p{N}_]+/gu);
+  const matches = text.normalize("NFC").toLowerCase().match(/[\p{L}\p{M}\p{N}_]+/gu);
   return matches ?? [];
 }
 

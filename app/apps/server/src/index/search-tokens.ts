@@ -26,7 +26,10 @@ export const SEALED_TOKENS_MAX = 1024 * 1024;
  * Non-ASCII query tokens (Hangul, CJK, accented Latin, ...) are lowered by JS
  * on both the query and the stored side of the app path. Uncased scripts such
  * as Hangul and CJK match identically in the SQL fallback too; for cased
- * non-ASCII letters the SQL fallback follows the database collation.
+ * non-ASCII letters the SQL fallback follows the database collation. `tokenize`
+ * also NFC-normalizes and the SQL fallback does not, so a fallback row whose text
+ * is DECOMPOSED (`e` + U+0301) misses a query typed precomposed; token-set rows
+ * normalize both sides.
  */
 const UNSAFE_LOWER: ReadonlySet<number> = (() => {
   const set = new Set<number>([0x130, 0x212a]);
@@ -52,8 +55,8 @@ export function hasUnsafeLowercase(text: string): boolean {
 /**
  * The derived keyword set search scores against instead of reading note text in
  * SQL: unique `tokenize()` output in first-seen order, joined by single spaces.
- * A query token (always `[\p{L}\p{N}_]+`) is a substring of `lower(text)` exactly
- * when it is a substring of one maximal `[\p{L}\p{N}_]` run, i.e. of one token, so
+ * A query token (always `[\p{L}\p{M}\p{N}_]+`, NFC) is a substring of `lower(text)`
+ * exactly when it is a substring of one maximal `[\p{L}\p{M}\p{N}_]` run, i.e. of one token, so
  * `set.includes(q)` reproduces the old `position(q IN lower(text)) > 0` (the
  * space separator is outside the alphabet and can never be part of a match).
  *
