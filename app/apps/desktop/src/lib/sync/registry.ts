@@ -3219,6 +3219,8 @@ export class VaultRegistry {
     const removalTotal = plan.trash.length + plan.removeFolders.length;
     if (removalTotal > 0) this.sink.phase("removing", removalTotal);
     const bulkRemoval = useBulkPath(plan.trash.length);
+    /** Parent folders of the notes a teammate deleted that this pass removed. */
+    const deletedNoteParents = new Set<string>();
     /** path → `.context/trash` copy made for unseen work before removal. */
     // The disk's binary hashes, listed once per pass and only if a revoked
     // binary needs them. A failed listing answers null: kept, never deleted.
@@ -3431,6 +3433,9 @@ export class VaultRegistry {
         this.baselineDocs.delete(gone.docId);
         this.authoredDocs.delete(gone.docId);
         this.host?.noteRemoved(gone.docId, gone.path, null, gone.reason, bulkRemoval);
+        if (gone.reason === "deleted" && gone.path.includes("/")) {
+          deletedNoteParents.add(gone.path.slice(0, gone.path.lastIndexOf("/")));
+        }
         this.sink.item("ok");
       }
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -3519,6 +3524,41 @@ export class VaultRegistry {
     // in the outbound half, which can tell new work from leftovers.
     const listedFolderIds = new Set(args.serverFolders.map((f) => f.id));
     const listedFolderPath = new Map(args.serverFolders.map((f) => [f.id, f.path] as const));
+    // A folder a teammate's delete just emptied that NO server folder owns (the
+    // directories a followed move created, deleted before this device recorded
+    // their ids): removed, deepest first and empty-only, up to the first folder
+    // the server knows. Left, the outbound half saw an empty unknown folder and
+    // registered it, bringing the deleted folder back, empty, for everyone.
+    {
+      const known = new Set(
+        [...args.serverFolders.map((f) => f.path), ...this.folderByPath.keys(), ...this.revokedFolders.keys()].map(pathKey),
+      );
+      const tried = new Set<string>();
+      const chains = [...deletedNoteParents].sort((a, b) => b.split("/").length - a.split("/").length);
+      for (const start of chains) {
+        if (this.stopRun()) break;
+        for (let dir = start; dir; dir = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "") {
+          const key = pathKey(dir);
+          if (known.has(key) || tried.has(key)) break;
+          tried.add(key);
+          this.markOwnRemovals([dir]);
+          let removed = false;
+          try {
+            removed = await ipc.deleteFolderIfEmpty(dir, this.epoch());
+          } catch (e) {
+            this.forgetOwnRemoval(dir);
+            if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
+            break;
+          }
+          if (!removed) {
+            this.forgetOwnRemoval(dir);
+            break;
+          }
+          changedDisk = true;
+          this.markMaterialized(dir);
+        }
+      }
+    }
     // Empty directories inside a folder being removed that no server folder
     // owns (a teammate's move made them while the folder was being deleted):
     // gone first, deepest first, each empty-only. Left, they held the dead
@@ -6957,7 +6997,11 @@ export class VaultRegistry {
    * it. The mapping was never dropped, so nothing is re-registered and the
    * delete is not retried. Reported once per note per session.
    */
-  async restoreRefusedDelete(relPath: string, docId: string): Promise<boolean> {
+  async restoreRefusedDelete(
+    relPath: string,
+    docId: string,
+    detail: string = NOT_CREATOR_DETAIL,
+  ): Promise<boolean> {
     if (this.stale()) return false;
     let created = false;
     try {
@@ -6983,7 +7027,7 @@ export class VaultRegistry {
         kind: "restoredFromServer",
         docId,
         path: relPath,
-        detail: NOT_CREATOR_DETAIL,
+        detail,
       });
     }
     return true;

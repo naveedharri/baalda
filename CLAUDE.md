@@ -291,7 +291,9 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   and an EXACTLY empty file of a mapped note is written back from the local CRDT 5 s later
   (`readOnlyDocs.setEmptyFileRefiller` → `materializeContent`, re-checked before writing; at launch
   `closedAppEdits` `refillEmpty` does the same before any merge), so emptied notes no longer stay empty. A disk delete the server refuses on the creator rule (403
-  `delete_not_creator` / `folder_has_others_items`, per item in a batch) is put back, never retried:
+  `delete_not_creator` / `folder_has_others_items`, per item in a batch) or on view-only access (403
+  `no_edit_permission`, a bare 403 from older servers, a batch item's `denied`; detail
+  `VIEW_ONLY_DELETE_DETAIL`, 2026-11-24: it used to stay gone on this device until some later pull) is put back, never retried:
   `registry.restoreRefusedDelete` re-creates the file create-only, fills it from the local CRDT, owes
   one `consumeMaterialized` echo and records one `restoredFromServer` entry (detail
   `NOT_CREATOR_DETAIL`, `lib/sync/deletePolicy.ts`), the held banner's Delete for everyone included.
@@ -389,7 +391,13 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   sidebar's recursive one), regardless of authorship. A revoked removal also `docStore.drop`s +
   `ipc.clearYjsDoc`s, so `ready` stops re-naming it; a DELETION drops the local CRDT the same way
   (`noteRemoved`, 2026-11-19), so a checkpoint restore of a purged note can never merge stale ops into
-  it. The deletion cap is never lifted. **Nothing is ever written to `.context/trash` any more
+  it. **Teammates' deletions have no cap** (decided 2026-11-24, `inbound.ts`): a deletion is planned
+  only for an explicit tombstone matched by id, so a truncated listing cannot produce one (absence takes
+  the revocation path, which keeps `revokeCap` and the access-check). The old 20% cap refused a big
+  folder delete again on every pass, leaving the notes on a member's disk for good, unsyncable; a
+  runaway client is stopped at the source by the outbound disk-delete cap. A folder those deletions
+  emptied that no server folder owns (directories a followed move created) is removed too, deepest
+  first and empty-only, or the outbound half registered it and the deleted folder came back. **Nothing is ever written to `.context/trash` any more
   (decided 2026-11-19, "deleted means deleted"):** deletes, revocations, read-only reconciliation,
   refused read-only edits, unsendable edits, binary three-way conflicts and server-wins merges all
   replace or remove the local bytes without a copy, and say so in the reconcile summary / Activity.
@@ -463,7 +471,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   custom line is not honoured there and they upload what it hides (a server-side refusal is not built).
   Membership loss (`delete_departed_vault` → `remove_departed_contents`) deletes every path the
   folder's own config registered (`docs`/`files`/`folders`, `parked` included — hidden by a rule is
-  still the team's), every file the vault would sync under its cached rules, and `.context`; only
+  still the team's), every file the vault would sync under its cached rules, the root `.baaldaignore` (the team's rules text) and `.context`; only
   files never registered that could not sync (a local checkout's own files, `.git`, unsynced types)
   and symlinks stay, and the notice names the folder (narrows the 2026-10-09 whole-folder delete).
 - **One-step creates** (`registry.ts registerNotesBatched`, pure packing/classification in
@@ -525,7 +533,11 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   setting the banner on that raw event flashed "was removed" on every rename until the move was
   paired. The check now runs after `DISK_DELETE_GRACE_MS` + `OPEN_NOTE_REMOVED_SLACK_MS` (500 ms) and
   shows only if the open note STILL sits on that path and `ipc.noteExists` says missing (a throw
-  shows nothing); `noteRemovedSynced` is sampled when the file vanished. `store.renameNoteFileExact`
+  shows nothing). It says "permanently removed for the team" only once the server ACCEPTED this
+  session's delete (`syncManager.wasDeletedForTeam` / `setDeletedForTeamListener`, keyed by the doc
+  id sampled when the file vanished), and it clears when the file is back at that path: a member's
+  refused delete or move of a teammate's or view-only note is put back, and the banner used to say it
+  was removed for everyone anyway. `store.renameNoteFileExact`
   re-points the open note, tabs, order and sorts right after the disk rename, BEFORE the server
   PATCH (a PATCH failure only warns). Empty notes pair too (`sync/emptyRename.ts
   pickUniqueEmptyRename`): every 0-byte placeholder hashes the same, so a renamed empty note used to
@@ -584,8 +596,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     unmaterializable rename keeps the note mapped at its current path (`heldRenames`; an occupied
     destination keeps #129). The folder carry SKIPS a file the server tombstoned (`ready.tombstones` plus `GET file-tombstones`,
     fetched BEFORE planning whenever a known folder moved and files sit under it) and leaves it to the
-    attachment pass's tombstone removal (by id, with no per-pass limit; deleted NOTES keep the
-    deletion cap), and a followed file released mid-rename is removed at its new path.
+    attachment pass's tombstone removal (by id, with no per-pass limit, like deleted notes), and a followed file released mid-rename is removed at its new path.
     A note the planned listing named but the post-apply re-read no longer does (a teammate deleted it
     while the pass ran) is suppressed at BOTH its mapped and its listed path (a note this pass moved
     already sits at the listing's path while the mapping names the old one until the pass ends), never
@@ -617,6 +628,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     through `registry.idToPathIndex()` (`lockScopesByPath` `index`), never the LAZY tree: a padlock
     on an unexpanded folder used to resolve to no path. Server `groupViewLocks` reports a group's
     Can view on a subfolder whose parent the group does not reach (it used to report nothing).
+  - **Transfers run smallest first** (`attachments.ts smallestFirst`, uploads and downloads): the
+    pass's first item runs alone as the server probe and a file over the 32 MiB in-flight budget runs
+    alone too, so a fresh device whose first listed binary was a 150 MB video downloaded nothing else
+    for 85 s. Big files now go at the end of the pass.
   - **A file beside notes held over the cap stays too** (`BinaryDeleteDeps.noteDeleteVerdict` →
     `docSession.binaryBesideNoteDeletes`): the binary queue waits while a note delete window is
     open or being decided, and for 60 s after an over-cap note batch refuses files in, above or below

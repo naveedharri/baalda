@@ -110,6 +110,7 @@ const fakeRegistry = vi.hoisted(() => {
     }),
     revertRefusedMove: vi.fn(async (_from: string, _to: string) => true),
     recordFailure: vi.fn((_f: unknown) => {}),
+    restoreRefusedDelete: vi.fn(async (_p: string, _d: string, _detail?: string) => true),
     // ---- #419: paths the registry removed from disk ITSELF ----
     ownRemovals: new Set<string>(),
     isOwnRemoval: vi.fn((relPath: string) => reg.ownRemovals.has(relPath)),
@@ -1806,10 +1807,10 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     );
   });
 
-  it("reports a note the server refused, and leaves the rest deleted", async () => {
+  it("puts back a note the server refused as view-only, and leaves the rest deleted", async () => {
     // The batch answers per item. A `denied` note keeps its mapping inside the
     // registry (pinned by `registryDeleteBatch.test.ts`); here the session must
-    // report it and NOT treat it as propagated.
+    // put it back (the delete did not happen) and NOT treat it as propagated.
     const sm = new SyncManager();
     const notes = mapMany(200);
     await live(sm);
@@ -1827,9 +1828,8 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     );
     await drain();
 
-    const refusals = fakeRegistry.recordFailure.mock.calls.map((c) => c[0] as { path: string });
-    expect(refusals).toHaveLength(1);
-    expect(refusals[0].path).toBe("D3.md");
+    expect(fakeRegistry.recordFailure).not.toHaveBeenCalled();
+    expect(fakeRegistry.restoreRefusedDelete.mock.calls.map((c) => c[0])).toEqual(["D3.md"]);
   });
 
   it("takes the OPEN note's provider down with the delete, not just its file", async () => {

@@ -1552,14 +1552,30 @@ export default function App() {
               // delete drain's grace window is over, and only if the note still
               // sits on this path and the file is still missing.
               const path = e.path;
-              const synced = !!useStore.getState().docIdByPath[path];
+              // Sampled now: propagating the delete drops the mapping.
+              const docId = useStore.getState().docIdByPath[path] ?? null;
               scheduleOpenNoteRemovedCheck(path, {
                 delayMs: DISK_DELETE_GRACE_MS + OPEN_NOTE_REMOVED_SLACK_MS,
                 currentPath: () => useStore.getState().openNote?.path ?? null,
                 exists: (p) => ipc.noteExists(p, useStore.getState().vault?.epoch),
-                setRemoved: () => useStore.getState().setNoteRemoved(true, synced),
+                setRemoved: () =>
+                  useStore
+                    .getState()
+                    .setNoteRemoved(true, docId !== null && syncManager.wasDeletedForTeam(docId), docId),
               });
             } else {
+              // The file is back (a refused delete or move was put back, or
+              // the person restored it): the "deleted on disk" banner is wrong now.
+              if (useStore.getState().noteRemoved) {
+                const back = e.path;
+                void ipc
+                  .noteExists(back, useStore.getState().vault?.epoch)
+                  .then((ok) => {
+                    const s = useStore.getState();
+                    if (ok && s.noteRemoved && s.openNote?.path === back) s.setNoteRemoved(false);
+                  })
+                  .catch(() => {});
+              }
               // Route the edit into the bridge; it debounces, drops our own echo,
               // and merges genuine external edits live into the open Y.Text.
               //

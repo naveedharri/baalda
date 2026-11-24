@@ -952,6 +952,11 @@ pub fn remove_departed_contents(target: &Path) -> AppResult<usize> {
             if rel.is_empty() && name == ".context" && ft.is_dir() {
                 continue; // removed last, after everything it describes
             }
+            // The vault's sync rules: the team's text, written here by sync.
+            if rel.is_empty() && name == crate::sync_rules::RULES_FILE && ft.is_file() {
+                std::fs::remove_file(&path).map_err(io_ctx("delete a file", &path))?;
+                continue;
+            }
             if ft.is_symlink() {
                 *kept += 1;
                 continue;
@@ -3879,6 +3884,7 @@ mod tests {
         w("projects/app/node_modules/x/index.js");
         w(".obsidian/app.json");
         w("tools/setup.exe");
+        w(".baaldaignore");
         let kept = remove_departed_contents(&v).unwrap();
         // Synced content and the CRDT store are gone, and the emptied folder too.
         // Synced content, what the vault registered anywhere (a parked note under
@@ -3890,6 +3896,7 @@ mod tests {
             "projects/app/context.md",
             "projects/app/code/synced-before-the-rule.md",
             "projects/app/node_modules/x",
+            ".baaldaignore",
             ".context",
         ] {
             assert!(!v.join(gone).exists(), "{gone} should be removed");
@@ -3914,6 +3921,7 @@ mod tests {
         std::fs::write(v2.join(".context/config.json"), "{}").unwrap();
         std::fs::create_dir_all(v2.join("A")).unwrap();
         std::fs::write(v2.join("A/n.md"), "x").unwrap();
+        std::fs::write(v2.join(".baaldaignore"), "/build/\n").unwrap();
         assert_eq!(remove_departed_contents(&v2).unwrap(), 0);
         assert!(!v2.exists());
     }

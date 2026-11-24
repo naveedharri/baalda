@@ -372,17 +372,17 @@ export function isSafeFolderPath(path: string): boolean {
 /**
  * Ceilings on how much one pass may change, per category.
  *
- * A teammate tidying up deletes a few notes; a bug in this file, a permission
- * glitch, or a truncated response "deletes" most of the vault. There is no rule
- * that tells those apart from the inside, so we cap the blast radius instead:
- * over the line, the whole category is abandoned and reported as a failure, and
- * the next pull gets to decide again with fresh data.
- *
- * This is the guard that would have caught the incident that destroyed 428 notes.
+ * Teammates' DELETIONS have no ceiling (2026-11-24). A deletion is planned only
+ * for a note the server sent an explicit tombstone for, matched by id, so a
+ * truncated or glitched listing cannot produce one: a note that is merely absent
+ * takes the revocation path below, which keeps its cap and its access-check. The
+ * old 20% deletion cap could not tell a teammate's big folder delete from a bug,
+ * and since the refused notes stay in the baseline it refused them again on every
+ * pass: they stayed on a member's disk for good, unsyncable, with the badge in
+ * error. A runaway client is stopped at the source instead, by the outbound
+ * disk-delete cap (`docSession.drainDiskDeletes`), and checkpoints bring back a
+ * mistaken delete.
  */
-function trashCap(mapped: number): number {
-  return Math.max(5, Math.ceil(mapped * 0.2));
-}
 /**
  * Revocation gets a more generous budget than deletion.
  *
@@ -809,8 +809,8 @@ function applyBreakers(
   // On an AUTHORITATIVE pass the revocation budget is lifted (see
   // `InboundInput.authoritative`): the cap's whole job is to disbelieve a
   // shrunken listing, and here the listing is the server's completed answer to
-  // "what may this user read now". The DELETION budget is never lifted — that
-  // one guards work, not access.
+  // "what may this user read now". Deletions have no budget at all (see
+  // `revokeCap`'s neighbour comment above).
   //
   // When the server also NAMED the revoked docs (`InboundInput.authoritativeRevoked`)
   // the lift is narrowed to those, so a listing that shrinks with nothing
@@ -836,7 +836,6 @@ function applyBreakers(
       : (t: InboundTrash) => t.reason === "revoked" && namedRevoked.has(t.docId)
     : () => false;
   const caps: Array<[InboundTrash["reason"], number, string]> = [
-    ["deleted", trashCap(mapped), "deletions"],
     ["revoked", revokeCap(mapped), "access removals"],
   ];
   for (const [reason, cap, label] of caps) {

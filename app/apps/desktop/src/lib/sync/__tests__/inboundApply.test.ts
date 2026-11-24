@@ -817,10 +817,10 @@ describe("inbound rename", () => {
   });
 
   it("never registers notes or folders a teammate moved and then deleted while the pass ran", async () => {
-    // A teammate moves Src to Dst and deletes it moments later. This pass
-    // follows the move (the notes now sit under Dst), the re-read listing has
-    // none of them, and the next pass's delete is over the limit, so they stay
-    // on disk. Neither the notes nor Dst may register as new.
+    // A teammate moves Src to Dst and deletes its subfolder moments later. This
+    // pass follows the move (the notes now sit under Dst), the re-read listing
+    // has none of them, and the next pass removes them. Neither the notes nor
+    // the emptied Dst/lang/docs (no server folder owns it) may register as new.
     const disk = new FakeDisk();
     disk.folders.add("Src");
     disk.folders.add("Src/lang");
@@ -886,6 +886,8 @@ describe("inbound rename", () => {
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
     expect(mkNote.mock.calls.map((c) => c[0].relPath)).toEqual([]);
     expect(mkFolder.mock.calls.map((c) => c[0].path)).toEqual([]);
+    expect([...disk.notes.keys()].filter((p) => p.startsWith("Dst/lang/docs/"))).toEqual([]);
+    expect(disk.folders.has("Dst/lang/docs")).toBe(false);
   });
 
   it("removes, never re-registers, notes a teammate moved and then deleted while the pass ran", async () => {
@@ -940,9 +942,9 @@ describe("inbound rename", () => {
     expect(disk.notes.has("Dst/b.md")).toBe(false);
   });
 
-  it("the folder follow neither moves nor removes deleted files the delete limit refused", async () => {
-    // Eight deleted files against a limit of five: neither carried to the new
-    // folder (that re-creates the delete) nor removed past the limit.
+  it("the folder follow never carries deleted files to the new folder; it removes them", async () => {
+    // Eight deleted files: carried to the new folder they would re-create the
+    // delete. Deletions have no limit, so they go.
     const disk = new FakeDisk();
     disk.folders.add("Big");
     disk.notes.set("Big/n.md", "d1");
@@ -965,8 +967,7 @@ describe("inbound rename", () => {
     const moved = vi.mocked(ipc.renamePath).mock.calls.map((c) => `${c[0]} → ${c[1]}`);
     expect(moved).toContain("Big/keep.png → Big2/keep.png");
     expect(moved.some((m) => m.includes("gone"))).toBe(false);
-    expect(vi.mocked(ipc.deleteFile).mock.calls.some((c) => String(c[0]).includes("gone"))).toBe(false);
-    expect(files.get("Big/gone0.png")).toBe("fg0");
+    expect(vi.mocked(ipc.deleteFile).mock.calls.filter((c) => String(c[0]).includes("gone"))).toHaveLength(8);
   });
 
   it("marks a teammate's rename as its own move, so the watcher echo is never a user rename", async () => {

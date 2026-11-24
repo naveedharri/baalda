@@ -1221,7 +1221,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const noteOrg = await vaultOrg(row.vault_id);
     if (!(await canEditDoc(session.userId, id))) {
       if (await refusedForBilling(noteOrg)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
-      return c.json({ error: "You cannot delete this note" }, 403);
+      return c.json({ error: "You cannot delete this note", code: "no_edit_permission" }, 403);
     }
     const noteGate = noteOrg
       ? await canDeleteItem(pool, { orgId: noteOrg, userId: session.userId, kind: "note", id })

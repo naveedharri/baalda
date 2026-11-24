@@ -13,7 +13,15 @@
 import { markAccessTreeStale } from "../accessTreeStale";
 import { isAttachmentWanted, onAttachmentWanted } from "../attachmentArrivals";
 import type { VaultAppearanceSettings } from "../appearanceSettings";
-import { NOT_CREATOR_DETAIL, NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
+import {
+  NOT_CREATOR_DETAIL,
+  NOT_CREATOR_MESSAGE,
+  VIEW_ONLY_DELETE_DETAIL,
+  VIEW_ONLY_DELETE_MESSAGE,
+  isNoEditDeleteRefusal,
+  isNotCreatorCode,
+  notCreatorCodeOf,
+} from "./deletePolicy";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
@@ -1517,6 +1525,24 @@ export class SyncManager implements InboundHost {
    */
   setAclListener(cb: (() => void) | undefined): void {
     this.onAclChangedListener = cb;
+  }
+
+  /** Doc ids whose disk delete THIS session sent to the server and the server
+   *  accepted: the only evidence that a note is "removed for the team". */
+  private readonly deletedForTeam = new Set<string>();
+  private onDeletedForTeam: ((docId: string) => void) | undefined;
+
+  /** Did the server accept this session's delete of that doc? */
+  wasDeletedForTeam(docId: string): boolean {
+    return this.deletedForTeam.has(docId);
+  }
+
+  /** UI subscribes here to re-word the open note's "deleted on disk" banner
+   *  once the delete actually reached the team (never before the server said so:
+   *  a refused delete or move is put back, and the banner used to say "removed
+   *  for the team" anyway). */
+  setDeletedForTeamListener(cb: ((docId: string) => void) | undefined): void {
+    this.onDeletedForTeam = cb;
   }
 
   /**
@@ -3037,6 +3063,8 @@ export class SyncManager implements InboundHost {
           `${d.relPath} was deleted on this device and removed from the server for everyone`,
           { docId: d.docId, path: d.relPath },
         );
+        this.deletedForTeam.add(d.docId);
+        this.onDeletedForTeam?.(d.docId);
         // The OPEN note keeps its bridge deliberately. The editor is still
         // mounted (the banner offers to close it), and destroying the Y.Doc
         // under CodeMirror throws on the next keystroke — which is why the
@@ -3125,6 +3153,7 @@ export class SyncManager implements InboundHost {
       if (!scope.isCurrent()) return propagated;
       const byPath = new Map(outcomes.map((o) => [o.path, o]));
       const putBack: Array<{ docId: string; relPath: string }> = [];
+      const viewOnly: Array<{ docId: string; relPath: string }> = [];
       for (const d of deleted) {
         const out = byPath.get(d.relPath);
         if (out?.status === "deleted") {
@@ -3135,9 +3164,14 @@ export class SyncManager implements InboundHost {
           putBack.push(d);
           continue;
         }
+        if (out?.status === "denied") {
+          viewOnly.push(d);
+          continue;
+        }
         refused(d, out?.reason ?? "the server did not answer for this note", out?.code ?? null);
       }
       await this.putBackNotCreator(putBack, scope);
+      await this.putBackNotCreator(viewOnly, scope, VIEW_ONLY_DELETE_MESSAGE);
       return propagated;
     }
 
@@ -3150,6 +3184,10 @@ export class SyncManager implements InboundHost {
         } catch (e) {
           if (notCreatorCodeOf(e)) {
             await this.putBackNotCreator([d], scope);
+            return;
+          }
+          if (isNoEditDeleteRefusal(e)) {
+            await this.putBackNotCreator([d], scope, VIEW_ONLY_DELETE_MESSAGE);
             return;
           }
           // Offline, or the server refused (no edit grant). The mapping is
@@ -3178,14 +3216,16 @@ export class SyncManager implements InboundHost {
   private async putBackNotCreator(
     items: ReadonlyArray<{ docId: string; relPath: string }>,
     scope: VaultScope,
+    why: string = NOT_CREATOR_MESSAGE,
   ): Promise<void> {
+    const detail = why === VIEW_ONLY_DELETE_MESSAGE ? VIEW_ONLY_DELETE_DETAIL : NOT_CREATOR_DETAIL;
     for (const d of items) {
       if (!scope.isCurrent()) return;
-      await this.registry.restoreRefusedDelete(d.relPath, d.docId);
+      await this.registry.restoreRefusedDelete(d.relPath, d.docId, detail);
       this.note(
         "info",
         "disk-delete",
-        `${d.relPath} was put back: ${NOT_CREATOR_MESSAGE.toLowerCase()}`,
+        `${d.relPath} was put back: ${why.charAt(0).toLowerCase()}${why.slice(1)}`,
         { docId: d.docId, path: d.relPath },
       );
     }

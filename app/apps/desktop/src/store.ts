@@ -276,6 +276,8 @@ interface AppStore {
    * banner a couple of seconds after it appeared.
    */
   noteRemovedSynced: boolean;
+  /** The doc id the open note had when its file vanished (null when unsynced). */
+  noteRemovedDocId: string | null;
   /**
    * Set when the note that was open left because of a TEAMMATE (or an AI) and we
    * applied that locally. `deleted`: they deleted it, and `trashedTo` is the
@@ -793,7 +795,7 @@ interface AppStore {
   refreshBacklinks: () => Promise<void>;
   /** `synced` overrides the latch below with a value sampled earlier (the
    *  deferred open-note removal check samples it when the file vanished). */
-  setNoteRemoved: (removed: boolean, synced?: boolean) => void;
+  setNoteRemoved: (removed: boolean, synced?: boolean, docId?: string | null) => void;
   closeNote: () => void;
   /** Close one tab. Closing the active one activates its right-hand neighbour
    *  (left-hand when it was last); closing the only tab clears the editor. */
@@ -2223,6 +2225,7 @@ export const useStore = create<AppStore>((set, get) => ({
     }),
   noteRemoved: false,
   noteRemovedSynced: false,
+  noteRemovedDocId: null,
   noteRemovedByTeammate: null,
   accessEvents: [],
   structureNotice: { rootMissing: false, pendingDelete: null, closedAppChanges: false },
@@ -3131,16 +3134,15 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  setNoteRemoved: (removed, synced) =>
-    set((s) => ({
+  setNoteRemoved: (removed, synced, docId) =>
+    set(() => ({
       noteRemoved: removed,
-      // Latched here: the sync layer drops the note's mapping when it propagates
-      // the disk delete, so `noteRemovedSynced` has to be sampled at the moment
-      // the file vanished rather than read off the map later — which is why a
-      // deferred caller passes the value it sampled then.
-      noteRemovedSynced: removed
-        ? (synced ?? !!s.docIdByPath[s.openNote?.path ?? ""])
-        : false,
+      // "Removed for the team" only once the server ACCEPTED the delete
+      // (`syncManager.wasDeletedForTeam`, then `setDeletedForTeamListener`):
+      // a member's delete or move of a teammate's or a view-only note is refused
+      // and put back, and the banner used to say it was removed for everyone.
+      noteRemovedSynced: removed ? synced === true : false,
+      noteRemovedDocId: removed ? (docId ?? null) : null,
     })),
 
   /**
@@ -3363,6 +3365,10 @@ export const useStore = create<AppStore>((set, get) => ({
     // its very first frame instead of an HTTP round trip in.
     syncManager.setAclListener(() => {
       void get().refreshLocks();
+    });
+    syncManager.setDeletedForTeamListener((docId) => {
+      const s = get();
+      if (s.noteRemoved && s.noteRemovedDocId === docId) set({ noteRemovedSynced: true });
     });
     // A teammate renamed/moved or deleted a note we have on disk, and the registry
     // has just applied that to the file. The open editor's bridge was destroyed

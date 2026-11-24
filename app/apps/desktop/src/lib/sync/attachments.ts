@@ -886,6 +886,19 @@ async function runProbeFirst<T>(
   await runPool(items.slice(1), (item, i) => worker(item, i + 1), opts);
 }
 
+/**
+ * A pass's transfers, smallest first (stable; an unknown size counts as 0).
+ *
+ * The first item is {@link runProbeFirst}'s probe and runs alone, and a file
+ * over {@link BYTES_IN_FLIGHT_BUDGET} waits for an empty pipe and then runs
+ * alone too. In listing order, a fresh device whose first binary was a 150 MB
+ * video downloaded nothing else for 85 s; small files first keep the counter
+ * moving and leave the big ones to the end of the pass.
+ */
+function smallestFirst<T extends { size?: number }>(items: readonly T[]): T[] {
+  return [...items].sort((a, b) => (a.size ?? 0) - (b.size ?? 0));
+}
+
 /** How long an `attachments/` drop refused for access (403) waits before the
  *  mirror asks again on its own. */
 export const EMBED_REFUSAL_RETRY_MS = 60_000;
@@ -2049,7 +2062,7 @@ export class AttachmentSync {
     let aborted: string | null = null;
     const bytes = new BytesInFlight(BYTES_IN_FLIGHT_BUDGET);
     await runProbeFirst(
-      toUpload,
+      smallestFirst(toUpload),
       async (a) => {
         // A file the server has already refused for good (too large, wrong type)
         // is skipped without a round trip — see `permanentSkips`.
@@ -2206,7 +2219,7 @@ export class AttachmentSync {
     if (total > 0) this.deps.onDownloadsQueued?.(total);
     let settled = 0;
     await runProbeFirst(
-      downloads,
+      smallestFirst(downloads),
       async (b) => {
         // Its bytes are moving now. The dot was already `queued` from the rebuild
         // above; this is the same queued → syncing → synced walk an upload makes.
@@ -3371,7 +3384,8 @@ export class AttachmentSync {
     if (this.deps.readOnlyPaths && paths.length > 0) {
       try {
         const readOnly = await this.deps.readOnlyPaths();
-        sendable = paths.filter((p) => !readOnly(p));        if (sendable.length < paths.length) {
+        sendable = paths.filter((p) => !readOnly(p));
+        if (sendable.length < paths.length) {
           console.info(`[attachments] ${paths.length - sendable.length} view-only file(s): no text sent`);
         }
       } catch (e) {

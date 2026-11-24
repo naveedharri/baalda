@@ -1684,3 +1684,39 @@ describe("tree binaries a download can never settle", () => {
     expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 1 });
   });
 });
+
+describe("transfer order", () => {
+  const sizes = { "attachments/big.mp4": 40, "attachments/tiny.png": 1, "attachments/mid.pdf": 8 };
+  const bytesOf = (n: number) => new Uint8Array(n).fill(n);
+
+  it("downloads the smallest files first, so a big video never holds the rest back", async () => {
+    const seed = Object.entries(sizes).map(([relPath, n], i) => ({ id: `s${i}`, relPath, bytes: bytesOf(n) }));
+    const { deps, local, server } = makeDeps([], seed);
+    const order: string[] = [];
+    const sync = new AttachmentSync({
+      ...deps,
+      listServer: async () => (await deps.listServer()).map((b) => ({ ...b, size: server.get(b.id)!.bytes.byteLength })),
+      downloadServer: async (id) => {
+        order.push(server.get(id)!.relPath);
+        return deps.downloadServer(id);
+      },
+    });
+    await sync.reconcile();
+    expect(order).toEqual(["attachments/tiny.png", "attachments/mid.pdf", "attachments/big.mp4"]);
+    expect(local.size).toBe(3);
+  });
+
+  it("uploads the smallest files first", async () => {
+    const seed = Object.entries(sizes).map(([relPath, n]) => ({ relPath, bytes: bytesOf(n) }));
+    const { deps } = makeDeps(seed, []);
+    const order: string[] = [];
+    await new AttachmentSync({
+      ...deps,
+      uploadServer: async (...args: Parameters<AttachmentSyncDeps["uploadServer"]>) => {
+        order.push(args[0]);
+        return deps.uploadServer(...args);
+      },
+    }).reconcile();
+    expect(order).toEqual(["attachments/tiny.png", "attachments/mid.pdf", "attachments/big.mp4"]);
+  });
+});

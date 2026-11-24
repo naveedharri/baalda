@@ -72,8 +72,16 @@ function tree(paths: string[]): TreeNode {
   };
 }
 
+/** What the fake server refuses with: the creator rule, or no edit access
+ *  (`no_edit_permission`, or a bare 403 from a server before that code). */
+let refusal: "creator" | "view" | "view-bare" = "creator";
 const creatorRefusal = () =>
-  new ApiError(403, "forbidden", { code: "delete_not_creator", error: "not the creator" });
+  refusal === "creator"
+    ? new ApiError(403, "forbidden", { code: "delete_not_creator", error: "not the creator" })
+    : new ApiError(403, "forbidden", {
+        error: "You cannot delete this note",
+        ...(refusal === "view" ? { code: "no_edit_permission" } : {}),
+      });
 
 function fakeApi(refuse: Set<string>) {
   const state = { singleDeletes: [] as string[], batchIds: [] as string[][] };
@@ -115,7 +123,9 @@ function fakeApi(refuse: Set<string>) {
       return docIds.map(
         (docId): NoteDeleteResult =>
           refuse.has(docId)
-            ? { docId, status: "denied", code: "delete_not_creator", error: "not the creator" }
+            ? refusal === "creator"
+              ? { docId, status: "denied", code: "delete_not_creator", error: "not the creator" }
+              : { docId, status: "denied", code: "no_edit_permission", error: "no edit permission" }
             : { docId, status: "deleted", code: null, error: null },
       );
     }),
@@ -144,6 +154,7 @@ async function setup(paths: string[], refuse: Set<string>) {
 }
 
 beforeEach(() => {
+  refusal = "creator";
   vi.clearAllMocks();
   reconcileReport.clear();
   vi.mocked(ipc.getVaultConfig).mockResolvedValue(null);
@@ -242,6 +253,40 @@ describe("disk deletes — a refused delete is put back", () => {
     // A second refusal of the same note in this session does not re-announce it.
     await reg.restoreRefusedDelete(THEIRS, serverId(THEIRS));
     expect(reconcileReport.items()).toHaveLength(1);
+  });
+
+  for (const kind of ["view", "view-bare"] as const) {
+    it(`a member's disk delete of a note they can only view (${kind}): put back, not left gone`, async () => {
+      refusal = kind;
+      const { reg, state, materializeContent } = await setup([MINE, THEIRS], new Set([serverId(THEIRS)]));
+      const d = { docId: serverId(THEIRS), relPath: THEIRS };
+      const h = host(reg);
+      const propagated = await propagate.call(h, [d], scope);
+      expect(propagated).toEqual([]);
+      expect(ipc.writeNoteIfMissing).toHaveBeenCalledWith(THEIRS, "", null);
+      expect(materializeContent).toHaveBeenCalledWith(serverId(THEIRS), THEIRS);
+      expect(reg.getMapping(THEIRS)?.docId).toBe(serverId(THEIRS));
+      expect(state.singleDeletes).toEqual([serverId(THEIRS)]);
+      expect(h.note).toHaveBeenCalledWith(
+        "info",
+        "disk-delete",
+        "Theirs.md was put back: you can only view this, so it can't be deleted",
+        { docId: serverId(THEIRS), path: THEIRS },
+      );
+      expect(summarizeReconcile(reconcileReport.items())[0].text).toBe(
+        "Theirs.md was put back: you can only view it, so it can't be deleted.",
+      );
+    });
+  }
+
+  it("a bulk disk delete with one view-only item restores only that item", async () => {
+    refusal = "view";
+    const paths = Array.from({ length: 30 }, (_, i) => `N${i}.md`).concat([THEIRS]);
+    const { reg } = await setup(paths, new Set([serverId(THEIRS)]));
+    const deleted = paths.map((p) => ({ docId: serverId(p), relPath: p }));
+    const propagated = await propagate.call(host(reg), deleted, scope);
+    expect(propagated).toHaveLength(30);
+    expect(vi.mocked(ipc.writeNoteIfMissing).mock.calls.map((c) => c[0])).toEqual([THEIRS]);
   });
 
   it("the member's own note still propagates", async () => {
