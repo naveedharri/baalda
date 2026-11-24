@@ -158,7 +158,8 @@ Errors: single `AppError(String)` (`error.rs`).
 - `index.rs` — SQLite at `<vault>/.context/index.sqlite` (WAL): `notes` (id=`doc_id`, path UNIQUE),
   FTS5 `notes_fts`, `tags`/`note_tags`, `links`, `folders`, `yjs_updates`, `yjs_snapshot`. Notes keyed by
   `doc_id`; `rebuild` preserves ids and never wipes the CRDT tables; `rename_note` rewrites paths by id so
-  backlinks survive moves. `note_file_identity.rs` retains reliable filesystem identity plus creation
+  backlinks survive moves, and skips its whole-vault link pass when no note row moved (a followed folder
+  move of 2,000 files paid it once per file under the index lock: minutes, not seconds). `note_file_identity.rs` retains reliable filesystem identity plus creation
   time beside each note ID, including across removal/rebuild batches. A unique owner at an absent old
   path lets local external renames retain identity; equal content or ambiguous hard links never merge.
   Unsupported identity metadata fails closed. Local tabs follow these indexed moves; synced moves

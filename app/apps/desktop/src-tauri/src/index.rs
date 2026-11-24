@@ -1336,6 +1336,10 @@ impl Index {
         let old_rel = rel_from_abs(vault, old_abs)?;
         let new_rel = rel_from_abs(vault, new_abs)?;
         let tx = self.conn.unchecked_transaction()?;
+        // Did any NOTE row move? Link resolution reads nothing but the notes
+        // table, so a rename that moved none (a teammate's moved image, video
+        // or script, followed one file at a time) cannot change a single link.
+        let mut moved_notes = false;
 
         // Exact file rename/move (preserves doc_id).
         if let Some(id) = self.id_for_path(&tx, &old_rel)? {
@@ -1344,6 +1348,7 @@ impl Index {
                 params![new_rel, id],
             )?;
             Self::remember_file_identity(&tx, &id, &new_rel, new_abs)?;
+            moved_notes = true;
         }
 
         // Folder move: rewrite the path prefix of every descendant note, keeping
@@ -1357,6 +1362,7 @@ impl Index {
             rows.collect::<Result<Vec<_>, _>>()?
         };
         for (id, path) in children {
+            moved_notes = true;
             let suffix = &path[old_prefix.len()..];
             let new_path = format!("{new_rel}/{suffix}");
             tx.execute(
@@ -1371,7 +1377,14 @@ impl Index {
         // and the ids are gathered above only for the descendants, so narrowing
         // here would be easy to get subtly wrong for a rename that changes a
         // basename other notes link to.
-        self.resolve_links(&tx, LinkScope::All)?;
+        //
+        // Skipped when no note moved: following a teammate's move of a folder
+        // holding 2,000 files paid this full pass once PER FILE (about 40 ms on a
+        // 1,200-note vault, held under the index lock every UI command and the
+        // watcher queue behind), which is what made such a move take minutes.
+        if moved_notes {
+            self.resolve_links(&tx, LinkScope::All)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -4624,6 +4637,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dst, Some(beta_id));
+    }
+
+    #[test]
+    fn renaming_a_non_note_file_skips_the_link_pass() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        std::fs::write(v.join("sub/photo.png"), b"png").unwrap();
+        std::fs::create_dir_all(v.join("pics")).unwrap();
+        std::fs::rename(v.join("sub/photo.png"), v.join("pics/photo.png")).unwrap();
+
+        let before = idx.resolve_call_count();
+        idx.rename_note(&v, &v.join("sub/photo.png"), &v.join("pics/photo.png"))
+            .unwrap();
+        assert_eq!(idx.resolve_call_count(), before, "no note moved, no link can change");
+
+        // A note (or a folder holding notes) still re-resolves.
+        std::fs::create_dir_all(v.join("other")).unwrap();
+        std::fs::rename(v.join("sub/Beta.md"), v.join("other/Beta.md")).unwrap();
+        idx.rename_note(&v, &v.join("sub/Beta.md"), &v.join("other/Beta.md"))
+            .unwrap();
+        assert_eq!(idx.resolve_call_count(), before + 1);
+        std::fs::rename(v.join("other"), v.join("other2")).unwrap();
+        idx.rename_note(&v, &v.join("other"), &v.join("other2")).unwrap();
+        assert_eq!(idx.resolve_call_count(), before + 2);
     }
 
     #[test]
