@@ -277,7 +277,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   that vanished and was NOT a move is deleted on the server after its notes and files
   (`propagateGoneFolders` → `registry.deleteVanishedFolder` → `DELETE /api/folders/:id?ifEmpty=1`,
   server feature `folder-delete-if-empty`; 409 `folder_not_empty` or a creator refusal keeps it),
-  deepest first, under the same cap (before this, a folder deleted on disk came back empty on every
+  deepest first, under the same cap; while its contents' deletes are still settling it asks again at
+  2.5 s / 5 s / 10 s for up to `GONE_FOLDER_SETTLE_MS` (60 s, `goneFolderRetryDelay`), and a folder that is
+  only waiting no longer holds its own files' deletes back (`binaryBesideNoteDeletes`; a 120 MB video
+  used to keep the folder alive, empty, on every device) (before this, a folder deleted on disk came back empty on every
   device). A refused delete of a teammate's tree binary is put back like a note
   (`BinaryDeleteQueue.onNotCreator` → `restoredFromServer` with `NOT_CREATOR_DETAIL`). A vanished vault
   root pauses every materialize/register/delete step, closes the tabs and offers Restore here (recreate

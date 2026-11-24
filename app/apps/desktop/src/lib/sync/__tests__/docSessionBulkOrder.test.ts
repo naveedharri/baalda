@@ -396,7 +396,7 @@ vi.mock("../syncManager", () => ({
 
 import type { SessionInfo } from "../../api";
 import * as ipc from "../../ipc";
-import { REGISTRY_FRAME_PULL_MIN_GAP_MS, SyncManager } from "../docSession";
+import { GONE_FOLDER_SETTLE_MS, REGISTRY_FRAME_PULL_MIN_GAP_MS, SyncManager, goneFolderRetryDelay } from "../docSession";
 import { vaultScopes, type SyncProgress } from "../vaultScope";
 
 function session(): SessionInfo {
@@ -1805,6 +1805,30 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeRegistry.recordFailure).not.toHaveBeenCalledWith(
       expect.objectContaining({ path: "D7.md" }),
     );
+  });
+
+  it("a folder waiting only for its contents does not hold its own files back", () => {
+    const sm = new SyncManager() as unknown as {
+      goneFolders: Map<string, number>;
+      goneFolderAttempts: Map<string, { n: number; since: number }>;
+      pendingDiskDeletes: Map<string, unknown>;
+      binaryBesideNoteDeletes(p: string): "wait" | "held" | null;
+    };
+    sm.goneFolders.set("Big", Date.now());
+    expect(sm.binaryBesideNoteDeletes("Big/sub/video.mp4")).toBe("wait"); // still being decided
+    sm.goneFolderAttempts.set("Big", { n: 1, since: Date.now() });
+    expect(sm.binaryBesideNoteDeletes("Big/sub/video.mp4")).toBeNull(); // only waiting for this file
+    sm.pendingDiskDeletes.set("d1", { relPath: "Other.md" });
+    expect(sm.binaryBesideNoteDeletes("Big/sub/video.mp4")).toBe("wait"); // a new note delete is undecided
+  });
+
+  it("a vanished folder keeps waiting for its contents' deletes, then gives up after a minute", () => {
+    expect(goneFolderRetryDelay(1, 0)).toBe(2500);
+    expect(goneFolderRetryDelay(2, 2500)).toBe(5000);
+    expect(goneFolderRetryDelay(3, 7500)).toBe(10_000);
+    expect(goneFolderRetryDelay(9, 50_000)).toBe(10_000);
+    expect(goneFolderRetryDelay(5, 14_000)).not.toBeNull(); // a 120 MB file's delete took 14 s
+    expect(goneFolderRetryDelay(9, GONE_FOLDER_SETTLE_MS)).toBeNull();
   });
 
   it("puts back a note the server refused as view-only, and leaves the rest deleted", async () => {

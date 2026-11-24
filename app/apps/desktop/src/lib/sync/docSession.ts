@@ -487,6 +487,24 @@ const DOC_STATUS_OWNS_BADGE: ReadonlySet<SyncStatus> = new Set<SyncStatus>([
   "too-large",
 ]);
 
+/** How long a folder deleted on disk waits for its contents' deletes. */
+export const GONE_FOLDER_SETTLE_MS = 60_000;
+
+/**
+ * The delay before asking again whether a vanished folder is empty enough to
+ * delete on the server, or null to give up. Its notes and files go first, each
+ * by its own queue, and a big file's delete can take a while: the old fixed 4
+ * tries at the 2.5 s grace gave up after about 10 s, so a folder holding a
+ * 120 MB video stayed on the server and came back, empty, on every device
+ * (the deleting one too). Now: 2.5 s, 5 s, then 10 s, for up to
+ * {@link GONE_FOLDER_SETTLE_MS}. Registry pulls wait meanwhile (`goneFolders`),
+ * so nothing re-creates the folder while it waits.
+ */
+export function goneFolderRetryDelay(attempt: number, elapsedMs: number): number | null {
+  if (elapsedMs >= GONE_FOLDER_SETTLE_MS) return null;
+  return Math.min(DISK_DELETE_GRACE_MS * 2 ** Math.max(0, attempt - 1), 10_000);
+}
+
 export class SyncManager implements InboundHost {
   registry = new VaultRegistry(api);
 
@@ -2718,6 +2736,9 @@ export class SyncManager implements InboundHost {
     // Notes under a vanished folder too: a resident bridge keeps the path it
     // was promoted at, so it is retired with the drained notes at the end.
     const goneAtStart = [...this.goneFolders.keys()];
+    // Whether this drain decides any NOTE delete, or only asks again whether a
+    // folder whose notes already went is empty yet (see binaryBesideNoteDeletes).
+    this.drainDecidesNotes = pending.length > 0 || goneAtStart.some((f) => !this.goneFolderAttempts.has(f));
     const underGone =
       goneAtStart.length === 0
         ? []
@@ -2968,8 +2989,13 @@ export class SyncManager implements InboundHost {
     }
   }
 
-  /** Retries per vanished folder whose contents were still settling. */
-  private readonly goneFolderAttempts = new Map<string, number>();
+  /** Does the running disk-delete drain decide any note delete (or only
+   *  re-ask a vanished folder that waits for its contents)? */
+  private drainDecidesNotes = false;
+
+  /** Retries per vanished folder whose contents were still settling, and when
+   *  the first one was made (see {@link goneFolderRetryDelay}). */
+  private readonly goneFolderAttempts = new Map<string, { n: number; since: number }>();
 
   /**
    * The last step of a disk-delete window: a registered folder that vanished
@@ -3033,14 +3059,19 @@ export class SyncManager implements InboundHost {
         this.goneFolderAttempts.delete(top);
         continue;
       }
-      const n = (this.goneFolderAttempts.get(top) ?? 0) + 1;
-      if (n > 4) {
+      const now = Date.now();
+      const prev = this.goneFolderAttempts.get(top);
+      const n = (prev?.n ?? 0) + 1;
+      const since = prev?.since ?? now;
+      const delay = goneFolderRetryDelay(n, now - since);
+      if (delay === null) {
         this.goneFolderAttempts.delete(top);
+        console.warn(`[sync] ${top}: its contents were still being deleted after ${Math.round((now - since) / 1000)} s; the folder stays on the server`);
         continue;
       }
-      this.goneFolderAttempts.set(top, n);
-      this.goneFolders.set(top, Date.now());
-      this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
+      this.goneFolderAttempts.set(top, { n, since });
+      this.goneFolders.set(top, now);
+      this.armDiskDeleteDrain(scope, delay);
     }
   }
 
@@ -4006,12 +4037,13 @@ export class SyncManager implements InboundHost {
     if (held && Date.now() - held.at < HELD_BINARY_REFUSE_MS) {
       if (held.dirs.some((d) => within(d, dir) || within(dir, d))) return "held";
     }
-    if (
-      this.pendingDiskDeletes.size > 0 ||
-      this.goneFolders.size > 0 ||
-      this.diskDeleteDrainsInFlight > 0 ||
-      this.diskDeleteTimer != null
-    ) {
+    // A vanished folder that is only waiting for its contents' deletes (its
+    // notes already went: `goneFolderAttempts`) decides no note delete, so it
+    // must not hold its own files back: it waited for them while they waited
+    // for it, and a 120 MB video's delete went only once the folder gave up.
+    const undecidedFolder = [...this.goneFolders.keys()].some((f) => !this.goneFolderAttempts.has(f));
+    const deciding = this.pendingDiskDeletes.size > 0 || undecidedFolder;
+    if (deciding || (this.diskDeleteDrainsInFlight > 0 && this.drainDecidesNotes)) {
       return "wait";
     }
     return null;
