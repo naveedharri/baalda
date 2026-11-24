@@ -652,6 +652,10 @@ const frozenRootNotified = new Set<string>();
 /** How long a revoked note with unsent work waits before the access re-check
  *  that decides whether it leaves the disk (a quick access flap keeps it). */
 export const REVOKE_UNSENT_SETTLE_MS = 2_000;
+
+/** Rust's answer when a removal guarded by `ifAtBaseOf` found the file saved
+ *  since it last synced (`commands.rs CHANGED_ON_DISK`). */
+export const CHANGED_ON_DISK = "changed on disk since it last synced; kept";
 export const HELD_REFUSAL_RETRY_MS = 10 * 60_000;
 /** Each refused re-ask doubles the hold (10 → 20 → 40 min …), up to this. */
 export const HELD_REFUSAL_MAX_MS = 6 * 60 * 60_000;
@@ -3427,13 +3431,24 @@ export class VaultRegistry {
       // this pass prunes them, so nothing else would tell the two apart.
       this.markOwnRemovals(ready.map((gone) => gone.path));
       try {
+        // A revoked note judged clean was judged from the index, which can lag
+        // a save by up to a second: removed only while its bytes are still the
+        // ones last synced. A save that raced the access change stays, and the
+        // next pass sees it as unsent work (kept if access came back).
+        const atBase = (gone: InboundTrash) =>
+          gone.reason === "revoked" && !unsentRevoked.has(gone.docId) ? gone.docId : null;
         if (bulkRemoval) {
           outcomes = ready.length === 0 ? [] : await ipc.deleteFilesBatch(ready.map((gone) => ({
-            path: gone.path, docId: gone.reason === "revoked" ? gone.docId : null,
+            path: gone.path, docId: gone.reason === "revoked" ? gone.docId : null, ifAtBaseOf: atBase(gone),
           })), this.epoch());
         } else {
           outcomes = await Promise.all(ready.map(async (gone) => {
             try {
+              const base = atBase(gone);
+              if (base !== null) {
+                const [out] = await ipc.deleteFilesBatch([{ path: gone.path, docId: null, ifAtBaseOf: base }], this.epoch());
+                return out ?? { path: gone.path, error: "local cleanup did not return a result" };
+              }
               await ipc.deleteFile(gone.path, this.epoch());
               return { path: gone.path, error: null };
             } catch (e) {
@@ -3453,6 +3468,11 @@ export class VaultRegistry {
         if (!out || out.error) {
           this.forgetOwnRemoval(gone.path); // still on disk: nothing of ours to echo
           if (gone.reason === "revoked") this.revokedKept.set(pathKey(gone.path), gone.docId);
+          if (out?.error === CHANGED_ON_DISK) {
+            console.info(`[sync] ${gone.path}: saved while its access changed; kept for the next pass`);
+            this.sink.item("ok");
+            continue;
+          }
           this.sink.item(this.recordFailure({ kind: "inbound", path: gone.path, docId: gone.docId,
             reason: out?.error ?? "local cleanup did not return a result", code: null }));
           continue;

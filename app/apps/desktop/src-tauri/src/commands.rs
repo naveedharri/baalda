@@ -2282,7 +2282,18 @@ pub async fn delete_file(
 pub struct InboundRemoval {
     path: String,
     doc_id: Option<String>,
+    /// Remove only while the file still hashes to THIS doc's disk base (the
+    /// bytes last agreed with the server). A save made moments before an
+    /// access change can reach the disk before the index has re-read it, so a
+    /// caller that judged the note clean from the index would otherwise delete
+    /// an edit it never saw. A changed file stays, with `CHANGED_ON_DISK`,
+    /// and is judged again on the next pass. No recorded base: no check.
+    #[serde(default)]
+    if_at_base_of: Option<String>,
 }
+
+/// The error a removal answers when the file moved on since its disk base.
+pub const CHANGED_ON_DISK: &str = "changed on disk since it last synced; kept";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2294,7 +2305,7 @@ pub struct InboundRemovalOutcome {
 #[cfg(test)]
 fn remove_inbound_file(vault: &Path, index: &Mutex<Index>, item: &InboundRemoval) -> AppResult<()> {
     let outcomes = remove_inbound_files(vault, index, vec![InboundRemoval {
-        path: item.path.clone(), doc_id: item.doc_id.clone(),
+        path: item.path.clone(), doc_id: item.doc_id.clone(), if_at_base_of: item.if_at_base_of.clone(),
     }], false, || Ok(()))?;
     if let Some(error) = &outcomes[0].error {
         return Err(AppError::new(error));
@@ -2331,6 +2342,14 @@ fn remove_inbound_files(
         // Re-check between files so a vault switch cancels the remaining work.
         check_epoch()?;
         let result = vault::resolve_in_vault(&vault, &item.path).and_then(|abs| {
+            if let Some(base_doc) = item.if_at_base_of.as_deref() {
+                let base = index.lock().unwrap().get_disk_base(base_doc)?;
+                if let Some(base) = base {
+                    if abs.is_file() && notefile::sha256_file(&abs)? != base {
+                        return Err(AppError::new(CHANGED_ON_DISK));
+                    }
+                }
+            }
             notefile::delete_file_with(&vault, &item.path, allow_excluded)?;
             removed.push((abs, item.doc_id));
             Ok(())
@@ -3786,18 +3805,48 @@ mod tests {
         index.lock().unwrap().append_yjs_update("d1", &[1]).unwrap();
         for path in ["Docs", ".context/config.json", "../outside.md"] {
             assert!(remove_inbound_file(tmp.path(), &index, &InboundRemoval {
-                path: path.into(), doc_id: Some("d1".into()),
+                path: path.into(), doc_id: Some("d1".into()), if_at_base_of: None,
             }).is_err());
         }
         assert!(tmp.path().join("Docs/n.md").exists());
         assert!(tmp.path().join(".context/config.json").exists());
         assert_eq!(index.lock().unwrap().load_yjs_state("d1").unwrap().update_count, 1);
         remove_inbound_file(tmp.path(), &index, &InboundRemoval {
-            path: "Docs/n.md".into(), doc_id: Some("d1".into()),
+            path: "Docs/n.md".into(), doc_id: Some("d1".into()), if_at_base_of: None,
         }).unwrap();
         assert!(!tmp.path().join("Docs/n.md").exists());
         assert!(tmp.path().join("Docs").exists());
         assert_eq!(index.lock().unwrap().load_yjs_state("d1").unwrap().update_count, 0);
+    }
+
+    #[test]
+    fn inbound_removal_at_base_keeps_a_file_saved_since_it_last_synced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index = Mutex::new(Index::open_in_memory().unwrap());
+        std::fs::create_dir(tmp.path().join("Docs")).unwrap();
+        std::fs::write(tmp.path().join("Docs/n.md"), "synced").unwrap();
+        index.lock().unwrap().set_disk_base("d1", &notefile::sha256_hex("synced")).unwrap();
+        index.lock().unwrap().append_yjs_update("d1", &[1]).unwrap();
+        // Saved moments before the access change: kept, CRDT untouched.
+        std::fs::write(tmp.path().join("Docs/n.md"), "synced\nan edit\n").unwrap();
+        let err = remove_inbound_file(tmp.path(), &index, &InboundRemoval {
+            path: "Docs/n.md".into(), doc_id: Some("d1".into()), if_at_base_of: Some("d1".into()),
+        }).unwrap_err();
+        assert_eq!(err.to_string(), CHANGED_ON_DISK);
+        assert!(tmp.path().join("Docs/n.md").exists());
+        assert_eq!(index.lock().unwrap().load_yjs_state("d1").unwrap().update_count, 1);
+        // Back at its base: removed as before.
+        std::fs::write(tmp.path().join("Docs/n.md"), "synced").unwrap();
+        remove_inbound_file(tmp.path(), &index, &InboundRemoval {
+            path: "Docs/n.md".into(), doc_id: Some("d1".into()), if_at_base_of: Some("d1".into()),
+        }).unwrap();
+        assert!(!tmp.path().join("Docs/n.md").exists());
+        // No recorded base: no check.
+        std::fs::write(tmp.path().join("Docs/m.md"), "anything").unwrap();
+        remove_inbound_file(tmp.path(), &index, &InboundRemoval {
+            path: "Docs/m.md".into(), doc_id: None, if_at_base_of: Some("d2".into()),
+        }).unwrap();
+        assert!(!tmp.path().join("Docs/m.md").exists());
     }
 
 

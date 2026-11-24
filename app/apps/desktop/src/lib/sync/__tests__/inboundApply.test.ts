@@ -32,7 +32,7 @@ vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }
 import { ACCESS_CHECK_MAX, type ApiClient } from "../../api";
 import * as ipc from "../../ipc";
 import type { TreeNode } from "../../ipc";
-import { OWN_DELETE_TTL_MS, OWN_REMOVAL_TTL_MS, VaultRegistry, type InboundHost } from "../registry";
+import { CHANGED_ON_DISK, OWN_DELETE_TTL_MS, OWN_REMOVAL_TTL_MS, VaultRegistry, type InboundHost } from "../registry";
 import { sha256Hex } from "../../bridge/adapter";
 import { reconcileReport } from "../reconcileReport";
 
@@ -1220,7 +1220,10 @@ describe("inbound delete", () => {
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
 
     expect(disk.notes.has("shared.md")).toBe(false);
-    expect(seen).toEqual([{ path: "shared.md", own: true, mapped: "d1" }]);
+    // Every removal call (the guarded batch delegates to the single one in
+    // this fake) saw the mark and the mapping.
+    expect(seen.length).toBeGreaterThan(0);
+    for (const s of seen) expect(s).toEqual({ path: "shared.md", own: true, mapped: "d1" });
     // Still ours after the pass, under any spelling the OS reports it by…
     expect(reg.isOwnRemoval("shared.md")).toBe(true);
     expect(reg.isOwnRemoval("Shared.md")).toBe(true);
@@ -2817,6 +2820,9 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
     accessCheck?: "confirm" | "grant" | "fail";
     /** The file was edited on disk after the doc last agreed with it. */
     fileAhead?: boolean;
+    /** Saved after the index last read it: Rust's guarded removal finds the
+     *  bytes moved on from the disk base and keeps the file. */
+    savedSinceIndex?: boolean;
   }) {
     reconcileReport.clear();
     const disk = new FakeDisk();
@@ -2824,6 +2830,10 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
     if (opts.fileAhead) disk.unseen.add("d1");
     disk.bodies.set("n.md", opts.body ?? "the team's words");
     install(disk);
+    if (opts.savedSinceIndex) {
+      vi.mocked(ipc.deleteFilesBatch).mockImplementation(async (items) =>
+        items.map((item) => ({ path: item.path, error: item.ifAtBaseOf ? CHANGED_ON_DISK : null })));
+    }
     if (opts.noDiskBase) vi.mocked(ipc.getDiskBase).mockResolvedValue(null as never);
     if (opts.copyFails) {
       vi.mocked(ipc.copyToTrash).mockRejectedValue(new Error("could not copy"));
@@ -2930,6 +2940,31 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
     });
     expect(disk.bodies.get("n.md")).toBe("the team's words + typed in another editor");
     expect(disk.notes.has("n.md")).toBe(true);
+  });
+
+  it("keeps a file saved after the index last read it: removal is guarded by the disk base", async () => {
+    // Judged clean (the CRDT is acknowledged and the index says the file is at
+    // its base), but the save landed a moment before the access change, before
+    // the watcher re-indexed it. Removing it then lost the edit for good.
+    const sv = svOf("the team's words");
+    const { disk, reg } = await revokeWith({ localSv: sv, acked: sv, crdtText: "the team's words", savedSinceIndex: true });
+    const calls = vi.mocked(ipc.deleteFilesBatch).mock.calls.flatMap(([items]) => items);
+    expect(calls).toContainEqual(expect.objectContaining({ path: "n.md", ifAtBaseOf: "d1" }));
+    expect(disk.notes.has("n.md")).toBe(true);
+    expect(reg.hasFailures()).toBe(false);
+    // Out of sight until the server lists it again, like any kept revocation.
+    expect(reg.isHiddenPath("n.md")).toBe(true);
+  });
+
+  it("removes a revoked note with unsent work without the guard once access is confirmed off", async () => {
+    const { disk } = await revokeWith({
+      body: "the team's words + my own lines",
+      localSv: svOf("the team's words"),
+      acked: null,
+      crdtText: "the team's words",
+      savedSinceIndex: true,
+    });
+    expect(disk.notes.has("n.md")).toBe(false);
   });
 
   it("still finds an on-disk edit when the index query fails (per-note read)", async () => {

@@ -335,7 +335,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   `list_disk_drift` query per chunk) — and a revoked tree binary whose bytes left its `fileBases` sha —
   is asked about once more `REVOKE_UNSENT_SETTLE_MS` (2 s) before removal and stays if readable again
   or unanswered (an unanswered one stays named for the next pass): a quick No access flap used to
-  delete what the person typed; a revocation still in force at that check removes it. And a
+  delete what the person typed; a revocation still in force at that check removes it. A revoked note
+  judged clean is removed only while its file still hashes to its disk base (`delete_files_batch`
+  `ifAtBaseOf`, answer `CHANGED_ON_DISK`): the index can lag a save by a second, and a save made
+  just before the access change was otherwise deleted unseen; the kept file is judged again next pass. And a
   disagreement, an unanswered id, a throw on ANY slice or the 30 s `ACCESS_CHECK_TIMEOUT_MS` abort
   LEAVES the whole group (a refused id also leaves the named set via
   `InboundHost.revocationRefused`). The named set unions across the session and shrinks only on evidence of access: an access-check

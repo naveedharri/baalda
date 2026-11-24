@@ -577,7 +577,13 @@ export const deleteFile = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("delete_file", { path, expectedEpoch: expectedEpoch ?? null });
 /** Bounded, file-only inbound cleanup; docId also clears revoked CRDT state. */
 export const deleteFilesBatch = (
-  items: Array<{ path: string; docId: string | null }>,
+  items: Array<{
+    path: string;
+    docId: string | null;
+    /** Remove only while the file still hashes to this doc's disk base; a
+     *  changed file stays and answers `CHANGED_ON_DISK` (`sync/registry.ts`). */
+    ifAtBaseOf?: string | null;
+  }>,
   expectedEpoch?: VaultEpoch,
   /** Only for a confirmed revocation of rule-hidden team files
    *  (`registry.revokeParked`): Rust otherwise refuses an excluded path. */
