@@ -6150,6 +6150,7 @@ export class SyncManager implements InboundHost {
       onDocState: (patch) => { if (scope.isCurrent()) this.onDocState?.(patch); },
     });
     this.progress = progress;
+    progress.setCarry(() => this.binaryDownloads);
     // The registry writes into the SHARED reporter, but its COUNTERS are muted
     // while a content run or the download phase owns the pill: a pull that lands
     // mid-run re-stamps `registering` with its own (tiny) total while the
@@ -8291,12 +8292,14 @@ export class SyncManager implements InboundHost {
     if (count <= 0 || !scope.isCurrent()) return;
     const progress = this.progress;
     if (!progress) return;
-    this.binaryDownloads += count;
     if (this.downloadPhase || this.contentRunInFlight() || this.binaryDownloadPhase) {
+      this.binaryDownloads += count;
       progress.addTotal(count);
     } else {
       this.binaryDownloadPhase = true;
+      // Counted before the add: the phase adds the downloads still in flight.
       progress.phase("downloading", count);
+      this.binaryDownloads += count;
     }
     progress.flush();
   }

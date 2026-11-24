@@ -110,6 +110,8 @@ export class SyncProgressReporter implements SyncProgressSink {
   private lastEmitAt = -Infinity;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  /** Items already started that will report into whatever phase is current. */
+  private carry: () => number = () => 0;
 
   constructor(opts: SyncProgressReporterOptions) {
     this.onProgress = opts.onProgress;
@@ -119,6 +121,15 @@ export class SyncProgressReporter implements SyncProgressSink {
     this.nowFn = opts.now ?? (() => Date.now());
     this.setT = opts.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearT = opts.clearTimeoutImpl ?? ((h) => clearTimeout(h));
+  }
+
+  /**
+   * Work in flight from an earlier phase (file downloads) settles into the
+   * current one. A phase that resets its counters counts it in its total, or
+   * the pill read "Syncing 1142/292" while a big group grant downloaded.
+   */
+  setCarry(fn: () => number): void {
+    this.carry = fn;
   }
 
   /** Snapshot of the counters (tests / the manager's own honesty checks). */
@@ -134,7 +145,7 @@ export class SyncProgressReporter implements SyncProgressSink {
       // or "12/500 uploading" would carry the registering phase's count. The
       // byte subtitle goes with them — a phase that reports no bytes must not
       // inherit the previous phase's.
-      this.current = { phase, done: 0, total, failed: 0 };
+      this.current = { phase, done: 0, total: total + Math.max(0, this.carry()), failed: 0 };
     }
     this.dirty = true;
     // Phase changes are rare and are what the UI keys its copy off, so they are
