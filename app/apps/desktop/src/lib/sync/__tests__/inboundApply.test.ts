@@ -1775,8 +1775,14 @@ describe("inbound folder deletion", () => {
     // the claim is dropped (surfaced, not silent).
     vi.mocked(api.createNote).mockClear();
     const reg = new VaultRegistry(api);
-    reg.setInboundHost(recordingHost().host);
+    const h3 = recordingHost().host;
+    const claimsReleased = vi.fn();
+    (h3 as { claimsReleased?: () => void }).claimsReleased = claimsReleased;
+    reg.setInboundHost(h3);
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    // …and asks for that next pass: with no later disk change, nothing else
+    // would run it and the file stayed unsynced while the app said Synced.
+    expect(claimsReleased).toHaveBeenCalledTimes(1);
     expect(disk.trashed).toEqual([]); // never destroy content we can't identify
     expect(vi.mocked(api.createNote)).not.toHaveBeenCalled(); // no ghost this pass
     expect(reg.failures().map((f) => f.reason).join(" ")).toContain(

@@ -45,12 +45,14 @@ vi.mock("../registry", () => ({
   },
 }));
 
-const disk = vi.hoisted(() => ({ files: new Map<string, string>() }));
+const disk = vi.hoisted(() => ({ files: new Map<string, string>(), unreadable: new Set<string>() }));
 
 vi.mock("../../ipc", () => ({
   isVaultMismatch: () => false,
   clearYjsDoc: vi.fn(async () => {}),
+  noteExists: vi.fn(async (p: string) => disk.files.has(p) || disk.unreadable.has(p)),
   readNote: vi.fn(async (p: string) => {
+    if (disk.unreadable.has(p)) throw new Error("permission denied");
     const t = disk.files.get(p);
     if (t === undefined) throw new Error("missing");
     return t;
@@ -125,6 +127,7 @@ beforeEach(() => {
   store.applied = [];
   store.log = [];
   disk.files.clear();
+  disk.unreadable.clear();
   fakeRegistry.paths.clear();
   fakeRegistry.paths.set("d", REL);
   vi.clearAllMocks();
@@ -202,11 +205,33 @@ describe("noteSeeded when the file changed during registration (#406)", () => {
 
   it("an unreadable file is no evidence: today's behaviour", async () => {
     const { sm, merge } = manager();
-    const seed = await seedOf("", true); // file missing from `disk`
+    const seed = await seedOf("", true);
+    disk.unreadable.add(REL); // there, but could not be read
 
     await sm.noteSeeded("d", null, seed);
 
     expect(fakeRegistry.markPushed).toHaveBeenCalledWith("d");
+    expect(store.log).toEqual(["promote:d", "demote:d"]);
+    expect(merge).not.toHaveBeenCalled();
+  });
+
+  it("a file deleted while its create was answered is settled without being written back", async () => {
+    const { sm, merge } = manager();
+    const queue = vi
+      .spyOn(sm as unknown as { queueDiskDelete(s: unknown, p: string): boolean }, "queueDiskDelete")
+      .mockReturnValue(true);
+    const seed = await seedOf(FILLED, true); // file gone from `disk`
+
+    await sm.noteSeeded("d", null, seed);
+
+    // Its watcher removal came while it was unmapped and was dropped: this is
+    // the delete now.
+    expect(queue).toHaveBeenCalledWith(expect.anything(), REL);
+
+    expect(fakeRegistry.markPushed).toHaveBeenCalledWith("d");
+    expect(fakeRegistry.recordAck).toHaveBeenCalled();
+    expect(store.log).toEqual([]); // no bridge, so no egest re-creating the file
+    expect(store.applied).toEqual([]);
     expect(merge).not.toHaveBeenCalled();
   });
 });

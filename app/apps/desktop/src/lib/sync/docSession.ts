@@ -427,6 +427,12 @@ export type RegistryPullReason =
   // The attachment pass removed files a teammate deleted: their emptied
   // folders are the registry's to remove.
   | "deleted-files-removed"
+  // A pass released the claim on a deleted note's path that a new file holds
+  // now: the next pass registers it (`InboundHost.claimsReleased`).
+  | "claims-released"
+  // A file held back by a recent own delete of its path: asked again once the
+  // mark ages out (`InboundHost.pullAfter`).
+  | "own-delete-expired"
   // #262: a `meta` frame (last-edited stamps only), after its throttle.
   | "meta-frame";
 
@@ -2654,7 +2660,7 @@ export class SyncManager implements InboundHost {
       }
       return false;
     }
-    if (!this.registry.isPushed(mapping.docId)) {
+    if (!(this.registry.serverHoldsContent?.(mapping.docId) ?? this.registry.isPushed(mapping.docId))) {
       console.info(
         `[sync] ${relPath} was deleted on disk but its content was never confirmed on the server — not propagating`,
       );
@@ -3625,7 +3631,7 @@ export class SyncManager implements InboundHost {
         // and then the delete drain, with every gate `queueDiskDelete` applies.
         if (this.liveSince == null) continue;
         for (const n of under) {
-          if (!this.registry.isPushed(n.docId)) continue;
+          if (!(this.registry.serverHoldsContent?.(n.docId) ?? this.registry.isPushed(n.docId))) continue;
           out.fallbackDeletes.push({ docId: n.docId, relPath: n.relPath });
         }
         continue;
@@ -3981,7 +3987,11 @@ export class SyncManager implements InboundHost {
 
   /** `InboundHost.heldDocIds`: the docs of a held bulk delete, until it is released. */
   heldDocIds(): ReadonlySet<string> {
-    return this.deleteDecisionIds;
+    // Disk deletes still being decided too: a pull already asked for (it joins
+    // the running one, past the hold in `handleRegistryChanged`) wrote them
+    // back as placeholders and the delete was lost.
+    if (this.pendingDiskDeletes.size === 0 && this.drainingDocs.size === 0) return this.deleteDecisionIds;
+    return new Set([...this.deleteDecisionIds, ...this.pendingDiskDeletes.keys(), ...this.drainingDocs]);
   }
 
   /**
@@ -4890,6 +4900,54 @@ export class SyncManager implements InboundHost {
     }
   }
 
+  /** {@link InboundHost.claimsReleased}: one more pass registers those files. */
+  claimsReleased(): void {
+    if (this.scope?.isCurrent()) this.handleRegistryChanged("claims-released");
+  }
+
+  /** {@link InboundHost.foldersRegistered}. */
+  foldersRegistered(paths: readonly string[]): void {
+    const scope = this.scope;
+    if (!scope?.isCurrent() || this.liveSince == null) return;
+    const root = scope.vaultPath.replace(/[\\/]+$/, "");
+    void (async () => {
+      const gone: string[] = [];
+      for (const p of paths) {
+        let exists = true;
+        try {
+          exists = await ipc.folderExists(`${root}/${p}`);
+        } catch {
+          exists = true; // couldn't ask ⇒ never assume a delete
+        }
+        if (!exists) gone.push(p);
+      }
+      if (gone.length === 0 || !scope.isCurrent()) return;
+      // Marked first: an inbound pass must not re-create it meanwhile.
+      this.registry.markOwnDeletes?.(gone);
+      // Only the topmost: the drain removes the ones beneath it, deepest first.
+      const tops = gone.filter((p) => !gone.some((q) => q !== p && isUnder(p, q)));
+      for (const t of tops) this.goneFolders.set(t, Date.now());
+      this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
+    })().catch((e) => console.warn("[sync] checking registered folders failed", e));
+  }
+
+  private ownDeletePullTimer: ReturnType<typeof setTimeout> | null = null;
+  private ownDeletePullAt = 0;
+
+  /** {@link InboundHost.pullAfter}: one pull once the latest such mark ends. */
+  pullAfter(delayMs: number): void {
+    const scope = this.scope;
+    if (!scope?.isCurrent()) return;
+    const at = Date.now() + Math.max(0, delayMs);
+    if (this.ownDeletePullTimer && at <= this.ownDeletePullAt) return;
+    if (this.ownDeletePullTimer) clearTimeout(this.ownDeletePullTimer);
+    this.ownDeletePullAt = at;
+    this.ownDeletePullTimer = setTimeout(() => {
+      this.ownDeletePullTimer = null;
+      if (scope.isCurrent()) this.handleRegistryChanged("own-delete-expired");
+    }, at - Date.now());
+  }
+
   noteRemoved(
     docId: string,
     path: string,
@@ -5462,8 +5520,22 @@ export class SyncManager implements InboundHost {
         // for a registry pull, and nothing would ever read the new bytes.
         // Settling here would mark the note synced while the server holds the
         // OLD text (often nothing) for every other device. Merge instead.
-        const fileMoved = (await this.fileDiffersFrom(relPath, seed.textSha256, scope)) === true;
+        const differs = await this.fileDiffersFrom(relPath, seed.textSha256, scope);
         if (!scope.isCurrent()) return;
+        if (differs === null && !(await ipc.noteExists(relPath, scope.vaultEpoch).catch(() => true))) {
+          // The file was deleted while its create was being answered. The
+          // server holds this state; loading it into a bridge here would egest
+          // the file straight back and cancel the user's delete. Settle only.
+          this.registry.markPushed(docId);
+          const gone = sv ?? (() => { try { return Y.encodeStateVectorFromUpdate(seed.state); } catch { return null; } })();
+          if (gone) this.registry.recordAck?.(docId, gone);
+          // Its watcher removal arrived before the note was mapped and was
+          // dropped ("the server has no note to delete"), so this is the delete
+          // now. Left alone, the next pull wrote the file back for everyone.
+          this.queueDiskDelete(scope, relPath);
+          return;
+        }
+        const fileMoved = differs === true;
         const unclaim = attributeRecoveryCopies(relPath, { kind: "conflictKeptServer", docId });
         let raced = fileMoved;
         try {

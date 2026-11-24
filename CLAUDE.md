@@ -619,6 +619,17 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     (it took 37 s for 1,568 notes), is still mapped at its OLD path: `queueDiskDelete` holds such
     unmatched removals (`removedWhilePairing`) and the drain re-judges them once the move re-pointed
     the notes. Dropped, the next pull wrote each one back as an empty file and the delete was lost.
+  - **A note created and deleted within a second stays deleted** (2026-11-24, 40 files written then
+    removed 0–2.5 s later): a one-step create the server answered but this device is still settling
+    (`seedAnswered`) or one registered WITHOUT state this session (`registeredBlank`: not indexed yet,
+    the server row is empty) counts as held by the server (`registry.serverHoldsContent`), so its disk
+    delete is propagated instead of refused as "never confirmed"; `buildSeeds` drops a file already gone
+    before its state was built (it used to register an EMPTY note for everyone); `noteSeeded` finds the
+    file gone, settles without writing it back and queues the delete its unmapped watcher event missed;
+    `heldDocIds` includes pending disk deletes, so a pull already joined never writes them back; and
+    `foldersRegistered` re-checks the folders a pass just created, queuing a gone one as a vanished
+    folder. Paths re-created where an own delete is still held register once the hold lapses
+    (`pullAfter` → `own-delete-expired`), and released baseline claims ask one pull (`claims-released`).
     The move step itself indexes the moved notes with `materializeNotesBatch(…, { indexOnly: true })`
     (Rust `index_existing_notes`): it never creates a missing file, because a note deleted between
     the pairing's disk listing and the server's answer was otherwise written back empty by the

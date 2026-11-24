@@ -31,6 +31,7 @@ vi.mock("../../ipc", () => ({
   writeNote: vi.fn(async () => {}),
   writeNoteIfMissing: vi.fn(async () => true),
   rebindNoteId: vi.fn(async () => true),
+  noteExists: vi.fn(async () => true),
   materializeNotesBatch: vi.fn(
     async (items: Array<{ relPath: string; docId: string | null }>) =>
       items.map((i) => ({ relPath: i.relPath, created: true, rebound: true })),
@@ -85,6 +86,12 @@ function fakeApi(answer: Answer = () => ({})) {
     listVaults: vi.fn(async () => [{ id: VAULT, name: "v", organization_id: ORG }]),
     createVault: vi.fn(async () => ({ id: VAULT, name: "v", organization_id: ORG })),
     listFolders: vi.fn(async () => []),
+    createFolder: vi.fn(async (input: { path: string; name: string }) => ({
+      id: `fid-${input.path}`,
+      path: input.path,
+      name: input.name,
+      parent_id: null,
+    })),
     listFolderRegistry: vi.fn(async () => ({ folders: [], tombstones: [] })),
     listNotes: vi.fn(async () => []),
     listNoteRegistry: vi.fn(async () => ({ notes: [], tombstones: [] })),
@@ -174,6 +181,117 @@ describe("one-step register + seed", () => {
     expect(h.seeded[0].sv).toBeInstanceOf(Uint8Array);
     expect(h.created).toEqual([]); // nothing left for the push phase / uploader
     expect(h.merged).toEqual([]);
+  });
+
+  it("a note the server answered for counts as held by the server while the batch is still settling", async () => {
+    localIds(3);
+    const { api } = fakeApi();
+    const h = fakeHost();
+    const reg = new VaultRegistry(api);
+    // While the first note settles, the other two are answered but not settled
+    // yet: a disk delete of them then is a real delete (it used to be refused
+    // as "never confirmed", and the file came back for everyone).
+    const seen: Array<[string, boolean, boolean]> = [];
+    (h.host as unknown as { noteSeeded: (d: string) => Promise<void> }).noteSeeded = async (docId: string) => {
+      if (docId === "loc-0") {
+        seen.push(["loc-1", reg.serverHoldsContent("loc-1"), reg.isPushed("loc-1")]);
+        seen.push(["loc-2", reg.serverHoldsContent("loc-2"), reg.isPushed("loc-2")]);
+      }
+      reg.markPushed(docId);
+    };
+    reg.setInboundHost(h.host);
+    expect(reg.serverHoldsContent("loc-1")).toBe(false);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(3));
+
+    expect(seen).toEqual([["loc-1", true, false], ["loc-2", true, false]]);
+    expect(reg.serverHoldsContent("loc-1")).toBe(true); // now through isPushed
+  });
+
+  it("a file deleted before its state was built is not registered (no empty note for everyone)", async () => {
+    localIds(3);
+    const { api, calls } = fakeApi();
+    const h = fakeHost();
+    const build = h.host.buildNoteState!;
+    (h.host as unknown as { buildNoteState: typeof build }).buildNoteState = async (docId, relPath) => {
+      if (relPath === "Note1.md") throw new Error("No such file or directory");
+      return build.call(h.host, docId, relPath);
+    };
+    vi.mocked(ipc.noteExists).mockImplementation(async (p: string) => p !== "Note1.md");
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(h.host);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(3));
+
+    expect(calls.items.map((i) => i.relPath).sort()).toEqual(["Note0.md", "Note2.md"]);
+    expect(reg.getMapping("Note1.md")).toBeFalsy();
+  });
+
+  it("a file not indexed yet that is already gone is not registered either", async () => {
+    localIds(0); // nothing indexed: no local doc ids
+    const { api, calls } = fakeApi();
+    const h = fakeHost();
+    vi.mocked(ipc.noteExists).mockImplementation(async (p: string) => p !== "Note1.md");
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(h.host);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(2));
+
+    expect(calls.items.map((i) => i.relPath)).toEqual(["Note0.md"]);
+  });
+
+  it("a file that exists but cannot be read still registers without state, as before", async () => {
+    localIds(2);
+    const { api, calls } = fakeApi();
+    const h = fakeHost();
+    const build = h.host.buildNoteState!;
+    (h.host as unknown as { buildNoteState: typeof build }).buildNoteState = async (docId, relPath) => {
+      if (relPath === "Note1.md") throw new Error("permission denied");
+      return build.call(h.host, docId, relPath);
+    };
+    vi.mocked(ipc.noteExists).mockResolvedValue(true);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(h.host);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(2));
+
+    const sent = calls.items.find((i) => i.relPath === "Note1.md");
+    expect(sent).toBeTruthy();
+    expect(sent!.state).toBeFalsy();
+  });
+
+  it("reports the folders a pass created, so a folder already deleted again can go too", async () => {
+    vi.mocked(ipc.listNoteTitles).mockResolvedValue([{ id: "loc-a", path: "F/a.md", title: "a" }]);
+    const { api } = fakeApi();
+    const h = fakeHost();
+    const registered = vi.fn();
+    (h.host as { foldersRegistered?: (p: readonly string[]) => void }).foldersRegistered = registered;
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(h.host);
+    const t: TreeNode = {
+      id: "root", name: "vault", path: "", isDir: true,
+      children: [{ id: "F", name: "F", path: "F", isDir: true, children: [{ id: "a", name: "a.md", path: "F/a.md", isDir: false }] }],
+    };
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, t);
+    expect(registered).toHaveBeenCalledWith(["F"]);
+  });
+
+  it("a note created without state (not indexed yet) can be deleted for everyone", async () => {
+    localIds(0);
+    const { api } = fakeApi();
+    const h = fakeHost();
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(h.host);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(1));
+    const id = reg.getMapping("Note0.md")!.docId;
+    expect(reg.isPushed(id)).toBe(false);
+    expect(reg.serverHoldsContent(id)).toBe(true);
+  });
+
+  it("a note whose create failed is never held by the server", async () => {
+    localIds(1);
+    const { api } = fakeApi(() => ({ status: "error", code: "boom", error: "boom", seeded: false }) as never);
+    const h = fakeHost();
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(h.host);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(1));
+    expect(reg.serverHoldsContent("loc-0")).toBe(false);
   });
 
   it("24 notes go in ONE request with no per-note socket", async () => {

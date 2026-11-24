@@ -364,6 +364,27 @@ function adoptAcked(
 
 export interface InboundHost {
   /**
+   * A pass released the baseline claim on a path a deleted note used to hold,
+   * because a file WITH content sits there now. This pass suppressed it; only
+   * the next one registers it as the new note it is. Ask for that pass: with
+   * no later disk change nothing would, and the file stayed unsynced while the
+   * app said Synced (a folder deleted, then re-created at the same paths).
+   */
+  claimsReleased?(): void;
+  /**
+   * A local file was held back from registering because this device deleted
+   * its path (or a folder above it) moments ago (`isOwnDelete`). Pull again
+   * once that mark has aged out, `delayMs` from now, so a file re-created
+   * there registers without waiting for some unrelated change.
+   */
+  pullAfter?(delayMs: number): void;
+  /**
+   * The server just created these folders for this device. The host checks
+   * them against disk: one already deleted again is a disk delete whose
+   * watcher event came while it was unmapped.
+   */
+  foldersRegistered?(paths: readonly string[]): void;
+  /**
    * This device's local Yjs state vector for `docId` (resident bridge first,
    * else the SQLite CRDT store), or null when it holds no CRDT for it. Used by
    * {@link VaultRegistry.hasUnseenWork}. Optional: no host ⇒ file fallback only.
@@ -1737,9 +1758,15 @@ export class VaultRegistry {
    * {@link OWN_DELETE_TTL_MS}? Not consumed, entries age out.
    */
   isOwnDelete(relPath: string): boolean {
-    if (this.ownDeletes.size === 0) return false;
+    return this.ownDeleteExpiry(relPath) !== null;
+  }
+
+  /** When the youngest own-delete mark covering `relPath` ages out, or null. */
+  private ownDeleteExpiry(relPath: string): number | null {
+    if (this.ownDeletes.size === 0) return null;
     const now = Date.now();
     const parts = pathKey(relPath).split("/");
+    let until: number | null = null;
     for (let i = parts.length; i > 0; i--) {
       const key = parts.slice(0, i).join("/");
       const at = this.ownDeletes.get(key);
@@ -1748,9 +1775,9 @@ export class VaultRegistry {
         this.ownDeletes.delete(key);
         continue;
       }
-      return true;
+      until = Math.max(until ?? 0, at + OWN_DELETE_TTL_MS);
     }
-    return false;
+    return until;
   }
 
   /**
@@ -3121,6 +3148,8 @@ export class VaultRegistry {
     }
 
     let changedDisk = false;
+    /** Baseline claims released this pass; see {@link InboundHost.claimsReleased}. */
+    let releasedClaims = 0;
 
     // Folders first: a rename or materialize below may need one as a parent.
     // `ensureFolder` is idempotent, so a folder that already exists costs nothing
@@ -3325,7 +3354,7 @@ export class VaultRegistry {
             // it: `planInbound` suppresses any local note whose own id is
             // tombstoned, and the server refuses a dead id with `note_deleted`
             // besides (prod 2026-09-23).
-            if (gone.reason !== "revoked") this.baselineDocs.delete(gone.docId);
+            if (gone.reason !== "revoked" && this.baselineDocs.delete(gone.docId)) releasedClaims++;
             this.sink.item("failed");
             return;
           }
@@ -3484,6 +3513,7 @@ export class VaultRegistry {
         for (const [docId, rp] of [...this.baselineDocs]) {
           if (rp !== path) continue;
           this.baselineDocs.delete(docId);
+          releasedClaims++;
           this.recordFailure({
             kind: "inbound",
             path,
@@ -3508,6 +3538,14 @@ export class VaultRegistry {
       } catch (e) {
         if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
         // Left on disk; it stays suppressed and harmless, as before.
+      }
+    }
+
+    if (releasedClaims > 0) {
+      try {
+        this.host?.claimsReleased?.();
+      } catch (e) {
+        console.warn("[registry] claimsReleased listener threw", e);
       }
     }
 
@@ -5103,6 +5141,18 @@ export class VaultRegistry {
       const listed = new Set(serverNotes.map((n) => noteDocId(n)));
       for (const id of [...this.deletedDocIds]) if (listed.has(id)) this.deletedDocIds.delete(id);
     }
+    // A file at a path this device deleted moments ago is held back (it may be
+    // the deleted note itself, its disk removal still to come). One the user
+    // re-created there is not, but it looks the same until the mark ages out,
+    // and then nothing asked again: it stayed unsynced until some unrelated
+    // change. So remember when the last such mark ends and pull right after.
+    let ownDeleteWaitUntil = 0;
+    const heldByOwnDelete = (p: string): boolean => {
+      const until = this.ownDeleteExpiry(p);
+      if (until === null) return false;
+      ownDeleteWaitUntil = Math.max(ownDeleteWaitUntil, until);
+      return true;
+    };
     let missingNotes = notes.filter(
       (n) =>
         !resolvedNotePathsCi.has(pathKey(n.path)) &&
@@ -5111,9 +5161,16 @@ export class VaultRegistry {
         !this.aliasPaths.has(n.path) &&
         !this.hiddenPaths.has(pathKey(n.path)) &&
         !this.deletedPaths.has(pathKey(n.path)) &&
-        !this.isOwnDelete(n.path) &&
+        !heldByOwnDelete(n.path) &&
         !this.isHeldRefusal(n.path),
     );
+    if (ownDeleteWaitUntil > 0) {
+      try {
+        this.host?.pullAfter?.(ownDeleteWaitUntil - Date.now() + 500);
+      } catch (e) {
+        console.warn("[registry] pullAfter listener threw", e);
+      }
+    }
 
     // 3b. A rename made while the app was closed (offline reconciliation, row
     // 4b): a mapped note's file is missing AND an unmapped file holds exactly
@@ -5171,6 +5228,8 @@ export class VaultRegistry {
     const titleByPath = new Map(titleRows.map((t) => [t.path, t.title] as const));
     const idByPath = new Map(titleRows.map((t) => [t.path, t.id] as const));
 
+    // Folders this pass creates on the server, to check against disk at the end.
+    const hadFolder = new Set(this.folderByPath.keys());
     // ---- folders, level by level ----
     const byDepth = new Map<number, TreeNode[]>();
     for (const f of missingFolders) {
@@ -5600,6 +5659,20 @@ export class VaultRegistry {
     // The run is over, so the short idle window comes back — and the flush above
     // means nothing is owed across the switch.
     checkpoint.setBulk(false);
+    // A folder this pass registered that is already gone from disk again (made
+    // and deleted within a second): its removal came while it was unmapped and
+    // was dropped, so without this the next pull re-created it, empty, on
+    // every device.
+    const createdFolders = missingFolders
+      .map((f) => f.path)
+      .filter((p) => !hadFolder.has(p) && this.folderByPath.has(p));
+    if (createdFolders.length > 0) {
+      try {
+        this.host?.foldersRegistered?.(createdFolders);
+      } catch (e) {
+        console.warn("[registry] foldersRegistered listener threw", e);
+      }
+    }
     perf.mark("reconcile-done");
     return mutated;
   }
@@ -5731,6 +5804,11 @@ export class VaultRegistry {
     list: ReadonlyArray<{ docId: string; sv: Uint8Array | null; seed: NoteSeedState }>,
   ): Promise<void> {
     const hook = this.host?.noteSeeded;
+    // The server has answered for every one of these: it holds the state we
+    // sent. Settling is one note at a time and each does disk work, so a batch
+    // of 40 took several seconds, and a file deleted meanwhile was refused as
+    // "never confirmed" and came back for everyone.
+    for (const { docId } of list) this.seedAnswered.add(docId);
     for (const { docId, sv, seed } of list) {
       try {
         if (hook) await hook.call(this.host, docId, sv, seed);
@@ -5740,8 +5818,29 @@ export class VaultRegistry {
         }
       } catch (e) {
         console.warn(`[registry] settling the one-step create of ${docId} failed`, e);
+      } finally {
+        this.seedAnswered.delete(docId);
       }
     }
+  }
+
+  /** Notes whose one-step create the server answered, not yet settled here. */
+  private readonly seedAnswered = new Set<string>();
+  /**
+   * Notes this device created on the server in this session WITHOUT state (not
+   * indexed yet, or the state could not be built): the server row is empty and
+   * nothing else holds content for it, so deleting it loses nothing. Refused as
+   * "never confirmed", the file came back empty on every device.
+   */
+  private readonly registeredBlank = new Set<string>();
+
+  /**
+   * Does the server hold this note's content? {@link isPushed}, or a one-step
+   * create the server has answered and this device is still settling. Only for
+   * the disk-delete gate: a delete of such a note is a real delete.
+   */
+  serverHoldsContent(docId: string): boolean {
+    return this.pushed.has(docId) || this.seedAnswered.has(docId) || this.registeredBlank.has(docId);
   }
 
   /** Hand the session the ids that need an HTTP pull-then-merge. */
@@ -5775,12 +5874,20 @@ export class VaultRegistry {
       async (outerGroup) => {
         // States are built per outer group, so memory stays at
         // REGISTRY_CONCURRENCY × 100 notes rather than the whole import.
-        const seeds = oneStep ? await this.buildSeeds(outerGroup, ctx.idByPath) : new Map<string, NoteSeedState>();
+        const gone = new Set<string>();
+        const seeds = oneStep ? await this.buildSeeds(outerGroup, ctx.idByPath, gone) : new Map<string, NoteSeedState>();
+        // A file deleted between the listing and its state build is not a new
+        // note. Registered without state it became an EMPTY note on the server,
+        // its disk delete was refused as "never confirmed", and every teammate
+        // got an empty copy of a file that no longer existed anywhere.
+        for (const _ of gone) this.sink.item("ok");
+        const live = gone.size > 0 ? outerGroup.filter((n) => !gone.has(n.path)) : outerGroup;
+        if (live.length === 0) return;
         const groups = oneStep
           ? packSeedChunks(
-              outerGroup.map((n) => ({ n, stateBytes: seeds.get(n.path)?.state.byteLength ?? 0 })),
+              live.map((n) => ({ n, stateBytes: seeds.get(n.path)?.state.byteLength ?? 0 })),
             ).map((c) => c.map((x) => x.n))
-          : [outerGroup];
+          : [live];
         for (const group of groups) {
           if (this.stopRun()) return;
           if (await this.sendNoteGroup(vaultId, group, seeds, ctx)) mutated = true;
@@ -5809,6 +5916,7 @@ export class VaultRegistry {
   private async buildSeeds(
     group: TreeNode[],
     idByPath: Map<string, string>,
+    gone?: Set<string>,
   ): Promise<Map<string, NoteSeedState>> {
     const seeds = new Map<string, NoteSeedState>();
     const build = this.host?.buildNoteState;
@@ -5817,13 +5925,23 @@ export class VaultRegistry {
       group,
       async (n) => {
         const docId = idByPath.get(n.path);
-        if (!docId) return;
+        if (!docId) {
+          // Not indexed yet (a file written a moment ago): it registers without
+          // state and its text follows later. Unless it is already gone again.
+          if (gone && !(await ipc.noteExists(n.path, this.epoch()).catch(() => true))) gone.add(n.path);
+          return;
+        }
         try {
           const seed = await build.call(this.host, docId, n.path);
           if (seed && seed.state.byteLength > 0 && seed.state.byteLength <= SEED_SINGLE_MAX_BYTES) {
             seeds.set(n.path, seed);
           }
         } catch (e) {
+          // Gone from disk since the listing: nothing to register (see the caller).
+          if (gone && !(await ipc.noteExists(n.path, this.epoch()).catch(() => true))) {
+            gone.add(n.path);
+            return;
+          }
           console.warn(`[registry] couldn't build state for ${n.path}; registering without it`, e);
         }
       },
@@ -5955,6 +6073,9 @@ export class VaultRegistry {
               !!seed,
               !!localDocId && res.docId === localDocId,
             );
+            if (!seed && res.status === "created" && !this.pushed.has(res.docId)) {
+              this.registeredBlank.add(res.docId);
+            }
             if (next === "seeded" && seed) {
               seededNow.push({ docId: res.docId, sv: base64ToBytes(res.sv), seed });
             } else if (next === "merge") {
