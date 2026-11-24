@@ -642,6 +642,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     through `registry.idToPathIndex()` (`lockScopesByPath` `index`), never the LAZY tree: a padlock
     on an unexpanded folder used to resolve to no path. Server `groupViewLocks` reports a group's
     Can view on a subfolder whose parent the group does not reach (it used to report nothing).
+  - **A dropped connection resumes downloads by itself** (`attachments.ts transientTimer`, 2026-11-24): a
+    pass whose listing or downloads failed on the network asks again at 15 s, doubling to 5 min, reset by a
+    clean pass, and every `channel-synced` owes the blob mirror one pass (`attachmentsOwedByFrame`). Before,
+    files cut off mid-download (173 of a group grant) stayed missing until an unrelated disk change or a restart.
   - **Transfers run smallest first** (`attachments.ts smallestFirst`, uploads and downloads): the
     pass's first item runs alone as the server probe and a file over the 32 MiB in-flight budget runs
     alone too, so a fresh device whose first listed binary was a 150 MB video downloaded nothing else

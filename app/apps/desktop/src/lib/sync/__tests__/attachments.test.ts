@@ -4,6 +4,7 @@ import {
   AttachmentSync,
   CHANGED_DURING_UPLOAD,
   UPLOAD_QUIET_MS,
+  TRANSIENT_RETRY_MS,
   diffAttachments,
   isSafeAttachmentRelPath,
   mimeForPath,
@@ -287,6 +288,37 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
     expect(onEntitlementBlocked).toHaveBeenCalledWith(true);
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("a pass cut off by the network asks again on its own, backing off until one succeeds", async () => {
+    const { deps } = makeDeps();
+    let fail = true;
+    const listServer = deps.listServer;
+    const delays: number[] = [];
+    const timers: Array<() => void> = [];
+    const setTimeoutImpl = ((cb: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      timers.push(cb);
+      return timers.length as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
+    const sync = new AttachmentSync(
+      { ...deps, listServer: () => (fail ? Promise.reject(new TypeError("Load failed")) : listServer()) },
+      400,
+      setTimeoutImpl,
+      (() => {}) as unknown as typeof clearTimeout,
+    );
+    await sync.reconcile();
+    expect(delays).toEqual([TRANSIENT_RETRY_MS]);
+    await sync.reconcile(); // another failing pass while the retry waits
+    expect(delays).toEqual([TRANSIENT_RETRY_MS]); // one retry timer at a time
+    timers[0]!(); // the retry timer fires → a debounced pass is armed
+    expect(delays).toEqual([TRANSIENT_RETRY_MS, 400]);
+    await sync.reconcile(); // the retry fails too: twice as long
+    expect(delays[delays.length - 1]).toBe(TRANSIENT_RETRY_MS * 2);
+    fail = false;
+    const n = delays.length;
+    await sync.reconcile(); // back online: no further retry
+    expect(delays.length).toBe(n);
   });
 
   it("scheduleReconcile debounces a burst into a single pass", () => {

@@ -1780,7 +1780,9 @@ export class SyncManager implements InboundHost {
       const scope = this.scope;
       if (scope?.isCurrent() && scope.orgId) void this.refreshSyncRules(scope, scope.orgId);
     }
-    if (reason === "registry-frame") this.attachmentsOwedByFrame = true;
+    // A reconnect owes the blob mirror a pass too: downloads cut off by the drop
+    // are retried even when the catch-up pull finds no registry change.
+    if (reason === "registry-frame" || reason === "channel-synced") this.attachmentsOwedByFrame = true;
     this.armRegistryPull(reason, opts?.fileChange === true);
   }
 

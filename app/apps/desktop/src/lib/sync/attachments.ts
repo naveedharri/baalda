@@ -107,6 +107,10 @@ export interface LocalAttachment {
 export const UPLOAD_QUIET_MS = 3_000;
 /** How soon a pass held back by a failed deleted-files listing asks again. */
 export const HELD_FILES_RETRY_MS = 15_000;
+/** First retry after a pass whose listing or downloads failed on the network;
+ *  doubles per failing pass up to {@link TRANSIENT_RETRY_MAX_MS}. */
+export const TRANSIENT_RETRY_MS = 15_000;
+export const TRANSIENT_RETRY_MAX_MS = 5 * 60_000;
 /** How many quick passes (one per {@link UPLOAD_QUIET_MS}) may wait for the
  *  local index to give newly dropped files their ids. */
 export const INDEX_WAIT_MAX_ROUNDS = 40;
@@ -1356,6 +1360,15 @@ export class AttachmentSync {
   private settleTimer: ReturnType<typeof setTimeout> | null = null;
   /** The retry for files held by a failed deleted-files listing. */
   private heldTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * A pass whose listing failed or whose downloads failed on the network (the
+   * connection dropped mid-pass) asks again on its own. Before, nothing did:
+   * the reconnect's pull changed nothing, so 173 files of a group grant stayed
+   * missing until some unrelated file changed on disk or the app restarted.
+   */
+  private transientTimer: ReturnType<typeof setTimeout> | null = null;
+  private transientFailed = false;
+  private transientStreak = 0;
   /** The "your image could not be shared" toast, once per sync instance. */
   private embedRefusalNotified = false;
   /** The storage-full toast is raised at most once per sync instance. */
@@ -1598,11 +1611,14 @@ export class AttachmentSync {
     try {
       do {
         this.rerun = false;
+        this.transientFailed = false;
         result = await this.pass();
       } while (this.rerun && this.current());
     } finally {
       this.running = false;
     }
+    if (this.transientFailed) this.retryTransient();
+    else this.transientStreak = 0;
     return result;
   }
 
@@ -1829,6 +1845,17 @@ export class AttachmentSync {
     }, HELD_FILES_RETRY_MS);
   }
 
+  /** See {@link transientTimer}. */
+  private retryTransient(): void {
+    if (this.transientTimer || !this.current()) return;
+    const delay = Math.min(TRANSIENT_RETRY_MS * 2 ** this.transientStreak, TRANSIENT_RETRY_MAX_MS);
+    this.transientStreak = Math.min(this.transientStreak + 1, 10);
+    this.transientTimer = this.setTimeoutImpl(() => {
+      this.transientTimer = null;
+      if (this.current()) this.scheduleReconcile();
+    }, delay);
+  }
+
   /** Ask again once the quiet period has passed (see {@link settleTimer}). */
   private retryAfterSettle(): void {
     if (this.settleTimer) return;
@@ -1872,6 +1899,7 @@ export class AttachmentSync {
         return { uploaded: 0, downloaded: 0 };
       }
       console.warn("[attachments] listing failed — skipping this pass", e);
+      this.transientFailed = true;
       return { uploaded: 0, downloaded: 0 };
     }
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
@@ -2265,6 +2293,7 @@ export class AttachmentSync {
             );
           } else {
             console.error("[attachments] download failed", b.relPath, e);
+            this.transientFailed = true;
           }
           // The dot stays `syncing` — like a failed upload, `error` is reserved
           // for a refusal retrying cannot fix, and the next pass tries again.
@@ -3512,6 +3541,10 @@ export class AttachmentSync {
     if (this.heldTimer) {
       this.clearTimeoutImpl(this.heldTimer);
       this.heldTimer = null;
+    }
+    if (this.transientTimer) {
+      this.clearTimeoutImpl(this.transientTimer);
+      this.transientTimer = null;
     }
     // The text pass holds the same captured vaultId and must die with it.
     if (this.textTimer) {
