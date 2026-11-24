@@ -560,6 +560,26 @@ describe("inbound rename", () => {
     expect(reg.isOwnRemoval("New/a.png")).toBe(true);
   });
 
+  it("never maps a followed file's id back onto the name it moved away from", async () => {
+    // A blob pass whose listings were read mid-move reported the OLD path as
+    // agreed; mapping it again made the old name's echo a user delete that
+    // removed the moved file for everyone.
+    const disk = new FakeDisk();
+    install(disk);
+    const reg = new VaultRegistry(fakeApi({ notes: [] }));
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    (reg as unknown as { fileByPath: Map<string, string> }).fileByPath.set("Old/a.png", "f1");
+    vi.mocked(ipc.renamePath).mockImplementationOnce((async () => "New/a.png") as never);
+    expect(await reg.followFileMove("Old/a.png", "New/a.png")).toBe(true);
+
+    reg.setFileId("Old/a.png", "f1");
+    expect(reg.getFileId("Old/a.png")).toBeNull();
+    expect(reg.getFileId("New/a.png")).toBe("f1");
+    // Another id at that name (a new file the person put there) still maps.
+    reg.setFileId("Old/a.png", "f2");
+    expect(reg.getFileId("Old/a.png")).toBe("f2");
+  });
+
   it("removes a deleted file inside a moved folder instead of carrying it to the new path", async () => {
     // Offline device learns a folder move AND a delete inside it at once. The
     // carry moved the deleted file too, re-creating its folder at the new path,

@@ -8373,6 +8373,7 @@ export class SyncManager implements InboundHost {
       movedIntoHidden: (relPath, sha) => this.binaryMovedToHidden(scope, relPath, sha),
       fileId: (relPath) => registry.getFileId(relPath),
       isOwnRemoval: (relPath) => registry.isOwnRemoval(relPath),
+      isOwnMoveSource: (relPath) => registry.isOwnMoveSource(relPath),
       // The mirror caches ids per path too, and consults that cache BEFORE the
       // registry. Forgetting only the registry's copy left the dead id live for
       // the rest of the session: a file that came back uploaded under a row

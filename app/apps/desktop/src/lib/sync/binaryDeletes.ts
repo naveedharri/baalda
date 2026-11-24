@@ -143,6 +143,15 @@ export interface BinaryDeleteDeps {
    * is never a user delete, however many watcher events report it.
    */
   isOwnRemoval?: (relPath: string) => boolean;
+  /**
+   * Did the registry move a file AWAY from this path itself (a teammate's move
+   * or folder move followed here, a refused rename put back;
+   * `registry.isOwnMoveSource`)? The file still exists, under its new name and
+   * the same `files` id: the old name vanishing is never a delete. Unchecked,
+   * a pass that learned the old path again from a listing read mid-move
+   * deleted the moved file for everyone.
+   */
+  isOwnMoveSource?: (relPath: string) => boolean;
   /** Forget a registration whose file is gone. */
   forgetFileId(relPath: string): void;
   /** Move one to the path its bytes turned up at. */
@@ -282,6 +291,7 @@ export class BinaryDeleteQueue {
     // A repeat report of the same removal (the claim above is spent by the
     // first event): still ours, still not a delete.
     if (this.deps.isOwnRemoval?.(relPath)) return;
+    if (this.deps.isOwnMoveSource?.(relPath)) return;
     // Not live ⇒ startup: a file that isn't there yet is a disk (or a pull)
     // catching up, not a deletion. Refused HERE rather than at drain time so
     // the window never starts and the path stays downloadable meanwhile.
@@ -412,7 +422,7 @@ export class BinaryDeleteQueue {
       const present: string[] = [];
       batch.forEach((item, i) => {
         if (!missing[i]) present.push(item.relPath);
-        else if (!this.deps.isOwnRemoval?.(item.relPath)) gone.push(item);
+        else if (!this.deps.isOwnRemoval?.(item.relPath) && !this.deps.isOwnMoveSource?.(item.relPath)) gone.push(item);
       });
       if (gone.length === 0) return;
 

@@ -1907,6 +1907,13 @@ export class VaultRegistry {
     const me = this.host?.localUserId?.() ?? null;
     if (opts.authored || (me !== null && opts.createdBy === me)) this.claimAuthorship(id);
     if (this.fileByPath.get(relPath) === id) return;
+    // A pass whose listings were read before a followed move finished names
+    // the OLD path again. The id already lives at the path the move put it on;
+    // mapping it back made the old name's watcher echo look like this user
+    // deleting the file, and the delete queue removed it for everyone.
+    if (this.isOwnMoveSource(relPath)) {
+      for (const [p, other] of this.fileByPath) if (other === id && !samePath(p, relPath)) return;
+    }
     this.fileByPath.set(relPath, id);
     this.persist();
     markAccessTreeStale();

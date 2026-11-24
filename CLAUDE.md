@@ -602,7 +602,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     unmaterializable rename keeps the note mapped at its current path (`heldRenames`; an occupied
     destination keeps #129). The folder carry SKIPS a file the server tombstoned (`ready.tombstones` plus `GET file-tombstones`,
     fetched BEFORE planning whenever a known folder moved and files sit under it) and leaves it to the
-    attachment pass's tombstone removal (by id, with no per-pass limit, like deleted notes), and a followed file released mid-rename is removed at its new path.
+    attachment pass's tombstone removal (by id, with no per-pass limit, like deleted notes), and a followed file released mid-rename is removed at its new path. The name a followed move LEFT
+    is never a binary delete (`BinaryDeleteQueue` skips `isOwnMoveSource`), and `setFileId` never maps an
+    id back onto that name while it lives elsewhere: a blob pass reading its listings mid-move named the
+    old path again, and the old name's echo deleted the moved file for everyone (4 of 41 in one move).
     A note the planned listing named but the post-apply re-read no longer does (a teammate deleted it
     while the pass ran) is suppressed at BOTH its mapped and its listed path (a note this pass moved
     already sits at the listing's path while the mapping names the old one until the pass ends), never

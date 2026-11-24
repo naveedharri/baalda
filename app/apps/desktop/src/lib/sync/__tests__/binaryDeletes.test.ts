@@ -556,6 +556,38 @@ describe("suppressNext — the revocation's claim on its own echo", () => {
     expect(h.deleted).toEqual(["file-1"]);
   });
 
+  it("the old name of a file the app moved itself is never a delete", async () => {
+    // A teammate moved a folder; this device followed the move. A blob pass
+    // whose listings were read mid-move mapped the old name to the file's id
+    // again, so the old name vanishing looked like this user deleting it, and
+    // `DELETE /api/files/:id` removed the moved file for everyone.
+    const moved = new Set(["Old/small-12.csv"]);
+    const h = harness({
+      local: [],
+      server: [blob("b1", "Old/small-12.csv")],
+      onDisk: [],
+      fileIds: { "Old/small-12.csv": "file-1" },
+    });
+    h.deps.isOwnMoveSource = (relPath) => moved.has(relPath);
+    h.queue.noteChanged("Old/small-12.csv");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+    expect(h.blobsDeleted).toEqual([]);
+
+    // A window opened before the mark is judged at the drain too.
+    moved.clear();
+    h.queue.noteChanged("Old/small-12.csv");
+    moved.add("Old/small-12.csv");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+
+    // Once the mark has aged out, deleting a file there is a real delete.
+    moved.clear();
+    h.queue.noteChanged("Old/small-12.csv");
+    await h.queue.drain();
+    expect(h.deleted).toEqual(["file-1"]);
+  });
+
   it("closes a window already open for the path", async () => {
     // The watcher can beat the plan: a `tree` event lands, then the revocation
     // removes the same file. The pending entry is ours now, not the user's.
