@@ -2117,6 +2117,7 @@ pub async fn rename_path(
     to: String,
     expected_epoch: Option<u64>,
     allow_excluded_target: Option<bool>,
+    defer_links: Option<bool>,
 ) -> AppResult<String> {
     // Epoch-pinned because the UI renames a multi-select in a loop: every lap
     // after the first runs past an await, and a rename applied to the wrong vault
@@ -2135,10 +2136,24 @@ pub async fn rename_path(
         let _ = guard.remove_notes(&vault, &gone);
         let _ = guard.remove_files(&vault, &gone);
     } else {
-        // Keep doc_id stable across the move (file or folder subtree).
-        guard.rename_note(&vault, &old_abs, &new_abs)?;
+        // Keep doc_id stable across the move (file or folder subtree). A
+        // follow of many renames defers the link pass to one
+        // `flush_deferred_links` at its end (`Index::rename_note_opts`).
+        guard.rename_note_opts(&vault, &old_abs, &new_abs, defer_links.unwrap_or(false))?;
     }
     Ok(new_rel)
+}
+
+/// The one link pass a run of `rename_path { deferLinks: true }` owes. Cheap
+/// when nothing is owed. True when a pass ran.
+#[tauri::command]
+pub async fn flush_deferred_links(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<bool> {
+    let (_vault, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    guard.flush_deferred_links()
 }
 
 /// One excluded file's content hash (#401), see [`excluded_hashes`].

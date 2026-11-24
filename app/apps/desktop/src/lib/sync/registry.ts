@@ -3209,6 +3209,12 @@ export class VaultRegistry {
       }
     }
 
+    // Many renames (a teammate moved a folder of notes): each one skips the
+    // index's whole-vault link pass and ONE runs after the loop. Paid per
+    // rename it was ~50 ms a note on a 1,200-note vault, growing with the
+    // vault, all under the index lock the UI and the watcher wait on.
+    const deferLinks = plan.renames.length > 1;
+    let linksOwed = false;
     for (const move of plan.renames) {
       if (this.stopRun()) break;
       // A destination this OS cannot hold (Windows): keep the old local path.
@@ -3228,7 +3234,12 @@ export class VaultRegistry {
       try {
         // Rust refuses a rename onto an existing file, so this cannot overwrite
         // content — we lean on that rather than pre-checking and racing.
-        await ipc.renamePath(move.from, move.to, this.epoch());
+        if (deferLinks) {
+          linksOwed = true;
+          await ipc.renamePath(move.from, move.to, this.epoch(), { deferLinks: true });
+        } else {
+          await ipc.renamePath(move.from, move.to, this.epoch());
+        }
         changedDisk = true;
         this.host?.notePathChanged(move.docId, move.from, move.to);
       } catch (e) {
@@ -3242,6 +3253,15 @@ export class VaultRegistry {
           reason: reasonOf(e),
           code: null,
         });
+      }
+    }
+    if (linksOwed) {
+      // Best effort: a failure here leaves the owed pass recorded in the index,
+      // which runs it with its next link pass or the next open.
+      try {
+        await ipc.flushDeferredLinks(this.epoch());
+      } catch (e) {
+        if (!ipc.isVaultMismatch(e)) console.warn("[registry] deferred link pass failed", e);
       }
     }
 

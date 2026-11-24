@@ -12,6 +12,7 @@ vi.mock("../../ipc", () => ({
   readNote: vi.fn(),
   ensureFolder: vi.fn(),
   renamePath: vi.fn(),
+  flushDeferredLinks: vi.fn(async () => true),
   trashNote: vi.fn(),
   deletePath: vi.fn(),
   deleteFile: vi.fn(),
@@ -462,6 +463,8 @@ describe("inbound rename", () => {
     });
 
     expect(ipc.renamePath).toHaveBeenCalledWith("old.md", "new.md", null);
+    // One rename keeps its own link pass: nothing deferred, nothing to flush.
+    expect(ipc.flushDeferredLinks).not.toHaveBeenCalled();
     // The whole point: one file at the new path. Before this, the old path kept
     // the content and the new path was materialized as a second, empty file.
     expect([...disk.notes.keys()]).toEqual(["new.md"]);
@@ -477,6 +480,7 @@ describe("inbound rename", () => {
     // A folder move is proven by the folder's own server id moving, so its notes
     // are not a "mass rename". Refused, every other device wrote each note again
     // at the new path and left the old files behind: the whole folder twice.
+    vi.mocked(ipc.flushDeferredLinks).mockClear();
     const disk = new FakeDisk();
     disk.folders.add("Big");
     disk.folders.add("Big/sub");
@@ -501,6 +505,12 @@ describe("inbound rename", () => {
     expect(paths.filter((p) => p.startsWith("Big2/"))).toHaveLength(40);
     expect(r.renamed).toHaveLength(40);
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
+    // Each rename skipped the index's whole-vault link pass and ONE ran after
+    // the loop: paid per rename, a big folder move took minutes to follow.
+    const moves = vi.mocked(ipc.renamePath).mock.calls.filter(([from]) => String(from).startsWith("Big/"));
+    expect(moves).toHaveLength(40);
+    expect(moves.every((c) => (c[3] as { deferLinks?: boolean } | undefined)?.deferLinks === true)).toBe(true);
+    expect(ipc.flushDeferredLinks).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a note where it is when its rename is refused, instead of writing it again at the new path", async () => {

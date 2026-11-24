@@ -159,7 +159,9 @@ Errors: single `AppError(String)` (`error.rs`).
   FTS5 `notes_fts`, `tags`/`note_tags`, `links`, `folders`, `yjs_updates`, `yjs_snapshot`. Notes keyed by
   `doc_id`; `rebuild` preserves ids and never wipes the CRDT tables; `rename_note` rewrites paths by id so
   backlinks survive moves, and skips its whole-vault link pass when no note row moved (a followed folder
-  move of 2,000 files paid it once per file under the index lock: minutes, not seconds). `note_file_identity.rs` retains reliable filesystem identity plus creation
+  move of 2,000 files paid it once per file under the index lock: minutes, not seconds). A follow of
+  many note renames defers it (`renamePath` `deferLinks`, one `flush_deferred_links` after the loop); the
+  debt is the `index_flags` row `links_dirty`, paid by the next link pass of any kind or the next open. `note_file_identity.rs` retains reliable filesystem identity plus creation
   time beside each note ID, including across removal/rebuild batches. A unique owner at an absent old
   path lets local external renames retain identity; equal content or ambiguous hard links never merge.
   Unsupported identity metadata fails closed. Local tabs follow these indexed moves; synced moves

@@ -532,7 +532,7 @@ export const renamePath = (
   from: string,
   to: string,
   expectedEpoch?: VaultEpoch,
-  opts?: { allowExcludedTarget?: boolean },
+  opts?: { allowExcludedTarget?: boolean; deferLinks?: boolean },
 ) =>
   invoke<string>("rename_path", {
     from,
@@ -541,7 +541,15 @@ export const renamePath = (
     // Only the sync layer sets it: following a teammate's move INTO a folder
     // the vault's sync rules hide (#401). The UI never may.
     allowExcludedTarget: opts?.allowExcludedTarget ?? null,
+    // A run of many renames (following a teammate's folder move) skips the
+    // per-rename whole-vault link pass and calls `flushDeferredLinks` once at
+    // its end; Rust records what it owes, so a run that never ends is caught up
+    // by the next link pass or the next open.
+    deferLinks: opts?.deferLinks ?? null,
   });
+/** The single link pass a run of `renamePath(…, { deferLinks: true })` owes. */
+export const flushDeferredLinks = (expectedEpoch?: VaultEpoch) =>
+  invoke<boolean>("flush_deferred_links", { expectedEpoch: expectedEpoch ?? null });
 /** Idempotent folder create — safe to call on every reconcile. Resolves true
  *  when THIS call created the directory (the watcher will echo it), false when
  *  it already existed — including under another spelling on a case-insensitive

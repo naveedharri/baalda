@@ -334,6 +334,11 @@ impl Index {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         let idx = Index::new(conn);
         idx.migrate()?;
+        // A follow that deferred its link pass and never reached the end (the
+        // app quit, the vault switched) owes that pass now.
+        if let Err(e) = idx.flush_deferred_links() {
+            log::warn!("[index] deferred link pass failed: {e}");
+        }
         Ok(idx)
     }
 
@@ -424,6 +429,13 @@ impl Index {
                 parent_id TEXT,
                 name      TEXT,
                 path      TEXT
+            );
+
+            -- Named switches that must survive a crash. Today only
+            -- 'links_dirty': a rename made with its link pass deferred
+            -- (`rename_note_opts`) and not yet followed by one.
+            CREATE TABLE IF NOT EXISTS index_flags (
+                name TEXT PRIMARY KEY
             );
 
             CREATE INDEX IF NOT EXISTS idx_links_dst ON links(dst_note_id);
@@ -1333,6 +1345,28 @@ impl Index {
     /// folder subtree (prefix rewrite). Inbound links, keyed by `dst_note_id`,
     /// are untouched, so a *move* never breaks a link.
     pub fn rename_note(&self, vault: &Path, old_abs: &Path, new_abs: &Path) -> AppResult<()> {
+        self.rename_note_opts(vault, old_abs, new_abs, false)
+    }
+
+    /// [`Self::rename_note`], optionally leaving its whole-vault link pass for
+    /// later. Following a teammate's folder move renames hundreds of notes one
+    /// at a time, and the pass (every note's path and title, every link) cost
+    /// ~50 ms per note on a 1,200-note vault and grows with the vault: the
+    /// follow paid it N times under the index lock. With `defer_links` the
+    /// rename records `links_dirty` in the SAME transaction instead; the next
+    /// link pass of any kind runs in full and clears it
+    /// ([`Self::resolve_links`]), as do [`Self::flush_deferred_links`] (the
+    /// follow calls it once at the end) and the next open, so a crash
+    /// mid-follow still ends in exactly the links a per-rename pass gives.
+    /// Links already resolved are keyed by note id and stay right meanwhile;
+    /// only a link whose best match changes with these paths waits.
+    pub fn rename_note_opts(
+        &self,
+        vault: &Path,
+        old_abs: &Path,
+        new_abs: &Path,
+        defer_links: bool,
+    ) -> AppResult<()> {
         let old_rel = rel_from_abs(vault, old_abs)?;
         let new_rel = rel_from_abs(vault, new_abs)?;
         let tx = self.conn.unchecked_transaction()?;
@@ -1382,11 +1416,36 @@ impl Index {
         // holding 2,000 files paid this full pass once PER FILE (about 40 ms on a
         // 1,200-note vault, held under the index lock every UI command and the
         // watcher queue behind), which is what made such a move take minutes.
-        if moved_notes {
+        if moved_notes && defer_links {
+            tx.execute(
+                "INSERT OR IGNORE INTO index_flags (name) VALUES ('links_dirty')",
+                [],
+            )?;
+        } else if moved_notes {
             self.resolve_links(&tx, LinkScope::All)?;
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Run the link pass a deferred rename owes, if any. True when one ran.
+    pub fn flush_deferred_links(&self) -> AppResult<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        if !Self::links_dirty(&tx)? {
+            return Ok(false);
+        }
+        // `resolve_links` sees the flag, runs in full and clears it.
+        self.resolve_links(&tx, LinkScope::All)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn links_dirty(tx: &Connection) -> AppResult<bool> {
+        Ok(tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM index_flags WHERE name = 'links_dirty')",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     /// Re-key the note row at `rel` to `doc_id`, keeping its content.
@@ -1705,6 +1764,14 @@ impl Index {
     fn resolve_links(&self, tx: &Connection, scope: LinkScope<'_>) -> AppResult<()> {
         #[cfg(test)]
         self.resolve_calls.set(self.resolve_calls.get() + 1);
+        // A deferred rename (`rename_note_opts`) is still owed a full pass: a
+        // narrower one now would leave the links its paths changed unresolved.
+        let scope = if Self::links_dirty(tx)? {
+            tx.execute("DELETE FROM index_flags WHERE name = 'links_dirty'", [])?;
+            LinkScope::All
+        } else {
+            scope
+        };
         // Build lookup maps from all notes.
         let mut by_basename: HashMap<String, String> = HashMap::new();
         let mut by_title: HashMap<String, String> = HashMap::new();
@@ -4662,6 +4729,76 @@ mod tests {
         std::fs::rename(v.join("other"), v.join("other2")).unwrap();
         idx.rename_note(&v, &v.join("other"), &v.join("other2")).unwrap();
         assert_eq!(idx.resolve_call_count(), before + 2);
+    }
+
+    #[test]
+    fn a_deferred_link_pass_runs_once_and_survives_a_reopen() {
+        let (_tmp, v) = seed_vault();
+        // Alpha links [[sub/Beta]] by path: moving Beta breaks that match, the
+        // case a deferred pass must still settle.
+        write_note(&v, "Alpha.md", "# Alpha\n\n[[sub/Beta]]").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        let alpha = idx.get_note_meta("Alpha.md").unwrap().unwrap().id;
+        let beta = idx.get_note_meta("sub/Beta.md").unwrap().unwrap().id;
+        let dst = |idx: &Index| -> Option<String> {
+            idx.conn
+                .query_row(
+                    "SELECT dst_note_id FROM links WHERE src_note_id=?1 AND dst_path_raw LIKE 'sub/Beta%'",
+                    params![alpha],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(dst(&idx), Some(beta.clone()));
+
+        std::fs::create_dir_all(v.join("other")).unwrap();
+        std::fs::rename(v.join("sub/Beta.md"), v.join("other/Gamma2.md")).unwrap();
+        let before = idx.resolve_call_count();
+        idx.rename_note_opts(&v, &v.join("sub/Beta.md"), &v.join("other/Gamma2.md"), true)
+            .unwrap();
+        assert_eq!(idx.resolve_call_count(), before, "deferred: no pass yet");
+        assert!(Index::links_dirty(&idx.conn).unwrap());
+
+        // The flush runs the full pass once and clears the debt.
+        assert!(idx.flush_deferred_links().unwrap());
+        assert_eq!(idx.resolve_call_count(), before + 1);
+        assert!(!idx.flush_deferred_links().unwrap(), "nothing owed twice");
+        let settled = dst(&idx);
+
+        // Same rename on a fresh copy, never flushed: a reopen settles it the
+        // same way (an app quit mid-follow).
+        let (_tmp2, v2) = seed_vault();
+        write_note(&v2, "Alpha.md", "# Alpha\n\n[[sub/Beta]]").unwrap();
+        {
+            let idx2 = Index::open(&v2).unwrap();
+            idx2.rebuild(&v2).unwrap();
+            std::fs::create_dir_all(v2.join("other")).unwrap();
+            std::fs::rename(v2.join("sub/Beta.md"), v2.join("other/Gamma2.md")).unwrap();
+            idx2.rename_note_opts(&v2, &v2.join("sub/Beta.md"), &v2.join("other/Gamma2.md"), true)
+                .unwrap();
+        }
+        let idx2 = Index::open(&v2).unwrap();
+        assert!(!Index::links_dirty(&idx2.conn).unwrap(), "the open ran the owed pass");
+        let alpha2 = idx2.get_note_meta("Alpha.md").unwrap().unwrap().id;
+        let reopened: Option<String> = idx2
+            .conn
+            .query_row(
+                "SELECT dst_note_id FROM links WHERE src_note_id=?1 AND dst_path_raw LIKE 'sub/Beta%'",
+                params![alpha2],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reopened.is_some(), settled.is_some());
+
+        // A narrower pass that finds the debt runs in full instead.
+        std::fs::rename(v.join("other/Gamma2.md"), v.join("other/Gamma3.md")).unwrap();
+        idx.rename_note_opts(&v, &v.join("other/Gamma2.md"), &v.join("other/Gamma3.md"), true)
+            .unwrap();
+        let tx = idx.conn.unchecked_transaction().unwrap();
+        idx.resolve_links(&tx, LinkScope::Touched(&[])).unwrap();
+        tx.commit().unwrap();
+        assert!(!Index::links_dirty(&idx.conn).unwrap());
     }
 
     #[test]

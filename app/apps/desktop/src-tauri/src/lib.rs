@@ -289,6 +289,7 @@ pub fn run() {
             commands::create_folder,
             commands::ensure_folder,
             commands::rename_path,
+            commands::flush_deferred_links,
             commands::delete_path,
             commands::delete_file,
             commands::delete_files_batch,
