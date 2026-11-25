@@ -36,3 +36,55 @@ export function leaveWithGhost(node: HTMLElement | null): void {
   document.body.appendChild(ghost);
   window.setTimeout(() => ghost.remove(), 420);
 }
+
+/**
+ * Redesign: the settings cross-link ("Vault settings ↗" / "Account settings ↗")
+ * swaps one dialog for the other. Unmounting one and mounting the next made the
+ * dimmed backdrop blink and the new card rise in: the window looked killed and
+ * re-popped. Now the new dialog appears at once under a static copy of the old
+ * card, and only that copy fades, once the new one has painted: one dissolve,
+ * nothing half-transparent, nothing sliding, the backdrop never moving.
+ */
+let settingsSwapAt = -Infinity;
+
+export function swapSettingsWithFade(card: HTMLElement | null, open: () => void): void {
+  const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  if (!card || !card.isConnected || reduce) {
+    open();
+    return;
+  }
+  settingsSwapAt = performance.now();
+  const rect = card.getBoundingClientRect();
+  const ghost = card.cloneNode(true) as HTMLElement;
+  ghost.classList.add("settings-swap-ghost");
+  ghost.removeAttribute("role");
+  ghost.removeAttribute("aria-modal");
+  ghost.setAttribute("aria-hidden", "true");
+  ghost.style.cssText += `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;margin:0;z-index:250;pointer-events:none;animation:none;opacity:1;`;
+  document.body.appendChild(ghost);
+  open();
+  let done = false;
+  const remove = () => {
+    if (done) return;
+    done = true;
+    ghost.remove();
+  };
+  // Two frames: React has committed the new dialog and the browser painted it
+  // under the copy. Starting earlier let the fade run while the new dialog was
+  // still being built, so it stuttered or was cut short.
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      ghost.addEventListener("animationend", remove, { once: true });
+      ghost.style.animation = "";
+      ghost.classList.add("is-leaving");
+    }),
+  );
+  window.setTimeout(remove, 1200);
+}
+
+/** Did a cross-link swap just start? The incoming settings dialog then shows at
+ *  once (no backdrop fade, no rise, no tab glide). Read, never cleared, so a
+ *  double render in development answers the same both times. */
+export function settingsSwapJustStarted(): boolean {
+  return performance.now() - settingsSwapAt < 1000;
+}

@@ -32,12 +32,36 @@ import { CheckIcon } from "./CheckIcon";
    on demand. `null` is the right fallback for a modal: the popover stays put
    and the sheet arrives a beat later. */
 import type { AccountSettingsTab, SettingsTab } from "../lib/settingsTabs";
-const VaultSettingsDialog = lazy(() =>
-  import("./VaultSettingsDialog").then((m) => ({ default: m.VaultSettingsDialog })),
-);
-const AccountSettings = lazy(() =>
-  import("./AccountSettings").then((m) => ({ default: m.AccountSettings })),
-);
+// Each settings dialog is code-split, but once its code is in it renders
+// directly rather than through `lazy`: a lazy component suspends on its first
+// render even when the module is already loaded, and that one frame with
+// neither dialog on screen made the cross-link swap blink.
+type VaultSettingsDialogT = typeof import("./VaultSettingsDialog").VaultSettingsDialog;
+type AccountSettingsT = typeof import("./AccountSettings").AccountSettings;
+let loadedVaultSettings: VaultSettingsDialogT | null = null;
+let loadedAccountSettings: AccountSettingsT | null = null;
+const loadVaultSettings = () =>
+  import("./VaultSettingsDialog").then((m) => {
+    loadedVaultSettings = m.VaultSettingsDialog;
+    return { default: m.VaultSettingsDialog };
+  });
+const loadAccountSettings = () =>
+  import("./AccountSettings").then((m) => {
+    loadedAccountSettings = m.AccountSettings;
+    return { default: m.AccountSettings };
+  });
+const VaultSettingsDialogLazy = lazy(loadVaultSettings);
+const AccountSettingsLazy = lazy(loadAccountSettings);
+// Chosen once per mount: switching from the lazy wrapper to the direct
+// component mid-life would remount the open dialog and lose its tab.
+function VaultSettingsDialog(props: React.ComponentProps<VaultSettingsDialogT>) {
+  const [C] = useState(() => loadedVaultSettings ?? VaultSettingsDialogLazy);
+  return <C {...props} />;
+}
+function AccountSettings(props: React.ComponentProps<AccountSettingsT>) {
+  const [C] = useState(() => loadedAccountSettings ?? AccountSettingsLazy);
+  return <C {...props} />;
+}
 const AuthDialogLazy = lazy(() =>
   import("./AuthDialog").then((m) => ({ default: m.AuthDialog })),
 );
@@ -150,6 +174,13 @@ export function AccountMenu() {
   // page each one opens on is the tab its latest request named.
   const settingsDialog = useStore((s) => s.settingsDialog);
   const closeSettingsDialog = useStore((s) => s.closeSettingsDialog);
+  // While either settings dialog is open, load the other one's code too: the
+  // cross-link swap must not leave a frame with neither on screen.
+  useEffect(() => {
+    if (settingsDialog === null) return;
+    void loadVaultSettings();
+    void loadAccountSettings();
+  }, [settingsDialog]);
   const membersOpen = settingsDialog === "vault";
   const accountOpen = settingsDialog === "account";
   const settingsTab: SettingsTab | undefined = settingsRequest?.tab;

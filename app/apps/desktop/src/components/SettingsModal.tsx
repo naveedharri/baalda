@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { settingsSwapJustStarted } from "../lib/exitMotion";
 
 /**
  * Shared shell for the two settings surfaces — Account settings
@@ -49,6 +50,8 @@ export function SettingsModal({
    * backdrop counts as clicking away.
    */
   const pressedBackdrop = useRef(false);
+  /** Arrived through the other dialog's cross-link: no backdrop fade, no rise. */
+  const [swapIn] = useState(settingsSwapJustStarted);
 
   // Focus the way out on open, and hand focus back to whatever opened us on
   // close (the account/vault popover button, usually — which is gone from the
@@ -88,7 +91,7 @@ export function SettingsModal({
 
   return createPortal(
     <div
-      className="modal-backdrop settings-backdrop"
+      className={`modal-backdrop settings-backdrop${swapIn ? " settings-swap-in" : ""}`}
       // Not stopped by the card, so a press anywhere inside it reaches here
       // with `target !== currentTarget` and correctly clears the flag.
       onMouseDown={(e) => {

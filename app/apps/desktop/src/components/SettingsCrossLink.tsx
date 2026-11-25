@@ -1,3 +1,5 @@
+import { swapSettingsWithFade } from "../lib/exitMotion";
+
 /**
  * The quiet link pinned to the bottom of a settings dialog's nav, pointing at
  * the OTHER settings dialog ("Account settings ↗" / "Vault settings ↗").
@@ -7,7 +9,11 @@
 export function SettingsCrossLink({ label, onOpen }: { label: string; onOpen: () => void }) {
   return (
     <div className="settings-nav-crosslink">
-      <button type="button" className="menu-item" onClick={onOpen}>
+      <button
+        type="button"
+        className="menu-item"
+        onClick={(e) => swapSettingsWithFade(e.currentTarget.closest<HTMLElement>(".settings-modal"), onOpen)}
+      >
         <span className="menu-item-label">{label}</span>
         <svg
           className="settings-nav-crosslink-arrow"

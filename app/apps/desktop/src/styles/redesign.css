@@ -2152,6 +2152,12 @@ html:not(.rd-off) .account-vault-page > .subhead { margin: 22px 0 8px 2px; line-
      to the side). Same entrance, nothing left behind. */
   .settings-backdrop > * { animation: rd-rise 210ms var(--ease) backwards; }
   .settings-content.rd-tab-in { animation: rd-tab-glide 170ms var(--ease) backwards; }
+  /* Cross-link swap (exitMotion.ts swapSettingsWithFade): the backdrop holds
+     still, the old card's copy fades out above while the new one fades in. */
+  .settings-backdrop.settings-swap-in,
+  .settings-backdrop.settings-swap-in > *,
+  .settings-backdrop.settings-swap-in .settings-content.rd-tab-in { animation: none; }
+  .settings-swap-ghost.is-leaving { animation: rd-out-fade 200ms cubic-bezier(0.4, 0, 0.2, 1) both; }
   .settings-nav .menu-item { transition: background-color 120ms var(--ease), color 120ms var(--ease); }
 }
 
@@ -2884,7 +2890,9 @@ html:not(.rd-off) .vault-icon-settings .vault-icon-customise {
 html:not(.rd-off) .settings-content .vault-root-path { background: transparent; padding: 0; }
 
 /* Danger zone: each action is its own red-edged card, with a gap between. */
-html:not(.rd-off) .vault-local-only-card + .vault-local-only-card { margin-top: var(--sp-3); }
+/* Stacked Danger zone cards sit 8px apart: the page's own gap already spaces
+   them, so a full margin on top of it read as two unrelated sections. */
+html:not(.rd-off) .vault-local-only-card + .vault-local-only-card { margin-top: calc(var(--sp-2) - var(--rd-gap, 14px)); }
 html:not(.rd-off) .vault-local-only-card { background: var(--rd-surface); }
 
 /* Activity status: the chosen status is a neutral row with an ink check,
