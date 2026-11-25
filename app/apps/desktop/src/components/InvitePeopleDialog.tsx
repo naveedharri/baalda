@@ -12,6 +12,7 @@ import { AsyncButton } from "./AsyncButton";
 import { LimitNudge } from "./LimitNudge";
 import { PeopleLimitNotice, inviteLimitError, peopleLimitKind } from "./PeopleLimitNotice";
 import { MenuSelect } from "./MenuSelect";
+import { toast } from "../lib/toast";
 import { UpgradeDialog } from "./UpgradeDialog";
 
 type InviteAccess = TeamAccessMode | "default";
@@ -144,15 +145,55 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
   const [tab, setTab] = useState<"email" | "code">("email");
   const [copied, setCopied] = useState(false);
 
+  // The access groups the join code adds people to; null until known, and on
+  // a server that cannot set them (no groups section then).
+  const [codeGroups, setCodeGroups] = useState<string[] | null>(null);
   useEffect(() => {
     let live = true;
     authManager.api
-      .getJoinCode()
-      .then((c) => vaultKeysJoinCode(orgId, c))
+      .getJoinCodeInfo()
+      .then((info) => {
+        if (live) setCodeGroups(info.groupIds);
+        return vaultKeysJoinCode(orgId, info.code);
+      })
       .then((c) => { if (live) setCode(c); })
       .catch(() => {});
     return () => { live = false; };
   }, []);
+  const codeGroupIds = (codeGroups ?? []).filter((id) => groups.some((g) => g.id === id));
+  const toggleCodeGroup = (id: string) => {
+    if (codeGroups === null) return;
+    const prev = codeGroups;
+    const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
+    setCodeGroups(next);
+    authManager.api
+      .setJoinCodeGroups(orgId, next)
+      .then((saved) => setCodeGroups(saved))
+      .catch((e) => {
+        setCodeGroups(prev);
+        toast(e instanceof Error ? e.message : "Couldn't change the join code's groups.", "error");
+      });
+  };
+  type CodeChoice = TeamAccessMode | `group:${string}` | "groups";
+  const canSetCodeGroups = !!onNewMembersAccess && codeGroups !== null && groups.length > 0;
+  const codeOptions: ReadonlyArray<{ value: CodeChoice; label: string; hint?: string; section?: string; checked?: boolean }> = [
+    ...ACCESS_LEVELS.map((o) => ({ ...o, checked: codeGroupIds.length ? o.value === newMembersAccess : undefined })),
+    ...(canSetCodeGroups
+      ? groups.map((g, i) => ({
+          value: `${GROUP_OPTION}${g.id}` as const,
+          label: g.name,
+          hint: i === 0 ? "Joins the group and gets what it can open" : undefined,
+          section: i === 0 ? "Also add to access groups" : undefined,
+          checked: codeGroupIds.includes(g.id),
+        }))
+      : []),
+  ];
+  const codeGroupsLabel = codeGroupIds.length
+    ? (() => {
+        const first = groups.find((g) => g.id === codeGroupIds[0])?.name ?? "Group";
+        return codeGroupIds.length === 1 ? first : `${first} + ${codeGroupIds.length - 1}`;
+      })()
+    : null;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !upgradeOpen) onClose(); };
@@ -265,21 +306,28 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
                 <small>Of the notes made before they join; later ones follow Default access</small>
               </span>
               {newMembersAccess && onNewMembersAccess ? (
-                <MenuSelect<TeamAccessMode>
-                  value={newMembersAccess}
-                  options={ACCESS_LEVELS}
-                  onSelect={onNewMembersAccess}
+                <MenuSelect<CodeChoice>
+                  value={codeGroupsLabel ? "groups" : newMembersAccess}
+                  options={codeOptions}
+                  onSelect={(v) => {
+                    if (v === "groups") return;
+                    if (isGroupOption(v)) toggleCodeGroup(groupOptionId(v));
+                    else onNewMembersAccess(v as TeamAccessMode);
+                  }}
                   ariaLabel="People who join get"
                   triggerClassName="invite-field-trigger"
                   menuClassName="access-menu"
+                  triggerContent={
+                    codeGroupsLabel ? (
+                      <span className="role-trigger-label">
+                        {ACCESS_LEVELS.find((o) => o.value === newMembersAccess)?.label} + {codeGroupsLabel}
+                      </span>
+                    ) : undefined
+                  }
                 />
               ) : (
                 <span className="muted">{ACCESS_LEVELS.find((o) => o.value === newMembersAccess)?.label ?? "The New members setting"}</span>
               )}
-            </div>
-            <div className="invite-foot">
-              <span className={`invite-foot-hint${codeSeesNothing ? " is-warning" : ""}`}>{codeSeesNothing ? SEES_NOTHING : "They join as Members."}</span>
-              <button type="button" className="ghost-pill" onClick={onClose}>Done</button>
             </div>
           </>
         ) : (<>

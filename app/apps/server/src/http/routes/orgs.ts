@@ -16,7 +16,14 @@ import {
 import { announceMemberJoined, announceMemberRemoved } from "../../sync/member-events.js";
 import { announceInvitationGone } from "../../sync/user-events.js";
 import { applyInvitationAccess } from "../../members/invitation-access.js";
-import { applyInvitationGroups } from "../../groups/service.js";
+import {
+  applyInvitationGroups,
+  applyJoinCodeGroups,
+  GroupError,
+  joinCodeGroupIds,
+  setJoinCodeGroups,
+  validGroupIds,
+} from "../../groups/service.js";
 import { applyInvitationKeys } from "../../members/invitation-keys.js";
 import { billingEnabled } from "../../config.js";
 import { dispatchMail, emailEnabled } from "../../email/mailer.js";
@@ -29,7 +36,9 @@ import { accountIdForOrg } from "../../billing/accounts.js";
  * Vault (org) routes (session-authenticated).
  *
  *  - GET    /api/orgs/join-code → owner/admin fetch (lazily generates) the code
- *    for their active vault, so they can share it.
+ *    for their active vault, so they can share it, with `groupIds`: the access
+ *    groups a code joiner is added to.
+ *  - PUT    /api/orgs/:orgId/join-code/groups {groupIds} → owner/admin choose them.
  *  - POST   /api/orgs/join {code} → any signed-in user redeems a code and becomes
  *    a 'member' of that vault (idempotent if already a member). A pending email
  *    invitation for the same address is consumed on the way in — same role,
@@ -510,11 +519,14 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       return c.json({ error: "Only vault owner/admin can view the join code" }, 403);
     }
 
+    // The groups a code joiner is added to (migration 099). Always an array:
+    // its presence is how a desktop knows this server can set them.
+    const groupIds = await joinCodeGroupIds(pool, org);
     const existing = await pool.query<{ code: string }>(
       "SELECT code FROM org_join_codes WHERE organization_id = $1",
       [org],
     );
-    if (existing.rows[0]) return c.json({ code: existing.rows[0].code });
+    if (existing.rows[0]) return c.json({ code: existing.rows[0].code, groupIds });
 
     // Lazily generate + persist. Retry on the (unlikely) unique-code collision.
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -526,19 +538,42 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
            RETURNING code`,
           [org, code],
         );
-        if (rows[0]) return c.json({ code: rows[0].code });
+        if (rows[0]) return c.json({ code: rows[0].code, groupIds });
         // Another request generated the code first — read it back.
         const raced = await pool.query<{ code: string }>(
           "SELECT code FROM org_join_codes WHERE organization_id = $1",
           [org],
         );
-        if (raced.rows[0]) return c.json({ code: raced.rows[0].code });
+        if (raced.rows[0]) return c.json({ code: raced.rows[0].code, groupIds });
       } catch (err) {
         // Unique violation on `code` (23505): loop and try a fresh code.
         if ((err as { code?: string }).code !== "23505") throw err;
       }
     }
     return c.json({ error: "Could not generate a join code" }, 500);
+  });
+
+    // Choose the access groups the join code adds people to (owner/admin). A
+  // person with a live email invitation who joins by code gets their
+  // invitation's groups instead, like its role and access.
+  orgRoutes.put("/orgs/:orgId/join-code/groups", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const orgId = c.req.param("orgId");
+    const role = await orgRole(orgId, session.userId);
+    if (!role) return c.json({ error: "Unknown vault" }, 404);
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "access_manager_required", message: "Only owners and admins can change this" }, 403);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    try {
+      const ids = await validGroupIds(pool, orgId, (body as { groupIds?: unknown }).groupIds ?? []);
+      const groupIds = await setJoinCodeGroups(pool, orgId, ids, session.userId);
+      return c.json({ groupIds });
+    } catch (e) {
+      if (e instanceof GroupError) return c.json({ error: e.code, message: e.message }, e.status);
+      throw e;
+    }
   });
 
   // Redeem a join code: join the vault as a 'member' (idempotent).
@@ -637,6 +672,12 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       );
       // Seamless keys (B3): the invite's direct seal applies here too.
       await applyInvitationKeys({ invitationIds: [liveInvite.id], organizationId, userId: session.userId });
+    } else {
+      // No invitation: the join code's own groups (migration 099).
+      await applyJoinCodeGroups(
+        { organizationId, userId: session.userId },
+        { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
+      );
     }
 
     // Announce to teammates already live in the vault (this path bypasses

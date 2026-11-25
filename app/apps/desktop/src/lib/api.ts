@@ -2636,8 +2636,24 @@ export class ApiClient {
 
   /** The active vault's shareable join code (owner/admin; lazily created). */
   async getJoinCode(): Promise<string> {
-    const { data } = await this.request<{ code: string }>("GET", "/api/orgs/join-code");
-    return data.code;
+    return (await this.getJoinCodeInfo()).code;
+  }
+
+  /** The join code plus the access groups it adds people to. `groupIds` is
+   *  null on a server that cannot set them (it answers the code alone). */
+  async getJoinCodeInfo(): Promise<{ code: string; groupIds: string[] | null }> {
+    const { data } = await this.request<{ code: string; groupIds?: string[] }>("GET", "/api/orgs/join-code");
+    return { code: data.code, groupIds: Array.isArray(data.groupIds) ? data.groupIds : null };
+  }
+
+  /** Choose the access groups the vault's join code adds people to (owner/admin). */
+  async setJoinCodeGroups(orgId: string, groupIds: string[]): Promise<string[]> {
+    const { data } = await this.request<{ groupIds: string[] }>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/join-code/groups`,
+      { body: { groupIds } },
+    );
+    return data.groupIds;
   }
 
   /** Join a vault by its shared code (any signed-in user). */

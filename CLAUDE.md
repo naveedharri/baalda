@@ -787,7 +787,10 @@ owner excluded); removing someone disconnects only the docs that group reached. 
 `POST access/bulk` with `audience: {type:"group"}` (`private` = no row; an Everyone write never clears group
 rows), read through `access-board?groupId=`; `GET /locks` returns the caller's group `edit` rows as lifts, and a group's Can view as the caller's own `readonly` row (`reason: "group_view"`, id `group-view:<id>`, never removable by Unlock — `lib/locks.ts isRemovableLock`) on the topmost visible view-only folder or item, resolving only the subtrees a group can view.
 Skills: `skill_group_access` (required/optional), inherited level = max(Everyone, groups). Invites carry
-`groupIds` (with an access level too ⇒ 400 `access_or_groups`). Management follows `canManageMemberAccess`.
+`groupIds` (with an access level too ⇒ 400 `access_or_groups`); the join code has its own groups
+(migration 099 `join_code_groups`, `PUT /orgs/:orgId/join-code/groups`, returned by `GET /orgs/join-code`
+as `groupIds`, whose absence hides the choice on older servers), applied to a code joiner with no live
+invitation, beside the New members level. Management follows `canManageMemberAccess`.
 UI: a People | Groups toggle with one search under the Default access row, a Groups column of chips,
 a group page (Members / Access board / Skills / Activity), the person page's Groups row, and groups listed in
 the Default access menu (opens the group), the group page (auto-join) and the invite Access menu

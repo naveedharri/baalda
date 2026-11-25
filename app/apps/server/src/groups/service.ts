@@ -474,6 +474,73 @@ export async function rememberInvitationGroups(
   );
 }
 
+/** The groups the vault's join code adds people to. */
+export async function joinCodeGroupIds(db: Db, orgId: string): Promise<string[]> {
+  const { rows } = await db.query<{ group_id: string }>(
+    `SELECT jcg.group_id FROM join_code_groups jcg
+       JOIN access_groups g ON g.id = jcg.group_id AND g.organization_id = jcg.organization_id
+      WHERE jcg.organization_id = $1
+      ORDER BY jcg.created_at, jcg.group_id`,
+    [orgId],
+  );
+  return rows.map((r) => r.group_id);
+}
+
+/** Replace the join code's groups (ids already validated by `validGroupIds`). */
+export async function setJoinCodeGroups(db: pg.Pool, orgId: string, groupIds: string[], userId: string): Promise<string[]> {
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "DELETE FROM join_code_groups WHERE organization_id = $1 AND NOT (group_id = ANY($2::text[]))",
+      [orgId, groupIds],
+    );
+    await client.query(
+      `INSERT INTO join_code_groups (organization_id, group_id, set_by)
+       SELECT $1, g.id, (SELECT id FROM "user" WHERE id = $3)
+         FROM access_groups g WHERE g.organization_id = $1 AND g.id = ANY($2::text[])
+       ON CONFLICT DO NOTHING`,
+      [orgId, groupIds, userId],
+    );
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  return joinCodeGroupIds(db, orgId);
+}
+
+/**
+ * Add someone who just joined by code to the join code's groups. Best-effort,
+ * like invitation groups: membership is already committed.
+ */
+export async function applyJoinCodeGroups(
+  input: { organizationId: string; userId: string },
+  deps: AccessChangeDeps = {},
+  db: pg.Pool = defaultPool,
+): Promise<number> {
+  try {
+    const res = await db.query(
+      `INSERT INTO access_group_members (group_id, organization_id, user_id, added_by)
+       SELECT jcg.group_id, $1, $2, jcg.set_by
+         FROM join_code_groups jcg
+         JOIN access_groups g ON g.id = jcg.group_id AND g.organization_id = jcg.organization_id
+        WHERE jcg.organization_id = $1
+          AND EXISTS (SELECT 1 FROM member WHERE "organizationId" = $1 AND "userId" = $2)
+       ON CONFLICT DO NOTHING`,
+      [input.organizationId, input.userId],
+    );
+    const added = res.rowCount ?? 0;
+    if (added > 0) await afterGroupChange(db, input.organizationId, [], deps);
+    return added;
+  } catch (err) {
+    console.error("[join] applying join code groups failed:", (err as Error).message);
+    return 0;
+  }
+}
+
 /** Validate group ids for an invitation: every one must belong to the vault. */
 export async function validGroupIds(db: Db, orgId: string, raw: unknown): Promise<string[]> {
   if (raw === undefined || raw === null) return [];

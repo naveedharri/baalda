@@ -296,6 +296,37 @@ describe("access groups: write gates", () => {
     expect(rest.rows.some((r: any) => r.principal_type === "org")).toBe(true);
   });
 
+  it("a join code adds people who join by it to the groups chosen for it", async () => {
+    const put = await call(owner, "PUT", `/api/orgs/${org}/join-code/groups`, { groupIds: [groupId] });
+    expect(put.status).toBe(200);
+    expect(((await put.json()) as any).groupIds).toEqual([groupId]);
+    expect((await call(cat, "PUT", `/api/orgs/${org}/join-code/groups`, { groupIds: [] })).status).toBe(403);
+    expect((await call(owner, "PUT", `/api/orgs/${org}/join-code/groups`, { groupIds: ["nope"] })).status).toBe(404);
+    const got = (await (await call(owner, "GET", "/api/orgs/join-code")).json()) as any;
+    expect(got.groupIds).toEqual([groupId]);
+
+    const dan = await signUp("dan@groups-http.test");
+    const joined = await call(dan, "POST", "/api/orgs/join", { code: got.code });
+    expect(joined.status).toBe(200);
+    const inGroup = await pool.query("SELECT 1 FROM access_group_members WHERE group_id = $1 AND user_id = $2", [groupId, dan.userId]);
+    expect(inGroup.rowCount).toBe(1);
+    // What the group opens, dan now reads.
+    expect(await effectivePermission(dan.userId, notes.open)).toBe("edit");
+
+    // An invited person who joins by code gets their invitation's choices, not the code's.
+    const eve = await signUp("eve@groups-http.test");
+    expect((await call(owner, "POST", `/api/orgs/${org}/invitations`, { emails: ["eve@groups-http.test"] })).status).toBe(200);
+    expect((await call(eve, "POST", "/api/orgs/join", { code: got.code })).status).toBe(200);
+    const eveIn = await pool.query("SELECT 1 FROM access_group_members WHERE group_id = $1 AND user_id = $2", [groupId, eve.userId]);
+    expect(eveIn.rowCount).toBe(0);
+
+    // Clearing the choice, and deleting a chosen group, both leave the code with none.
+    expect(((await (await call(owner, "PUT", `/api/orgs/${org}/join-code/groups`, { groupIds: [] })).json()) as any).groupIds).toEqual([]);
+    await call(owner, "PUT", `/api/orgs/${org}/join-code/groups`, { groupIds: [groupId] });
+    expect((await call(owner, "DELETE", `/api/orgs/${org}/groups/${groupId}`)).status).toBeLessThan(300);
+    expect(((await (await call(owner, "GET", "/api/orgs/join-code")).json()) as any).groupIds).toEqual([]);
+  });
+
   it("a resent invitation keeps its groups", async () => {
     const first = await call(owner, "POST", `/api/orgs/${org}/invitations`, { emails: ["again@groups-http.test"], groupIds: [groupId] });
     expect(first.status).toBe(200);

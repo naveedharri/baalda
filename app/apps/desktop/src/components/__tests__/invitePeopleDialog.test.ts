@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InvitePeopleDialog, inviteAccessOptions } from "../InvitePeopleDialog";
 import { useStore } from "../../store";
 
-const api = vi.hoisted(() => ({ getJoinCode: vi.fn(), inviteMany: vi.fn() }));
+const api = vi.hoisted(() => ({ getJoinCodeInfo: vi.fn(), setJoinCodeGroups: vi.fn(), inviteMany: vi.fn() }));
 vi.mock("../../lib/auth/authManager", () => ({ authManager: { api, getServerUrl: () => "http://test.invalid" } }));
 vi.mock("../../store", async () => {
   const { create } = await import("zustand");
@@ -24,7 +24,8 @@ describe("Invite people dialog", () => {
     (useStore as unknown as { setState: (s: Record<string, unknown>) => void }).setState({
       serverUrl: "http://test.invalid", refreshVault: vi.fn().mockResolvedValue(undefined),
     });
-    api.getJoinCode.mockResolvedValue("2TG7KNEA");
+    api.getJoinCodeInfo.mockResolvedValue({ code: "2TG7KNEA", groupIds: [] });
+    api.setJoinCodeGroups.mockImplementation(async (_org: string, ids: string[]) => ids);
     api.inviteMany.mockResolvedValue([]);
     host = document.createElement("div");
     document.body.appendChild(host);
@@ -64,6 +65,30 @@ describe("Invite people dialog", () => {
     await act(async () => codeTab.click());
     expect(document.body.querySelector(".invite-code-tiles")?.getAttribute("aria-label")).toBe("Join code 2TG7KNEA");
     expect(document.body.querySelector('input[aria-label="Email addresses"]')).toBeNull();
+    // No footer on this tab: no warning line, no Done button.
+    expect(document.body.querySelector(".invite-foot")).toBeNull();
+  });
+
+  it("lets the join code add people to access groups, keeping the level", async () => {
+    const onNewMembersAccess = vi.fn();
+    const groups = [{ id: "g1", name: "Sales" }, { id: "g2", name: "Design" }];
+    await act(async () =>
+      root.render(
+        createElement(InvitePeopleDialog, {
+          orgId: "org-1", newMembersAccess: "private", onNewMembersAccess, groups: groups as never,
+          onClose: vi.fn(), onInvited: vi.fn(),
+        }),
+      ),
+    );
+    const codeTab = [...document.body.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Join code")!;
+    await act(async () => codeTab.click());
+    const trigger = () => document.body.querySelector<HTMLButtonElement>('button[aria-label="People who join get"]')!;
+    await act(async () => trigger().click());
+    const sales = [...document.body.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]')].find((li) => li.textContent?.startsWith("Sales"))!;
+    await act(async () => sales.click());
+    expect(api.setJoinCodeGroups).toHaveBeenCalledWith("org-1", ["g1"]);
+    expect(onNewMembersAccess).not.toHaveBeenCalled();
+    expect(trigger().textContent).toContain("No access + Sales");
   });
 
   const pick = async (menu: string, label: string) => {
