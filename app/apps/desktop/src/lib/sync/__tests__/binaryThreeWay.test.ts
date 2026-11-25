@@ -242,8 +242,10 @@ function device(name: string, server: FakeServer, seed: Record<string, string>, 
       const id = url.slice(9);
       const p = server.pending.get(id)!;
       server.pending.delete(id);
-      // One version per doc: the new row retires the old one.
-      server.rows.set(p.docId, { id: `blob-${id}`, relPath: p.relPath, bytes: p.bytes! });
+      // One version per doc: the new row retires the old one. The `files` row
+      // keeps its own path (a teammate's rename stands), as on the real server.
+      const at = server.rows.get(p.docId)?.relPath ?? p.relPath;
+      server.rows.set(p.docId, { id: `blob-${id}`, relPath: at, bytes: p.bytes! });
     },
     knownFileId: (p) => d.ids.get(p) ?? null,
     registerFile: async ({ id }) => id,
@@ -252,6 +254,16 @@ function device(name: string, server: FakeServer, seed: Record<string, string>, 
     fileBase: (docId) => d.bases.get(docId) ?? null,
     setFileBase: (docId, sha) => void d.bases.set(docId, sha),
     notify: (text) => void d.notices.push(text),
+    followFileMove: async (from, to) => {
+      const b = d.files.get(from);
+      if (!b || d.files.has(to)) return false;
+      d.files.delete(from);
+      d.files.set(to, b);
+      const id = d.ids.get(from);
+      d.ids.delete(from);
+      if (id) d.ids.set(to, id);
+      return true;
+    },
   });
   d.sync = new AttachmentSync(deps());
   d.restart = () => {
@@ -264,6 +276,26 @@ const P = "Team/report.docx";
 const read = (d: Device) => dec(d.files.get(P)!);
 
 describe("AttachmentSync three-way, two devices on one server", () => {
+  it("an edit uploaded after a teammate renamed the file follows the rename in the same reconcile", async () => {
+    const server = new FakeServer();
+    server.seed("D", "Old/r.docx", "V1");
+    const a = device("A", server, { "Old/r.docx": "V1" }, { "Old/r.docx": "D" });
+    await a.sync.reconcile();
+
+    // A teammate renames it while A edits it under the old name.
+    server.rows.get("D")!.relPath = "New/r.docx";
+    a.files.set("Old/r.docx", enc("V2"));
+    await a.sync.reconcile();
+
+    expect(server.uploads).toEqual([{ device: "A", sha: "sha:V2", baseSha: "sha:V1" }]);
+    expect(server.current("D")).toBe("V2");
+    expect(server.meta("D").relPath).toBe("New/r.docx");
+    // Followed without waiting for some unrelated pass, the id kept.
+    expect(a.files.has("Old/r.docx")).toBe(false);
+    expect(dec(a.files.get("New/r.docx")!)).toBe("V2");
+    expect(a.ids.get("New/r.docx")).toBe("D");
+  });
+
   it("the production flip converges: an upgraded pair with no bases settles on the server's version", async () => {
     // A holds V1, B holds V2, and the server holds whichever uploaded last.
     const server = new FakeServer();

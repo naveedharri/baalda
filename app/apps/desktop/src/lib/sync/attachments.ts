@@ -297,7 +297,14 @@ export function diffAttachments(
 }
 
 /** A local upload, plus the base it was edited from (see {@link planBinarySync}). */
-export type PlannedUpload = LocalAttachment & { baseSha?: string | null };
+export type PlannedUpload = LocalAttachment & {
+  baseSha?: string | null;
+  /** The server row's own path when it differs from this one: a teammate
+   *  renamed the file while it was being edited here. Once the edit is up the
+   *  pass looks again, so the local file follows the rename (see the upload
+   *  loop) instead of staying under the old name until some unrelated pass. */
+  serverPath?: string;
+};
 
 /**
  * Replace a local tree binary with the server's version of the SAME file.
@@ -517,7 +524,12 @@ export function planBinarySync(
       const base = ctx.baseFor(docId);
       if (base && rows.some((r) => r.sha256 === base)) {
         // The server still holds what we last agreed on: the change is ours.
-        toUpload.push({ ...a, baseSha: base });
+        const serverPath = current.relPath as string;
+        toUpload.push({
+          ...a,
+          baseSha: base,
+          ...(pathKey(serverPath) !== pathKey(a.relPath) ? { serverPath } : {}),
+        });
         continue;
       }
       const blob = { ...current, docId, relPath: a.relPath };
@@ -2131,6 +2143,9 @@ export class AttachmentSync {
         try {
           if (await bytes.run(a.size ?? 0, () => this.uploadOne(a))) {
             uploaded++;
+            // A teammate renamed it meanwhile: the server keeps its row's path,
+            // so one more pass finds the same bytes there and follows it.
+            if (a.serverPath) this.rerun = true;
             // The bytes are THERE now — the one position an upload may say so.
             this.deps.confirmFileBytes?.(a.relPath);
             if (isUnderAttachments(a.relPath)) this.deps.setAttachmentBase?.(a.relPath, a.sha256, "up");
