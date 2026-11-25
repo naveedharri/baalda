@@ -58,3 +58,44 @@ export function dashboardPrompt(path: string, vaultPath: string, request = "Upda
 export async function copyDashboardPrompt(path: string, vaultPath: string, request?: string) {
   await navigator.clipboard.writeText(dashboardPrompt(path, vaultPath, request));
 }
+
+/** Designs whose page is dark, measured from their thumbnails (average
+ *  brightness under 30 of 255; every other design is light, above 180). */
+const DARK_TEMPLATES = new Set([
+  "black-dashboard", "corona-free-dark-bootstrap-admin-template", "cosmos-agentic-os",
+  "marketing-os", "meridian-agentic-os", "orbit-agentic-os", "waystation-agentic-os",
+]);
+export const isDarkTemplate = (t: DashboardTemplate): boolean => DARK_TEMPLATES.has(t.id);
+
+/** Style tabs after "All styles": Minimal first, the rest in catalog order. */
+export function templateCategories(templates: readonly DashboardTemplate[]): string[] {
+  const all = [...new Set(templates.map((t) => t.category).filter(Boolean))];
+  return [...all.filter((c) => c === "Minimal"), ...all.filter((c) => c !== "Minimal")];
+}
+
+/**
+ * The "All styles" order: light and dark designs mixed evenly through the
+ * grid instead of every dark one in a block, leading with a light Minimal one.
+ * Within each tone, categories follow {@link templateCategories}.
+ */
+export function mixedTemplateOrder(templates: readonly DashboardTemplate[]): DashboardTemplate[] {
+  const rank = new Map(templateCategories(templates).map((c, i) => [c, i] as const));
+  const byCategory = (list: DashboardTemplate[]) =>
+    list
+      .map((t, i) => ({ t, i }))
+      .sort((a, b) => (rank.get(a.t.category) ?? 99) - (rank.get(b.t.category) ?? 99) || a.i - b.i)
+      .map((x) => x.t);
+  const light = byCategory(templates.filter((t) => !isDarkTemplate(t)));
+  const dark = byCategory(templates.filter(isDarkTemplate));
+  const out: DashboardTemplate[] = [];
+  const total = light.length + dark.length;
+  let d = 0;
+  let l = 0;
+  for (let k = 0; k < total; k++) {
+    // Dark ones land at evenly spaced slots, never first: slot k takes a dark
+    // design once the share placed so far falls behind dark/total.
+    const wantDark = k > 0 && d < dark.length && (l >= light.length || d < Math.floor(((k + 1) * dark.length) / total));
+    out.push(wantDark ? dark[d++] : light[l++]);
+  }
+  return out;
+}
