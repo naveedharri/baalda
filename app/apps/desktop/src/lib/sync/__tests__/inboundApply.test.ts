@@ -1673,7 +1673,7 @@ describe("inbound folder deletion", () => {
     );
   });
 
-  it("re-creates a folder at a path the server MOVED away from, so a file left there registers", async () => {
+  it("a note made in a folder the server MOVED away from follows the folder and registers there", async () => {
     // Production case ("1 not synced", forever): the server moved
     // `Projects/vid` to `Archive/vid`. The old directory stayed on disk (it held
     // a file the per-note rename never carried), the old path → id entry stayed
@@ -1709,17 +1709,20 @@ describe("inbound folder deletion", () => {
     reg.setInboundHost(recordingHost().host);
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
 
-    // The stale entry is gone, the old path is a NEW folder under its real
-    // parent, and the note registers against it — not against the moved id.
-    expect(vi.mocked(api.createFolder)).toHaveBeenCalledWith(
-      expect.objectContaining({ path: "Projects/vid", parentId: "folder-Projects" }),
+    // The note goes where its folder went and registers against the moved id;
+    // the old name never comes back as a second folder. (Before, the old path
+    // was registered again, a twin of the moved folder holding just this note.)
+    expect(disk.notes.has("Archive/vid/new.md")).toBe(true);
+    expect(disk.notes.has("Projects/vid/new.md")).toBe(false);
+    expect(vi.mocked(api.createFolder)).not.toHaveBeenCalledWith(
+      expect.objectContaining({ path: "Projects/vid" }),
     );
-    expect(reg.getFolderId("Projects/vid")).toBe("folder-Projects/vid");
+    expect(reg.getFolderId("Projects/vid")).toBeNull();
     expect(reg.getFolderId("Archive/vid")).toBe("f1");
     expect(vi.mocked(api.createNote)).toHaveBeenCalledWith(
-      expect.objectContaining({ relPath: "Projects/vid/new.md", folderId: "folder-Projects/vid" }),
+      expect.objectContaining({ relPath: "Archive/vid/new.md", folderId: "f1" }),
     );
-    expect(reg.getMapping("Projects/vid/new.md")?.docId).toBe("d-new");
+    expect(reg.getMapping("Archive/vid/new.md")?.docId).toBe("d-new");
     expect(reg.failures()).toEqual([]);
   });
 

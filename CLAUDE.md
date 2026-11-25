@@ -625,7 +625,9 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
     work" that releases a deleted folder: three folder deletes in a row used to re-create the
     folders, empty, for everyone. The own-move list prunes expired entries past 20,000 (cleared only
     past 200,000), and a failed inbound rename forgets its own-move mark. A moved folder's old directory that still holds
-    leftovers stays pending in `revokedFolders` (never registered as a new folder), and a folder being
+    leftovers stays pending in `revokedFolders` (never registered as a new folder); a note or file made on this
+    device in the old directory (offline, or before the move arrived) follows the folder to the same place under
+    its new path (`carryNewWorkIntoMovedFolders`; it used to bring the old name back as a second folder); and a folder being
     removed first loses its empty subdirectories that no server folder owns. Before, an offline teammate
     coming back after a move + delete re-created the deleted subtree and the old folder name, empty, for everyone.
     A note deleted inside a folder the user just moved on disk, while the move is still being paired

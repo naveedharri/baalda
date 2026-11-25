@@ -2008,6 +2008,58 @@ export class VaultRegistry {
   }
 
   /**
+   * Move this device's NEW work (unmapped notes and files, see `applyInbound`)
+   * out of folders a teammate moved, into the same place under each folder's new
+   * path. The deepest moved folder that holds a path decides where it goes.
+   * True when anything moved.
+   */
+  private async carryNewWorkIntoMovedFolders(
+    plan: InboundPlan,
+    notes: readonly TreeNode[],
+    binaries: readonly string[],
+    knownFiles: ReadonlySet<string>,
+  ): Promise<boolean> {
+    const moves = [...(plan.movedFolders ?? [])].sort((a, b) => b.from.length - a.from.length);
+    const destOf = (p: string): string | null => {
+      const key = pathKey(p);
+      const mf = moves.find((m) => key.startsWith(pathKey(m.from) + "/"));
+      return mf ? mf.to + p.slice(mf.from.length) : null;
+    };
+    const handled = new Set<string>([
+      ...plan.renames.map((r) => pathKey(r.from)),
+      ...plan.trash.map((t) => pathKey(t.path)),
+    ]);
+    const fresh = (p: string): boolean =>
+      !handled.has(pathKey(p)) &&
+      !plan.suppress.has(p) &&
+      !this.inboundSuppressed.has(p) &&
+      !this.deletedPaths.has(pathKey(p)) &&
+      !this.isOwnDelete(p) &&
+      !this.isOwnRemoval(p);
+    const candidates = [
+      ...notes.map((n) => n.path).filter((p) => !this.byPath.has(p) && fresh(p)),
+      ...binaries.filter((p) => !knownFiles.has(p) && !this.fileByPath.has(p) && fresh(p)),
+    ];
+    let moved = false;
+    for (const from of candidates) {
+      if (this.stopRun() || this.stale()) break;
+      const to = destOf(from);
+      if (!to || this.unmaterializable.skip(to)) continue;
+      this.noteOwnMove(from, to);
+      try {
+        await ipc.renamePath(from, to, this.epoch());
+        moved = true;
+        console.info(`[registry] ${from} → ${to} (made here in a folder a teammate moved; following the folder)`);
+      } catch (e) {
+        this.forgetOwnMove(from, to);
+        if (ipc.isVaultMismatch(e)) return moved;
+        console.info(`[registry] couldn't carry ${from} into the moved folder`, e);
+      }
+    }
+    return moved;
+  }
+
+  /**
    * Follow a teammate's move of a tree binary on THIS disk: `from` → `to`,
    * keeping its `files` id, marked as our own move so the watcher's echo is
    * never read as a delete or a new file. A destination already taken, or a
@@ -3020,6 +3072,8 @@ export class VaultRegistry {
       serverNotes: RegisteredNote[];
       tombstones: string[] | null;
       folderTombstones: string[] | null;
+      /** Tree binaries on disk, as listed before this pass moved anything. */
+      binaries?: readonly string[];
     },
   ): Promise<{ changedDisk: boolean; suppress: Set<string> }> {
     const none = { changedDisk: false, suppress: new Set<string>() };
@@ -3275,6 +3329,7 @@ export class VaultRegistry {
     // came back, empty, for everyone. It stays where it is; the removal loop
     // below deletes it there, under the same per-pass limit as every delete.
     const deadIds = tombstones ?? new Set<string>();
+    const knownFiles = new Set(this.fileByPath.keys());
     for (const mf of plan.movedFolders ?? []) {
       if (this.stopRun()) break;
       const prefix = pathKey(mf.from) + "/";
@@ -3286,6 +3341,19 @@ export class VaultRegistry {
         if (await this.followFileMove(rp, to)) changedDisk = true;
         if (this.stale()) return { changedDisk, suppress: plan.suppress };
       }
+    }
+    // New work made here in that folder (a note or file the server has never
+    // seen: written offline, or before the move reached this device) follows it
+    // too, to the same place under the new path. Left behind, it kept the old
+    // directory alive and the outbound half registered the old name again as a
+    // second folder holding just that note. Only what no server row and no
+    // removal accounts for moves; a destination already taken keeps it where it
+    // is (Rust refuses to rename onto an existing path).
+    if ((plan.movedFolders ?? []).length > 0) {
+      if (await this.carryNewWorkIntoMovedFolders(plan, args.notes, args.binaries ?? [], knownFiles)) {
+        changedDisk = true;
+      }
+      if (this.stale()) return { changedDisk, suppress: plan.suppress };
     }
 
     // Use bounded IPC batches for large revocations. Only one batch is resident
@@ -4848,6 +4916,7 @@ export class VaultRegistry {
           return t && this.parkedDocs.size > 0 ? t.filter((id) => !this.parkedDocs.has(id)) : t;
         })(),
         folderTombstones: folderRegistry.tombstones,
+        binaries,
       });
       if (this.stale()) return false;
       if (applied.changedDisk) {
