@@ -23,7 +23,7 @@ import {
   useUpdateState,
 } from "../lib/updater";
 import { isUpdateBusy, updateCheckToast } from "../lib/updateMenuRow";
-import { menuUpdateView, showsSidebarUpdateLine, updateView } from "../lib/updateView";
+import { menuUpdateView, updateView } from "../lib/updateView";
 import { toast } from "../lib/toast";
 import { CheckIcon } from "./CheckIcon";
 
@@ -478,7 +478,6 @@ export function AccountMenu() {
           else menu.toggle();
         }}
       />
-      <SidebarUpdateLine />
       <div className="identity-row">
         <button
           className={`identity-bar ${open ? "open" : ""}`}
@@ -688,48 +687,6 @@ function UpdateMenuRow({ onClose }: { onClose: () => void }) {
         )}
       </span>
     </button>
-  );
-}
-
-/**
- * B: a quiet line above the account row, only while an update is moving or
- * waiting on you; nothing when up to date. Ready restarts, a failure retries.
- */
-function SidebarUpdateLine() {
-  const update = useUpdateState();
-  const view = updateView(update, menuVersion);
-  if (!showsSidebarUpdateLine(view)) return null;
-  const act = view.action === "restart" ? () => void relaunchForUpdate() : view.action === "retry" ? () => void checkAndAutoInstall() : undefined;
-  return (
-    <div className={`sidebar-update is-${view.tone}`} role="status">
-      <span className="sidebar-update-icon" aria-hidden="true">
-        {view.tone === "busy" ? (
-          view.percent !== null ? (
-            <svg viewBox="0 0 36 36" width="18" height="18">
-              <circle cx="18" cy="18" r="14" fill="none" strokeWidth="5" className="ring-bg" />
-              <circle cx="18" cy="18" r="14" fill="none" strokeWidth="5" className="ring-fg" strokeLinecap="round" strokeDasharray={`${(view.percent / 100) * 88} 88`} transform="rotate(-90 18 18)" />
-            </svg>
-          ) : (
-            <span className="btn-spinner" />
-          )
-        ) : view.tone === "ready" ? (
-          "●"
-        ) : view.tone === "error" ? (
-          "!"
-        ) : (
-          "◷"
-        )}
-      </span>
-      <span className="sidebar-update-text">
-        <b>{view.title}</b>
-        <small>{view.sub}</small>
-      </span>
-      {act && (
-        <button type="button" className="sidebar-update-btn" onClick={act}>
-          {view.action === "restart" ? "Restart" : "Retry"}
-        </button>
-      )}
-    </div>
   );
 }
 

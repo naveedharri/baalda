@@ -803,8 +803,9 @@ never the "✓" text glyph.
 Personal info shows Name, Email, Role, Joined ("…, invited by X"), Last active and Status
 (Online/Away from vault presence); Activity renders `GET …/members/:userId/activity`. Vault Settings
 no longer has an Updates tab (version + Check for updates live in Account Settings → About; a failed
-check or install is shown ONLY there: the sidebar line and the account menu's update row never show an
-update error, `updateView.ts showsSidebarUpdateLine`/`menuUpdateView`), and
+check or install is shown ONLY there: the account menu's update row never shows an update error
+(`updateView.ts menuUpdateView`), and the sidebar shows NOTHING about updates, not even a ready one
+(2026-11-25): the updater installs on restart and About says where it stands), and
 each settings dialog cross-links the other bottom-left. Hover/pressed colours are one accent tint
 app-wide (`--bg-hover`/`--bg-active` in `tokens.css`). A quiet tip under the list links to the MCP tab. The vault mode is **unknown until fetched** (`lib/teamAccessCache.ts` seeds the paint
 from localStorage but can never authorise a write); `lib/accessMode.ts` `effectiveTeamMode` stays

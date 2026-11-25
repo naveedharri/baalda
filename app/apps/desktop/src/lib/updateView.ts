@@ -2,8 +2,9 @@ import type { UpdateState } from "./updater";
 
 /**
  * One reading of the updater's state for every surface that shows it: the
- * About card, the sidebar line above the account row, and the account menu's
- * update row. They differ in size, never in what they say.
+ * About card and the account menu's update row. Nothing about updates shows
+ * in the sidebar (owner decision 2026-11-25): Account Settings → About says it.
+ * They differ in size, never in what they say.
  */
 export interface UpdateView {
   /** `ok` up to date, `busy` working, `ready` restart pending, `wait` on its way, `error`. */
@@ -57,15 +58,6 @@ export function updateView(state: UpdateState, current: string | null): UpdateVi
     default:
       return { tone: "idle", title: `Baalda ${here}`, sub: "", percent: null, action: "check" };
   }
-}
-
-/**
- * The sidebar line shows only while something is happening or waiting on you.
- * Never an error: a failed check or install is said in Account Settings →
- * About, not in a red card under the sidebar (owner decision 2026-11-20).
- */
-export function showsSidebarUpdateLine(view: UpdateView): boolean {
-  return view.tone === "busy" || view.tone === "ready" || view.tone === "wait";
 }
 
 /**
