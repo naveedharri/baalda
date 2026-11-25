@@ -5,6 +5,7 @@ import { Readable, Transform } from "node:stream";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import type { PoolClient } from "pg";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import {
@@ -774,8 +775,9 @@ export async function retireSupersededDocBlobs(docId: string | null, keepBlobId:
   // both edits were reverted on every device. So retirements of one doc run
   // one at a time, and a row a concurrent retirement already removed keeps the
   // newest survivor instead: a ready file always keeps exactly one version.
-  const client = await pool.connect();
+  let client: PoolClient | null = null;
   try {
+    client = await pool.connect();
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`blob-retire:${docId}`]);
     const { rowCount } = await client.query(
@@ -793,12 +795,12 @@ export async function retireSupersededDocBlobs(docId: string | null, keepBlobId:
       console.info(`[blobs] retired ${rowCount} superseded row(s) for file ${docId}`);
     }
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
+    await client?.query("ROLLBACK").catch(() => {});
     // Never fail an upload that has already landed over housekeeping — a stale
     // sibling is a duplicate listing, not lost content.
     console.warn(`[blobs] could not retire superseded rows for file ${docId}:`, err);
   } finally {
-    client.release();
+    client?.release();
   }
 }
 

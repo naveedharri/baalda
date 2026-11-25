@@ -356,7 +356,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   server==base ⇒ upload with `baseSha` (server 409 `stale_base` if it moved on; retiring the superseded row is serialized per file and keeps the newest survivor, so two uploads finishing together never leave a file with no version, which made a third device re-upload its stale copy over both edits), no base or both
   changed ⇒ server canonical, the local bytes replaced with no copy kept (2026-11-19) — never a flip.
   `isSafeTreeBinaryRelPath` must reject everything Rust's `ensure_tree_binary_rel` refuses (including
-  `DENIED_DIRS`). A teammate's rename/move of a tree binary is FOLLOWED here (`planBinarySync
+  `DENIED_DIRS`). A teammate's rename/move of a tree binary is FOLLOWED here (also right after this device uploads an edit to a file the server already lists under a new name: the pass runs once more, `PlannedUpload.serverPath`) (`planBinarySync
   toFollow` → `registry.followFileMove`, an own move keeping the id) when this device holds it by id
   with the same bytes and the server path is free locally; a folder a teammate moved carries the
   binaries this device knows under it (`InboundPlan.movedFolders`) before the emptied directory is

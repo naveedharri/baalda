@@ -194,8 +194,8 @@ describe("baseSha: stale-base refusal for registered files", () => {
     },
   );
 
-  it("two uploads finishing together leave the file exactly one version, never none", async () => {
-    const { owner, vault } = await setup("retire-race");
+  it.each(["in turn", "at once"])("two uploads finishing together leave the file exactly one version, never none (%s)", async (how) => {
+    const { owner, vault } = await setup(`retire-race-${how === "at once" ? "b" : "a"}`);
     await uploadVia(owner, vault, V1);
     // Two devices edited V1 at the same moment; both intents pass the base check.
     const ids: string[] = [];
@@ -217,8 +217,12 @@ describe("baseSha: stale-base refusal for registered files", () => {
     // then each retires "every row but mine" (the interleaving that used to
     // delete both rows and leave the file with no version).
     await pool.query("UPDATE blobs SET status = 'ready', updated_at = now() WHERE id = ANY($1)", [ids]);
-    await retireSupersededDocBlobs(DOC, ids[0]);
-    await retireSupersededDocBlobs(DOC, ids[1]);
+    if (how === "at once") {
+      await Promise.all([retireSupersededDocBlobs(DOC, ids[0]), retireSupersededDocBlobs(DOC, ids[1])]);
+    } else {
+      await retireSupersededDocBlobs(DOC, ids[0]);
+      await retireSupersededDocBlobs(DOC, ids[1]);
+    }
     const left = await readyShas(vault);
     expect(left).toHaveLength(1);
     expect([shaOf(V2), shaOf(V3)]).toContain(left[0]);
