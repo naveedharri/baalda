@@ -4,6 +4,7 @@ import { createApp } from "../src/http/app.js";
 import { testAppDeps } from "./helpers/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
+import { retireSupersededDocBlobs } from "../src/http/routes/blobs.js";
 import { signUp, type TestUser } from "./helpers/auth.js";
 import { seedMember, seedOrg, seedVault, seedVaultGrant } from "./helpers/seed.js";
 
@@ -192,4 +193,34 @@ describe("baseSha: stale-base refusal for registered files", () => {
       expect(await readyShas(vault)).toEqual([shaOf(V3)]);
     },
   );
+
+  it("two uploads finishing together leave the file exactly one version, never none", async () => {
+    const { owner, vault } = await setup("retire-race");
+    await uploadVia(owner, vault, V1);
+    // Two devices edited V1 at the same moment; both intents pass the base check.
+    const ids: string[] = [];
+    for (const bytes of [V2, V3]) {
+      const res = await intent(owner, vault, bytes, V1);
+      expect(res.status).toBe(200);
+      const plan = (await res.json()) as Intent;
+      const put = await app.fetch(
+        new Request(plan.upload!.url.replace(/^https?:\/\/[^/]+/, "http://local"), {
+          method: "PUT",
+          headers: plan.upload!.headers,
+          body: bytes,
+        }),
+      );
+      expect(put.status).toBe(204);
+      ids.push(plan.blobId!);
+    }
+    // Both completions mark their row ready before either retires the others,
+    // then each retires "every row but mine" (the interleaving that used to
+    // delete both rows and leave the file with no version).
+    await pool.query("UPDATE blobs SET status = 'ready', updated_at = now() WHERE id = ANY($1)", [ids]);
+    await retireSupersededDocBlobs(DOC, ids[0]);
+    await retireSupersededDocBlobs(DOC, ids[1]);
+    const left = await readyShas(vault);
+    expect(left).toHaveLength(1);
+    expect([shaOf(V2), shaOf(V3)]).toContain(left[0]);
+  });
 });

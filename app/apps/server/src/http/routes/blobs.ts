@@ -765,20 +765,40 @@ function staleBase(c: Context, current: BlobRow) {
  * drain re-checks for a live row on the key first, so a sibling that shares the
  * content keeps its bytes.
  */
-async function retireSupersededDocBlobs(docId: string | null, keepBlobId: string): Promise<void> {
+export async function retireSupersededDocBlobs(docId: string | null, keepBlobId: string): Promise<void> {
   if (!docId) return;
+  // Two uploads finishing together each mark their row ready, then each retire
+  // "every row but mine": the first deleted the second's row, the second the
+  // first's, and the file was left with NO version. A third device then saw a
+  // file it knows with nothing on the server, re-uploaded its old bytes, and
+  // both edits were reverted on every device. So retirements of one doc run
+  // one at a time, and a row a concurrent retirement already removed keeps the
+  // newest survivor instead: a ready file always keeps exactly one version.
+  const client = await pool.connect();
   try {
-    const { rowCount } = await pool.query(
-      "DELETE FROM blobs WHERE doc_id = $1 AND id <> $2 AND status = 'ready'",
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`blob-retire:${docId}`]);
+    const { rowCount } = await client.query(
+      `DELETE FROM blobs
+        WHERE doc_id = $1 AND status = 'ready'
+          AND id <> COALESCE(
+            (SELECT id FROM blobs WHERE id = $2 AND doc_id = $1 AND status = 'ready'),
+            (SELECT id FROM blobs WHERE doc_id = $1 AND status = 'ready'
+              ORDER BY updated_at DESC, id DESC LIMIT 1)
+          )`,
       [docId, keepBlobId],
     );
+    await client.query("COMMIT");
     if (rowCount) {
       console.info(`[blobs] retired ${rowCount} superseded row(s) for file ${docId}`);
     }
   } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
     // Never fail an upload that has already landed over housekeeping — a stale
     // sibling is a duplicate listing, not lost content.
     console.warn(`[blobs] could not retire superseded rows for file ${docId}:`, err);
+  } finally {
+    client.release();
   }
 }
 
