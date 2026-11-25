@@ -136,11 +136,14 @@ function PresenceAvatar({
   peer,
   className,
   online = true,
+  index,
 }: {
   peer: Peer;
   className?: string;
   /** When false the ring goes neutral gray — the local session isn't live. */
   online?: boolean;
+  /** Place in the header stack (0 = front); drives its depth and fan-out. */
+  index?: number;
 }) {
   // The ring shows the peer's unique colour only when the local session is live
   // AND the peer's own availability reads as present (online/busy). Away/invisible
@@ -148,7 +151,7 @@ function PresenceAvatar({
   const tone = statusTone(peer.status);
   const live = online && ringShowsColor(tone);
   return (
-    <span className="sm-host">
+    <span className="sm-host" style={index === undefined ? undefined : ({ "--i": index } as CSSProperties)}>
       <FaceSvg
         userId={peer.id}
         name={peer.name}
@@ -215,14 +218,19 @@ function PresenceBar({
     <button
       type="button"
       className={`presence-bar${open ? " open" : ""}`}
+      style={{ "--n": shown.length + (overflow > 0 ? 1 : 0) } as CSSProperties}
       onClick={onOpen}
       aria-label={`${peers.length} here: ${names}`}
       aria-expanded={open}
     >
-      {shown.map((p) => (
-        <PresenceAvatar key={p.id} peer={p} online={online} />
+      {shown.map((p, i) => (
+        <PresenceAvatar key={p.id} peer={p} online={online} index={i} />
       ))}
-      {overflow > 0 && <span className="presence-avatar presence-overflow">+{overflow}</span>}
+      {overflow > 0 && (
+        <span className="presence-avatar presence-overflow" style={{ "--i": shown.length } as CSSProperties}>
+          +{overflow}
+        </span>
+      )}
     </button>
   );
 }

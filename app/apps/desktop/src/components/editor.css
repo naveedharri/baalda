@@ -192,14 +192,48 @@
 .presence-avatar:first-child {
   margin-left: 0;
 }
-/* Hovering the stack lifts every face; the one under the cursor grows a touch
-   more and rises above its neighbours. */
-.presence-bar:hover .presence-avatar {
-  transform: scale(1.1);
+/* The header faces are a STACK: each tucks behind the one before it (the first
+   in front), and hovering the controls fans them out to the left, one after
+   another with a little spring. Transforms only, so fanning out never moves
+   the toolbar's layout; `:hover` on the controls holds while the pointer is
+   over a fanned face, because it is still a descendant. `--i` is a face's
+   place (0 = front), `--n` the count, both set in Editor.tsx PresenceBar. */
+.presence-bar > .sm-host,
+.presence-bar > .presence-overflow {
+  position: relative;
+  z-index: calc(20 - var(--i, 0));
+  transition: transform 360ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition-delay: calc((var(--n, 1) - 1 - var(--i, 0)) * 28ms);
+}
+.presence-bar > .sm-host > .presence-avatar,
+.presence-bar > .presence-overflow {
+  margin-left: 0;
+}
+.presence-bar > * + * {
+  margin-left: -18px;
+}
+.presence-controls:hover .presence-bar > .sm-host,
+.presence-controls:hover .presence-bar > .presence-overflow,
+.presence-bar.open > .sm-host,
+.presence-bar.open > .presence-overflow,
+.presence-bar:focus-visible > .sm-host,
+.presence-bar:focus-visible > .presence-overflow {
+  transform: translateX(calc((var(--i, 0) - (var(--n, 1) - 1)) * 22px));
+  transition-delay: calc(var(--i, 0) * 28ms);
+}
+/* The face under the pointer pops forward and grows. */
+.presence-bar > .sm-host:hover {
+  z-index: 30;
 }
 .presence-bar .presence-avatar:hover {
-  transform: scale(1.22);
-  z-index: 3;
+  transform: scale(1.18) translateY(-1px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .presence-bar > .sm-host,
+  .presence-bar > .presence-overflow,
+  .presence-avatar {
+    transition: none;
+  }
 }
 /* Offline / not-live: neutral gray ring (colour comes in via --user-color) with
    a slight dim so present peers read as brighter than absent ones. */
