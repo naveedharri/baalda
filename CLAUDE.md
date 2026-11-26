@@ -732,14 +732,20 @@ and the title widget's `eq()` compares only `{path, readOnly, hasFrontmatter, mo
 Vault Settings has ONE **Members and access** tab (id `members`; the old `access` tab and
 `AccessPanel.tsx` are gone): `components/MembersAccessTab.tsx`, `MemberProfilePage.tsx` (a PAGE
 inside Vault Settings with a back link, not a dialog; rows open it on click; tabs Personal info /
-Access / Activity), `InvitePeopleDialog.tsx`, pure logic in `lib/membersAccess.ts`. Owners/admins see the
-**Default access** row (the vault's team access, called "Everyone in <vault>" until 2026-11-22; Can edit / Can view /
-**Only what's shared** = wire `open`/`readonly`/`private`; that third label is Default access's alone, while a
-person's own level and the board keep "No access"; copy says it is where every member STARTS, that groups and
-personal settings change it, and that it applies to owners and admins too). The **New members** setting
-(`join_default`, notes made before someone joined) has NO row in Vault Settings since 2026-11-23: it lives in the
-invite dialog (the Access level tagged Default, and the Join code tab's "People who join get"); groups' auto-join
-is set on the group page. Making a member an admin (`PATCH /orgs/:orgId/members/:userId`) gives them a per-user vault `edit` row unless they
+Access / Activity), `InvitePeopleDialog.tsx`, pure logic in `lib/membersAccess.ts`. **Access model of 2026-11-25:** Default access is
+fixed to Only what's shared (sealed) and has NO row; neither has the New members setting (`PUT team-access`
+refuses any other mode with 409 `default_access_fixed` — a sealed vault's `private` is a no-op 200 — and so do
+`POST /shares` / `DELETE /shares/:id` on the org vault row and an Everyone-audience vault write through
+`access/bulk` or MCP `manage_access`; `setJoinDefault` answers 409 `join_default_fixed`). The Groups toggle
+wears a quiet "New" chip for owners/admins (`lib/groupsNewChip.ts`: 21 days from its first showing, or
+until the Groups tab is opened).
+People made admin start on Can edit everything (a per-user vault `edit` row; making someone admin overwrites theirs); existing owners and admins kept exactly what they had at the conversion.
+Everyone else gets what is shared with them, what their access groups open, or a level of their own. The
+invite dialog's Access is Only what's shared (tagged Default, sends no level) / Can edit everything / Can view
+everything / groups; admins are fixed on Can edit everything. Its Join code tab only picks the access groups a
+code joiner is added to (groups with auto-join are shown ticked and are not toggled there). Migration 101
+(shipped in the release AFTER 100 and this resolver) moved every vault onto it with no access change: see
+"Access model conversion" below. Making a member an admin (`PATCH /orgs/:orgId/members/:userId`) gives them a per-user vault `edit` row unless they
 already have a per-user vault row (kept as is; demotion leaves it). The invite's Access starts on "Can edit everything" for Admin and on the vault default
 for Member until picked by hand, and warns when the person would see nothing ("…until you share something with
 them or add them to a group", or for an explicit No access "…until you change their access"). Then a per-person Access cell (Can edit everything / Can view everything /
@@ -762,13 +768,17 @@ views, persisted per device in localStorage `context.memberAccess.view`: **List*
 checkbox tree with the "Across the vault" level) and **Board** (default; `MemberAccessBoard.tsx`, the same
 bulk-access writes, one resource per write): columns Can edit / Can view / No access, rows moved by
 drag-and-drop or arrows, grey ancestor rows showing only the path (up to 5 levels), a "Set
-everything to" menu with Reset to vault default and per-column Add all / Remove all. Add all targets
+everything to" menu with Reset to groups only (Reset to vault default in a vault still on an older Default access, where a reset gives the team level) and per-column Add all / Remove all. Add all targets
 existing item roots (including their folder subtrees), never the vault resource; future root items
 keep the vault's existing default. An empty item selection is a no-op. A single-row
 move applies at once with no confirm and no undo; the app's standard toast states the result
 ("Sara can now view X."). **Confirms are for destructive changes only**, i.e. a target of No access
-(`private`): the Everyone row, a person's vault-wide level, a List row/note change, the board's Set
-everything to → No access, Add all → No access, Remove all and Reset to vault default. Can view, Can edit, Set
+(`private`) — and taking someone out of an access group or deleting one, whose confirm says plainly what leaves
+their computer, own notes included (`lib/groups.ts groupRemoveNote`/`groupDeleteNote`), and on a GROUP's board
+any row moved to No access (it leaves every member's computer; a group that opens the whole vault says so,
+`MemberAccessBoard.tsx groupRemoveCopy`). A group's board moves any row, below a grant the group has from above
+too, since its deepest row decides: the Everyone row, a person's vault-wide level, a List row/note change, the board's Set
+everything to → No access, Add all → No access, Remove all and Reset to groups only. Can view, Can edit, Set
 everything to → Can view and the invite's New members level never confirm. Access levels are colour-coded
 everywhere (List and Members-table pills, board column headers, drag highlight, landing pulse):
 Can edit green, Can view amber, No access grey, Custom/Mixed neutral, from `--access-{edit,view,none}-{bg,fg}`
@@ -779,15 +789,27 @@ swallows HTML5 drag events inside the webview, so they never fire. A press becom
 highlight, landing).
 **Access groups** (migration 097, `/health` feature `access-groups`; server `groups/`,
 `http/routes/groups.ts`, MCP `list_groups`/`manage_group`; desktop `components/GroupsPanel.tsx`,
-`lib/groups.ts`): a group's grants are `shares` rows with `principal_type='group'`, `view`/`edit` only. Groups
-only ADD (max with everything else, after every resolver branch except the person's own vault-level row,
-which ignores groups; per-user deny/readonly caps and locks still cap them); a group can open an item that
-is Private or a sealed vault. Membership cascades with `member`; `auto_join` groups take new members (trigger,
+`lib/groups.ts`): a group's grants are `shares` rows with `principal_type='group'`, `view`/`edit`/`denied` (migration 100).
+Within ONE group the deepest of its rows on an item's chain decides (`resolver.ts rowsGroupGrant`, folded for
+whole collections by `vault-docs.ts groupReachInVault`), so a group's No access stops only that group below
+it; groups combine highest-wins with each other and with everything else, after every resolver branch
+(a person's own vault Can edit / Can view combines with groups too; their own No access ignores groups);
+per-user deny/readonly caps and locks still cap them; a group can open an item that is Private or a sealed
+vault. Only the converted "Everyone" groups' rows (`shares.legacy_team_grant`, column from migration 100, set
+by 101) follow a join snapshot: at or below its revision they do not open content that existed at the join,
+and under a Private snapshot their vault row never seeds empty folders, as the old team posture never did.
+Any other group gives what it opens whenever the person joined (a `denied` row always counts). The board's No access for a group writes a group `denied` row where a
+grant from above reaches the item (`access-management.ts groupReachesFromAbove`), else removes the row. Membership cascades with `member`; `auto_join` groups take new members (trigger,
 owner excluded); removing someone disconnects only the docs that group reached. Written through
 `POST access/bulk` with `audience: {type:"group"}` (`private` = no row; an Everyone write never clears group
 rows), read through `access-board?groupId=`; `GET /locks` returns the caller's group `edit` rows as lifts, and a group's Can view as the caller's own `readonly` row (`reason: "group_view"`, id `group-view:<id>`, never removable by Unlock — `lib/locks.ts isRemovableLock`) on the topmost visible view-only folder or item, resolving only the subtrees a group can view.
 Skills: `skill_group_access` (required/optional), inherited level = max(Everyone, groups). Invites carry
-`groupIds` (with an access level too ⇒ 400 `access_or_groups`); the join code has its own groups
+`groupIds` (with an access level too ⇒ 400 `access_or_groups`); an invite that carries a level also leaves the
+`auto_join` groups the join trigger added (`members/invitation-access.ts`), so an invited Can view is never lifted by
+a Can edit group that takes every new member. The invite dialog's default reads "Vault default — New members start on
+Can edit/Can view everything" (no sees-nothing warning, same line on the Join code tab) only in a vault still on an
+older Default access (`legacyNewMembersSetting`: posture edit/view and `join_default` open/readonly), where the
+server still applies that setting; the join code has its own groups
 (migration 099 `join_code_groups`, `PUT /orgs/:orgId/join-code/groups`, returned by `GET /orgs/join-code`
 as `groupIds`, whose absence hides the choice on older servers), applied to a code joiner with no live
 invitation, beside the New members level. Management follows `canManageMemberAccess`.
@@ -938,7 +960,7 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   when the caller cannot see the resource); owner/admin or self, else 403; 404 `not_member`;
   created/edited filtered to the CALLER's readable set, no role exemption;
   `DELETE /orgs/:orgId/members/:userId/shares` (`createMemberShareRoutes`, the Access tab Board's "Reset
-  to vault default") → `{removed, disconnectedDocs}`: one transaction deletes every per-user share row
+  to groups only") → `{removed, disconnectedDocs}`: one transaction deletes every per-user share row
   the member holds in the org (vault/folder/file, their own `denied`/`locked` too, so it can widen as
   well as narrow), leaves `member_access_snapshots` alone, disconnects docs that left their readable
   set (before/after) and fires `onAclChanged` per vault; owner → anyone, admin → anyone but the
@@ -1060,11 +1082,11 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   the file LEFT as an own move (`registry.isOwnMoveSource`, what `queueDiskDelete` skips); deleting
   the restored name right after is a real delete, put back again if refused (it used to vanish
   until the next launch).
-  **A per-user row on the vault resource is that person's ABSOLUTE level**
-  (`personalVaultLevel`, "person wins either way"): for them alone it replaces the org posture, the
-  join snapshot, the owner/admin shortcut and authorship — `edit` = edit everywhere, `view` = view
-  everywhere (raises AND caps), `denied` = nothing, and org (Everyone) folder/file grants do not lift
-  it; only that person's own folder/file rows do. Item-level per-user rows still override inside
+  **A per-user row on the vault resource is that person's own level**
+  (`personalVaultLevel`): for them it replaces the org posture, the join snapshot, the owner/admin
+  shortcut and authorship — `edit` = edit everywhere, `view` = at least view everywhere (their groups
+  still add, highest wins, since 2026-11-25), `denied` = nothing (groups ignored), and org (Everyone)
+  folder/file grants do not lift it; only that person's own folder/file rows do. Item-level per-user rows still override inside
   their subtree and locks still cap. **Among ONE user's own per-user rows, the deepest wins**: a
   per-user file row beats that user's ancestor-folder row in either direction (file `edit` over
   folder `readonly`/`view`/`denied`; file `denied` over folder `edit`), and a per-user folder row
@@ -1132,6 +1154,25 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   carry `code: "no_write_access"` and are checked BEFORE the `root_frozen` latch. `onAuthenticate`
   re-resolves `effectivePermission` at connect, so a pre-revocation edit token cannot be replayed for the
   rest of its TTL.
+  **Access model conversion** (migration 101, `access_model_conversion(_rows)` log every row written or
+  changed, for an undo). Rule: NOBODY gains or loses anything, owners and admins included, with ONE exception
+  (decided 2026-11-25): owners and admins of a never-shared vault get Can edit everything. A Can edit / Can view vault gets the org `denied` vault row and an "Everyone" group (or "All
+  members" on a name clash) holding every member, owners and admins too, without a vault level of their
+  own, a group vault row at the OLD posture's revision (so join snapshots keep hiding what they hid), a
+  group `denied` row on every org-`denied` item, and `auto_join` only where new members already started
+  at that level. Owners and admins get a per-user vault `edit` row ONLY in a Can edit vault with nothing
+  hidden from the team and no non-open join snapshot of their own (they already edit everything there);
+  people made admin later get it from the role change. Sealed vaults are left as they are. A never-shared
+  vault (no org vault row) is NOT sealed (sealing would take members' own notes away): members keep "Only
+  what's shared, and members keep what they write" — a member creates anywhere, the top level included,
+  and what they create is theirs alone among members — while every owner and admin without a vault level
+  of their own gets a per-user vault `edit` row, so they see and edit everything there. Every org gets `join_default = private`, and the 032
+  snapshot trigger is dropped: new members get no snapshot; existing ones still apply. Checked on a fresh
+  production copy (2026-11-25): 0 differences for every member in reads, edits, visible folders,
+  deleted-note lists, create/edit gates, uploads, delete/rename gates; owners gain only in never-shared
+  vaults (8 there); 44,969 padlocks disappear, every one on an item the person can edit; the undo
+  restores everything exactly. Release order: 100 + the resolver first (the
+  server suite passes there too, with the 032 trigger still live), 101 in a later release.
   Future-member access is separate from the live vault posture. Migration 032 adds an org
   `join_default` (Private by default), per-membership snapshots and an ordered ACL revision, and
   migration 033 seeds that default ONCE from each existing vault's posture (org-wide vault grant

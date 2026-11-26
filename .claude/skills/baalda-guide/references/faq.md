@@ -87,10 +87,12 @@ verified with Baalda's own signing key, and then shows a short What's New for th
 
 ## How do I share notes with my team?
 Sign in, turn on sync for your vault, then open Vault Settings → **Members and access** →
-**Invite people**. Add email addresses, choose a role and an access level, or share the join code.
-New vaults are shared with the whole team by default. The **Everyone** row sets Can edit, Can view
-or No access for all members; each person can get their own level, which wins for them, and their
-profile's **Access** tab lets you pick folders one by one. Roles are owner, admin, member.
+**Invite people**. Add email addresses, choose a role and either an access level or access groups, or share the join
+code. A new vault starts on **Only what's shared**: members see what you share with them or with
+their access groups. To give the whole team the same access, put everyone in one group (it can add
+new members automatically) and set what it opens on its Access board. Each person can also get
+their own level, and their profile's **Access** tab lets you pick folders one by one. Roles are
+owner, admin, member.
 
 ## Can I share a note with someone who does not use Baalda?
 Yes. "Copy link" on a note offers a public link: a read-only web page anyone with the link can

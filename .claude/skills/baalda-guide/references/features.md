@@ -169,32 +169,42 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - **Live presence**: coloured cursors and selections in the note, "who is viewing" avatars,
   and small presence dots in the sidebar showing who is in which note or folder. Ping a
   teammate to get their attention.
-- **Sharing model**: since late November 2026 a new vault starts on **Only what's shared**: members
-  see only what is shared with them or their access groups. Whoever creates the vault starts with
-  **Can edit everything** as their own level, and so does anyone invited as an admin (both can be
-  lowered later). Vaults created earlier keep the setting they had. The
-  **Default access** row (called "Everyone" in older versions) is where every member starts: **Can edit**,
-  **Can view** or **Only what's shared** (shown as "No access" in older versions). Access groups add to it.
-  Each person can then be given their own level (**Can edit everything**, **Can view everything**,
-  **No access**) and that person's level wins either way, for them only. A person's level can also
-  be **Custom**: per-folder choices made in their profile. Permissions cascade down folders, and
+- **Sharing model**: members see what is shared with them, what their access groups open, and
+  anything their own level gives. A new vault starts that way (**Only what's shared**): whoever
+  creates it starts with **Can edit everything** as their own level, and so does anyone made an
+  admin (both can be lowered later). Vaults created earlier keep what their members could already
+  reach. There is no vault-wide "Default access" setting to change any more. Each person can be
+  given their own level (**Can edit everything**, **Can view everything**, **No access**) or
+  **Custom**: per-folder choices made in their profile. Their own Can edit or Can view combines
+  with their groups (the higher one counts); their own No access ignores groups. Permissions cascade down folders, and
   "locked" still makes things read-only. **No access really means nobody**: not the owner, not an
-  admin, not even the person who wrote the note, until someone gives them access. So when you
-  close off the whole vault, give yourself access too. Owners and admins can always manage access
-  and change the setting back.
-- **New members**: what someone who joins later gets of the notes that already existed is chosen
-  when inviting (the Access level marked Default, and "People who join get" on the Join code tab).
-  If the person would see nothing yet, the invite says so.
+  admin, not even the person who wrote the note, until someone gives them access, so an owner or
+  admin without a level of their own sees only what is shared with them or their groups. Owners and
+  admins can always manage access, including their own.
+- **Access groups** (Members and access → Groups): name a group, add people, and set what it opens
+  on the group's own Access board: Can edit, Can view or No access per folder or note, or
+  everything at once. A group can open the whole vault and still give No access to one folder in
+  it; that only limits what this group gives, never anyone's own access or another group's. Someone
+  in several groups gets the highest. A group can be set so new members join it automatically.
+  Taking someone out of a group, deleting a group, or moving something to No access on a group's
+  board asks first and says plainly what will leave people's computers.
+- **New members**: an invitation gives either a level (**Only what's shared**, the default; **Can
+  edit everything**; **Can view everything**) or access groups, not both; admins always start on
+  Can edit everything. The Join code tab picks which groups people who join with the code are added
+  to. If the person would see nothing yet, the invite says so. In a vault still on an older setting,
+  the invite's default says what new members get there.
 - The MCP screen in the app puts the AI rule plainly: "Connect any MCP-compatible AI client to
   this vault. It gets the same access you do: read, search, create, edit and delete notes and
-  folders. Owners and admins can also manage the team's access from the same chat — ask Claude or
-  ChatGPT to share a folder with someone, make it view only, or set what new members see."
+  folders. Owners and admins can also manage the team's access from the same chat." For example,
+  ask Claude or ChatGPT to share a folder with someone, make it view only for a group, or add
+  someone to a group.
   Deleting a token cuts the AI off immediately.
 - **Locks**: new locks can no longer be created from the app; read-only access is now given per
   person on the Members and access page. A note or folder locked before this change still shows a
   padlock and stays read-only for everyone, admins included, until an owner or admin right-clicks
-  it (or selects several) and chooses Unlock. Setting the whole vault to read-only shows that same
-  padlock on every folder and note, except the ones you were given edit access to.
+  it (or selects several) and chooses Unlock. Anything you can only view because you were given Can view
+  (by name or through a group) shows a padlock too; it can't be unlocked, only changed on the
+  Members and access page.
 - **Losing access** removes the note from the ex-reader's devices (the note itself stays on the
   server for everyone who can still read it); regaining access brings it back.
 - Not built (deferred): comments and @mentions, activity feed, audit log, sub-teams or custom
@@ -204,21 +214,18 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   access; they carry no access themselves.
 - **Push-to-talk voice**: hold a button to talk to everyone in the vault. Nothing is recorded.
 - **Members and access** (Vault Settings): one page for people and permissions. Everyone sees the
-  member list; owners and admins also see and change access. The **Default access** row applies to every
-  folder and note at once. Hovering a person's access says where it comes from (default access, a group
-  adding to it, or a level set just for them that default access and groups don't change); their
-  profile's Access tab says the same in one sentence under "Across the vault". If some folders still have their own older setting for everyone, a
-  banner says how many, and **Reset** brings them back in line; people given access by name keep
-  it either way. Each person's **⋯** menu has View profile, Manage access, Make admin or Make
+  member list; owners and admins also see and change access. A **People | Groups** switch sits above the list. Hovering a person's access says where it comes
+  from (their groups, an older vault setting, or a level set just for them); their profile's Access
+  tab says the same in one sentence. Each person's **⋯** menu has View profile, Manage access, Make admin or Make
   member, and Remove. Clicking a person opens their profile as a page inside Vault settings (a back
   link returns to the list). The profile has three tabs. **Personal info** shows name, email, role,
   when they joined and who invited them, when they were last active, and whether they are online
   now. **Access** has two views, picked with a small switch at its top-right and remembered on this
   device. **List** has a checkbox per folder; each change applies straight away.
   **Board** (the default) sets the same access with Can edit, Can view and No access columns: drag folders and
-  notes between columns, set everything at once, or reset to the vault default. Moving one item
+  notes between columns, set everything at once, or reset someone to what their groups give. Moving one item
   applies straight away and a short message says what changed. Baalda only asks "are you sure?" when a
-  change would take access away completely (No access, Remove all, or Reset to the vault default);
+  change would take access away completely (No access, Remove all, or Reset to groups only);
   giving someone view or edit access never asks. Access levels have colours everywhere: green for
   Can edit, amber for Can view, grey for No access. **Activity** lists what
   they did recently: joining, notes they created or edited, and access they were given. You only

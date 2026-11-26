@@ -291,7 +291,7 @@ adds `member.last_seen_at` and `invitation_access`; `GET /api/orgs/:orgId/member
 Later the same day: the member profile has Personal info / Access / Activity tabs, and the Access
 tab toggles (per device, `context.memberAccess.view`) between **List**, the checkbox tree,
 and **Board**, the default (Can edit / Can view / No access columns, drag-and-drop or arrows, Set everything to
-+ Reset to vault default; same one-resource bulk-access writes; single-row moves need no confirm
++ Reset to groups only; same one-resource bulk-access writes; single-row moves need no confirm
 and report through the standard toast, with no undo; pointer-event drag, since Tauri swallows
 native HTML5 drag-and-drop). The overview
 now carries `invitedBy`, and `GET /api/orgs/:orgId/members/:userId/activity` (owner/admin or self;
