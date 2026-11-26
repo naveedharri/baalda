@@ -765,8 +765,8 @@ code joiner is added to (groups with auto-join are shown ticked and are not togg
 (shipped in the release AFTER 100 and this resolver) moved every vault onto it with no access change: see
 "Access model conversion" below. Making a member an admin (`PATCH /orgs/:orgId/members/:userId`) gives them a per-user vault `edit` row unless they
 already have a per-user vault row (kept as is; demotion leaves it). The invite's Access starts on "Can edit everything" for Admin and on the vault default
-for Member until picked by hand, and warns when the person would see nothing ("…until you share something with
-them or add them to a group", or for an explicit No access "…until you change their access"). Then a per-person Access cell (Can edit everything / Can view everything /
+for Member until picked by hand, and warns, in a note under the fields (never in the footer beside the buttons), when the person would see nothing
+("They'll see an empty vault until you share notes or add them to a group", or for an explicit No access "…until you change their access"). Then a per-person Access cell (Can edit everything / Can view everything /
 No access / Custom; hovering it says where that comes from, `membersAccess.ts accessSources().lines`, with no
 visible second line; the profile's Access tab says it in one sentence, `accessSources().sentence`: under the List's "Across the vault" row, or as a plain line above the Board, whose own "Set everything to" is the vault-wide control there) plus a ⋯ menu (View profile, Manage access, Make admin/member, Remove). Plain
 members get a read-only roster from `GET /orgs/:orgId/members/overview`. Who may change one person's access is one rule,

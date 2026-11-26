@@ -2471,7 +2471,7 @@ html:not(.rd-off) .switch .switch-input:focus-visible + .switch-track {
    By email / Join code as equal segments, the code as large tiles with one copy
    button that confirms, the New members setting beside it, and a quiet footer
    hint. No rules between sections. */
-html:not(.rd-off) .modal.invite-people { width: 480px; padding: 22px 22px 18px; border-radius: 22px; }
+html:not(.rd-off) .modal.invite-people { width: 540px; max-width: calc(100vw - 32px); padding: 22px 22px 18px; border-radius: 22px; }
 html:not(.rd-off) .invite-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
 html:not(.rd-off) .invite-head .confirm-title { margin: 0; font-size: 19px; }
 html:not(.rd-off) .invite-close {
@@ -2513,9 +2513,30 @@ html:not(.rd-off) .invite-code-row {
 html:not(.rd-off) .invite-code-row small { display: block; margin-top: 2px; font-size: 12px; color: var(--text-tertiary); }
 html:not(.rd-off) .invite-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; }
 html:not(.rd-off) .invite-foot-hint { font-size: 12.5px; color: var(--text-tertiary); }
-/* "They won't see any notes…": amber like Can view, and allowed to wrap. */
-html:not(.rd-off) .invite-foot-hint.is-warning { color: var(--access-view-fg); max-width: 260px; line-height: 1.35; }
-html:not(.rd-off) .invite-foot .confirm-actions { margin: 0; display: flex; gap: 8px; }
+html:not(.rd-off) .invite-foot .confirm-actions { margin: 0; display: flex; gap: 8px; flex: none; }
+html:not(.rd-off) .invite-foot .confirm-actions button { white-space: nowrap; }
+/* "They'll see an empty vault…": a quiet line under the fields, never squeezed
+   into the footer beside the buttons. */
+html:not(.rd-off) .invite-access-note {
+  display: flex; align-items: flex-start; gap: 8px; margin: 12px 2px 0;
+  font-size: 12.5px; line-height: 1.45; color: var(--text-secondary);
+}
+html:not(.rd-off) .invite-access-note svg { flex: none; margin-top: 2px; color: var(--access-view-fg); }
+/* No seat left: what happened in bold, what it means below, one real button. */
+html:not(.rd-off) .invite-seats {
+  display: flex; align-items: center; gap: 14px; margin-top: 14px; padding: 12px 12px 12px 14px;
+  border-radius: 14px; background: var(--warning-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 22%, transparent);
+}
+html:not(.rd-off) .invite-seats-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+html:not(.rd-off) .invite-seats-copy strong { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+html:not(.rd-off) .invite-seats-copy span { font-size: 12.5px; line-height: 1.45; color: var(--text-secondary); }
+html:not(.rd-off) .invite-seats-btn {
+  flex: none; height: 32px; padding: 0 14px; border: 0; border-radius: 10px; cursor: pointer; white-space: nowrap;
+  font: 500 13px var(--font-body); color: var(--text-primary); background: var(--rd-surface);
+  box-shadow: 0 0 0 1px rgba(var(--rd-ink), 0.1), 0 1px 2px rgba(var(--rd-ink), 0.08);
+}
+html:not(.rd-off) .invite-seats-btn:hover { background: var(--bg-hover); }
 
 /* Import and export (redesign): one card of action rows, each an icon tile, a
    title with a one-line hint, and a quiet button. No loud violet buttons and no

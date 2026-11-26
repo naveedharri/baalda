@@ -18,7 +18,7 @@ import { UpgradeDialog } from "./UpgradeDialog";
 /** `default` = no level of their own: only what is shared with them or their groups. */
 type InviteAccess = Exclude<TeamAccessMode, "private"> | "default";
 
-const SEES_NOTHING = "They won't see any notes until you share something with them or add them to a group.";
+const SEES_NOTHING = "They'll see an empty vault until you share notes or add them to a group.";
 /** The Access menu's values: a level, or a group to join (`group:<id>`, toggles). */
 type AccessChoice = InviteAccess | `group:${string}` | "groups";
 
@@ -402,22 +402,34 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
             />
           </label>
         </div>
+        {emailWarning && !results && (
+          <p className="invite-access-note" role="note">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M8 7.2v3.6M8 5.1v.1" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            <span>{emailWarning}</span>
+          </p>
+        )}
         {error && <div className="auth-error">{error}</div>}
         {prewarning && !results && peopleNotice == null && (
-          <div className="limit-nudge">
-            <span>{prewarning.text}</span>
+          <div className="invite-seats" role="status">
+            <div className="invite-seats-copy">
+              <strong>{prewarning.title}</strong>
+              <span>{prewarning.text}</span>
+            </div>
             {prewarning.action === "add-seats" && (
-              <button type="button" className="link-btn" onClick={() => useStore.getState().requestAccountSettings("plan")}>
+              <button type="button" className="invite-seats-btn" onClick={() => useStore.getState().requestAccountSettings("plan")}>
                 Add seats
               </button>
             )}
             {prewarning.action === "upgrade" && (
               <button
                 type="button"
-                className="link-btn"
+                className="invite-seats-btn"
                 onClick={() => useStore.getState().requestUpgradeDialog({ reason: peopleLimitReason(seatAccount ? freeLimitOf(seatAccount) : null) })}
               >
-                Upgrade →
+                Upgrade
               </button>
             )}
           </div>
@@ -451,7 +463,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
           );
         })}
         <div className="invite-foot">
-          <span className={`invite-foot-hint${emailWarning ? " is-warning" : ""}`}>{emailWarning ?? "They get an email with a link."}</span>
+          <span className="invite-foot-hint">They get an email with a link.</span>
           <div className="confirm-actions invite-people-actions">
             <button type="button" className="ghost-pill" onClick={onClose}>{results ? "Done" : "Cancel"}</button>
             <AsyncButton

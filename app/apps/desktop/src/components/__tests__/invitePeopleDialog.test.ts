@@ -104,33 +104,33 @@ describe("Invite people dialog", () => {
     await act(async () => item.click());
   };
   const hint = () => document.body.querySelector(".invite-foot-hint");
+  const note = () => document.body.querySelector(".invite-access-note")?.textContent ?? null;
+  const SEES_NOTHING = "They'll see an empty vault until you share notes or add them to a group.";
   const base = { orgId: "org-1", onClose: vi.fn(), onInvited: vi.fn() };
 
   it("warns that a member on Only what's shared sees nothing yet; an admin can edit everything", async () => {
     await act(async () => root.render(createElement(InvitePeopleDialog, base)));
-    expect(hint()?.textContent).toBe("They won't see any notes until you share something with them or add them to a group.");
-    expect(hint()?.classList.contains("is-warning")).toBe(true);
+    expect(note()).toBe(SEES_NOTHING);
+    expect(hint()?.textContent).toBe("They get an email with a link.");
 
     await pick("Role", "Admin");
     expect(document.body.querySelector('button[aria-label="Access"]')?.textContent).toContain("Can edit everything");
-    expect(hint()?.textContent).toBe("They get an email with a link.");
+    expect(note()).toBeNull();
     await pick("Role", "Member");
-    expect(hint()?.classList.contains("is-warning")).toBe(true);
+    expect(note()).toBe(SEES_NOTHING);
     expect(inviteAccessOptions("admin").map((o) => o.value)).toEqual(["open"]);
     expect(inviteAccessOptions("member").map((o) => o.value)).toEqual(["default", "open", "readonly"]);
   });
 
   it("never warns that someone sees nothing while the vault's default is still unknown", async () => {
     await act(async () => root.render(createElement(InvitePeopleDialog, { ...base, defaultKnown: false })));
-    expect(hint()?.textContent).toBe("They get an email with a link.");
-    expect(hint()?.classList.contains("is-warning")).toBe(false);
+    expect(note()).toBeNull();
   });
 
   it("in a vault still on an older New members setting, says what joiners actually get", async () => {
     await act(async () => root.render(createElement(InvitePeopleDialog, { ...base, newMembersAccess: "open" })));
     expect(document.body.querySelector('button[aria-label="Access"]')?.textContent).toContain("Vault default");
-    expect(hint()?.textContent).toBe("They get an email with a link.");
-    expect(hint()?.classList.contains("is-warning")).toBe(false);
+    expect(note()).toBeNull();
     const codeTab = [...document.body.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Join code")!;
     await act(async () => codeTab.click());
     expect(document.body.querySelector(".invite-code-row")?.textContent).toContain("New members start on Can edit everything");
@@ -154,12 +154,12 @@ describe("Invite people dialog", () => {
     await pick("Role", "Admin");
     await pick("Role", "Member");
     expect(document.body.querySelector('button[aria-label="Access"]')?.textContent).toContain("Can view everything");
-    expect(hint()?.textContent).toBe("They get an email with a link.");
+    expect(note()).toBeNull();
   });
 
   it("stays quiet when a group takes every new member", async () => {
     await act(async () => root.render(createElement(InvitePeopleDialog, { ...base, groups: [{ id: "g3", name: "Everyone", autoJoin: true }] as never })));
-    expect(hint()?.textContent).toBe("They get an email with a link.");
+    expect(note()).toBeNull();
   });
 
 });
