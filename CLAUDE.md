@@ -1179,15 +1179,18 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   (decided 2026-11-25): owners and admins of a never-shared vault get Can edit everything. A Can edit / Can view vault gets the org `denied` vault row and an "Everyone" group (or "All
   members" on a name clash) holding every member, owners and admins too, without a vault level of their
   own, a group vault row at the OLD posture's revision (so join snapshots keep hiding what they hid), a
-  group `denied` row on every org-`denied` item, and `auto_join` only where new members already started
-  at that level. Owners and admins get a per-user vault `edit` row ONLY in a Can edit vault with nothing
+  group `denied` row on every org-`denied` item, and `auto_join` on every converted group (people who join
+  later land in Everyone, as they got the team level before). Owners and admins get a per-user vault `edit` row ONLY in a Can edit vault with nothing
   hidden from the team and no non-open join snapshot of their own (they already edit everything there);
   people made admin later get it from the role change. Sealed vaults are left as they are. A never-shared
   vault (no org vault row) is NOT sealed (sealing would take members' own notes away): members keep "Only
   what's shared, and members keep what they write" — a member creates anywhere, the top level included,
   and what they create is theirs alone among members — while every owner and admin without a vault level
-  of their own gets a per-user vault `edit` row, so they see and edit everything there. Every org gets `join_default = private`, and the 032
-  snapshot trigger is dropped: new members get no snapshot; existing ones still apply. Checked on a fresh
+  of their own gets a per-user vault `edit` row, so they see and edit everything there. Every org gets `join_default = private`; the 032
+  snapshot trigger stays, but its function now reads the org's OLD join default from `access_model_conversion`
+  (no conversion row, i.e. a vault made later: no snapshot; old Can edit + open: none needed), so a later joiner
+  sees exactly what the old New members setting gave. Everyone members' 'open' snapshots in Can edit vaults
+  only repeated the group and are removed (logged in `access_model_conversion_snapshots` for the undo). Checked on a fresh
   production copy (2026-11-25): 0 differences for every member in reads, edits, visible folders,
   deleted-note lists, create/edit gates, uploads, delete/rename gates; owners gain only in never-shared
   vaults (8 there); 44,969 padlocks disappear, every one on an item the person can edit; the undo
