@@ -11910,6 +11910,51 @@ button.group-chip-name:hover { text-decoration: underline; }
 .members-access-switch-btn.is-active { color: var(--accent); background: var(--accent-soft); font-weight: 500; }
 .members-access-switch-count { font-size: var(--fs-xs); color: var(--text-tertiary); }
 .members-access-switch-btn.is-active .members-access-switch-count { color: inherit; opacity: .75; }
+/* Access groups' quiet "New" chip (lib/groupsNewChip.ts): the Agent Skills
+   row's tag (SkillsShortcut.css), Baalda's logo green with one slow light
+   sweep through the letters and no sparkles, so it invites rather than
+   shouts. Reduced motion: the flat tag. */
+.members-access-new {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 1px 6px 0;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--brand-green) 40%, transparent);
+  background: color-mix(in srgb, var(--brand-green) 14%, transparent);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 13px;
+  letter-spacing: 0.02em;
+}
+.members-access-new-text {
+  color: var(--access-edit-fg);
+  background: linear-gradient(
+    100deg,
+    var(--access-edit-fg) 0%,
+    var(--access-edit-fg) 40%,
+    var(--brand-green-bright) 50%,
+    var(--access-edit-fg) 60%,
+    var(--access-edit-fg) 100%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: members-access-new-sweep 4s ease-in-out infinite;
+}
+@keyframes members-access-new-sweep {
+  0% { background-position: 100% 0; }
+  55%, 100% { background-position: 0% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .members-access-new-text {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
 
 /* The groups list */
 .groups-list-tools {

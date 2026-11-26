@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterGroups, groupAccessSummary, groupColor, groupCountLine, groupNameProblem, nextGroupColor } from "../groups";
-import { groupFloor } from "../../components/MemberAccessBoard";
+import { filterGroups, groupAccessSummary, groupColor, groupCountLine, groupNameProblem, nextGroupColor, groupDeleteNote, groupOpensWholeVault, groupRemoveNote } from "../groups";
 import type { AccessGroup } from "../api";
 
 const g = (over: Partial<AccessGroup>): AccessGroup => ({
@@ -36,14 +35,53 @@ describe("groups helpers", () => {
     expect(groupNameProblem("design", groups, "1")).toBeNull();
   });
 
-  it("a group's board cannot drop a row below what an ancestor grant gives", () => {
-    const grants = [
-      { resourceType: "folder" as const, permission: "edit" as const, path: "Specs" },
-      { resourceType: "vault" as const, permission: "view" as const, path: null },
-    ];
-    expect(groupFloor("Specs/a.md", grants)).toEqual({ mode: "open", from: "Specs" });
-    expect(groupFloor("Specs", grants)).toEqual({ mode: "readonly", from: null });
-    expect(groupFloor("Other/b.md", grants.slice(0, 1))).toEqual({ mode: "private", from: null });
-    expect(groupFloor("Specsheet.md", grants.slice(0, 1)).mode).toBe("private");
+  it("a group's No access rows are named as exceptions, never as access", () => {
+    const vault = { resourceType: "vault" as const, resourceId: "org", permission: "edit" as const, path: null };
+    const hidden = (path: string) => ({ resourceType: "folder" as const, resourceId: path, permission: "denied" as const, path });
+    expect(groupAccessSummary([vault, hidden("HR")])).toBe("Can edit everything except HR");
+    expect(groupAccessSummary([vault, hidden("HR"), hidden("Board/Pay")])).toBe("Can edit everything except HR and 1 more");
+    expect(groupAccessSummary([hidden("HR")])).toBe("No access yet");
+    expect(groupOpensWholeVault([hidden("HR")])).toBe(false);
+  });
+});
+
+describe("group removal and deletion say plainly what is lost", () => {
+  const whole = [{ resourceType: "vault" as const, resourceId: "org", permission: "edit" as const, path: null }];
+  const folder = [{ resourceType: "folder" as const, resourceId: "f", permission: "view" as const, path: "Sales" }];
+
+  it("knows a group that opens the whole vault", () => {
+    expect(groupOpensWholeVault(whole)).toBe(true);
+    expect(groupOpensWholeVault(folder)).toBe(false);
+    expect(groupOpensWholeVault(null)).toBe(false);
+  });
+
+  it("removing someone from a whole-vault group names the loss, own notes included", () => {
+    const t = groupRemoveNote("Everyone", whole, { self: false, name: "Mia" });
+    expect(t).toContain("Everyone opens the whole vault");
+    expect(t).toContain("everything else leaves their computer, notes they wrote included");
+    expect(t).toContain("stays on the server");
+    expect(t).toContain("adding them back returns it");
+  });
+
+  it("leaving it yourself speaks to you", () => {
+    const t = groupRemoveNote("Everyone", whole, { self: true, name: "Me" });
+    expect(t).toContain("you keep only your own access");
+    expect(t).toContain("leaves this computer, notes you wrote included");
+    expect(t).toContain("adding yourself back");
+  });
+
+  it("a narrower group still says notes written there go too", () => {
+    expect(groupRemoveNote("Sales", folder, { self: false, name: "Sam" })).toBe(
+      "Sam loses what Sales gave, notes they wrote there included. Their own access and other groups stay, and nothing is deleted for the team.",
+    );
+  });
+
+  it("deleting a whole-vault group warns it cannot be rebuilt exactly", () => {
+    const t = groupDeleteNote("Everyone", whole, 12);
+    expect(t).toContain("Its 12 members keep only their own access");
+    expect(t).toContain("notes they wrote included");
+    expect(t).toContain("not exactly who saw what before");
+    expect(t).toContain("This can't be undone.");
+    expect(groupDeleteNote("Sales", folder, 1)).toContain("Its member loses what Sales gave");
   });
 });

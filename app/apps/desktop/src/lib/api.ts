@@ -459,7 +459,8 @@ export interface MemberOverview {
 export interface GroupGrant {
   resourceType: "vault" | "folder" | "file";
   resourceId: string;
-  permission: "edit" | "view";
+  /** "denied" = No access for this group below a folder it otherwise reaches (migration 100). */
+  permission: "edit" | "view" | "denied";
   /** The folder/note/file path; null for the whole vault. */
   path: string | null;
 }
@@ -3921,7 +3922,7 @@ export class ApiClient {
   }
 
   /**
-   * Back to the vault default for one member: deletes every per-user share row
+   * Back to groups only for one member: deletes every per-user share row
    * of theirs in the org (vault and items). Owner/admin only; the server kicks
    * affected sockets and refreshes ACLs.
    */

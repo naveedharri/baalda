@@ -18,10 +18,6 @@ import { rosterCache, type RosterSnapshot } from "../lib/membersAccessCaches";
 import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
 import {
   countLine,
-  EVERYONE_OPTIONS,
-  DEFAULT_PRIVATE_LABEL,
-  DEFAULT_ACCESS_SUB,
-  DEFAULT_ACCESS_TITLE,
   accessSources,
   everyoneLabel,
   filterPeople,
@@ -31,14 +27,12 @@ import {
   LEVEL_TO_MODE,
   levelClass,
   lastActiveLabel,
-  NEW_MEMBER_OPTIONS,
   PERSON_LEVEL_LABEL,
   reduceAccessCopy,
   ROLE_LABEL,
   shortDate,
   presentUserIds,
   levelOfMode,
-  patchedTeamAccess,
   withMemberLevel,
   withNewInvitations,
   withoutInvitation,
@@ -51,7 +45,7 @@ import type { SettingsTab } from "../lib/settingsTabs";
 import { useStore } from "../store";
 import { Avatar } from "./Avatar";
 import { ConfirmDialog, type ConfirmChange } from "./ConfirmDialog";
-import { InvitePeopleDialog } from "./InvitePeopleDialog";
+import { InvitePeopleDialog, legacyNewMembersSetting } from "./InvitePeopleDialog";
 import { PeopleLimitNotice, inviteLimitError, peopleLimitKind } from "./PeopleLimitNotice";
 import { MemberProfilePage, type ProfileTab } from "./MemberProfilePage";
 import { ProfileSkeleton } from "./MemberProfileSkeletons";
@@ -63,8 +57,9 @@ import { MemberSelectionBar } from "./MemberSelectionBar";
 import { bulkResultLine, chunkIds, headerCheckState, peopleCount, pruneSelection, splitBulkTargets, toggleShown } from "../lib/membersAccess";
 import { serverFeatures } from "../lib/serverFeatures";
 import { SKILL_ACCESS_FEATURE } from "../lib/skills/access";
-import { ACCESS_GROUPS_FEATURE, GROUP_OPTION, groupAccessSummary, groupOptionId, isGroupOption } from "../lib/groups";
+import { ACCESS_GROUPS_FEATURE, groupAccessSummary, groupDeleteNote, groupRemoveNote } from "../lib/groups";
 import { GroupChip, GroupDialog, GroupPage, GroupsList, useAccessGroups, type GroupTab } from "./GroupsPanel";
+import { markGroupsTabOpened, showGroupsNewChip } from "../lib/groupsNewChip";
 
 
 /** How long a burst of per-item ticks settles before the shared side effects run. */
@@ -163,6 +158,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     return () => { live = false; };
   }, [serverUrl]);
   const groupsOn = features.has(ACCESS_GROUPS_FEATURE);
+  // Decided once per visit, once the tab is there, and only for the people
+  // who set access up (the first showing starts its 21 days).
+  const [groupsNew, setGroupsNew] = useState<boolean | null>(null);
   const groupsState = useAccessGroups(orgId, groupsOn);
   const groups: AccessGroup[] = groupsState.list?.groups ?? [];
   const [listView, setListView] = useState<"people" | "groups">("people");
@@ -173,6 +171,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   // opened; the overview is re-read on every open, so once it has answered
   // its `canManage` is the authority (a promotion made after launch, #admin).
   const manage = overview ? overview.canManage : canManage;
+  useEffect(() => {
+    if (groupsNew === null && groupsOn && manage) setGroupsNew(showGroupsNewChip());
+  }, [groupsNew, groupsOn, manage]);
   const seatAccount = useSeatAccount(orgId, manage);
 
   const reload = useCallback(async () => {
@@ -259,12 +260,27 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     toast(`Added to ${groups.find((g) => g.id === groupId)?.name ?? "the group"}.`);
     await afterAccessWrite();
   };
+  // Taking someone out of a group is a narrowing, so it confirms, and says
+  // plainly what leaves their computer (GroupsPanel's remove uses the same text).
   const leaveGroup = async (userId: string, groupId: string) => {
     if (!orgId) return;
-    if (userId === myUserId) markSelfAccessChange([orgId]);
-    await authManager.api.removeGroupMember(orgId, groupId, userId);
-    toast(`Removed from ${groups.find((g) => g.id === groupId)?.name ?? "the group"}.`);
-    await afterAccessWrite();
+    const g = groups.find((x) => x.id === groupId);
+    const self = userId === myUserId;
+    const who = overview?.members.find((m) => m.userId === userId);
+    const name = who?.name || who?.email || "This person";
+    const groupName = g?.name ?? "the group";
+    setConfirm({
+      title: self ? `Leave ${groupName}?` : `Remove ${name} from ${groupName}?`,
+      label: "Remove",
+      tone: "danger",
+      apply: () => run(async () => {
+        if (self) markSelfAccessChange([orgId]);
+        await authManager.api.removeGroupMember(orgId, groupId, userId);
+        toast(`Removed from ${groupName}.`);
+        await afterAccessWrite();
+      }),
+      body: <p className="confirm-note">{groupRemoveNote(groupName, g?.grants ?? null, { self, name })}</p>,
+    });
   };
   const askDeleteGroup = (g: AccessGroup) => setConfirm({
     title: `Delete ${g.name}?`,
@@ -278,9 +294,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       await afterAccessWrite();
     }),
     body: (
-      <p className="confirm-note">
-        Its members lose only what {g.name} gave; their own access and other groups stay. This can't be undone.
-      </p>
+      <p className="confirm-note">{groupDeleteNote(g.name, g.grants ?? null, g.memberIds.length)}</p>
     ),
   });
 
@@ -348,52 +362,6 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     }
   };
 
-  // ── Everyone ────────────────────────────────────────────────────────────
-  const writeEveryone = (mode: TeamAccessMode) => run(async () => {
-    if (!orgId) return;
-    markSelfAccessChange([orgId]); // Everyone includes the signed-in user
-    await authManager.api.setTeamAccess(orgId, mode);
-    patchRoster((r) => ({ ...r, teamAccess: r.teamAccess ? patchedTeamAccess(r.teamAccess, mode) : r.teamAccess }));
-    refreshBehind();
-    toast(`${DEFAULT_ACCESS_TITLE}: ${EVERYONE_OPTIONS.find((o) => o.value === mode)?.label}`);
-  });
-
-  const chooseEveryone = (mode: TeamAccessMode) => {
-    if (!teamAccess) return;
-    if (mode === teamAccess.mode && teamAccess.overrides.length === 0 && teamAccess.posture !== "none") return;
-    if (!needsAccessConfirm(teamAccess.posture === "none" ? "private" : teamAccess.mode, mode)) {
-      void writeEveryone(mode);
-      return;
-    }
-    if (mode === "open") return;
-    const copy = reduceAccessCopy({ kind: "everyone" }, mode);
-    setConfirm({
-      title: copy.title,
-      label: copy.button,
-      tone: mode === "private" ? "danger" : "accent",
-      apply: () => writeEveryone(mode),
-      subtitle: <>People set by name keep their own setting.</>,
-      change: {
-        who: DEFAULT_ACCESS_TITLE,
-        sub: `Every member of ${vaultName} starts here`,
-        from: teamAccess.posture === "none" ? "private" : teamAccess.mode,
-        to: mode,
-        labels: { private: DEFAULT_PRIVATE_LABEL },
-      },
-      cancelLabel: "Keep as is",
-      body: <p className="confirm-note">{copy.outcome}</p>,
-    });
-  };
-
-  // ── New members ─────────────────────────────────────────────────────────
-  const chooseDefault = (mode: TeamAccessMode) => run(async () => {
-    if (!orgId || accessDefault?.mode === mode) return;
-    const next = await authManager.api.setAccessDefault(orgId, mode);
-    setAccessDefault(next);
-    patchRoster((r) => ({ ...r, accessDefault: next }));
-    toast(`People who join now get: ${NEW_MEMBER_OPTIONS.find((o) => o.value === next.mode)?.label}`);
-  });
-
   // ── One person ──────────────────────────────────────────────────────────
   const writePerson = (m: MemberOverview, mode: TeamAccessMode) => run(async () => {
     if (!orgId) return;
@@ -435,7 +403,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       subtitle: (
         <>
           This applies across {vaultName}
-          {self ? ", and owners and admins are not exempt." : ", just for them. Default access and their groups no longer change it."}
+          {self ? ", and owners and admins are not exempt." : ", just for them. Their access groups no longer change it."}
         </>
       ),
       change: {
@@ -507,7 +475,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       label: "Set to No access",
       tone: "danger",
       apply,
-      subtitle: <>This applies across {vaultName}, just for these people. Default access and their groups no longer change it.</>,
+      subtitle: <>This applies across {vaultName}, just for these people. Their access groups no longer change it.</>,
       cancelLabel: "Keep as is",
       body: <p className="confirm-note">{namesLine(split.apply)} will not open anything in {vaultName} until someone gives them access again.</p>,
     });
@@ -746,48 +714,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
           <button className="primary members-invite-btn" onClick={() => setInviteOpen(true)}>Invite people</button>
         )}
       </div>
-      <p className="members-access-intro">Owners and admins can always manage access. Default access applies to them too.</p>
+      <p className="members-access-intro">Each person gets what is shared with them, what their access groups open, or a level you set just for them. People you make admin start on Can edit everything.</p>
       {error && <div className="auth-error">{error}</div>}
       {limitCause != null && <PeopleLimitNotice error={limitCause} canManageBilling={myRole === "owner"} ownerName={ownerName(members)} freeLimit={seatAccount ? freeLimitOf(seatAccount) : null} />}
-
-      {manage && (
-        <div className="members-access-rows">
-          <div className="members-access-row">
-            <span className="members-access-row-icon" aria-hidden="true">
-              <PeopleIcon />
-            </span>
-            <span className="members-access-row-copy">
-              <span className="members-access-row-title">{DEFAULT_ACCESS_TITLE}</span>
-              <span className="muted">{everyone?.sub ?? DEFAULT_ACCESS_SUB}</span>
-            </span>
-            {teamAccess ? (
-              <MenuSelect<string>
-                value={teamAccess.posture === "none" ? "none" : teamAccess.mode}
-                options={[
-                  ...EVERYONE_OPTIONS,
-                  ...(groupsOn ? groups.map((g, i) => ({
-                    value: `${GROUP_OPTION}${g.id}`,
-                    label: g.name,
-                    hint: groupAccessSummary(g.grants) ?? undefined,
-                    section: i === 0 ? "Access groups add to this" : undefined,
-                  })) : []),
-                ]}
-                onSelect={(v) => {
-                  if (isGroupOption(v)) openGroup(groupOptionId(v), "access");
-                  else chooseEveryone(v as TeamAccessMode);
-                }}
-                disabled={busy}
-                ariaLabel={`Default access for members of ${vaultName}`}
-                triggerClassName={`members-access-trigger is-level ${levelClass(teamAccess.posture === "none" ? "private" : teamAccess.mode)}`}
-                menuClassName="access-menu"
-                triggerContent={everyone?.label}
-              />
-            ) : (
-              <PillSkeleton label={`Loading default access for ${vaultName}`} />
-            )}
-          </div>
-        </div>
-      )}
 
       <div className={`members-access-slot${selecting ? " is-selecting" : ""}`}>
       {groupsOn ? (
@@ -800,9 +729,14 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
                 role="tab"
                 aria-selected={listView === v}
                 className={`members-access-switch-btn${listView === v ? " is-active" : ""}`}
-                onClick={() => { setListView(v); setQuery(""); setSelected(new Set()); }}
+                onClick={() => { setListView(v); setQuery(""); setSelected(new Set()); if (v === "groups") markGroupsTabOpened(); }}
               >
                 {v === "people" ? "People" : "Access groups"}
+                {v === "groups" && groupsNew && (
+                  <span className="members-access-new" title="New: give a group of people the same access in one place">
+                    <span className="members-access-new-text">New</span>
+                  </span>
+                )}
                 <span className="members-access-switch-count">
                   {v === "people" ? (overview ? members.length + invitations.length : "") : (groupsState.list ? groups.length : "")}
                 </span>
@@ -1094,9 +1028,9 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
         <InvitePeopleDialog
           orgId={orgId}
           vaultName={vaultName}
-          newMembersAccess={accessDefault?.mode ?? null}
-          defaultAccess={teamAccess ? (teamAccess.posture === "none" ? "private" : teamAccess.mode) : null}
-          onNewMembersAccess={manage ? (mode) => void chooseDefault(mode) : undefined}
+          newMembersAccess={legacyNewMembersSetting(teamAccess?.posture, accessDefault?.mode)}
+          defaultKnown={teamAccess != null && accessDefault != null}
+          canSetCodeGroups={manage}
           canManageBilling={myRole === "owner"}
           seatAccount={seatAccount}
           ownerName={ownerName(members)}
@@ -1181,25 +1115,6 @@ export function isRowOwnClick(e: { target: EventTarget | null; currentTarget: Ev
 
 export function displayName(m: Pick<MemberOverview, "name" | "email" | "userId">): string {
   return m.name || m.email || m.userId;
-}
-
-function PeopleIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
-    </svg>
-  );
-}
-
-/**
- * Placeholders that hold the final layout while the server answers: no text
- * and no mode until the state is authoritative, and nothing that jumps when it
- * arrives. They borrow the editor skeleton's `.skel-line` shimmer.
- */
-function PillSkeleton({ label }: { label: string }) {
-  return <span className="skel-line members-skel-pill" role="status" aria-busy="true" aria-label={label} />;
 }
 
 /** The table's select-all box; `indeterminate` is a property, never an attribute. */

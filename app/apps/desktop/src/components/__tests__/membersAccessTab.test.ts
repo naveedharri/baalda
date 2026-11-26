@@ -88,35 +88,13 @@ describe("Members and access tab", () => {
     expect(host.textContent).not.toContain("Stale Owner");
   });
 
-  it("shows no Default access value before the server answers, and no New members row", async () => {
-    const team = deferred<unknown>();
-    const joining = deferred<unknown>();
-    api.getTeamAccess.mockReturnValueOnce(team.promise);
-    api.getAccessDefault.mockReturnValueOnce(joining.promise);
-    await render();
-    const rows = () => host.querySelector(".members-access-rows");
-    expect(rows()).not.toBeNull();
-    expect(rows()!.querySelectorAll(".members-access-trigger")).toHaveLength(0);
-    expect(rows()!.textContent).not.toMatch(/Can edit|Can view|No access/);
-    await act(async () => {
-      team.resolve({ mode: "readonly", posture: "view", grantId: "g", overrides: [] });
-      joining.resolve({ mode: "private" });
-    });
-    await flush();
-    const triggers = rows()!.querySelectorAll(".members-access-trigger");
-    // New members moved to the invite dialog: only Default access is left here.
-    expect(triggers).toHaveLength(1);
-    expect(triggers[0].textContent).toContain("Can view");
-    expect(rows()!.textContent).not.toContain("New members");
-  });
-
-  it("reads a never-shared vault as Only what's shared with the authorship note", async () => {
-    api.getTeamAccess.mockResolvedValueOnce({ mode: "private", posture: "none", grantId: null, overrides: [] });
+  it("has no Default access or New members row (2026-11-25)", async () => {
     await render();
     await flush();
-    const everyone = host.querySelector(".members-access-row");
-    expect(everyone?.textContent).toContain("Only what's shared");
-    expect(everyone?.textContent).toContain("Members also keep notes they wrote");
+    expect(host.querySelector(".members-access-rows")).toBeNull();
+    expect(host.textContent).not.toContain("Default access");
+    expect(host.textContent).not.toContain("New members");
+    expect(host.querySelector(".members-access-intro")?.textContent).toContain("People you make admin start on Can edit everything");
   });
 
   it("lets an owner in a No access vault give themselves Can edit everything", async () => {
@@ -298,18 +276,16 @@ describe("Members and access tab", () => {
     expect(host.querySelector(".member-profile-about")).not.toBeNull();
   });
 
-  it("calls the vault-wide row Default access and keeps where access comes from to the hover", async () => {
+  it("keeps where access comes from to the hover", async () => {
+    api.getTeamAccess.mockResolvedValue({ mode: "private", posture: "sealed", grantId: null, overrides: [] });
     const own = { ...person("u2", "Sara Own"), access: { level: "view" as const, own: true } };
-    const plain = { ...person("u3", "Ali Default"), access: { level: "view" as const } };
+    const plain = { ...person("u3", "Ali Shared"), access: { level: "custom" as const } };
     api.getMembersOverview.mockResolvedValue(overview([person("u1", "Owner One", "owner"), own, plain]));
     await render();
     await flush();
-    const rows = host.querySelector(".members-access-rows")!;
-    expect(rows.textContent).toContain("Default access");
-    expect(rows.textContent).toContain("Every member starts here");
-    expect(rows.textContent).not.toContain("Everyone in");
     const rowOf = (name: string) => [...host.querySelectorAll("tbody tr")].find((r) => r.textContent?.includes(name))!;
     expect(host.querySelector(".members-access-source")).toBeNull();
-    expect(rowOf("Ali Default").querySelector(".members-access-cell")?.getAttribute("title")).toBe("Default access: Can view.");
+    expect(rowOf("Ali Shared").querySelector(".members-access-cell")?.getAttribute("title")).toBe("Some folders or notes are shared with them.");
+    expect(rowOf("Sara Own").querySelector(".members-access-cell")?.getAttribute("title")).toBe("Set just for them: Can view everything.");
   });
 });

@@ -482,7 +482,7 @@ describe("Member access board", () => {
     expect(api.setBulkAccess).not.toHaveBeenCalled();
   });
 
-  it("Reset to vault default confirms, then makes one request and reloads", async () => {
+  it("Reset to vault default (older Default access) confirms, then makes one request and reloads", async () => {
     api.resetMemberAccess.mockResolvedValue({ removed: 2, disconnectedDocs: 0 });
     await render({ personVaultMode: "readonly", everyoneMode: "open" });
     await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Set everything to"]')!.click());
@@ -496,6 +496,30 @@ describe("Member access board", () => {
     expect(api.resetMemberAccess).toHaveBeenCalledWith("org-1", "u2");
     expect(api.setBulkAccess).not.toHaveBeenCalled();
     expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+  it("Reset to groups only confirms, then makes one request and reloads", async () => {
+    api.resetMemberAccess.mockResolvedValue({ removed: 2, disconnectedDocs: 0 });
+    await render({ personVaultMode: "readonly", everyoneMode: "private" });
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Set everything to"]')!.click());
+    const option = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
+      .find((li) => li.textContent?.startsWith("Reset to groups only"))!;
+    await act(async () => option.click());
+    expect(dialog()?.textContent).toContain("Reset Sara's access to groups only?");
+    expect(api.resetMemberAccess).not.toHaveBeenCalled();
+    await act(async () => dialogButton("Reset").click());
+    expect(api.resetMemberAccess).toHaveBeenCalledTimes(1);
+    expect(api.resetMemberAccess).toHaveBeenCalledWith("org-1", "u2");
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+  it("Reset to groups only says what the person keeps", async () => {
+    await render({ personVaultMode: "readonly", everyoneMode: "private" });
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Set everything to"]')!.click());
+    const option = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
+      .find((li) => li.textContent?.startsWith("Reset to groups only"))!;
+    expect(option.textContent).toContain("Remove their own settings");
+    await act(async () => option.click());
+    expect(dialog()?.textContent).toContain("They keep what their groups give.");
   });
   describe("collapsed folders", () => {
     const nested = () => {

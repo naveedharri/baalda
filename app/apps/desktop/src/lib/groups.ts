@@ -37,9 +37,15 @@ const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? o
  */
 export function groupAccessSummary(grants: readonly GroupGrant[] | null): string | null {
   if (grants === null) return null;
+  // A No access row (migration 100) gives nothing: it only stops this group
+  // below a folder it otherwise reaches, so it reads as an exception.
+  const hidden = grants.filter((g) => g.permission === "denied");
+  grants = grants.filter((g) => g.permission !== "denied");
   if (grants.length === 0) return "No access yet";
   const vault = grants.find((g) => g.resourceType === "vault");
   const items = grants.filter((g) => g.resourceType !== "vault");
+  const except = hidden.length === 0 ? ""
+    : ` except ${hidden[0].path ? lastPart(hidden[0].path) : "an item"}${hidden.length > 1 ? ` and ${hidden.length - 1} more` : ""}`;
   const part = (perm: "edit" | "view") => {
     const list = items.filter((g) => g.permission === perm);
     if (list.length === 0) return null;
@@ -48,7 +54,7 @@ export function groupAccessSummary(grants: readonly GroupGrant[] | null): string
     return list.length === 1 ? `${verb} ${first}` : `${verb} ${first} and ${list.length - 1} more`;
   };
   if (vault) {
-    const head = vault.permission === "edit" ? "Can edit everything" : "Can view everything";
+    const head = (vault.permission === "edit" ? "Can edit everything" : "Can view everything") + except;
     // Under a vault edit nothing more can add; under a vault view only edits do.
     const extra = vault.permission === "view" ? part("edit") : null;
     return extra ? `${head} · ${extra}` : head;
@@ -98,3 +104,34 @@ export function groupNameProblem(name: string, groups: readonly Pick<AccessGroup
 export const GROUP_OPTION = "group:";
 export const isGroupOption = (v: string) => v.startsWith(GROUP_OPTION);
 export const groupOptionId = (v: string) => v.slice(GROUP_OPTION.length);
+
+/** True when the group opens the whole vault (a vault-level grant). The
+ *  converted "Everyone" groups are like this, and for most people they are
+ *  the ONLY way in: the vault itself is Only what's shared. */
+export function groupOpensWholeVault(grants: readonly GroupGrant[] | null): boolean {
+  return !!grants?.some((g) => g.resourceType === "vault" && (g.permission === "edit" || g.permission === "view"));
+}
+
+/** The confirm text for taking one person out of a group. It names the loss
+ *  plainly: what the group gave leaves their computer, notes they wrote
+ *  included, because an Only what's shared vault gives authors nothing of
+ *  their own. Nothing is deleted for the team. */
+export function groupRemoveNote(groupName: string, grants: readonly GroupGrant[] | null, who: { self: boolean; name: string }): string {
+  const they = who.self ? "you" : who.name;
+  const their = who.self ? "your" : "their";
+  const computer = who.self ? "this computer" : "their computer";
+  if (groupOpensWholeVault(grants)) {
+    return `${groupName} opens the whole vault. Without it, ${they} ${who.self ? "keep" : "keeps"} only ${their} own access and other groups: everything else leaves ${computer}, notes ${who.self ? "you" : "they"} wrote included. It stays on the server for the team, and adding ${who.self ? "yourself" : "them"} back returns it.`;
+  }
+  return `${who.self ? "You lose" : `${who.name} loses`} what ${groupName} gave, notes ${who.self ? "you" : "they"} wrote there included. ${who.self ? "Your" : "Their"} own access and other groups stay, and nothing is deleted for the team.`;
+}
+
+/** The confirm text for deleting a group. */
+export function groupDeleteNote(groupName: string, grants: readonly GroupGrant[] | null, memberCount: number): string {
+  const members = memberCount === 1 ? "Its member keeps" : `Its ${memberCount} members keep`;
+  if (groupOpensWholeVault(grants)) {
+    return `${groupName} opens the whole vault. ${members} only their own access and other groups: everything else leaves their computers, notes they wrote included. It stays on the server. A new group can give the same access back, but not exactly who saw what before. This can't be undone.`;
+  }
+  const lose = memberCount === 1 ? "Its member loses" : `Its ${memberCount} members lose`;
+  return `${lose} what ${groupName} gave, notes they wrote there included; their own access and other groups stay, and nothing is deleted for the team. This can't be undone.`;
+}

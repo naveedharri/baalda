@@ -125,8 +125,8 @@ export interface MemberAccessBoardProps {
   accessMap?: AccessMap;
   /**
    * An access GROUP's board instead of a person's (migration 097). Its rows
-   * are what the group's own grants give (groups only add, so No access means
-   * the group gives nothing there), writes use the group audience, and every
+   * are what the group's own grants give (its deepest row decides, so No access
+   * under a grant from above writes a group No access row), writes use the group audience, and every
    * re-read is one reload of the group's map. `member` is then only a label.
    */
   group?: { id: string; name: string; grants: readonly GroupGrantLite[]; includesMe: boolean };
@@ -135,45 +135,32 @@ export interface MemberAccessBoardProps {
 /** The part of a group grant the board needs (see `GroupGrant` in lib/api). */
 export interface GroupGrantLite {
   resourceType: "vault" | "folder" | "file";
-  permission: "edit" | "view";
+  permission: "edit" | "view" | "denied";
   path: string | null;
 }
 
-/** Confirm copy for taking away what a group gives (never anyone's own access). */
-export function groupRemoveCopy(group: string, where: string): { title: string; button: string; outcome: string } {
+/** Confirm copy for taking away what a group gives (never anyone's own access).
+ *  A group that opens the whole vault (the converted "Everyone") is, for most
+ *  people, their only way in: then it says plainly what leaves their computers. */
+export function groupRemoveCopy(group: string, where: string, opensWholeVault = false, includesMe = false): { title: string; button: string; outcome: string } {
+  const members = includesMe ? "Its members, you included," : "Its members";
   return {
     title: `Remove what ${group} gives ${where}?`,
     button: "Remove",
-    outcome: `Members of ${group} keep their own access and what other groups give. Only what ${group} gave ${where} goes.`,
+    outcome: opensWholeVault
+      ? `${group} opens the whole vault. ${members} keep only their own access and other groups: what ${group} gave ${where} leaves their computers, notes they wrote included. It stays on the server for the team, and moving it back returns it.`
+      : `Members of ${group}${includesMe ? ", you included," : ""} keep their own access and what other groups give. Only what ${group} gave ${where} goes.`,
   };
 }
+
+const opensWholeVault = (grants: readonly GroupGrantLite[]) =>
+  grants.some((g) => g.resourceType === "vault" && g.permission !== "denied");
 
 /** "Design can now edit Specs." / "Design no longer gives access to Specs." */
 export function groupMoveMessage(group: string, what: string, mode: TeamAccessMode): string {
   if (mode === "open") return `${group} can now edit ${what}.`;
   if (mode === "readonly") return `${group} can now view ${what}.`;
   return `${group} no longer gives access to ${what}.`;
-}
-
-const MODE_RANK: Record<TeamAccessMode, number> = { private: 0, readonly: 1, open: 2 };
-
-/**
- * The lowest level a row can have on a group's board: groups only add, so a
- * row inside a folder (or vault) the group already reaches keeps at least
- * that. Returns the floor and the path that sets it (null = the whole vault).
- */
-export function groupFloor(
-  path: string,
-  grants: readonly GroupGrantLite[],
-): { mode: TeamAccessMode; from: string | null } {
-  let best: { mode: TeamAccessMode; from: string | null } = { mode: "private", from: null };
-  for (const g of grants) {
-    const covers = g.resourceType === "vault" || (g.resourceType === "folder" && g.path !== null && path.startsWith(g.path + "/"));
-    if (!covers) continue;
-    const mode: TeamAccessMode = g.permission === "edit" ? "open" : "readonly";
-    if (MODE_RANK[mode] > MODE_RANK[best.mode]) best = { mode, from: g.resourceType === "vault" ? null : g.path };
-  }
-  return best;
 }
 
 /**
@@ -290,6 +277,9 @@ export function MemberAccessBoard({
   }, [entries, allRows, storeLocks, storeTree]);
   // A mixed folder with no answered children sits at the person's own
   // vault-wide level, else Everyone's.
+  // A vault still on an older Default access (Can edit / Can view everything):
+  // a reset there falls back to that team level, not to groups only.
+  const legacyDefault = everyoneMode === "open" || everyoneMode === "readonly";
   const fallback: TeamAccessMode = personVaultMode && personVaultMode !== "custom" ? personVaultMode : everyoneMode ?? "private";
   const own = useMemo(() => ownModes(allRows, summaryModes, fallback), [allRows, summaryModes, fallback]);
   const columns = useMemo(
@@ -467,7 +457,7 @@ export function MemberAccessBoard({
     if (group) {
       // A group only adds: lowering it takes away only what the group gave.
       if (to !== "private") return void run();
-      setConfirm({ ...groupRemoveCopy(group.name, "everywhere"), danger: true, apply: run });
+      setConfirm({ ...groupRemoveCopy(group.name, "everywhere", opensWholeVault(group.grants), group.includesMe), danger: true, apply: run });
       return;
     }
     if (to === "open" || !needsAccessConfirm(from, to)) return void run();
@@ -493,26 +483,16 @@ export function MemberAccessBoard({
   /**
    * Move one row to `to`: arrows and drops both land here. Applied at once,
    * even when lowering: one row is cheap to move back, and a toast says what changed.
+   * Except No access on a group's board, which leaves every member's computer: that asks first.
    */
   const move = (row: AccessRow, to: TeamAccessMode) => {
     if (!canSetAccess || busy) return;
     const fromOwn = own.get(row.key);
     if (!fromOwn || fromOwn === to) return;
-    if (group) {
-      // Groups only add: inside a folder the group reaches, a row cannot go
-      // below that folder's level. Say where it comes from instead.
-      const floor = groupFloor(row.path, group.grants);
-      if (MODE_RANK[to] < MODE_RANK[floor.mode]) {
-        const level = floor.mode === "open" ? "edit" : "view";
-        toast(
-          floor.from === null
-            ? `${group.name} can ${level} the whole vault, so ${row.name} stays at least that. Change the whole vault first.`
-            : `${row.name} is inside ${floor.from}, which ${group.name} can ${level}. Change ${floor.from} instead.`,
-          "neutral",
-        );
-        return;
-      }
-    }
+    // On a group's board any row can move: within one group the deepest of its
+    // rows decides, so Can view or No access inside a folder (or vault) the
+    // group can edit writes a group row there (migration 100) that limits only
+    // this group, never anyone's own access or other groups.
     // A folder move includes its contents. Check their Everyone caps too,
     // including ancestor locks, before claiming a per-person write can lift them.
     const paths = new Map(allRows.map((r) => [`${accessResourceType(r.kind)}:${r.id}`, r.path]));
@@ -567,6 +547,10 @@ export function MemberAccessBoard({
         danger: false,
         apply: run,
       });
+    } else if (group && to === "private") {
+      // One row is one person's on their own board, but on a group's board it
+      // leaves every member's computer: ask first, saying so.
+      setConfirm({ ...groupRemoveCopy(group.name, `on ${row.name}`, opensWholeVault(group.grants), group.includesMe), danger: true, apply: run });
     } else void run();
   };
 
@@ -580,11 +564,13 @@ export function MemberAccessBoard({
     }
     if (choice === "reset") {
       setConfirm({
-        title: isSelf ? "Reset your access to the vault default?" : `Reset ${who}'s access to the vault default?`,
+        title: legacyDefault
+          ? (isSelf ? "Reset your access to the vault default?" : `Reset ${who}'s access to the vault default?`)
+          : (isSelf ? "Reset your access to groups only?" : `Reset ${who}'s access to groups only?`),
         button: "Reset",
-        outcome: isSelf
-          ? "Your own settings are removed; you get what every member gets."
-          : "Their own settings are removed; they get what every member gets.",
+        outcome: legacyDefault
+          ? (isSelf ? "Your own settings are removed; you get what every member gets." : "Their own settings are removed; they get what every member gets.")
+          : (isSelf ? "Your own settings are removed. You keep what your groups give." : "Their own settings are removed. They keep what their groups give."),
         danger: false,
         apply: resetToDefault,
       });
@@ -595,7 +581,7 @@ export function MemberAccessBoard({
     });
   };
 
-  /** Back to what every member gets: one request deletes this person's own rows. */
+  /** Back to groups only: one request deletes this person's own rows. */
   const resetToDefault = async () => {
     setBusy(true);
     setError(null);
@@ -626,7 +612,7 @@ export function MemberAccessBoard({
       if (await write(roots, mode)) toast("Updated access to existing items.");
     };
     if (mode === "private" && group) {
-      setConfirm({ ...groupRemoveCopy(group.name, "on every existing item"), danger: true, apply });
+      setConfirm({ ...groupRemoveCopy(group.name, "on every existing item", opensWholeVault(group.grants), group.includesMe), danger: true, apply });
     } else if (mode === "private") {
       setConfirm({
         title: "Move all existing items to No access?",
@@ -647,7 +633,7 @@ export function MemberAccessBoard({
       title: `Move ${count} ${count === 1 ? "item" : "items"} to No access?`,
       button: "Remove access",
       outcome: group
-        ? groupRemoveCopy(group.name, count === 1 ? `on ${tops[0].name}` : `on these ${count} items`).outcome
+        ? groupRemoveCopy(group.name, count === 1 ? `on ${tops[0].name}` : `on these ${count} items`, opensWholeVault(group.grants), group.includesMe).outcome
         : reduceAccessCopy({ kind: "person", name: fullName, self: isSelf }, "private").outcome,
       danger: true,
       apply: async () => {
@@ -880,7 +866,9 @@ export function MemberAccessBoard({
               ? [{ value: "reset" as const, label: "Remove all", hint: `${who} gives nothing; each person keeps their own access` }]
               : [
                   { value: "private" as const, label: "No access", hint: `Hide everything from ${isSelf ? "you" : who}` },
-                  { value: "reset" as const, label: "Reset to vault default", hint: "Back to what every member gets" },
+                  legacyDefault
+                    ? { value: "reset" as const, label: "Reset to vault default", hint: "Back to what every member gets" }
+                    : { value: "reset" as const, label: "Reset to groups only", hint: `Remove ${isSelf ? "your" : "their"} own settings` },
                 ]),
           ]}
           triggerContent="Set everything to"

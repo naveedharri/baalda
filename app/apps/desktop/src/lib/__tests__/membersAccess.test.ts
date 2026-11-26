@@ -182,35 +182,37 @@ describe("the viewer's role follows the freshest authority", () => {
 
 describe("where a person's access comes from", () => {
   const design = { name: "Design", summary: "Can edit Design" };
-  it("starts at default access when there are no groups", () => {
-    expect(accessSources({ level: "none", own: false, defaultLabel: "No access", groups: [] }))
-      .toEqual({ short: "Default access", lines: ["Default access: No access."], sentence: "From default access (no access). Choosing a level here sets it just for them." });
+  it("says only what's shared when nothing else gives access", () => {
+    expect(accessSources({ level: "none", own: false, defaultLabel: "Only what's shared", groups: [] }))
+      .toEqual({ short: "Only what's shared", lines: ["Only what's shared with them."], sentence: "Only what's shared with them. Choosing a level here sets it just for them." });
   });
   it("names the groups that add something, and skips groups that give nothing", () => {
     const empty = { name: "Sales", summary: "No access yet" };
-    expect(accessSources({ level: "custom", own: false, defaultLabel: "No access", groups: [design, empty] }))
+    expect(accessSources({ level: "custom", own: false, defaultLabel: "Only what's shared", groups: [design, empty] }))
       .toEqual({
-        short: "Default + Design",
-        lines: ["Default access: No access.", "Design group: Can edit Design."],
-        sentence: "From default access (no access) and the Design group (can edit Design). Choosing a level here sets it just for them.",
+        short: "Design",
+        lines: ["Design group: Can edit Design."],
+        sentence: "From the Design group (can edit Design). Choosing a level here sets it just for them.",
       });
-    const two = accessSources({ level: "custom", own: false, defaultLabel: "Can view", groups: [design, { name: "Ops", summary: "Can edit Ops" }] });
-    expect(two.short).toBe("Default + 2 groups");
+    const two = accessSources({ level: "custom", own: false, defaultLabel: null, groups: [design, { name: "Ops", summary: "Can edit Ops" }] });
+    expect(two.short).toBe("2 groups");
   });
-  it("says a person's own setting replaces default access and groups", () => {
-    expect(accessSources({ level: "view", own: true, defaultLabel: "No access", groups: [design] })).toEqual({
-      short: "Set just for them",
-      lines: ["Set just for them: Can view everything.", "Default access and access groups don't change this."],
-      sentence: "Set just for them. Default access and access groups don't change it.",
-    });
-    expect(accessSources({ level: "edit", own: true, isSelf: true, defaultLabel: "No access", groups: [] }).lines)
-      .toEqual(["Set just for you: Can edit everything.", "Default access doesn't change this."]);
-  });
-  it("explains a mixed level with no group behind it", () => {
+  it("names a vault's older default while it still has one", () => {
     expect(accessSources({ level: "custom", own: false, defaultLabel: "Can edit", groups: [] })).toEqual({
       short: "Default, with changes",
-      lines: ["Default access: Can edit.", "Some folders or notes are set differently for them."],
-      sentence: "From default access (can edit), with some folders or notes set differently. Choosing a level here sets it just for them.",
+      lines: ["Default access: Can edit.", "Some folders or notes are shared with them."],
+      sentence: "From default access (can edit), with some folders or notes shared with them. Choosing a level here sets it just for them.",
     });
+  });
+  it("says groups add to a person's own Can view, and never to their own No access", () => {
+    expect(accessSources({ level: "view", own: true, defaultLabel: null, groups: [design] })).toEqual({
+      short: "Set just for them",
+      lines: ["Set just for them: Can view everything.", "The Design group adds to it."],
+      sentence: "Set just for them. The Design group adds to it.",
+    });
+    expect(accessSources({ level: "none", own: true, defaultLabel: null, groups: [design] }).lines)
+      .toEqual(["Set just for them: No access.", "Access groups don't change it."]);
+    expect(accessSources({ level: "edit", own: true, isSelf: true, defaultLabel: null, groups: [] }).lines)
+      .toEqual(["Set just for you: Can edit everything."]);
   });
 });

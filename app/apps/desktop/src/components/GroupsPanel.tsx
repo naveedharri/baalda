@@ -12,6 +12,8 @@ import {
   groupColor,
   groupCountLine,
   groupNameProblem,
+  groupDeleteNote,
+  groupRemoveNote,
   nextGroupColor,
 } from "../lib/groups";
 import { relativeTime } from "../lib/health/format";
@@ -453,9 +455,7 @@ export function GroupPage({
       title: self ? `Leave ${group.name}?` : `Remove ${personName(m)} from ${group.name}?`,
       label: "Remove",
       body: (
-        <p className="confirm-note">
-          {self ? "You lose" : "They lose"} only what {group.name} gave. {self ? "Your" : "Their"} own access and other groups stay.
-        </p>
+        <p className="confirm-note">{groupRemoveNote(group.name, group.grants ?? null, { self, name: personName(m) })}</p>
       ),
       apply: async () => {
         if (self) markSelfAccessChange(selfResources());
@@ -497,10 +497,7 @@ export function GroupPage({
     title: `Delete ${group.name}?`,
     label: "Delete access group",
     body: (
-      <p className="confirm-note">
-        Its {group.memberIds.length === 1 ? "member loses" : `${group.memberIds.length} members lose`} only what {group.name} gave;
-        their own access and other groups stay. This can't be undone.
-      </p>
+      <p className="confirm-note">{groupDeleteNote(group.name, group.grants ?? null, group.memberIds.length)}</p>
     ),
     apply: async () => {
       if (includesMe) markSelfAccessChange(selfResources());
@@ -694,7 +691,7 @@ function GroupAccessTab({ orgId, group, includesMe, teamAccess, onGrantsChanged,
         everyoneMode={teamAccess && teamAccess.posture !== "none" ? teamAccess.mode : null}
         personVaultMode={vaultGrant ? (vaultGrant.permission === "edit" ? "open" : "readonly") : null}
         // Each move: the debounced padlock refresh, plus the group's grants
-        // (the board's "groups only add" floor reads them). No roster reload.
+        // (the board's whole-vault confirm and the list summary read them). No roster reload.
         onItemWritten={() => { onItemWritten(); void onGrantsChanged(); }}
         onChanged={async () => { onItemWritten(); await onGrantsChanged(); }}
         group={{ id: group.id, name: group.name, grants: group.grants ?? [], includesMe }}

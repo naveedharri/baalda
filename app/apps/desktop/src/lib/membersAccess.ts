@@ -473,48 +473,55 @@ export interface AccessSourceGroup {
 /**
  * Where one person's vault-wide access comes from, in plain words: a short
  * label for the Access column and the full lines for its tooltip and the
- * profile. Mirrors the resolver without asking it: a person with their OWN
- * vault-wide level (`access.own`) ignores default access and groups;
- * everyone else starts at default access and their groups add to it.
+ * profile. Mirrors the resolver without asking it (2026-11-25): a person's OWN Can edit / Can view everything
+ * combines with their groups (the higher wins) and their own No access is
+ * absolute; everyone else gets what is shared with them or their groups.
+ * Default access is always Only what's shared, so it is not named, except on
+ * a vault still on an older setting (`defaultLabel` other than that).
  */
 export function accessSources(input: {
   level: MemberAccessLevel;
   own: boolean;
   isSelf?: boolean;
-  /** Default access as the row shows it ("No access"); null until known. */
+  /** Default access as the row showed it; only a level other than Only what's shared is named. */
   defaultLabel: string | null;
   groups: readonly AccessSourceGroup[];
 }): { short: string; lines: string[]; sentence: string } {
   const who = input.isSelf ? "you" : "them";
+  const giving = input.groups.filter((g) => g.summary && g.summary !== "No access yet");
+  const lower = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
   if (input.own) {
     const head = input.level === "custom"
       ? `Set just for ${who}, with some folders or notes set differently.`
       : `Set just for ${who}: ${PERSON_LEVEL_LABEL[input.level]}.`;
-    const tail = input.groups.length ? "Default access and access groups don't change it." : "Default access doesn't change it.";
+    // No access of their own is absolute; Can edit / Can view combine with groups.
+    const tail = input.level === "none"
+      ? (input.groups.length ? "Access groups don't change it." : null)
+      : giving.length ? `${giving.length === 1 ? `The ${giving[0].name} group adds` : "Their access groups add"} to it.` : null;
     return {
       short: `Set just for ${who}`,
-      lines: [head, input.groups.length ? "Default access and access groups don't change this." : "Default access doesn't change this."],
-      sentence: `Set just for ${who}. ${tail}`,
+      lines: tail ? [head, tail] : [head],
+      sentence: tail ? `Set just for ${who}. ${tail}` : `Set just for ${who}.`,
     };
   }
-  const giving = input.groups.filter((g) => g.summary && g.summary !== "No access yet");
+  const legacy = input.defaultLabel && input.defaultLabel !== DEFAULT_PRIVATE_LABEL ? input.defaultLabel : null;
   const lines: string[] = [];
-  if (input.defaultLabel) lines.push(`Default access: ${input.defaultLabel}.`);
+  if (legacy) lines.push(`Default access: ${legacy}.`);
   for (const g of giving) lines.push(`${g.name} group: ${g.summary}.`);
-  if (input.level === "custom" && giving.length === 0) lines.push(`Some folders or notes are set differently for ${who}.`);
+  if (input.level === "custom" && giving.length === 0) lines.push(`Some folders or notes are shared with ${who}.`);
+  if (lines.length === 0) lines.push(`Only what's shared with ${who}.`);
   const short = giving.length === 0
-    ? (input.level === "custom" ? "Default, with changes" : "Default access")
-    : giving.length === 1
-      ? `Default + ${giving[0].name}`
-      : `Default + ${giving.length} groups`;
-  const lower = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
+    ? (legacy ? (input.level === "custom" ? "Default, with changes" : "Default access") : input.level === "custom" ? "Shared with them" : "Only what's shared")
+    : (legacy ? "Default + " : "") + (giving.length === 1 ? giving[0].name : `${giving.length} groups`);
   const from = [
-    input.defaultLabel ? `default access (${lower(input.defaultLabel)})` : "default access",
+    ...(legacy ? [`default access (${lower(legacy)})`] : []),
     ...(giving.length > 2
       ? [`${giving.length} access groups`]
       : giving.map((g) => `the ${g.name} group (${lower(g.summary!)})`)),
   ];
-  const changed = input.level === "custom" && giving.length === 0 ? ", with some folders or notes set differently" : "";
-  const sentence = `From ${from.join(" and ")}${changed}. Choosing a level here sets it just for ${who}.`;
+  const tail = `Choosing a level here sets it just for ${who}.`;
+  const sentence = from.length
+    ? `From ${from.join(" and ")}${input.level === "custom" && giving.length === 0 ? ", with some folders or notes shared with " + who : ""}. ${tail}`
+    : `Only what's shared with ${who}${input.level === "custom" ? " (some folders or notes)" : ""}. ${tail}`;
   return { short, lines, sentence };
 }
