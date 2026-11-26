@@ -2740,6 +2740,116 @@ body:has(.sidebar-resizer.dragging) {
   margin-top: var(--sp-4);
   padding: var(--sp-3) var(--sp-4);
 }
+/* The release's video: its thumbnail, a play button and the title, which
+   becomes the player in place. */
+.whats-new-video-block {
+  display: grid;
+  margin: 0 0 10px;
+  text-align: left;
+  animation: whats-new-line 320ms var(--ease) 100ms both;
+}
+.whats-new-player-frame {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 16px;
+  overflow: hidden;
+  background: radial-gradient(80% 90% at 75% 30%, rgba(124, 92, 255, 0.55), transparent 60%), #07060b;
+  box-shadow: 0 0 0 1px rgba(11, 10, 16, 0.06), 0 16px 34px -18px rgba(40, 24, 90, 0.8);
+}
+.whats-new-player-frame iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+.whats-new-poster {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: #fff;
+  font: inherit;
+  text-align: left;
+}
+.whats-new-poster img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 600ms var(--ease);
+}
+.whats-new-poster:hover img {
+  transform: scale(1.03);
+}
+/* A shade at the bottom so the title reads on any thumbnail. */
+.whats-new-poster::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 45%, rgba(7, 6, 11, 0.72));
+}
+.whats-new-poster-play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  translate: -50% -50%;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35) inset, 0 12px 28px -8px rgba(0, 0, 0, 0.6);
+  transition: transform 300ms cubic-bezier(0.2, 0.9, 0.3, 1.3);
+}
+.whats-new-poster-play::after {
+  content: "";
+  margin-left: 5px;
+  border-left: 16px solid #fff;
+  border-top: 10px solid transparent;
+  border-bottom: 10px solid transparent;
+}
+.whats-new-poster:hover .whats-new-poster-play {
+  transform: scale(1.08);
+}
+.whats-new-poster:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 3px rgba(127, 115, 255, 0.7);
+}
+.whats-new-poster-title {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 13px;
+  z-index: 1;
+  font: 600 15px/1.25 var(--font-display);
+  letter-spacing: -0.01em;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.45);
+}
+.whats-new-youtube {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 0 0 2px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-tertiary);
+  font: 500 12px var(--font-body);
+  cursor: pointer;
+}
+.whats-new-youtube:hover {
+  color: var(--text-primary);
+}
 @keyframes whats-new-pop {
   from {
     opacity: 0;
@@ -7611,56 +7721,91 @@ button.is-done:disabled {
   display: grid;
   place-items: center;
   padding: var(--sp-6);
-  background: color-mix(in srgb, var(--bg-app) 82%, transparent);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  /* The welcome screen's glow. */
+  background:
+    radial-gradient(70% 75% at 100% 0%, rgba(150, 120, 255, 0.5), rgba(150, 120, 255, 0.18) 42%, transparent 72%),
+    radial-gradient(60% 65% at 0% 100%, rgba(255, 160, 120, 0.42), rgba(255, 160, 120, 0.14) 44%, transparent 72%),
+    radial-gradient(50% 55% at 0% 8%, rgba(120, 190, 255, 0.28), transparent 70%),
+    radial-gradient(55% 55% at 100% 100%, rgba(236, 130, 200, 0.26), transparent 70%),
+    var(--bg-app);
   animation: fade-in var(--t-med) var(--ease) both;
 }
+[data-theme="dark"] .update-gate {
+  background:
+    radial-gradient(120% 70% at 50% -10%, rgba(140, 118, 255, 0.2), transparent 62%),
+    radial-gradient(80% 60% at 100% 0%, rgba(214, 120, 190, 0.07), transparent 60%),
+    var(--bg-app);
+}
+/* Frosted like the sign-in card. */
 .update-gate-card {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--sp-4);
-  width: min(420px, 100%);
-  padding: var(--sp-8) var(--sp-8) var(--sp-6);
+  gap: 12px;
+  width: min(320px, 100%);
+  padding: 26px 22px 20px;
   text-align: center;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-lg);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 22px;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.8) inset,
+    0 30px 70px -24px rgba(40, 24, 90, 0.35),
+    0 0 0 1px rgba(11, 10, 16, 0.04);
+  backdrop-filter: blur(28px) saturate(170%);
+  -webkit-backdrop-filter: blur(28px) saturate(170%);
   animation: rise-in var(--t-med) var(--ease) both;
 }
-/* Accent tile with a download arrow — the one graphic on the card; no logo. */
-.update-gate-badge {
+[data-theme="dark"] .update-gate-card {
+  background: rgba(34, 32, 30, 0.86);
+  border-color: rgba(255, 248, 236, 0.08);
+  box-shadow: 0 1px 0 rgba(255, 248, 236, 0.06) inset, 0 30px 70px -24px rgba(0, 0, 0, 0.7);
+}
+.update-gate-card.is-stopped {
+  width: min(380px, 100%);
+}
+/* The real app icon. The PNG carries macOS's margin, so it is cropped into
+   its own squircle. */
+.update-gate-icon {
+  flex: none;
   display: grid;
   place-items: center;
-  width: 52px;
-  height: 52px;
-  color: var(--accent);
-  background: var(--accent-soft);
-  border-radius: var(--radius-lg);
+  width: 118px;
+  height: 118px;
+  margin-bottom: 2px;
+  border-radius: 30px;
+  overflow: hidden;
+  background: #000;
+  box-shadow: 0 18px 38px -14px rgba(60, 30, 160, 0.65), 0 0 0 0.5px rgba(0, 0, 0, 0.5);
 }
-.update-gate-heading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--sp-2);
+.update-gate-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform: scale(1.12);
+  object-fit: cover;
+  user-select: none;
+}
+.update-gate-card.is-stopped .update-gate-icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 18px;
 }
 .update-gate-card h1 {
-  margin: 0;
+  margin: 2px 0 0;
   font-family: var(--font-display);
-  font-size: var(--fs-xl);
+  font-size: 20px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
   color: var(--text-primary);
 }
 .update-gate-version {
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
+  font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--text-secondary);
-  background: var(--bg-subtle);
+  letter-spacing: 0.03em;
+  color: var(--accent);
+  background: var(--accent-soft);
   padding: 2px 10px;
   border-radius: var(--radius-pill);
 }
@@ -7671,9 +7816,106 @@ button.is-done:disabled {
   line-height: var(--lh-body);
   max-width: 34ch;
 }
+.update-gate-card p.update-gate-status {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
 .update-gate-card p strong {
   color: var(--text-primary);
   font-weight: 600;
+}
+/* Download · Install · Restart, ticking over as they finish. */
+.update-gate-steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.update-gate-steps li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 5px;
+  border-radius: var(--radius-pill);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  background: rgba(11, 10, 16, 0.05);
+  transition: background var(--t-med) var(--ease), color var(--t-med) var(--ease);
+}
+[data-theme="dark"] .update-gate-steps li {
+  background: rgba(255, 248, 236, 0.06);
+}
+.update-gate-steps i {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border: 1.6px solid currentColor;
+  border-radius: 50%;
+  opacity: 0.6;
+}
+.update-gate-steps li.is-now {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.update-gate-steps li.is-now i {
+  opacity: 1;
+  border-top-color: transparent;
+  animation: update-step-spin 0.8s linear infinite;
+}
+.update-gate-steps li.is-done {
+  color: #3f8850;
+  background: color-mix(in srgb, #9bd8a9 40%, transparent);
+}
+[data-theme="dark"] .update-gate-steps li.is-done {
+  color: #7cc48e;
+  background: color-mix(in srgb, #9bd8a9 22%, transparent);
+}
+.update-gate-steps li.is-done i {
+  opacity: 1;
+  border: 0;
+  background: #3f8850;
+  animation: update-step-tick 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.3);
+}
+.update-gate-steps li.is-done i::after {
+  content: "";
+  width: 6px;
+  height: 3px;
+  border-left: 1.7px solid #fff;
+  border-bottom: 1.7px solid #fff;
+  transform: translateY(-1px) rotate(-45deg);
+}
+@keyframes update-step-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes update-step-tick {
+  0% {
+    transform: scale(0.8);
+  }
+  60% {
+    transform: scale(1.15);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-gate-steps li.is-now i {
+    animation-duration: 2.4s;
+  }
+  .update-gate-steps li.is-done i {
+    animation: none;
+  }
 }
 .update-gate-actions {
   display: flex;
@@ -7696,12 +7938,6 @@ button.is-done:disabled {
 .update-gate-actions .ghost-pill:hover:not(:disabled) {
   color: var(--text-primary);
   background: var(--bg-hover);
-}
-.update-gate .update-progress {
-  width: 100%;
-  max-width: 260px;
-  flex: none;
-  margin-top: var(--sp-1);
 }
 
 /* ---- Update download progress ---- */

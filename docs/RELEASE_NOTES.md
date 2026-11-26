@@ -19,6 +19,9 @@
   - SILENT IS THE DEFAULT. A release shows What's New only when its own
     `## <version>` section has points; no section or an empty one ships silently
     (every app still installs it). Ask before each release: silent, or notes?
+  - A section may start with ONE video line, shown at the top of What's New:
+    `video: https://youtu.be/<id> "Title"` (YouTube only; the title is optional).
+    A section with only a video line still opens What's New.
 -->
 
 ## 0.1.110

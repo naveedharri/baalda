@@ -14,6 +14,12 @@
 /** A `## 0.1.61` heading line, with any surrounding whitespace. */
 const HEADING = /^[ \t]*##[ \t]+(.+?)[ \t]*$/;
 
+/**
+ * A `video: https://youtu.be/<id> "Title"` line in a release section: the
+ * video What's New offers above the notes. Never a note line itself.
+ */
+const VIDEO_LINE = /^[ \t]*video:[ \t]*(\S+)(?:[ \t]+"([^"]*)")?[ \t]*$/i;
+
 /** Strip `<!-- … -->` blocks, including multi-line ones. */
 function stripHtmlComments(body: string): string {
   return body.replace(/<!--[\s\S]*?-->/g, "");
@@ -84,6 +90,7 @@ export function releaseNoteLines(
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !line.startsWith("#"))
     .filter((line) => !line.startsWith("See the assets below"))
+    .filter((line) => !VIDEO_LINE.test(line))
     .map((line) => line.replace(/^[-*•]\s+/, ""))
     .map((line) => line.replace(/\*\*(.+?)\*\*/g, "$1"))
     .slice(0, max);
@@ -104,6 +111,7 @@ export function releaseNoteItems(
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !line.startsWith("#"))
     .filter((line) => !line.startsWith("See the assets below"))
+    .filter((line) => !VIDEO_LINE.test(line))
     .map((line) => line.replace(/^[-*•]\s+/, ""))
     .slice(0, max)
     .map((line) => {
@@ -112,6 +120,53 @@ export function releaseNoteItems(
       if (!m) return { title: "", detail: strip(line) };
       return { title: strip(m[1]).replace(/[.:]$/, ""), detail: strip(m[2]) };
     });
+}
+
+/** A YouTube video a release section offers in What's New. */
+export type ReleaseVideo = { id: string; url: string; title: string };
+
+const YOUTUBE_ID = /^[A-Za-z0-9_-]{11}$/;
+
+/**
+ * The video id of a YouTube link: youtu.be/<id>, youtube.com/watch?v=<id>,
+ * /embed/, /shorts/ and /live/, on youtube.com, its www./m. hosts and
+ * youtube-nocookie.com. Anything else is null, so a typo shows no video
+ * rather than a broken player.
+ */
+export function youtubeVideoId(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  const host = url.hostname.toLowerCase().replace(/^(www|m)\./, "");
+  let id: string | null = null;
+  if (host === "youtu.be") id = url.pathname.split("/")[1] ?? null;
+  else if (host === "youtube.com" || host === "youtube-nocookie.com") {
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (parts[0] === "watch") id = url.searchParams.get("v");
+    else if (["embed", "shorts", "live", "v"].includes(parts[0] ?? "")) id = parts[1] ?? null;
+  }
+  return id && YOUTUBE_ID.test(id) ? id : null;
+}
+
+/**
+ * The video a release section offers, from its first `video:` line:
+ * `video: https://youtu.be/AbC123xyz_0 "Access groups in two minutes"`.
+ * The title is optional. Null when there is none or the link is not YouTube.
+ */
+export function releaseNoteVideo(notes: string | null | undefined): ReleaseVideo | null {
+  if (!notes) return null;
+  for (const line of stripHtmlComments(notes).split(/\r?\n/)) {
+    const m = VIDEO_LINE.exec(line);
+    if (!m) continue;
+    const id = youtubeVideoId(m[1]);
+    if (!id) continue;
+    return { id, url: `https://www.youtube.com/watch?v=${id}`, title: (m[2] ?? "").trim() };
+  }
+  return null;
 }
 
 /**
@@ -132,5 +187,6 @@ export function isSilentRelease(
   version?: string | null,
 ): boolean {
   if (body?.includes(SILENT_RELEASE_MARKER)) return true;
-  return releaseNoteLines(notesForVersion(body, version)).length === 0;
+  const section = notesForVersion(body, version);
+  return releaseNoteLines(section).length === 0 && releaseNoteVideo(section) == null;
 }

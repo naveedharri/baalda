@@ -7,7 +7,23 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async ({ mode }) => ({
-  plugins: [react(), ...(mode === "simulator" ? [{
+  plugins: [react(), {
+    // Development only: `curl 'http://localhost:1420/__baalda/preview?screen=update'`
+    // shows a design screen in the running app (src/components/DevPreview.tsx).
+    name: "baalda-dev-preview",
+    apply: "serve" as const,
+    configureServer(server: import("vite").ViteDevServer) {
+      server.middlewares.use("/__baalda/preview", (request, response) => {
+        const params = new URL(request.url ?? "/", "http://localhost").searchParams;
+        server.ws.send({
+          type: "custom",
+          event: "baalda:preview",
+          data: { screen: params.get("screen"), video: params.get("video") },
+        });
+        response.end("ok\n");
+      });
+    },
+  }, ...(mode === "simulator" ? [{
     name: "dashboard-simulator-sdk",
     configureServer(server: import("vite").ViteDevServer) {
       server.middlewares.use("/__baalda/sdk.js", (_request, response) => {

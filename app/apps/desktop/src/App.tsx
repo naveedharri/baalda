@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { EditorView } from "@codemirror/view";
 import "./App.css";
 import "./styles/redesign.css";
@@ -55,7 +55,6 @@ import { RightPanel } from "./components/RightPanel";
 import { TalkStatus } from "./components/TalkButton";
 import { usePendingReviewCount } from "./components/ReviewTab";
 import { bridgeManager } from "./lib/bridge";
-import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
 import { FILES_AND_FOLDERS_SETTINGS_URL, folderErrorText } from "./lib/vault/folderErrors";
 import { LOCATE_ORIGINAL, autoRestoredNoticeText } from "./lib/vault/missingFolder";
@@ -83,8 +82,16 @@ import {
 } from "./lib/updater";
 import { onClientOutdated } from "./lib/api";
 import { setUpdateHintHandler } from "./lib/updateHint";
-import { isSilentRelease, notesForVersion, releaseNoteItems } from "./lib/releaseNotes";
+import {
+  isSilentRelease,
+  notesForVersion,
+  releaseNoteItems,
+  releaseNoteVideo,
+  type ReleaseVideo,
+} from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
+import { UpdateGateView } from "./components/UpdateGateView";
+import { WhatsNewDialog } from "./components/WhatsNewDialog";
 import { viewerFor } from "./lib/formats";
 import { effectiveHomeNote, homeSidebarVisitKey } from "./lib/pins";
 import { lockBlocksCaller, lockScopesByPath } from "./lib/locks";
@@ -811,11 +818,6 @@ function UpdateGate({ launchVersion = null }: { launchVersion?: string | null })
   if (required === null && launchVersion == null) return null;
   const launching = required === null;
 
-  const pct =
-    update.phase === "downloading" && update.total > 0
-      ? Math.round((update.downloaded / update.total) * 100)
-      : null;
-
   const version =
     ("version" in update ? update.version : null) ?? required ?? (launchVersion || null);
 
@@ -848,89 +850,16 @@ function UpdateGate({ launchVersion = null }: { launchVersion?: string | null })
   };
 
   return (
-    <div
-      className="update-gate"
-      role="alertdialog"
-      aria-modal="true"
-      aria-label={launching ? `Updating ${BRAND_NAME}` : "Update required"}
-    >
-      <div className="update-gate-card">
-        <div className="update-gate-badge" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 4v11" />
-            <path d="m7 10 5 5 5-5" />
-            <path d="M4 19h16" />
-          </svg>
-        </div>
-        <div className="update-gate-heading">
-          <h1>{launching ? `Updating ${BRAND_NAME}` : "Update required"}</h1>
-          {version && <span className="update-gate-version">v{version}</span>}
-        </div>
-        {working && (
-          <>
-            <p role="status">
-              {update.phase === "checking"
-                ? "Checking for the update…"
-                : update.phase === "available"
-                  ? "Starting the download…"
-                  : update.phase === "downloading"
-                  ? `Downloading v${update.version}${pct != null ? `: ${pct}%` : "…"}`
-                  : "Installing. The app will restart itself…"}
-            </p>
-            {/* A determinate bar when the server sent a content length, an
-                indeterminate sweep when it didn't — a bar that fills to an
-                unknown target and stalls is worse than one that never claimed
-                to know. */}
-            <div
-              className={`update-progress${pct == null ? " indeterminate" : ""}`}
-              role="progressbar"
-              aria-valuenow={pct ?? undefined}
-              aria-valuemin={0}
-              aria-valuemax={100}
-            >
-              <span
-                className="update-progress-fill"
-                style={pct != null ? { width: `${pct}%` } : undefined}
-              />
-            </div>
-          </>
-        )}
-        {!working && (
-          <>
-            {required ? (
-              <p>
-                {BRAND_NAME} couldn&rsquo;t install the update to <strong>v{required}</strong>
-                {"message" in update && update.message ? ` (${update.message})` : ""}. It tried
-                twice on its own. Check your connection and try again. Your notes stay right
-                where they are, on your disk.
-              </p>
-            ) : (
-              <p>
-                Your server needs a newer version of {BRAND_NAME} before this one can sync.
-                Your notes and edits stay right where they are, on your disk, and sync as
-                soon as the update is in.
-              </p>
-            )}
-            <div className="update-gate-actions">
-              <AsyncButton className="primary update-gate-cta" onClick={retry}>
-                Try again
-              </AsyncButton>
-              {/* For when the updater itself cannot install (#251): the same
-                  release, fetched by hand. */}
-              <button
-                className="ghost-pill lg"
-                onClick={() => void ipc.openExternal(RELEASES_PAGE_URL).catch(() => {})}
-              >
-                Download manually
-              </button>
-              <button className="ghost-pill lg" onClick={() => void reload()}>
-                Reload
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-    </div>
+    <UpdateGateView
+      update={update}
+      version={version}
+      launching={launching}
+      required={required}
+      working={working}
+      onRetry={retry}
+      onDownloadManually={() => void ipc.openExternal(RELEASES_PAGE_URL).catch(() => {})}
+      onReload={() => void reload()}
+    />
   );
 }
 
@@ -971,13 +900,19 @@ function GraphPrewarm({ paused }: { paused: boolean }) {
 const GRAPH_PREWARM_DELAY_MS = 4000;
 
 /** Folder colours for the change tiles, in order (lib/appearance.ts ITEM_COLORS). */
-const WHATS_NEW_TONES = ["violet", "green", "orange", "sky", "pink"] as const;
+/**
+ * Development only: shows the update card or What's New on request
+ * (`components/DevPreview.tsx`). Never part of a release build: only a dev
+ * server or a local test build made with VITE_DESIGN_PREVIEW=1 includes it.
+ */
+const DevPreview = import.meta.env.DEV || import.meta.env.VITE_DESIGN_PREVIEW ? lazy(() => import("./components/DevPreview")) : null;
 
 function WhatsNewModal() {
-  const [updated, setUpdated] = useState<{ version: string; notes: { title: string; detail: string }[] } | null>(
-    null,
-  );
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [updated, setUpdated] = useState<{
+    version: string;
+    notes: { title: string; detail: string }[];
+    video: ReleaseVideo | null;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -992,9 +927,11 @@ function WhatsNewModal() {
       // five points of it. The body used to be the whole cumulative notes file,
       // so every update opened on twelve bullets from releases already
       // installed; the workflow ships one section now and this is the backstop.
+      const section = notesForVersion(stash.notes, stash.version);
       setUpdated({
         version: stash.version,
-        notes: releaseNoteItems(notesForVersion(stash.notes, stash.version), 5),
+        notes: releaseNoteItems(section, 5),
+        video: releaseNoteVideo(section),
       });
     });
     return () => {
@@ -1002,77 +939,13 @@ function WhatsNewModal() {
     };
   }, []);
 
-  const open = updated != null;
-
-  useEffect(() => {
-    if (!open || !canvasRef.current) return;
-    return runConfetti(canvasRef.current);
-  }, [open]);
-
-  const close = () => {
+  const close = useCallback(() => {
     clearJustUpdated();
     setUpdated(null);
-  };
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, []);
 
   if (!updated) return null;
-  return (
-    <>
-      <canvas ref={canvasRef} className="celebrate-confetti" aria-hidden="true" />
-      <div className="modal-backdrop" onClick={close}>
-        <div
-          className="modal whats-new"
-          role="dialog"
-          aria-label="What's new"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="whats-new-hero">
-            {/* Redesign: a ring in the sidebar's folder colours around the sparkle. */}
-            <div className="whats-new-badge" aria-hidden="true">
-              <div>
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
-                </svg>
-              </div>
-            </div>
-            <h2 className="whats-new-title">
-              {BRAND_NAME} <span className="whats-new-title-version">v{updated.version}</span>
-            </h2>
-            <p className="whats-new-sub">Updated and ready. Here&rsquo;s what&rsquo;s new.</p>
-          </div>
-          {updated.notes.length > 0 && (
-            <ul className="whats-new-notes">
-              {updated.notes.map((n, i) => (
-                <li key={i} className={`tone-${WHATS_NEW_TONES[i % WHATS_NEW_TONES.length]}`} style={{ animationDelay: `${120 + i * 70}ms` }}>
-                  <span className="whats-new-tile" aria-hidden="true">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M20 6L9 17l-5-5" />
-                    </svg>
-                  </span>
-                  <span className="whats-new-text">
-                    {n.title && <b>{n.title}</b>}
-                    {n.detail && <span>{n.detail}</span>}
-                  </span>
-                  {i === 0 && <span className="whats-new-tag">NEW</span>}
-                </li>
-              ))}
-            </ul>
-          )}
-          <button className="primary whats-new-cta" autoFocus onClick={close}>
-            Awesome
-          </button>
-        </div>
-      </div>
-    </>
-  );
+  return <WhatsNewDialog version={updated.version} notes={updated.notes} video={updated.video} onClose={close} />;
 }
 
 function SyncIndicator({
@@ -1916,6 +1789,11 @@ export default function App() {
             expectedEpoch={vault.epoch} launchTarget={dashboardHeaderActionsHost}
             rightPanelOpen={rightPanelOpen} onOpen={useStore.getState().closeRightPanel} />
           <WhatsNewModal />
+          {DevPreview && (
+            <Suspense fallback={null}>
+              <DevPreview />
+            </Suspense>
+          )}
           <MessagePopup />
           {/* Sits flush against the top of the window now that there's no system
               title bar above it (`titleBarStyle: "Overlay"`), which is where the
