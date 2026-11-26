@@ -120,6 +120,8 @@ tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+# The same version wry uses, so its WebView2 types are ours (webview_recovery.rs).
+webview2-com = "0.38"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Com", "Win32_UI_Shell", "Win32_Security"] }
 
 [dev-dependencies]

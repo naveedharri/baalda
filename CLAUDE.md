@@ -94,6 +94,16 @@ The main window sets `backgroundThrottling: "disabled"` (`tauri.conf.json`, pinn
 few minutes, and since sync runs in that page, remote edits stopped reaching disk until focus (#405).
 macOS 14+ only; Windows/Linux ignore it.
 
+Old webviews and lost pages never leave an empty window. `index.html` loads two classic ES5 scripts before
+the module: `public/legacy-polyfills.js` (`Object.hasOwn`, `.at`, `findLast`, `replaceAll`,
+`structuredClone`, only when missing: @noble's ed25519 calls `Object.hasOwn` at load, so Macs on Safari
+< 15.4 got a black window) and `public/boot-guard.js` (a plain message in `#root` when the app never
+draws; `main.tsx` sets `__baaldaMounted` and logs `[boot] legacy support`), pinned by
+`legacyWebview.test.ts`. `main.tsx` wraps `<App/>` in a top-level `ErrorBoundary` (`AppCrashFallback`,
+Reload). On Windows, `webview_recovery.rs` handles WebView2 `ProcessFailed`: a renderer that exited
+reloads the page (at most 3 per 10 min), a browser process that exited restarts the app (after 60 s up),
+GPU exits and every focus nudge the surface; all logged `[webview]`.
+
 ## Build & run
 
 Prereqs: Node ≥ 22, Rust/cargo, Docker (for Postgres). Run `pnpm install` once from `app/`.

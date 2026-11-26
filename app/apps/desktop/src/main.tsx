@@ -27,6 +27,8 @@ import "@fontsource/ibm-plex-mono/600.css";
 import "./styles/tokens.css";
 
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { AppCrashFallback, logAppCrash } from "./components/AppCrashFallback";
 import { WindowsControls } from "./components/WindowsControls";
 import { UpgradeDialogHost } from "./components/UpgradeDialog";
 import { OAuthConsentHost } from "./components/OAuthConsentHost";
@@ -45,14 +47,31 @@ initPlatform();
 // Dev builds only: webview console → `tauri dev` terminal, for sync diagnostics.
 mirrorConsoleToTerminal();
 
+// The startup guard (public/boot-guard.js) writes a message into #root when
+// the app never draws; once we get here it must neither show nor stay.
+(window as unknown as { __baaldaMounted?: boolean }).__baaldaMounted = true;
+document.querySelector("[data-boot-failure]")?.remove();
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    {/* A render error anywhere outside the inner boundaries used to unmount
+        the whole tree: a blank window (reported on Windows after the app sat
+        in the background). Now it says so and offers a reload. The Windows
+        caption buttons stay outside, so the window can still be closed. */}
+    <ErrorBoundary label="Baalda" fallback={(error) => <AppCrashFallback error={error} />} onError={logAppCrash}>
+      <App />
+    </ErrorBoundary>
     <WindowsControls />
     <UpgradeDialogHost />
     <OAuthConsentHost />
   </React.StrictMode>,
 );
+// Whether the classic scripts in index.html ran (the packaged CSP must allow
+// them) and what this computer's webview was missing: one line in the log.
+{
+  const w = window as unknown as { __baaldaPolyfills?: string[]; __baaldaBootGuard?: boolean };
+  const line = `[boot] legacy support: polyfills ${w.__baaldaPolyfills ? `loaded (filled: ${w.__baaldaPolyfills.join(", ") || "none"})` : "MISSING"}, startup guard ${w.__baaldaBootGuard ? "loaded" : "MISSING"}`;
+  void import("@tauri-apps/plugin-log").then(({ info }) => info(line)).catch(() => {});
+}
 // Render is synchronous up to the first commit's paint, so this is the cost of
 // parsing + evaluating the bundle plus React's first render.
 perf.mark("react-mount");

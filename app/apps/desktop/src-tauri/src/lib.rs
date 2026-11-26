@@ -33,6 +33,8 @@ pub mod trash;
 pub mod tree;
 pub mod vault;
 mod watcher;
+#[cfg(windows)]
+mod webview_recovery;
 
 use state::AppState;
 use tauri::Manager;
@@ -202,6 +204,10 @@ pub fn run() {
                 // existing window decorations and titlebar behavior.
                 #[cfg(windows)]
                 win.set_decorations(false)?;
+                // A page Windows ended while Baalda sat in the background is
+                // brought back instead of leaving a blank window.
+                #[cfg(windows)]
+                webview_recovery::install(&win);
                 // While it is still hidden, so the first frame is already the
                 // right size — resizing after reveal would visibly jump.
                 fit_window_to_screen(&win);

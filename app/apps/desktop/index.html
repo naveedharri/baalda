@@ -5,6 +5,9 @@
     <link rel="icon" type="image/png" href="/baalda-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Baalda</title>
+    <!-- Classic scripts: they run before the module below, on any webview. -->
+    <script src="/legacy-polyfills.js"></script>
+    <script src="/boot-guard.js"></script>
     <script>
       // Paint the persisted theme before first render to avoid a flash.
       (function () {
