@@ -237,10 +237,10 @@ describe("MCP server", () => {
       const adminToken = await tokenFor(admin, org);
 
       expect((await call(ownerToken, "get_access_default")).data.mode).toBe("private");
-      expect(
-        (await call(adminToken, "set_access_default", { mode: "readonly" })).data.mode,
-      ).toBe("readonly");
-      expect((await call(ownerToken, "get_access_default")).data.mode).toBe("readonly");
+      // New members always start on Only what's shared (2026-11-25).
+      expect(JSON.stringify(await call(adminToken, "set_access_default", { mode: "readonly" }))).toContain("join_default_fixed");
+      expect((await call(adminToken, "set_access_default", { mode: "private" })).data.mode).toBe("private");
+      expect((await call(ownerToken, "get_access_default")).data.mode).toBe("private");
 
       const listed = await call(ownerToken, "list_resource_access", {
         resourceType: "folder",

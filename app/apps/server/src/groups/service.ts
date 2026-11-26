@@ -43,7 +43,7 @@ const MAX_MEMBERS_PER_CALL = 500;
 export interface GroupGrant {
   resourceType: "vault" | "folder" | "file";
   resourceId: string;
-  permission: "edit" | "view";
+  permission: "edit" | "view" | "denied";
   /** The folder/note/file path, null for the whole vault (or a gone item). */
   path: string | null;
 }
@@ -154,7 +154,7 @@ async function grantsByGroup(db: Db, orgId: string): Promise<Map<string, GroupGr
     principal_id: string;
     resource_type: "vault" | "folder" | "file";
     resource_id: string;
-    permission: "edit" | "view";
+    permission: "edit" | "view" | "denied";
     path: string | null;
   }>(
     `SELECT s.principal_id, s.resource_type, s.resource_id, s.permission,

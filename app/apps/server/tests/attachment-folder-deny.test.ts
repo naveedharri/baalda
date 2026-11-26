@@ -115,6 +115,13 @@ describe("attachments embedded in a folder the reader is denied", () => {
     // nothing; `later` joins after it, so the existing notes stay hidden.
     const later = await signUp(`later-${randomUUID()}@att.test`);
     await seedMember(orgId, later.userId, "member");
+  // Joined before 2026-11-25 under New members = No access: the trigger took
+  // this snapshot then (migration 100 stopped taking new ones).
+  await pool.query(
+    `INSERT INTO member_access_snapshots (organization_id, user_id, mode, access_revision, snapshot_at)
+     VALUES ($1, $2, 'private', 0, now()) ON CONFLICT DO NOTHING`,
+    [orgId, later.userId],
+  );
     expect(await readsWholeVault(pool, later.userId, vault)).toBe(false);
     expect(await canReadAttachment(later.userId, vault, hidden)).toBe(false);
     expect(await canReadAttachment(later.userId, vault, shared)).toBe(false);

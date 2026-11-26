@@ -17,6 +17,13 @@ import { applyBulkAccess, type AccessChangeDeps, type AccessMode } from "../perm
  * vault, else the vault's owner — the choice was authorised when the invite
  * was made, and `applyBulkAccess` requires a manager as actor.
  *
+ * A level picked on the invite is the person's own vault-wide level, so the
+ * groups that take every new member (`auto_join`, added by the m097 trigger
+ * when the member row went in) are left again: an invite gives a level OR
+ * groups, never both (400 `access_or_groups`), and a group's Can edit would
+ * otherwise lift an invited Can view. The same rule as migration 101, whose
+ * Everyone group holds only members without a vault level of their own.
+ *
  * Best-effort: membership is already committed, so a failure is logged and the
  * member keeps the vault's join default.
  */
@@ -58,6 +65,12 @@ export async function applyInvitationAccess(
       },
       deps,
       db,
+    );
+    await db.query(
+      `DELETE FROM access_group_members gm USING access_groups g
+        WHERE g.id = gm.group_id AND g.auto_join
+          AND gm.organization_id = $1 AND gm.user_id = $2`,
+      [input.organizationId, input.userId],
     );
     await db.query(`DELETE FROM invitation_access WHERE invitation_id = ANY($1::text[])`, [
       rows.map((r) => r.invitation_id),

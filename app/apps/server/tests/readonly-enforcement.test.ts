@@ -584,27 +584,14 @@ describe("live sync: a read-only connection cannot change a doc", () => {
 // ═══ 2. Revocation ═══════════════════════════════════════════════════════════
 
 describe("revocation: narrowing to read-only reaches live sockets", () => {
-  it("PUT /team-access {mode:'readonly'} force-closes every doc socket", async () => {
-    const f = await fixture();
-    await seedVaultGrant(f.orgId, "edit");
-
-    const res = await req(f.owner, "PUT", `/api/orgs/${f.orgId}/team-access`, {
-      mode: "readonly",
-    });
-    expect(res.status).toBe(200);
-
-    const kicked = rec.disconnected.map((d) => d.docId);
-    expect(kicked).toContain(f.note);
-    expect(kicked).toContain(f.rootNote);
-    expect(kicked).toContain(f.memberNote);
-  });
-
   it("a RECONNECT after the switch mints a read-only token", async () => {
     const f = await fixture();
     await seedVaultGrant(f.orgId, "edit");
     expect((await mint(f.member, f.note)).readOnly).toBe(false);
 
-    await req(f.owner, "PUT", `/api/orgs/${f.orgId}/team-access`, { mode: "readonly" });
+    // The vault narrows to Can view (written directly: the API no longer
+    // changes Default access, but a person's or group's level can narrow too).
+    await pool.query("UPDATE shares SET permission = 'view' WHERE resource_type = 'vault' AND resource_id = $1 AND principal_type = 'org'", [f.orgId]);
 
     const after = await mint(f.member, f.note);
     expect(after.status).toBe(200);
@@ -624,7 +611,9 @@ describe("revocation: narrowing to read-only reaches live sockets", () => {
     expect(stale.readOnly).toBe(false);
 
     await seedDocText(f.vault, f.note, "canonical");
-    await req(f.owner, "PUT", `/api/orgs/${f.orgId}/team-access`, { mode: "readonly" });
+    // The vault narrows to Can view (written directly: the API no longer
+    // changes Default access, but a person's or group's level can narrow too).
+    await pool.query("UPDATE shares SET permission = 'view' WHERE resource_type = 'vault' AND resource_id = $1 AND principal_type = 'org'", [f.orgId]);
 
     // A fresh mint is correctly read-only…
     expect((await mint(f.member, f.note)).readOnly).toBe(true);
@@ -648,7 +637,7 @@ describe("revocation: narrowing to read-only reaches live sockets", () => {
 
     // Access revoked entirely: the vault goes Private, so a plain member has no
     // grant left on a note they did not create.
-    await req(f.owner, "PUT", `/api/orgs/${f.orgId}/team-access`, { mode: "private" });
+    await sealVault(f.orgId);
     expect((await mint(f.member, f.note)).status).toBe(403);
 
     await expectAuthRejected(f.vault, f.note, stale.token!);
@@ -802,10 +791,6 @@ describe("HTTP registry: structural writes require edit, not membership", () => 
     for (const r of await rootCreateAttempts(f.owner, f)) {
       expect(r.status, `${r.what} must be refused for the owner`).toBe(403);
     }
-    // …and the owner can still flip the vault back.
-    const back = await req(f.owner, "PUT", `/api/orgs/${f.orgId}/team-access`, { mode: "open" });
-    expect(back.status).toBe(200);
-    expect((await rootCreateAttempts(f.owner, f))[0].status).toBe(201);
   });
 
   it("(3) a per-user vault-scoped edit grant lifts one person out of Read-only", async () => {

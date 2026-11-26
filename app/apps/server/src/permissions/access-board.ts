@@ -60,7 +60,7 @@ export async function boardModes(input: {
   userId: string;
   role: string | null;
   /** A GROUP's board instead of a person's: each item is what that group's own
-   *  rows give there (groups only add, so no row = No access). `userId` and
+   *  rows give there (its deepest row decides; no row from it = No access). `userId` and
    *  `role` are then ignored. */
   groupId?: string;
   /** Ids the caller lists (the access-tree SELECTs). An id the index lacks

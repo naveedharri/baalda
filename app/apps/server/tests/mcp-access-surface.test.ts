@@ -310,116 +310,51 @@ describe("MCP access-management HTTP surface", () => {
     ).toBe(false);
     expect(await effectivePermission(member, rootDoc)).toBe("edit");
 
-    expect(
-      (
-        await call(adminToken, "manage_access", {
+    // Default access is fixed (2026-11-25): an Everyone change on the whole
+    // vault is refused, for owners and admins alike, and changes nothing.
+    for (const managerToken of [ownerToken, adminToken]) {
+      for (const mode of ["private", "readonly", "open"]) {
+        const refused = await call(managerToken, "manage_access", {
           resources: resources(["vault", org]),
           audience: { type: "org" },
-          mode: "private",
-        })
-      ).isError,
-    ).toBe(false);
-    for (const userId of [owner, admin, member]) {
-      expect(await effectivePermission(userId, nestedDoc)).toBe("none");
-      expect(await listReadableDocsInVault(userId, vault)).toEqual(new Set());
+          mode,
+        });
+        expect(refused.isError, mode).toBe(true);
+        expect(JSON.stringify(refused)).toContain("default_access_fixed");
+      }
     }
-    expect((await call(ownerToken, "list_notes", { vaultId: vault })).data.results).toEqual([]);
-
-    // Management is role-based, so an admin can undo Private even while the
-    // sealed vault gives that admin no content access.
-    const reopened = await call(adminToken, "manage_access", {
-      resources: resources(["vault", org]),
-      audience: { type: "org" },
-      mode: "open",
-    });
-    expect(reopened.isError).toBe(false);
     expect(await effectivePermission(member, nestedDoc)).toBe("edit");
+    expect(await listReadableDocsInVault(member, vault)).toContain(nestedDoc);
 
     expect((await call(ownerToken, "get_access_default")).data).toEqual({ mode: "private" });
-    expect(
-      (await call(adminToken, "set_access_default", { mode: "readonly" })).data,
-    ).toEqual({ mode: "readonly" });
+    // New members always start on Only what's shared (2026-11-25): a level
+    // other than private is refused, and joining takes no snapshot.
+    const refusedDefault = await call(adminToken, "set_access_default", { mode: "readonly" });
+    expect(JSON.stringify(refusedDefault)).toContain("join_default_fixed");
+    expect((await call(ownerToken, "set_access_default", { mode: "private" })).data).toEqual({ mode: "private" });
     const future = await seedUser(`future-${randomUUID()}@mcp.test`);
     await seedMember(org, future, "member");
     const futureToken = await tokenFor(future, org);
-    expect(await effectivePermission(future, nestedDoc)).toBe("view");
-    expect((await call(futureToken, "read_note", { docId: nestedDoc })).data.permission).toBe(
-      "view",
-    );
-    expect(
-      (
-        await call(futureToken, "update_note", {
-          docId: nestedDoc,
-          content: "future member cannot rewrite pre-join content",
-        })
-      ).isError,
-    ).toBe(true);
-
-    const postJoinDoc = await seedNote(vault, folder, "Docs/post-join.md");
-    writer.store.set(postJoinDoc, "post join v1");
-    expect(await effectivePermission(future, postJoinDoc)).toBe("edit");
-    expect(
-      (
-        await call(futureToken, "update_note", {
-          docId: postJoinDoc,
-          content: "post join v2",
-        })
-      ).isError,
-    ).toBe(false);
-    expect(writer.store.get(postJoinDoc)).toBe("post join v2");
-
-    expect(
-      (await call(ownerToken, "set_access_default", { mode: "private" })).data,
-    ).toEqual({ mode: "private" });
-    const privateFuture = await seedUser(`private-future-${randomUUID()}@mcp.test`);
-    await seedMember(org, privateFuture, "member");
-    const privateFutureToken = await tokenFor(privateFuture, org);
-    expect(await effectivePermission(privateFuture, nestedDoc)).toBe("none");
-    expect((await call(privateFutureToken, "list_notes", { vaultId: vault })).data.results).toEqual(
-      [],
-    );
-
-    const privatePostJoinDoc = await seedNote(vault, folder, "Docs/private-post-join.md");
-    writer.store.set(privatePostJoinDoc, "private post join v1");
-    expect(await effectivePermission(privateFuture, privatePostJoinDoc)).toBe("edit");
-
-    expect((await call(adminToken, "set_access_default", { mode: "open" })).data).toEqual({
-      mode: "open",
-    });
-    const openFuture = await seedUser(`open-future-${randomUUID()}@mcp.test`);
-    await seedMember(org, openFuture, "member");
-    expect(await effectivePermission(openFuture, nestedDoc)).toBe("edit");
+    // The vault is Can edit for everyone, so a new member gets that on
+    // what is written after they join (older notes follow their join snapshot,
+    // which only members who joined before migration 101 have).
+    const laterDoc = await seedNote(vault, folder, "Docs/later.md");
+    writer.store.set(laterDoc, "later");
+    expect(await effectivePermission(future, laterDoc)).toBe("edit");
+    expect((await call(futureToken, "read_note", { docId: laterDoc })).data.permission).toBe("edit");
 
     const accessList = await call(ownerToken, "list_resource_access", {
       resourceType: "file",
-      resourceId: nestedDoc,
+      resourceId: laterDoc,
     });
     expect(accessList.isError).toBe(false);
     expect(
       accessList.data.results.find((row: any) => row.userId === future),
-    ).toMatchObject({ role: "member", permission: "view", capped: false });
+    ).toMatchObject({ role: "member", permission: "edit", capped: false });
     expect((await call(memberToken, "list_resource_access", {
       resourceType: "file",
       resourceId: nestedDoc,
     })).isError).toBe(true);
 
-    // Exercise the complete vault posture cycle independently through each
-    // privileged identity. Private removes the caller's own read access, but
-    // the following role-gated management call must still be able to undo it.
-    for (const managerToken of [ownerToken, adminToken]) {
-      for (const [mode, permission] of [
-        ["readonly", "view"],
-        ["private", "none"],
-        ["open", "edit"],
-      ] as const) {
-        const changed = await call(managerToken, "manage_access", {
-          resources: resources(["vault", org]),
-          audience: { type: "org" },
-          mode,
-        });
-        expect(changed.isError).toBe(false);
-        expect(await effectivePermission(member, nestedDoc)).toBe(permission);
-      }
-    }
   });
 });

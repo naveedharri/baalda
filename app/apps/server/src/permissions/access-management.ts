@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { docsForResource, docsForResources, orgRole, resolveResource } from "./lookup.js";
+import { ancestorFolderIds } from "./resolver.js";
 
 export type AccessMode = "private" | "readonly" | "open";
 export type AccessResource = {
@@ -13,9 +14,10 @@ export type AccessResource = {
 export type AccessAudience =
   | { type: "org" }
   | { type: "users"; userIds: string[] }
-  /** One access group (migration 097). Groups only add: `open` writes an
-   *  `edit` row, `readonly` a `view` row and `private` writes nothing, so
-   *  "No access" for a group just removes what the group gave there. */
+  /** One access group (migration 097). `open` writes an `edit` row,
+   *  `readonly` a `view` row; `private` writes a group `denied` row where the
+   *  group reaches the item from above (migration 100: its deepest row
+   *  decides), else just removes what the group gave there. */
   | { type: "group"; groupId: string };
 
 type Queryable = Pick<pg.Pool | pg.PoolClient, "query">;
@@ -23,12 +25,24 @@ type Queryable = Pick<pg.Pool | pg.PoolClient, "query">;
 export class AccessManagementError extends Error {
   constructor(
     message: string,
-    readonly status: 400 | 403 | 404,
+    readonly status: 400 | 403 | 404 | 409,
     readonly code: string,
   ) {
     super(message);
   }
 }
+
+/**
+ * Default access (the org row on the vault resource) is fixed (2026-11-25):
+ * new vaults start sealed, converted vaults were sealed by migration 101, and a
+ * vault that was never shared keeps "members keep what they write". No surface
+ * may change it any more — sealing a never-shared vault would take every
+ * member's own notes off their disk. Access comes from groups and personal
+ * levels instead. Shared by `POST /shares`, `DELETE /shares/:id`,
+ * `PUT team-access`, the bulk API and MCP, so they cannot disagree.
+ */
+export const DEFAULT_ACCESS_FIXED_MESSAGE =
+  "Default access can't be changed any more. Give people access with access groups or their own level.";
 
 export interface AccessChangeDeps {
   disconnectDoc?: (vaultId: string, docId: string) => void;
@@ -103,6 +117,15 @@ export async function setJoinDefault(
   db: pg.Pool = defaultPool,
 ): Promise<AccessMode> {
   await requireAccessManager(organizationId, userId, db);
+  // New members always start on Only what's shared (2026-11-25): they get
+  // access from the groups they join. Older desktops still offer the setting.
+  if (mode !== "private") {
+    throw new AccessManagementError(
+      "New members always start with only what's shared now. Add them to an access group instead.",
+      409,
+      "join_default_fixed",
+    );
+  }
   return withAuditActor(userId, async (client) => {
     await ensureSettings(client, organizationId);
     const { rows } = await client.query<{ join_default: AccessMode }>(
@@ -315,6 +338,9 @@ export async function applyBulkAccess(
     ).values(),
   ];
   await requireAccessManager(input.organizationId, input.actorUserId, db);
+  if (input.audience.type === "org" && resources.some((r) => r.resourceType === "vault")) {
+    throw new AccessManagementError(DEFAULT_ACCESS_FIXED_MESSAGE, 409, "default_access_fixed");
+  }
   await validateResources(db, input.organizationId, resources);
   const selectedUsers = await validateAudience(db, input.organizationId, input.audience, input.actorUserId);
   const currentMembers = await db.query<{ user_id: string }>(
@@ -324,6 +350,7 @@ export async function applyBulkAccess(
 
   const client = await db.connect();
   let cleared = 0;
+  let groupDenied = false;
   const removedPermissions: string[] = [];
   try {
     await client.query("BEGIN");
@@ -356,12 +383,36 @@ export async function applyBulkAccess(
       }
     }
 
+    // A group's No access is the absence of a row, unless the group still
+    // reaches the item from above (a folder or the vault): then a `denied` row
+    // stops that group's reach from here down (resolver `rowsGroupGrant`:
+    // within one group the deepest row wins).
+    const groupNoAccess: AccessResource[] = [];
+    if (input.audience.type === "group" && input.mode === "private") {
+      for (const resource of resources) {
+        if (resource.resourceType === "vault") continue;
+        if (await groupReachesFromAbove(client, input.organizationId, input.audience.groupId, resource)) {
+          groupNoAccess.push(resource);
+        }
+      }
+    }
+    for (const resource of groupNoAccess) {
+      groupDenied = true;
+      await client.query(
+        `INSERT INTO shares
+           (id, org_id, resource_type, resource_id, principal_type, principal_id,
+            permission, created_by, access_revision)
+         VALUES ($1,$2,$3,$4,'group',$5,'denied',$6,$7)`,
+        [randomUUID(), input.organizationId, resource.resourceType, resource.resourceId,
+          (input.audience as { groupId: string }).groupId, input.actorUserId, revision],
+      );
+    }
     const principalIds =
       input.audience.type === "org"
         ? [input.organizationId]
         : input.audience.type === "group"
           ? input.mode === "private"
-            ? [] // a group's No access is the absence of a row
+            ? []
             : [input.audience.groupId]
           : selectedUsers;
     const principalType =
@@ -423,6 +474,7 @@ export async function applyBulkAccess(
   const groupRank = (permission: string) => (permission === "edit" ? 2 : permission === "view" ? 1 : 0);
   const narrowed =
     input.audience.type !== "group" ||
+    groupDenied ||
     removedPermissions.some(
       (permission) => groupRank(permission) > (input.mode === "open" ? 2 : input.mode === "readonly" ? 1 : 0),
     );
@@ -450,4 +502,31 @@ export async function applyBulkAccess(
           : selectedUsers.length,
     disconnectedDocs,
   };
+}
+
+/** True when `groupId` holds a `view`/`edit` row on an ANCESTOR of the
+ *  resource (a parent folder, or the vault), i.e. it reaches it from above. */
+async function groupReachesFromAbove(
+  db: pg.PoolClient,
+  organizationId: string,
+  groupId: string,
+  resource: AccessResource,
+): Promise<boolean> {
+  const { rows: loc } = await db.query<{ folder_id: string | null }>(
+    resource.resourceType === "folder"
+      ? "SELECT parent_id AS folder_id FROM folders WHERE id = $1"
+      : `SELECT folder_id FROM notes WHERE id = $1 AND deleted_at IS NULL
+         UNION ALL SELECT folder_id FROM files WHERE id = $1 LIMIT 1`,
+    [resource.resourceId],
+  );
+  const chain = await ancestorFolderIds(db, loc[0]?.folder_id ?? null);
+  const { rowCount } = await db.query(
+    `SELECT 1 FROM shares
+      WHERE principal_type = 'group' AND principal_id = $1 AND permission IN ('view', 'edit')
+        AND ((resource_type = 'vault' AND resource_id = $2)
+          OR (resource_type = 'folder' AND resource_id = ANY($3::text[])))
+      LIMIT 1`,
+    [groupId, organizationId, chain],
+  );
+  return (rowCount ?? 0) > 0;
 }

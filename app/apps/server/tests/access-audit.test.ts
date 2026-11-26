@@ -63,11 +63,16 @@ it("logs bulk changes and join defaults atomically, ignores heartbeat updates an
   await seedVault(org.id);
   await pool.query("DELETE FROM access_audit");
   await applyBulkAccess({ organizationId: org.id, actorUserId: owner.userId,
-    resources: [{ resourceType: "vault", resourceId: org.id }], audience: { type: "org" }, mode: "private" });
-  await setJoinDefault(org.id, owner.userId, "readonly");
+    resources: [{ resourceType: "vault", resourceId: org.id }], audience: { type: "users", userIds: [owner.userId] }, mode: "open" });
+  await pool.query(
+    `INSERT INTO organization_access_settings (organization_id, join_default) VALUES ($1, 'open')
+     ON CONFLICT (organization_id) DO UPDATE SET join_default = 'open'`,
+    [org.id],
+  );
+  await setJoinDefault(org.id, owner.userId, "private");
   const before = await listAccessAudit(org.id, owner.userId);
   expect(before.events.some(e => e.entityType === "shares" && e.actorUserId === owner.userId)).toBe(true);
-  expect(before.events.some(e => e.after?.joinDefault === "readonly" && e.actorUserId === owner.userId)).toBe(true);
+  expect(before.events.some(e => e.after?.joinDefault === "private" && e.actorUserId === owner.userId)).toBe(true);
   await expect(withAuditActor(owner.userId, async client => {
     await client.query("DELETE FROM shares WHERE org_id = $1", [org.id]);
     throw new Error("rollback");

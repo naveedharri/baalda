@@ -1060,10 +1060,12 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       // is). In a vault on Only what's shared they would otherwise manage a
       // vault they can't see. An ordinary personal setting: it can be lowered.
       if (role === "admin") {
+        // Admins can edit everything, like the owner (2026-11-25): their own
+        // level becomes Can edit everything, whatever it was.
         const own = await client.query(
           `SELECT 1 FROM shares
             WHERE resource_type = 'vault' AND resource_id = $1
-              AND principal_type = 'user' AND principal_id = $2`,
+              AND principal_type = 'user' AND principal_id = $2 AND permission = 'edit'`,
           [orgId, targetUserId],
         );
         if (own.rows.length === 0) {
@@ -1073,7 +1075,8 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
                (id, org_id, resource_type, resource_id, principal_type, principal_id,
                 permission, created_by, access_revision)
              VALUES ($1, $2, 'vault', $2, 'user', $3, 'edit', $4, $5)
-             ON CONFLICT (resource_type, resource_id, principal_type, principal_id) DO NOTHING`,
+             ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
+             DO UPDATE SET permission = 'edit', access_revision = EXCLUDED.access_revision`,
             [randomUUID(), orgId, targetUserId, session.userId, revision],
           );
         }

@@ -250,7 +250,7 @@ describe("change a member's role", () => {
     expect(await ownVaultLevel(org.id, member.userId)).toBe("edit");
   });
 
-  it("keeps a level the member already has when made admin", async () => {
+  it("makes an admin Can edit everything, whatever level they had", async () => {
     const owner = await signUp("owner@role11.com");
     const org = await createOrg(owner, "Acme", "acme-role11");
     for (const [i, level] of (["view", "denied"] as const).entries()) {
@@ -262,7 +262,7 @@ describe("change a member's role", () => {
         [randomUUID(), org.id, member.userId, level, owner.userId],
       );
       expect((await changeRole(owner.token, org.id, member.userId, { role: "admin" })).status).toBe(200);
-      expect(await ownVaultLevel(org.id, member.userId)).toBe(level);
+      expect(await ownVaultLevel(org.id, member.userId)).toBe("edit");
     }
   });
 });

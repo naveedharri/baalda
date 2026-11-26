@@ -85,15 +85,15 @@ describe("POST /shares — realtime read-only enforcement", () => {
     expect(disconnected).toContainEqual({ vaultId: vault, docId });
   });
 
-  it("vault Open→Read-only (org-wide view) kicks every doc in the vault", async () => {
+  it("a vault-wide Everyone row is refused: default access is fixed", async () => {
     const res = await postShare(owner, {
       resourceType: "vault",
       resourceId: orgId,
       principalType: "org",
       permission: "view",
     });
-    expect(res.status).toBe(201);
-    expect(disconnected).toContainEqual({ vaultId: vault, docId });
+    expect(res.status).toBe(409);
+    expect(disconnected).not.toContainEqual({ vaultId: vault, docId });
   });
 
   // Issue #5: an Everyone/org lock subsumes per-user locks on the same resource.

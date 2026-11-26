@@ -9,7 +9,7 @@ import { listReadableDocsInVault } from "../src/permissions/vault-docs.js";
 import { resetDb } from "./helpers/db.js";
 import {
   seedFolder,
-  seedMember,
+  seedMember as seedMemberRow,
   seedNote,
   seedOrg,
   seedUser,
@@ -28,6 +28,24 @@ async function seedOrgShare(
        (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
      VALUES ($1,$2,$3,$4,'org',$2,$5)`,
     [randomUUID(), orgId, resourceType, resourceId, permission],
+  );
+}
+
+/**
+ * Joins like a member did before 2026-11-25, when a trigger (migration 032,
+ * dropped by 100) took a snapshot of the New members setting at the join.
+ * Those snapshots still exist and still apply; nobody new gets one.
+ */
+async function seedMember(org: string, user: string, role: string): Promise<void> {
+  await seedMemberRow(org, user, role as never);
+  if (role === "owner") return;
+  await pool.query(
+    `INSERT INTO member_access_snapshots (organization_id, user_id, mode, access_revision, snapshot_at)
+     SELECT m."organizationId", m."userId", coalesce(a.join_default, 'private'), coalesce(a.access_revision, 0), m."createdAt"
+       FROM member m LEFT JOIN organization_access_settings a ON a.organization_id = m."organizationId"
+      WHERE m."organizationId" = $1 AND m."userId" = $2
+     ON CONFLICT DO NOTHING`,
+    [org, user],
   );
 }
 
@@ -131,22 +149,39 @@ describe("future-member access snapshots", () => {
     expect(await canCreateIn(admin, vault, folder)).toBe(true);
   });
 
-  it("changes only future joins and keeps legacy memberships unchanged", async () => {
-    const { org, owner, doc } = await fixture();
-    const existing = await seedUser(`existing-${randomUUID()}@test.dev`);
-    await seedMember(org, existing, "member");
-    // Represent a membership that existed when migration 032 was installed.
-    await pool.query(
-      "DELETE FROM member_access_snapshots WHERE organization_id = $1 AND user_id = $2",
-      [org, existing],
-    );
-
-    await setJoinDefault(org, owner, "readonly");
+  it("New members is fixed to Only what's shared", async () => {
+    const { org, owner, vault, folder } = await fixture();
+    await expect(setJoinDefault(org, owner, "readonly")).rejects.toMatchObject({ code: "join_default_fixed", status: 409 });
+    expect(await setJoinDefault(org, owner, "private")).toBe("private");
     const future = await seedUser(`future-${randomUUID()}@test.dev`);
-    await seedMember(org, future, "member");
+    await seedMemberRow(org, future, "member");
+    // What is written after they join reaches them through the vault (here a
+    // legacy Can edit posture). Migration 101 stops new snapshots: see
+    // access-model-conversion.test.ts.
+    const later = await seedNote(vault, folder, "Existing/later.md", owner);
+    expect(await effectivePermission(future, later)).toBe("edit");
+  });
 
-    expect(await effectivePermission(existing, doc)).toBe("edit");
-    expect(await effectivePermission(future, doc)).toBe("view");
+  it("a group someone is added to opens what it opens, whenever they joined; only the converted Everyone group follows the snapshot", async () => {
+    const { org, owner, vault, folder, doc } = await fixture();
+    const joiner = await seedUser(`joiner-${randomUUID()}@test.dev`);
+    await seedMember(org, joiner, "member"); // legacy private snapshot, taken now
+    expect(await effectivePermission(joiner, doc)).toBe("none");
+    for (const [legacy, expected] of [[false, "edit"], [true, "none"]] as const) {
+      const gid = randomUUID();
+      await pool.query("INSERT INTO access_groups (id, organization_id, name) VALUES ($1, $2, $3)", [gid, org, `G ${gid.slice(0, 6)}`]);
+      await pool.query("INSERT INTO access_group_members (group_id, organization_id, user_id) VALUES ($1, $2, $3)", [gid, org, joiner]);
+      // Written before the join (revision 0), as a group made before they joined.
+      await pool.query(
+        `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, access_revision, legacy_team_grant)
+         VALUES ($1, $2, 'folder', $3, 'group', $4, 'edit', 0, $5)`,
+        [randomUUID(), org, folder, gid, legacy],
+      );
+      expect(await effectivePermission(joiner, doc), `legacy=${legacy}`).toBe(expected);
+      expect((await listReadableDocsInVault(joiner, vault)).has(doc), `legacy=${legacy}`).toBe(expected === "edit");
+      await pool.query("DELETE FROM access_groups WHERE id = $1", [gid]);
+      await pool.query("DELETE FROM shares WHERE principal_type = 'group' AND principal_id = $1", [gid]);
+    }
   });
 
   it("selected people replace only their subtree overrides", async () => {
@@ -211,7 +246,7 @@ describe("future-member access snapshots", () => {
     expect(rows.rows.map((row) => row.principal_id)).toEqual([untouched]);
   });
 
-  it("whole-vault Everyone replaces snapshots and every member override but not the future default", async () => {
+  it("whole-vault Everyone is refused: default access is fixed, and nothing changes", async () => {
     const { org, owner, doc } = await fixture();
     const member = await seedUser(`member-${randomUUID()}@test.dev`);
     await seedMember(org, member, "member");
@@ -222,32 +257,19 @@ describe("future-member access snapshots", () => {
       [randomUUID(), org, doc, member],
     );
 
-    await applyBulkAccess({
+    const snapsBefore = (await pool.query("SELECT user_id, mode FROM member_access_snapshots WHERE organization_id = $1 ORDER BY user_id", [org])).rows;
+    const before = await effectivePermission(member, doc);
+    await expect(applyBulkAccess({
       organizationId: org,
       actorUserId: owner,
       resources: [{ resourceType: "vault", resourceId: org }],
       audience: { type: "org" },
       mode: "readonly",
-    });
-
-    expect(await effectivePermission(member, doc)).toBe("view");
+    })).rejects.toMatchObject({ code: "default_access_fixed", status: 409 });
+    expect(await effectivePermission(member, doc)).toBe(before);
+    expect((await pool.query("SELECT user_id, mode FROM member_access_snapshots WHERE organization_id = $1 ORDER BY user_id", [org])).rows).toEqual(snapsBefore);
     expect(
-      Number(
-        (
-          await pool.query(
-            "SELECT count(*) AS count FROM member_access_snapshots WHERE organization_id = $1",
-            [org],
-          )
-        ).rows[0].count,
-      ),
-    ).toBe(0);
-    expect(
-      (
-        await pool.query<{ join_default: string }>(
-          "SELECT join_default FROM organization_access_settings WHERE organization_id = $1",
-          [org],
-        )
-      ).rows[0].join_default,
-    ).toBe("private");
+      (await pool.query("SELECT 1 FROM shares WHERE org_id = $1 AND resource_type = 'file' AND principal_type = 'user' AND permission = 'denied'", [org])).rowCount,
+    ).toBe(1);
   });
 });

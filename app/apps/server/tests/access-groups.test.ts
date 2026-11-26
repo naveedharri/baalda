@@ -68,12 +68,16 @@ async function grant(
   groupId: string,
   type: "vault" | "folder" | "file",
   id: string,
-  permission: "view" | "edit",
+  permission: "view" | "edit" | "denied",
+  // Written through the access API, a group row gets the next ACL revision,
+  // so it is newer than any join snapshot; 0 is a converted Everyone row
+  // (migration 101 marks those `legacy_team_grant`).
+  revision = 1,
 ) {
   await pool.query(
-    `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
-     VALUES ($1, $2, $3, $4, 'group', $5, $6)`,
-    [randomUUID(), org, type, id, groupId, permission],
+    `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, access_revision, legacy_team_grant)
+     VALUES ($1, $2, $3, $4, 'group', $5, $6, $7, $8)`,
+    [randomUUID(), org, type, id, groupId, permission, revision, revision === 0],
   );
 }
 async function readonlyCap(org: string, type: "folder" | "file", id: string, userId: string) {
@@ -117,6 +121,7 @@ async function buildFixture(slug: string, posture: Posture, groupVault: boolean)
   const locked = await seedFolder(vault, null, "Frozen", "Frozen", owner);
   const priv = await seedFolder(vault, null, "Secret", "Secret", owner);
   const team = await seedFolder(vault, null, "Team", "Team", owner);
+  const hiddenDir = await seedFolder(vault, top, "Hidden", "Projects/Hidden", owner);
   const docs = [
     await seedNote(vault, null, "root.md", owner),
     await seedNote(vault, null, "mine.md", member),
@@ -127,6 +132,7 @@ async function buildFixture(slug: string, posture: Posture, groupVault: boolean)
     await seedNote(vault, team, "Team/plan.md", owner),
     await seedFile(vault, mid, "Projects/Alpha/diagram.png"),
     await seedFile(vault, priv, "Secret/cover.png"),
+    await seedNote(vault, hiddenDir, "Projects/Hidden/salaries.md", owner),
   ];
 
   const design = await group(org, "Design");
@@ -140,6 +146,11 @@ async function buildFixture(slug: string, posture: Posture, groupVault: boolean)
   await grant(org, ops, "file", docs[4], "edit"); // a lock still caps it
   await grant(org, ops, "folder", team, "edit"); // capped by a per-user readonly
   if (groupVault) await grant(org, ops, "vault", org, "edit");
+  await grant(org, design, "folder", hiddenDir, "denied"); // Design: No access below its view
+  // A converted Everyone-style row: written before the joiner's snapshot.
+  const legacy = await group(org, "Legacy");
+  await join(org, legacy, joiner);
+  await grant(org, legacy, "vault", org, "view", 0);
 
   await seedItemPrivate(org, "folder", priv);
   await seedLock(org, "folder", locked, { type: "org" });
@@ -226,9 +237,15 @@ describe("access groups: one algebra everywhere", () => {
     expect(await p(both, cover)).toBe("edit");
     expect(await p(both, contract)).toBe("view");
     expect(await p(both, plan)).toBe("edit");
-    // A vault level of their own ignores groups: view everywhere, spec too.
-    expect(await p(personal, spec)).toBe("view");
+    // A vault level of their own (Can view) combines with groups: Design's
+    // edit on spec wins there, view everywhere else.
+    expect(await p(personal, spec)).toBe("edit");
     expect(await p(personal, root)).toBe("view");
+    // A group's No access stops only that group: Design's view of Projects
+    // does not reach Projects/Hidden, and Ops never reached it.
+    const salaries = f.docs[9];
+    expect(await p(both, salaries)).toBe("none");
+    expect(await p(personal, salaries)).toBe("view"); // their own Can view still reaches it
     // A per-user readonly caps the group's edit.
     expect(await p(capped, plan)).toBe("view");
     // A per-user deny beats the group.
@@ -237,6 +254,10 @@ describe("access groups: one algebra everywhere", () => {
     // A Private join snapshot is lifted by a group grant, like a named grant.
     expect(await p(joiner, brief)).toBe("view");
     expect(await p(joiner, root)).toBe("none");
+    // A group grant the snapshot already accounts for (an older revision) does
+    // not open pre-join content, like an org grant.
+    expect(await p(joiner, f.docs[6])).toBe("none");
+    expect(await p(joiner, f.docs[9])).toBe("none");
   });
 
   it("a group's whole-vault edit opens the vault even when sealed, but not past a person's own level", async () => {
@@ -418,6 +439,37 @@ describe("group access through bulk access", () => {
     // folders: Projects (view + spec edit = mixed), Alpha (spec edit, diagram view = mixed),
     // Frozen none, Secret none, Team none; notes: root n, mine n, brief v, spec e, contract n, keys n, plan n;
     // files: diagram v, cover n.
-    expect(modes).toBe("mmnnn" + "nnvennn" + "vn");
+    // (+ salaries, under Design's own No access.)
+    expect(modes).toBe("mmnnn" + "nnvennn" + "vn" + "n");
+  });
+
+  it("No access for a group below its own grant writes a group No access row", async () => {
+    const f = await buildFixture("group-no-access", "sealed", false);
+    const [, , brief, , , , plan, diagram] = f.docs;
+    const audience = { type: "group" as const, groupId: f.design };
+    expect(await effectivePermission(f.users.both, diagram)).toBe("view");
+    await applyBulkAccess({
+      organizationId: f.org, actorUserId: f.users.owner,
+      resources: [{ resourceType: "folder", resourceId: f.folders.mid }], audience, mode: "private",
+    });
+    const rows = await pool.query(
+      "SELECT permission FROM shares WHERE principal_type = 'group' AND principal_id = $1 AND resource_id = $2",
+      [f.design, f.folders.mid],
+    );
+    expect(rows.rows.map((r) => r.permission)).toEqual(["denied"]);
+    expect(await effectivePermission(f.users.both, diagram)).toBe("none");
+    expect(await effectivePermission(f.users.both, brief)).toBe("view");
+    expect((await listReadableDocsInVault(f.users.both, f.vault)).has(diagram)).toBe(false);
+    // Where the group reached nothing from above, No access is just no row.
+    await applyBulkAccess({
+      organizationId: f.org, actorUserId: f.users.owner,
+      resources: [{ resourceType: "folder", resourceId: f.folders.team }], audience, mode: "private",
+    });
+    const none = await pool.query(
+      "SELECT 1 FROM shares WHERE principal_type = 'group' AND principal_id = $1 AND resource_id = $2",
+      [f.design, f.folders.team],
+    );
+    expect(none.rowCount).toBe(0);
+    expect(await effectivePermission(f.users.both, plan)).toBe("edit"); // Ops still gives it
   });
 });

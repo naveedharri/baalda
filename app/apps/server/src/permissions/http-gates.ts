@@ -725,11 +725,17 @@ export async function vaultRootWritable(
   const personal = cache
     ? await cache.personal(db, organizationId, userId)
     : await personalVaultLevel(db, organizationId, userId);
-  if (personal !== null) return personal === "edit";
-  const posture = cache
-    ? await cache.baseline(db, organizationId)
-    : await vaultBaseline(db, organizationId);
-  if (posture !== "view" && posture !== "sealed") return true;
+  // A personal No access / Can edit decides outright; a personal Can view
+  // combines with the person's groups (resolver), so a group's whole-vault
+  // `edit` still opens the root for them.
+  if (personal === "denied") return false;
+  if (personal === "edit") return true;
+  if (personal === null) {
+    const posture = cache
+      ? await cache.baseline(db, organizationId)
+      : await vaultBaseline(db, organizationId);
+    if (posture !== "view" && posture !== "sealed") return true;
+  }
   // A per-user OR a group whole-vault `edit` grant lifts the root, exactly as
   // either lifts every doc in the resolver.
   const groupIds = cache

@@ -255,7 +255,7 @@ export const TOOLS: McpTool[] = [
     name: "get_access_default",
     annotations: { title: "Get access default for new members", ...READ },
     description:
-      "Get what future members initially see when they join this vault (the New members row): open (Can edit) / readonly (Can view) / private (No access). Owner/admin only.",
+      "Get what future members initially see when they join this vault. Since 2026-11-25 this is always private (Only what's shared): new members get what is shared with them and what their access groups open. Owner/admin only.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: (ctx) => getAccessDefaultTool(ctx),
   },
@@ -263,7 +263,7 @@ export const TOOLS: McpTool[] = [
     name: "set_access_default",
     annotations: { title: "Set access default for new members", ...ACCESS },
     description:
-      "Set future members' initial access to content that already exists when they join (the New members row): open (Can edit) / readonly (Can view) / private (No access). Existing members are unchanged. Owner/admin only.",
+      "Kept for older clients: new members always start on Only what's shared, so only private is accepted (anything else is refused with join_default_fixed). To give new members access, use an access group that takes new members automatically. Owner/admin only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -300,7 +300,7 @@ export const TOOLS: McpTool[] = [
     name: "manage_access",
     annotations: { title: "Change access", ...ACCESS },
     description:
-      "Replace access on one or more selected folders/files, or the whole vault. Modes: open (Can edit) / readonly (Can view) / private (No access). Everyone clears all custom member overrides in selected subtrees; selected users changes only those users; a group changes only that group's grants (groups only add access: open/readonly grant Can edit/Can view to its members, private removes what the group gave there). A users-audience mode on the vault resource is that person's absolute vault level (Can edit everything / Can view everything / No access): it replaces Everyone access, the owner/admin shortcut and authorship for them, and only their own folder/file grants lift a No access. Owner/admin only.",
+      "Replace access on one or more selected folders/files, or the whole vault. Modes: open (Can edit) / readonly (Can view) / private (No access). Everyone clears all custom member overrides in selected subtrees; selected users changes only those users; a group changes only that group's grants (open/readonly grant Can edit/Can view to its members; private takes away what the group gives there, also inside a folder or vault the group can reach, because a group's deepest row decides; a group never takes away anyone's own access or another group's). A users-audience mode on the vault resource is that person's absolute vault level (Can edit everything / Can view everything / No access): it replaces Everyone access, the owner/admin shortcut and authorship for them, and only their own folder/file grants lift a No access. Owner/admin only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -345,7 +345,7 @@ export const TOOLS: McpTool[] = [
     name: "list_groups",
     annotations: { title: "List access groups", ...READ },
     description:
-      "List the vault's access groups with their members (user ids) and, for owners/admins, the folders/files each group can view or edit. Groups only add access: a member gets the higher of their own access and any group's.",
+      "List the vault's access groups with their members (user ids) and, for owners/admins, each group's grants: the folders/files it can view or edit, and 'denied' rows where it gives No access below a folder (or the whole vault) it otherwise reaches. A member gets the higher of their own access and any group's; a group's denied row only limits that group.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: (ctx) => listGroupsTool(ctx),
   },
