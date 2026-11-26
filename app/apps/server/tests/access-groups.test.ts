@@ -313,6 +313,37 @@ describe("group management", () => {
     expect(rowCount).toBe(0);
   });
 
+  it("a write landing while the group is being deleted: 404, never a stray row or a 500", async () => {
+    const f = await buildFixture("race", "never-shared", false);
+    const gid = await group(f.org, "Racing");
+    const holder = await pool.connect();
+    try {
+      // A delete of the group, not yet committed, while another admin writes.
+      await holder.query("BEGIN");
+      await holder.query("DELETE FROM access_groups WHERE id = $1", [gid]);
+      const write = applyBulkAccess({
+        organizationId: f.org,
+        actorUserId: f.users.owner,
+        resources: [{ resourceType: "folder", resourceId: f.folders.team }],
+        audience: { type: "group", groupId: gid },
+        mode: "open",
+      }).then(() => "ok", (e: unknown) => e);
+      const add = addGroupMembers(f.org, f.users.owner, gid, [f.users.member]).then(() => "ok", (e: unknown) => e);
+      await new Promise((r) => setTimeout(r, 300));
+      await holder.query("COMMIT");
+      const [w, a] = await Promise.all([write, add]);
+      expect(w).toMatchObject({ status: 404, code: "group_not_found" });
+      expect(a).toMatchObject({ status: 404, code: "group_not_found" });
+    } finally {
+      holder.release();
+    }
+    const { rowCount } = await pool.query(
+      "SELECT 1 FROM shares WHERE principal_type = 'group' AND principal_id = $1",
+      [gid],
+    );
+    expect(rowCount).toBe(0);
+  });
+
   it("removing someone from the vault removes them from its groups", async () => {
     const f = await buildFixture("leave", "never-shared", false);
     await pool.query(`DELETE FROM member WHERE "organizationId" = $1 AND "userId" = $2`, [f.org, f.users.both]);

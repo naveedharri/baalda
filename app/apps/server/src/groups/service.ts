@@ -363,13 +363,23 @@ export async function deleteGroup(
 ): Promise<{ disconnectedDocs: number; skillsChanged: boolean }> {
   await requireManager(db, orgId, actorId);
   await loadGroup(db, orgId, groupId);
-  // Read BEFORE the delete: the trigger drops the group's share rows with it.
-  const docs = await docsReachedByGroup(db, orgId, groupId);
-  const skillsChanged = await groupHasSkills(db, groupId);
   const client = await db.connect();
+  let docs: { vaultId: string; docId: string }[];
+  let skillsChanged: boolean;
   try {
     await client.query("BEGIN");
     await setAuditActor(client, actorId);
+    // Lock first, then read what the group reaches: a write to this group at
+    // the same moment finishes before (and its rows are counted and removed)
+    // or finds the group gone.
+    const locked = await client.query(
+      "SELECT 1 FROM access_groups WHERE id = $1 AND organization_id = $2 FOR UPDATE",
+      [groupId, orgId],
+    );
+    if (!locked.rowCount) throw new GroupError("That group does not exist", 404, "group_not_found");
+    // Read BEFORE the delete: the trigger drops the group's share rows with it.
+    docs = await docsReachedByGroup(client, orgId, groupId);
+    skillsChanged = await groupHasSkills(client, groupId);
     await client.query("DELETE FROM access_groups WHERE id = $1 AND organization_id = $2", [groupId, orgId]);
     await client.query("COMMIT");
   } catch (e) {
@@ -401,6 +411,12 @@ export async function addGroupMembers(
   try {
     await client.query("BEGIN");
     await setAuditActor(client, actorId);
+    // A group deleted at the same moment: say so (404), not a foreign-key 500.
+    const held = await client.query(
+      "SELECT 1 FROM access_groups WHERE id = $1 AND organization_id = $2 FOR SHARE",
+      [groupId, orgId],
+    );
+    if (!held.rowCount) throw new GroupError("That group does not exist", 404, "group_not_found");
     for (const userId of ids) {
       const r = await client.query(
         `INSERT INTO access_group_members (group_id, organization_id, user_id, added_by)
@@ -466,12 +482,25 @@ export async function rememberInvitationGroups(
   groupIds: string[],
 ): Promise<void> {
   if (groupIds.length === 0) return;
-  await db.query(
-    `INSERT INTO invitation_groups (invitation_id, group_id)
-     SELECT $1, g.id FROM access_groups g WHERE g.organization_id = $2 AND g.id = ANY($3::text[])
-     ON CONFLICT DO NOTHING`,
-    [invitationId, orgId, groupIds],
-  );
+  const insert = () =>
+    db.query(
+      `INSERT INTO invitation_groups (invitation_id, group_id)
+       SELECT $1, g.id FROM access_groups g WHERE g.organization_id = $2 AND g.id = ANY($3::text[])
+       ON CONFLICT DO NOTHING`,
+      [invitationId, orgId, groupIds],
+    );
+  try {
+    await insert();
+  } catch (e) {
+    // A picked group deleted at that moment: once more, without it.
+    if (!isForeignKeyViolation(e)) throw e;
+    await insert();
+  }
+}
+
+/** Postgres 23503: a row's group (or other parent) was deleted meanwhile. */
+function isForeignKeyViolation(e: unknown): boolean {
+  return (e as { code?: unknown } | null)?.code === "23503";
 }
 
 /** The groups the vault's join code adds people to. */
@@ -491,6 +520,12 @@ export async function setJoinCodeGroups(db: pg.Pool, orgId: string, groupIds: st
   const client = await db.connect();
   try {
     await client.query("BEGIN");
+    // Hold the picked groups: one deleted at the same moment is simply left
+    // out instead of failing the save on its foreign key.
+    await client.query("SELECT 1 FROM access_groups WHERE organization_id = $1 AND id = ANY($2::text[]) FOR SHARE", [
+      orgId,
+      groupIds,
+    ]);
     await client.query(
       "DELETE FROM join_code_groups WHERE organization_id = $1 AND NOT (group_id = ANY($2::text[]))",
       [orgId, groupIds],

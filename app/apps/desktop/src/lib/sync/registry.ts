@@ -59,7 +59,7 @@ import { seedWelcomeContent } from "../vault/seed";
 import { Checkpointer, checkpointBatchFor } from "./checkpoint";
 import { sha256Hex } from "../bridge/adapter";
 import { mergeSv, svFromBase64, svIsEmpty, svToBase64, unseenWork } from "./ackedSv";
-import { reconcileReport } from "./reconcileReport";
+import { reconcileReport, SELF_REVOKED_DETAIL } from "./reconcileReport";
 import { vaultVisibility } from "./vaultVisibility";
 import { isSelfAccessChange } from "./selfAccessChanges";
 
@@ -2972,6 +2972,18 @@ export class VaultRegistry {
    * again after {@link REVOKE_UNSENT_SETTLE_MS}, or unanswerable (any failed
    * slice keeps the whole group, like {@link confirmRevocations}).
    */
+  /** The person's unsent edits left with a note or file whose access was
+   *  removed (deleted means deleted): say so, never silently (2026-11-26). */
+  private reportUnsentRemoved(gone: { docId: string; path: string }): void {
+    console.info(`[sync] ${gone.path}: removed with unsent changes (access removed); told the person`);
+    reconcileReport.record({
+      kind: "unsentRemoved",
+      docId: gone.docId,
+      path: gone.path,
+      ...(this.isSelfRevocation(gone.docId, gone.path) ? { detail: SELF_REVOKED_DETAIL } : {}),
+    });
+  }
+
   private async recheckUnsentRevocations(
     vaultId: string,
     gone: InboundTrash[],
@@ -3518,7 +3530,10 @@ export class VaultRegistry {
             continue;
           }
           const removed = await this.removeRevokedBinary(g, localBinarySha);
-          if (removed) changedDisk = true;
+          if (removed) {
+            changedDisk = true;
+            this.reportUnsentRemoved(g);
+          }
           this.sink.item(removed ? "ok" : "failed");
         }
         if (kept.size > 0) {
@@ -3592,6 +3607,7 @@ export class VaultRegistry {
         this.baselineDocs.delete(gone.docId);
         this.authoredDocs.delete(gone.docId);
         this.host?.noteRemoved(gone.docId, gone.path, null, gone.reason, bulkRemoval);
+        if (gone.reason === "revoked" && unsentRevoked.has(gone.docId)) this.reportUnsentRemoved(gone);
         if (gone.reason === "deleted" && gone.path.includes("/")) {
           deletedNoteParents.add(gone.path.slice(0, gone.path.lastIndexOf("/")));
         }
@@ -6269,7 +6285,24 @@ export class VaultRegistry {
    * download ends however it ends; calling it with nothing pending is free.
    * Returns whether it created anything.
    */
-  async materializePendingFromBootstrap(): Promise<boolean> {
+  materializePendingFromBootstrap(): Promise<boolean> {
+    if (this.pendingFromBootstrap.size === 0) return Promise.resolve(false);
+    // In pull order, like a rules change. Run beside a pull, it resolved a
+    // doc's path while that pull was deleting the doc: the pull found no file
+    // to remove and unmapped it, then this create-only write landed, leaving
+    // an empty orphan at the old name until the next pass (a teammate's note
+    // created, renamed and deleted within ~2 s). After the pull, a deleted or
+    // moved doc resolves to nothing or to its new path.
+    const step = () => this.materializePendingNow();
+    const run = this.pullChain.then(step, step);
+    this.pullChain = run.then(
+      () => false,
+      () => false,
+    );
+    return run;
+  }
+
+  private async materializePendingNow(): Promise<boolean> {
     if (this.pendingFromBootstrap.size === 0) return false;
     const epoch = this.pendingFromBootstrapEpoch;
     const docIds = [...this.pendingFromBootstrapByDoc.keys()];
@@ -6796,6 +6829,21 @@ export class VaultRegistry {
    * (`access-check`, different SQL) answering `none` for it. Any failed check
    * keeps everything; a failed removal keeps that file and its parking.
    */
+  /**
+   * The server's own resolver (`access-check`) on ids this device knows: the
+   * subset this user can no longer read. Used by the file pass before it
+   * uploads a known file the server stopped listing. A throw means "no answer".
+   */
+  async noAccessIds(ids: readonly string[]): Promise<Set<string>> {
+    const vaultId = this.serverVaultId;
+    if (!vaultId) throw new Error("no vault");
+    const none = new Set<string>();
+    for (let i = 0; i < ids.length; i += ACCESS_CHECK_MAX) {
+      for (const id of await this.api.accessCheck(vaultId, ids.slice(i, i + ACCESS_CHECK_MAX))) none.add(id);
+    }
+    return none;
+  }
+
   private async revokeParked(vaultId: string, listed: RegisteredNote[]): Promise<boolean> {
     if (this.parkedDocs.size + this.parkedFiles.size === 0) return false;
     if (this.host?.revocationAuthority?.() !== true) return false;

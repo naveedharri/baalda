@@ -14,7 +14,11 @@ export type ReconcileKind =
   | "selfRevoked" // D7, but B removed their OWN access from this device moments before; same copy, quiet notice
   | "folderKept" // D8: teammate deleted a folder but B's new notes inside it kept it alive
   | "externalEditSaved" // another app edited a never-opened note offline; the server's text won, the file went to trash (detail = trash path)
+  | "unsentRemoved" // access removed before this device's edits reached the server: the note left with them (decided 2026-11-26: say so)
   | "conflictKeptServer"; // one-step create met DIFFERENT server text (adopt/conflict merge): server text kept, local text to trash (detail = trash path)
+
+/** `unsentRemoved` detail: the access change was this person's own. */
+export const SELF_REVOKED_DETAIL = "self";
 
 export interface ReconcileItem {
   kind: ReconcileKind;

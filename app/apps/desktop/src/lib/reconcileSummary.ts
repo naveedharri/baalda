@@ -9,8 +9,10 @@ import type { ReconcileItem, ReconcileKind } from "./sync/reconcileReport";
 import { READ_ONLY_DETAIL } from "./sync/readOnlyRejections";
 import { isNoteExt } from "./formats";
 import { NOT_CREATOR_DETAIL, VIEW_ONLY_DELETE_DETAIL } from "./sync/deletePolicy";
+import { SELF_REVOKED_DETAIL } from "./sync/reconcileReport";
 
 export const RECONCILE_KIND_ORDER: readonly ReconcileKind[] = [
+  "unsentRemoved",
   "deletedByTeammate",
   "keptLocally",
   "externalEditSaved",
@@ -31,6 +33,7 @@ export const RECONCILE_KIND_LABEL: Record<ReconcileKind, string> = {
   folderKept: "Folder kept",
   externalEditSaved: "Replaced",
   conflictKeptServer: "Teammate's version kept",
+  unsentRemoved: "Unsent changes removed",
 };
 
 export interface ReconcileLine {
@@ -129,6 +132,13 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
         );
       }
       return parts.join(" ");
+    }
+    case "unsentRemoved": {
+      const what = one ? base(group[0].path) : items;
+      if (group.every((it) => it.detail === SELF_REVOKED_DETAIL)) {
+        return `Your unsent changes to ${what} were removed: you removed your own access before they reached the team.`;
+      }
+      return `Your unsent changes to ${what} were removed: your access to ${one ? "it" : "them"} was removed before they reached the team.`;
     }
     case "selfRevoked":
       return `You removed your own access to ${items}; ${one ? "its copy stays" : "their copies stay"} on this device.`;

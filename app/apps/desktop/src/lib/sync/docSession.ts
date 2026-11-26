@@ -8430,6 +8430,8 @@ export class SyncManager implements InboundHost {
     this.readOnlyForText = null;
     this.attachments = new AttachmentSync({
       isRevokedFile: (fileId) => this.authoritativeRevoked()?.has(fileId) ?? false,
+      noAccessFileIds: (fileIds) => this.registry.noAccessIds(fileIds),
+      isOwnRemoval: (relPath) => this.registry.isOwnRemoval?.(relPath) === true,
       readOnlyPaths: () => {
         const check = this.readOnlyPathCheck;
         if (!check) return Promise.reject(new Error("no lock view"));

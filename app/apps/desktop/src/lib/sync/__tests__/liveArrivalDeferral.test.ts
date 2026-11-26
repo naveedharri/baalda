@@ -387,3 +387,39 @@ describe("small arrivals land with their content, no placeholder first", () => {
     expect(applyBatch).not.toHaveBeenCalled();
   });
 });
+
+describe("the placeholder flush waits for a running pull", () => {
+  // A teammate's note created, renamed and deleted within ~2 s: the 2 s flush
+  // resolved the note's path while the pull carrying the delete was running,
+  // the pull found no file to remove, then the flush wrote an empty file at
+  // the old name that stayed until the next pass.
+  it("a note the running pull deletes gets no empty file at its old name", async () => {
+    const t = setup(serverOnly(1));
+    await t.pull();
+    expect(t.reg.pendingFromBootstrapCount()).toBe(1);
+    const api = (t.reg as unknown as { api: ApiClient }).api;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    vi.mocked(api.listNoteRegistryPaged).mockImplementationOnce(async () => {
+      await gate;
+      return { notes: [], tombstones: ["srv-0"] } as never;
+    });
+    const pulling = t.reg.pull();
+    await new Promise((r) => setTimeout(r, 0));
+    const flushing = t.reg.materializePendingFromBootstrap();
+    await new Promise((r) => setTimeout(r, 0));
+    release();
+    await pulling;
+    await flushing;
+    expect(placeholders()).toEqual([]);
+    expect(t.fs.get("Remote/N0.md")).toBeUndefined();
+    expect(t.reg.pendingFromBootstrapCount()).toBe(0);
+  });
+
+  it("with no pull running the flush still writes the placeholder", async () => {
+    const t = setup(serverOnly(1));
+    await t.pull();
+    await t.reg.materializePendingFromBootstrap();
+    expect(placeholders()).toEqual(["Remote/N0.md"]);
+  });
+});

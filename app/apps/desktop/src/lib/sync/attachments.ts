@@ -991,6 +991,23 @@ export interface AttachmentSyncDeps {
    *  revoked for this user this session (`docSession.authoritativeRevoked`). */
   isRevokedFile?: (fileId: string) => boolean;
   /**
+   * The server's resolver on known `files` ids the listing stopped naming:
+   * the ids this user can no longer read (`registry.noAccessIds`). Asked
+   * before such a file uploads. An access change reaches the blob listing
+   * before the revocation frame does, so without it the pass tried to upload
+   * every file the person had just lost, one refusal each (37 in one test).
+   * A throw holds those files for the pass.
+   */
+  noAccessFileIds?: (fileIds: string[]) => Promise<Set<string>>;
+  /**
+   * Is the app removing this path itself right now (a revocation, a teammate's
+   * delete; `registry.isOwnRemoval`, marked BEFORE the file goes)? Such a file
+   * never uploads. The removal deletes the file and then forgets its id, and a
+   * pass listing the disk a moment earlier saw a file with no id: it uploaded
+   * it as new and the server refused (11 in one access-loss test).
+   */
+  isOwnRemoval?: (relPath: string) => boolean;
+  /**
    * This user's view-only paths, from the same lock view the editor and the
    * sidebar padlocks use (`docSession.setReadOnlyPathCheck`). The text pass
    * sends nothing for them: the server refuses it (403), and the device that
@@ -1955,13 +1972,46 @@ export class AttachmentSync {
         );
       }
     }
+    // Known files the server stopped listing, neither deleted nor already
+    // named revoked: lost access, or a row still waiting for its bytes. Only
+    // the second may upload, so ask the server which is which first.
+    let noAccess: Set<string> | null = null;
+    let accessUnknown = false;
+    if (this.deps.noAccessFileIds && !tombstonesUnknown) {
+      const listedIds = new Set(server.flatMap((b) => (b.docId ? [b.docId] : [])));
+      const unlisted = new Set<string>();
+      for (const a of local) {
+        if (isUnderAttachments(a.relPath)) continue;
+        const id = this.docIdFor(a.relPath);
+        if (!id || listedIds.has(id) || tombstoned?.has(id) || this.deps.isRevokedFile?.(id)) continue;
+        unlisted.add(id);
+      }
+      if (unlisted.size > 0) {
+        try {
+          noAccess = await this.deps.noAccessFileIds([...unlisted]);
+        } catch (e) {
+          // A 404 is a server without the access check: nothing to wait for,
+          // so the older behaviour (upload) holds, as for tombstones above.
+          if ((e as { status?: number } | null)?.status !== 404) {
+            accessUnknown = true;
+            noAccess = unlisted;
+            console.warn("[attachments] could not check access for files the server stopped listing — they wait", e);
+          }
+        }
+        if (!this.current()) return { uploaded: 0, downloaded: 0 };
+      }
+    }
+    const revoked = this.deps.isRevokedFile;
     const plan = planBinarySync(local, server, {
       docIdFor: (relPath) => this.docIdFor(relPath),
       baseFor: (docId) => this.baseFor(docId),
       isTombstoned: tombstoned ? (docId) => tombstoned.has(docId) : undefined,
       tombstonesUnknown,
-      isRevoked: this.deps.isRevokedFile,
+      isRevoked: noAccess
+        ? (docId) => noAccess.has(docId) || (revoked?.(docId) ?? false)
+        : revoked,
     });
+    if (accessUnknown) this.retryHeldFiles();
     await this.trashTombstoned(plan.toTrash);
     if (plan.held.length > 0) this.retryHeldFiles();
     // #408: `attachments/` drops this listing no longer names for us.
@@ -2120,6 +2170,13 @@ export class AttachmentSync {
           this.embedRefusedUntil.delete(a.sha256);
         }
         if (this.unreadable.has(pathKey(a.relPath))) return;
+        if (this.deps.isOwnRemoval?.(a.relPath)) {
+          // Asked again later: a new file saved at this path while the mark
+          // lasts must still go up once the removal is over.
+          this.setFileState(a.relPath, "queued");
+          this.retryHeldFiles();
+          return;
+        }
         if (this.isHeldCreate(a.relPath)) {
           this.setFileState(a.relPath, "error");
           return;
@@ -2474,6 +2531,9 @@ export class AttachmentSync {
       // The lane ahead may have learned these bytes are refused for good.
       if (this.isPermanentlySkipped(a.sha256)) return false;
     }
+    // Re-checked here: the wait for a lane or the byte budget can outlast the
+    // moment the app began removing this file.
+    if (this.deps.isOwnRemoval?.(a.relPath)) return false;
     let release!: () => void;
     const claim = new Promise<void>((resolve) => (release = resolve));
     this.uploadBySha.set(a.sha256, claim);

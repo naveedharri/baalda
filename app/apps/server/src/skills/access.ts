@@ -260,7 +260,9 @@ export async function setSkillAccess(
     if (groups.length > 0) {
       const ids = [...new Set(groups.map((g) => g.groupId))];
       const { rows } = await client.query<{ id: string }>(
-        "SELECT id FROM access_groups WHERE organization_id = $1 AND id = ANY($2)",
+        // FOR SHARE: a group deleted at the same moment waits for this write
+        // (its cascade then removes these rows) or is already gone (refused).
+        "SELECT id FROM access_groups WHERE organization_id = $1 AND id = ANY($2) FOR SHARE",
         [orgId, ids],
       );
       if (rows.length !== ids.length) throw new SkillError(400, { error: "group_not_found" });

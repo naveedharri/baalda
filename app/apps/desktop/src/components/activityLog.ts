@@ -10,7 +10,7 @@
    so they cannot re-raise its banner. The pure half (append / dedupe / prune)
    is what the tests pin. */
 
-export type ActivityLogKind = "restoredFromServer" | "folderKept" | "access" | "failed" | "held";
+export type ActivityLogKind = "restoredFromServer" | "folderKept" | "unsentRemoved" | "access" | "failed" | "held";
 
 export interface ActivityLogEntry {
   /** Stable across sessions; the feed row key. */
@@ -67,6 +67,7 @@ export function removeFromLog(log: readonly ActivityLogEntry[], ids: readonly st
 const KINDS: ReadonlySet<string> = new Set<ActivityLogKind>([
   "restoredFromServer",
   "folderKept",
+  "unsentRemoved",
   "access",
   "failed",
   "held",

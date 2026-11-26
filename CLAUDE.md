@@ -387,6 +387,11 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   preReadLimit(ext))` refuses in Rust from file metadata (`ExternalFileTooLarge`) and the paste path
   checks `File.size`; formats that transcode (`transcodeTo`) are read first, since their cap
   applies after conversion. Reading a 600 MB drop whole used to push the app past 700 MB.
+  A known file the blob listing stopped naming (neither tombstoned nor named revoked) uploads
+  only after `POST access-check` (`registry.noAccessIds`) says it is still readable: an access
+  loss reaches the listing before the revocation frame, and each such file was a refused upload.
+  A path the app is removing itself (`isOwnRemoval`, marked before the file goes) never uploads:
+  the removal forgets the id after deleting, so a pass that listed the disk first saw a new file.
   A local binary this device knows by a `files` id the server TOMBSTONED (`GET /vaults/:id/file-tombstones`,
   ids from `file_tombstones` with no live row) is `toTrash`: removed outright, its id
   forgotten — never re-uploaded, which used to undo a teammate's delete (#215). Id match only. A
@@ -435,7 +440,8 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   are NOT pushed into the deleted note either. For an explicit deletion, a matching local index
   `doc_id` and path establish identity even without a per-document reconciliation baseline. An unprovable identity still stays on disk;
   a tombstone must never remove an unrelated file reusing its path. A REVOCATION
-  (`registry.revokedVerdict`) likewise removes the note outright, unsent work included; an
+  (`registry.revokedVerdict`) likewise removes the note outright, unsent work included, and
+  says so (`unsentRemoved`, kept in Activity; decided 2026-11-26: it used to go silently); an
   unrelated local id at the path still stays. `store.openNoteByPath` refuses a path the server answered
   `not_readable` for (`registry.isHiddenPath`) instead of opening its local bytes. A same-path create from two devices stays
   two notes: the later one by `created_at` is renamed `<stem> (conflict YYYY-MM-DD).<ext>`
@@ -443,7 +449,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   while the app was closed is paired back by content hash at startup (`pairClosedAppRenames`) so the
   `doc_id` survives. Every such action is recorded as a `ReconcileKind` (`restoredFromServer`,
   `deletedByTeammate`, `renamedConflict`, `keptLocally`, `selfRevoked`, `folderKept`,
-  `externalEditSaved`) and shown once per session as one plain-words summary (`ReconcileBanner`,
+  `externalEditSaved`, `unsentRemoved`) and shown once per session as one plain-words summary (`ReconcileBanner`,
   which fades after 20 s like Dismiss; details stay in the Activity panel's Review changes); nothing
   in the report persists. Entries are PER VAULT: `reconcileReport` stamps each one with the current
   `vaultScopes` folder path and every reader (`items`/`drain`/`forgetReadable`/`clear`/subscribers)
@@ -540,7 +546,9 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   is simply not on disk, so the sidebar has nothing to open. Placeholders are still written now for
   docs the server holds no state for (`ready.empty`), docs this device holds CRDT for
   (`materializeContent` fills them), D5 restores, and everything when nothing will deliver. When
-  the download ends however it ends, `materializePendingFromBootstrap` writes create-only
+  the download ends however it ends, `materializePendingFromBootstrap` (on the registry's pull
+  chain, like a rules change: beside a pull it wrote a placeholder for a note that pull was
+  deleting) writes create-only
   placeholders for what it did not deliver (the server-empty `ready.empty` class, or a cancelled
   run), re-resolved by `doc_id`. The pending set is memory only, never persisted as done: an
   interrupted run leaves files missing and the next pull finds them again. A server-content
@@ -809,7 +817,9 @@ vault. Only the converted "Everyone" groups' rows (`shares.legacy_team_grant`, c
 by 101) follow a join snapshot: at or below its revision they do not open content that existed at the join,
 and under a Private snapshot their vault row never seeds empty folders, as the old team posture never did.
 Any other group gives what it opens whenever the person joined (a `denied` row always counts). The board's No access for a group writes a group `denied` row where a
-grant from above reaches the item (`access-management.ts groupReachesFromAbove`), else removes the row. Membership cascades with `member`; `auto_join` groups take new members (trigger,
+grant from above reaches the item (`access-management.ts groupReachesFromAbove`), else removes the row. Every group write (bulk access, member adds, join-code and skill group saves) locks the group
+row `FOR SHARE` in its transaction and `deleteGroup` takes it `FOR UPDATE` first, so a write
+racing a delete answers 404 `group_not_found`, never a stray row or a 500. Membership cascades with `member`; `auto_join` groups take new members (trigger,
 owner excluded); removing someone disconnects only the docs that group reached. Written through
 `POST access/bulk` with `audience: {type:"group"}` (`private` = no row; an Everyone write never clears group
 rows), read through `access-board?groupId=`; `GET /locks` returns the caller's group `edit` rows as lifts, and a group's Can view as the caller's own `readonly` row (`reason: "group_view"`, id `group-view:<id>`, never removable by Unlock — `lib/locks.ts isRemovableLock`) on the topmost visible view-only folder or item, resolving only the subtrees a group can view.

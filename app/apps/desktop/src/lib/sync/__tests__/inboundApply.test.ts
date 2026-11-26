@@ -1641,7 +1641,10 @@ describe("inbound folder deletion", () => {
 
     expect(disk.copies).toEqual([]);
     expect(disk.folders.has("Getting Started")).toBe(false);
-    expect(reconcileReport.items()).toEqual([]);
+    // Removed, and said so: the unsent words are gone (decided 2026-11-26).
+    expect(reconcileReport.items()).toEqual([
+      expect.objectContaining({ kind: "unsentRemoved", docId: "d1", path: "Getting Started/mine.md" }),
+    ]);
   });
 
   it("removes the emptied old directory after a server-side folder move, and does not re-register it", async () => {
@@ -2960,6 +2963,8 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
     expect(disk.notes.has("n.md")).toBe(true);
     expect(disk.bodies.get("n.md")).toBe("the team's words + my own lines");
     expect(reg.isHiddenPath("n.md")).toBe(false);
+    // Kept, so nothing to announce.
+    expect(reconcileReport.items().filter((it) => it.kind === "unsentRemoved")).toEqual([]);
   });
 
   it("keeps an on-disk edit the doc has not taken in yet when access is back (a quick flap)", async () => {
@@ -2994,6 +2999,7 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
   });
 
   it("removes a revoked note with unsent work without the guard once access is confirmed off", async () => {
+    reconcileReport.clear();
     const { disk } = await revokeWith({
       body: "the team's words + my own lines",
       localSv: svOf("the team's words"),
@@ -3002,6 +3008,15 @@ describe("a revoked note leaves the vault unless this device proves unsent edits
       savedSinceIndex: true,
     });
     expect(disk.notes.has("n.md")).toBe(false);
+    expect(reconcileReport.items()).toEqual([expect.objectContaining({ kind: "unsentRemoved", path: "n.md" })]);
+  });
+
+  it("a clean revoked note leaves without a notice", async () => {
+    reconcileReport.clear();
+    const sv = svOf("the team's words");
+    const { disk } = await revokeWith({ localSv: sv, acked: sv, crdtText: "the team's words" });
+    expect(disk.notes.has("n.md")).toBe(false);
+    expect(reconcileReport.items()).toEqual([]);
   });
 
   it("still finds an on-disk edit when the index query fails (per-note read)", async () => {
@@ -3508,7 +3523,8 @@ describe("offline reconciliation — ready.tombstones", () => {
     const { disk, reg } = await pull({ listingTombstones: [] });
     expect(reg.isServerTombstoned("d1")).toBe(false);
     expect(disk.copies).toEqual([]);
-    expect(reconcileReport.items()).toEqual([]);
+    // Its file had unsent edits: a revocation says what it removed.
+    expect(reconcileReport.items()).toEqual([expect.objectContaining({ kind: "unsentRemoved", docId: "d1" })]);
   });
 
   it("a listing that cannot answer tombstones stays 'cannot answer'", async () => {

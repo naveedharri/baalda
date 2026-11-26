@@ -180,3 +180,98 @@ describe("a pass whose deleted-files listing fails", () => {
     expect(h.timers.some((t) => t.ms === HELD_FILES_RETRY_MS)).toBe(false);
   });
 });
+
+describe("a known file the server stopped listing: ask before uploading", () => {
+  // Access taken away reaches the blob listing before the revocation frame:
+  // the pass used to upload every file the person had just lost, one refused
+  // request each (37 in one test). The server's access check settles it.
+  const P = "Team/report.pdf";
+  function pass(noAccessFileIds?: AttachmentSyncDeps["noAccessFileIds"]) {
+    const uploads: string[] = [];
+    const asked: string[][] = [];
+    const deps = {
+      listLocal: async () => [L(P, "v1"), L("Team/new.pdf", "v2")],
+      readLocal: async () => new Uint8Array([1, 2, 3]),
+      writeLocal: async () => {},
+      listServer: async () => [],
+      listFileTombstones: async () => [],
+      knownFileId: (p: string) => (p === P ? "F1" : null),
+      uploadServer: async (relPath: string) => {
+        uploads.push(relPath);
+      },
+      downloadServer: async () => new Uint8Array(),
+      ...(noAccessFileIds
+        ? {
+            noAccessFileIds: async (ids: string[]) => {
+              asked.push(ids);
+              return noAccessFileIds(ids);
+            },
+          }
+        : {}),
+    } as unknown as AttachmentSyncDeps;
+    return { sync: new AttachmentSync(deps), uploads, asked };
+  }
+
+  it("a file the server answers No access for is not uploaded", async () => {
+    const t = pass(async () => new Set(["F1"]));
+    await t.sync.reconcile();
+    expect(t.asked).toEqual([["F1"]]);
+    expect(t.uploads).toEqual(["Team/new.pdf"]);
+  });
+
+  it("no answer: the file waits for a later pass", async () => {
+    const t = pass(async () => {
+      throw new Error("offline");
+    });
+    await t.sync.reconcile();
+    expect(t.uploads).toEqual(["Team/new.pdf"]);
+  });
+
+  it("still readable (a row waiting for its bytes): it uploads", async () => {
+    const t = pass(async () => new Set());
+    await t.sync.reconcile();
+    expect([...t.uploads].sort()).toEqual(["Team/new.pdf", P]);
+  });
+});
+
+describe("a file the app is removing itself never uploads", () => {
+  // A revocation deletes the file, then forgets its id. A pass that listed the
+  // disk a moment earlier found a file with no id and uploaded it as new: one
+  // refused request each (11 in one access-loss test).
+  it("skips a path marked as the app's own removal, uploads the rest", async () => {
+    const uploads: string[] = [];
+    const deps = {
+      listLocal: async () => [L("Team/going.pdf", "v1"), L("Team/new.pdf", "v2")],
+      readLocal: async () => new Uint8Array([1, 2, 3]),
+      writeLocal: async () => {},
+      listServer: async () => [],
+      uploadServer: async (relPath: string) => void uploads.push(relPath),
+      downloadServer: async () => new Uint8Array(),
+      isOwnRemoval: (p: string) => p === "Team/going.pdf",
+    } as unknown as AttachmentSyncDeps;
+    await new AttachmentSync(deps).reconcile();
+    expect(uploads).toEqual(["Team/new.pdf"]);
+  });
+});
+
+describe("the access check on a server without it", () => {
+  it("a 404 from the access check uploads as before instead of holding", async () => {
+    const P = "Team/known.pdf";
+    const uploads: string[] = [];
+    const deps = {
+      listLocal: async () => [L(P, "v2")],
+      readLocal: async () => new Uint8Array([1, 2, 3]),
+      writeLocal: async () => {},
+      listServer: async () => [],
+      uploadServer: async (relPath: string) => void uploads.push(relPath),
+      downloadServer: async () => new Uint8Array(),
+      knownFileId: (p: string) => (p === P ? "f1" : null),
+      listFileTombstones: async () => [],
+      noAccessFileIds: async () => {
+        throw Object.assign(new Error("Not found"), { status: 404 });
+      },
+    } as unknown as AttachmentSyncDeps;
+    await new AttachmentSync(deps).reconcile();
+    expect(uploads).toEqual([P]);
+  });
+});

@@ -355,6 +355,18 @@ export async function applyBulkAccess(
   try {
     await client.query("BEGIN");
     await setAuditActor(client, input.actorUserId);
+    // Hold the group while its rows are written: a delete at the same moment
+    // either waits for this write (and its trigger then removes these rows
+    // too) or has already gone, and this write is refused. Without the lock a
+    // write could land after the delete, leaving rows for a group that no
+    // longer exists.
+    if (input.audience.type === "group") {
+      const { rowCount } = await client.query(
+        "SELECT 1 FROM access_groups WHERE id = $1 AND organization_id = $2 FOR SHARE",
+        [input.audience.groupId, input.organizationId],
+      );
+      if (!rowCount) throw new AccessManagementError("Unknown group", 404, "group_not_found");
+    }
     const revision = await nextAccessRevision(client, input.organizationId);
     for (const resource of resources) {
       cleared += await clearResourceOverrides(
