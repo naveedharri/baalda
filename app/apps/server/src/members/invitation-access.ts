@@ -133,6 +133,35 @@ export async function applyNewMemberDefault(
 }
 
 /**
+ * Admins START at Can edit everything (decided 2026-11-23), however they were
+ * invited. Today's desktop sends that level on an admin invite; an older one,
+ * Better Auth's own invite route or the API may send nothing, and an admin
+ * would then join a vault on Only what's shared seeing nothing at all (the
+ * 2026-11-28 five-app test). So an admin who joins with no vault level of
+ * their own gets it here, the same row a promotion writes. A level the invite
+ * did choose is kept as it is. Best-effort.
+ */
+export async function applyAdminStart(
+  input: { organizationId: string; userId: string },
+  deps: AccessChangeDeps = {},
+  db: pg.Pool = defaultPool,
+): Promise<void> {
+  try {
+    const { rows } = await db.query<{ role: string | null; own: boolean }>(
+      `SELECT (SELECT role FROM member WHERE "organizationId" = $1 AND "userId" = $2) AS role,
+              EXISTS (SELECT 1 FROM shares WHERE resource_type = 'vault' AND resource_id = $1
+                        AND principal_type = 'user' AND principal_id = $2) AS own`,
+      [input.organizationId, input.userId],
+    );
+    const r = rows[0];
+    if (!r || r.role !== "admin" || r.own) return;
+    await applyMemberLevel({ organizationId: input.organizationId, userId: input.userId, mode: "open" }, deps, db);
+  } catch (err) {
+    console.error("[invitations] giving a new admin Can edit everything failed:", (err as Error).message);
+  }
+}
+
+/**
  * Give a member who just joined their own vault-wide level (the join code's
  * level). Same as an invite's level, applied by the vault's owner, and like an
  * invite's level they leave the groups that take every new member.

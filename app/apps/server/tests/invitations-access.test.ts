@@ -176,6 +176,32 @@ describe("invitations with access", () => {
     expect(await groupsOf(plain.userId)).toEqual([gid]);
   });
 
+  it("an admin invite that names no level starts at Can edit everything (older apps, the API)", async () => {
+    const viaAccept = await signUp("admin-accept@inv-access.test");
+    const { results } = (await (
+      await inviteMany(owner, orgId, { emails: [viaAccept.email], role: "admin" })
+    ).json()) as InviteResponse;
+    await auth.api.acceptInvitation({ headers: bearerHeaders(viaAccept), body: { invitationId: results[0].invitationId! } });
+    expect(await personalVaultRows(orgId, viaAccept.userId)).toEqual(["edit"]);
+
+    const viaCode = await signUp("admin-code@inv-access.test");
+    await inviteMany(owner, orgId, { emails: [viaCode.email], role: "admin" });
+    expect((await joinByCode(owner, viaCode)).status).toBe(200);
+    expect(await personalVaultRows(orgId, viaCode.userId)).toEqual(["edit"]);
+
+    // A level the invite did choose is kept as it is.
+    const chose = await signUp("admin-view@inv-access.test");
+    await inviteMany(owner, orgId, { emails: [chose.email], role: "admin", access: "readonly" });
+    expect((await joinByCode(owner, chose)).status).toBe(200);
+    expect(await personalVaultRows(orgId, chose.userId)).toEqual(["view"]);
+
+    // A plain member invited with nothing still gets nothing of their own.
+    const plain = await signUp("member-none@inv-access.test");
+    await inviteMany(owner, orgId, { emails: [plain.email], role: "member" });
+    expect((await joinByCode(owner, plain)).status).toBe(200);
+    expect(await personalVaultRows(orgId, plain.userId)).toEqual([]);
+  });
+
   it("Better Auth accept applies the invite's access too", async () => {
     const invitee = await signUp("accept@inv-access.test");
     const { results } = (await (

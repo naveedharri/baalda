@@ -20,7 +20,7 @@ import { isValidVaultIcon } from "./vault-icon.js";
 import { isValidProfileImage } from "./profile-image.js";
 import { hasExpiryNotice } from "../invitations/expiries.js";
 import { invitationActivityChanged } from "../invitations/sweep.js";
-import { applyInvitationAccess, applyNewMemberDefault, invitationHadChoice } from "../members/invitation-access.js";
+import { applyAdminStart, applyInvitationAccess, applyNewMemberDefault, invitationHadChoice } from "../members/invitation-access.js";
 import { applyInvitationGroups } from "../groups/service.js";
 import { applyInvitationKeys } from "../members/invitation-keys.js";
 import { announceInvitation, announceInvitationGone } from "../sync/user-events.js";
@@ -430,6 +430,7 @@ export const auth = betterAuth({
             userId: data.user.id,
           });
           if (!chose) await applyNewMemberDefault({ organizationId: data.organization.id, userId: data.user.id });
+          await applyAdminStart({ organizationId: data.organization.id, userId: data.user.id });
           // Seamless keys (B3): a seal made at invite time to this person's
           // current account key becomes their wrap. Best-effort, logged.
           await applyInvitationKeys({

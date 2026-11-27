@@ -15,7 +15,7 @@ import {
 } from "../../billing/store.js";
 import { announceMemberJoined, announceMemberRemoved } from "../../sync/member-events.js";
 import { announceInvitationGone } from "../../sync/user-events.js";
-import { applyInvitationAccess, applyMemberLevel, applyNewMemberDefault, invitationHadChoice } from "../../members/invitation-access.js";
+import { applyAdminStart, applyInvitationAccess, applyMemberLevel, applyNewMemberDefault, invitationHadChoice } from "../../members/invitation-access.js";
 import {
   applyInvitationGroups,
   applyJoinCodeGroups,
@@ -738,6 +738,11 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
           { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
         );
       }
+      // An admin invite starts at Can edit everything, whatever app sent it.
+      await applyAdminStart(
+        { organizationId, userId: session.userId },
+        { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
+      );
       // Seamless keys (B3): the invite's direct seal applies here too.
       await applyInvitationKeys({ invitationIds: [liveInvite.id], organizationId, userId: session.userId });
     } else {
