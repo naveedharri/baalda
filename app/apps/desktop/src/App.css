@@ -8267,7 +8267,9 @@ button.secondary:active:not(:disabled),
   flex-direction: column;
   gap: var(--sp-3);
   min-height: 100%;
-  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  /* Rows' own hover box lines up with the header's icons (2026-11-28: the
+     list sat too far in from the left edge). */
+  padding: var(--sp-3) var(--sp-2) var(--sp-4);
   container-type: inline-size;
 }
 .activity-toolbar {

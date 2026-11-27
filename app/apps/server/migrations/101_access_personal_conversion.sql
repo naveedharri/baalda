@@ -86,24 +86,29 @@ SELECT m."organizationId" AS org_id, m."userId" AS user_id, m.role,
 CREATE UNIQUE INDEX ON c_mem (org_id, user_id);
 ANALYZE c_mem;
 
+CREATE TEMP TABLE c_snaporg ON COMMIT DROP AS
+SELECT org_id, max(snap_at) AS snap_at FROM c_mem WHERE snap_mode IS NOT NULL GROUP BY org_id;
+ANALYZE c_snaporg;
+
 -- Only a place some setting reaches, or content someone with a join record
 -- joined under, can answer differently after the move: everywhere else a
 -- person's answer is the vault level, which the move copies. So only those
--- are checked.
+-- are checked, and EVERYTHING under them, whenever it was made: a setting
+-- the move writes on a folder (for a join record) reaches what was added
+-- inside it later too. (Rehearsal 2026-11-28: checking only content older
+-- than the last join let newer notes in those folders inherit the written
+-- row, gaining edit or losing access.)
 CREATE TEMP TABLE c_hotf ON COMMIT DROP AS
 WITH RECURSIVE r AS (
   SELECT f.id FROM folders f JOIN vaults v ON v.id = f.vault_id JOIN c_org c ON c.org_id = v.organization_id
    WHERE EXISTS (SELECT 1 FROM shares s WHERE s.resource_type = 'folder' AND s.resource_id = f.id)
+      OR f.created_at <= (SELECT so.snap_at FROM c_snaporg so WHERE so.org_id = v.organization_id)
   UNION
   SELECT k.id FROM r JOIN folders k ON k.parent_id = r.id
 )
 SELECT id FROM r;
 CREATE UNIQUE INDEX ON c_hotf (id);
 ANALYZE c_hotf;
-
-CREATE TEMP TABLE c_snaporg ON COMMIT DROP AS
-SELECT org_id, max(snap_at) AS snap_at FROM c_mem WHERE snap_mode IS NOT NULL GROUP BY org_id;
-ANALYZE c_snaporg;
 
 CREATE TEMP TABLE c_item ON COMMIT DROP AS
 SELECT 'folder'::text AS kind, f.id, v.organization_id AS org_id, f.created_at, NULL::text AS created_by, f.id AS folder_id

@@ -18,6 +18,7 @@ import { sealVault, seedFolder, seedMember, seedNote, seedOrg, seedUser, seedUse
  * before, except that owners and admins of a never-shared vault get Can edit.
  */
 const CONVERT_SQL = readFileSync(new URL("../migrations/101_access_personal_conversion.sql", import.meta.url), "utf8");
+const START_SQL = readFileSync(new URL("../migrations/103_new_member_level_follows_join_default.sql", import.meta.url), "utf8");
 
 type Posture = "edit" | "view" | "sealed" | "never";
 
@@ -56,6 +57,7 @@ async function fixture(posture: Posture) {
     early: await mk("early"),
     shut: await mk("shut"),
     denied: await mk("denied"),
+    opener: await mk("opener"),
   };
   for (const [name, id] of Object.entries(people)) {
     await seedMember(org, id, name === "owner" ? "owner" : name === "admin" ? "admin" : "member");
@@ -98,7 +100,26 @@ async function fixture(posture: Posture) {
   await userRow(org, "folder", top, people.denied, "denied");
   await snapshot(org, people.early, "readonly", joined);
   await snapshot(org, people.shut, "private", joined);
-  const folders = [top, sub, secret, peek, frozen, fresh];
+  await snapshot(org, people.opener, "open", joined);
+  // Made AFTER those joins, inside folders that existed then (rehearsal
+  // 2026-11-28): the rows the move writes on the old folders must not reach
+  // these (they follow the team level today, not the join record).
+  const later = await seedFolder(vault, top, "Later", "Projects/Later", people.owner);
+  // An old folder no setting touches: only the join records reach it.
+  const archive = await seedFolder(vault, null, "Archive", "Archive", people.owner);
+  await pool.query("UPDATE folders SET created_at = $2 WHERE id = $1", [archive, old]);
+  const archiveOld = await seedNote(vault, archive, "Archive/Old.md", people.owner);
+  await pool.query("UPDATE notes SET created_at = $2 WHERE id = $1", [archiveOld, old]);
+  const archiveLater = await seedFolder(vault, archive, "Later", "Archive/Later", people.owner);
+  docs.push(
+    await seedNote(vault, top, "Projects/Added.md", people.owner),
+    await seedNote(vault, sub, "Projects/Alpha/Added.md", people.owner),
+    await seedNote(vault, later, "Projects/Later/Deep.md", people.owner),
+    archiveOld,
+    await seedNote(vault, archive, "Archive/Added.md", people.owner),
+    await seedNote(vault, archiveLater, "Archive/Later/Deep.md", people.owner),
+  );
+  const folders = [top, sub, secret, peek, frozen, fresh, later, archive, archiveLater];
   return { org, vault, people, docs, folders };
 }
 
@@ -122,7 +143,6 @@ async function picture(f: Awaited<ReturnType<typeof fixture>>) {
 
 describe("migration 101: team-wide access becomes each person's own", () => {
   beforeEach(resetDb);
-  afterAll(() => pool.end());
 
   for (const posture of ["edit", "view", "sealed"] as const) {
     it(`a ${posture} vault: nobody's access changes`, async () => {
@@ -178,3 +198,45 @@ describe("migration 101: team-wide access becomes each person's own", () => {
     expect(lvl.rows[0]?.new_member_level).toBe("edit");
   });
 });
+
+describe("migration 103: new people start with the lower of the team level and the New members setting", () => {
+  beforeEach(resetDb);
+
+  const cases: Array<[posture: "edit" | "view", joinDefault: "open" | "readonly" | "private" | null, expected: "edit" | "view" | null]> = [
+    ["edit", "open", "edit"],
+    ["edit", "readonly", "view"],
+    ["edit", "private", null],
+    ["edit", null, null], // no settings row: the old trigger's default was Only what's shared
+    ["view", "open", "view"],
+    ["view", "readonly", "view"],
+    ["view", "private", null],
+  ];
+  for (const [posture, jd, expected] of cases) {
+    it(`team ${posture}, New members ${jd ?? "(never set)"} → ${expected ?? "No access"} for invites and the join code`, async () => {
+      const slug = randomUUID().slice(0, 8);
+      const org = await seedOrg(`Start ${slug}`, `start-${slug}`);
+      const owner = await seedUser(`owner-${slug}@start.test`);
+      await seedMember(org, owner, "owner");
+      await seedVault(org);
+      await orgRow(org, "vault", org, posture);
+      if (jd) {
+        await pool.query(
+          `INSERT INTO organization_access_settings (organization_id, join_default) VALUES ($1, $2)
+           ON CONFLICT (organization_id) DO UPDATE SET join_default = $2`,
+          [org, jd],
+        );
+      } else {
+        await pool.query("DELETE FROM organization_access_settings WHERE organization_id = $1", [org]);
+      }
+      await pool.query("INSERT INTO org_join_codes (organization_id, code) VALUES ($1, $2)", [org, `c${slug}`]);
+      await pool.query(CONVERT_SQL);
+      await pool.query(START_SQL);
+      const lvl = await pool.query("SELECT new_member_level FROM organization_access_settings WHERE organization_id = $1", [org]);
+      const code = await pool.query("SELECT access_level FROM org_join_codes WHERE organization_id = $1", [org]);
+      expect(lvl.rows[0]?.new_member_level ?? null).toBe(expected);
+      expect(code.rows[0]?.access_level ?? null).toBe(expected);
+    });
+  }
+});
+
+afterAll(() => pool.end());
