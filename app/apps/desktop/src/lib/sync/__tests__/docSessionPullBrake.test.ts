@@ -144,6 +144,27 @@ describe("SyncManager — idle registry pull brake", () => {
     vi.useRealTimers();
   });
 
+  it("a braked reauth never delays a teammate's frame pull already armed", async () => {
+    const sm = await enabled();
+    loop(sm, "reauth", () => false);
+    sm.handleRegistryChanged("reauth");
+    await vi.advanceTimersByTimeAsync(120_000); // braked deep into the backoff
+    fakeRegistry.pull.mockReset().mockResolvedValue(false);
+    await vi.advanceTimersByTimeAsync(31_000);
+    // One more teammate pull that changes nothing, just ended…
+    sm.handleRegistryChanged("registry-frame");
+    await vi.advanceTimersByTimeAsync(2_500);
+    fakeRegistry.pull.mockClear();
+    // …and a second after it the next new note: its frame, then the reauth.
+    await vi.advanceTimersByTimeAsync(1_000);
+    sm.handleRegistryChanged("registry-frame");
+    sm.handleRegistryChanged("reauth");
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
+    sm.disable();
+    vi.useRealTimers();
+  });
+
   it("a pull that changes something releases the brake", async () => {
     const sm = await enabled();
     let change = false;

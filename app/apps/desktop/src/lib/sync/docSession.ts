@@ -1813,7 +1813,8 @@ export class SyncManager implements InboundHost {
       : 250;
     if (USER_PULL_REASONS.has(reason)) this.releasePullBrake();
     const idle = this.registryPullIdleStreak;
-    if (BRAKED_PULL_REASONS.has(reason) && idle >= REGISTRY_PULL_BRAKE_AFTER) {
+    const braked = BRAKED_PULL_REASONS.has(reason) && idle >= REGISTRY_PULL_BRAKE_AFTER;
+    if (braked) {
       let wait = Math.min(
         REGISTRY_PULL_BRAKE_MAX_MS,
         REGISTRY_PULL_BRAKE_BASE_MS * 2 ** Math.min(idle - REGISTRY_PULL_BRAKE_AFTER, 8),
@@ -1828,6 +1829,15 @@ export class SyncManager implements InboundHost {
       }
     }
     const dueAt = now + delay;
+    if (this.registryPullTimer && braked && dueAt > this.registryPullDueAt) {
+      // A braked request never pushes back a pull already due sooner: it rides
+      // that pull, which answers it too. Without this, a teammate's new note
+      // (a registry frame, due in ~2 s) followed by the `reauth` the server
+      // sends with it waited out the brake instead: 4, 8, 16, 30 s for a member
+      // whose pulls change nothing (2026-11-28 five-app test).
+      if (!gapDelayed) this.registryPullGapOnly = false;
+      return;
+    }
     if (this.registryPullTimer) {
       // Already armed. Re-arming is the coalescing, but only up to a point: past
       // REGISTRY_PULL_MAX_WAIT_MS the frames are a storm, not a burst, and
