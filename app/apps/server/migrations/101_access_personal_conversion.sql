@@ -21,7 +21,7 @@
 --     team row on the vault becomes Only what's shared; join records in the
 --     converted vaults go. Read-only padlocks stay: they are caps.
 --   * The level new people start with (invites, join code) is the vault's old
---     team level.
+--     team level (migration 103 lowers it to the old New members setting).
 --
 -- Everything written or removed is logged in access_personal_conversion*, so it
 -- can be undone exactly. Access groups are not read: none exist before this.
