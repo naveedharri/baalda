@@ -88,7 +88,7 @@ import { CheckIcon } from "./CheckIcon";
 /* Lazy: the sharing sheet is a context-menu action, and keeping it out of the
    eager graph is also what lets it static-import the avatar chunk. */
 /** The row menu's Share… is hidden until per-item sharing is reworked;
- *  Members and access is where access is managed meanwhile. */
+ *  People and access is where access is managed meanwhile. */
 const SHOW_SHARE_ITEM = false;
 
 /**
@@ -559,7 +559,7 @@ export function FileTree() {
    * posture — there is no lock row on the item to unlock.
    *
    * Unlock speaks to an item's own row, so on these rows it has nothing to act
-   * on. The vault posture is changed in Members and access, not here.
+   * on. The vault posture is changed in People and access, not here.
    */
   const vaultLockedOnly = (path: string) => lockByPath.get(path) === "vault";
 
@@ -2288,7 +2288,7 @@ export function FileTree() {
               <li
                 className="disabled"
                 aria-disabled="true"
-                title="Everyone can only view this vault. Change it in Members and access"
+                title="Everyone can only view this vault. Change it in People and access"
                 onClick={(e) => e.stopPropagation()}
               >
                 Locked by the vault

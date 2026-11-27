@@ -326,7 +326,7 @@ function InvitationRowActions({
             /* clipboard unavailable */
           }
         }
-        const how = copied ? "Its link is copied; share it with them." : "Share its link from Vault Settings → Members and access.";
+        const how = copied ? "Its link is copied; share it with them." : "Share its link from Vault Settings → People and access.";
         toast(
           r.emailError ? `New invitation created, but the email failed: ${r.emailError} ${how}` : `New invitation created. ${how}`,
           r.emailError ? "error" : "success",

@@ -46,6 +46,7 @@ import { useStore } from "../store";
 import { Avatar } from "./Avatar";
 import { ConfirmDialog, type ConfirmChange } from "./ConfirmDialog";
 import { InvitePeopleDialog, legacyNewMembersSetting } from "./InvitePeopleDialog";
+import { Switch } from "./Switch";
 import { PeopleLimitNotice, inviteLimitError, peopleLimitKind } from "./PeopleLimitNotice";
 import { MemberProfilePage, type ProfileTab } from "./MemberProfilePage";
 import { ProfileSkeleton } from "./MemberProfileSkeletons";
@@ -79,7 +80,7 @@ interface Confirm {
 }
 
 /**
- * Settings → Members and access: one table of people with their role, their
+ * Settings → People and access: one table of people with their role, their
  * vault-wide access and when they were last around, under the two vault-level
  * rows (Everyone, New members). Plain members see the roster read-only.
  *
@@ -165,7 +166,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   const groups: AccessGroup[] = groupsState.list?.groups ?? [];
   const [listView, setListView] = useState<"people" | "groups">("people");
   const [groupPage, setGroupPage] = useState<{ id: string; tab: GroupTab } | null>(null);
-  const [groupDialog, setGroupDialog] = useState<{ rename?: AccessGroup } | null>(null);
+  const [groupDialog, setGroupDialog] = useState<{ rename?: AccessGroup; forEveryone?: boolean } | null>(null);
 
   // `canManage` comes from the store's member list, read when the vault
   // opened; the overview is re-read on every open, so once it has answered
@@ -232,7 +233,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     if (next !== current) useStore.setState({ members: next });
   }, [overview, orgId, myUserId]);
 
-  // Clicking the already-active "Members and access" item returns to the
+  // Clicking the already-active "People and access" item returns to the
   // first page of the tab: the roster, search cleared.
   useEffect(() => {
     if (resetToken === 0) return;
@@ -418,10 +419,33 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
     });
   };
 
-  const changeRole = (m: MemberOverview, role: "member" | "admin") => run(async () => {
-    await useStore.getState().updateMemberRole(m.userId, role);
-    await reload();
-  });
+  // Demote asks (2026-11-27): "Switch to groups" (the default) removes the
+  // settings just for them, so their groups decide; "Keep" leaves them as they are.
+  const keepOwnOnDemote = useRef(false);
+  const demoteBody = (who: string) => (
+    <DemoteChoice who={who} onChange={(keep) => { keepOwnOnDemote.current = keep; }} />
+  );
+  const changeRole = async (m: MemberOverview, role: "member" | "admin"): Promise<void> => {
+    if (role === "member" && m.role === "admin" && orgId) {
+      keepOwnOnDemote.current = false;
+      setConfirm({
+        title: `Make ${displayName(m)} a member?`,
+        label: "Make member",
+        tone: "accent",
+        apply: () => run(async () => {
+          await authManager.api.updateMemberRole(orgId, m.userId, "member", keepOwnOnDemote.current ? "keep" : "groups");
+          await useStore.getState().refreshVault().catch(() => {});
+          await reload();
+        }),
+        body: demoteBody(displayName(m)),
+      });
+      return;
+    }
+    return run(async () => {
+      await useStore.getState().updateMemberRole(m.userId, role);
+      await reload();
+    });
+  };
 
   const askRemove = (m: MemberOverview) => setConfirm({
     title: `Remove ${displayName(m)} from ${vaultName}?`,
@@ -484,12 +508,14 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   const bulkRole = (role: "member" | "admin") => {
     const split = splitBulkTargets(pickedMembers(), canAct, (m) => m.role === role);
     if (split.apply.length === 0) { toast(bulkResultLine("Nothing to change.", split)); return; }
-    void run(async () => {
+    const demoting = role === "member" && split.apply.some((m) => m.role === "admin");
+    const apply = () => run(async () => {
       if (!orgId) return;
       let done = 0;
       try {
         for (const m of split.apply) {
-          await authManager.api.updateMemberRole(orgId, m.userId, role);
+          await authManager.api.updateMemberRole(orgId, m.userId, role,
+            role === "member" && m.role === "admin" ? (keepOwnOnDemote.current ? "keep" : "groups") : undefined);
           done += 1;
         }
       } catch (cause) {
@@ -499,6 +525,15 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
       }
       clearSelection();
       toast(bulkResultLine(`${peopleCount(done)} now ${role === "admin" ? "admins" : "members"}.`, split));
+    });
+    if (!demoting) { void apply(); return; }
+    keepOwnOnDemote.current = false;
+    setConfirm({
+      title: `Make ${peopleCount(split.apply.length)} members?`,
+      label: "Make members",
+      tone: "accent",
+      apply,
+      body: demoteBody("them"),
     });
   };
 
@@ -609,6 +644,8 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   const sourceOf = (m: MemberOverview) => m.access ? accessSources({
     level: m.access.level,
     own: !!m.access.own,
+    // A server from 2026-11-27 on names `ownLevel`: there, own settings decide.
+    ownDecides: m.access.ownLevel !== undefined,
     isSelf: m.userId === myUserId,
     defaultLabel: everyone?.label ?? null,
     groups: groupsOn
@@ -709,7 +746,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
   return (
     <div className="members-access">
       <div className="members-access-header">
-        <h2 className="settings-section-title">Members and access</h2>
+        <h2 className="settings-section-title">People and access</h2>
         {manage && (
           <button className="primary members-invite-btn" onClick={() => setInviteOpen(true)}>Invite people</button>
         )}
@@ -808,6 +845,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
           query={query}
           onOpen={(g) => openGroup(g.id)}
           onRename={(g) => setGroupDialog({ rename: g })}
+          onCreateForEveryone={() => setGroupDialog({ forEveryone: true })}
           onDelete={askDeleteGroup}
           onRetry={() => void groupsState.reload()}
         />
@@ -983,6 +1021,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
           orgId={orgId}
           groups={groups}
           group={groupDialog.rename}
+          forEveryone={groupDialog.forEveryone}
           candidates={members.filter((m) => canSetAccess(m))}
           myUserId={myUserId}
           onClose={() => setGroupDialog(null)}
@@ -990,7 +1029,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
             const made = !groupDialog.rename;
             setGroupDialog(null);
             void afterAccessWrite();
-            if (made) openGroup(id, "access");
+            if (made) openGroup(id, "members");
           }}
         />
       )}
@@ -1029,6 +1068,7 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
           orgId={orgId}
           vaultName={vaultName}
           newMembersAccess={legacyNewMembersSetting(teamAccess?.posture, accessDefault?.mode)}
+          startLevel={overview?.newMemberLevel === "edit" ? "open" : overview?.newMemberLevel === "view" ? "readonly" : null}
           defaultKnown={teamAccess != null && accessDefault != null}
           canSetCodeGroups={manage}
           canManageBilling={myRole === "owner"}
@@ -1189,5 +1229,26 @@ function SearchIcon() {
       <circle cx="11" cy="11" r="7" />
       <path d="m20 20-3.5-3.5" />
     </svg>
+  );
+}
+
+/** The demote confirm's one choice: switch to groups (default) or keep their own settings. */
+function DemoteChoice({ who, onChange }: { who: string; onChange: (keep: boolean) => void }) {
+  const [keep, setKeep] = useState(false);
+  return (
+    <>
+      <p>
+        {keep
+          ? `${who} keeps the settings just for them, including Can edit everything.`
+          : `The settings just for ${who} are removed, so their access groups and what is shared with them decide.`}
+      </p>
+      <label className="group-dialog-setting">
+        <span className="group-dialog-setting-text">
+          Keep their own settings
+          <small className="muted">Off: switch to groups. On: they keep what they have now.</small>
+        </span>
+        <Switch checked={keep} onChange={(on) => { setKeep(on); onChange(on); }} ariaLabel="Keep their own settings" />
+      </label>
+    </>
   );
 }

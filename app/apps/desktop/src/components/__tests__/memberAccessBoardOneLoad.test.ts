@@ -12,6 +12,7 @@ import { forgetAccessBoardSupport } from "../../lib/accessBoardLoad";
 const api = vi.hoisted(() => ({
   listAccessTree: vi.fn(), resolveAccessSummary: vi.fn(), resolveAccessSummaries: vi.fn(), setBulkAccess: vi.fn(),
   resetMemberAccess: vi.fn(), getAccessBoard: vi.fn(), getHealth: vi.fn(), getBaseUrl: vi.fn(() => "http://test.invalid"),
+  groupHeld: vi.fn(async () => []), groupLetDecide: vi.fn(async () => []),
 }));
 vi.mock("../../lib/auth/authManager", () => ({ authManager: { api, getServerUrl: () => "http://test.invalid" } }));
 vi.mock("../FileTree", () => ({ iconForPath: () => null }));
@@ -78,6 +79,31 @@ describe("Access board, one request", () => {
     }
   };
 
+  it("the third column is always No access, whether or not anything is set", async () => {
+    const renderPerson = () => act(async () => root.render(createElement(MemberAccessBoard, {
+      orgId: "org-1", vaultId: "v1", member, isSelf: false, canSetAccess: true,
+      everyoneMode: "private", personVaultMode: "custom", accessSource: "group",
+      onItemWritten: vi.fn(), onChanged: vi.fn(async () => {}),
+    } as never)));
+    const third = () => host.querySelector<HTMLElement>('.access-board-column[data-mode="private"]')!;
+    // Nothing gives them anything and nothing is set: still No access.
+    api.getAccessBoard.mockResolvedValue({ ...tree, modes: "nnnn", complete: true });
+    await renderPerson();
+    await waitForColumns();
+    await settle();
+    expect(third().textContent).toContain("No access");
+    expect(third().textContent).not.toContain("Not shared");
+    // A group gives them something: the rest is No access.
+    act(() => root.unmount());
+    resetMembersAccessCaches();
+    root = createRoot(host);
+    api.getAccessBoard.mockResolvedValue({ ...tree, modes: "vvnn", complete: true });
+    await renderPerson();
+    await waitForColumns();
+    await settle();
+    expect(third().textContent).toContain("No access");
+  });
+
   it("a group's board moves a row below the group's whole-vault Can edit (its deepest row decides)", async () => {
     api.getAccessBoard.mockResolvedValue({ ...tree, modes: "eeee", complete: true });
     await act(async () => root.render(createElement(MemberAccessBoard, {
@@ -124,7 +150,7 @@ describe("Access board, one request", () => {
     expect(api.setBulkAccess.mock.calls[1][1]).toMatchObject({ audience: { type: "group", groupId: "g1" }, mode: "private" });
   });
 
-  it("Set everything to → No access on a group that opens the whole vault says what leaves people's computers", async () => {
+  it("No access → Add all on a group that opens the whole vault says what leaves people's computers (no Set everything to)", async () => {
     api.getAccessBoard.mockResolvedValue({ ...tree, modes: "eeee", complete: true });
     const renderGroup = (vaultPermission: "edit" | null) => act(async () => root.render(createElement(MemberAccessBoard, {
       orgId: "org-1", vaultId: "v1", member, isSelf: false, canSetAccess: true,
@@ -133,8 +159,9 @@ describe("Access board, one request", () => {
         grants: vaultPermission ? [{ resourceType: "vault", permission: vaultPermission, path: null }] : [{ resourceType: "folder", permission: "edit", path: "Specs" }] },
     } as never)));
     const noAccess = async () => {
-      await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Set everything to"]')!.click());
-      const none = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find((li) => li.textContent?.startsWith("Remove all"))!;
+      expect(host.querySelector('button[aria-label="Set everything to"]')).toBeNull();
+      await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="No access actions"]')!.click());
+      const none = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find((li) => li.textContent?.startsWith("Add all"))!;
       await act(async () => none.click());
       return document.querySelector<HTMLElement>('[role="alertdialog"]');
     };

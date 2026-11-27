@@ -1,12 +1,14 @@
-import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { groupIconFor } from "../lib/groupIcon";
 import { ActivitySkeleton } from "./MemberProfileSkeletons";
 import { dayLabel } from "../lib/memberActivity";
 import { createPortal } from "react-dom";
-import type { AccessGroup, AccessGroupsList, GroupActivityEvent, GroupSkill, MemberOverview, TeamAccess } from "../lib/api";
+import type { AccessGroup, AccessGroupsList, GroupActivityEvent, GroupSkill, HeldPerson, MemberOverview, TeamAccess } from "../lib/api";
+import { HeldBackDialog, HeldChoices } from "./HeldBackDialog";
 import { ApiError } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import {
+  defaultGroupName,
   filterGroups,
   groupAccessSummary,
   groupColor,
@@ -25,6 +27,7 @@ import { markSelfAccessChange } from "../lib/sync/selfAccessChanges";
 import { toast } from "../lib/toast";
 import { AsyncButton } from "./AsyncButton";
 import { Avatar } from "./Avatar";
+import { CheckIcon } from "./CheckIcon";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { MemberAccessBoard } from "./MemberAccessBoard";
 import { MenuSelect } from "./MenuSelect";
@@ -119,8 +122,10 @@ function AvatarStack({ people }: { people: MemberOverview[] }) {
 
 // ── The list ───────────────────────────────────────────────────────────────
 
-export function GroupsList({ list, failed, members, manage, busy, query, onOpen, onRename, onDelete, onRetry }: {
+export function GroupsList({ list, failed, members, manage, busy, query, onOpen, onRename, onDelete, onRetry, onCreateForEveryone }: {
   list: AccessGroupsList | null;
+  /** "Create a group for everyone" (owners/admins; no automatic group, 2026-11-27). */
+  onCreateForEveryone?: () => void;
   /** The toolbar's search text (Members and access owns the search box). */
   query: string;
   failed: boolean;
@@ -149,8 +154,13 @@ export function GroupsList({ list, failed, members, manage, busy, query, onOpen,
           <p className="groups-empty-title">No access groups yet</p>
           <p className="muted groups-empty-line">
             Put people in a group (Design, Sales, Contractors) and give the group access once, instead of person by person.
-            {manage ? " A group only adds access; it never takes any away. Start with + New access group above." : ""}
+            {manage ? " A group only gives access, and a setting just for a person still decides for them. Start with + New access group above." : ""}
           </p>
+          {manage && onCreateForEveryone && (
+            <button type="button" className="ghost-pill groups-empty-everyone" disabled={busy} onClick={onCreateForEveryone}>
+              Create a group for everyone
+            </button>
+          )}
         </div>
       ) : shown.length === 0 ? (
         <p className="member-activity-empty">No group matches “{query.trim()}”.</p>
@@ -206,15 +216,15 @@ export function GroupsList({ list, failed, members, manage, busy, query, onOpen,
 
 // ── Dialogs ────────────────────────────────────────────────────────────────
 
-function Modal({ label, onClose, children }: { label: string; onClose: () => void; children: React.ReactNode }) {
+function Modal({ label, onClose, children, className, closeOnBackdrop = true }: { label: string; onClose: () => void; children: React.ReactNode; className?: string; closeOnBackdrop?: boolean }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   return createPortal(
-    <div className="modal-backdrop" onClick={(e) => { e.stopPropagation(); onClose(); }}>
-      <div className="modal group-dialog" role="dialog" aria-modal="true" aria-label={label} onClick={(e) => e.stopPropagation()}>
+    <div className="modal-backdrop" onClick={(e) => { e.stopPropagation(); if (closeOnBackdrop) onClose(); }}>
+      <div className={`modal group-dialog${className ? ` ${className}` : ""}`} role="dialog" aria-modal="true" aria-label={label} onClick={(e) => e.stopPropagation()}>
         {children}
       </div>
     </div>,
@@ -223,28 +233,85 @@ function Modal({ label, onClose, children }: { label: string; onClose: () => voi
 }
 
 /** Checkbox list of people, searchable. */
-function PeopleChecklist({ people, picked, onToggle, myUserId }: {
+function PeopleChecklist({ people, picked, onToggle, onToggleAll, myUserId, grid = false, label }: {
+  /** "Select all" on the head line (the people the search shows). */
+  onToggleAll?: (userIds: string[], on: boolean) => void;
+  /** Cards in a grid (the wide dialogs), easier to scan for many people. */
+  grid?: boolean;
+  /** The field's name, drawn on the head line with the count, search and Select all. */
+  label?: string;
   people: MemberOverview[];
-  picked: ReadonlySet<string>;
+  picked: Set<string>;
   onToggle: (userId: string) => void;
   myUserId?: string;
 }) {
   const [q, setQ] = useState("");
+  const [searching, setSearching] = useState(false);
   const shown = people.filter((m) => {
     const s = q.trim().toLowerCase();
     return !s || (m.name ?? "").toLowerCase().includes(s) || (m.email ?? "").toLowerCase().includes(s);
   });
+  const allOn = shown.length > 0 && shown.every((m) => picked.has(m.userId));
+  const some = !allOn && shown.some((m) => picked.has(m.userId));
+  const searchIcon = (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+      <circle cx="11" cy="11" r="7" />
+      <path d="m20 20-3.5-3.5" />
+    </svg>
+  );
+  // One head line (2026-11-28): name and count on the left; a search icon
+  // that opens a small field, and Select all, on the right.
+  const head = label !== undefined && (
+    <div className="group-picker-head">
+      <span className="invite-field-label">{label}</span>
+      <small className="muted group-picker-count">{picked.size} of {people.length} selected</small>
+      <span className="group-picker-tools">
+        {people.length > 6 && (searching || q ? (
+          <span className="members-access-search group-picker-search is-compact">
+            {searchIcon}
+            <input
+              type="search"
+              autoFocus
+              placeholder="Find people"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onBlur={() => { if (!q) setSearching(false); }}
+              onKeyDown={(e) => { if (e.key === "Escape" && q) { e.stopPropagation(); setQ(""); } }}
+              aria-label="Search people"
+            />
+          </span>
+        ) : (
+          <button type="button" className="icon-btn group-picker-search-btn" aria-label="Search people" title="Search people" onClick={() => setSearching(true)}>
+            {searchIcon}
+          </button>
+        ))}
+        {onToggleAll && shown.length > 1 && (
+          <label className="group-picker-all">
+            <input
+              type="checkbox"
+              checked={allOn}
+              ref={(el) => { if (el) el.indeterminate = some; }}
+              onChange={() => onToggleAll(shown.map((m) => m.userId), !allOn)}
+            />
+            <span>Select all</span>
+          </label>
+        )}
+      </span>
+    </div>
+  );
   return (
     <div className="group-picker">
-      {people.length > 6 && (
-        <span className="members-access-search">
-          <input type="search" placeholder="Name or email" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search people" />
+      {head}
+      {label === undefined && people.length > 6 && (
+        <span className="members-access-search group-picker-search">
+          {searchIcon}
+          <input type="search" placeholder="Find people" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search people" />
         </span>
       )}
-      <ul className="group-picker-list">
+      <ul className={`group-picker-list${grid ? " is-grid" : ""}`}>
         {shown.map((m) => (
           <li key={m.userId}>
-            <label className="group-picker-row">
+            <label className={`group-picker-row${picked.has(m.userId) ? " is-picked" : ""}`}>
               <input type="checkbox" checked={picked.has(m.userId)} onChange={() => onToggle(m.userId)} />
               <Avatar label={personName(m)} image={m.image} userId={m.userId} />
               <span className="members-table-names">
@@ -260,9 +327,11 @@ function PeopleChecklist({ people, picked, onToggle, myUserId }: {
   );
 }
 
-/** New group (name, people, auto-join) or Rename (name only). */
-export function GroupDialog({ orgId, groups, group, candidates, myUserId, onClose, onSaved }: {
+/** New group (name, people, auto-join, then what it opens) or Rename (name only). */
+export function GroupDialog({ orgId, groups, group, candidates, myUserId, onClose, onSaved, forEveryone = false }: {
   orgId: string;
+  /** "Create a group for everyone": everyone in, new members join. */
+  forEveryone?: boolean;
   groups: readonly AccessGroup[];
   /** Rename this group; absent = create a new one. */
   group?: AccessGroup;
@@ -272,40 +341,38 @@ export function GroupDialog({ orgId, groups, group, candidates, myUserId, onClos
   onClose: () => void;
   onSaved: (groupId: string) => void;
 }) {
-  const [name, setName] = useState(group?.name ?? "");
-  const [picked, setPicked] = useState<Set<string>>(() => new Set());
-  const [autoJoin, setAutoJoin] = useState(group?.autoJoin ?? false);
+  if (!group) {
+    return <NewGroupWizard orgId={orgId} groups={groups} candidates={candidates} myUserId={myUserId} forEveryone={forEveryone} onClose={onClose} onSaved={onSaved} />;
+  }
+  return <RenameGroupDialog orgId={orgId} groups={groups} group={group} onClose={onClose} onSaved={onSaved} />;
+}
+
+function RenameGroupDialog({ orgId, groups, group, onClose, onSaved }: {
+  orgId: string;
+  groups: readonly AccessGroup[];
+  group: AccessGroup;
+  onClose: () => void;
+  onSaved: (groupId: string) => void;
+}) {
+  const [name, setName] = useState(group.name);
   const [error, setError] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
-  const problem = groupNameProblem(name, groups, group?.id);
-
+  const problem = groupNameProblem(name, groups, group.id);
   const save = async () => {
     setTouched(true);
     if (problem) return;
     setError(null);
     try {
-      if (group) {
-        await authManager.api.updateGroup(orgId, group.id, { name: name.trim() });
-        onSaved(group.id);
-      } else {
-        const made = await authManager.api.createGroup(orgId, {
-          name: name.trim(),
-          color: nextGroupColor(groups),
-          autoJoin,
-          memberIds: [...picked],
-        });
-        if (myUserId && picked.has(myUserId)) markSelfAccessChange([orgId]);
-        onSaved(made.id);
-      }
+      await authManager.api.updateGroup(orgId, group.id, { name: name.trim() });
+      onSaved(group.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
-
   return (
-    <Modal label={group ? "Rename access group" : "New access group"} onClose={onClose}>
+    <Modal label="Rename access group" onClose={onClose}>
       <div className="invite-head">
-        <h2 className="confirm-title">{group ? "Rename access group" : "New access group"}</h2>
+        <h2 className="confirm-title">Rename access group</h2>
         <button type="button" className="invite-close" aria-label="Close" onClick={onClose}>×</button>
       </div>
       <label className="group-dialog-field">
@@ -316,40 +383,239 @@ export function GroupDialog({ orgId, groups, group, candidates, myUserId, onClos
           className="group-name-input"
           value={name}
           maxLength={60}
-          placeholder="Design, Sales, Contractors…"
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void save(); } }}
         />
       </label>
       {touched && problem && <div className="auth-error">{problem}</div>}
-      {!group && (
-        <>
-          <span className="invite-field-label group-dialog-sub">People</span>
-          <PeopleChecklist
-            people={candidates}
-            picked={picked}
-            myUserId={myUserId}
-            onToggle={(id) => setPicked((p) => { const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id); return n; })}
-          />
-          {/* A setting, not another person: a switch row, unlike the People checkboxes. */}
-          <label className="group-dialog-setting">
-            <span className="group-dialog-setting-text">
-              New members join this group
-              <small className="muted">Everyone who joins {"the vault"} later is added automatically.</small>
-            </span>
-            <Switch checked={autoJoin} onChange={setAutoJoin} ariaLabel="New members join this group" />
-          </label>
-          <p className="field-hint">Pick what it can open on its Access tab. Groups only add access.</p>
-        </>
-      )}
       {error && <div className="auth-error">{error}</div>}
       <div className="invite-foot">
         <span />
         <div className="confirm-actions">
           <button type="button" className="ghost-pill" onClick={onClose}>Cancel</button>
-          <AsyncButton className="primary" spinnerTone="on-accent" onClick={save}>
-            {group ? "Save" : picked.size ? `Create with ${picked.size} ${picked.size === 1 ? "person" : "people"}` : "Create access group"}
-          </AsyncButton>
+          <AsyncButton className="primary" spinnerTone="on-accent" onClick={save}>Save</AsyncButton>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * New access group in two steps, in one large dialog that keeps its size
+ * (2026-11-28): 1. name and people; 2. what it can open, on the group's own
+ * board. Nothing reaches anyone until Create group: step 2 edits a group with
+ * nobody in it yet, so its moves change nobody's access. Create group then
+ * asks about everyone whose own setting differs from what the group gives
+ * (Keep their own / Use the group's), adds the people and applies the
+ * choices. Cancel, Escape or the close button at step 2 deletes it again.
+ */
+function NewGroupWizard({ orgId, groups, candidates, myUserId, forEveryone, onClose, onSaved }: {
+  orgId: string;
+  groups: readonly AccessGroup[];
+  candidates: MemberOverview[];
+  myUserId?: string;
+  forEveryone: boolean;
+  onClose: () => void;
+  onSaved: (groupId: string) => void;
+}) {
+  const [name, setName] = useState(forEveryone ? (groups.some((g) => g.name.trim().toLowerCase() === "everyone") ? "All members" : "Everyone") : "");
+  const [picked, setPicked] = useState<Set<string>>(() => new Set(forEveryone ? candidates.map((c) => c.userId) : []));
+  const [autoJoin, setAutoJoin] = useState(forEveryone);
+  const [error, setError] = useState<string | null>(null);
+  const [touched, setTouched] = useState(false);
+  // 3 ("own") only when someone's own setting differs from what the group gives.
+  const [step, setStep] = useState<"people" | "access" | "own">("people");
+  const [chosen, setChosen] = useState<Set<string>>(() => new Set());
+  // The group being set up (nobody in it until Create group).
+  const [draft, setDraft] = useState<AccessGroup | null>(null);
+  const [held, setHeld] = useState<HeldPerson[] | null>(null);
+  const [working, setWorking] = useState(false);
+  // Closed some other way (Settings shut) before Create group: delete it too.
+  const pending = useRef<string | null>(null);
+  useEffect(() => () => {
+    if (pending.current) void authManager.api.deleteGroup(orgId, pending.current).catch(() => {});
+  }, [orgId]);
+  // No name typed: "Group N" (2026-11-28), shown as the placeholder.
+  const fallbackName = useMemo(() => defaultGroupName(groups.filter((g) => g.id !== draft?.id)), [groups, draft?.id]);
+  const finalName = name.trim() || fallbackName;
+  const problem = groupNameProblem(finalName, groups.filter((g) => g.id !== draft?.id), draft?.id);
+  const byId = useMemo(() => new Map(candidates.map((m) => [m.userId, m])), [candidates]);
+  const nameOf = (userId: string) => { const m = byId.get(userId); return m?.name || m?.email || "Someone"; };
+  const imageOf = (userId: string) => byId.get(userId)?.image ?? null;
+  const count = picked.size;
+
+  const reloadDraft = async (id: string) => {
+    const list = await authManager.api.listGroups(orgId);
+    const g = list.groups.find((x) => x.id === id) ?? null;
+    if (g) setDraft(g);
+    return g;
+  };
+
+  const next = async () => {
+    setTouched(true);
+    if (problem) return;
+    setError(null);
+    try {
+      if (!draft) {
+        const made = await authManager.api.createGroup(orgId, { name: finalName, color: nextGroupColor(groups), autoJoin: false, memberIds: [] });
+        pending.current = made.id;
+        const g = await reloadDraft(made.id);
+        if (!g) setDraft({ id: made.id, name: finalName, color: null, autoJoin: false, memberIds: [], invited: [], grants: [] } as unknown as AccessGroup);
+      } else if (draft.name !== finalName) {
+        await authManager.api.updateGroup(orgId, draft.id, { name: finalName });
+        await reloadDraft(draft.id);
+      }
+      setStep("access");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Leaving before Create group: the group was never created for anyone.
+  const cancel = () => {
+    if (draft) void authManager.api.deleteGroup(orgId, draft.id).catch(() => {});
+    pending.current = null;
+    onClose();
+  };
+
+  const commit = async (useGroups: HeldPerson[]) => {
+    if (!draft) return;
+    const ids = [...picked];
+    if (myUserId && picked.has(myUserId)) markSelfAccessChange([orgId, ...(draft.grants ?? []).map((g) => g.resourceId)]);
+    if (ids.length) await authManager.api.addGroupMembers(orgId, draft.id, ids);
+    if (useGroups.length) {
+      await authManager.api.groupLetDecide(orgId, draft.id, useGroups.map((h) => ({ userId: h.userId, resourceType: h.resourceType, resourceId: h.resourceId })));
+    }
+    if (autoJoin) await authManager.api.updateGroup(orgId, draft.id, { autoJoin: true });
+    pending.current = null;
+    syncManager.retryHeldRegistrations();
+    toast(ids.length ? `Created ${draft.name} with ${ids.length === 1 ? "1 person" : `${ids.length} people`}.` : `Created ${draft.name}.`);
+    onSaved(draft.id);
+  };
+
+  const create = async () => {
+    if (!draft || working) return;
+    setError(null);
+    setWorking(true);
+    try {
+      const list = count
+        ? await authManager.api.groupHeld(orgId, draft.id, { addUserIds: [...picked] }).catch(() => [] as HeldPerson[])
+        : [];
+      if (list.length) { setHeld(list); setChosen(new Set()); setStep("own"); return; }
+      await commit([]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const placeOf = (type: string, id: string) => type === "vault"
+    ? "the whole vault"
+    : (draft?.grants ?? []).find((g) => g.resourceId === id)?.path?.split("/").pop() ?? null;
+  const STEPS = { people: "Name and people", access: "Access", own: "Their own settings" } as const;
+  const stepNo = step === "people" ? 1 : step === "access" ? 2 : 3;
+  const close = step === "people" ? onClose : cancel;
+
+  const createLabel = count ? `Create with ${count} ${count === 1 ? "person" : "people"}` : "Create access group";
+
+  return (
+    <Modal label="New access group" onClose={close} className="is-wizard" closeOnBackdrop={step === "people"}>
+      <div className="invite-head">
+        <span className="group-wizard-title">
+          <h2 className="confirm-title">New access group</h2>
+          <ol className="wizard-steps" aria-label={`Step ${stepNo}`}>
+            {(held || step === "own" ? (["people", "access", "own"] as const) : (["people", "access"] as const)).map((s, i) => {
+              const n = i + 1;
+              const state = n < stepNo ? "done" : n === stepNo ? "current" : "todo";
+              return (
+                <li key={s} className={`wizard-step is-${state}`} aria-current={state === "current" ? "step" : undefined}>
+                  <span className="wizard-step-dot">{state === "done" ? <CheckIcon size={11} /> : n}</span>
+                  <span className="wizard-step-label">{STEPS[s]}</span>
+                </li>
+              );
+            })}
+          </ol>
+        </span>
+        <button type="button" className="invite-close" aria-label="Close" onClick={close}>×</button>
+      </div>
+      <div className="group-wizard-body">
+        {step === "people" ? (
+          <>
+            <label className="group-dialog-field">
+              <span className="invite-field-label">Name</span>
+              <input
+                type="text"
+                autoFocus
+                className="group-name-input"
+                value={name}
+                maxLength={60}
+                placeholder={fallbackName}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void next(); } }}
+              />
+            </label>
+            {touched && problem && <div className="auth-error">{problem}</div>}
+            <PeopleChecklist
+              label="People"
+              people={candidates}
+              picked={picked}
+              myUserId={myUserId}
+              grid
+              onToggle={(id) => setPicked((p) => { const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id); return n; })}
+              onToggleAll={(ids, on) => setPicked((p) => { const n = new Set(p); for (const id of ids) { if (on) n.add(id); else n.delete(id); } return n; })}
+            />
+            {/* Settings, not more people: switch rows, set apart from the cards. */}
+            <div className="group-dialog-settings">
+            <label className="group-dialog-setting">
+              <span className="group-dialog-setting-text">
+                New members join this group
+                <small className="muted">Everyone who joins {"the vault"} later is added automatically.</small>
+              </span>
+              <Switch checked={autoJoin} onChange={setAutoJoin} ariaLabel="New members join this group" />
+            </label>
+            </div>
+          </>
+        ) : step === "own" && held && draft ? (
+          <>
+            <p className="group-wizard-question">Keep theirs, or use the group's?</p>
+            <HeldChoices groupName={draft.name} held={held} nameOf={nameOf} imageOf={imageOf} placeOf={placeOf} chosen={chosen} onChosen={setChosen} />
+          </>
+        ) : draft ? (
+          <>
+            <p className="field-hint group-wizard-note">
+              What {draft.name} can open. <span className="access-board-intro-drag">Drag</span> rows between columns; nothing reaches anyone until you create the group.
+            </p>
+            <GroupAccessTab
+              orgId={orgId}
+              group={draft}
+              includesMe={false}
+              teamAccess={null}
+              onGrantsChanged={async () => { await reloadDraft(draft.id); }}
+              onItemWritten={() => {}}
+              nameOf={nameOf}
+              imageOf={imageOf}
+              setup
+            />
+          </>
+        ) : null}
+      </div>
+      {error && <div className="auth-error">{error}</div>}
+      <div className="invite-foot">
+        {step !== "people" ? (
+          <button type="button" className="ghost-pill" onClick={() => { if (step === "own") { setHeld(null); setStep("access"); } else setStep("people"); }}>← Back</button>
+        ) : <span />}
+        <div className="confirm-actions">
+          <button type="button" className="ghost-pill" onClick={close}>Cancel</button>
+          {step === "people" ? (
+            <AsyncButton className="primary" spinnerTone="on-accent" onClick={next}>Next</AsyncButton>
+          ) : step === "own" ? (
+            <AsyncButton className="primary" spinnerTone="on-accent" onClick={async () => {
+              try { await commit((held ?? []).filter((h) => chosen.has(h.userId))); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+            }}>{createLabel}</AsyncButton>
+          ) : (
+            <AsyncButton className="primary" spinnerTone="on-accent" disabled={!draft} onClick={create}>{createLabel}</AsyncButton>
+          )}
         </div>
       </div>
     </Modal>
@@ -367,7 +633,7 @@ export function AddPeopleDialog({ group, candidates, myUserId, onClose, onAdd }:
   const [picked, setPicked] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
   return (
-    <Modal label={`Add people to ${group.name}`} onClose={onClose}>
+    <Modal label={`Add people to ${group.name}`} onClose={onClose} className="is-wide">
       <div className="invite-head">
         <h2 className="confirm-title">Add people to {group.name}</h2>
         <button type="button" className="invite-close" aria-label="Close" onClick={onClose}>×</button>
@@ -376,10 +642,13 @@ export function AddPeopleDialog({ group, candidates, myUserId, onClose, onAdd }:
         <p className="muted">Everyone you can manage is already in this group.</p>
       ) : (
         <PeopleChecklist
+          label="People"
           people={candidates}
           picked={picked}
           myUserId={myUserId}
+          grid
           onToggle={(id) => setPicked((p) => { const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id); return n; })}
+          onToggleAll={(ids, on) => setPicked((p) => { const n = new Set(p); for (const id of ids) { if (on) n.add(id); else n.delete(id); } return n; })}
         />
       )}
       {error && <div className="auth-error">{error}</div>}
@@ -436,6 +705,7 @@ export function GroupPage({
 }) {
   const [tab, setTab] = useState<GroupTab>(manage ? initialTab : "members");
   const [adding, setAdding] = useState(false);
+  const [heldAdd, setHeldAdd] = useState<{ userIds: string[]; held: HeldPerson[] } | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [confirm, setConfirm] = useState<{ title: string; label: string; body: React.ReactNode; apply: () => Promise<void> } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -471,12 +741,39 @@ export function GroupPage({
     await onChanged();
   };
 
-  const add = async (userIds: string[]) => {
+  const nameOf = (userId: string) => {
+    const m = members.find((x) => x.userId === userId);
+    return m?.name || m?.email || "Someone";
+  };
+  const imageOf = (userId: string) => members.find((x) => x.userId === userId)?.image ?? null;
+  const placeOf = (type: string, id: string) => type === "vault"
+    ? "the whole vault"
+    : (group.grants ?? []).find((g) => g.resourceId === id)?.path?.split("/").pop() ?? null;
+
+  const commitAdd = async (userIds: string[], letDecide: HeldPerson[]) => {
     if (myUserId && userIds.includes(myUserId)) markSelfAccessChange(selfResources());
     const out = await authManager.api.addGroupMembers(orgId, group.id, userIds);
+    if (letDecide.length) {
+      await authManager.api.groupLetDecide(orgId, group.id, letDecide.map((h) => ({
+        userId: h.userId, resourceType: h.resourceType, resourceId: h.resourceId,
+      })));
+    }
     setAdding(false);
+    setHeldAdd(null);
     toast(out.added === 1 ? `Added 1 person to ${group.name}.` : `Added ${out.added} people to ${group.name}.`);
     await afterMembership();
+  };
+
+  // Ask first (2026-11-27): someone whose own setting keeps what the group
+  // gives from reaching them is named before they are added.
+  const add = async (userIds: string[]) => {
+    const held = await authManager.api.groupHeld(orgId, group.id, { addUserIds: userIds }).catch(() => [] as HeldPerson[]);
+    if (held.length) {
+      setAdding(false);
+      setHeldAdd({ userIds, held });
+      return;
+    }
+    await commitAdd(userIds, []);
   };
 
   const toggleAutoJoin = async () => {
@@ -617,18 +914,32 @@ export function GroupPage({
             </table>
           )}
           <p className="field-hint group-members-note">
-            A group only adds access: someone in two groups gets the higher level. A person set to No access somewhere,
-            or with their own vault-wide level, keeps that.
+            A group only gives access: someone in two groups gets the higher level. A setting just for a person decides
+            for them where it applies; adding them asks first.
           </p>
         </div>
       ) : tab === "access" ? (
-        <GroupAccessTab orgId={orgId} group={group} includesMe={includesMe} teamAccess={teamAccess} onGrantsChanged={onGrantsChanged} onItemWritten={onItemWritten} />
+        <GroupAccessTab orgId={orgId} group={group} includesMe={includesMe} teamAccess={teamAccess} onGrantsChanged={onGrantsChanged} onItemWritten={onItemWritten} nameOf={nameOf} imageOf={imageOf} />
       ) : tab === "skills" ? (
         <GroupSkillsTab orgId={orgId} group={group} includesMe={includesMe} onChanged={onChanged} />
       ) : (
         <GroupActivityTab orgId={orgId} group={group} vaultName={vaultName} />
       )}
 
+      {heldAdd && (
+        <HeldBackDialog
+          groupName={group.name}
+          held={heldAdd.held}
+          nameOf={nameOf}
+          imageOf={imageOf}
+          placeOf={placeOf}
+          action={heldAdd.userIds.length === 1 ? "Add 1 person" : `Add ${heldAdd.userIds.length} people`}
+          onCancel={() => setHeldAdd(null)}
+          onApply={async (chosen) => {
+            try { await commitAdd(heldAdd.userIds, chosen); } catch (e) { toast(e instanceof Error ? e.message : String(e), "error"); }
+          }}
+        />
+      )}
       {adding && (
         <AddPeopleDialog group={group} candidates={candidates} myUserId={myUserId} onClose={() => setAdding(false)} onAdd={add} />
       )}
@@ -661,7 +972,11 @@ export function GroupPage({
   );
 }
 
-function GroupAccessTab({ orgId, group, includesMe, teamAccess, onGrantsChanged, onItemWritten }: {
+function GroupAccessTab({ orgId, group, includesMe, teamAccess, onGrantsChanged, onItemWritten, nameOf, imageOf, setup = false }: {
+  /** Inside the New access group dialog: the wizard says what the board means. */
+  setup?: boolean;
+  nameOf: (userId: string) => string;
+  imageOf?: (userId: string) => string | null;
   orgId: string;
   group: AccessGroup;
   includesMe: boolean;
@@ -679,9 +994,9 @@ function GroupAccessTab({ orgId, group, includesMe, teamAccess, onGrantsChanged,
   if (!vaultId) return <p className="member-activity-empty">Open the vault's folder on this computer to set what {group.name} can open.</p>;
   return (
     <div className="group-access">
-      <p className="field-hint group-access-note">
-        What {group.name} can open, on top of each member's own access. No access here only means the group adds nothing.
-      </p>
+      {!setup && <p className="field-hint group-access-note">
+        What {group.name} can open for its members. Where someone has a setting just for them, that decides; a change here asks first. No access here means only that the group gives nothing there; people keep what they get from elsewhere.
+      </p>}
       <MemberAccessBoard
         orgId={orgId}
         vaultId={vaultId}
@@ -695,6 +1010,9 @@ function GroupAccessTab({ orgId, group, includesMe, teamAccess, onGrantsChanged,
         onItemWritten={() => { onItemWritten(); void onGrantsChanged(); }}
         onChanged={async () => { onItemWritten(); await onGrantsChanged(); }}
         group={{ id: group.id, name: group.name, grants: group.grants ?? [], includesMe }}
+        nameOf={nameOf}
+        imageOf={imageOf}
+        hideIntro={setup}
       />
     </div>
   );
@@ -771,7 +1089,7 @@ function GroupSkillsTab({ orgId, group, includesMe, onChanged }: {
         })}
       </ul>
       <p className="field-hint skills-access-note group-tab-note">
-        A group only adds: members get the higher of the group's level and the Everyone row. Someone set to No access for a
+        A group only adds: members get the highest level their groups give. Someone set to No access for a
         skill keeps that.
       </p>
     </div>

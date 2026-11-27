@@ -198,8 +198,8 @@ describe("access groups: lock list ≡ resolver", () => {
   it("concrete: Read-only vault, group edit on a folder", async () => {
     await seedVaultGrant(org, "view");
     expect(await resolverEditable(ana)).toEqual({ root: false, open: true, sub: true, frozen: false, other: false });
-    // A person's own Can view everything combines with the group, highest wins.
-    expect(await resolverEditable(ben)).toEqual({ root: false, open: true, sub: true, frozen: false, other: false });
+    // A person's own Can view everything decides over the group (2026-11-27).
+    expect(await resolverEditable(ben)).toEqual({ root: false, open: false, sub: false, frozen: false, other: false });
     expect(await resolverEditable(cat)).toEqual({ root: false, open: false, sub: false, frozen: false, other: false });
   });
 });
@@ -211,7 +211,7 @@ describe("access groups: write gates", () => {
     expect(await canCreateIn(ana.userId, vault, folders.sub)).toBe(true);
     expect(await canCreateIn(ana.userId, vault, folders.other)).toBe(false);
     expect(await canCreateIn(ana.userId, vault, null)).toBe(false);
-    expect(await canCreateIn(ben.userId, vault, folders.open)).toBe(true); // own Can view + the group's edit
+    expect(await canCreateIn(ben.userId, vault, folders.open)).toBe(false); // own Can view decides over the group's edit
     expect(await canCreateIn(cat.userId, vault, folders.open)).toBe(false);
 
     const ok = await call(ana, "POST", "/api/notes", { vaultId: vault, relPath: "Open/new.md", folderId: folders.open });
@@ -221,7 +221,7 @@ describe("access groups: write gates", () => {
 
     await grant("vault", org, "edit");
     expect(await vaultRootWritable(ana.userId, org)).toBe(true);
-    expect(await vaultRootWritable(ben.userId, org)).toBe(true); // own Can view + the group's vault edit
+    expect(await vaultRootWritable(ben.userId, org)).toBe(false); // own Can view decides over the group's vault edit
     expect(await vaultRootWritable(cat.userId, org)).toBe(false);
     const atRoot = await call(ana, "POST", "/api/notes", { vaultId: vault, relPath: "top.md" });
     expect(atRoot.status).toBe(201);

@@ -111,7 +111,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNo
   },
   {
     id: "members",
-    label: "Members and access",
+    label: "People and access",
     icon: (
       <MenuIcon>
         <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
@@ -370,7 +370,7 @@ export function VaultSettingsDialog({
         </nav>
 
         <section key={shown} ref={contentRef} className="settings-content rd-tab-in" aria-label={activeTab.label}>
-          {/* Members and access (and Skills) swap the title for a back link
+          {/* People and access (and Skills) swap the title for a back link
               while a profile (or a skill) is open. */}
           {!((shown === "members" || shown === "skills") && !lockedTab) && <h2 className="settings-section-title">{rdLabel(activeTab)}</h2>}
           {shown === "general" ? (

@@ -82,7 +82,6 @@ describe("Member profile skeletons", () => {
   });
 
   it("Board view shows three skeleton columns until the tree arrives", async () => {
-    localStorage.setItem("context.memberAccess.view", "board");
     const d = deferred<unknown>();
     api.listAccessTree.mockReturnValue(d.promise);
     await render("access");
@@ -96,21 +95,7 @@ describe("Member profile skeletons", () => {
     expect(host.querySelector(".member-skel-pending")).toBeNull();
   });
 
-  it("List view shows skeleton tree rows until the tree arrives", async () => {
-    localStorage.setItem("context.memberAccess.view", "list");
-    const d = deferred<unknown>();
-    api.listAccessTree.mockReturnValue(d.promise);
-    await render("access");
-    expect(host.querySelectorAll(".member-skel-tree .member-access-row")).toHaveLength(6);
-    expect(spinners()).toBe(0);
-    await act(async () => d.resolve({ folders: [{ id: "f1", path: "Specs" }], notes: [] }));
-    for (let i = 0; i < 3; i++) await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
-    expect(host.querySelector(".member-skel-tree")).toBeNull();
-    expect(skeletons()).toBe(0);
-  });
-
   it("a failed tree load shows the error, not a skeleton", async () => {
-    localStorage.setItem("context.memberAccess.view", "list");
     api.listAccessTree.mockRejectedValue(new Error("down"));
     await render("access");
     await act(async () => { await new Promise((r) => setTimeout(r, 10)); });

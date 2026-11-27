@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { sharePrincipalType, shareResourceId, shareResourceType, type BulkAccessResource, type MemberOverview, type TeamAccessMode } from "../lib/api";
+import { sharePrincipalType, shareResourceId, shareResourceType, type BulkAccessResource, type HeldPerson, type MemberOverview, type TeamAccessMode } from "../lib/api";
+import { HeldBackDialog } from "./HeldBackDialog";
 import { authManager } from "../lib/auth/authManager";
 import {
   BOARD_COLUMNS,
@@ -37,7 +38,8 @@ import { itemLockRows, resourceIdsByPath } from "../lib/locks";
 import { useStore } from "../store";
 
 /** A column's mark: a pencil for Can edit, an eye for Can view, a crossed-out
- *  eye for No access, drawn in the column's ink on its own tint. */
+ *  eye for No access, drawn in the column's ink on
+ *  its own tint. */
 function ColumnGlyph({ mode }: { mode: TeamAccessMode }) {
   return (
     <span className="access-board-column-glyph" aria-hidden="true">
@@ -119,6 +121,8 @@ export interface MemberAccessBoardProps {
   onChanged: () => Promise<void>;
   /** The host already shows a vault-wide control: skip "Set everything to". */
   hideSetEverything?: boolean;
+  /** The dialog around it says how to use it (New access group). */
+  hideIntro?: boolean;
   /** Extra controls at the end of the header (the profile's List/Board switch). */
   headExtra?: React.ReactNode;
   /** The Access tab's shared load (tree + modes). Absent: the board loads its own. */
@@ -130,6 +134,18 @@ export interface MemberAccessBoardProps {
    * re-read is one reload of the group's map. `member` is then only a label.
    */
   group?: { id: string; name: string; grants: readonly GroupGrantLite[]; includesMe: boolean };
+  /** A group board's names for its members (the held-back dialog). */
+  nameOf?: (userId: string) => string;
+  /** A person's profile picture for the held-back dialog (null: their drawn avatar). */
+  imageOf?: (userId: string) => string | null;
+  /**
+   * Where this person's access comes from (2026-11-27): settings just for them
+   * (Personal Access) or their groups (Group Access). Null hides the switch:
+   * a group's board, or a server without `personal-access`.
+   */
+  accessSource?: "personal" | "group" | null;
+  /** They have some setting just for them (vault or item): offer Reset to Group Access. */
+  hasPersonal?: boolean;
 }
 
 /** The part of a group grant the board needs (see `GroupGrant` in lib/api). */
@@ -181,10 +197,10 @@ export function MemberAccessBoard({
   onItemWritten,
   onChanged,
   hideSetEverything = false,
+  hideIntro = false,
   headExtra,
   accessMap,
-  group,
-}: MemberAccessBoardProps) {
+  group, nameOf, imageOf, accessSource = null, hasPersonal = false }: MemberAccessBoardProps) {
   /** Whose map this is: a person's user id, or `group:<id>`. */
   const subject = group ? `group:${group.id}` : member.userId;
   /** A write here changes the signed-in user's own access. */
@@ -221,6 +237,7 @@ export function MemberAccessBoard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [held, setHeld] = useState<{ list: HeldPerson[]; resolve: (choice: HeldPerson[] | null) => void } | null>(null);
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [overColumn, setOverColumn] = useState<TeamAccessMode | null>(null);
   /** Armed press: becomes a drag once it travels DRAG_THRESHOLD. */
@@ -280,6 +297,11 @@ export function MemberAccessBoard({
   // A vault still on an older Default access (Can edit / Can view everything):
   // a reset there falls back to that team level, not to groups only.
   const legacyDefault = everyoneMode === "open" || everyoneMode === "readonly";
+  /** The Personal Access / Group Access switch replaces "Reset to groups only". */
+  const showSource = !group && !legacyDefault && accessSource !== null;
+  // Shown at once after a write here, before the member list re-reads.
+  const [personalNow, setPersonalNow] = useState(hasPersonal);
+  useEffect(() => setPersonalNow(hasPersonal), [hasPersonal]);
   const fallback: TeamAccessMode = personVaultMode && personVaultMode !== "custom" ? personVaultMode : everyoneMode ?? "private";
   const own = useMemo(() => ownModes(allRows, summaryModes, fallback), [allRows, summaryModes, fallback]);
   const columns = useMemo(
@@ -410,6 +432,20 @@ export function MemberAccessBoard({
     const vaultWide = selection === null;
     const rows = selection ?? [];
     const resources = vaultWide ? [{ resourceType: "vault" as const, resourceId: orgId }] : rows.map(resourceOf);
+    // Ask first (2026-11-27): a setting just for a person decides for them, so
+    // a group change doesn't reach them. Keep (default) or Let the group decide.
+    let letDecide: HeldPerson[] = [];
+    // Both directions (2026-11-28): a move to No access asks people whose own setting sits there.
+    if (group) {
+      const list = await authManager.api.groupHeld(orgId, group.id, { access: { resources, mode } }).catch(() => [] as HeldPerson[]);
+      if (!live.current) return false;
+      if (list.length) {
+        const choice = await new Promise<HeldPerson[] | null>((resolve) => setHeld({ list, resolve }));
+        setHeld(null);
+        if (choice === null || !live.current) return false;
+        letDecide = choice;
+      }
+    }
     // A row is affected when it, or one of its ancestors, was written: one
     // set lookup per path level instead of scanning every written row.
     const written = new Set(rows.map((w) => w.path));
@@ -433,6 +469,15 @@ export function MemberAccessBoard({
         audience: group ? { type: "group", groupId: group.id } : { type: "users", userIds: [member.userId] },
         mode,
       }, { timeoutMs: BULK_WRITE_TIMEOUT_MS });
+      if (group && letDecide.length) {
+        const results = await authManager.api.groupLetDecide(orgId, group.id, letDecide.map((h) => ({
+          userId: h.userId, resourceType: h.resourceType, resourceId: h.resourceId,
+        })));
+        const people = new Set(results.filter((r) => r.action !== "skipped").map((r) => r.userId)).size;
+        if (people) toast(`${group.name} now decides for ${people === 1 ? "1 more person" : `${people} more people`} there.`);
+      }
+      // A person's write is a setting just for them: offer Reset to Group Access.
+      if (!group) setPersonalNow(true);
       if (!live.current) return true;
       rereadOrReload(allRows.filter((r) => r.key !== except && (affectedKeys.has(r.key) || ancestors.has(r.path))));
       if (vaultWide) await onChanged();
@@ -562,6 +607,18 @@ export function MemberAccessBoard({
       });
       return;
     }
+    if (choice === "reset" && showSource) {
+      setConfirm({
+        title: isSelf ? "Reset to Group Access?" : `Reset ${who} to Group Access?`,
+        button: "Reset",
+        outcome: isSelf
+          ? "Your settings are removed and your groups decide what you get. What your groups don't give leaves your computer. It stays on the server for the team."
+          : "Their settings are removed and their groups decide what they get. What their groups don't give leaves their computer. It stays on the server for the team.",
+        danger: true,
+        apply: resetToDefault,
+      });
+      return;
+    }
     if (choice === "reset") {
       setConfirm({
         title: legacyDefault
@@ -595,6 +652,8 @@ export function MemberAccessBoard({
         readModes(allRows);
       }
       await onChanged();
+      if (live.current) setPersonalNow(false);
+      if (showSource && live.current) toast(isSelf ? "You're back on Group Access." : `${who} is back on Group Access.`);
     } catch (cause) {
       if (live.current) toast(accessWriteFailureMessage(cause), "error");
     } finally {
@@ -604,6 +663,13 @@ export function MemberAccessBoard({
 
   const addAll = (mode: TeamAccessMode) => {
     if (!canSetAccess || busy) return;
+    // Personal Access: Add all is the whole level, including what is added
+    // later (their own vault row), the job "Set everything to" did (2026-11-27).
+    if (showSource && accessSource === "personal") return setEverything(mode);
+    // A group's board has no "Set everything to" (2026-11-28): Add all is the
+    // whole vault, including what is added later, and on No access the group
+    // stops giving anything.
+    if (group) return setEverything(mode === "private" ? "reset" : mode);
     // Snapshot existing item roots. Folder writes include their descendants,
     // just like moving those rows individually; the vault default is untouched.
     const roots = topLevelRows(allRows.map((row) => ({ row, grey: false, indent: 0 })));
@@ -611,9 +677,7 @@ export function MemberAccessBoard({
     const apply = async () => {
       if (await write(roots, mode)) toast("Updated access to existing items.");
     };
-    if (mode === "private" && group) {
-      setConfirm({ ...groupRemoveCopy(group.name, "on every existing item", opensWholeVault(group.grants), group.includesMe), danger: true, apply });
-    } else if (mode === "private") {
+    if (mode === "private") {
       setConfirm({
         title: "Move all existing items to No access?",
         button: "Remove access",
@@ -630,8 +694,10 @@ export function MemberAccessBoard({
     if (tops.length === 0) return;
     const count = tops.length;
     setConfirm({
-      title: `Move ${count} ${count === 1 ? "item" : "items"} to No access?`,
-      button: "Remove access",
+      title: group
+        ? `Stop sharing ${count === 1 ? tops[0].name : `${count} items`} with ${group.name}?`
+        : `Move ${count} ${count === 1 ? "item" : "items"} to No access?`,
+      button: group ? "Stop sharing" : "Remove access",
       outcome: group
         ? groupRemoveCopy(group.name, count === 1 ? `on ${tops[0].name}` : `on these ${count} items`, opensWholeVault(group.grants), group.includesMe).outcome
         : reduceAccessCopy({ kind: "person", name: fullName, self: isSelf }, "private").outcome,
@@ -856,19 +922,32 @@ export function MemberAccessBoard({
   return (
     <div ref={boardRef} className={`access-board${dragKey ? " is-dragging" : ""}`}>
       <div className="access-board-head">
-        <p className="access-board-intro"><span className="access-board-intro-drag">Drag</span> rows between columns, or use the arrows. Changes save right away.</p>
-        {!hideSetEverything && <MenuSelect<EverythingChoice | "none">
+        {!hideIntro && <p className="access-board-intro"><span className="access-board-intro-drag">Drag</span> rows between columns, or use the arrows. Changes save right away.</p>}
+        {showSource && personalNow && (
+          <button
+            type="button"
+            className="member-access-pill is-lg access-board-everything"
+            disabled={locked || !canSetAccess || busy}
+            title={isSelf ? "Remove the settings just for you; your groups decide." : "Remove the settings just for them; their groups decide."}
+            onClick={() => setEverything("reset")}
+          >
+            Reset to Group Access
+          </button>
+        )}
+        {!hideSetEverything && !showSource && !group && <MenuSelect<EverythingChoice | "none">
           value="none"
           options={[
             { value: "open", label: "Can edit", hint: "Every folder and note" },
             { value: "readonly", label: "Can view", hint: "Read only" },
             ...(group
-              ? [{ value: "reset" as const, label: "Remove all", hint: `${who} gives nothing; each person keeps their own access` }]
+              ? [{ value: "reset" as const, label: "No access", hint: `${who} gives nothing; each person keeps their own access` }]
               : [
-                  { value: "private" as const, label: "No access", hint: `Hide everything from ${isSelf ? "you" : who}` },
-                  legacyDefault
-                    ? { value: "reset" as const, label: "Reset to vault default", hint: "Back to what every member gets" }
-                    : { value: "reset" as const, label: "Reset to groups only", hint: `Remove ${isSelf ? "your" : "their"} own settings` },
+                  { value: "private" as const, label: "No access", hint: "Hide everything" },
+                  ...(showSource
+                    ? []
+                    : legacyDefault
+                      ? [{ value: "reset" as const, label: "Reset to vault default", hint: "Back to what every member gets" }]
+                      : [{ value: "reset" as const, label: "Reset to groups only", hint: `Remove settings just for ${isSelf ? "you" : "them"}` }]),
                 ]),
           ]}
           triggerContent="Set everything to"
@@ -888,25 +967,34 @@ export function MemberAccessBoard({
           {columns.map((col, i) => {
             const count = col.count;
             const view = views[i];
+            const title = col.title;
             const actions: Array<{ value: ColumnAction; label: string; hint: string; danger?: boolean }> = [
+              {
+                value: "add",
+                label: "Add all",
+                hint: (showSource && accessSource === "personal") || (group && col.mode !== "private")
+                  ? "Everything, including what's added later"
+                  : col.mode === "private" && group ? `${group.name} gives nothing anywhere`
+                  : col.mode === "private" && showSource ? "No access to everything that exists now, just for them"
+                  : showSource || group ? "Share everything that exists now" : "Move existing items here; keep the vault default",
+              },
               { value: "expand", label: "Expand all", hint: "Show what's inside every folder" },
               { value: "collapse", label: "Collapse all", hint: "Show only the top level" },
-              { value: "add", label: "Add all", hint: "Move existing items here; keep the vault default" },
             ];
             if (col.mode !== "private") {
-              actions.push({ value: "remove", label: "Remove all", hint: "Move everything here to No access", danger: true });
+              actions.push({ value: "remove", label: "Remove all", hint: group ? "Stop sharing everything here" : "Move everything here to No access", danger: true });
             }
             return (
               <section
                 key={col.mode}
                 className={`access-board-column${overColumn === col.mode ? " is-over" : ""}${hint?.target === col.mode ? " is-hint-target" : ""}`}
-                aria-label={col.title}
+                aria-label={title}
                 data-mode={col.mode}
               >
                 <header className="access-board-column-head">
                   <span className="access-board-column-title">
                     <ColumnGlyph mode={col.mode} />
-                    {col.title} <span className="access-board-count">{count}</span>
+                    {title} <span className="access-board-count">{count}</span>
                   </span>
                   <MenuSelect<ColumnAction | "none">
                     value="none"
@@ -915,7 +1003,7 @@ export function MemberAccessBoard({
                     options={canSetAccess ? actions : actions.filter((a) => a.value === "expand" || a.value === "collapse")}
                     triggerContent={dots}
                     caret={false}
-                    ariaLabel={`${col.title} actions`}
+                    ariaLabel={`${title} actions`}
                     triggerClassName="row-more-btn access-board-column-more"
                     menuClassName="access-menu access-board-column-menu"
                     onSelect={(v) => {
@@ -986,6 +1074,18 @@ export function MemberAccessBoard({
           <span className="access-board-icon">{rowGlyph(dragRow)}</span>
           <span className="access-board-name">{dragRow.name}</span>
         </div>
+      )}
+      {held && group && (
+        <HeldBackDialog
+          groupName={group.name}
+          held={held.list}
+          nameOf={nameOf ?? ((id) => id)}
+          imageOf={imageOf}
+          placeOf={(type, id) => type === "vault" ? "the whole vault" : allRows.find((r) => resourceOf(r).resourceId === id)?.name ?? null}
+          action="Save change"
+          onCancel={() => held.resolve(null)}
+          onApply={async (chosen) => held.resolve(chosen)}
+        />
       )}
       {confirm && (
         <ConfirmDialog

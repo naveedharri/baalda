@@ -15,7 +15,7 @@ import {
 } from "../../billing/store.js";
 import { announceMemberJoined, announceMemberRemoved } from "../../sync/member-events.js";
 import { announceInvitationGone } from "../../sync/user-events.js";
-import { applyInvitationAccess } from "../../members/invitation-access.js";
+import { applyInvitationAccess, applyMemberLevel, applyNewMemberDefault, invitationHadChoice } from "../../members/invitation-access.js";
 import {
   applyInvitationGroups,
   applyJoinCodeGroups,
@@ -503,6 +503,34 @@ async function deleteVaultEverywhere(
   return { ok: true, orgName, vaultIds, docIds, counts, subscription };
 }
 
+/**
+ * Remove every setting just for one person in a vault (their per-user rows on
+ * the vault, folders, notes and files) and their "may raise" marks. Used when
+ * an admin is demoted with "Switch to groups" and, keeping the vault-wide
+ * Can edit, when someone is promoted.
+ */
+async function clearOwnSettings(
+  client: { query: (text: string, values?: unknown[]) => Promise<unknown> },
+  orgId: string,
+  userId: string,
+  opts: { keepVaultEdit?: boolean } = {},
+): Promise<void> {
+  await client.query(
+    `DELETE FROM shares s
+      WHERE s.principal_type = 'user' AND s.principal_id = $2
+        AND (
+          (s.resource_type = 'vault' AND s.resource_id = $1 AND NOT ($3 AND s.permission = 'edit'))
+          OR (s.resource_type = 'folder' AND s.resource_id IN (
+                SELECT f.id FROM folders f JOIN vaults v ON v.id = f.vault_id WHERE v.organization_id = $1))
+          OR (s.resource_type = 'file' AND (
+                s.resource_id IN (SELECT n.id FROM notes n JOIN vaults v ON v.id = n.vault_id WHERE v.organization_id = $1)
+                OR s.resource_id IN (SELECT fi.id FROM files fi JOIN vaults v ON v.id = fi.vault_id WHERE v.organization_id = $1)))
+        )`,
+    [orgId, userId, opts.keepVaultEdit === true],
+  );
+  await client.query(`DELETE FROM access_group_raises WHERE organization_id = $1 AND user_id = $2`, [orgId, userId]);
+}
+
 export function createOrgRoutes(deps: OrgDeps): Hono {
   const orgRoutes = new Hono();
 
@@ -522,11 +550,14 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     // The groups a code joiner is added to (migration 099). Always an array:
     // its presence is how a desktop knows this server can set them.
     const groupIds = await joinCodeGroupIds(pool, org);
-    const existing = await pool.query<{ code: string }>(
-      "SELECT code FROM org_join_codes WHERE organization_id = $1",
+    const existing = await pool.query<{ code: string; access_level: string | null }>(
+      "SELECT code, access_level FROM org_join_codes WHERE organization_id = $1",
       [org],
     );
-    if (existing.rows[0]) return c.json({ code: existing.rows[0].code, groupIds });
+    // The level a code joiner starts with (2026-11-27): null = Only what's
+    // shared (they get their groups). Always present, so a desktop knows this
+    // server can set it.
+    if (existing.rows[0]) return c.json({ code: existing.rows[0].code, groupIds, level: existing.rows[0].access_level });
 
     // Lazily generate + persist. Retry on the (unlikely) unique-code collision.
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -538,13 +569,13 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
            RETURNING code`,
           [org, code],
         );
-        if (rows[0]) return c.json({ code: rows[0].code, groupIds });
+        if (rows[0]) return c.json({ code: rows[0].code, groupIds, level: null });
         // Another request generated the code first — read it back.
         const raced = await pool.query<{ code: string }>(
           "SELECT code FROM org_join_codes WHERE organization_id = $1",
           [org],
         );
-        if (raced.rows[0]) return c.json({ code: raced.rows[0].code, groupIds });
+        if (raced.rows[0]) return c.json({ code: raced.rows[0].code, groupIds, level: null });
       } catch (err) {
         // Unique violation on `code` (23505): loop and try a fresh code.
         if ((err as { code?: string }).code !== "23505") throw err;
@@ -569,11 +600,41 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     try {
       const ids = await validGroupIds(pool, orgId, (body as { groupIds?: unknown }).groupIds ?? []);
       const groupIds = await setJoinCodeGroups(pool, orgId, ids, session.userId);
+      // Groups and a level are one choice: picking groups means Only what's shared.
+      if (groupIds.length > 0) {
+        await pool.query("UPDATE org_join_codes SET access_level = NULL WHERE organization_id = $1", [orgId]);
+      }
       return c.json({ groupIds });
     } catch (e) {
       if (e instanceof GroupError) return c.json({ error: e.code, message: e.message }, e.status);
       throw e;
     }
+  });
+
+  // The level the join code gives (owner/admin): "edit" | "view" | null (Only
+  // what's shared). A level is the joiner's own vault-wide level, which their
+  // groups don't add to, so it and the code's groups are not offered together.
+  orgRoutes.put("/orgs/:orgId/join-code/level", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const orgId = c.req.param("orgId");
+    const role = await orgRole(orgId, session.userId);
+    if (!role) return c.json({ error: "Unknown vault" }, 404);
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "access_manager_required", message: "Only owners and admins can change this" }, 403);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { level?: unknown };
+    const level = body.level ?? null;
+    if (level !== null && level !== "edit" && level !== "view") {
+      return c.json({ error: "invalid_level", message: "level must be edit, view or null" }, 400);
+    }
+    const { rows } = await pool.query<{ access_level: string | null }>(
+      "UPDATE org_join_codes SET access_level = $2 WHERE organization_id = $1 RETURNING access_level",
+      [orgId, level],
+    );
+    if (!rows[0]) return c.json({ error: "no_join_code", message: "Open the join code first" }, 404);
+    if (level !== null) await setJoinCodeGroups(pool, orgId, [], session.userId);
+    return c.json({ level: rows[0].access_level });
   });
 
   // Redeem a join code: join the vault as a 'member' (idempotent).
@@ -662,6 +723,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     // invite counts, like the role above. After COMMIT, so the member row
     // (and its m032 snapshot) exists.
     if (liveInvite) {
+      const chose = await invitationHadChoice([liveInvite.id]).catch(() => true);
       await applyInvitationAccess(
         { invitationIds: [liveInvite.id], organizationId, userId: session.userId },
         { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
@@ -670,14 +732,33 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
         { invitationIds: [liveInvite.id], organizationId, userId: session.userId },
         { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
       );
+      if (!chose) {
+        await applyNewMemberDefault(
+          { organizationId, userId: session.userId },
+          { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
+        );
+      }
       // Seamless keys (B3): the invite's direct seal applies here too.
       await applyInvitationKeys({ invitationIds: [liveInvite.id], organizationId, userId: session.userId });
     } else {
-      // No invitation: the join code's own groups (migration 099).
-      await applyJoinCodeGroups(
-        { organizationId, userId: session.userId },
-        { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
+      // No invitation: the join code's own level (2026-11-27), else its own
+      // groups (migration 099).
+      const level = await pool.query<{ access_level: string | null }>(
+        "SELECT access_level FROM org_join_codes WHERE organization_id = $1",
+        [organizationId],
       );
+      const codeLevel = level.rows[0]?.access_level ?? null;
+      if (codeLevel === "edit" || codeLevel === "view") {
+        await applyMemberLevel(
+          { organizationId, userId: session.userId, mode: codeLevel === "edit" ? "open" : "readonly" },
+          { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
+        );
+      } else {
+        await applyJoinCodeGroups(
+          { organizationId, userId: session.userId },
+          { disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged },
+        );
+      }
     }
 
     // Announce to teammates already live in the vault (this path bypasses
@@ -1059,9 +1140,19 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       // have a level of their own (any per-user vault row, which is kept as it
       // is). In a vault on Only what's shared they would otherwise manage a
       // vault they can't see. An ordinary personal setting: it can be lowered.
+      // Demoting asks the desktop what happens to the person's own settings
+      // (decided 2026-11-27, default "Switch to groups"): `groups` removes every
+      // setting just for them, so their groups decide; `keep` (and older
+      // desktops, which send nothing) leaves them as they are.
+      if (role === "member" && body.ownSettings === "groups") {
+        await clearOwnSettings(client, orgId, targetUserId);
+      }
       if (role === "admin") {
-        // Admins can edit everything, like the owner (2026-11-25): their own
-        // level becomes Can edit everything, whatever it was.
+        // Admins can edit everything, like the owner (2026-11-25). Promoting
+        // REPLACES their own settings with Can edit everything (2026-11-27): a
+        // No access just for them on some folder would otherwise survive the
+        // promotion and leave an admin who can't see what they manage.
+        await clearOwnSettings(client, orgId, targetUserId, { keepVaultEdit: true });
         const own = await client.query(
           `SELECT 1 FROM shares
             WHERE resource_type = 'vault' AND resource_id = $1

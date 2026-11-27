@@ -28,9 +28,9 @@ describe("members and access rules", () => {
     expect(needsAccessConfirm("private", "private")).toBe(false);
   });
 
-  it("a never-shared vault reads as Only what's shared and says authors keep their notes", () => {
-    expect(everyoneLabel("private", "none")).toEqual({ label: "Only what's shared", sub: "Members also keep notes they wrote" });
-    expect(everyoneLabel("private", "sealed")).toEqual({ label: "Only what's shared", sub: null });
+  it("a never-shared vault reads as No access and says authors keep their notes", () => {
+    expect(everyoneLabel("private", "none")).toEqual({ label: "No access", sub: "Members also keep notes they wrote" });
+    expect(everyoneLabel("private", "sealed")).toEqual({ label: "No access", sub: null });
     expect(everyoneLabel("open", "edit")).toEqual({ label: "Can edit", sub: null });
   });
 
@@ -45,7 +45,7 @@ describe("members and access rules", () => {
     expect(countLine("", 4, 1)).toBe("4 people · 1 invite pending");
     expect(countLine("", 1, 0)).toBe("1 person");
     expect(countLine("x", 1, 0)).toBe("1 person found");
-    expect(invitationAccessLabel(null)).toBe("Default");
+    expect(invitationAccessLabel(null)).toBe("No access");
   });
 
   it("last active prefers live presence", () => {
@@ -110,7 +110,7 @@ describe("confirm copy for taking access away", () => {
     expect(reduceAccessCopy({ kind: "person", name: "Me", self: true }, "private")).toMatchObject({
       title: "Remove your access to this vault?", outcome: expect.stringContaining("removed from your devices"),
     });
-    expect(reduceAccessCopy({ kind: "everyone" }, "private").title).toBe("Set default access to Only what's shared?");
+    expect(reduceAccessCopy({ kind: "everyone" }, "private").title).toBe("Set default access to No access?");
     expect(reduceAccessCopy({ kind: "everyone" }, "readonly").title).toBe("Set default access to Can view?");
     for (const to of ["private", "readonly"] as const) {
       const c = reduceAccessCopy({ kind: "everyone" }, to);
@@ -180,39 +180,50 @@ describe("the viewer's role follows the freshest authority", () => {
   });
 });
 
+describe("three levels only", () => {
+  it("has no Not shared state", async () => {
+    const mod = await import("../membersAccess");
+    expect("isNotShared" in mod).toBe(false);
+    expect(Object.values(mod.PERSON_LEVEL_LABEL)).toEqual(["Can edit everything", "Can view everything", "No access", "Custom"]);
+  });
+});
+
 describe("where a person's access comes from", () => {
   const design = { name: "Design", summary: "Can edit Design" };
-  it("says only what's shared when nothing else gives access", () => {
-    expect(accessSources({ level: "none", own: false, defaultLabel: "Only what's shared", groups: [] }))
-      .toEqual({ short: "Only what's shared", lines: ["Only what's shared with them."], sentence: "Only what's shared with them. Choosing a level here sets it just for them." });
+  it("says No access when nothing gives access", () => {
+    expect(accessSources({ level: "none", own: false, groups: [] }))
+      .toEqual({
+        short: "No access",
+        lines: ["Nothing shared with them yet, and in no access groups."],
+        sentence: "Nothing shared with them yet, and in no access groups. Move a folder or note to Can edit or Can view to share it just with them.",
+      });
   });
   it("names the groups that add something, and skips groups that give nothing", () => {
-    const empty = { name: "Sales", summary: "No access yet" };
-    expect(accessSources({ level: "custom", own: false, defaultLabel: "Only what's shared", groups: [design, empty] }))
+    const empty = { name: "Sales", summary: "No access" };
+    expect(accessSources({ level: "custom", own: false, groups: [design, empty] }))
       .toEqual({
         short: "Design",
         lines: ["Design group: Can edit Design."],
-        sentence: "From the Design group (can edit Design). Choosing a level here sets it just for them.",
+        sentence: "From the Design group (can edit Design). Move a folder or note to Can edit or Can view to share it just with them.",
       });
-    const two = accessSources({ level: "custom", own: false, defaultLabel: null, groups: [design, { name: "Ops", summary: "Can edit Ops" }] });
+    const two = accessSources({ level: "custom", own: false, groups: [design, { name: "Ops", summary: "Can edit Ops" }] });
     expect(two.short).toBe("2 groups");
+    expect(accessSources({ level: "none", own: false, groups: [empty] }).lines)
+      .toEqual(["Nothing shared with them yet, and their groups give nothing."]);
   });
-  it("names a vault's older default while it still has one", () => {
-    expect(accessSources({ level: "custom", own: false, defaultLabel: "Can edit", groups: [] })).toEqual({
-      short: "Default, with changes",
-      lines: ["Default access: Can edit.", "Some folders or notes are shared with them."],
-      sentence: "From default access (can edit), with some folders or notes shared with them. Choosing a level here sets it just for them.",
-    });
+  it("tells a person's own No access from nothing shared yet", () => {
+    expect(accessSources({ level: "none", own: true, groups: [] }))
+      .toEqual({ short: "No access, set just for them", lines: ["No access, set just for them."], sentence: "No access, set just for them." });
   });
-  it("says groups add to a person's own Can view, and never to their own No access", () => {
-    expect(accessSources({ level: "view", own: true, defaultLabel: null, groups: [design] })).toEqual({
+  it("says a person's own setting decides over their groups", () => {
+    expect(accessSources({ level: "view", own: true, groups: [design] })).toEqual({
       short: "Set just for them",
-      lines: ["Set just for them: Can view everything.", "The Design group adds to it."],
-      sentence: "Set just for them. The Design group adds to it.",
+      lines: ["Set just for them: Can view everything.", "Their access groups don't change it."],
+      sentence: "Set just for them: Can view everything. Their access groups don't change it.",
     });
-    expect(accessSources({ level: "none", own: true, defaultLabel: null, groups: [design] }).lines)
-      .toEqual(["Set just for them: No access.", "Access groups don't change it."]);
-    expect(accessSources({ level: "edit", own: true, isSelf: true, defaultLabel: null, groups: [] }).lines)
+    expect(accessSources({ level: "none", own: true, groups: [design] }).lines)
+      .toEqual(["No access, set just for them.", "Their access groups don't change it."]);
+    expect(accessSources({ level: "edit", own: true, isSelf: true, groups: [] }).lines)
       .toEqual(["Set just for you: Can edit everything."]);
   });
 });

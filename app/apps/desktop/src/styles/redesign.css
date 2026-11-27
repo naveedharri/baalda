@@ -1174,8 +1174,11 @@ html:not(.rd-off) .confirm-note::before {
 }
 html:not(.rd-off) .confirm-dialog .confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 0; }
 html:not(.rd-off) .confirm-dialog .confirm-actions > * { width: 100%; justify-content: center; }
-html:not(.rd-off) .modal .invite-chips input:not([type]),
-html:not(.rd-off) .modal .invite-chips input:not([type]):focus,
+html:not(.rd-off) .modal .invite-chips input,
+html:not(.rd-off) .modal .invite-chips input:focus,
+html:not(.rd-off) .modal .members-access-search input,
+html:not(.rd-off) .modal .members-access-search input:hover,
+html:not(.rd-off) .modal .members-access-search input:focus,
 html:not(.rd-off) .modal .skills-prefix-input input,
 html:not(.rd-off) .modal .skills-prefix-input input:focus {
   background: transparent !important; box-shadow: none !important; min-height: 0;
@@ -3598,3 +3601,17 @@ html :is(.ghost-pill.members-access-toolbar-btn, .modal.group-dialog .confirm-ac
   border-color: color-mix(in srgb, var(--text-on-accent) 35%, transparent);
   border-top-color: var(--text-on-accent);
 }
+
+/* A search field inside a dialog (Add people to a group): one soft well with
+   the search icon, like the other fields in dialogs; the input inside is bare,
+   never WebKit's own rounded search box. */
+html:not(.rd-off) .modal .members-access-search {
+  height: 40px; background: var(--bg-app); box-shadow: inset 0 0 0 1px rgba(var(--rd-ink), 0.06);
+  border-radius: var(--radius-md); color: var(--text-tertiary);
+}
+html:not(.rd-off) .modal .members-access-search:focus-within {
+  background: var(--rd-surface); box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft);
+}
+html:not(.rd-off) .modal .members-access-search input { -webkit-appearance: none; appearance: none; font-size: var(--fs-md); width: auto; }
+html:not(.rd-off) .modal .members-access-search input::-webkit-search-decoration { -webkit-appearance: none; }
+html:not(.rd-off) .group-picker-search { margin-bottom: var(--sp-2); }

@@ -121,7 +121,7 @@ export async function setJoinDefault(
   // access from the groups they join. Older desktops still offer the setting.
   if (mode !== "private") {
     throw new AccessManagementError(
-      "New members always start with only what's shared now. Add them to an access group instead.",
+      "New members start on No access unless you give them a level or add them to an access group.",
       409,
       "join_default_fixed",
     );

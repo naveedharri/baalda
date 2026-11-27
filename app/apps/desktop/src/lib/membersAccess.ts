@@ -13,17 +13,17 @@ import type {
   TeamAccessPosture,
 } from "./api";
 import { relativeTime } from "./health/format";
+import { NOTHING_SHARED_YET } from "./groups";
 
 /** The three wire modes in the page's words, for the Default access row (wire: team access). */
 export const EVERYONE_OPTIONS: ReadonlyArray<{ value: TeamAccessMode; label: string; hint: string }> = [
   { value: "open", label: "Can edit", hint: "Members can open and change every note" },
   { value: "readonly", label: "Can view", hint: "Members can open every note, but not change it" },
-  { value: "private", label: "Only what's shared", hint: "Everyone, owners and admins too, sees only what's shared with them or their groups" },
+  { value: "private", label: "No access", hint: "Everyone, owners and admins too, sees only what's shared with them or their groups" },
 ];
 
-/** Default access's third level in its own words: the board and a person's
- * own level keep "No access", where it really means nothing at all. */
-export const DEFAULT_PRIVATE_LABEL = "Only what's shared";
+/** Default access's third level: one of the three levels everywhere (2026-11-27). */
+export const DEFAULT_PRIVATE_LABEL = "No access";
 
 /** The Default access row (the vault's team access, the old "Everyone" row). */
 export const DEFAULT_ACCESS_TITLE = "Default access";
@@ -43,6 +43,7 @@ export const PERSON_LEVEL_LABEL: Record<MemberAccessLevel, string> = {
   none: "No access",
   custom: "Custom",
 };
+
 
 export const INVITE_ACCESS_LABEL: Record<TeamAccessMode, string> = {
   open: "Can edit everything",
@@ -178,7 +179,7 @@ export function splitNotePath(path: string): { name: string; folders: string[] }
 
 /** The Access column's static text for an invitation row. */
 export function invitationAccessLabel(access: TeamAccessMode | null): string {
-  return access ? INVITE_ACCESS_LABEL[access] : "Default";
+  return access ? INVITE_ACCESS_LABEL[access] : "No access";
 }
 
 /** Split typed or pasted text into addresses on commas, whitespace and semicolons. */
@@ -290,7 +291,10 @@ export function levelOfMode(mode: TeamAccessMode): MemberAccessLevel {
 export function withMemberLevel(ov: MembersOverview, userId: string, level: MemberAccessLevel): MembersOverview {
   return {
     ...ov,
-    members: ov.members.map((m) => (m.userId === userId && m.access ? { ...m, access: { level } } : m)),
+    // A level chosen here is their own, so the pill is right before the list re-reads.
+    members: ov.members.map((m) => (m.userId === userId && m.access
+      ? { ...m, access: { ...m.access, level, own: true, personal: true, ...(level === "custom" ? {} : { ownLevel: level }) } }
+      : m)),
   };
 }
 
@@ -466,7 +470,7 @@ export function chunkIds<T>(ids: readonly T[], size: number): T[][] {
 /** One of a person's access groups, with what it gives (`groupAccessSummary`). */
 export interface AccessSourceGroup {
   name: string;
-  /** null for a caller who can't see grants; "No access yet" for a group that gives nothing. */
+  /** null for a caller who can't see grants; NOTHING_SHARED_YET for a group that gives nothing. */
   summary: string | null;
 }
 
@@ -479,7 +483,11 @@ export interface AccessSourceGroup {
  * Default access is always Only what's shared, so it is not named, except on
  * a vault still on an older setting (`defaultLabel` other than that).
  */
-export function accessSources(input: {
+/** `/health` feature: a person's own setting decides over their groups (2026-11-27). */
+export const PERSONAL_ACCESS_FEATURE = "personal-access";
+
+/** How a server without `personal-access` combines things: its groups add to a person's own Can view. */
+function accessSourcesBefore(input: {
   level: MemberAccessLevel;
   own: boolean;
   isSelf?: boolean;
@@ -488,7 +496,7 @@ export function accessSources(input: {
   groups: readonly AccessSourceGroup[];
 }): { short: string; lines: string[]; sentence: string } {
   const who = input.isSelf ? "you" : "them";
-  const giving = input.groups.filter((g) => g.summary && g.summary !== "No access yet");
+  const giving = input.groups.filter((g) => g.summary && g.summary !== NOTHING_SHARED_YET);
   const lower = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
   if (input.own) {
     const head = input.level === "custom"
@@ -509,9 +517,9 @@ export function accessSources(input: {
   if (legacy) lines.push(`Default access: ${legacy}.`);
   for (const g of giving) lines.push(`${g.name} group: ${g.summary}.`);
   if (input.level === "custom" && giving.length === 0) lines.push(`Some folders or notes are shared with ${who}.`);
-  if (lines.length === 0) lines.push(`Only what's shared with ${who}.`);
+  if (lines.length === 0) lines.push(`Nothing shared with ${who}.`);
   const short = giving.length === 0
-    ? (legacy ? (input.level === "custom" ? "Default, with changes" : "Default access") : input.level === "custom" ? "Shared with them" : "Only what's shared")
+    ? (legacy ? (input.level === "custom" ? "Default, with changes" : "Default access") : input.level === "custom" ? "Shared with them" : "No access")
     : (legacy ? "Default + " : "") + (giving.length === 1 ? giving[0].name : `${giving.length} groups`);
   const from = [
     ...(legacy ? [`default access (${lower(legacy)})`] : []),
@@ -522,6 +530,60 @@ export function accessSources(input: {
   const tail = `Choosing a level here sets it just for ${who}.`;
   const sentence = from.length
     ? `From ${from.join(" and ")}${input.level === "custom" && giving.length === 0 ? ", with some folders or notes shared with " + who : ""}. ${tail}`
-    : `Only what's shared with ${who}${input.level === "custom" ? " (some folders or notes)" : ""}. ${tail}`;
+    : `${input.level === "custom" ? `Some folders or notes are shared with ${who}` : `Nothing shared with ${who}`}. ${tail}`;
+  return { short, lines, sentence };
+}
+
+export function accessSources(input: {
+  level: MemberAccessLevel;
+  own: boolean;
+  isSelf?: boolean;
+  /** Unused since 2026-11-27 (team-wide levels became each person's own); kept for callers. */
+  defaultLabel?: string | null;
+  groups: readonly AccessSourceGroup[];
+  /** False against a server without `personal-access` (groups still add there). */
+  ownDecides?: boolean;
+}): { short: string; lines: string[]; sentence: string } {
+  if (input.ownDecides === false) return accessSourcesBefore({ ...input, defaultLabel: input.defaultLabel ?? null });
+  const who = input.isSelf ? "you" : "them";
+  const giving = input.groups.filter((g) => g.summary && g.summary !== NOTHING_SHARED_YET);
+  const lower = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
+  if (input.own) {
+    // A setting just for a person decides for them; their groups don't change
+    // it (Folder and Access, 2026-11-27).
+    const head = input.level === "custom"
+      ? `Set just for ${who}, with some folders or notes set differently.`
+      : input.level === "none"
+        ? `No access, set just for ${who}.`
+        : `Set just for ${who}: ${PERSON_LEVEL_LABEL[input.level]}.`;
+    const tail = input.groups.length ? "Their access groups don't change it." : null;
+    return {
+      short: input.level === "none" ? `No access, set just for ${who}` : `Set just for ${who}`,
+      lines: tail ? [head, tail] : [head],
+      sentence: tail ? `${head} ${tail}` : head,
+    };
+  }
+  const lines: string[] = [];
+  for (const g of giving) lines.push(`${g.name} group: ${g.summary}.`);
+  if (input.level === "custom" && giving.length === 0) lines.push(`Some folders or notes are shared with ${who}.`);
+  const nothing = lines.length === 0;
+  if (nothing) {
+    lines.push(input.groups.length
+      ? `Nothing shared with ${who} yet, and ${who === "you" ? "your" : "their"} groups give nothing.`
+      : `Nothing shared with ${who} yet, and in no access groups.`);
+  }
+  const short = giving.length === 0
+    ? (input.level === "custom" ? "Shared with them" : "No access")
+    : giving.length === 1 ? giving[0].name : `${giving.length} groups`;
+  const from = giving.length > 2
+    ? [`${giving.length} access groups`]
+    : giving.map((g) => `the ${g.name} group (${lower(g.summary!)})`);
+  // Group Access (2026-11-27): the board's Can edit / Can view columns share a place just with them.
+  const tail = `Move a folder or note to Can edit or Can view to share it just with ${who}.`;
+  const sentence = from.length
+    ? `From ${from.join(" and ")}. ${tail}`
+    : input.level === "custom"
+      ? `Some folders or notes are shared with ${who}. ${tail}`
+      : `${lines[0]} ${tail}`;
   return { short, lines, sentence };
 }

@@ -128,7 +128,7 @@ memberRoutes.get("/orgs/:orgId/members/overview", async (c) => {
     ),
   ]);
 
-  const [inviters, memberGroups, inviteGroups, ownVault] = await Promise.all([
+  const [inviters, memberGroups, inviteGroups, ownVault, ownAny] = await Promise.all([
     invitersByUser(orgId, members.rows.map((m) => m.user_id)),
     groupsByUser(pool, orgId),
     pool.query<{ invitation_id: string; group_id: string }>(
@@ -139,14 +139,37 @@ memberRoutes.get("/orgs/:orgId/members/overview", async (c) => {
     // Who has their OWN vault-wide level: for them groups change nothing
     // (resolver: a personal vault row is absolute), which the UI says.
     canManage
-      ? pool.query<{ principal_id: string }>(
-          `SELECT principal_id FROM shares
+      ? pool.query<{ principal_id: string; permission: string }>(
+          `SELECT principal_id, permission FROM shares
             WHERE org_id = $1 AND resource_type = 'vault' AND resource_id = $1 AND principal_type = 'user'`,
+          [orgId],
+        )
+      : Promise.resolve({ rows: [] as { principal_id: string; permission: string }[] }),
+    // Who has ANY setting just for them here (vault or item): their access has
+    // moved off what their groups give, so the desktop offers "Reset to Group
+    // Access" (2026-11-27).
+    canManage
+      ? pool.query<{ principal_id: string }>(
+          `SELECT DISTINCT principal_id FROM shares WHERE org_id = $1 AND principal_type = 'user'`,
           [orgId],
         )
       : Promise.resolve({ rows: [] as { principal_id: string }[] }),
   ]);
+  const personalIds = new Set(ownAny.rows.map((r) => r.principal_id));
   const ownVaultIds = new Set(ownVault.rows.map((r) => r.principal_id));
+  // Their own whole-vault level, so the list can tell "No access, set just
+  // for Ben" from "Nothing shared yet" (2026-11-27).
+  const ownVaultLevel = new Map(
+    ownVault.rows.map((r) => [r.principal_id, r.permission === "edit" ? "edit" : r.permission === "denied" ? "none" : "view"] as const),
+  );
+  // The level new people start with (invites, join code): the vault's old team
+  // level in a converted vault (migration 101), else none.
+  const newMemberLevel = canManage
+    ? ((await pool.query<{ new_member_level: string | null }>(
+        "SELECT new_member_level FROM organization_access_settings WHERE organization_id = $1",
+        [orgId],
+      )).rows[0]?.new_member_level ?? null)
+    : null;
 
   let levels: Map<string, AccessLevel> | null = null;
   if (canManage && members.rows.length) {
@@ -191,7 +214,9 @@ memberRoutes.get("/orgs/:orgId/members/overview", async (c) => {
       lastActiveAt: m.last_seen_at ? new Date(m.last_seen_at).toISOString() : null,
       invitedBy: inviters.get(m.user_id) ?? null,
       groupIds: memberGroups.get(m.user_id) ?? [],
-      ...(levels ? { access: { level: levels.get(m.user_id) ?? "none", own: ownVaultIds.has(m.user_id) } } : {}),
+      ...(levels
+        ? { access: { level: levels.get(m.user_id) ?? "none", own: ownVaultIds.has(m.user_id), ownLevel: ownVaultLevel.get(m.user_id) ?? null, personal: personalIds.has(m.user_id) } }
+        : {}),
     })),
     invitations: invitations.rows.map((i) => ({
       id: i.id,
@@ -204,6 +229,7 @@ memberRoutes.get("/orgs/:orgId/members/overview", async (c) => {
       groupIds: inviteGroups.rows.filter((g) => g.invitation_id === i.id).map((g) => g.group_id),
     })),
     canManage,
+    ...(canManage ? { newMemberLevel } : {}),
   });
 });
 
@@ -494,6 +520,9 @@ memberRoutes.post("/orgs/:orgId/invitations", async (c) => {
       400,
     );
   }
+  // "Only what's shared" picked on purpose (2026-11-27); without it, an invite
+  // with no level and no groups gives the vault's old team level.
+  const onlyShared = access === null && groupIds.length === 0 && (body as { onlyShared?: unknown }).onlyShared === true;
 
   // Seamless keys (B1): VK wrapped per invitee under an invite secret, by a
   // device that proves HERE that it holds VK. A failed proof creates NO
@@ -539,6 +568,12 @@ memberRoutes.post("/orgs/:orgId/invitations", async (c) => {
         );
       }
       await rememberInvitationGroups(pool, orgId, inv.id, groupIds);
+      if (onlyShared) {
+        await pool.query(
+          "INSERT INTO invitation_no_level (invitation_id) VALUES ($1) ON CONFLICT DO NOTHING",
+          [inv.id],
+        );
+      }
       const keyItem = keyItems?.get(email);
       let secret: string | undefined;
       if (keyItem && vaultKeys) {
@@ -651,6 +686,9 @@ export function createMemberShareRoutes(deps: AccessChangeDeps = {}) {
         [orgId, targetId],
       );
       removed = res.rowCount ?? 0;
+      // Reset also drops their "may raise" marks (2026-11-27): their groups decide.
+      const marks = await client.query(`DELETE FROM access_group_raises WHERE organization_id = $1 AND user_id = $2`, [orgId, targetId]);
+      removed += marks.rowCount ?? 0;
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK");

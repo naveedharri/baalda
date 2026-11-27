@@ -150,12 +150,12 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 
 ## Team collaboration
 
-- **Invite** teammates from Vault Settings → **Members and access** → **Invite people**: type
+- **Invite** teammates from Vault Settings → **People and access** → **Invite people**: type
   one or more email addresses, pick their role and how much they can see (Can edit everything,
   Can view everything or No access), or hand out the **join code** shown in the same dialog. The
   access you pick is applied the moment they accept. Invitations expire after 7 days.
   On a server with email configured (the managed service does) the invitee gets an email with a
-  link that opens Baalda on the invitation; otherwise Members and access shows a **Copy link** for each
+  link that opens Baalda on the invitation; otherwise People and access shows a **Copy link** for each
   pending invitation to paste into chat. Someone invited by email who uses the join code instead
   ends up in exactly the same place, with the invited role.
 - **Roles**: owner, admin, member.
@@ -170,7 +170,7 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   and small presence dots in the sidebar showing who is in which note or folder. Ping a
   teammate to get their attention.
 - **Sharing model**: members see what is shared with them, what their access groups open, and
-  anything their own level gives. A new vault starts that way (**Only what's shared**): whoever
+  anything their own level gives. A new vault starts that way (members on **No access**): whoever
   creates it starts with **Can edit everything** as their own level, and so does anyone made an
   admin (both can be lowered later). Vaults created earlier keep what their members could already
   reach. There is no vault-wide "Default access" setting to change any more. Each person can be
@@ -181,15 +181,20 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   admin, not even the person who wrote the note, until someone gives them access, so an owner or
   admin without a level of their own sees only what is shared with them or their groups. Owners and
   admins can always manage access, including their own.
-- **Access groups** (Members and access → Groups): name a group, add people, and set what it opens
+- **Access groups** (People and access → Access groups): name a group, add people, and set what it opens
   on the group's own Access board: Can edit, Can view or No access per folder or note, or
   everything at once. A group can open the whole vault and still give No access to one folder in
   it; that only limits what this group gives, never anyone's own access or another group's. Someone
   in several groups gets the highest. A group can be set so new members join it automatically.
   Taking someone out of a group, deleting a group, or moving something to No access on a group's
-  board asks first and says plainly what will leave people's computers.
-- **New members**: an invitation gives either a level (**Only what's shared**, the default; **Can
-  edit everything**; **Can view everything**) or access groups, not both; admins always start on
+  board asks first and says plainly what will leave people's computers. Creating a group takes two
+  steps in one dialog: name and people, then what it can open; nothing reaches anyone until
+  **Create group**. Wherever someone has their own setting that differs from what the group gives,
+  the admin is asked once, per person: **Keep their own** (the default) or **Use the group's**.
+- **New members**: an invitation gives one of the three levels (**Can edit everything**, **Can view
+  everything** or **No access**, which means nothing until something is shared with them or they
+  join a group) or access groups, not both. There is no fourth "Only what's shared" or "Not shared"
+  state; admins always start on
   Can edit everything. The Join code tab picks which groups people who join with the code are added
   to. If the person would see nothing yet, the invite says so. In a vault still on an older setting,
   the invite's default says what new members get there.
@@ -200,11 +205,11 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   someone to a group.
   Deleting a token cuts the AI off immediately.
 - **Locks**: new locks can no longer be created from the app; read-only access is now given per
-  person on the Members and access page. A note or folder locked before this change still shows a
+  person on the People and access page. A note or folder locked before this change still shows a
   padlock and stays read-only for everyone, admins included, until an owner or admin right-clicks
   it (or selects several) and chooses Unlock. Anything you can only view because you were given Can view
   (by name or through a group) shows a padlock too; it can't be unlocked, only changed on the
-  Members and access page.
+  People and access page.
 - **Losing access** removes the note from the ex-reader's devices (the note itself stays on the
   server for everyone who can still read it); regaining access brings it back.
 - Not built (deferred): comments and @mentions, activity feed, audit log, sub-teams or custom
@@ -213,7 +218,7 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   any time. **Private links** (`baalda://note/...`) open a note for teammates who already have
   access; they carry no access themselves.
 - **Push-to-talk voice**: hold a button to talk to everyone in the vault. Nothing is recorded.
-- **Members and access** (Vault Settings): one page for people and permissions. Everyone sees the
+- **People and access** (Vault Settings): one page for people and permissions. Everyone sees the
   member list; owners and admins also see and change access. A **People | Groups** switch sits above the list. Hovering a person's access says where it comes
   from (their groups, an older vault setting, or a level set just for them); their profile's Access
   tab says the same in one sentence. Each person's **⋯** menu has View profile, Manage access, Make admin or Make

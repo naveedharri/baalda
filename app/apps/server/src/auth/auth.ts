@@ -20,7 +20,7 @@ import { isValidVaultIcon } from "./vault-icon.js";
 import { isValidProfileImage } from "./profile-image.js";
 import { hasExpiryNotice } from "../invitations/expiries.js";
 import { invitationActivityChanged } from "../invitations/sweep.js";
-import { applyInvitationAccess } from "../members/invitation-access.js";
+import { applyInvitationAccess, applyNewMemberDefault, invitationHadChoice } from "../members/invitation-access.js";
 import { applyInvitationGroups } from "../groups/service.js";
 import { applyInvitationKeys } from "../members/invitation-keys.js";
 import { announceInvitation, announceInvitationGone } from "../sync/user-events.js";
@@ -413,6 +413,9 @@ export const auth = betterAuth({
         },
         afterAcceptInvitation: async (data) => {
           await attributeMembershipEvent(data.member.id, "insert", data.user.id);
+          // An invite that chose nothing (an older app) keeps giving the vault's
+          // old team level (2026-11-27). Read before the choices are consumed.
+          const chose = await invitationHadChoice([data.invitation.id]).catch(() => true);
           // Apply the access the inviter chose (invitation_access, m046). The
           // member row exists by now; best-effort, never fails the accept.
           await applyInvitationAccess({
@@ -426,6 +429,7 @@ export const auth = betterAuth({
             organizationId: data.organization.id,
             userId: data.user.id,
           });
+          if (!chose) await applyNewMemberDefault({ organizationId: data.organization.id, userId: data.user.id });
           // Seamless keys (B3): a seal made at invite time to this person's
           // current account key becomes their wrap. Best-effort, logged.
           await applyInvitationKeys({

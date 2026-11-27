@@ -358,6 +358,9 @@ export function createApp(deps: AppDeps): Hono {
         MESSAGES_FEATURE,
         // `DELETE /api/folders/:id?ifEmpty=1` (registry/tree-ops.ts).
         FOLDER_DELETE_IF_EMPTY_FEATURE,
+        // A setting just for a person decides over their groups; groups ask
+        // first and may be let decide (2026-11-27, migrations 101/102).
+        "personal-access",
         // The vault's sync rules (`/api/orgs/:orgId/sync-rules`, #401).
         SYNC_RULES_FEATURE,
         MORE_FILE_TYPES_FEATURE,

@@ -138,7 +138,7 @@ describe("Members and access tab", () => {
     expect(host.querySelector('[role="dialog"]')).toBeNull();
     expect(host.querySelector(".member-profile-name")?.textContent).toBe("Sara Khan");
     expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Personal info");
-    const back = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Members and access"))!;
+    const back = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("People and access"))!;
     await act(async () => back.click());
     expect(host.querySelector(".members-table")).not.toBeNull();
     // "Manage access…" in the row dropdown lands on the Access tab directly.

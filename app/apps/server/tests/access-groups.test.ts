@@ -237,9 +237,9 @@ describe("access groups: one algebra everywhere", () => {
     expect(await p(both, cover)).toBe("edit");
     expect(await p(both, contract)).toBe("view");
     expect(await p(both, plan)).toBe("edit");
-    // A vault level of their own (Can view) combines with groups: Design's
-    // edit on spec wins there, view everywhere else.
-    expect(await p(personal, spec)).toBe("edit");
+    // A vault level of their own (Can view) decides over their groups
+    // (2026-11-27): Design's edit on spec does not reach them.
+    expect(await p(personal, spec)).toBe("view");
     expect(await p(personal, root)).toBe("view");
     // A group's No access stops only that group: Design's view of Projects
     // does not reach Projects/Hidden, and Ops never reached it.

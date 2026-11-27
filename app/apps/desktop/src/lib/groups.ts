@@ -1,6 +1,8 @@
-import type { AccessGroup, GroupGrant, MemberOverview } from "./api";
+import type { AccessGroup, GroupGrant, HeldPerson, MemberOverview } from "./api";
 
 /** `/health` feature: access groups (server migration 097). */
+/** A group that gives nothing anywhere: one of the three levels, No access (2026-11-27). */
+export const NOTHING_SHARED_YET = "No access";
 export const ACCESS_GROUPS_FEATURE = "access-groups";
 
 /** The colours the server accepts (`groups/service.ts GROUP_COLORS`). */
@@ -33,7 +35,7 @@ const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? o
 /**
  * One line saying what a group gives, for the groups list:
  * "Can edit everything", "Can edit Specs and 2 more", "Can view Specs · Can edit Design",
- * "No access yet". `null` grants (plain members) say nothing.
+ * "No access". `null` grants (plain members) say nothing.
  */
 export function groupAccessSummary(grants: readonly GroupGrant[] | null): string | null {
   if (grants === null) return null;
@@ -41,7 +43,7 @@ export function groupAccessSummary(grants: readonly GroupGrant[] | null): string
   // below a folder it otherwise reaches, so it reads as an exception.
   const hidden = grants.filter((g) => g.permission === "denied");
   grants = grants.filter((g) => g.permission !== "denied");
-  if (grants.length === 0) return "No access yet";
+  if (grants.length === 0) return NOTHING_SHARED_YET;
   const vault = grants.find((g) => g.resourceType === "vault");
   const items = grants.filter((g) => g.resourceType !== "vault");
   const except = hidden.length === 0 ? ""
@@ -100,14 +102,23 @@ export function groupNameProblem(name: string, groups: readonly Pick<AccessGroup
   return null;
 }
 
+/** The name a new group gets when none is typed: "Group 1", "Group 2"…, the
+ *  first one no group in the vault has (any case). */
+export function defaultGroupName(groups: readonly Pick<AccessGroup, "name">[]): string {
+  const taken = new Set(groups.map((g) => g.name.trim().toLowerCase()));
+  let n = 1;
+  while (taken.has(`group ${n}`)) n++;
+  return `Group ${n}`;
+}
+
 /** Option value prefix for groups inside access menus. */
 export const GROUP_OPTION = "group:";
 export const isGroupOption = (v: string) => v.startsWith(GROUP_OPTION);
 export const groupOptionId = (v: string) => v.slice(GROUP_OPTION.length);
 
-/** True when the group opens the whole vault (a vault-level grant). The
- *  converted "Everyone" groups are like this, and for most people they are
- *  the ONLY way in: the vault itself is Only what's shared. */
+/** True when the group opens the whole vault (a vault-level grant). A group
+ *  made "for everyone" is like this, and for people with nothing of their own
+ *  it is the only way in: the vault itself is Only what's shared. */
 export function groupOpensWholeVault(grants: readonly GroupGrant[] | null): boolean {
   return !!grants?.some((g) => g.resourceType === "vault" && (g.permission === "edit" || g.permission === "view"));
 }
@@ -135,3 +146,24 @@ export function groupDeleteNote(groupName: string, grants: readonly GroupGrant[]
   const lose = memberCount === 1 ? "Its member loses" : `Its ${memberCount} members lose`;
   return `${lose} what ${groupName} gave, notes they wrote there included; their own access and other groups stay, and nothing is deleted for the team. This can't be undone.`;
 }
+
+const HELD_LEVEL: Record<HeldPerson["current"], string> = { edit: "Can edit", view: "Can view", none: "No access" };
+const HELD_RANK: Record<HeldPerson["current"], number> = { none: 0, view: 1, edit: 2 };
+
+/** One line of the held-back dialog: what the person has, why, and what the
+ *  group would give. `place`/`ownPlace` are names ("Specs", "the whole vault"). */
+export function heldPersonLine(h: HeldPerson, groupName: string, place: string | null, ownPlace: string | null): string {
+  // Their own whole-vault level, above what the group gives (2026-11-28).
+  if (h.resourceType === "vault" && h.ownAt === "here" && (h.current === "edit" || h.current === "view") && HELD_RANK[h.groupGives] < HELD_RANK[h.current]) {
+    return `${h.current === "edit" ? "Can edit everything" : "Can view everything"}, set just for them. Using the group's removes it, so they get only what their groups give.`;
+  }
+  const where = place ?? (h.resourceType === "vault" ? "the whole vault" : "here");
+  const has = `${HELD_LEVEL[h.current]} on ${where}`;
+  const why = h.ownAt === "here"
+    ? "set just for them there"
+    : h.ownPlace.resourceType === "vault"
+      ? "from their own vault-wide level"
+      : `from a setting just for them on ${ownPlace ?? "a folder above"}`;
+  return `${has}, ${why}. ${groupName} gives ${HELD_LEVEL[h.groupGives]}.`;
+}
+

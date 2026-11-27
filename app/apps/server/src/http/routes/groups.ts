@@ -14,6 +14,7 @@ import {
   removeGroupMember,
   updateGroup,
 } from "../../groups/service.js";
+import { heldByOwnSettings, letGroupDecide } from "../../groups/held.js";
 
 /** `/health` feature flag: access groups (migration 097). */
 export const ACCESS_GROUPS_FEATURE = "access-groups";
@@ -124,6 +125,46 @@ export function createGroupRoutes(deps: AccessChangeDeps = {}): Hono {
       const out = await removeGroupMember(orgId, session.userId, groupId, userId, deps);
       await skillsHint(orgId, out.skillsChanged);
       return c.json({ removed: out.removed, disconnectedDocs: out.disconnectedDocs });
+    } catch (e) {
+      return fail(c, e);
+    }
+  });
+
+  // Ask first (2026-11-27): who a proposed group change would not reach
+  // because of a setting just for them. Body: {access?: {resources, mode}} or
+  // {addUserIds}. Writes nothing.
+  app.post("/orgs/:orgId/groups/:groupId/held", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const { orgId, groupId } = c.req.param();
+    if (!ID_RE.test(orgId) || !ID_RE.test(groupId)) return c.json({ error: "Malformed id" }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as { access?: { resources?: unknown; mode?: unknown }; addUserIds?: unknown };
+    try {
+      const access = body.access && Array.isArray(body.access.resources) &&
+        (body.access.mode === "open" || body.access.mode === "readonly" || body.access.mode === "private")
+        ? { resources: body.access.resources as never, mode: body.access.mode as "open" | "readonly" | "private" }
+        : undefined;
+      const addUserIds = Array.isArray(body.addUserIds) ? body.addUserIds.filter((x): x is string => typeof x === "string") : undefined;
+      return c.json({ held: await heldByOwnSettings({ orgId, actorUserId: session.userId, groupId, access, addUserIds }) });
+    } catch (e) {
+      return fail(c, e);
+    }
+  });
+
+  // "Let the group decide" for chosen people and places (removes their own
+  // setting there, or saves a "may raise" mark), then reports what changed.
+  app.post("/orgs/:orgId/groups/:groupId/let-decide", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const { orgId, groupId } = c.req.param();
+    if (!ID_RE.test(orgId) || !ID_RE.test(groupId)) return c.json({ error: "Malformed id" }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as { entries?: unknown };
+    try {
+      const results = await letGroupDecide(
+        { orgId, actorUserId: session.userId, groupId, entries: (body.entries ?? []) as never },
+        deps,
+      );
+      return c.json({ results });
     } catch (e) {
       return fail(c, e);
     }

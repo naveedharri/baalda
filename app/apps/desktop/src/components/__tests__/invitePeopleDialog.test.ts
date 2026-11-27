@@ -50,7 +50,7 @@ describe("Invite people dialog", () => {
     await act(async () => root.render(createElement(InvitePeopleDialog, { orgId: "org-1", onClose: vi.fn(), onInvited: vi.fn() })));
     const fields = [...document.body.querySelectorAll(".invite-field")];
     expect(fields.map((f) => f.querySelector(".invite-field-label")?.textContent)).toEqual(["Role", "Access"]);
-    expect(fields[1].querySelector(".invite-field-trigger")?.textContent).toContain("Only what's shared");
+    expect(fields[1].querySelector(".invite-field-trigger")?.textContent).toContain("No access");
     expect(send().textContent).toBe("Send invite");
     expect(send().disabled).toBe(true);
     await type("maya@team.com, jo@team.com ");
@@ -93,7 +93,7 @@ describe("Invite people dialog", () => {
     await act(async () => root.render(createElement(InvitePeopleDialog, { orgId: "org-1", onClose: vi.fn(), onInvited: vi.fn() })));
     const codeTab = [...document.body.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Join code")!;
     await act(async () => codeTab.click());
-    expect(document.body.querySelector(".invite-code-row")?.textContent).toContain("They get only what is shared with them");
+    expect(document.body.querySelector(".invite-code-row")?.textContent).toContain("They start on No access until you share something with them");
     expect(document.body.querySelector(".invite-code-row .muted")?.textContent).toBe("No group");
   });
 
@@ -108,7 +108,7 @@ describe("Invite people dialog", () => {
   const SEES_NOTHING = "They'll see an empty vault until you share notes or add them to a group.";
   const base = { orgId: "org-1", onClose: vi.fn(), onInvited: vi.fn() };
 
-  it("warns that a member on Only what's shared sees nothing yet; an admin can edit everything", async () => {
+  it("warns that a member on No access sees nothing yet; an admin can edit everything", async () => {
     await act(async () => root.render(createElement(InvitePeopleDialog, base)));
     expect(note()).toBe(SEES_NOTHING);
     expect(hint()?.textContent).toBe("They get an email with a link.");
@@ -119,7 +119,7 @@ describe("Invite people dialog", () => {
     await pick("Role", "Member");
     expect(note()).toBe(SEES_NOTHING);
     expect(inviteAccessOptions("admin").map((o) => o.value)).toEqual(["open"]);
-    expect(inviteAccessOptions("member").map((o) => o.value)).toEqual(["default", "open", "readonly"]);
+    expect(inviteAccessOptions("member").map((o) => o.value)).toEqual(["open", "readonly", "default"]);
   });
 
   it("never warns that someone sees nothing while the vault's default is still unknown", async () => {
@@ -134,10 +134,15 @@ describe("Invite people dialog", () => {
     const codeTab = [...document.body.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Join code")!;
     await act(async () => codeTab.click());
     expect(document.body.querySelector(".invite-code-row")?.textContent).toContain("New members start on Can edit everything");
-    expect(inviteAccessOptions("member", "readonly")[0]).toMatchObject({ value: "default", label: "Vault default", hint: "New members start on Can view everything", tag: "Default" });
-    // Only what's shared (the converted model) keeps today's wording and warning.
-    expect(inviteAccessOptions("member", "private")[0]).toMatchObject({ value: "default", label: "Only what's shared" });
+    expect(inviteAccessOptions("member", "readonly")[2]).toMatchObject({ value: "default", label: "Vault default", hint: "New members start on Can view everything", tag: "Default" });
+    // The converted model: no level of their own reads No access.
+    expect(inviteAccessOptions("member", "private")[2]).toMatchObject({ value: "default", label: "No access" });
     expect(inviteAccessOptions("admin", "open").map((o) => o.value)).toEqual(["open"]);
+    // A vault whose members all had Can edit: invites start there too.
+    const start = inviteAccessOptions("member", null, "open");
+    expect(start.map((o) => o.value)).toEqual(["open", "readonly", "default"]);
+    expect(start[0]).toMatchObject({ value: "open", tag: "Default", hint: "Like the members already in the vault" });
+    expect(start[2]).not.toHaveProperty("tag");
     // Only a vault still on an older Default access passes its setting on;
     // a converted (sealed) or never-shared vault gives joiners their groups.
     expect(legacyNewMembersSetting("edit", "open")).toBe("open");

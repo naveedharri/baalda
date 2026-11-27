@@ -512,12 +512,48 @@ describe("Member access board", () => {
     expect(api.setBulkAccess).not.toHaveBeenCalled();
     expect(onChanged).toHaveBeenCalledTimes(1);
   });
+  it("Group Access: the third column is No access (there is no Not shared), and no Reset until a setting is just for them", async () => {
+    modes = { f1: "private", n1: "private", n2: "private", n3: "private" };
+    await render({ accessSource: "group", everyoneMode: "private", personVaultMode: "private" });
+    expect(column("private").textContent).toContain("No access");
+    expect(column("private").textContent).not.toContain("Not shared");
+    const reset = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Reset to Group Access");
+    expect(reset()).toBeUndefined();
+    expect([...host.querySelectorAll("button")].some((b) => /Personal Access/.test(b.textContent ?? ""))).toBe(false);
+  });
+  it("on Personal Access, a column's Add all sets the whole level, including what's added later", async () => {
+    await render({ accessSource: "personal", everyoneMode: "private", personVaultMode: "open" });
+    await act(async () => button("Can view actions").click());
+    const add = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find((li) => li.textContent?.startsWith("Add all"))!;
+    expect(add.textContent).toContain("including what's added later");
+    await act(async () => add.click());
+    if (dialog()) { const bs = [...dialog()!.querySelectorAll("button")]; await act(async () => bs[bs.length - 1].click()); }
+    await settle();
+    const calls = api.setBulkAccess.mock.calls;
+    const last = calls[calls.length - 1][1] as { resources: Array<{ resourceType: string }>; mode: string };
+    expect(last.resources.map((r) => r.resourceType)).toEqual(["vault"]);
+    expect(last.mode).toBe("readonly");
+  });
+  it("Reset to Group Access shows once a setting is just for them, says what can leave their computer, then removes their settings", async () => {
+    await render({ accessSource: "personal", hasPersonal: true, everyoneMode: "private", personVaultMode: "open" });
+    expect(column("private").textContent).toContain("No access");
+    expect(host.querySelector('button[aria-label="Set everything to"]')).toBeNull();
+    const reset = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Reset to Group Access")!;
+    await act(async () => reset.click());
+    expect(dialog()?.textContent).toContain("Reset Sara to Group Access?");
+    expect(dialog()?.textContent).toContain("What their groups don't give leaves their computer.");
+    await act(async () => dialogButton("Reset").click());
+    await settle();
+    expect(api.resetMemberAccess).toHaveBeenCalledTimes(1);
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    expect([...host.querySelectorAll("button")].some((b) => b.textContent === "Reset to Group Access")).toBe(false);
+  });
   it("Reset to groups only says what the person keeps", async () => {
     await render({ personVaultMode: "readonly", everyoneMode: "private" });
     await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Set everything to"]')!.click());
     const option = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
       .find((li) => li.textContent?.startsWith("Reset to groups only"))!;
-    expect(option.textContent).toContain("Remove their own settings");
+    expect(option.textContent).toContain("Remove settings just for them");
     await act(async () => option.click());
     expect(dialog()?.textContent).toContain("They keep what their groups give.");
   });

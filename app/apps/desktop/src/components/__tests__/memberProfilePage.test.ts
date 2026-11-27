@@ -45,8 +45,6 @@ describe("Member profile page, Access tab", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     patchStore({ locks: [], denies: [], tree: null });
-    // These cover the tree; the Access tab opens on the board by default.
-    localStorage.setItem("context.memberAccess.view", "list");
     api.listAccessTree.mockResolvedValue({
       folders: [{ id: "f1", path: "Specs" }],
       notes: [{ id: "n1", relPath: "Specs/API.md" }],
@@ -77,30 +75,8 @@ describe("Member profile page, Access tab", () => {
   async function settle() {
     for (let i = 0; i < 3; i++) await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
   }
-  const folderBox = () => document.body.querySelector<HTMLInputElement>('input[aria-label="Specs: can open"]');
 
-  it("shows each row's icon, name, level pill and annotation", async () => {
-    api.listAccessTree.mockResolvedValue({
-      folders: [{ id: "f1", path: "Specs" }, { id: "f2", path: "Archive" }],
-      notes: [{ id: "n1", relPath: "Welcome.md" }],
-    });
-    api.resolveAccessSummaries.mockImplementation(async (_org: string, groups: Array<Array<{ resourceId: string }>>) =>
-      groups.map((g) => (g[0].resourceId === "f2" ? "private" : g[0].resourceId === "n1" ? "readonly" : "open")));
-    await render();
-    await settle();
-    const rows = [...host.querySelectorAll(".member-access-row")];
-    expect(rows.map((r) => r.querySelector(".member-access-name")?.textContent)).toEqual(["Archive", "Specs", "Welcome"]);
-    expect(rows.every((r) => r.querySelector(".member-access-icon svg"))).toBe(true);
-    const byName = (n: string) => rows.find((r) => r.querySelector(".member-access-name")?.textContent === n)!;
-    // Team mode is Can edit: an open row is inherited, a view row is the person's own.
-    expect(byName("Specs").textContent).toContain("Same as default");
-    expect(byName("Specs").querySelector(".member-access-pill")?.textContent).toContain("Can edit");
-    expect(byName("Welcome").querySelector(".member-access-pill")?.textContent).toContain("Can view");
-    expect(byName("Welcome").textContent).not.toContain("Same as default");
-    expect(byName("Archive").querySelector(".member-access-pill")).toBeNull();
-  });
-
-  it("with access-board, List and Board share one request and read no summaries", async () => {
+  it("the board is the only view: one request, no per-row reads", async () => {
     const { forgetServerFeatures } = await import("../../lib/serverFeatures");
     const { forgetAccessBoardSupport } = await import("../../lib/accessBoardLoad");
     forgetServerFeatures();
@@ -112,13 +88,8 @@ describe("Member profile page, Access tab", () => {
     try {
       await render();
       await settle();
-      const rows = [...host.querySelectorAll(".member-access-row")];
-      const byName = (n: string) => rows.find((r) => r.querySelector(".member-access-name")?.textContent === n)!;
-      expect(byName("Specs").querySelector(".member-access-pill")?.textContent).toContain("Can edit");
-      expect(byName("Welcome").querySelector(".member-access-pill")?.textContent).toContain("Can view");
-      const boardBtn = host.querySelector<HTMLButtonElement>('[role="radiogroup"] [aria-label="Board view"]')!;
-      await act(async () => boardBtn.click());
-      await settle();
+      expect(host.querySelector(".member-access-tree")).toBeNull();
+      expect(host.querySelector('[aria-label="Board view"]')).toBeNull();
       expect(host.querySelector('.access-board-column[data-mode="open"] .access-board-count')?.textContent).toBe("1");
       expect(host.querySelector('.access-board-column[data-mode="readonly"] .access-board-count')?.textContent).toBe("1");
       expect(api.getAccessBoard).toHaveBeenCalledTimes(1);
@@ -133,125 +104,12 @@ describe("Member profile page, Access tab", () => {
   it("is a page with a way back, not a dialog", async () => {
     await render();
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-    const back = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Members and access"));
+    const back = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("People and access"));
     expect(back).toBeDefined();
     await act(async () => back!.click());
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("updates the ticked row in place: no tree re-fetch, only that subtree re-read", async () => {
-    api.listAccessTree.mockResolvedValue({
-      folders: [{ id: "f1", path: "Specs" }, { id: "f2", path: "Archive" }],
-      notes: [{ id: "n1", relPath: "Welcome.md" }],
-    });
-    await render();
-    await settle();
-    expect(api.listAccessTree).toHaveBeenCalledTimes(1);
-    const reads = api.resolveAccessSummaries.mock.calls.length;
-    const spinnersBefore = host.querySelectorAll(".member-access-row .spinner, .member-access-row [class*=spinner]").length;
-    await act(async () => folderBox()!.click());
-    // Optimistic: checked before the re-read lands, and no row went back to loading.
-    expect(folderBox()?.checked).toBe(true);
-    expect(host.querySelectorAll(".member-access-row .spinner, .member-access-row [class*=spinner]").length).toBe(spinnersBefore);
-    await settle();
-    expect(api.listAccessTree).toHaveBeenCalledTimes(1);
-    const later = api.resolveAccessSummaries.mock.calls.slice(reads);
-    const reRead = later.flatMap((call) => (call[1] as Array<Array<{ resourceId: string }>>).map((g) => g[0].resourceId));
-    expect(reRead).toEqual(["f1"]);
-  });
-
-  const spinning = () => host.querySelectorAll(".member-access-row [aria-busy], .member-access-row .spinner, .member-access-row [class*=spinner]").length;
-
-  it("resolves every row under StrictMode, and re-reads the whole tree after a vault-wide change", async () => {
-    api.listAccessTree.mockResolvedValue({
-      folders: [{ id: "f1", path: "Specs" }, { id: "f2", path: "Archive" }],
-      notes: [{ id: "n1", relPath: "Welcome.md" }],
-    });
-    let serverMode = "open";
-    api.resolveAccessSummaries.mockImplementation(async (_org: string, groups: unknown[][]) => groups.map(() => serverMode));
-    await render(true);
-    await settle();
-    expect(spinning()).toBe(0);
-    expect(host.querySelectorAll(".member-access-row .member-access-pill")).toHaveLength(3);
-    const reads = api.resolveAccessSummaries.mock.calls.length;
-
-    // Across the vault: Custom → Can view everything. View-only never asks.
-    serverMode = "readonly";
-    await act(async () => document.body.querySelector<HTMLButtonElement>('[aria-label="Access across the vault"]')!.click());
-    const viewAll = [...document.body.querySelectorAll('[role="menuitemradio"]')]
-      .find((n) => n.textContent?.startsWith("Can view everything")) as HTMLElement;
-    await act(async () => viewAll.click());
-    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
-    await settle();
-
-    expect(onChanged).toHaveBeenCalledTimes(1);
-    const reRead = api.resolveAccessSummaries.mock.calls.slice(reads)
-      .flatMap((call) => (call[1] as Array<Array<{ resourceId: string }>>).map((g) => g[0].resourceId));
-    expect(new Set(reRead)).toEqual(new Set(["f1", "f2", "n1"]));
-    expect(spinning()).toBe(0);
-    const pills = [...host.querySelectorAll(".member-access-row .member-access-pill")].map((p) => p.textContent ?? "");
-    expect(pills).toHaveLength(3);
-    expect(pills.every((p) => p.includes("Can view"))).toBe(true);
-    expect([...host.querySelectorAll<HTMLInputElement>('.member-access-row input[type="checkbox"]')].every((b) => b.checked)).toBe(true);
-  });
-
-  it("never spins forever: an unanswered row shows a dash after five seconds", async () => {
-    vi.useFakeTimers();
-    try {
-      api.resolveAccessSummaries.mockImplementation(() => new Promise(() => {}));
-      await render();
-      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
-      expect(spinning()).toBeGreaterThan(0);
-      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
-      expect(spinning()).toBe(0);
-      const dash = host.querySelector('.member-access-row [title="Couldn\'t load"]');
-      expect(dash?.textContent).toBe("—");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("submits exactly one resource for exactly one person", async () => {
-    await render();
-    await settle();
-    expect(folderBox()?.checked).toBe(false);
-    await act(async () => folderBox()!.click());
-    await settle();
-    expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
-    expect(api.setBulkAccess).toHaveBeenCalledWith("org-1", {
-      resources: [{ resourceType: "folder", resourceId: "f1" }],
-      audience: { type: "users", userIds: ["u2"] },
-      // Their own level is Custom, so the tick takes Everyone's: Can edit.
-      // Never a silent default to Can view.
-      mode: "open",
-    });
-    // A per-item write reloads nothing: the debounced side effects only.
-    expect(onItemWritten).toHaveBeenCalledTimes(1);
-    expect(onChanged).not.toHaveBeenCalled();
-  });
-
-  it("asks before removing access and writes nothing until confirmed", async () => {
-    api.resolveAccessSummaries.mockImplementation(async (_org: string, groups: unknown[][]) => groups.map(() => "open"));
-    await render();
-    await settle();
-    expect(folderBox()?.checked).toBe(true);
-    await act(async () => folderBox()!.click());
-    await settle();
-    const dialog = document.body.querySelector('[role="alertdialog"]');
-    expect(dialog?.querySelector(".confirm-title")?.textContent).toBe("Remove access to “Specs”?");
-    expect(dialog?.textContent).toContain("removed from their devices on the next sync");
-    expect(dialog?.textContent).not.toMatch(/narrow/i);
-    expect(api.setBulkAccess).not.toHaveBeenCalled();
-    const apply = [...dialog!.querySelectorAll("button")].find((b) => b.textContent === "Remove access")!;
-    await act(async () => apply.click());
-    await settle();
-    expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
-    expect(api.setBulkAccess.mock.calls[0][1]).toMatchObject({
-      resources: [{ resourceType: "folder", resourceId: "f1" }],
-      audience: { type: "users", userIds: ["u2"] },
-      mode: "private",
-    });
-  });
 });
 
 describe("Member profile page, Personal info and Activity tabs", () => {
@@ -422,63 +280,4 @@ describe("Member profile page, Personal info and Activity tabs", () => {
     expect(host.querySelector(".member-activity-empty")?.textContent).toBe("Couldn't load activity.");
   });
 
-  describe("Access view toggle", () => {
-    let store: Record<string, string>;
-    beforeEach(() => {
-      resetMembersAccessCaches();
-      store = {};
-      vi.stubGlobal("localStorage", {
-        getItem: (k: string) => (k in store ? store[k] : null),
-        setItem: (k: string, v: string) => { store[k] = String(v); },
-        removeItem: (k: string) => { delete store[k]; },
-      });
-      api.listAccessTree.mockResolvedValue({ folders: [], notes: [] });
-      api.resolveAccessSummaries.mockImplementation(async (_org: string, groups: unknown[][]) => groups.map(() => "private"));
-    });
-    afterEach(() => vi.unstubAllGlobals());
-    const view = (label: string) => host.querySelector<HTMLButtonElement>(`[role="radiogroup"] [aria-label="${label}"]`)!;
-    const acrossRow = () => [...host.querySelectorAll(".members-access-row-title")].some((n) => n.textContent === "Across the vault");
-
-    it("defaults to the board, switches to the list and back, and remembers the choice", async () => {
-      await render({ initialTab: "access" });
-      await flush();
-      expect(view("Board view").getAttribute("aria-checked")).toBe("true");
-      expect(host.querySelector(".access-board")).not.toBeNull();
-      // The board's own "Set everything to" is the vault-wide control there, with
-      // the switch beside it; the "Across the vault" row is the List's alone.
-      expect(acrossRow()).toBe(false);
-      expect(host.querySelector('[aria-label="Access across the vault"]')).toBeNull();
-      expect(view("Board view").closest(".access-board-head")?.querySelector('[aria-label="Set everything to"]')).not.toBeNull();
-
-      await act(async () => view("List view").click());
-      await flush();
-      expect(host.querySelector(".access-board")).toBeNull();
-      expect(acrossRow()).toBe(true);
-      expect(view("List view").closest(".members-access-row")?.querySelector('[aria-label="Access across the vault"]')).not.toBeNull();
-      expect(view("List view").getAttribute("aria-checked")).toBe("true");
-      expect(store["context.memberAccess.view"]).toBe("list");
-
-      await act(async () => view("Board view").click());
-      await flush();
-      expect(host.querySelector(".access-board")).not.toBeNull();
-      expect(store["context.memberAccess.view"]).toBe("board");
-    });
-
-    it("opens on the list when this device last chose it", async () => {
-      store["context.memberAccess.view"] = "list";
-      await render({ initialTab: "access" });
-      await flush();
-      expect(host.querySelector(".access-board")).toBeNull();
-      expect(view("List view").getAttribute("aria-checked")).toBe("true");
-    });
-
-    it("falls back to the board when storage throws", async () => {
-      vi.stubGlobal("localStorage", { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } });
-      await render({ initialTab: "access" });
-      await flush();
-      expect(view("Board view").getAttribute("aria-checked")).toBe("true");
-      await act(async () => view("List view").click());
-      expect(host.querySelector(".access-board")).toBeNull();
-    });
-  });
 });

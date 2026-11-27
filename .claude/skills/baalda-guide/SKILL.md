@@ -98,7 +98,7 @@ That is about 110 words. It names every format asked about, says what does not w
 - "Is there a mobile / web app?" No. iOS is planned; public links open read-only in a browser.
 - "Does it have AI built in?" It has an AI *connection point* (MCP) and works with any local
   agent; it ships no model and no chat panel.
-- "Are notes private by default?" Yes for new vaults: they start on "Only what's shared", so members
+- "Are notes private by default?" Yes for new vaults: members start on **No access**, so they
   see only what is shared with them or their groups, while the creator and invited admins start
   with Can edit everything. Older vaults keep their setting. See `sources.md`, "Known
   stale spots".

@@ -450,7 +450,7 @@ export interface MemberOverview {
   invitedBy?: MemberRef | null;
   /** Only for owner/admin callers. */
   /** `own`: they have their own vault-wide level, so groups change nothing for them. */
-  access?: { level: MemberAccessLevel; own?: boolean };
+  access?: { level: MemberAccessLevel; own?: boolean; ownLevel?: "edit" | "view" | "none" | null; personal?: boolean };
   /** The access groups they are in (absent on servers without groups). */
   groupIds?: string[];
 }
@@ -548,6 +548,22 @@ export interface MembersOverview {
   members: MemberOverview[];
   invitations: InvitationOverview[];
   canManage: boolean;
+  /** The level new invites start on (the vault's old team-wide level; owner/admin only). */
+  newMemberLevel?: "edit" | "view" | null;
+}
+
+/** Someone a group change would not reach: a setting just for them decides there. */
+export interface HeldPerson {
+  userId: string;
+  resourceType: "vault" | "folder" | "file";
+  resourceId: string;
+  current: "edit" | "view" | "none";
+  groupGives: "edit" | "view" | "none";
+  /** "here": their own setting sits on this place; "above": it comes from higher up. */
+  ownAt: "here" | "above";
+  ownPlace: { resourceType: string; resourceId: string };
+  /** The place's name; null for the whole vault (absent on older servers). */
+  placeName?: string | null;
 }
 
 export interface InviteManyInput {
@@ -558,6 +574,9 @@ export interface InviteManyInput {
   /** Access groups the invitee joins on acceptance. Mutually exclusive with
    *  `access` (a personal level ignores groups); the server refuses both. */
   groupIds?: string[];
+  /** "Only what's shared" picked on purpose: without it, a server from
+   *  2026-11-27 on gives a choiceless invite the vault's old team level. */
+  onlyShared?: boolean;
   /** Seamless keys B1: the vault key wrapped per invitee under a one-time
    *  secret (sent with `X-Baalda-VK`). Omitted by a device without the key. */
   vaultKeys?: {
@@ -2642,9 +2661,23 @@ export class ApiClient {
 
   /** The join code plus the access groups it adds people to. `groupIds` is
    *  null on a server that cannot set them (it answers the code alone). */
-  async getJoinCodeInfo(): Promise<{ code: string; groupIds: string[] | null }> {
-    const { data } = await this.request<{ code: string; groupIds?: string[] }>("GET", "/api/orgs/join-code");
-    return { code: data.code, groupIds: Array.isArray(data.groupIds) ? data.groupIds : null };
+  async getJoinCodeInfo(): Promise<{ code: string; groupIds: string[] | null; level?: "edit" | "view" | null }> {
+    const { data } = await this.request<{ code: string; groupIds?: string[]; level?: "edit" | "view" | null }>("GET", "/api/orgs/join-code");
+    return {
+      code: data.code,
+      groupIds: Array.isArray(data.groupIds) ? data.groupIds : null,
+      ...(data.level !== undefined ? { level: data.level } : {}),
+    };
+  }
+
+  /** The level people who join by the code start on (null = only what's shared or their groups). */
+  async setJoinCodeLevel(orgId: string, level: "edit" | "view" | null): Promise<"edit" | "view" | null> {
+    const { data } = await this.request<{ level: "edit" | "view" | null }>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/join-code/level`,
+      { body: { level } },
+    );
+    return data.level;
   }
 
   /** Choose the access groups the vault's join code adds people to (owner/admin). */
@@ -2809,11 +2842,13 @@ export class ApiClient {
     organizationId: string,
     userId: string,
     role: "member" | "admin",
+    /** On a demotion: "groups" removes their own settings so their groups decide. */
+    ownSettings?: "keep" | "groups",
   ): Promise<void> {
     await this.request<{ updated: boolean }>(
       "PATCH",
       `/api/orgs/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(userId)}`,
-      { body: { role } },
+      { body: ownSettings ? { role, ownSettings } : { role } },
     );
   }
 
@@ -4207,6 +4242,32 @@ export class ApiClient {
     change: { name?: string; color?: string | null; autoJoin?: boolean },
   ): Promise<void> {
     await this.request("PATCH", `/api/orgs/${encodeURIComponent(orgId)}/groups/${encodeURIComponent(groupId)}`, { body: change });
+  }
+
+  /** Who a proposed group change would not reach (writes nothing). */
+  async groupHeld(
+    orgId: string,
+    groupId: string,
+    input: { access: { resources: BulkAccessResource[]; mode: TeamAccessMode } } | { addUserIds: string[] },
+  ): Promise<HeldPerson[]> {
+    return (await this.request<{ held: HeldPerson[] }>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(orgId)}/groups/${encodeURIComponent(groupId)}/held`,
+      { body: input },
+    )).data.held;
+  }
+
+  /** "Let the group decide" for chosen people and places. */
+  async groupLetDecide(
+    orgId: string,
+    groupId: string,
+    entries: Array<{ userId: string; resourceType: "vault" | "folder" | "file"; resourceId: string }>,
+  ): Promise<Array<{ userId: string; action: "removed" | "marked" | "skipped"; before: string; after: string }>> {
+    return (await this.request<{ results: Array<{ userId: string; action: "removed" | "marked" | "skipped"; before: string; after: string }> }>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(orgId)}/groups/${encodeURIComponent(groupId)}/let-decide`,
+      { body: { entries } },
+    )).data.results;
   }
 
   async deleteGroup(orgId: string, groupId: string): Promise<void> {

@@ -18,6 +18,7 @@ import {
   vaultBaseline,
   personalVaultLevel,
   type ResolverCache,
+  raiseMarksFor,
 } from "./resolver.js";
 import { listReadableDocsInVault, readsWholeVault, vaultAccess } from "./vault-docs.js";
 import { isAccountReadOnly } from "../billing/lapse.js";
@@ -153,7 +154,9 @@ export async function canEditFolder(
     pre
       ? Promise.resolve(indexedIsDenied(pre.index, principalType, principalId, null, chain))
       : isDenied(db, principalType, principalId, null, chain);
-  if (await denied("user", userId)) return false;
+  // A "may raise" mark under their own No access is the resolver's to judge.
+  const userDenied = await denied("user", userId);
+  if (userDenied && (await raiseMarksFor(db, row.organization_id, userId, cache)).length === 0) return false;
   if (pre ? indexedIsLocked(pre.index, userId, null, chain) : await isLocked(db, userId, null, chain)) return false;
   const itemPrivate = await denied("org", row.organization_id);
   const baseline = cache
@@ -182,7 +185,7 @@ export async function canEditFolder(
     pre
       ? buildAccessContextFromIndex(pre.index, "folder", folderId, db, cache)
       : buildAccessContext("folder", folderId, db, cache);
-  if (personal !== null || itemPrivate || readOnlyVault || sealedVault || existingAtJoin) {
+  if (userDenied || personal !== null || itemPrivate || readOnlyVault || sealedVault || existingAtJoin) {
     const ctx = await accessContext();
     if (!ctx) return false;
     return (await resolveAccessForUser(ctx, userId, role, db, cache, pre?.index)).permission === "edit";
@@ -725,12 +728,26 @@ export async function vaultRootWritable(
   const personal = cache
     ? await cache.personal(db, organizationId, userId)
     : await personalVaultLevel(db, organizationId, userId);
-  // A personal No access / Can edit decides outright; a personal Can view
-  // combines with the person's groups (resolver), so a group's whole-vault
-  // `edit` still opens the root for them.
-  if (personal === "denied") return false;
+  // A setting just for the person decides over their groups (resolver): Can
+  // edit opens the root, Can view / No access close it unless a "may raise"
+  // mark on the whole vault names a group that edits the whole vault.
   if (personal === "edit") return true;
-  if (personal === null) {
+  if (personal !== null) {
+    const marks = (await raiseMarksFor(db, organizationId, userId, cache)).filter(
+      (m) => m.resourceType === "vault" && m.resourceId === organizationId,
+    );
+    if (marks.length === 0) return false;
+    const { rows } = await db.query<{ ok: number }>(
+      `SELECT 1 AS ok FROM shares s
+         JOIN access_group_members gm ON gm.group_id = s.principal_id AND gm.user_id = $2
+        WHERE s.resource_type = 'vault' AND s.resource_id = $1 AND s.permission = 'edit'
+          AND s.principal_type = 'group' AND s.principal_id = ANY($3::text[])
+        LIMIT 1`,
+      [organizationId, userId, marks.map((m) => m.groupId)],
+    );
+    return rows.length > 0;
+  }
+  {
     const posture = cache
       ? await cache.baseline(db, organizationId)
       : await vaultBaseline(db, organizationId);

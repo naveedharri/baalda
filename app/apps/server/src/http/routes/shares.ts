@@ -19,6 +19,7 @@ import {
   type AccessIndex,
   memberGroupIds,
   personalVaultLevel,
+  raiseMarksFor,
   vaultBaseline,
 } from "../../permissions/resolver.js";
 import {
@@ -693,7 +694,14 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     // entirely, so no vault padlock is reported for them.
     // A personal Can view combines with groups (resolver); a personal No
     // access ignores them.
-    const groupIds = personal !== "denied" ? await memberGroupIds(pool, org, session.userId) : [];
+    // Since 2026-11-27 a setting just for a person decides over their groups:
+    // with a vault level of their own, only groups MARKED as allowed to raise
+    // them count (access_group_raises), and only through the marked places.
+    const allGroupIds = personal !== "denied" ? await memberGroupIds(pool, org, session.userId) : [];
+    const allMarks = await raiseMarksFor(pool, org, session.userId);
+    const marks = personal ? allMarks : [];
+    const vaultMarked = new Set(marks.filter((m) => m.resourceType === "vault").map((m) => m.groupId));
+    const groupIds = personal ? allGroupIds.filter((g) => vaultMarked.has(g)) : allGroupIds;
     const groupVaultEdit =
       groupIds.length > 0 &&
       ((
@@ -759,6 +767,30 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       [vaultId, org, session.userId, postureLocked, groupIds],
     );
     rows.push(...lifts);
+    // A group marked to raise them on one folder or note lifts exactly there:
+    // reported as a lift at the marked place when they can edit it now. In
+    // every posture: the mark sits under a setting just for them (Can view or
+    // No access on a folder above), which the client otherwise folds down.
+    if (allMarks.length > 0) {
+      const cache = createResolverCache();
+      for (const m of allMarks) {
+        if (m.resourceType === "vault" || !allGroupIds.includes(m.groupId)) continue;
+        const ctx = await buildAccessContext(m.resourceType === "file" ? "file" : "folder", m.resourceId, pool, cache);
+        if (!ctx || ctx.organizationId !== org) continue;
+        const now = await resolveAccessForUser(ctx, session.userId, role, pool, cache);
+        if (now.permission !== "edit") continue;
+        rows.push({
+          id: `raise:${m.groupId}:${m.resourceId}`,
+          resource_type: m.resourceType,
+          resource_id: m.resourceId,
+          principal_type: "user",
+          principal_id: session.userId,
+          permission: "edit",
+          created_by: null,
+          created_at: null,
+        });
+      }
+    }
     if (!postureLocked && groupIds.length > 0) {
       rows.push(...(await groupViewLocks(vaultId, org, session.userId, role, groupIds)));
     }

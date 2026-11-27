@@ -9,7 +9,7 @@ const g = (over: Partial<AccessGroup>): AccessGroup => ({
 describe("groups helpers", () => {
   it("summarises what a group gives", () => {
     expect(groupAccessSummary(null)).toBeNull();
-    expect(groupAccessSummary([])).toBe("No access yet");
+    expect(groupAccessSummary([])).toBe("No access");
     expect(groupAccessSummary([{ resourceType: "vault", resourceId: "o", permission: "edit", path: null }])).toBe("Can edit everything");
     expect(groupAccessSummary([
       { resourceType: "vault", resourceId: "o", permission: "view", path: null },
@@ -40,7 +40,7 @@ describe("groups helpers", () => {
     const hidden = (path: string) => ({ resourceType: "folder" as const, resourceId: path, permission: "denied" as const, path });
     expect(groupAccessSummary([vault, hidden("HR")])).toBe("Can edit everything except HR");
     expect(groupAccessSummary([vault, hidden("HR"), hidden("Board/Pay")])).toBe("Can edit everything except HR and 1 more");
-    expect(groupAccessSummary([hidden("HR")])).toBe("No access yet");
+    expect(groupAccessSummary([hidden("HR")])).toBe("No access");
     expect(groupOpensWholeVault([hidden("HR")])).toBe(false);
   });
 });
@@ -85,3 +85,4 @@ describe("group removal and deletion say plainly what is lost", () => {
     expect(groupDeleteNote("Sales", folder, 1)).toContain("Its member loses what Sales gave");
   });
 });
+

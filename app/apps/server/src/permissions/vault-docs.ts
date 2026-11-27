@@ -6,6 +6,9 @@ import {
   personalVaultLevel,
   type PersonalVaultLevel,
   vaultBaseline,
+  createResolverCache,
+  effectivePermission,
+  raiseMarksFor,
 } from "./resolver.js";
 
 type Queryable = Pick<pg.Pool, "query">;
@@ -814,7 +817,22 @@ async function listDocsInVault(
     for (const id of orgDenied) if (!personal.has(id) && !groupDocs.has(id)) reachable.delete(id);
   }
   for (const id of groupDocs) reachable.add(id);
-  return subtract(reachable, userDenied);
+  const result = subtract(reachable, userDenied);
+  // "Sales may raise Sam here" marks can lift a doc a setting just for the
+  // person keeps from them (resolver `RaiseMark`). Rare, so resolve those
+  // candidates one by one through the enforcer rather than in SQL.
+  if (!opts.deleted && role !== null && (await raiseMarksFor(db, organizationId, userId)).length > 0) {
+    const { rows } = await db.query<{ id: string }>(
+      `SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL
+       UNION SELECT id FROM files WHERE vault_id = $1`,
+      [vaultId],
+    );
+    const candidates = rows.map((r) => r.id).filter((id) => !result.has(id));
+    const cache = createResolverCache();
+    await cache.prefetch(db, candidates);
+    for (const id of candidates) if ((await effectivePermission(userId, id, db, cache)) !== "none") result.add(id);
+  }
+  return result;
 }
 
 /** `a` minus `b`, in place on `a`. */

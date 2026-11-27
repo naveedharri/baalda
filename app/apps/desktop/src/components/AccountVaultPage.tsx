@@ -121,7 +121,7 @@ export function AccountVaultPage({
           description={
             settingsAction === "unavailable"
               ? VAULT_SETTINGS_UNAVAILABLE_HINT
-              : "Members and access, appearance and more."
+              : "People and access, appearance and more."
           }
         >
           <AsyncButton

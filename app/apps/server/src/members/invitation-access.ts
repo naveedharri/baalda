@@ -81,3 +81,94 @@ export async function applyInvitationAccess(
     return null;
   }
 }
+
+/**
+ * Whether the inviter chose anything for these invitations: a level, groups,
+ * or "Only what's shared" on purpose. Read BEFORE the choices are applied
+ * (applying consumes their rows).
+ */
+export async function invitationHadChoice(invitationIds: readonly string[], db: pg.Pool = defaultPool): Promise<boolean> {
+  if (invitationIds.length === 0) return true;
+  const { rows } = await db.query<{ any: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM invitation_access WHERE invitation_id = ANY($1::text[]))
+         OR EXISTS (SELECT 1 FROM invitation_groups WHERE invitation_id = ANY($1::text[]))
+         OR EXISTS (SELECT 1 FROM invitation_no_level WHERE invitation_id = ANY($1::text[])) AS any`,
+    [[...invitationIds]],
+  );
+  return rows[0]?.any ?? true;
+}
+
+/**
+ * An invite that chose nothing (sent by an app made before 2026-11-27) gives
+ * the vault's old team level, as it did before the conversion: a plain member
+ * with no vault level of their own and in no group that takes new members gets
+ * `new_member_level` as their own level. Best-effort.
+ */
+export async function applyNewMemberDefault(
+  input: { organizationId: string; userId: string },
+  deps: AccessChangeDeps = {},
+  db: pg.Pool = defaultPool,
+): Promise<void> {
+  try {
+    const { rows } = await db.query<{ level: string | null; role: string | null; own: boolean; grouped: boolean }>(
+      `SELECT (SELECT new_member_level FROM organization_access_settings WHERE organization_id = $1) AS level,
+              (SELECT role FROM member WHERE "organizationId" = $1 AND "userId" = $2) AS role,
+              EXISTS (SELECT 1 FROM shares WHERE resource_type = 'vault' AND resource_id = $1
+                        AND principal_type = 'user' AND principal_id = $2) AS own,
+              EXISTS (SELECT 1 FROM access_group_members gm JOIN access_groups g ON g.id = gm.group_id
+                        WHERE g.auto_join AND gm.organization_id = $1 AND gm.user_id = $2) AS grouped`,
+      [input.organizationId, input.userId],
+    );
+    const r = rows[0];
+    if (!r || r.role !== "member" || r.own || r.grouped) return;
+    if (r.level !== "edit" && r.level !== "view") return;
+    await applyMemberLevel(
+      { organizationId: input.organizationId, userId: input.userId, mode: r.level === "edit" ? "open" : "readonly" },
+      deps,
+      db,
+    );
+  } catch (err) {
+    console.error("[invitations] applying the vault's default level failed:", (err as Error).message);
+  }
+}
+
+/**
+ * Give a member who just joined their own vault-wide level (the join code's
+ * level). Same as an invite's level, applied by the vault's owner, and like an
+ * invite's level they leave the groups that take every new member.
+ */
+export async function applyMemberLevel(
+  input: { organizationId: string; userId: string; mode: AccessMode },
+  deps: AccessChangeDeps = {},
+  db: pg.Pool = defaultPool,
+): Promise<void> {
+  try {
+    const { rows } = await db.query<{ user_id: string }>(
+      `SELECT "userId" AS user_id FROM member
+        WHERE "organizationId" = $1 AND role IN ('owner', 'admin')
+        ORDER BY (role = 'owner') DESC, "createdAt" ASC LIMIT 1`,
+      [input.organizationId],
+    );
+    const actor = rows[0]?.user_id;
+    if (!actor) return;
+    await applyBulkAccess(
+      {
+        organizationId: input.organizationId,
+        actorUserId: actor,
+        resources: [{ resourceType: "vault", resourceId: input.organizationId }],
+        audience: { type: "users", userIds: [input.userId] },
+        mode: input.mode,
+      },
+      deps,
+      db,
+    );
+    await db.query(
+      `DELETE FROM access_group_members gm USING access_groups g
+        WHERE g.id = gm.group_id AND g.auto_join
+          AND gm.organization_id = $1 AND gm.user_id = $2`,
+      [input.organizationId, input.userId],
+    );
+  } catch (err) {
+    console.error("[join-code] applying the join code level failed:", (err as Error).message);
+  }
+}

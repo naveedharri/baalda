@@ -392,6 +392,9 @@ export interface AccessIndex {
   /** user id → the access groups they belong to. Absent on a partial index
    *  (`preloadFolders`): the caller then reads memberships itself. */
   memberGroups?: Map<string, string[]>;
+  /** user id → their "may raise" marks ({@link RaiseMark}). Absent on a
+   *  partial index: the caller then reads them itself. */
+  raises?: Map<string, RaiseMark[]>;
 }
 
 const shareKey = (type: string, id: string) => `${type}\u0000${id}`;
@@ -439,6 +442,10 @@ export async function loadAccessIndex(db: Queryable, organizationId: string): Pr
       [organizationId],
     ),
   ]);
+  const raiseRows = await db.query<{ user_id: string; group_id: string; resource_type: string; resource_id: string }>(
+    `SELECT user_id, group_id, resource_type, resource_id FROM access_group_raises WHERE organization_id = $1`,
+    [organizationId],
+  );
   const index: AccessIndex = {
     organizationId,
     shares: new Map(),
@@ -446,7 +453,14 @@ export async function loadAccessIndex(db: Queryable, organizationId: string): Pr
     notes: new Map(notes.rows.map((r) => [r.id, { vaultId: r.vault_id, folderId: r.folder_id, createdBy: r.created_by, createdAt: r.created_at }])),
     files: new Map(files.rows.map((r) => [r.id, { vaultId: r.vault_id, folderId: r.folder_id, createdBy: r.created_by, createdAt: r.created_at }])),
     memberGroups: new Map(),
+    raises: new Map(),
   };
+  for (const r of raiseRows.rows) {
+    const mark = { groupId: r.group_id, resourceType: r.resource_type, resourceId: r.resource_id };
+    const list = index.raises!.get(r.user_id);
+    if (list) list.push(mark);
+    else index.raises!.set(r.user_id, [mark]);
+  }
   for (const r of groupMembers.rows) {
     const list = index.memberGroups!.get(r.user_id);
     if (list) list.push(r.group_id);
@@ -684,6 +698,99 @@ export function rowsGroupGrant(
     }
   }
   return best;
+}
+
+/**
+ * "Sales may raise Sam here" (decided 2026-11-27). A setting just for a person
+ * decides for them over their groups; a mark names ONE group that may still
+ * give them more at that place and inside it, for as long as they stay in the
+ * group (the row cascades away with the membership, the group, or Reset).
+ */
+export interface RaiseMark {
+  groupId: string;
+  resourceType: string;
+  resourceId: string;
+}
+
+/** The places on an item's chain, nearest first: the item (a note or file),
+ *  its folders, then the vault. */
+function chainOrder(docId: string | null, folderIds: readonly string[], organizationId: string): Array<[string, string]> {
+  const order: Array<[string, string]> = [];
+  if (docId !== null) order.push(["file", docId]);
+  for (const f of folderIds) order.push(["folder", f]);
+  order.push(["vault", organizationId]);
+  return order;
+}
+
+/**
+ * Where the person's closest setting of their own sits on the chain (0 = the
+ * item itself, the vault last), or null when they have none there. Over any
+ * superset of rows that holds their own rows on the chain and the vault.
+ */
+export function ownSettingDepth(
+  rows: readonly ShareRow[],
+  userId: string,
+  docId: string | null,
+  folderIds: readonly string[],
+  organizationId: string,
+): number | null {
+  const order = chainOrder(docId, folderIds, organizationId);
+  for (let i = 0; i < order.length; i++) {
+    const [type, id] = order[i]!;
+    if (rows.some((r) =>
+      r.principal_type === "user" && r.principal_id === userId &&
+      r.resource_type === type && r.resource_id === id &&
+      (r.permission === "edit" || r.permission === "view" || r.permission === "readonly" || r.permission === "denied"),
+    )) return i;
+  }
+  return null;
+}
+
+/** The groups whose marks reach this item past an own setting at `ownDepth`:
+ *  a mark at the own setting's place or anywhere nearer the item. */
+export function raisingGroups(
+  marks: readonly RaiseMark[],
+  memberOf: readonly string[],
+  ownDepth: number,
+  docId: string | null,
+  folderIds: readonly string[],
+  organizationId: string,
+): string[] {
+  if (marks.length === 0) return [];
+  const order = chainOrder(docId, folderIds, organizationId);
+  const out = new Set<string>();
+  for (const m of marks) {
+    if (!memberOf.includes(m.groupId)) continue;
+    const at = order.findIndex(([t, id]) => t === m.resourceType && id === m.resourceId);
+    if (at !== -1 && at <= ownDepth) out.add(m.groupId);
+  }
+  return [...out];
+}
+
+const raiseMemo = new WeakMap<object, Map<string, Promise<RaiseMark[]>>>();
+
+/** This person's marks in the vault, read at most once per request cache. */
+export async function raiseMarksFor(
+  db: Queryable,
+  organizationId: string,
+  userId: string,
+  cache?: object,
+  index?: AccessIndex,
+): Promise<RaiseMark[]> {
+  if (index?.raises && index.organizationId === organizationId) return index.raises.get(userId) ?? [];
+  const read = () =>
+    db.query<{ group_id: string; resource_type: string; resource_id: string }>(
+      `SELECT group_id, resource_type, resource_id FROM access_group_raises
+        WHERE organization_id = $1 AND user_id = $2`,
+      [organizationId, userId],
+    ).then((r) => r.rows.map((x) => ({ groupId: x.group_id, resourceType: x.resource_type, resourceId: x.resource_id })));
+  if (!cache) return read();
+  let memo = raiseMemo.get(cache);
+  if (!memo) raiseMemo.set(cache, (memo = new Map()));
+  const key = `${organizationId}\u0000${userId}`;
+  let p = memo.get(key);
+  if (!p) memo.set(key, (p = read()));
+  return p;
 }
 
 /** The access groups `userId` belongs to in this vault. */
@@ -1122,6 +1229,29 @@ async function userItemRows(
   return rows;
 }
 
+/** This person's own rows on the chain AND the vault resource: what
+ *  {@link ownSettingDepth} reads on the uncached paths. */
+async function userChainAndVaultRows(
+  db: Queryable,
+  userId: string,
+  docId: string | null,
+  folderIds: readonly string[],
+  organizationId: string,
+): Promise<ShareRow[]> {
+  const { rows } = await db.query<ShareRow>(
+    `SELECT resource_type, resource_id, principal_type, principal_id, permission, access_revision, legacy_team_grant
+       FROM shares
+      WHERE principal_type = 'user' AND principal_id = $1
+        AND (
+          ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
+          OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
+          OR (resource_type = 'vault' AND resource_id = $4)
+        )`,
+    [userId, docId, [...folderIds], organizationId],
+  );
+  return rows;
+}
+
 /** Highest-wins over {@link sharePermission}'s matching rows, skipping the org
  *  grants a join snapshot already accounts for. */
 function grantFromRows(
@@ -1466,7 +1596,11 @@ async function effectivePermissionInner(
   // on trust. The escape hatch is elsewhere and role-based — managing shares
   // (`canManage` in http/routes/shares.ts) is gated on owner/admin, never on
   // effective permission, so an owner can always lift what they set.
-  if (await denied("user", userId)) return "none";
+  // One exception (2026-11-27): a "may raise" mark at or below the person's own
+  // No access lets that group decide there ("Let Sales decide" under a folder
+  // set No access just for them). Without marks this is the plain early return.
+  const userDenied = await denied("user", userId);
+  if (userDenied && (await raiseMarksFor(db, loc.organizationId, userId, cache)).length === 0) return "none";
   const itemPrivate = await denied("org", loc.organizationId);
 
   const facts = cache ? await cache.membership(db, loc.organizationId, userId) : null;
@@ -1482,6 +1616,30 @@ async function effectivePermissionInner(
       ? rowsGroupGrant(rows, ids, docId, folderIds, loc.organizationId, snapshot, loc.createdAt)
       : groupSharePermission(db, ids, docId, folderIds, loc.organizationId, snapshot, loc.createdAt);
   };
+  // A setting just for the person decides for them over their groups (decided
+  // 2026-11-27): groups count only where the person has no setting of their own
+  // on the chain, or through a "may raise" mark naming that group.
+  const groupsHere = async (snapshot?: MemberAccessSnapshot | null): Promise<Permission> => {
+    if (role === null) return "none";
+    const own = rows ?? (await userChainAndVaultRows(db, userId, docId, folderIds, loc.organizationId));
+    const depth = ownSettingDepth(own, userId, docId, folderIds, loc.organizationId);
+    if (depth === null) return groupGrant(snapshot);
+    const ids = cachedGroups ?? (await memberGroupIds(db, loc.organizationId, userId));
+    const raising = raisingGroups(
+      await raiseMarksFor(db, loc.organizationId, userId, cache), ids, depth, docId, folderIds, loc.organizationId,
+    );
+    if (raising.length === 0) return "none";
+    return rows
+      ? rowsGroupGrant(rows, raising, docId, folderIds, loc.organizationId, snapshot, loc.createdAt)
+      : groupSharePermission(db, raising, docId, folderIds, loc.organizationId, snapshot, loc.createdAt);
+  };
+
+  // Under their own No access only a marked group reaches them, capped by locks.
+  if (userDenied) {
+    const lifted = await groupsHere();
+    if (lifted !== "none" && (await locked())) return "view";
+    return lifted;
+  }
 
   // The person's own vault level replaces the whole vault-wide baseline (org
   // posture, join snapshot, role shortcut, authorship) — see
@@ -1496,9 +1654,9 @@ async function effectivePermissionInner(
     // A personal `denied` drops org ITEM grants too, exactly like an item set
     // Private: only per-user item grants can lift a person out of "No access".
     let granted = await grant(role !== null, !itemPrivate && personal !== "denied", undefined, undefined, false);
-    // A personal Can edit / Can view combines with the person's groups,
-    // highest wins; a personal No access stays absolute.
-    if (personal !== "denied" && granted !== "edit") granted = maxPermission(granted, await groupGrant());
+    // The person's own level decides; a group reaches past it only through a
+    // "may raise" mark ({@link RaiseMark}).
+    if (granted !== "edit") granted = maxPermission(granted, await groupsHere());
     if (granted !== "none" && (await locked())) return "view";
     return granted;
   }
@@ -1519,7 +1677,7 @@ async function effectivePermissionInner(
           ? "view"
           : "none";
     snapped = maxPermission(snapped, direct);
-    if (snapped !== "edit") snapped = maxPermission(snapped, await groupGrant(snapshot));
+    if (snapped !== "edit") snapped = maxPermission(snapped, await groupsHere(snapshot));
     if (snapped !== "none" && (await locked())) return "view";
     return snapped;
   }
@@ -1575,7 +1733,7 @@ async function effectivePermissionInner(
   } else {
     granted = await grant(role !== null, true); // isMember — gates the org-wide grant
   }
-  if (granted !== "edit") granted = maxPermission(granted, await groupGrant());
+  if (granted !== "edit") granted = maxPermission(granted, await groupsHere());
 
   // Cap overlay: a matching lock caps at view; it never grants.
   if (granted !== "none" && (await locked())) {
@@ -1729,7 +1887,9 @@ async function resolveAccessForUserInner(
     index
       ? Promise.resolve(indexedIsLocked(index, userId, ctx.docId, ctx.folderIds))
       : isLocked(db, userId, ctx.docId, ctx.folderIds);
-  if (await denied("user", userId)) {
+  // Mirrors `effectivePermission`: a mark lets a group past an own No access.
+  const userDenied = await denied("user", userId);
+  if (userDenied && (await raiseMarksFor(db, ctx.organizationId, userId, cache, index)).length === 0) {
     return { permission: "none", capped: false, denied: true };
   }
   const itemPrivate = await denied("org", ctx.organizationId);
@@ -1748,6 +1908,38 @@ async function resolveAccessForUserInner(
       ? rowsGroupGrant(indexedRows(index, ctx.docId, ctx.folderIds, ctx.organizationId), ids, ctx.docId, ctx.folderIds, ctx.organizationId, snapshot, ctx.createdAt)
       : groupSharePermission(db, ids, ctx.docId, ctx.folderIds, ctx.organizationId, snapshot, ctx.createdAt);
   };
+  // Mirrors `effectivePermission` exactly: an own setting decides over groups,
+  // a "may raise" mark lets one named group past it.
+  const groupsHere = async (snapshot?: MemberAccessSnapshot | null): Promise<Permission> => {
+    if (role === null) return "none";
+    const own = index
+      ? indexedRowsFor(index, ctx.docId, ctx.folderIds)
+      : await userChainAndVaultRows(db, userId, ctx.docId, ctx.folderIds, ctx.organizationId);
+    const depth = ownSettingDepth(own, userId, ctx.docId, ctx.folderIds, ctx.organizationId);
+    if (depth === null) return groupGrant(snapshot);
+    const ids =
+      index?.memberGroups?.get(userId) ??
+      (index?.memberGroups
+        ? []
+        : cache
+          ? await cache.groups(db, ctx.organizationId, userId)
+          : await memberGroupIds(db, ctx.organizationId, userId));
+    const raising = raisingGroups(
+      await raiseMarksFor(db, ctx.organizationId, userId, cache, index), ids, depth, ctx.docId, ctx.folderIds, ctx.organizationId,
+    );
+    if (raising.length === 0) return "none";
+    return index
+      ? rowsGroupGrant(indexedRows(index, ctx.docId, ctx.folderIds, ctx.organizationId), raising, ctx.docId, ctx.folderIds, ctx.organizationId, snapshot, ctx.createdAt)
+      : groupSharePermission(db, raising, ctx.docId, ctx.folderIds, ctx.organizationId, snapshot, ctx.createdAt);
+  };
+  if (userDenied) {
+    const lifted = await groupsHere();
+    if (lifted === "none") return { permission: "none", capped: false, denied: true };
+    const locked = await lockedFor();
+    if (locked && lifted === "edit") return { permission: "view", capped: true };
+    if (locked) return { permission: "view", capped: false };
+    return { permission: lifted, capped: false };
+  }
   // The person's own vault level — mirrors `effectivePermission` exactly.
   const personal = index
     ? indexedPersonalVault(index, userId)
@@ -1768,9 +1960,8 @@ async function resolveAccessForUserInner(
       index,
       false,
     );
-    // Mirrors `effectivePermission`: a personal Can edit / Can view combines
-    // with groups; a personal No access stays absolute.
-    if (personal !== "denied" && granted !== "edit") granted = maxPermission(granted, await groupGrant());
+    // Mirrors `effectivePermission`: the person's own level decides.
+    if (granted !== "edit") granted = maxPermission(granted, await groupsHere());
     if (granted === "none") return { permission: "none", capped: false, denied: itemPrivate || personal === "denied" };
     const locked = await lockedFor();
     if (locked && granted === "edit") return { permission: "view", capped: true };
@@ -1802,7 +1993,7 @@ async function resolveAccessForUserInner(
           ? "view"
           : "none";
     permission = maxPermission(permission, direct);
-    if (permission !== "edit") permission = maxPermission(permission, await groupGrant(snapshot));
+    if (permission !== "edit") permission = maxPermission(permission, await groupsHere(snapshot));
     if (permission === "none") return { permission, capped: false, denied: itemPrivate };
     const locked = await lockedFor();
     if (locked && permission === "edit") return { permission: "view", capped: true };
@@ -1853,7 +2044,7 @@ async function resolveAccessForUserInner(
               undefined,
               index,
             );
-  if (granted !== "edit") granted = maxPermission(granted, await groupGrant());
+  if (granted !== "edit") granted = maxPermission(granted, await groupsHere());
 
   if (granted === "none") return { permission: "none", capped: false, denied: itemPrivate };
 
