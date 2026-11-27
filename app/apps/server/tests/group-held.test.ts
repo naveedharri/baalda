@@ -243,9 +243,25 @@ describe("an invite that chose nothing keeps the vault's old team level", () => 
 describe("the group giving less than a setting just for them (2026-11-28)", () => {
   beforeEach(resetDb);
 
-  it("adding someone with their own Can edit everything to a group that gives nothing there is asked; using the group's removes it", async () => {
+  it("a group with no setting on a place says nothing there: an empty group asks nobody", async () => {
+    const f = await fixture();
+    const fresh = await group(f.org, "Empty");
+    await seedUserVaultGrant(f.org, f.sam, "edit");
+    await userRow(f.org, "folder", f.specs, f.ana, "edit");
+    expect(await heldByOwnSettings({ orgId: f.org, actorUserId: f.owner, groupId: fresh, addUserIds: [f.sam, f.ana] })).toEqual([]);
+    // A group that reaches only one folder says nothing about the rest of the
+    // vault: adding Sam asks nothing about his own Can edit everything.
+    expect(await heldByOwnSettings({ orgId: f.org, actorUserId: f.owner, groupId: f.sales, addUserIds: [f.sam] })).toEqual([]);
+  });
+
+  it("adding someone with their own Can edit everything to a group whose whole-vault level is lower is asked; using the group's removes it", async () => {
     const f = await fixture();
     const fresh = await group(f.org, "New");
+    await pool.query(
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES ($1, $2, 'vault', $2, 'group', $3, 'denied')`,
+      [randomUUID(), f.org, fresh],
+    );
     await seedUserVaultGrant(f.org, f.sam, "edit");
     const leo = await seedUser(`leo-${randomUUID().slice(0, 8)}@held.test`);
     await seedMember(f.org, leo, "member");
