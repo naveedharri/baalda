@@ -46,6 +46,19 @@ export function mergeSv(a: Uint8Array | null, b: Uint8Array): Uint8Array {
   return encodeSvMap(out);
 }
 
+/**
+ * What a SERVER-SENT update proves the server holds: for every client in it,
+ * all ops up to the end of that client's run (`parseUpdateMeta(...).to`). The
+ * server's document is complete, so a delta carrying client c's ops up to clock
+ * `to` means it holds c's ops 0..to. Not `Y.encodeStateVectorFromUpdate`: that
+ * counts only clients whose run starts at clock 0, so a teammate typing on in
+ * one session (every later delta starts above 0) recorded nothing.
+ */
+export function ackSvFromServerUpdate(update: Uint8Array): Uint8Array {
+  const { to } = Y.parseUpdateMeta(update);
+  return encodeSvMap(to);
+}
+
 /** Encode a client→clock map as a Yjs state vector (varuint count, then pairs). */
 function encodeSvMap(m: Map<number, number>): Uint8Array {
   const bytes: number[] = [];

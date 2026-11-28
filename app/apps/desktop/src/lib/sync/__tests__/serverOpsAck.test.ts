@@ -35,6 +35,14 @@ describe("VaultDocStore — server ops count as acknowledged", () => {
     Y.applyUpdate(local, Y.encodeStateAsUpdate(server));
     expect(unseenWork({ localSv: Y.encodeStateVector(local), ackedSv: acked })).toBe(false);
 
+    // The same teammate keeps typing in the same session: a delta whose ops
+    // start ABOVE clock 0 for a client the ack already knows.
+    const before2 = Y.encodeStateVector(server);
+    server.getText("content").insert(0, "[still typing] ");
+    await store.applyUpdate("doc1", Y.encodeStateAsUpdate(server, before2));
+    Y.applyUpdate(local, Y.encodeStateAsUpdate(server));
+    expect(unseenWork({ localSv: Y.encodeStateVector(local), ackedSv: acked })).toBe(false);
+
     // A word typed here and never sent stays unseen work.
     local.clientID = 11;
     local.getText("content").insert(0, ">");

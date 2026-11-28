@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { mergeSv, svCovers, svFromBase64, svIsEmpty, svToBase64, unseenWork } from "../ackedSv";
+import { ackSvFromServerUpdate, mergeSv, svCovers, svFromBase64, svIsEmpty, svToBase64, unseenWork } from "../ackedSv";
 
 function docWith(text: string, clientID?: number): Y.Doc {
   const d = new Y.Doc();
@@ -10,6 +10,16 @@ function docWith(text: string, clientID?: number): Y.Doc {
 }
 
 describe("ackedSv", () => {
+  it("a server delta from a client already known still proves its ops (run starting above clock 0)", () => {
+    const server = docWith("abc", 5);
+    const before = Y.encodeStateVector(server);
+    server.getText("content").insert(3, "def");
+    const delta = Y.encodeStateAsUpdate(server, before);
+    // Yjs' own helper drops the client (its run starts at clock 3).
+    expect(Y.decodeStateVector(Y.encodeStateVectorFromUpdate(delta)).get(5)).toBeUndefined();
+    expect(Y.decodeStateVector(ackSvFromServerUpdate(delta)).get(5)).toBe(6);
+  });
+
   it("a stale device (no ops since the ack) has no unseen work", () => {
     const d = docWith("hello");
     const acked = Y.encodeStateVector(d);

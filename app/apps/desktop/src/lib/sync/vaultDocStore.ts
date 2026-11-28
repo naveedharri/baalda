@@ -31,6 +31,7 @@ import { createTauriBridgeIO } from "../bridge/adapter";
 import type { BridgeIO } from "../bridge/types";
 import * as ipc from "../ipc";
 import type { DocUpdateSink } from "./vaultSyncEngine";
+import { ackSvFromServerUpdate } from "./ackedSv";
 
 /** Default resident-doc cap (spec 05 §10; override via opts). */
 export const HOT_DOC_CAP = 100;
@@ -325,7 +326,7 @@ export class VaultDocStore implements DocUpdateSink {
   async applyUpdate(docId: string, update: Uint8Array): Promise<void> {
     if (this.onServerOps) {
       try {
-        this.onServerOps(docId, Y.encodeStateVectorFromUpdate(update));
+        this.onServerOps(docId, ackSvFromServerUpdate(update));
       } catch {
         // Unreadable update: no acknowledgement, which only keeps the gate strict.
       }
