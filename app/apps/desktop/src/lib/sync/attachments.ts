@@ -2106,6 +2106,7 @@ export class AttachmentSync {
       if (b.relPath && this.unmaterializable.skip(b.relPath)) continue;
       if (b.relPath && this.deps.isDeletePending?.(b.relPath)) {
         console.info(`[attachments] ${b.relPath} has a delete pending — not downloading it back`);
+        this.skippedForPendingDelete = true;
         continue;
       }
       downloads.push(b);
@@ -2341,7 +2342,10 @@ export class AttachmentSync {
     }
     const replaces = replacements.filter((r) => {
       if (this.attachmentSyncBlocked) return false;
-      if (this.deps.isDeletePending?.(r.local.relPath)) return false;
+      if (this.deps.isDeletePending?.(r.local.relPath)) {
+        this.skippedForPendingDelete = true;
+        return false;
+      }
       return true;
     });
     const total = downloads.length + replaces.length;
@@ -3643,6 +3647,20 @@ export class AttachmentSync {
         shouldStop: () => !this.current() || this.textSupported === false,
       },
     );
+  }
+
+  /** A pass skipped a download or replacement because its path sat in an open
+   *  delete window (`deps.isDeletePending`); {@link deleteWindowClosed} owes it
+   *  another pass. */
+  private skippedForPendingDelete = false;
+
+  /** The delete queue closed a window: run the pass a skipped file is owed.
+   *  A path that really was deleted is no longer listed locally and stays
+   *  deleted; one that was a save or a move's arrival gets its bytes now. */
+  deleteWindowClosed(): void {
+    if (!this.skippedForPendingDelete || !this.current()) return;
+    this.skippedForPendingDelete = false;
+    this.scheduleReconcile();
   }
 
   /** Debounced reconcile — collapses a burst of watcher events into one pass. */

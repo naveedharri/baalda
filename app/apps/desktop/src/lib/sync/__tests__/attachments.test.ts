@@ -185,6 +185,25 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     expect(local.has("Team/guide.pdf")).toBe(true);
   });
 
+  it("a file skipped for an open delete window is owed a pass when that window closes", async () => {
+    // A teammate's move lands the file here (the watcher opens a window on the
+    // arrival path) and their edit arrives inside it: the replacement is
+    // skipped, and nothing asked again until an unrelated change.
+    const bytes = new Uint8Array([5, 5, 5]);
+    const { deps } = makeDeps([], [{ id: "srv1", relPath: "Team/sheet.csv", bytes }]);
+    deps.isDeletePending = () => true;
+    const sync = new AttachmentSync(deps);
+    const again = vi.spyOn(sync, "scheduleReconcile").mockImplementation(() => {});
+    sync.deleteWindowClosed();
+    expect(again).not.toHaveBeenCalled(); // nothing was skipped yet
+
+    await sync.reconcile();
+    sync.deleteWindowClosed();
+    expect(again).toHaveBeenCalledTimes(1);
+    sync.deleteWindowClosed();
+    expect(again).toHaveBeenCalledTimes(1); // owed once, not on every window
+  });
+
   it("keeps syncing embeds after a standalone-file plan refusal", async () => {
     const { deps, local, server } = makeDeps(
       [{ relPath: "standalone.pdf", bytes: new Uint8Array([1]) },

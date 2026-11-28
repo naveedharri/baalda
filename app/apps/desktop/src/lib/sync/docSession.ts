@@ -8464,6 +8464,7 @@ export class SyncManager implements InboundHost {
         this.attachments?.scheduleReconcile();
         this.embedArrivals?.nudge();
       },
+      onDrained: () => this.attachments?.deleteWindowClosed(),
       // Reported like a refused note delete: once per file per session.
       onNotCreator: (relPath, fileId) => {
         const key = `not-creator-file:${fileId ?? relPath}`;

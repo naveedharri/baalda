@@ -185,6 +185,14 @@ export interface BinaryDeleteDeps {
    */
   onServerChanged?: () => void;
   /**
+   * A window just closed: its paths are no longer `isPending`. The mirror
+   * skips downloads into an open window, and nothing else asked again for a
+   * path that turned out to be a save or a teammate's move landing here, so a
+   * teammate's edit that arrived inside the window waited for an unrelated
+   * change or a restart (2026-11-28 five-app test).
+   */
+  onDrained?: () => void;
+  /**
    * The server refused to delete a file because this person did not create it
    * (403 `delete_not_creator`, the creator-only rule). The server copy stays,
    * so the next mirror pass downloads it back here; this reports that it was
@@ -667,6 +675,11 @@ export class BinaryDeleteQueue {
         if (this.retained.delete(key(item.relPath))) continue;
         if (this.pending.get(key(item.relPath)) === item) this.pending.delete(key(item.relPath));
       }
+      // A path noted while this drain ran had its timer fire into
+      // `if (this.draining) return` and would stay pending, blocking its
+      // downloads, until some later event touched the queue.
+      if (this.pending.size > 0 && !this.timer && this.deps.isCurrent()) this.arm();
+      if (this.deps.isCurrent()) this.deps.onDrained?.();
     }
   }
 

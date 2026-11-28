@@ -104,6 +104,31 @@ describe("binaryDeleteCap", () => {
 });
 
 describe("BinaryDeleteQueue", () => {
+  it("tells the mirror each closed window, and re-arms for a path noted while it drained", async () => {
+    let release!: () => void;
+    const h = harness({ server: [blob("b1", "Team/gone.pdf")], onDisk: [], fileIds: { "Team/gone.pdf": "file-1" } });
+    const drained = vi.fn();
+    const armed = vi.fn(() => 0 as unknown as ReturnType<typeof setTimeout>);
+    h.deps.onDrained = drained;
+    h.deps.setTimeoutImpl = armed;
+    h.deps.listServer = () => new Promise((res) => { release = () => res([blob("b1", "Team/gone.pdf")]); });
+    h.queue.noteChanged("Team/gone.pdf");
+    const run = h.queue.drain();
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    // A move's arrival lands while the drain is still listing.
+    h.queue.noteChanged("Team/arrived.pdf");
+    const armsBefore = armed.mock.calls.length;
+    release();
+    await run;
+
+    expect(drained).toHaveBeenCalledTimes(1);
+    expect(h.queue.isPending("Team/gone.pdf")).toBe(false);
+    // Still pending, so its window must still be on a timer.
+    expect(h.queue.isPending("Team/arrived.pdf")).toBe(true);
+    expect(armed.mock.calls.length).toBeGreaterThan(armsBefore);
+  });
+
   it("deletes a tree file through its files row", async () => {
     const h = harness({
       local: [{ relPath: "Team/keep.docx", sha256: "sha-keep" }],
