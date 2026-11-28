@@ -150,6 +150,11 @@ describe("attachments of a purged note", () => {
       await replaceBlobRefs(id, vaultId, "no pictures now", pool, { announce: true });
       flushBlobRefsAnnouncements();
       expect(heard).toEqual([vaultId, vaultId]);
+      // A wiki embed by bare name of a mixed-case drop counts the same.
+      await seedBlob(vaultId, orgId, "attachments/Mixed Case.PNG");
+      await replaceBlobRefs(id, vaultId, "![[Mixed Case.PNG]]", pool, { announce: true });
+      flushBlobRefsAnnouncements();
+      expect(heard).toEqual([vaultId, vaultId, vaultId]);
     } finally {
       setBlobRefsNotifier(null);
     }
