@@ -153,6 +153,25 @@ describe("VaultRegistry — a folder renamed while the app was closed (#276)", (
     expect(reg.getFileId("Examples/qa-moved-folder/moved-2.jpeg")).toBe("file-2");
   });
 
+  it("a folder moved into a NEW folder while closed is one move under that folder, registered first", async () => {
+    const { api, reg } = await binariesSetup();
+    // Quit; `mkdir -p Box && mv Examples/qa-move Box/`; reopen.
+    vi.mocked(ipc.listTree).mockResolvedValue(fullTree(tree([], ["Examples", "Box", "Box/qa-move"])));
+    vi.mocked(ipc.listBinaries).mockResolvedValue([
+      { relPath: "Box/qa-move/moved-1.png", sha256: "sha-1", size: 1 },
+      { relPath: "Box/qa-move/moved-2.jpeg", sha256: "sha-2", size: 1 },
+    ] as never);
+
+    await reg.pull();
+
+    expect(created(api)).toContain("Box");
+    expect(created(api)).not.toContain("Box/qa-move");
+    expect(api.updateFolder).toHaveBeenCalledTimes(1);
+    expect(api.updateFolder).toHaveBeenCalledWith("f-qa", { name: "qa-move", path: "Box/qa-move", parentId: "folder-Box" });
+    expect(reg.getFolderId("Box/qa-move")).toBe("f-qa");
+    expect(reg.getFileId("Box/qa-move/moved-1.png")).toBe("file-1");
+  });
+
   it("binaries whose bytes do not match their agreed base are no evidence: nothing moves", async () => {
     const { api, reg } = await binariesSetup();
     vi.mocked(ipc.listBinaries).mockResolvedValue([

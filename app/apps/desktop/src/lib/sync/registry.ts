@@ -3996,10 +3996,20 @@ export class VaultRegistry {
         .map(([p]) => p),
     );
     if (gone.length === 0) return out;
+    // Its parent must be the root, a registered folder, or itself a folder only
+    // this disk has (the move registers it first, `moveOnServer`), up to one
+    // that is. Requiring a REGISTERED parent missed every folder moved into a
+    // new folder while the app was closed: its notes went over one by one
+    // into a second folder with no sharing rows, and the people the old one
+    // was shared with lost them (2026-11-28 five-app test).
+    const newHere = (p: string) => !serverCi.has(pathKey(p)) && !mappedCi.has(pathKey(p));
     const cands = localFolders.filter((c) => {
-      if (serverCi.has(pathKey(c)) || mappedCi.has(pathKey(c))) return false;
-      const parent = parentDir(c);
-      return parent === "" || this.folderByPath.has(parent);
+      if (!newHere(c)) return false;
+      for (let a = parentDir(c); a !== ""; a = parentDir(a)) {
+        if (this.folderByPath.has(a)) return true;
+        if (!newHere(a)) return false;
+      }
+      return true;
     });
     if (cands.length === 0) return out;
 
