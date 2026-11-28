@@ -141,21 +141,26 @@ export async function replaceBlobRefs(
   opts: { announce?: boolean } = {},
 ): Promise<number> {
   const paths = assetRefsFromMarkdown(markdown);
-  const { rows: added } = await db.query<{ rel_path: string }>(
+  const { rows: moved } = await db.query<{ rel_path: string }>(
     `WITH incoming AS (
        SELECT DISTINCT unnest($3::text[]) AS rel_path
      ), del AS (
        DELETE FROM blob_refs
         WHERE doc_id = $1
           AND (vault_id <> $2 OR rel_path NOT IN (SELECT rel_path FROM incoming))
+       RETURNING rel_path
+     ), ins AS (
+       INSERT INTO blob_refs (vault_id, rel_path, doc_id)
+       SELECT $2, i.rel_path, $1 FROM incoming i
+       ON CONFLICT (vault_id, rel_path, doc_id) DO NOTHING
+       RETURNING rel_path
      )
-     INSERT INTO blob_refs (vault_id, rel_path, doc_id)
-     SELECT $2, i.rel_path, $1 FROM incoming i
-     ON CONFLICT (vault_id, rel_path, doc_id) DO NOTHING
-     RETURNING rel_path`,
+     SELECT rel_path FROM ins UNION ALL SELECT rel_path FROM del`,
     [docId, vaultId, paths],
   );
-  if (opts.announce && added.length > 0) await announceGainedRefs(vaultId, added.map((r) => r.rel_path), db);
+  // Gained OR lost: either can change which drops a member sees through this
+  // note (a lost one leaves their disk, #408), and neither says so otherwise.
+  if (opts.announce && moved.length > 0) await announceGainedRefs(vaultId, moved.map((r) => r.rel_path), db);
   return paths.length;
 }
 
@@ -172,8 +177,8 @@ const ANNOUNCE_COALESCE_MS = 1_500;
 const announceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /**
- * A note just started embedding an `attachments/` drop the server already
- * holds. A member who reads that note but not the whole vault may see the
+ * A note just started (or stopped) embedding an `attachments/` drop the server
+ * already holds. A member who reads that note but not the whole vault may see the
  * drop only from now on, and nothing else says so: the upload's own frame went
  * out when its bytes landed, usually BEFORE the edit embedding it was indexed,
  * so their list then did not include it and their device never asked again

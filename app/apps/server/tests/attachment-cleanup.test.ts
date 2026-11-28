@@ -146,6 +146,10 @@ describe("attachments of a purged note", () => {
       await replaceBlobRefs(id, vaultId, "![](attachments/there.png) and more text", pool, { announce: true });
       flushBlobRefsAnnouncements();
       expect(heard).toEqual([vaultId]);
+      // The embed taken out: members who saw it through this note must hear.
+      await replaceBlobRefs(id, vaultId, "no pictures now", pool, { announce: true });
+      flushBlobRefsAnnouncements();
+      expect(heard).toEqual([vaultId, vaultId]);
     } finally {
       setBlobRefsNotifier(null);
     }
