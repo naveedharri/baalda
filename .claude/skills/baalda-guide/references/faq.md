@@ -139,6 +139,9 @@ renaming, moving and deleting, keep Baalda open (or use the sidebar, or the AI t
 - With Baalda open, a note or a whole folder renamed or moved in Finder or by a script keeps its
   history, links and permissions.
 - Removing a lot of notes at once makes Baalda ask: delete them for everyone, or restore them.
+- Moving a note or folder to the top level of the vault needs the same right as creating there.
+  Someone who can edit only one folder can't move things out of it to the top; Baalda puts the
+  item back where it was and says so.
 - If you rename or move the vault folder itself, Baalda stops syncing it and asks you to reopen it
   from its new location.
 - Renames made while Baalda is closed are recognised on the next launch when the note's text is

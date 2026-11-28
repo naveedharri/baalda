@@ -5,6 +5,7 @@ import { orgRole, resolveResource } from "../permissions/lookup.js";
 import { createResolverCache, effectivePermission, type Permission } from "../permissions/resolver.js";
 import { listReadableDocsInVault, listVisibleFolders, readsWholeVault } from "../permissions/vault-docs.js";
 import {
+  canCreateIn,
   canEditFolder,
   canReadAttachment,
   filterReadableBlobs,
@@ -620,6 +621,10 @@ export async function moveFolderTool(
   // same latch the HTTP registry honours (a rename in place at root is fine).
   if (plan.parentId === null && folder.parent_id !== null) {
     await assertRootNotFrozen(folder.vault_id, null, "move");
+    // ...and needs the right to create at the root, as over HTTP.
+    if (!(await canCreateIn(ctx.auth.userId, folder.vault_id, null))) {
+      throw await writeRefusal(ctx.auth.organizationId, "You do not have permission to move this folder to the top of the vault", "no_access");
+    }
   }
   try {
     const moved = await moveFolder(pool, input.folderId, moveInput);
@@ -665,6 +670,10 @@ export async function moveNoteTool(
   // to a frozen root is refused; a rename in place at root is allowed.
   if (plan.folderId === null && note.folder_id !== null) {
     await assertRootNotFrozen(note.vault_id, null, "move");
+    // ...and needs the right to create at the root, as over HTTP.
+    if (!(await canCreateIn(ctx.auth.userId, note.vault_id, null))) {
+      throw await writeRefusal(ctx.auth.organizationId, "You do not have permission to move this note to the top of the vault", "no_access");
+    }
   }
   try {
     const moved = await moveNote(pool, input.docId, moveInput);

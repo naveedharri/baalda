@@ -816,6 +816,14 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (plan.parentId === null && current.parent_id !== null && (await isRootFrozen(row.vault_id))) {
       return c.json(ROOT_FROZEN_ERROR, 403);
     }
+    // ...so it needs the same right as creating at the root (files already
+    // judge their destination with `canCreateIn`). Without it a member with
+    // edit on one folder could move a folder out to the root, where everyone
+    // with a whole-vault level reads it, and then not move it back (2026-11-28).
+    if (plan.parentId === null && current.parent_id !== null && !(await canCreateIn(session.userId, row.vault_id, null))) {
+      if (await refusedForBilling(await vaultOrg(row.vault_id))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+      return c.json({ error: "You cannot move this folder to the top of the vault", code: "no_write_access" }, 403);
+    }
 
     // Color is a vault-wide fact about the folder, so it rides the same PATCH
     // and syncs to every member like a rename does.
@@ -1178,6 +1186,14 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // unless it already lives there, which is a rename, not a move.
     if (plan.folderId === null && row.folder_id !== null && (await isRootFrozen(row.vault_id))) {
       return c.json(ROOT_FROZEN_ERROR, 403);
+    }
+    // ...so it needs the same right as creating at the root, like a file move.
+    // Without it a member with edit on a group's folder could move a note out
+    // to the root, where everyone with a whole-vault level reads it, and then
+    // not move it back (2026-11-28 five-app test).
+    if (plan.folderId === null && row.folder_id !== null && !(await canCreateIn(session.userId, row.vault_id, null))) {
+      if (await refusedForBilling(await vaultOrg(row.vault_id))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+      return c.json({ error: "You cannot move this note to the top of the vault", code: "no_write_access" }, 403);
     }
 
     const color = normalizeColor(body.color);
