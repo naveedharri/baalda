@@ -4052,90 +4052,150 @@ export class VaultRegistry {
     };
     const usedCands = new Set<string>();
 
-    // Topmost first: a whole folder renamed moves as one. When one does not
-    // pair, its vanished sub-folders are tried on their own: "move Sub out of
-    // Parent, then delete the emptied Parent" left only Parent to judge, its
-    // notes matched nowhere, and Sub went over note by note into a folder with
-    // none of its sharing rows (2026-11-28 five-app test).
-    const queue = [...gone];
-    while (queue.length > 0) {
-      const g = queue.shift()!;
-      if (this.stopRun()) break;
+    // PLAN deepest first, MOVE parents first: the same rule as the live
+    // `docSession.drainFolderMoves`. A paired sub-folder counts for its parent
+    // when its new place lies under the parent's candidate and is no evidence
+    // either way when it went elsewhere, so "rename P and P/Sub" stays two
+    // folder moves and "move Sub out, delete the emptied P" stays Sub's move;
+    // by position alone the parent sank and its notes went over one by one into
+    // a folder without its sharing rows (2026-11-28 five-app test).
+    type Plan = {
+      g: string;
+      to: string;
+      notesUnder: typeof mappedNotes;
+      matched: Set<string>;
+      matchedFiles: Set<string>;
+      score: number;
+      total: number;
+    };
+    const plans: Plan[] = [];
+    const ownerBelow = (p: string, g: string): Plan | undefined => {
+      let best: Plan | undefined;
+      for (const pl of plans) {
+        if (pl.g === g || !under(pl.g, g) || !under(p, pl.g)) continue;
+        if (!best || pl.g.length > best.g.length) best = pl;
+      }
+      return best;
+    };
+    const goneBelow = (g: string) => topmost(allGone.filter((p) => p !== g && under(p, g)));
+    const planFor = async (g: string): Promise<boolean> => {
+      for (const s of goneBelow(g)) if (!(await planFor(s))) return false;
+      if (this.stopRun()) return false;
       const notesUnder = mappedNotes.filter((n) => under(n.relPath, g));
       const filesUnder = mappedFiles.filter((f) => under(f.relPath, g));
-      const total = notesUnder.length + filesUnder.length;
-      if (total === 0) continue; // no evidence either way — as before
-      const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+      if (notesUnder.length + filesUnder.length === 0) return true; // no evidence either way — as before
       const shas = filesUnder.length > 0 ? await localBinaryShas() : null;
-      if (this.stale()) return out;
-      let best: { to: string; matched: string[]; score: number } | null = null;
+      if (this.stale()) return false;
+      let best: Plan | null = null;
       for (const c of cands) {
         if (usedCands.has(c)) continue;
         const at = (p: string) => c + p.slice(g.length);
-        const present = notesUnder.filter((n) => notesOnDisk.has(at(n.relPath)));
-        const filesPresent = shas ? filesUnder.filter((f) => shas.has(at(f.relPath))) : [];
-        if (present.length + filesPresent.length < need) continue; // no hashing at all
-        const matched: string[] = [];
+        let total = 0;
+        const matched = new Set<string>();
+        const matchedFiles = new Set<string>();
+        const present: typeof mappedNotes = [];
+        const filesPresent: typeof mappedFiles = [];
+        for (const n of notesUnder) {
+          const o = ownerBelow(n.relPath, g);
+          if (!o) {
+            total++;
+            if (notesOnDisk.has(at(n.relPath))) present.push(n);
+          } else if (under(o.to + n.relPath.slice(o.g.length), c)) {
+            total++;
+            if (o.matched.has(n.docId)) matched.add(n.docId);
+          }
+        }
+        for (const f of filesUnder) {
+          const o = ownerBelow(f.relPath, g);
+          if (!o) {
+            total++;
+            if (shas?.has(at(f.relPath))) filesPresent.push(f);
+          } else if (under(o.to + f.relPath.slice(o.g.length), c)) {
+            total++;
+            if (o.matchedFiles.has(f.relPath)) matchedFiles.add(f.relPath);
+          }
+        }
+        if (total === 0) continue;
+        const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+        if (matched.size + matchedFiles.size + present.length + filesPresent.length < need) continue; // no hashing at all
         for (const n of present) {
           const a = await docSha(n.docId);
-          if (this.stale()) return out;
+          if (this.stale()) return false;
           if (a == null) continue;
           const b = await fileSha(at(n.relPath));
-          if (this.stale()) return out;
-          if (a === b) matched.push(n.docId);
+          if (this.stale()) return false;
+          if (a === b) matched.add(n.docId);
         }
-        const files = filesPresent.filter((f) => shas!.get(at(f.relPath)) === f.base).length;
-        const score = matched.length + files;
-        if (score >= need && (!best || score > best.score)) best = { to: c, matched, score };
-      }
-      if (!best) {
-        queue.push(...topmost(allGone.filter((p) => p !== g && under(p, g))));
-        continue;
-      }
-      usedCands.add(best.to);
-      const to = best.to;
-      // Nothing may still write to the OLD paths once they move: a bridge that
-      // egests after the move re-creates the file (and forks the note).
-      for (const n of notesUnder) await this.host?.releaseDoc(n.docId);
-      if (this.stale()) return out;
-      const res = await this.moveOnServer(g, to);
-      if (!res.ok) {
-        // Same as a note above: a refused folder rename is put back on disk.
-        if (res.refused && (await this.revertRefusedMove(g, to))) {
-          toast(renameRefusedMessage(g, true, res.code, res.status), "error");
+        for (const f of filesPresent) if (shas!.get(at(f.relPath)) === f.base) matchedFiles.add(f.relPath);
+        const score = matched.size + matchedFiles.size;
+        if (score >= need && (!best || score > best.score)) {
+          best = { g, to: c, notesUnder, matched, matchedFiles, score, total };
         }
-        continue;
       }
-      if (this.stale()) return out;
-      // The index row at each new note path was minted a fresh id on launch;
-      // give it the kept doc id back (same local half `pairClosedAppRenames` does).
-      for (const n of notesUnder) {
-        const np = to + n.relPath.slice(g.length);
-        if (!notesOnDisk.has(np)) continue;
-        try {
-          await ipc.rebindNoteId(np, n.docId, this.epoch());
-        } catch (e) {
-          if (ipc.isVaultMismatch(e)) return out;
-          console.warn(`[registry] couldn't rebind ${np} to ${n.docId}`, e);
+      if (best) {
+        usedCands.add(best.to);
+        plans.push(best);
+      }
+      return true;
+    };
+    for (const g of gone) if (!(await planFor(g))) return out;
+
+    const done: Plan[] = [];
+    const failed: Plan[] = [];
+    for (const p of [...plans].sort((a, b) => a.g.split("/").length - b.g.split("/").length)) {
+      if (this.stopRun()) break;
+      if (failed.some((f) => under(p.g, f.g))) continue;
+      let anc: Plan | undefined;
+      for (const d of done) if (d.g !== p.g && under(p.g, d.g) && (!anc || d.g.length > anc.g.length)) anc = d;
+      const now = (q: string) => (anc ? anc.to + q.slice(anc.g.length) : q);
+      const from = now(p.g);
+      const to = p.to;
+      if (from !== to) {
+        // Nothing may still write to the OLD paths once they move: a bridge that
+        // egests after the move re-creates the file (and forks the note).
+        for (const n of p.notesUnder) await this.host?.releaseDoc(n.docId);
+        if (this.stale()) return out;
+        const res = await this.moveOnServer(from, to);
+        if (!res.ok) {
+          // Same as a note above: a refused folder rename is put back on disk.
+          if (res.refused && (await this.revertRefusedMove(from, to))) {
+            toast(renameRefusedMessage(from, true, res.code, res.status), "error");
+          }
+          failed.push(p);
+          continue;
         }
-        this.host?.notePathChanged(n.docId, n.relPath, np);
-      }
-      const remap = (p: string) => (under(p, g) ? to + p.slice(g.length) : p);
-      for (const f of serverFolders) {
-        if (!under(f.path, g)) continue;
-        if (f.path === g) f.name = baseName(to);
-        f.path = remap(f.path);
-      }
-      for (const n of serverNotes) {
-        const rp = noteRelPath(n);
-        if (!rp || !under(rp, g)) continue;
-        if (n.relPath !== undefined) n.relPath = remap(rp);
-        if (n.rel_path !== undefined || n.relPath === undefined) n.rel_path = remap(rp);
+        if (this.stale()) return out;
+        // The index row at each new note path was minted a fresh id on launch;
+        // give it the kept doc id back (same local half `pairClosedAppRenames` does).
+        for (const n of p.notesUnder) {
+          const np = to + now(n.relPath).slice(from.length);
+          if (!notesOnDisk.has(np)) continue;
+          try {
+            await ipc.rebindNoteId(np, n.docId, this.epoch());
+          } catch (e) {
+            if (ipc.isVaultMismatch(e)) return out;
+            console.warn(`[registry] couldn't rebind ${np} to ${n.docId}`, e);
+          }
+          this.host?.notePathChanged(n.docId, n.relPath, np);
+        }
+        const remap = (q: string) => (under(q, from) ? to + q.slice(from.length) : q);
+        for (const f of serverFolders) {
+          if (!under(f.path, from)) continue;
+          if (f.path === from) f.name = baseName(to);
+          f.path = remap(f.path);
+        }
+        for (const n of serverNotes) {
+          const rp = noteRelPath(n);
+          if (!rp || !under(rp, from)) continue;
+          if (n.relPath !== undefined) n.relPath = remap(rp);
+          if (n.rel_path !== undefined || n.relPath === undefined) n.rel_path = remap(rp);
+        }
       }
       console.info(
-        `[registry] ${g} → ${to} (folder moved while the app was closed; ${best.score}/${total} items matched, keeping folder and file ids)`,
+        `[registry] ${p.g} → ${to} (folder moved while the app was closed; ${p.score}/${p.total} items matched, keeping folder and file ids)`,
       );
-      out.set(g, to);
+      done.push(p);
+      out.set(p.g, to);
     }
     return out;
   }

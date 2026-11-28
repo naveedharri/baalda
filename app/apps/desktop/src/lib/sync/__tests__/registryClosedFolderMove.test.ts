@@ -210,6 +210,46 @@ describe("VaultRegistry — a folder renamed while the app was closed (#276)", (
     expect(api.updateFolder).not.toHaveBeenCalled();
   });
 
+  it("a folder and its sub-folder renamed together are two folder moves, parent first", async () => {
+    // `mv Old/sub Old/sub2 && mv Old Archive` (a git checkout, an agent's two mvs).
+    // By position alone the renamed sub-folder sank the parent below the ratio.
+    const notes = [
+      { id: "a1", rel_path: "Old/a1.md" },
+      { id: "a2", rel_path: "Old/a2.md" },
+      { id: "a3", rel_path: "Old/a3.md" },
+      { id: "b1", rel_path: "Old/sub/b1.md" },
+      { id: "b2", rel_path: "Old/sub/b2.md" },
+    ];
+    const api = fakeApi(notes, [
+      { id: "f-old", path: "Old" },
+      { id: "f-sub", path: "Old/sub" },
+    ]);
+    const reg = new VaultRegistry(api as unknown as ApiClient);
+    reg.setInboundHost(host({ localText: async (id) => `text ${id}` }));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(notes.map((n) => n.rel_path), ["Old", "Old/sub"]));
+    api.createFolder.mockClear();
+    api.createNote.mockClear();
+    const moved = (p: string) => p.replace(/^Old\/sub\//, "Archive/sub2/").replace(/^Old\//, "Archive/");
+    vi.mocked(ipc.listTree).mockResolvedValue(fullTree(tree(notes.map((n) => moved(n.rel_path)), ["Archive", "Archive/sub2"])));
+    vi.mocked(ipc.readNote).mockImplementation(async (p: string) => {
+      const n = notes.find((x) => moved(x.rel_path) === p);
+      return n ? `text ${n.id}` : "";
+    });
+
+    await reg.pull();
+
+    expect(api.updateFolder.mock.calls).toEqual([
+      ["f-old", { name: "Archive", path: "Archive", parentId: null }],
+      ["f-sub", { name: "sub2", path: "Archive/sub2", parentId: "f-old" }],
+    ]);
+    expect(created(api)).toEqual([]);
+    expect(api.createNote).not.toHaveBeenCalled();
+    expect(reg.getFolderId("Archive")).toBe("f-old");
+    expect(reg.getFolderId("Archive/sub2")).toBe("f-sub");
+    expect(reg.getMapping("Archive/sub2/b1.md")?.docId).toBe("b1");
+    expect(reg.getMapping("Archive/a3.md")?.docId).toBe("a3");
+  });
+
   it("pairs a folder of notes by their text and gives each index row its kept doc id", async () => {
     const api = fakeApi([{ id: "n1", rel_path: "Old/a.md" }, { id: "n2", rel_path: "Old/sub/b.md" }], [
       { id: "f-old", path: "Old" },

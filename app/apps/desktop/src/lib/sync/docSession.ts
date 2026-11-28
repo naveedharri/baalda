@@ -3621,11 +3621,6 @@ export class SyncManager implements InboundHost {
     };
     const usedCands = new Set<string>();
 
-    // Topmost first; a vanished folder that does not pair hands its vanished
-    // sub-folders a turn of their own ("move Sub out, delete the emptied
-    // Parent" — see `registry.pairClosedAppFolderMoves`). Only the notes
-    // outside those sub-folders fall to the per-note pairing from here; each
-    // sub-folder that fails too sends its own.
     // The watcher names only the TOPMOST vanished folder, so the registered
     // folders below it that are gone too are read off the items they held.
     const goneBelow = (g: string): string[] => {
@@ -3638,64 +3633,146 @@ export class SyncManager implements InboundHost {
       }
       return topmost([...found]);
     };
-    const queue = [...gone];
-    while (queue.length > 0) {
-      const g = queue.shift()!;
-      const inner = goneBelow(g);
+
+    // PLAN deepest first, so a sub-folder renamed or moved in the same breath as
+    // its parent (`mv P/Sub P/Sub2 && mv P P2`, a git checkout, an agent's two
+    // `mv`s) is already paired when the parent is judged: its items count for
+    // the parent when their new place lies under the parent's candidate, and are
+    // no evidence either way when they went elsewhere ("move Sub out, delete the
+    // emptied P"). Judged by position alone, the renamed sub-folder sank the
+    // parent below the ratio; its other notes went over one by one into a NEW
+    // folder and the old one, emptied, was deleted with its sharing rows
+    // (2026-11-28 five-app test). Then MOVE parents first.
+    type Plan = {
+      g: string;
+      to: string;
+      under: Array<{ docId: string; relPath: string }>;
+      matched: Set<string>;
+      matchedFiles: Set<string>;
+      files: number;
+      filesTotal: number;
+    };
+    const plans: Plan[] = [];
+    /** The deepest planned folder strictly below `g` that holds `p`. */
+    const ownerBelow = (p: string, g: string): Plan | undefined => {
+      let best: Plan | undefined;
+      for (const pl of plans) {
+        if (pl.g === g || !isUnder(pl.g, g) || !isUnder(p, pl.g)) continue;
+        if (!best || pl.g.length > best.g.length) best = pl;
+      }
+      return best;
+    };
+    const planFor = async (g: string): Promise<boolean> => {
+      for (const s of goneBelow(g)) if (!(await planFor(s))) return false;
       const under = mapped.filter((n) => isUnder(n.relPath, g));
       const filesUnder = mappedFiles.filter((f) => isUnder(f.relPath, g));
       // no evidence either way — the pull decides, as before
-      if (under.length === 0 && filesUnder.length === 0) continue;
+      if (under.length === 0 && filesUnder.length === 0) return true;
       const shas = filesUnder.length > 0 ? await localBinaryShas() : null;
-      if (!scope.isCurrent()) return out;
-      const total = under.length + filesUnder.length;
-      const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
-      // The notes-only rule this replaced still qualifies on its own, so adding
-      // binaries to the evidence can only ever turn a fallback into a move.
-      const needNotes = under.length > 0 ? Math.ceil(under.length * FOLDER_MOVE_MIN_RATIO) : Infinity;
-      let best: { to: string; matched: Set<string>; files: number; score: number } | null = null;
+      if (!scope.isCurrent()) return false;
+      let best: (Plan & { score: number }) | null = null;
       for (const c of cands) {
         if (usedCands.has(c)) continue;
-        const present = under.filter((n) => notesOnDisk.has(c + n.relPath.slice(g.length)));
-        const filesPresent = shas
-          ? filesUnder.filter((f) => shas.has(c + f.relPath.slice(g.length)))
-          : [];
-        // cannot reach the ratio: no hashing at all
-        if (present.length < needNotes && present.length + filesPresent.length < need) continue;
+        let notesTotal = 0;
+        let filesTotal = 0;
         const matched = new Set<string>();
+        const matchedFiles = new Set<string>();
+        const present: Array<{ docId: string; relPath: string }> = [];
+        const filesPresent: typeof filesUnder = [];
+        for (const n of under) {
+          const o = ownerBelow(n.relPath, g);
+          if (!o) {
+            notesTotal++;
+            if (notesOnDisk.has(c + n.relPath.slice(g.length))) present.push(n);
+          } else if (isUnder(o.to + n.relPath.slice(o.g.length), c)) {
+            notesTotal++;
+            if (o.matched.has(n.docId)) matched.add(n.docId);
+          }
+        }
+        for (const f of filesUnder) {
+          const o = ownerBelow(f.relPath, g);
+          if (!o) {
+            filesTotal++;
+            if (shas?.has(c + f.relPath.slice(g.length))) filesPresent.push(f);
+          } else if (isUnder(o.to + f.relPath.slice(o.g.length), c)) {
+            filesTotal++;
+            if (o.matchedFiles.has(f.relPath)) matchedFiles.add(f.relPath);
+          }
+        }
+        const total = notesTotal + filesTotal;
+        if (total === 0) continue;
+        const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+        // The notes-only rule this replaced still qualifies on its own, so adding
+        // binaries to the evidence can only ever turn a fallback into a move.
+        const needNotes = notesTotal > 0 ? Math.ceil(notesTotal * FOLDER_MOVE_MIN_RATIO) : Infinity;
+        // cannot reach the ratio: no hashing at all
+        const known = matched.size + matchedFiles.size;
+        if (matched.size + present.length < needNotes && known + present.length + filesPresent.length < need) continue;
         for (const n of present) {
           const a = await docSha(n.docId, n.relPath);
-          if (!scope.isCurrent()) return out;
+          if (!scope.isCurrent()) return false;
           const b = await fileSha(c + n.relPath.slice(g.length));
-          if (!scope.isCurrent()) return out;
+          if (!scope.isCurrent()) return false;
           if (a != null && a === b) matched.add(n.docId);
         }
-        const files = filesPresent.filter((f) => shas!.get(c + f.relPath.slice(g.length)) === f.base).length;
-        const score = matched.size + files;
+        for (const f of filesPresent) if (shas!.get(c + f.relPath.slice(g.length)) === f.base) matchedFiles.add(f.relPath);
+        const score = matched.size + matchedFiles.size;
         if ((matched.size >= needNotes || score >= need) && (!best || score > best.score)) {
-          best = { to: c, matched, files, score };
+          best = { g, to: c, under, matched, matchedFiles, files: matchedFiles.size, filesTotal: filesUnder.length, score };
         }
       }
-      if (!best) {
-        queue.push(...inner);
-        // Below the ratio: the notes under G go through the per-note pairing
-        // and then the delete drain, with every gate `queueDiskDelete` applies.
-        if (this.liveSince == null) continue;
-        for (const n of under) {
-          if (inner.some((s) => isUnder(n.relPath, s))) continue;
+      if (best) {
+        usedCands.add(best.to);
+        plans.push(best);
+      }
+      return true;
+    };
+    for (const g of gone) if (!(await planFor(g))) return out;
+
+    // Below the ratio: the notes no plan carries go through the per-note
+    // pairing and then the delete drain, with every gate `queueDiskDelete`
+    // applies. Decided once the plan is whole: a sub-folder's notes are never
+    // sent to the delete drain while a plan above or below still carries them.
+    if (this.liveSince != null) {
+      for (const g of gone) {
+        for (const n of mapped) {
+          if (!isUnder(n.relPath, g)) continue;
+          if (plans.some((p) => isUnder(n.relPath, p.g))) continue;
           if (!(this.registry.serverHoldsContent?.(n.docId) ?? this.registry.isPushed(n.docId))) continue;
           out.fallbackDeletes.push({ docId: n.docId, relPath: n.relPath });
         }
-        continue;
       }
-      usedCands.add(best.to);
-      console.info(
-        `[sync] ${g} → ${best.to}: ${best.files}/${filesUnder.length} binaries matched their agreed bytes`,
-      );
-      if (await this.applyFolderMove(g, best.to, under, best.matched, notesOnDisk, scope)) {
-        out.movedFrom.push(g);
-        out.movedTo.push(best.to);
+    }
+
+    // MOVE parents first; a child moves from where its moved parent put it, and
+    // not at all when that is already where it belongs. A parent that failed
+    // or was put back leaves its children for the next pass, as before.
+    const done: Plan[] = [];
+    const failed: Plan[] = [];
+    for (const p of [...plans].sort((a, b) => a.g.split("/").length - b.g.split("/").length)) {
+      if (failed.some((f) => isUnder(p.g, f.g))) continue;
+      let anc: Plan | undefined;
+      for (const d of done) if (d.g !== p.g && isUnder(p.g, d.g) && (!anc || d.g.length > anc.g.length)) anc = d;
+      const at = (q: string) => (anc ? anc.to + q.slice(anc.g.length) : q);
+      const from = at(p.g);
+      console.info(`[sync] ${p.g} → ${p.to}: ${p.files}/${p.filesTotal} binaries matched their agreed bytes`);
+      const res =
+        from === p.to
+          ? true
+          : await this.applyFolderMove(
+              from,
+              p.to,
+              p.under.map((n) => ({ docId: n.docId, relPath: at(n.relPath) })),
+              p.matched,
+              notesOnDisk,
+              scope,
+            );
+      if (res) {
+        out.movedFrom.push(p.g);
+        out.movedTo.push(p.to);
       }
+      if (res === true) done.push(p);
+      else failed.push(p);
       if (!scope.isCurrent() || this.rootMissing) return out;
     }
     // What appeared and was not a move target: its notes may still be renames.

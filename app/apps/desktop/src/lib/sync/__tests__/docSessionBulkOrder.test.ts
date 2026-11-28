@@ -2095,6 +2095,37 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     );
   });
 
+  it("a folder and its sub-folder renamed in the same breath are two folder moves, parent first", async () => {
+    // `mv Old/sub Old/sub2 && mv Old Archive`: by position alone the renamed
+    // sub-folder sank the parent, its notes went over one by one into a new
+    // folder and the old one was deleted with its sharing rows.
+    const sm = new SyncManager();
+    const kids = [
+      { docId: "t1", relPath: "Old/t1.md" },
+      { docId: "t2", relPath: "Old/t2.md" },
+      { docId: "t3", relPath: "Old/t3.md" },
+      { docId: "k1", relPath: "Old/sub/x.md" },
+      { docId: "k2", relPath: "Old/sub/y.md" },
+    ];
+    for (const n of kids) storeHooks.texts.set(n.docId, textOf(n.docId));
+    mapNotes([...kids, ...others], ["Old", "Old/sub", "Keep"]);
+    await live(sm);
+    const moved = (p: string) => p.replace(/^Old\/sub\//, "Archive/sub2/").replace(/^Old\//, "Archive/");
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub2", "Keep"]);
+    for (const n of kids) fakeDisk.files.set(moved(n.relPath), textOf(n.docId));
+    sm.handleLocalFilesChanged([
+      { path: "Archive", kind: "tree", gone: false },
+      { path: "Old", kind: "tree", gone: true },
+    ]);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([
+      ["Old", "Archive"],
+      ["Archive/sub", "Archive/sub2"],
+    ]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+  });
+
   it("a sub-folder moved out with its emptied parent deleted in the same breath is still ONE move", async () => {
     // `mv Old/sub Sub && rm -r Old`: the watcher names `Old` gone and `Sub`
     // new. Judged against `Old` alone nothing matched and `Sub` went over note
