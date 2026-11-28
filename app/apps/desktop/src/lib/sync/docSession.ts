@@ -6787,6 +6787,7 @@ export class SyncManager implements InboundHost {
           this.serverEmpty.delete(docId);
           this.serverBehind.delete(docId);
         },
+        markAcked: (docId, sv) => registry.recordAck?.(docId, sv),
         markMaterialized: (relPath) => registry.markMaterialized(relPath),
         loadResume: () => registry.bootstrapResume(),
         saveResume: (state) => registry.setBootstrapResume(state),
@@ -7960,6 +7961,11 @@ export class SyncManager implements InboundHost {
         return !!p && [...this.goneFolders.keys()].some((f) => isUnder(p, f));
       },
       fileMissing: async (path) => !(await ipc.noteExists(path, scope.vaultEpoch)),
+      // Ops the server just sent are ops it holds: the update's own state
+      // vector, never the local doc's (`VaultDocStoreOptions.onServerOps`).
+      onServerOps: (docId, sv) => {
+        if (scope.isCurrent()) this.registry.recordAck?.(docId, sv);
+      },
       // The background feed writes .md files for docs nobody has open. Pin its
       // IO to this vault's epoch so a cold apply that lands after a vault switch
       // is refused by Rust instead of overwriting the new vault's file at the

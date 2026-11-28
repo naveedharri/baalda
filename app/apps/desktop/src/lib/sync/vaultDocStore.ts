@@ -120,6 +120,16 @@ export interface VaultDocStoreOptions {
    */
   onConverged?: (docId: string) => void;
   /**
+   * The server just sent these ops for `docId` (every update this store
+   * applies came from the server: channel frames, bootstrap merges, parked
+   * re-applies). `sv` is the UPDATE's own state vector, never the local doc's,
+   * so it covers only ops the server holds and can never vouch for unsent local
+   * work. Recording it as an acknowledgement (`registry.recordAck`) keeps a
+   * teammate's later edit from reading as this device's own unsent work when
+   * access goes.
+   */
+  onServerOps?: (docId: string, sv: Uint8Array) => void;
+  /**
    * A cold apply for a doc whose placeholder the registry DEFERRED: create the
    * file with this content in one create-only write and return the new state
    * vector, or null to take the ordinary cold-apply path (`deferredArrival.ts`).
@@ -156,6 +166,7 @@ export class VaultDocStore implements DocUpdateSink {
   private readonly fileMissing?: (path: string) => Promise<boolean>;
   private readonly onExternalMerge?: (docId: string) => void;
   private readonly onConverged?: (docId: string) => void;
+  private readonly onServerOps?: (docId: string, sv: Uint8Array) => void;
   private readonly createDeferred?: VaultDocStoreOptions["createDeferred"];
   private readonly hotCap: number;
   private readonly manifest: ManifestStore;
@@ -207,6 +218,7 @@ export class VaultDocStore implements DocUpdateSink {
     this.fileMissing = opts.fileMissing;
     this.onExternalMerge = opts.onExternalMerge;
     this.onConverged = opts.onConverged;
+    this.onServerOps = opts.onServerOps;
     this.createDeferred = opts.createDeferred;
     this.hotCap = opts.hotCap ?? HOT_DOC_CAP;
     this.manifest = opts.manifest ?? nullManifestStore;
@@ -293,6 +305,13 @@ export class VaultDocStore implements DocUpdateSink {
   }
 
   async applyUpdate(docId: string, update: Uint8Array): Promise<void> {
+    if (this.onServerOps) {
+      try {
+        this.onServerOps(docId, Y.encodeStateVectorFromUpdate(update));
+      } catch {
+        // Unreadable update: no acknowledgement, which only keeps the gate strict.
+      }
+    }
     if (docId === this.suppressed) return; // open note: its own provider owns it
     if (this.holdUpdates?.(docId)) {
       this.park(docId, update);

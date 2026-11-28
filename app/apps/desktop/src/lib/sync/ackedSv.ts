@@ -8,9 +8,12 @@
  * a device holding unseen work must recover it first.
  *
  * `ackedSv` is the per-doc Yjs state vector the server is known to cover: taken
- * from the doc when a Hocuspocus `synced` lands for it, when a batch push is
- * acknowledged, and after a backfill/bootstrap apply (at those moments the local
- * doc and the server agree on at least that much). It only ever grows — the
+ * from the doc when a Hocuspocus `synced` lands for it and when a batch push is
+ * acknowledged; for a backfill/bootstrap apply, from the SERVER'S UPDATE itself
+ * (`encodeStateVectorFromUpdate`), never from the local doc after it, because a
+ * server diff proves nothing about local ops but everything about its own.
+ * Without that, a teammate's edit received after this device's last ack read as
+ * this device's own unsent work when access went (2026-11-28). It only ever grows — the
  * server never forgets ops — so recording merges per-client clocks by max.
  */
 import * as Y from "yjs";
